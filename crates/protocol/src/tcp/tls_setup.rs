@@ -142,7 +142,7 @@ fn build_tcp_tls_settings(
     ),
     ProxyError,
 > {
-    crate::tls_setup::build_tls_settings(tls, address, "TCP")
+    crate::tls_setup::build_tls_settings(tls, address, "TCP", false)
 }
 
 // -----------------------------------------------------------------------------

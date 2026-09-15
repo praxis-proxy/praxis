@@ -348,9 +348,15 @@ pub(super) fn is_boundary_stripped(name: &http::header::HeaderName, nominated: &
     // `HeaderName::as_str` is always lowercase, so the fixed list needs
     // no case folding; nominated tokens arrive raw from the wire.
     let name = name.as_str();
+    // A client-supplied `Connection` token must not delete a proxy-owned
+    // forwarding header (x-forwarded-*, Forwarded, Host, Content-Length): the
+    // main upstream path and filtered sub-requests already refuse this, so the
+    // core sub-request path honors the same rule. Reserved and fixed hop-by-hop
+    // headers are still stripped via their own branches.
     HOP_BY_HOP_HEADERS.contains(&name)
         || crate::reserved_headers::is_reserved(name)
-        || nominated.iter().any(|token| token.eq_ignore_ascii_case(name))
+        || (nominated.iter().any(|token| token.eq_ignore_ascii_case(name))
+            && !crate::reserved_headers::is_connection_token_protected(name))
 }
 
 /// Request-direction predicate: boundary-stripped plus the framing

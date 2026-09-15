@@ -33,7 +33,7 @@ pub(crate) struct Subset {
     fallback_policy: SubsetFallbackPolicy,
 
     /// Indices of the matched subset endpoints in the health state array.
-    subset_indices: Vec<usize>,
+    subset_addresses: Vec<Arc<str>>,
 }
 
 impl Subset {
@@ -55,7 +55,7 @@ impl Subset {
             .cloned()
             .collect();
 
-        let subset_indices: Vec<usize> = matched.iter().map(|ep| ep.index).collect();
+        let subset_addresses: Vec<Arc<str>> = matched.iter().map(|ep| Arc::clone(&ep.address)).collect();
 
         let subset_strategy = if matched.is_empty() {
             None
@@ -69,7 +69,7 @@ impl Subset {
             subset_strategy,
             fallback_strategy,
             fallback_policy,
-            subset_indices,
+            subset_addresses,
         }
     }
 
@@ -100,12 +100,7 @@ impl Subset {
         let Some(state) = health else {
             return false;
         };
-        let endpoints = state.endpoints();
-        !self.subset_indices.is_empty()
-            && self
-                .subset_indices
-                .iter()
-                .all(|&idx| endpoints.get(idx).is_none_or(|ep| !ep.is_healthy()))
+        !self.subset_addresses.is_empty() && self.subset_addresses.iter().all(|addr| !state.is_address_healthy(addr))
     }
 
     /// Propagate release to inner strategies.
@@ -145,9 +140,9 @@ mod tests {
     #[test]
     fn selects_from_matching_subset() {
         let endpoints = vec![
-            ep("10.0.0.1:80", 0, &[("version", "stable")]),
-            ep("10.0.0.2:80", 1, &[("version", "canary")]),
-            ep("10.0.0.3:80", 2, &[("version", "canary")]),
+            ep("10.0.0.1:80", &[("version", "stable")]),
+            ep("10.0.0.2:80", &[("version", "canary")]),
+            ep("10.0.0.3:80", &[("version", "canary")]),
         ];
         let selector = HashMap::from([("version".to_owned(), "canary".to_owned())]);
         let subset = Subset::new(
@@ -170,8 +165,8 @@ mod tests {
     #[test]
     fn fallback_any_endpoint_when_no_match() {
         let endpoints = vec![
-            ep("10.0.0.1:80", 0, &[("version", "stable")]),
-            ep("10.0.0.2:80", 1, &[("version", "stable")]),
+            ep("10.0.0.1:80", &[("version", "stable")]),
+            ep("10.0.0.2:80", &[("version", "stable")]),
         ];
         let selector = HashMap::from([("version".to_owned(), "canary".to_owned())]);
         let subset = Subset::new(
@@ -188,8 +183,8 @@ mod tests {
     #[test]
     fn fallback_no_endpoint_when_no_match() {
         let endpoints = vec![
-            ep("10.0.0.1:80", 0, &[("version", "stable")]),
-            ep("10.0.0.2:80", 1, &[("version", "stable")]),
+            ep("10.0.0.1:80", &[("version", "stable")]),
+            ep("10.0.0.2:80", &[("version", "stable")]),
         ];
         let selector = HashMap::from([("version".to_owned(), "canary".to_owned())]);
         let subset = Subset::new(
@@ -206,9 +201,9 @@ mod tests {
     #[test]
     fn multi_key_selector() {
         let endpoints = vec![
-            ep("10.0.0.1:80", 0, &[("version", "canary"), ("gpu", "a100")]),
-            ep("10.0.0.2:80", 1, &[("version", "canary"), ("gpu", "h100")]),
-            ep("10.0.0.3:80", 2, &[("version", "stable"), ("gpu", "a100")]),
+            ep("10.0.0.1:80", &[("version", "canary"), ("gpu", "a100")]),
+            ep("10.0.0.2:80", &[("version", "canary"), ("gpu", "h100")]),
+            ep("10.0.0.3:80", &[("version", "stable"), ("gpu", "a100")]),
         ];
         let selector = HashMap::from([
             ("version".to_owned(), "canary".to_owned()),
@@ -230,8 +225,8 @@ mod tests {
     #[test]
     fn empty_selector_matches_all() {
         let endpoints = vec![
-            ep("10.0.0.1:80", 0, &[("version", "stable")]),
-            ep("10.0.0.2:80", 1, &[("version", "canary")]),
+            ep("10.0.0.1:80", &[("version", "stable")]),
+            ep("10.0.0.2:80", &[("version", "canary")]),
         ];
         let selector = HashMap::new();
         let subset = Subset::new(
@@ -251,10 +246,10 @@ mod tests {
     #[test]
     fn fallback_when_all_subset_unhealthy() {
         let endpoints = vec![
-            ep("10.0.0.1:80", 0, &[("version", "canary")]),
-            ep("10.0.0.2:80", 1, &[("version", "canary")]),
-            ep("10.0.0.3:80", 2, &[("version", "stable")]),
-            ep("10.0.0.4:80", 3, &[("version", "stable")]),
+            ep("10.0.0.1:80", &[("version", "canary")]),
+            ep("10.0.0.2:80", &[("version", "canary")]),
+            ep("10.0.0.3:80", &[("version", "stable")]),
+            ep("10.0.0.4:80", &[("version", "stable")]),
         ];
         let selector = HashMap::from([("version".to_owned(), "canary".to_owned())]);
         let subset = Subset::new(
@@ -285,10 +280,9 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    fn ep(addr: &str, index: usize, meta: &[(&str, &str)]) -> WeightedEndpoint {
+    fn ep(addr: &str, meta: &[(&str, &str)]) -> WeightedEndpoint {
         WeightedEndpoint {
             address: Arc::from(addr),
-            index,
             weight: 1,
             metadata: meta.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
             priority: 0,

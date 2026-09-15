@@ -105,6 +105,7 @@ impl FilteredStreamingBody {
             response_body_mode: cont.response_body_mode,
             response_header: None,
             response_headers_modified: false,
+            upstream_reached: false,
             rewritten_path: None,
             selected_endpoint_index: None,
             attempted_endpoints: Vec::new(),

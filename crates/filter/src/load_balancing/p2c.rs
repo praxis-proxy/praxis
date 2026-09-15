@@ -44,7 +44,7 @@ pub(crate) struct PowerOfTwoChoices {
     /// [`release`]: Self::release
     index_by_addr: HashMap<Arc<str>, usize>,
 
-    /// Deduplicated endpoint list with weights and original indices.
+    /// Deduplicated endpoint list with weights.
     endpoints: Vec<WeightedEndpoint>,
 
     /// Deterministic RNG state (no randomness needed; just spread).
@@ -190,10 +190,7 @@ impl PowerOfTwoChoices {
             let mut candidates: SmallVec<[usize; 8]> = SmallVec::new();
             let mut any_healthy = false;
             for (pos, ep) in self.endpoints.iter().enumerate() {
-                let healthy = state
-                    .endpoints()
-                    .get(ep.index)
-                    .is_some_and(praxis_core::health::EndpointHealth::is_healthy);
+                let healthy = state.is_address_healthy(&ep.address);
                 if healthy {
                     any_healthy = true;
                     if !is_excluded(&ep.address, exclude) {
@@ -244,7 +241,7 @@ mod tests {
 
     #[test]
     fn single_endpoint_always_selected() {
-        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0)]);
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1)]);
         for _ in 0..10 {
             assert_eq!(
                 &*p2c.select(None, &[]).unwrap(),
@@ -256,11 +253,7 @@ mod tests {
 
     #[test]
     fn distributes_across_endpoints() {
-        let p2c = PowerOfTwoChoices::new(vec![
-            ep("10.0.0.1:80", 1, 0),
-            ep("10.0.0.2:80", 1, 1),
-            ep("10.0.0.3:80", 1, 2),
-        ]);
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1), ep("10.0.0.3:80", 1)]);
 
         for _ in 0..30 {
             let addr = p2c.select(None, &[]).unwrap();
@@ -275,7 +268,7 @@ mod tests {
 
     #[test]
     fn prefers_less_loaded() {
-        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0), ep("10.0.0.2:80", 1, 1)]);
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
         p2c.counter_for("10.0.0.1:80").store(100, Ordering::Relaxed);
 
         let mut picked_2 = 0_u32;
@@ -294,7 +287,7 @@ mod tests {
 
     #[test]
     fn weight_biases_sampling() {
-        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0), ep("10.0.0.2:80", 9, 1)]);
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 9)]);
 
         let mut counts = HashMap::new();
         for _ in 0..100 {
@@ -309,7 +302,7 @@ mod tests {
 
     #[test]
     fn skips_unhealthy() {
-        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0), ep("10.0.0.2:80", 1, 1)]);
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
         let state = health_state(2);
         state.endpoints()[0].mark_unhealthy();
 
@@ -325,7 +318,7 @@ mod tests {
 
     #[test]
     fn panic_mode_when_all_unhealthy() {
-        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0), ep("10.0.0.2:80", 1, 1)]);
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
         let state = health_state(2);
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
@@ -339,7 +332,7 @@ mod tests {
 
     #[test]
     fn release_does_not_underflow() {
-        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0)]);
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1)]);
         p2c.release("10.0.0.1:80");
         assert_eq!(
             p2c.counter_for("10.0.0.1:80").load(Ordering::Relaxed),
@@ -350,16 +343,13 @@ mod tests {
 
     #[test]
     fn release_unknown_addr_is_noop() {
-        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0)]);
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1)]);
         p2c.release("10.0.0.99:80");
     }
 
     #[test]
     fn concurrent_select_and_release() {
-        let p2c = Arc::new(PowerOfTwoChoices::new(vec![
-            ep("10.0.0.1:80", 1, 0),
-            ep("10.0.0.2:80", 1, 1),
-        ]));
+        let p2c = Arc::new(PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]));
 
         let handles: Vec<_> = std::iter::repeat_with(|| {
             let p = Arc::clone(&p2c);
@@ -384,14 +374,16 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Build a [`WeightedEndpoint`] for testing.
-    fn ep(addr: &str, weight: u32, index: usize) -> WeightedEndpoint {
-        WeightedEndpoint::simple(Arc::from(addr), index, weight)
+    fn ep(addr: &str, weight: u32) -> WeightedEndpoint {
+        WeightedEndpoint::simple(Arc::from(addr), weight)
     }
 
     /// Build a [`ClusterHealthState`] with `n` healthy endpoints.
     fn health_state(n: usize) -> ClusterHealthState {
         let healths: Vec<_> = std::iter::repeat_with(EndpointHealth::new).take(n).collect();
-        let addrs: Vec<_> = (0..n).map(|i| Arc::from(format!("10.0.0.{i}:80").as_str())).collect();
+        let addrs: Vec<_> = (0..n)
+            .map(|i| Arc::from(format!("10.0.0.{}:80", i + 1).as_str()))
+            .collect();
         Arc::new(ClusterHealthEntry::new(healths, addrs, None, None))
     }
 }

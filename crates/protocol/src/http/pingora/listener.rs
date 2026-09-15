@@ -26,7 +26,8 @@ pub(crate) fn add_listener<H>(
     let mut shutdown_tx = None;
 
     if let Some(tls) = &listener.tls {
-        let (tls_settings, watcher_shutdown) = crate::tls_setup::build_tls_settings(tls, &listener.address, "HTTP")?;
+        let (tls_settings, watcher_shutdown) =
+            crate::tls_setup::build_tls_settings(tls, &listener.address, "HTTP", true)?;
         shutdown_tx = watcher_shutdown;
         service.add_tls_with_settings(&listener.address, None, tls_settings);
     } else {

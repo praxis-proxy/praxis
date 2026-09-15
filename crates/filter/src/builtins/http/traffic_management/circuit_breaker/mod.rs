@@ -111,6 +111,13 @@ impl InstrumentedCircuitBreaker {
             self.publish_open_gauge(after);
         }
     }
+
+    /// Release a token without recording an outcome, for a request that
+    /// never reached the upstream. Frees the in-flight slot without moving
+    /// the breaker toward open or closed, so no gauge flip is possible.
+    fn release(&self, token: CircuitToken) {
+        self.inner.release(token);
+    }
 }
 
 impl Drop for InstrumentedCircuitBreaker {
@@ -263,17 +270,28 @@ impl HttpFilter for CircuitBreakerFilter {
             return Ok(FilterAction::Continue);
         };
 
-        let is_success = ctx
-            .response_header
-            .as_ref()
-            .is_some_and(|r| !r.status.is_server_error());
-
-        if is_success {
-            debug!(cluster = %active.cluster, "recording upstream success");
-            breaker.record_success(active.token);
-        } else {
-            warn!(cluster = %active.cluster, "recording upstream failure");
-            breaker.record_failure(active.token);
+        match ctx.response_header.as_ref() {
+            Some(resp) if resp.status.is_server_error() => {
+                warn!(cluster = %active.cluster, "recording upstream failure");
+                breaker.record_failure(active.token);
+            },
+            Some(_) => {
+                debug!(cluster = %active.cluster, "recording upstream success");
+                breaker.record_success(active.token);
+            },
+            None if ctx.upstream_reached => {
+                // Reached the upstream but received no response header (a
+                // connect or read failure): a genuine upstream failure.
+                warn!(cluster = %active.cluster, "recording upstream failure (no response header)");
+                breaker.record_failure(active.token);
+            },
+            None => {
+                // Rejected or aborted before the upstream was contacted, so
+                // this request carries no signal about the cluster: release
+                // the token without recording success or failure.
+                debug!(cluster = %active.cluster, "releasing circuit token: upstream not reached");
+                breaker.release(active.token);
+            },
         }
 
         Ok(FilterAction::Continue)

@@ -263,6 +263,43 @@ async fn on_request_sets_cluster_on_match() {
 }
 
 #[tokio::test]
+async fn on_request_clears_stale_route_retry_policy_on_reroute() {
+    // A router matching a route WITH a retry policy sets it; a second router
+    // matching a route WITHOUT one must clear the stale override, so a
+    // re-route cannot inherit a retry policy it never declared.
+    let with_policy = RouterFilter::from_config(
+        &serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+                routes:
+                  - path_prefix: "/"
+                    cluster: "a"
+                    retry_policy:
+                      per_try_timeout_ms: 1000
+                      request_timeout_ms: 5000
+                "#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let without_policy = make_router(vec![prefix_route("/", "b")]);
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(with_policy.on_request(&mut ctx).await.unwrap());
+    assert!(
+        ctx.route_retry_policy.is_some(),
+        "the first route's retry policy should be set"
+    );
+
+    drop(without_policy.on_request(&mut ctx).await.unwrap());
+    assert!(
+        ctx.route_retry_policy.is_none(),
+        "re-routing to a policy-less route must clear the stale override"
+    );
+}
+
+#[tokio::test]
 async fn on_request_metrics_route_distinguishes_exact_and_prefix() {
     let router = make_router(vec![
         exact_route("/api/v1", "exact-cluster"),

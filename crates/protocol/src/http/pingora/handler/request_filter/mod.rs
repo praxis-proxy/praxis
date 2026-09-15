@@ -63,6 +63,9 @@ pub(in crate::http) async fn execute(
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
 ) -> Result<bool> {
+    // Stale upstream-contact state from a prior keep-alive request is cleared in
+    // early_request_filter (the first per-request hook), before any rejection
+    // path, so it cannot leak into this request's passive-health attribution.
     if let Some(rejection) = validation::validate_host_header(session) {
         snapshot_for_early_exit(session, ctx);
         send_rejection(session, rejection).await;
@@ -89,11 +92,6 @@ pub(in crate::http) async fn execute(
     }
 
     ctx.client_http_version = Some(session.req_header().version);
-
-    // Clear stale upstream from previous request on this keep-alive connection.
-    // upstream_for_retry is set during upstream_peer selection and must not
-    // leak into the next request's filter context.
-    ctx.upstream_for_retry = None;
 
     let mut request = request_header_from_session(session);
     ctx.client_addr = session
@@ -319,19 +317,26 @@ async fn run_pipeline(
     ctx.metrics_route = templated_route(pipeline, ctx, metrics_route);
     ctx.response_body_mode = super::clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
 
+    // Write back the request-scoped upstream and retry lifecycle on EVERY
+    // outcome, not just Continue. A filter ordered after the load_balancer
+    // that returns Reject/TerminalResponse still took the cluster retry
+    // lease and the strategy in-flight slot in on_request; the response
+    // phase (always run via the logging hook) can only release them if the
+    // cluster, upstream, endpoint index and retry state are visible on ctx.
+    ctx.cluster = cluster;
+    ctx.upstream = upstream;
+    ctx.selected_endpoint_index = selected_endpoint_index;
+    ctx.cluster_retry_state = cluster_retry_state;
+    ctx.cluster_retry_state_released = cluster_retry_state_released;
+    ctx.endpoint_reselector = endpoint_reselector;
+
     match action {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
-            ctx.cluster = cluster;
-            ctx.upstream = upstream;
             ctx.rewritten_path = rewritten_path;
             ctx.request_body_mode = super::clamp_body_mode_to_ceiling(request_body_mode, baseline_request_body_mode);
-            ctx.selected_endpoint_index = selected_endpoint_index;
             ctx.attempted_endpoints = attempted_endpoints;
             ctx.retry_policy = retry_policy;
             ctx.route_retry_policy = route_retry_policy;
-            ctx.cluster_retry_state = cluster_retry_state;
-            ctx.cluster_retry_state_released = cluster_retry_state_released;
-            ctx.endpoint_reselector = endpoint_reselector;
             Ok(PipelineResult {
                 action: FilterAction::Continue,
                 extra_headers,
@@ -1465,6 +1470,32 @@ mod tests {
             obj.get("score"),
             Some(&serde_json::json!(0.95)),
             "score field should be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn reject_after_selection_writes_back_cluster_for_release() {
+        // A filter ordered after the load balancer that rejects must still
+        // leave the selected cluster on the context. The context macro
+        // consumes ctx.cluster when building each phase's filter context, so
+        // without the write-back the response/logging phase sees cluster =
+        // None and can never release the retry lease or in-flight slot the
+        // load balancer acquired.
+        let mut ctx = make_ctx();
+        ctx.cluster = Some(Arc::from("backend"));
+
+        let result = run_pipeline(&rejecting_pipeline(503), make_request(), &mut ctx)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result.action, FilterAction::Reject(_)),
+            "the static_response pipeline must reject"
+        );
+        assert_eq!(
+            ctx.cluster.as_deref(),
+            Some("backend"),
+            "a rejected request must retain its selected cluster so the response phase can release the lease"
         );
     }
 

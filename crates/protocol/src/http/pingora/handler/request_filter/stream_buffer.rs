@@ -242,14 +242,24 @@ pub(super) async fn pre_read_body(
     // size here ensures a large original body still prevents retries even
     // when a ReadWrite filter shrinks the forwarded payload.
     ctx.request_body_bytes = original_body_bytes;
-    if caps.any_request_body_writer {
+    let writer_ran = caps.any_request_body_writer;
+    if writer_ran {
         ctx.mutated_request_body_len = Some(forwarded.len());
     }
-    if forwarded.is_empty() {
-        ctx.pre_read_body = Some(VecDeque::new());
+    let chunks = if forwarded.is_empty() {
+        VecDeque::new()
     } else {
-        ctx.pre_read_body = Some(VecDeque::from([forwarded]));
+        VecDeque::from([forwarded])
+    };
+    // A body writer may have changed the forwarded bytes (or their length). The
+    // first attempt forwards them from pre_read_body; retries replay from
+    // Pingora's fixed buffer (the ORIGINAL bytes). Retain the mutated body so
+    // upstream_request_filter can re-seed it per retry, keeping the replayed
+    // body matched to the re-stamped Content-Length.
+    if writer_ran {
+        ctx.retained_pre_read_body = Some(chunks.clone());
     }
+    ctx.pre_read_body = Some(chunks);
 
     ctx.request_body_released = true;
 

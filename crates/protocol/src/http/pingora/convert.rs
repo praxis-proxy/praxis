@@ -34,19 +34,20 @@ pub(crate) fn request_header_from_session(session: &mut Session) -> Request {
     Request { method, uri, headers }
 }
 
-/// Build a transport-agnostic [`Response`] by taking headers from a Pingora response.
+/// Build a transport-agnostic [`Response`] by copying a Pingora response's
+/// status and headers.
 ///
-/// Uses [`std::mem::take`] to move the [`HeaderMap`] out of the Pingora
-/// response, avoiding a deep clone. The caller must move the headers
-/// back (or assign modified headers) before Pingora sends the response
-/// downstream.
+/// Clones the [`HeaderMap`]: Pingora 0.9.0 removed `DerefMut` on
+/// `ResponseHeader`, so the map can no longer be moved out in place, and the
+/// original must stay intact regardless so its status stays readable for the
+/// retry and commit checks that run before write-back.
 ///
 /// ```ignore
 /// // Requires `pingora_http::ResponseHeader` from Pingora internals.
 /// use praxis_protocol::http::pingora::convert::response_header_from_pingora;
 ///
-/// let mut upstream = pingora_http::ResponseHeader::build(200, None).unwrap();
-/// let resp = response_header_from_pingora(&mut upstream);
+/// let upstream = pingora_http::ResponseHeader::build(200, None).unwrap();
+/// let resp = response_header_from_pingora(&upstream);
 /// assert_eq!(resp.status.as_u16(), 200);
 /// ```
 ///
@@ -54,10 +55,10 @@ pub(crate) fn request_header_from_session(session: &mut Session) -> Request {
 /// [`HeaderMap`]: http::HeaderMap
 // Hot path: called per-request, cross-crate boundary.
 #[inline]
-pub(crate) fn response_header_from_pingora(upstream: &mut pingora_http::ResponseHeader) -> Response {
+pub(crate) fn response_header_from_pingora(upstream: &pingora_http::ResponseHeader) -> Response {
     Response {
         status: upstream.status,
-        headers: std::mem::take(&mut upstream.headers),
+        headers: upstream.headers.clone(),
     }
 }
 
@@ -169,8 +170,8 @@ mod tests {
 
     #[test]
     fn response_header_preserves_status() {
-        let mut upstream = pingora_http::ResponseHeader::build(200, None).unwrap();
-        let resp = response_header_from_pingora(&mut upstream);
+        let upstream = pingora_http::ResponseHeader::build(200, None).unwrap();
+        let resp = response_header_from_pingora(&upstream);
         assert_eq!(resp.status, StatusCode::OK, "status should be 200 OK");
     }
 
@@ -180,7 +181,7 @@ mod tests {
         let _insert1 = upstream.insert_header("x-custom", "value");
         let _insert2 = upstream.insert_header("content-type", "text/plain");
 
-        let resp = response_header_from_pingora(&mut upstream);
+        let resp = response_header_from_pingora(&upstream);
         assert_eq!(
             resp.headers.get("x-custom").unwrap(),
             "value",
@@ -194,26 +195,26 @@ mod tests {
     }
 
     #[test]
-    fn response_header_takes_headers_from_upstream() {
+    fn response_header_copies_headers_from_upstream() {
         let mut upstream = pingora_http::ResponseHeader::build(200, Some(1)).unwrap();
         let _insert = upstream.insert_header("x-test", "taken");
 
-        let resp = response_header_from_pingora(&mut upstream);
+        let resp = response_header_from_pingora(&upstream);
         assert_eq!(
             resp.headers.get("x-test").unwrap(),
             "taken",
             "header should be in response"
         );
         assert!(
-            upstream.headers.is_empty(),
-            "upstream headers should be empty after take"
+            !upstream.headers.is_empty(),
+            "upstream headers stay intact after the copy"
         );
     }
 
     #[test]
     fn response_header_empty_headers() {
-        let mut upstream = pingora_http::ResponseHeader::build(404, None).unwrap();
-        let resp = response_header_from_pingora(&mut upstream);
+        let upstream = pingora_http::ResponseHeader::build(404, None).unwrap();
+        let resp = response_header_from_pingora(&upstream);
         assert_eq!(resp.status, StatusCode::NOT_FOUND, "status should be 404 Not Found");
         assert!(
             resp.headers.is_empty(),

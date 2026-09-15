@@ -123,6 +123,32 @@ impl CertWatcher {
     }
 }
 
+/// How the watch loop should react to a change on the shutdown channel.
+enum ShutdownAction {
+    /// Shutdown was requested; stop the loop.
+    Shutdown,
+    /// A spurious wake-up (value unchanged); keep polling the channel.
+    KeepPolling,
+    /// The shutdown sender was dropped; stop polling this arm so the loop
+    /// does not busy-spin on a perpetually-ready error.
+    StopPolling,
+}
+
+/// Decide how to react to a shutdown-channel change.
+///
+/// `changed_ok` is whether [`watch::Receiver::changed`] returned `Ok` (the
+/// sender is still alive); `requested` is the current channel value. A
+/// dropped sender yields `changed_ok == false`.
+///
+/// [`watch::Receiver::changed`]: tokio::sync::watch::Receiver::changed
+fn on_shutdown_change(changed_ok: bool, requested: bool) -> ShutdownAction {
+    match (changed_ok, requested) {
+        (true, true) => ShutdownAction::Shutdown,
+        (true, false) => ShutdownAction::KeepPolling,
+        (false, _) => ShutdownAction::StopPolling,
+    }
+}
+
 /// Core watch loop: sets up the notify watcher, debounces events,
 /// and reloads certificates (and optionally the client verifier).
 #[expect(clippy::too_many_lines, reason = "event loop with tokio::select")]
@@ -161,6 +187,7 @@ async fn watch_loop(
     }
 
     let mut backoff_ms = DEBOUNCE_MS;
+    let mut watch_shutdown = true;
 
     loop {
         tokio::select! {
@@ -184,10 +211,24 @@ async fn watch_loop(
                     );
                 }
             }
-            result = shutdown.changed() => {
-                if result.is_ok() && *shutdown.borrow() {
-                    tracing::info!("certificate file watcher shutting down");
-                    return;
+            result = shutdown.changed(), if watch_shutdown => {
+                // Copy the flag out of the borrow guard before the match so the
+                // temporary Ref does not live across the arms.
+                let requested = *shutdown.borrow();
+                match on_shutdown_change(result.is_ok(), requested) {
+                    ShutdownAction::Shutdown => {
+                        tracing::info!("certificate file watcher shutting down");
+                        return;
+                    },
+                    ShutdownAction::KeepPolling => {},
+                    ShutdownAction::StopPolling => {
+                        // The shutdown sender was dropped. The watcher runs for
+                        // the process lifetime, so stop polling this arm (parking
+                        // select! on rx.recv()) rather than spinning on a
+                        // perpetually-ready Err; early termination is only via
+                        // send(true), which keeps a live sender.
+                        watch_shutdown = false;
+                    },
                 }
             }
         }
@@ -371,6 +412,15 @@ fn parent_dir(path: &str) -> PathBuf {
 mod tests {
     use super::*;
     use crate::test_utils::{gen_test_certs, gen_test_certs_in};
+
+    #[test]
+    fn shutdown_change_decisions() {
+        assert!(matches!(on_shutdown_change(true, true), ShutdownAction::Shutdown));
+        assert!(matches!(on_shutdown_change(true, false), ShutdownAction::KeepPolling));
+        // A dropped sender (changed() -> Err) must stop polling, not spin.
+        assert!(matches!(on_shutdown_change(false, false), ShutdownAction::StopPolling));
+        assert!(matches!(on_shutdown_change(false, true), ShutdownAction::StopPolling));
+    }
 
     #[test]
     fn parent_dir_extracts_directory() {

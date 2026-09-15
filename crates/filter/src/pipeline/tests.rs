@@ -2533,6 +2533,58 @@ async fn branch_filter_failure_mode_closed_propagates_its_error() {
 }
 
 #[tokio::test]
+async fn reenter_short_circuit_still_runs_on_response() {
+    // A ReEnter that loops back must not clear executed_filter_indices: a
+    // filter reached on the first pass but short-circuited (here: a reject)
+    // before being reached again on the second pass must still run its
+    // on_response. Clearing the indices dropped it.
+    let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let calls = Arc::new(AtomicUsize::new(0));
+
+    let reject_on_second = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(RejectOnSecondCallFilter {
+            calls: Arc::clone(&calls),
+        })),
+        vec![],
+        vec![],
+    );
+    let mut reenter = PipelineFilter::new(
+        1,
+        AnyFilter::Http(Box::new(LoggingFilter {
+            label: "reenter",
+            log: Arc::clone(&log),
+        })),
+        vec![],
+        vec![],
+    );
+    reenter.branches = vec![ResolvedBranch {
+        name: Arc::from("loop-back"),
+        condition: None,
+        filters: vec![],
+        max_iterations: Some(3),
+        rejoin: RejoinTarget::ReEnter(0),
+    }];
+
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![reject_on_second, reenter]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "the second pass should short-circuit with a reject"
+    );
+
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    assert_eq!(
+        log.lock().unwrap().clone(),
+        vec!["reenter"],
+        "a first-pass filter short-circuited on re-entry must still run on_response"
+    );
+}
+
+#[tokio::test]
 async fn skipped_filter_skips_its_branches() {
     let counter = Arc::new(AtomicUsize::new(0));
 
@@ -3086,6 +3138,45 @@ fn body_done_response_body_skips_filter_on_subsequent_chunks() {
 }
 
 #[tokio::test]
+async fn request_body_done_does_not_suppress_response_body() {
+    // A filter with both request- and response-body access that finishes the
+    // request body (BodyDone) must still run its response-body hook. The two
+    // loops share body_done_indices; the response header phase resets it at
+    // the request -> response boundary.
+    let responses = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![Box::new(RequestBodyDoneWithResponseFilter {
+        responses: Arc::clone(&responses),
+    })]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    let mut req_body = Some(Bytes::from_static(b"req"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut req_body, true)
+            .await
+            .unwrap(),
+    );
+
+    // Response header phase resets body-done tracking at the boundary.
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+
+    let mut resp_body = Some(Bytes::from_static(b"resp"));
+    drop(
+        pipeline
+            .execute_http_response_body(&mut ctx, &mut resp_body, true)
+            .unwrap(),
+    );
+
+    assert_eq!(
+        responses.lock().unwrap().clone(),
+        vec!["dual_body"],
+        "a request-body BodyDone must not suppress the response-body hook"
+    );
+}
+
+#[tokio::test]
 async fn body_done_with_stream_buffer_mode() {
     let done_chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
     let inspector_chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3456,6 +3547,69 @@ impl HttpFilter for BodyLoggingFilter {
         _end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         self.log.lock().unwrap().push(self.label);
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// Continues on the first `on_request`, rejects on every later call.
+struct RejectOnSecondCallFilter {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl HttpFilter for RejectOnSecondCallFilter {
+    fn name(&self) -> &'static str {
+        "reject_on_second"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) >= 1 {
+            Ok(FilterAction::Reject(crate::Rejection::status(403)))
+        } else {
+            Ok(FilterAction::Continue)
+        }
+    }
+}
+
+/// Finishes the request body (`BodyDone`) but records each response-body call.
+struct RequestBodyDoneWithResponseFilter {
+    responses: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl HttpFilter for RequestBodyDoneWithResponseFilter {
+    fn name(&self) -> &'static str {
+        "dual_body"
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::BodyDone)
+    }
+
+    fn on_response_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        self.responses.lock().unwrap().push("dual_body");
         Ok(FilterAction::Continue)
     }
 }

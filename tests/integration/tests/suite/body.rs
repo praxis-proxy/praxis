@@ -7,8 +7,8 @@ use bytes::Bytes;
 use praxis_core::config::Config;
 use praxis_filter::{BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection};
 use praxis_test_utils::{
-    custom_filter_yaml, free_port, http_post, http_send, parse_status, registry_with, simple_proxy_yaml,
-    start_backend_with_shutdown, start_echo_backend, start_proxy, start_proxy_with_registry,
+    Backend, custom_filter_yaml, free_port, http_post, http_send, parse_status, registry_with, simple_proxy_yaml,
+    start_backend_with_shutdown, start_echo_backend, start_proxy, start_proxy_with_registry, start_uri_echo_backend,
 };
 
 // -----------------------------------------------------------------------------
@@ -41,6 +41,124 @@ fn body_uppercase_filter_transforms_request_body() {
 
     assert_eq!(status, 200, "uppercase filter should return 200");
     assert_eq!(body, "HELLO WORLD", "body should be uppercased by filter");
+}
+
+#[test]
+fn retry_replays_the_mutated_request_body() {
+    // A StreamBuffer body writer uppercases the request body via the pre-read
+    // path on the first attempt. When that attempt gets a 503 and the request
+    // is retried onto a healthy backend, the retry must replay the MUTATED body
+    // (not the original bytes from Pingora's fixed retry buffer), so the echo
+    // backend returns the uppercased body. A regression re-forwards the original
+    // body under the mutated Content-Length: a request-smuggling gadget.
+    let failing = Backend::status(503, "unavailable").start();
+    let healthy = start_echo_backend();
+    let healthy_port = healthy.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: preread_uppercase
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "127.0.0.1:{failing}"
+              - "127.0.0.1:{healthy_port}"
+            retry_policy:
+              max_retries: 3
+              allow_non_idempotent: true
+              retriable_conditions: [connect_failure, status_5xx]
+              backoff:
+                base_interval_ms: 1
+                max_interval_ms: 5
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("preread_uppercase", || Box::new(PreReadUppercaseFilter));
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let (status, body) = http_post(proxy.addr(), "/echo", "hello world");
+    assert_eq!(
+        status, 200,
+        "a 503 first attempt should retry onto the healthy echo backend"
+    );
+    assert_eq!(
+        body, "HELLO WORLD",
+        "the retry must replay the mutated (uppercased) body, not the original bytes"
+    );
+}
+
+#[test]
+fn streamed_body_rewrite_is_reapplied_on_retry() {
+    // A path rewrite plus a STREAM-mode request-body filter: the request-body
+    // phase takes rewritten_path out of the context, so without restoring it a
+    // retry would forward the original path. A 503 first attempt retries onto a
+    // uri-echo backend, which must report the rewritten path.
+    let failing = Backend::status(503, "unavailable").start();
+    let healthy = start_uri_echo_backend();
+    let healthy_port = healthy.port();
+    let proxy_port = free_port();
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: path_rewrite
+        strip_prefix: "/api/v1"
+        conditions:
+          - when:
+              path_prefix: "/api/v1"
+      - filter: body_uppercase
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{failing}"
+              - "127.0.0.1:{healthy_port}"
+            retry_policy:
+              max_retries: 3
+              allow_non_idempotent: true
+              retriable_conditions: [connect_failure, status_5xx]
+              backoff:
+                base_interval_ms: 1
+                max_interval_ms: 5
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("body_uppercase", || Box::new(BodyUppercaseFilter::streaming()));
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let (status, body) = http_post(proxy.addr(), "/api/v1/users", "hello");
+    assert_eq!(status, 200, "a 503 first attempt should retry onto the healthy backend");
+    assert_eq!(
+        body, "/users",
+        "the retry must forward the rewritten path even with a streaming request-body filter"
+    );
 }
 
 #[test]
@@ -413,6 +531,49 @@ impl HttpFilter for BodyUppercaseFilter {
             *b = Bytes::from(upper);
         }
 
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// A body writer that statically declares StreamBuffer, forcing the request
+/// body through the pre-read path (populating `pre_read_body`) rather than the
+/// inline runtime path. This is the path a retry must replay from, so it is
+/// what exercises the mutated-body-on-retry fix.
+struct PreReadUppercaseFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for PreReadUppercaseFilter {
+    fn name(&self) -> &'static str {
+        "preread_uppercase"
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer {
+            max_bytes: Some(64 * 1024), // 64 KiB
+        }
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadWrite
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if !end_of_stream {
+            return Ok(FilterAction::Continue);
+        }
+        if let Some(b) = body {
+            let upper: Vec<u8> = b.iter().map(u8::to_ascii_uppercase).collect();
+            *b = Bytes::from(upper);
+        }
         Ok(FilterAction::Continue)
     }
 }

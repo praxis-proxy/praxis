@@ -38,7 +38,7 @@ pub(crate) struct LeastConnections {
     /// [`release`]: Self::release
     index_by_addr: HashMap<Arc<str>, usize>,
 
-    /// Deduplicated endpoint list with weights and original indices.
+    /// Deduplicated endpoint list with weights.
     endpoints: Vec<WeightedEndpoint>,
 
     /// Round-robin tiebreaker for equal load and weight.
@@ -110,17 +110,12 @@ impl LeastConnections {
     /// Scan endpoints and return the best candidate address with its
     /// current load. Prefers healthy endpoints when health state is
     /// available; falls back to all endpoints.
-    #[expect(clippy::indexing_slicing, reason = "bounds checked")]
     fn find_best(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<(usize, usize)> {
         let offset = self.rr_counter.fetch_add(1, Ordering::Relaxed);
 
         if let Some(state) = health
             && let Some((addr, load)) = self.select_from_candidates(
-                |ep| {
-                    ep.index < state.endpoints().len()
-                        && state.endpoints()[ep.index].is_healthy()
-                        && !is_excluded(&ep.address, exclude)
-                },
+                |ep| state.is_address_healthy(&ep.address) && !is_excluded(&ep.address, exclude),
                 offset,
             )
         {
@@ -205,9 +200,9 @@ mod tests {
     #[test]
     fn selects_min() {
         let lc = LeastConnections::new(vec![
-            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
-            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
-            WeightedEndpoint::simple(Arc::from("10.0.0.3:80"), 2, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.3:80"), 1),
         ]);
 
         let first = lc.select(None, &[]).unwrap();
@@ -229,7 +224,7 @@ mod tests {
 
     #[test]
     fn release_does_not_underflow() {
-        let lc = LeastConnections::new(vec![WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1)]);
+        let lc = LeastConnections::new(vec![WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1)]);
 
         lc.release("10.0.0.1:80");
         assert_eq!(
@@ -241,7 +236,7 @@ mod tests {
 
     #[test]
     fn release_unknown_addr_is_noop() {
-        let lc = LeastConnections::new(vec![WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1)]);
+        let lc = LeastConnections::new(vec![WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1)]);
 
         lc.release("10.0.0.99:80");
     }
@@ -249,8 +244,8 @@ mod tests {
     #[test]
     fn skips_unhealthy_endpoints() {
         let lc = LeastConnections::new(vec![
-            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
-            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
         ]);
         let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
             vec![EndpointHealth::new(), EndpointHealth::new()],
@@ -270,8 +265,8 @@ mod tests {
     #[test]
     fn panic_mode_when_all_unhealthy() {
         let lc = LeastConnections::new(vec![
-            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
-            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
         ]);
         let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
             vec![EndpointHealth::new(), EndpointHealth::new()],
@@ -292,8 +287,8 @@ mod tests {
     #[test]
     fn weight_breaks_ties() {
         let lc = LeastConnections::new(vec![
-            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
-            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 3),
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 3),
         ]);
 
         assert_eq!(
@@ -306,8 +301,8 @@ mod tests {
     #[test]
     fn concurrent_select_distributes_load() {
         let lc = Arc::new(LeastConnections::new(vec![
-            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
-            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
         ]));
         let total = 100;
 
@@ -330,8 +325,8 @@ mod tests {
     #[test]
     fn concurrent_select_and_release() {
         let lc = Arc::new(LeastConnections::new(vec![
-            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
-            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
         ]));
 
         let handles: Vec<_> = std::iter::repeat_with(|| {

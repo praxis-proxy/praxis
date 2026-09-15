@@ -73,6 +73,7 @@ pub(in crate::config::validate) fn validate_clusters(
             health_check::validate_health_check(hc, &cluster.name)?;
         }
         health_check::validate_health_check_ssrf(cluster, insecure_options)?;
+        health_check::warn_tls_http_probe_mismatch(cluster);
     }
     Ok(())
 }

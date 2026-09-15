@@ -137,12 +137,14 @@ fn rfc9110_duplicate_cl_different_values_rejected() {
 }
 
 /// [RFC 9110 Section 8.6]: two Content-Length headers with
-/// identical values. Pingora rejects any duplicate CL
-/// headers, even with matching values.
+/// identical values. RFC 9110 permits collapsing same-valued
+/// duplicates to a single field rather than rejecting; Pingora
+/// 0.9.0 forwards them and Praxis canonicalizes to one value.
+/// Conflicting values are still rejected.
 ///
 /// [RFC 9110 Section 8.6]: https://datatracker.ietf.org/doc/html/rfc9110#section-8.6
 #[test]
-fn rfc9110_duplicate_cl_same_value_rejected() {
+fn rfc9110_duplicate_cl_same_value_collapsed() {
     let backend_port = start_backend("ok");
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
@@ -162,8 +164,8 @@ fn rfc9110_duplicate_cl_same_value_rejected() {
     let status = parse_status(&raw);
 
     assert_eq!(
-        status, 400,
-        "duplicate Content-Length even with same value must be rejected (got {status})"
+        status, 200,
+        "duplicate Content-Length with identical values is collapsed and accepted (got {status})"
     );
 }
 

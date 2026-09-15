@@ -341,6 +341,19 @@ impl ClusterHealthEntry {
         &self.endpoints
     }
 
+    /// Whether the endpoint with `addr` is healthy.
+    ///
+    /// Health is keyed by address (identity), not by position: a load
+    /// balancer's endpoint list can be declared in a different order than the
+    /// health-checked top-level cluster, so a positional lookup could read a
+    /// different endpoint's health. An address the registry does not track is
+    /// treated as healthy (untracked endpoints are not health-gated).
+    pub fn is_address_healthy(&self, addr: &str) -> bool {
+        self.endpoint_index(addr)
+            .and_then(|i| self.endpoints.get(i))
+            .is_none_or(EndpointHealth::is_healthy)
+    }
+
     /// Return `(healthy, total)` endpoint counts for this cluster.
     pub fn endpoint_counts(&self) -> (usize, usize) {
         let total = self.endpoints.len();
@@ -414,6 +427,23 @@ mod tests {
     use std::thread;
 
     use super::*;
+
+    #[test]
+    fn is_address_healthy_keys_by_address() {
+        let entry = ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new()],
+            vec![Arc::from("a:80"), Arc::from("b:80")],
+            None,
+            None,
+        );
+        entry.endpoints()[1].mark_unhealthy();
+        assert!(entry.is_address_healthy("a:80"), "tracked healthy endpoint");
+        assert!(!entry.is_address_healthy("b:80"), "tracked unhealthy endpoint");
+        assert!(
+            entry.is_address_healthy("unknown:80"),
+            "an untracked address is treated as healthy"
+        );
+    }
 
     #[test]
     fn endpoint_starts_healthy() {

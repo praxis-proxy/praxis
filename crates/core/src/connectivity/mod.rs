@@ -9,8 +9,10 @@ mod network;
 ///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 pub mod peer;
+mod target;
 mod upstream;
 
 pub use connection_options::ConnectionOptions;
 pub use network::{CidrRange, is_private_ip, normalize_mapped_ipv4};
+pub use target::{InvalidTarget, PreparedSubrequest, PreparedTarget, UrlTargetError, prepare_url_target};
 pub use upstream::Upstream;

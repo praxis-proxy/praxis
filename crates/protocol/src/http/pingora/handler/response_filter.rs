@@ -160,11 +160,11 @@ async fn run_response_pipeline(
 
 /// Map the filter pipeline result to a Pingora Result, restoring headers on success.
 ///
-/// Headers were taken from the Pingora response via [`std::mem::take`] earlier,
-/// so they must always be restored. When the header name sequence is unchanged,
-/// a direct swap is safe because the internal `header_name_map` still lines up
-/// positionally with the restored [`HeaderMap`]. When the name sequence changed,
-/// we rebuild through Pingora's API to keep the two structures consistent.
+/// Headers were copied out of the Pingora response earlier, so they must
+/// always be written back. When the header name sequence is unchanged the map
+/// is moved straight back; when it changed we rebuild through Pingora's API.
+/// Either way the whole value is replaced, since 0.9.0 removed `DerefMut` on
+/// `ResponseHeader`.
 ///
 /// The status is written back unconditionally: it lives in the plain
 /// [`RespParts`] and has no coupling to the name map, so a filter that adjusts
@@ -225,14 +225,14 @@ fn handle_response_result(
 
 /// Restore the filtered headers and status onto the Pingora response.
 ///
-/// The header map was moved out with [`std::mem::take`] before the
-/// pipeline ran, so it must always be put back. `headers_modified`
-/// selects how: an unchanged name sequence can be swapped straight in,
-/// while a changed one has to be rebuilt through Pingora's API so the
-/// `header_name_map` stays in step (see [`write_headers_to_pingora`]).
+/// The header map was copied out before the pipeline ran, so it must always
+/// be written back. `headers_modified` selects how: an unchanged name
+/// sequence is moved straight back through owned [`RespParts`], while a
+/// changed one is rebuilt header by header (see [`write_headers_to_pingora`]).
 ///
-/// The status is assigned on both paths — it lives in the plain
-/// [`RespParts`] with no coupling to the name map, so it must not
+/// Pingora 0.9.0 removed `DerefMut` on `ResponseHeader`, so neither path can
+/// assign its fields directly; both replace the whole value. The reason phrase
+/// is carried across and the status is always set, so the outcome does not
 /// depend on whether headers happened to change.
 ///
 /// [`RespParts`]: http::response::Parts
@@ -244,8 +244,18 @@ fn write_back_response(
     if headers_modified {
         write_headers_to_pingora(&resp.headers, resp.status, upstream_response);
     } else {
-        upstream_response.headers = std::mem::take(&mut resp.headers);
-        upstream_response.status = resp.status;
+        // Names are unchanged, so move the map straight back with no per-header
+        // clone. 0.9.0 removed ResponseHeader's DerefMut, so build owned Parts
+        // and convert; carry the reason phrase across to match the rebuild path.
+        let reason = upstream_response.get_reason_phrase().map(str::to_owned);
+        let (mut parts, ()) = http::Response::new(()).into_parts();
+        parts.status = resp.status;
+        parts.headers = std::mem::take(&mut resp.headers);
+        let mut rebuilt = pingora_http::ResponseHeader::from(parts);
+        if let Some(reason) = reason {
+            let _set = rebuilt.set_reason_phrase(Some(&reason));
+        }
+        *upstream_response = rebuilt;
     }
 }
 
@@ -636,9 +646,9 @@ mod tests {
         let mut upstream = pingora_http::ResponseHeader::build(200, Some(1)).unwrap();
         drop(upstream.insert_header("x-old", "v"));
 
-        // Mirror what the response phase does: take the map, let a filter
+        // Mirror what the response phase does: copy the map out, let a filter
         // swap one name for another, then write back through the rebuild.
-        let mut taken = std::mem::take(&mut upstream.headers);
+        let mut taken = upstream.headers.clone();
         taken.remove("x-old");
         taken.insert("x-new", "v".parse().unwrap());
         let resp = praxis_filter::Response {

@@ -428,4 +428,40 @@ filter_chains:
             .expect("second endpoint");
         assert!(!down.healthy, "unhealthy endpoint should be false");
     }
+
+    #[test]
+    fn resolve_health_registry_prefers_live_over_stale_startup() {
+        let startup: HealthRegistry = Arc::new(
+            [(
+                Arc::from("backend"),
+                Arc::new(ClusterHealthEntry::new(
+                    vec![EndpointHealth::new()],
+                    vec![Arc::from("10.0.0.1:80")],
+                    None,
+                    None,
+                )),
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        // No live pipelines: fall back to the startup snapshot.
+        let empty_meta = new_listener_meta_store(std::collections::HashMap::new());
+        assert!(
+            resolve_health_registry(Some(&startup), None, &empty_meta).is_some(),
+            "with no live pipelines the startup registry is used"
+        );
+
+        // Live pipelines present but exposing no registry for current listeners:
+        // return None rather than the stale startup snapshot (which /ready would
+        // otherwise report frozen at the first reload).
+        let state = pipelines_admin::PipelinesAdminState {
+            pipelines: Arc::new(crate::ListenerPipelines::new(std::collections::HashMap::new())),
+            meta: new_listener_meta_store(std::collections::HashMap::new()),
+        };
+        assert!(
+            resolve_health_registry(Some(&startup), Some(&state), &state.meta).is_none(),
+            "must not fall back to the stale startup registry when pipelines are live"
+        );
+    }
 }

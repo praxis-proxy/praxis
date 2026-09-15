@@ -255,7 +255,6 @@ fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
         new,
         [
             global_queue_interval,
-            log_overrides,
             max_connections,
             max_memory_bytes,
             subrequest_pool_size,
@@ -663,11 +662,16 @@ mod tests {
     }
 
     #[test]
-    fn runtime_log_overrides_change_warns() {
+    fn runtime_log_overrides_change_does_not_warn() {
+        // log_overrides is applied on reload via refresh_baseline, so changing
+        // it must not warn that a restart is required.
         let old = config_with_runtime("");
         let new = config_with_runtime("runtime:\n  log_overrides:\n    praxis_filter: debug\n");
         let warnings = capture_warnings(|| detect_startup_only_runtime_changes(&old, &new));
-        assert_eq!(warnings.len(), 1, "changed log_overrides should produce one warning");
+        assert!(
+            warnings.is_empty(),
+            "a log_overrides-only change is applied on reload and must not warn: {warnings:?}"
+        );
     }
 
     #[test]

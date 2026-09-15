@@ -10,7 +10,7 @@
 //! [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::{Arc, OnceLock},
     time::Instant,
 };
@@ -77,14 +77,15 @@ pub enum AddressResolutionError {
         /// Hostname being resolved.
         address: String,
         /// The private or reserved address DNS returned.
-        ip: std::net::IpAddr,
+        ip: IpAddr,
     },
 }
 
-/// Cached DNS addresses, or the last resolution failure.
+/// Cached DNS resolution: the complete raw address set (portless, resolver
+/// order), or the failure message when the last resolution failed.
 struct DnsCacheEntry {
     /// Outcome of the last resolution.
-    outcome: Result<Arc<[SocketAddr]>, String>,
+    outcome: Result<Arc<[IpAddr]>, String>,
     /// Cache insertion time.
     resolved_at: Instant,
 }
@@ -101,31 +102,110 @@ impl DnsCacheEntry {
     }
 }
 
-/// Process-wide bounded cache of complete DNS results.
+/// Process-wide bounded DNS cache, keyed by canonical lowercase host.
 fn dns_cache() -> &'static DashMap<String, DnsCacheEntry> {
     static CACHE: OnceLock<DashMap<String, DnsCacheEntry>> = OnceLock::new();
     CACHE.get_or_init(DashMap::new)
 }
 
-/// Per-hostname single-flight gates: concurrent misses on one hostname
-/// coalesce into a single blocking `getaddrinfo` call instead of a
-/// stampede at every TTL boundary.
-fn dns_inflight() -> &'static DashMap<String, Arc<tokio::sync::Mutex<()>>> {
-    static INFLIGHT: OnceLock<DashMap<String, Arc<tokio::sync::Mutex<()>>>> = OnceLock::new();
+/// Fan-out payload for the inflight resolution result. `None` = still pending;
+/// `Some` = terminal. The error is `Arc`-wrapped because
+/// [`AddressResolutionError`] is not `Clone` (`Resolve { source: io::Error }`).
+type ResolvePayload = Option<Result<Arc<[IpAddr]>, Arc<AddressResolutionError>>>;
+
+/// Per-host inflight resolutions: a `watch::Receiver` fans the owner task's
+/// result out to every coalescing caller. The map value is only a result
+/// channel — the resolution itself is driven by a runtime-spawned owner task,
+/// so it completes even if every awaiter drops.
+fn dns_inflight() -> &'static DashMap<String, tokio::sync::watch::Receiver<ResolvePayload>> {
+    static INFLIGHT: OnceLock<DashMap<String, tokio::sync::watch::Receiver<ResolvePayload>>> = OnceLock::new();
     INFLIGHT.get_or_init(DashMap::new)
 }
 
-/// Resolve one upstream address, preferring IPv4.
+/// Canonical cache key: DNS names are case-insensitive, so fold to lowercase.
+fn cache_key(host: &str) -> String {
+    host.to_ascii_lowercase()
+}
+
+/// The blocking name lookup beneath the cache + single-flight. Production uses
+/// `getaddrinfo`; tests inject a controllable double.
 ///
-/// Use [`resolve_addresses`] when the caller can fail over.
+/// A *resolver* failure (NXDOMAIN, etc.) returns `Err`. An *infrastructure*
+/// failure (the blocking thread panicked / `JoinError`) MUST panic, so the
+/// owner task drops its result channel without publishing — the failure is
+/// never cached and the next caller re-resolves.
+pub(crate) trait BlockingLookup: Clone + Send + Sync + 'static {
+    /// Resolve `host` to its complete address set, or an [`AddressResolutionError`].
+    fn lookup(&self, host: String) -> impl Future<Output = Result<Vec<IpAddr>, AddressResolutionError>> + Send;
+}
+
+/// The real `getaddrinfo`-backed lookup.
+#[derive(Clone)]
+struct SystemLookup;
+
+impl BlockingLookup for SystemLookup {
+    async fn lookup(&self, host: String) -> Result<Vec<IpAddr>, AddressResolutionError> {
+        let task_host = host.clone();
+        let joined = tokio::task::spawn_blocking(move || {
+            use std::net::ToSocketAddrs as _;
+            (task_host.as_str(), 0_u16)
+                .to_socket_addrs()
+                .map(|it| it.map(|sa| sa.ip()).collect::<Vec<_>>())
+        })
+        .await;
+        let resolved = match joined {
+            Ok(resolved) => resolved,
+            // Blocking thread panicked: propagate so the owner drops the
+            // channel without poisoning the entry.
+            #[expect(
+                clippy::panic,
+                reason = "infrastructure panic (not resolver failure) must propagate to prevent poisoning"
+            )]
+            Err(join_err) => panic!("DNS resolver task panicked for '{host}': {join_err}"),
+        };
+        resolved.map_err(|source| AddressResolutionError::Resolve { address: host, source })
+    }
+}
+
+/// Rebuild an owned [`AddressResolutionError`] from the `Arc` fan-out payload,
+/// preserving the `Resolve` `io::Error`'s OS code when present.
+fn owned_from_arc(err: &AddressResolutionError) -> AddressResolutionError {
+    match err {
+        AddressResolutionError::Task { address, message } => AddressResolutionError::Task {
+            address: address.clone(),
+            message: message.clone(),
+        },
+        AddressResolutionError::Resolve { address, source } => AddressResolutionError::Resolve {
+            address: address.clone(),
+            source: source.raw_os_error().map_or_else(
+                || std::io::Error::new(source.kind(), source.to_string()),
+                std::io::Error::from_raw_os_error,
+            ),
+        },
+        AddressResolutionError::Empty(a) => AddressResolutionError::Empty(a.clone()),
+        AddressResolutionError::RecentFailure { address, message } => AddressResolutionError::RecentFailure {
+            address: address.clone(),
+            message: message.clone(),
+        },
+        AddressResolutionError::PrivateAddress { address, ip } => AddressResolutionError::PrivateAddress {
+            address: address.clone(),
+            ip: *ip,
+        },
+    }
+}
+
+/// Resolve an upstream `host:port` to a single preferred address.
+///
+/// Literal socket addresses take the allocation-free fast path. Hostnames use a
+/// bounded process-wide cache and the detached-owner single-flight, resolving
+/// the host to its complete set and applying the requested port.
 ///
 /// # Errors
 ///
 /// Returns [`AddressResolutionError`] when resolution fails or returns no
-/// usable addresses.
+/// usable addresses. Error `address` fields name the caller-visible
+/// `"host:port"`, not the portless cache key.
 pub async fn resolve_address(address: &str) -> Result<SocketAddr, AddressResolutionError> {
-    // Answer a literal without building the list, so the common host:port
-    // upstream costs no allocation on the request path.
     if let Some(addr) = literal_socket_addr(address) {
         return Ok(addr);
     }
@@ -133,46 +213,179 @@ pub async fn resolve_address(address: &str) -> Result<SocketAddr, AddressResolut
     select_preferred_address(&addresses, address)
 }
 
-/// Resolve every address returned for an upstream.
+/// Resolve every address returned for an upstream `host:port`.
 ///
-/// Results retain resolver order and are cached. Callers must validate each
-/// address before dialing it.
+/// Results retain resolver order (unlike [`resolve_address`], which prefers
+/// IPv4) and are cached. Callers must validate each address before dialing it.
+/// Literal socket addresses take the allocation-free fast path.
 ///
 /// # Errors
 ///
 /// Returns [`AddressResolutionError`] when resolution fails or returns no
-/// usable addresses.
+/// usable addresses. Error `address` fields name the caller-visible
+/// `"host:port"`, not the portless cache key.
 pub async fn resolve_addresses(address: &str) -> Result<Arc<[SocketAddr]>, AddressResolutionError> {
     if let Some(addr) = literal_socket_addr(address) {
         return Ok(Arc::from([addr]));
     }
-    if let Some(cached) = lookup_cached(address) {
-        return cached;
+    let (host, port) = split_host_port(address).ok_or_else(|| AddressResolutionError::Resolve {
+        address: address.to_owned(),
+        source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing port"),
+    })?;
+    let ips = resolve_host_cached(host).await.map_err(|e| readdress(e, address))?;
+    let addrs: Vec<SocketAddr> = ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect();
+    Ok(Arc::from(addrs))
+}
+
+/// Split `host:port`, stripping IPv6 brackets. `None` when no port is present.
+fn split_host_port(address: &str) -> Option<(&str, u16)> {
+    let (host, port) = address.rsplit_once(':')?;
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    let port = port.parse::<u16>().ok()?;
+    Some((host, port))
+}
+
+/// Re-address a host-keyed resolution error to the caller-visible `host:port`,
+/// moving the inner `io::Error` intact so `kind()`/`raw_os_error()` survive.
+fn readdress(err: AddressResolutionError, caller: &str) -> AddressResolutionError {
+    match err {
+        AddressResolutionError::Resolve { source, .. } => AddressResolutionError::Resolve {
+            address: caller.to_owned(),
+            source,
+        },
+        AddressResolutionError::Task { message, .. } => AddressResolutionError::Task {
+            address: caller.to_owned(),
+            message,
+        },
+        AddressResolutionError::Empty(_) => AddressResolutionError::Empty(caller.to_owned()),
+        AddressResolutionError::RecentFailure { message, .. } => AddressResolutionError::RecentFailure {
+            address: caller.to_owned(),
+            message,
+        },
+        other @ AddressResolutionError::PrivateAddress { .. } => other,
+    }
+}
+
+/// Resolve a bare host to its complete address set (cached, single-flight),
+/// portless, raw resolver order preserved. Never returns `Ok(vec![])`.
+///
+/// # Errors
+///
+/// Returns [`AddressResolutionError`] on resolver failure or a zero-address
+/// answer (mapped to [`AddressResolutionError::Empty`] and negatively cached).
+pub(crate) async fn resolve_host_cached(host: &str) -> Result<Vec<IpAddr>, AddressResolutionError> {
+    resolve_host_cached_with(host, &SystemLookup).await
+}
+
+/// Cache-checked, single-flight resolution over an injectable [`BlockingLookup`].
+/// The real machinery behind [`resolve_host_cached`]; tests drive it with a
+/// controllable lookup double.
+#[expect(
+    clippy::too_many_lines,
+    reason = "detached-owner single-flight spans setup, await loop, and error fan-out"
+)]
+async fn resolve_host_cached_with<L: BlockingLookup>(
+    host: &str,
+    lookup: &L,
+) -> Result<Vec<IpAddr>, AddressResolutionError> {
+    if let Some(cached) = lookup_cached(host) {
+        return cached.map(|arc| arc.to_vec());
+    }
+    let key = cache_key(host);
+
+    // Occupy (or join) the inflight entry. The first caller spawns the owner;
+    // the closure does nothing but create the channel and spawn (both
+    // non-blocking) while the DashMap shard lock is held.
+    let mut rx = dns_inflight()
+        .entry(key.clone())
+        .or_insert_with(|| {
+            let (tx, rx) = tokio::sync::watch::channel(None);
+            let owner_host = host.to_owned();
+            let owner_key = key.clone();
+            let owner_lookup = lookup.clone();
+            tokio::spawn(owner_resolve(owner_host, owner_key, tx, owner_lookup));
+            rx
+        })
+        .clone();
+
+    // Await the owner's terminal publish, or a channel close (owner dropped
+    // while still pending → panic path).
+    let payload = loop {
+        let current = rx.borrow_and_update().clone();
+        if let Some(terminal) = current {
+            break Some(terminal);
+        }
+        if rx.changed().await.is_err() {
+            break None;
+        }
+    };
+
+    match payload {
+        Some(Ok(ips)) => Ok(ips.to_vec()),
+        Some(Err(arc)) => Err(owned_from_arc(&arc)),
+        None => Err(AddressResolutionError::Resolve {
+            address: host.to_owned(),
+            source: std::io::Error::other("DNS resolution task ended without a result"),
+        }),
+    }
+}
+
+/// The detached owner: re-check the cache, run the blocking lookup, populate
+/// the cache, publish exactly one terminal payload. A cleanup guard removes the
+/// inflight entry on EVERY exit (success, error, panic).
+#[expect(
+    clippy::too_many_lines,
+    reason = "cleanup guard, TOCTOU re-check, blocking lookup, cache write, and channel publish"
+)]
+async fn owner_resolve<L: BlockingLookup>(
+    host: String,
+    key: String,
+    tx: tokio::sync::watch::Sender<ResolvePayload>,
+    lookup: L,
+) {
+    struct Cleanup(String);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            dns_inflight().remove(&self.0);
+        }
+    }
+    let _guard = Cleanup(key);
+
+    // TOCTOU re-check: a previous owner may have populated the cache between our
+    // caller's miss and our spawn. Mirrors the old post-lock re-check.
+    if let Some(cached) = lookup_cached(&host) {
+        let payload = match cached {
+            Ok(arc) => Ok(arc),
+            Err(e) => Err(Arc::new(e)),
+        };
+        drop(tx.send(Some(payload)));
+        return;
     }
 
-    // Single-flight: losers wait on the winner's lock, then hit the cache
-    // it populated. The Arc is cloned before the shard guard drops so the
-    // await below never holds a DashMap lock.
-    let gate = Arc::clone(
-        &dns_inflight()
-            .entry(address.to_owned())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-    );
-    let _flight = gate.lock().await;
-    if let Some(cached) = lookup_cached(address) {
-        return cached;
-    }
+    // A zero-address answer is negative, never a positive empty set.
+    let outcome = lookup.lookup(host.clone()).await.and_then(|ips| {
+        if ips.is_empty() {
+            Err(AddressResolutionError::Empty(host.clone()))
+        } else {
+            Ok(ips)
+        }
+    });
 
-    let outcome = resolve_uncached(address).await;
+    // Cache-write happens-before entry-removal: the guard fires at return, after
+    // this write, so a caller that finds the slot empty finds the cache filled.
     insert_cached(
-        address,
+        &host,
         match &outcome {
-            Ok(addresses) => Ok(Arc::clone(addresses)),
+            Ok(ips) => Ok(Arc::from(ips.as_slice())),
             Err(e) => Err(e.to_string()),
         },
     );
-    dns_inflight().remove(address);
-    outcome
+
+    let payload = match outcome {
+        Ok(ips) => Ok(Arc::<[IpAddr]>::from(ips.as_slice())),
+        Err(e) => Err(Arc::new(e)),
+    };
+    drop(tx.send(Some(payload)));
 }
 
 /// Resolve an upstream address, rejecting DNS answers that point at a
@@ -244,33 +457,12 @@ fn literal_socket_addr(address: &str) -> Option<SocketAddr> {
     address.parse::<SocketAddr>().ok()
 }
 
-/// Run the blocking resolver and keep every address it answers with.
-async fn resolve_uncached(address: &str) -> Result<Arc<[SocketAddr]>, AddressResolutionError> {
-    let owned = address.to_owned();
-    let task_address = owned.clone();
-    let addrs = tokio::task::spawn_blocking(move || {
-        use std::net::ToSocketAddrs as _;
-        task_address.to_socket_addrs().map(Iterator::collect::<Vec<_>>)
-    })
-    .await
-    .map_err(|error| AddressResolutionError::Task {
-        address: owned.clone(),
-        message: error.to_string(),
-    })?
-    .map_err(|source| AddressResolutionError::Resolve {
-        address: owned.clone(),
-        source,
-    })?;
-    if addrs.is_empty() {
-        return Err(AddressResolutionError::Empty(owned));
-    }
-    Ok(Arc::from(addrs))
-}
 
 /// Store a resolution outcome, evicting the oldest entry at capacity.
-fn insert_cached(address: &str, outcome: Result<Arc<[SocketAddr]>, String>) {
+fn insert_cached(host: &str, outcome: Result<Arc<[IpAddr]>, String>) {
     let cache = dns_cache();
-    if cache.len() >= MAX_DNS_ENTRIES && !cache.contains_key(address) {
+    let key = cache_key(host);
+    if cache.len() >= MAX_DNS_ENTRIES && !cache.contains_key(&key) {
         cache.retain(|_, entry| entry.is_fresh());
         if cache.len() >= MAX_DNS_ENTRIES
             && let Some(oldest) = cache
@@ -282,7 +474,7 @@ fn insert_cached(address: &str, outcome: Result<Arc<[SocketAddr]>, String>) {
         }
     }
     cache.insert(
-        address.to_owned(),
+        key,
         DnsCacheEntry {
             outcome,
             resolved_at: Instant::now(),
@@ -290,18 +482,18 @@ fn insert_cached(address: &str, outcome: Result<Arc<[SocketAddr]>, String>) {
     );
 }
 
-/// Return a non-expired cached outcome (positive or negative).
-fn lookup_cached(address: &str) -> Option<Result<Arc<[SocketAddr]>, AddressResolutionError>> {
-    dns_cache().get(address).and_then(|entry| {
+/// Return a non-expired cached outcome (positive or negative) for `host`.
+fn lookup_cached(host: &str) -> Option<Result<Arc<[IpAddr]>, AddressResolutionError>> {
+    dns_cache().get(&cache_key(host)).and_then(|entry| {
         entry.is_fresh().then(|| {
             entry
                 .outcome
                 .as_ref()
+                .map(Arc::clone)
                 .map_err(|message| AddressResolutionError::RecentFailure {
-                    address: address.to_owned(),
+                    address: host.to_owned(),
                     message: message.clone(),
                 })
-                .map(Arc::clone)
         })
     })
 }
@@ -418,7 +610,7 @@ pub fn is_ip_literal(host: &str) -> bool {
     host.strip_prefix('[')
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host)
-        .parse::<std::net::IpAddr>()
+        .parse::<IpAddr>()
         .is_ok()
 }
 
@@ -661,5 +853,290 @@ mod tests {
             ipv6,
             "an IPv6-only resolution must be usable"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_host_cached_returns_complete_portless_set() {
+        let ips = resolve_host_cached("localhost")
+            .await
+            .expect("localhost must resolve via the hosts file");
+        assert!(!ips.is_empty(), "must never return an empty set");
+        assert!(
+            ips.iter().all(|ip: &IpAddr| ip.is_loopback()),
+            "localhost must be loopback: {ips:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_host_cached_is_case_folded() {
+        resolve_host_cached("localhost").await.expect("resolve lowercase");
+        // A differently-cased host must hit the same cache entry.
+        assert!(
+            lookup_cached("LOCALHOST").is_some(),
+            "case-folded host must share the cache entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_address_still_prefers_ipv4_and_preserves_port() {
+        let addr = resolve_address("localhost:8123").await.expect("localhost must resolve");
+        assert_eq!(addr.port(), 8123, "the requested port must be preserved");
+        assert!(addr.ip().is_loopback());
+    }
+
+    #[tokio::test]
+    async fn resolve_address_readdresses_errors_to_host_port() {
+        let bogus = "does-not-exist.praxis-readdress-test.invalid:80";
+        let err = resolve_address(bogus).await.expect_err(".invalid must fail");
+        assert!(
+            err.to_string()
+                .contains("does-not-exist.praxis-readdress-test.invalid:80"),
+            "resolve_address errors must name the caller-visible host:port, not the portless key: {err}"
+        );
+    }
+
+    #[test]
+    fn is_ip_literal_detects_v4_v6_and_rejects_dns() {
+        assert!(is_ip_literal("127.0.0.1"), "bare IPv4 is a literal");
+        assert!(is_ip_literal("[::1]"), "bracketed IPv6 is a literal");
+        assert!(is_ip_literal("::1"), "bare IPv6 is a literal");
+        assert!(!is_ip_literal("api.example.com"), "a DNS name is not a literal");
+        assert!(!is_ip_literal("localhost"), "localhost is a DNS name, not a literal");
+    }
+
+    #[tokio::test]
+    async fn resolve_addresses_returns_literal_without_dns() {
+        let addrs = resolve_addresses("127.0.0.1:8080").await.expect("a literal must parse");
+        assert_eq!(addrs.len(), 1, "a literal resolves to exactly itself");
+        assert_eq!(addrs[0], "127.0.0.1:8080".parse().unwrap());
+    }
+
+    #[tokio::test]
+    async fn resolve_addresses_resolves_hostname_and_applies_port() {
+        let addrs = resolve_addresses("localhost:8123")
+            .await
+            .expect("localhost must resolve via the hosts file");
+        assert!(!addrs.is_empty(), "must never return an empty set");
+        assert!(
+            addrs.iter().all(|a| a.ip().is_loopback() && a.port() == 8123),
+            "every address must be loopback on the requested port: {addrs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_addresses_rejects_missing_port() {
+        resolve_addresses("localhost")
+            .await
+            .expect_err("a bare host with no port must be rejected");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    use std::sync::{
+        Arc as StdArc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Clone)]
+    enum Behavior {
+        Ok(Vec<IpAddr>),
+        Empty,
+        Fail,
+        Panic,
+    }
+
+    #[derive(Clone)]
+    struct ControlledLookup {
+        calls: StdArc<AtomicUsize>,
+        release: StdArc<tokio::sync::Notify>,
+        behavior: Behavior,
+    }
+
+    impl ControlledLookup {
+        fn new(behavior: Behavior) -> Self {
+            Self {
+                calls: StdArc::new(AtomicUsize::new(0)),
+                release: StdArc::new(tokio::sync::Notify::new()),
+                behavior,
+            }
+        }
+    }
+
+    impl BlockingLookup for ControlledLookup {
+        async fn lookup(&self, host: String) -> Result<Vec<IpAddr>, AddressResolutionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let release = StdArc::clone(&self.release);
+            let behavior = self.behavior.clone();
+            release.notified().await;
+            match behavior {
+                Behavior::Ok(ips) => Ok(ips),
+                Behavior::Empty => Ok(Vec::new()),
+                Behavior::Fail => Err(AddressResolutionError::Resolve {
+                    address: host,
+                    source: std::io::Error::from_raw_os_error(111),
+                }),
+                #[expect(clippy::panic, reason = "test double intentionally panics to verify cleanup guard")]
+                Behavior::Panic => panic!("controlled lookup panic for {host}"),
+            }
+        }
+    }
+
+    // Poll until the lookup has been entered (calls > 0), yielding cooperatively.
+    #[expect(clippy::panic, reason = "test helper panics on timeout to fail the test early")]
+    async fn await_lookup_started(calls: &AtomicUsize) {
+        for _ in 0..1_000 {
+            if calls.load(Ordering::SeqCst) > 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("lookup never started");
+    }
+
+    #[tokio::test]
+    async fn concurrent_callers_coalesce_to_one_lookup() {
+        let host = "coalesce.praxis-sf-test.invalid";
+        let lookup = ControlledLookup::new(Behavior::Ok(vec!["1.2.3.4".parse().unwrap()]));
+        let tasks: Vec<_> = std::iter::repeat_with(|| {
+            let l = lookup.clone();
+            tokio::spawn(async move { resolve_host_cached_with(host, &l).await })
+        })
+        .take(8)
+        .collect();
+        await_lookup_started(&lookup.calls).await;
+        assert!(
+            dns_inflight().contains_key(&cache_key(host)),
+            "inflight entry must exist while blocked"
+        );
+        lookup.release.notify_waiters();
+        for t in tasks {
+            let ips = t.await.unwrap().expect("all callers resolve");
+            assert_eq!(ips, vec!["1.2.3.4".parse::<IpAddr>().unwrap()]);
+        }
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1, "exactly one blocking lookup");
+        assert!(
+            !dns_inflight().contains_key(&cache_key(host)),
+            "entry removed after completion"
+        );
+        assert!(lookup_cached(host).is_some(), "cache populated after completion");
+    }
+
+    #[tokio::test]
+    async fn error_fans_out_to_all_waiters_and_removes_entry() {
+        let host = "errfanout.praxis-sf-test.invalid";
+        let lookup = ControlledLookup::new(Behavior::Fail);
+        let tasks: Vec<_> = std::iter::repeat_with(|| {
+            let l = lookup.clone();
+            tokio::spawn(async move { resolve_host_cached_with(host, &l).await })
+        })
+        .take(5)
+        .collect();
+        await_lookup_started(&lookup.calls).await;
+        lookup.release.notify_waiters();
+        for t in tasks {
+            let err = t.await.unwrap().expect_err("every waiter gets the error");
+            // The io::Error OS code must survive the Arc fan-out + reconstruction.
+            assert!(matches!(err, AddressResolutionError::Resolve { .. }), "got {err}");
+            if let AddressResolutionError::Resolve { source, .. } = &err {
+                assert_eq!(source.raw_os_error(), Some(111), "raw_os_error must survive fan-out");
+                assert_eq!(
+                    source.kind(),
+                    std::io::Error::from_raw_os_error(111).kind(),
+                    "io::ErrorKind must survive fan-out",
+                );
+            }
+        }
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+        assert!(
+            !dns_inflight().contains_key(&cache_key(host)),
+            "entry removed after error"
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_address_answer_is_negatively_cached() {
+        let host = "empty.praxis-sf-test.invalid";
+        let lookup = ControlledLookup::new(Behavior::Empty);
+        lookup.release.notify_one(); // store a permit; the owner consumes it at the gate
+        let err = resolve_host_cached_with(host, &lookup)
+            .await
+            .expect_err("empty → error");
+        assert!(matches!(err, AddressResolutionError::Empty(_)), "got {err}");
+        let cached = lookup_cached(host).expect("negative cache entry");
+        assert!(matches!(cached, Err(AddressResolutionError::RecentFailure { .. })));
+    }
+
+    #[tokio::test]
+    async fn owner_panic_removes_entry_and_does_not_poison() {
+        let host = "panic.praxis-sf-test.invalid";
+        let panicking = ControlledLookup::new(Behavior::Panic);
+        panicking.release.notify_one();
+        let first = resolve_host_cached_with(host, &panicking).await;
+        assert!(first.is_err(), "a panicked owner surfaces a fresh error");
+        assert!(
+            !dns_inflight().contains_key(&cache_key(host)),
+            "cleanup guard removed the entry"
+        );
+        assert!(
+            lookup_cached(host).is_none(),
+            "a panic must not be cached (positive or negative)"
+        );
+
+        // A subsequent caller must spawn a FRESH owner and re-resolve, not
+        // coalesce onto a dead channel.
+        let healthy = ControlledLookup::new(Behavior::Ok(vec!["9.9.9.9".parse().unwrap()]));
+        healthy.release.notify_one();
+        let ips = resolve_host_cached_with(host, &healthy).await.expect("re-resolves");
+        assert_eq!(ips, vec!["9.9.9.9".parse::<IpAddr>().unwrap()]);
+        assert_eq!(healthy.calls.load(Ordering::SeqCst), 1, "fresh owner ran");
+    }
+
+    #[tokio::test]
+    async fn owner_re_check_short_circuits_a_cached_host() {
+        let host = "recheck.praxis-sf-test.invalid";
+        insert_cached(host, Ok(Arc::from(["7.7.7.7".parse::<IpAddr>().unwrap()].as_slice())));
+        let lookup = ControlledLookup::new(Behavior::Ok(vec!["0.0.0.0".parse().unwrap()]));
+        lookup.release.notify_waiters();
+        let ips = resolve_host_cached_with(host, &lookup)
+            .await
+            .expect("served from cache");
+        assert_eq!(
+            ips,
+            vec!["7.7.7.7".parse::<IpAddr>().unwrap()],
+            "cache hit, not the fresh lookup"
+        );
+        assert_eq!(
+            lookup.calls.load(Ordering::SeqCst),
+            0,
+            "re-check must skip BlockingLookup"
+        );
+    }
+
+    #[tokio::test]
+    async fn caller_cancellation_leaves_the_owner_running() {
+        let host = "cancel.praxis-sf-test.invalid";
+        let lookup = ControlledLookup::new(Behavior::Ok(vec!["1.1.1.1".parse().unwrap()]));
+        let waiter = {
+            let l = lookup.clone();
+            tokio::spawn(async move { resolve_host_cached_with(host, &l).await })
+        };
+        await_lookup_started(&lookup.calls).await;
+        waiter.abort(); // cancel the caller that spawned the owner
+        drop(waiter.await);
+        assert!(
+            dns_inflight().contains_key(&cache_key(host)),
+            "the detached owner must survive caller cancellation"
+        );
+        lookup.release.notify_waiters();
+        // The owner still completes and populates the cache.
+        for _ in 0..1_000 {
+            if lookup_cached(host).is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(lookup_cached(host).is_some(), "owner completed after caller cancel");
     }
 }

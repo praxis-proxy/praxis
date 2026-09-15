@@ -287,10 +287,36 @@ async fn clusters_are_isolated() {
 }
 
 #[tokio::test]
-async fn on_response_no_header_records_failure() {
+async fn on_response_no_header_with_upstream_reached_records_failure() {
     let filter = make_filter(1, 9999);
     let req = crate::test_utils::make_request(http::Method::GET, "/");
 
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("backend"));
+    ctx.current_filter_id = Some(0);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    // Upstream was contacted but returned no response header: a real
+    // connect/read failure, which must trip the circuit.
+    ctx.upstream_reached = true;
+    drop(filter.on_response(&mut ctx).await.unwrap());
+
+    let mut ctx2 = crate::test_utils::make_filter_context(&req);
+    ctx2.cluster = Some(Arc::from("backend"));
+    ctx2.current_filter_id = Some(0);
+    let action = filter.on_request(&mut ctx2).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 503),
+        "missing response header after reaching the upstream should trip the circuit"
+    );
+}
+
+#[tokio::test]
+async fn on_response_no_header_without_upstream_does_not_trip() {
+    let filter = make_filter(1, 9999);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    // A request rejected or aborted before the upstream was contacted leaves
+    // upstream_reached = false; the breaker must not record a failure.
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.cluster = Some(Arc::from("backend"));
     ctx.current_filter_id = Some(0);
@@ -302,8 +328,8 @@ async fn on_response_no_header_records_failure() {
     ctx2.current_filter_id = Some(0);
     let action = filter.on_request(&mut ctx2).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(r) if r.status == 503),
-        "missing response header (connection failure) should trip the circuit"
+        matches!(action, FilterAction::Continue),
+        "a request that never reached the upstream must not trip the circuit"
     );
 }
 

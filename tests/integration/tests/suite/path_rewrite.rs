@@ -3,7 +3,7 @@
 
 //! Integration tests for the path_rewrite filter.
 
-use praxis_test_utils::{free_port, http_get, start_proxy, start_uri_echo_backend};
+use praxis_test_utils::{Backend, free_port, http_get, start_proxy, start_uri_echo_backend};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -49,6 +49,63 @@ insecure_options:
     let (status, body) = http_get(proxy.addr(), "/api/v1/users", None);
     assert_eq!(status, 200, "request should succeed");
     assert_eq!(body, "/users", "upstream should see stripped path");
+}
+
+#[test]
+fn rewritten_path_is_reapplied_on_retry() {
+    // The path rewrite must re-apply on a retried upstream attempt: a 503 from
+    // the first backend retries onto a healthy uri-echo backend, which must see
+    // the REWRITTEN path (/users), not the original (/api/v1/users). Pingora
+    // restarts each retry from the original downstream request, so the rewrite
+    // is deliberately re-applied every attempt rather than consumed once.
+    let failing = Backend::status(503, "unavailable").start();
+    let healthy = start_uri_echo_backend();
+    let healthy_port = healthy.port();
+    let proxy_port = free_port();
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: path_rewrite
+        strip_prefix: "/api/v1"
+        conditions:
+          - when:
+              path_prefix: "/api/v1"
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{failing}"
+              - "127.0.0.1:{healthy_port}"
+            retry_policy:
+              max_retries: 3
+              retriable_conditions: [connect_failure, status_5xx]
+              backoff:
+                base_interval_ms: 1
+                max_interval_ms: 5
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+    let config = praxis_core::config::Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let (status, body) = http_get(proxy.addr(), "/api/v1/users", None);
+    assert_eq!(status, 200, "a 503 first attempt should retry onto the healthy backend");
+    assert_eq!(
+        body, "/users",
+        "the retried attempt must forward the rewritten path, not the original"
+    );
 }
 
 #[test]

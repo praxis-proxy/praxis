@@ -349,6 +349,37 @@ fn nominated_tokens_match_case_insensitively() {
     );
 }
 
+#[test]
+fn connection_token_cannot_strip_a_protected_forwarding_header() {
+    // A client-supplied `Connection` token naming a proxy-owned forwarding
+    // header must not delete it from the sub-request (same rule as the main
+    // upstream path and filtered sub-requests).
+    let mut headers = HeaderMap::new();
+    headers.insert("connection", "x-forwarded-for, host".parse().unwrap());
+    let nominated = connection_nominated_tokens(&headers);
+
+    assert!(
+        !is_request_stripped(&"x-forwarded-for".parse().unwrap(), &nominated),
+        "a Connection token must not strip x-forwarded-for"
+    );
+    assert!(
+        !is_boundary_stripped(&"host".parse().unwrap(), &nominated),
+        "a Connection token must not strip host"
+    );
+    // A genuine custom hop-by-hop token is still stripped.
+    assert!(
+        is_request_stripped(
+            &"x-custom".parse().unwrap(),
+            &connection_nominated_tokens(&{
+                let mut h = HeaderMap::new();
+                h.insert("connection", "x-custom".parse().unwrap());
+                h
+            })
+        ),
+        "a non-protected nominated token must still strip"
+    );
+}
+
 // -- Helpers ------------------------------------------------------------
 
 #[test]

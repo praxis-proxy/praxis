@@ -121,7 +121,12 @@ impl FilterPipeline {
                 },
                 BranchOutcome::SkipTo(t) => idx = t,
                 BranchOutcome::ReEnter(t) => {
-                    ctx.executed_filter_indices[t..=idx].fill(false);
+                    // Do not clear executed_filter_indices for the re-entered
+                    // span: once a filter's on_request has run in any pass it
+                    // must keep its on_response paired, and re-execution re-marks
+                    // it idempotently. Clearing here dropped on_response for
+                    // filters that ran on the first pass but were short-circuited
+                    // (rejected, or skipped by conditions) on the second.
                     idx = t;
                 },
                 BranchOutcome::Reject(r) => return Ok(FilterAction::Reject(r)),
@@ -146,6 +151,14 @@ impl FilterPipeline {
     /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
     #[expect(clippy::too_many_lines, reason = "streaming terminal variant adds one match arm")]
     pub async fn execute_http_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // Reset body-done tracking at the request -> response boundary. The
+        // request-body and response-body loops share body_done_indices, so a
+        // filter with both request- and response-body access that returned
+        // BodyDone during the request-body phase would otherwise be skipped
+        // in the response-body phase. This hook runs once before any response
+        // body chunk, and its result is written back to the protocol cache.
+        ctx.body_done_indices.clear();
+        ctx.body_done_indices.resize(self.filters.len(), false);
         for (idx, pf) in self.filters.iter().enumerate().rev() {
             if ctx.executed_filter_indices.get(idx) == Some(&false) {
                 trace!(

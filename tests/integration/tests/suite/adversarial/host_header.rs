@@ -52,7 +52,7 @@ fn conflicting_host_headers_rejected() {
 }
 
 #[test]
-fn identical_duplicate_host_headers_accepted() {
+fn identical_duplicate_host_headers_rejected() {
     let backend_port_guard = start_backend_with_shutdown("ok");
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
@@ -68,9 +68,13 @@ fn identical_duplicate_host_headers_accepted() {
     let raw = http_send(proxy.addr(), request);
     let status = parse_status(&raw);
 
+    // Pingora 0.9.0's HTTP ambiguity hardening rejects any request carrying
+    // more than one Host header field at the protocol layer (RFC 9112 Section
+    // 3.2), before Praxis's identical-Host canonicalization can run. Even
+    // byte-identical duplicates are refused.
     assert_eq!(
-        status, 200,
-        "identical duplicate Host headers should be canonicalized and accepted"
+        status, 400,
+        "duplicate Host headers must be rejected with 400, even when identical"
     );
 }
 

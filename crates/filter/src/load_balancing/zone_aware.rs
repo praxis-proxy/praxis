@@ -6,10 +6,7 @@
 
 use std::sync::Arc;
 
-use praxis_core::{
-    config::SimpleStrategy,
-    health::{ClusterHealthState, EndpointHealth},
-};
+use praxis_core::{config::SimpleStrategy, health::ClusterHealthState};
 
 use super::{
     endpoint::WeightedEndpoint,
@@ -30,7 +27,7 @@ pub(crate) struct ZoneAware {
     all_strategy: Box<Strategy>,
 
     /// Indices of local-zone endpoints in the health state array.
-    local_indices: Vec<usize>,
+    local_addresses: Vec<Arc<str>>,
 
     /// Total number of endpoints (for health percentage calculation).
     local_count: usize,
@@ -53,7 +50,7 @@ impl ZoneAware {
             .cloned()
             .collect();
 
-        let local_indices: Vec<usize> = local_endpoints.iter().map(|ep| ep.index).collect();
+        let local_addresses: Vec<Arc<str>> = local_endpoints.iter().map(|ep| Arc::clone(&ep.address)).collect();
         let local_count = local_endpoints.len();
 
         let local_strategy = if local_endpoints.is_empty() {
@@ -67,7 +64,7 @@ impl ZoneAware {
         Self {
             local_strategy,
             all_strategy,
-            local_indices,
+            local_addresses,
             local_count,
             min_local_healthy_pct,
         }
@@ -116,9 +113,9 @@ impl ZoneAware {
         };
 
         let healthy_count = self
-            .local_indices
+            .local_addresses
             .iter()
-            .filter(|&&idx| state.endpoints().get(idx).is_some_and(EndpointHealth::is_healthy))
+            .filter(|addr| state.is_address_healthy(addr))
             .count();
 
         #[expect(clippy::cast_possible_truncation, reason = "percentage is 0..=100")]
@@ -143,17 +140,17 @@ impl ZoneAware {
 mod tests {
     use std::collections::HashSet;
 
-    use praxis_core::health::ClusterHealthEntry;
+    use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
 
     #[test]
     fn prefers_local_zone_when_healthy() {
         let endpoints = vec![
-            ep("10.0.0.1:80", 0, "us-east-1a"),
-            ep("10.0.0.2:80", 1, "us-east-1a"),
-            ep("10.0.0.3:80", 2, "us-east-1b"),
-            ep("10.0.0.4:80", 3, "us-west-2a"),
+            ep("10.0.0.1:80", "us-east-1a"),
+            ep("10.0.0.2:80", "us-east-1a"),
+            ep("10.0.0.3:80", "us-east-1b"),
+            ep("10.0.0.4:80", "us-west-2a"),
         ];
         let za = ZoneAware::new(endpoints, "us-east-1a", &SimpleStrategy::RoundRobin, 70);
 
@@ -170,10 +167,10 @@ mod tests {
     #[test]
     fn spills_to_all_when_local_degraded() {
         let endpoints = vec![
-            ep("10.0.0.1:80", 0, "us-east-1a"),
-            ep("10.0.0.2:80", 1, "us-east-1a"),
-            ep("10.0.0.3:80", 2, "us-east-1a"),
-            ep("10.0.0.4:80", 3, "us-east-1b"),
+            ep("10.0.0.1:80", "us-east-1a"),
+            ep("10.0.0.2:80", "us-east-1a"),
+            ep("10.0.0.3:80", "us-east-1a"),
+            ep("10.0.0.4:80", "us-east-1b"),
         ];
         let za = ZoneAware::new(endpoints, "us-east-1a", &SimpleStrategy::RoundRobin, 70);
 
@@ -195,10 +192,10 @@ mod tests {
     #[test]
     fn stays_local_when_above_threshold() {
         let endpoints = vec![
-            ep("10.0.0.1:80", 0, "us-east-1a"),
-            ep("10.0.0.2:80", 1, "us-east-1a"),
-            ep("10.0.0.3:80", 2, "us-east-1a"),
-            ep("10.0.0.4:80", 3, "us-east-1b"),
+            ep("10.0.0.1:80", "us-east-1a"),
+            ep("10.0.0.2:80", "us-east-1a"),
+            ep("10.0.0.3:80", "us-east-1a"),
+            ep("10.0.0.4:80", "us-east-1b"),
         ];
         let za = ZoneAware::new(endpoints, "us-east-1a", &SimpleStrategy::RoundRobin, 50);
 
@@ -216,7 +213,7 @@ mod tests {
 
     #[test]
     fn no_local_endpoints_uses_all() {
-        let endpoints = vec![ep("10.0.0.1:80", 0, "us-east-1b"), ep("10.0.0.2:80", 1, "us-west-2a")];
+        let endpoints = vec![ep("10.0.0.1:80", "us-east-1b"), ep("10.0.0.2:80", "us-west-2a")];
         let za = ZoneAware::new(endpoints, "us-east-1a", &SimpleStrategy::RoundRobin, 70);
 
         let mut seen = HashSet::new();
@@ -228,10 +225,9 @@ mod tests {
 
     #[test]
     fn endpoints_without_zone_are_not_local() {
-        let mut endpoints = vec![ep("10.0.0.1:80", 0, "us-east-1a")];
+        let mut endpoints = vec![ep("10.0.0.1:80", "us-east-1a")];
         endpoints.push(WeightedEndpoint {
             address: Arc::from("10.0.0.2:80"),
-            index: 1,
             weight: 1,
             metadata: std::collections::HashMap::new(),
             priority: 0,
@@ -249,10 +245,9 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    fn ep(addr: &str, index: usize, zone: &str) -> WeightedEndpoint {
+    fn ep(addr: &str, zone: &str) -> WeightedEndpoint {
         WeightedEndpoint {
             address: Arc::from(addr),
-            index,
             weight: 1,
             metadata: std::collections::HashMap::new(),
             priority: 0,

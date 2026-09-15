@@ -54,6 +54,13 @@ The probe sends a raw `HTTP/1.1 GET` with a
 Any status code other than `expected_status` counts as
 a failure.
 
+HTTP probes connect in plaintext and cannot probe a
+cluster that terminates TLS: the handshake never
+completes, so the endpoint is marked unhealthy. Use a
+`tcp` probe (connect-only) for a TLS cluster. Praxis logs
+a warning at startup when a cluster has `tls` and an
+`http` health check.
+
 ### TCP Probes
 
 TCP probes attempt a connection to the endpoint. A

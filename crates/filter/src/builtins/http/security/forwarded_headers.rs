@@ -148,12 +148,12 @@ impl ForwardedHeadersFilter {
         // staged the for= parameter, grew the entry through format!, and
         // re-allocated a third time for the trusted-append case.
         let existing = if trusted {
-            ctx.request.headers.get("forwarded").and_then(|v| v.to_str().ok())
+            joined_field_lines(&ctx.request.headers, "forwarded")
         } else {
             None
         };
-        let mut value = String::with_capacity(existing.map_or(0, |e| e.len() + 2) + 64);
-        if let Some(existing) = existing {
+        let mut value = String::with_capacity(existing.as_ref().map_or(0, |e| e.len() + 2) + 64);
+        if let Some(existing) = &existing {
             value.push_str(existing);
             value.push_str(", ");
         }
@@ -197,6 +197,27 @@ impl ForwardedHeadersFilter {
 // -----------------------------------------------------------------------------
 // Forwarded Header Formatting
 // -----------------------------------------------------------------------------
+
+/// Comma-join every field-line of `name` in `headers`, per RFC 7230.
+///
+/// Returns `None` when the header is absent or any field-line is
+/// non-UTF-8, signalling the caller to overwrite rather than extend a
+/// value it cannot faithfully reconstruct. Reading only the first line
+/// would silently drop a multi-line proxy chain.
+fn joined_field_lines(headers: &http::HeaderMap, name: &str) -> Option<String> {
+    let mut out: Option<String> = None;
+    for value in headers.get_all(name) {
+        let text = value.to_str().ok()?;
+        match &mut out {
+            Some(acc) => {
+                acc.push_str(", ");
+                acc.push_str(text);
+            },
+            None => out = Some(text.to_owned()),
+        }
+    }
+    out
+}
 
 /// Write the `for` parameter value per [RFC 7239 Section 6] into `out`.
 ///
@@ -262,20 +283,21 @@ impl HttpFilter for ForwardedHeadersFilter {
         // once instead of re-scanning the trusted CIDR list per use.
         let trusted = self.is_trusted(&client_ip);
         tracing::debug!(trusted, "setting X-Forwarded-For");
-        let xff = if trusted && let Some(existing) = ctx.request.headers.get("x-forwarded-for") {
-            if let Ok(existing) = existing.to_str() {
-                let mut val = String::with_capacity(existing.len() + 2 + 45);
-                val.push_str(existing);
-                val.push_str(", ");
-                let _ok = write!(val, "{client_ip}");
-                val
-            } else {
-                tracing::warn!(client_ip = %client_ip, "existing X-Forwarded-For contains non-UTF-8 bytes; overwriting");
-                let mut val = String::with_capacity(45);
-                let _ok = write!(val, "{client_ip}");
-                val
-            }
+        let existing_xff = if trusted {
+            joined_field_lines(&ctx.request.headers, "x-forwarded-for")
         } else {
+            None
+        };
+        let xff = if let Some(existing) = existing_xff {
+            let mut val = String::with_capacity(existing.len() + 2 + 45);
+            val.push_str(&existing);
+            val.push_str(", ");
+            let _ok = write!(val, "{client_ip}");
+            val
+        } else {
+            if trusted && ctx.request.headers.contains_key("x-forwarded-for") {
+                tracing::warn!(client_ip = %client_ip, "existing X-Forwarded-For contains non-UTF-8 bytes; overwriting");
+            }
             let mut val = String::with_capacity(45);
             let _ok = write!(val, "{client_ip}");
             val
@@ -393,6 +415,35 @@ mod tests {
             xff,
             Some("203.0.113.50, 10.1.2.3"),
             "trusted proxy should append to existing XFF"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_combines_multiple_xff_field_lines() {
+        let f = make_filter(&["10.0.0.0/8"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.append(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            "1.1.1.1".parse().unwrap(),
+        );
+        req.headers.append(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            "2.2.2.2".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("10.1.2.3".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let xff = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-For")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            xff,
+            Some("1.1.1.1, 2.2.2.2, 10.1.2.3"),
+            "every X-Forwarded-For field-line from a trusted proxy must be preserved"
         );
     }
 
@@ -575,6 +626,35 @@ trusted_proxies:
     }
 
     #[tokio::test]
+    async fn trusted_proxy_combines_multiple_forwarded_field_lines() {
+        let f = make_standard_filter(&["10.0.0.0/8"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.append(
+            http::header::HeaderName::from_static("forwarded"),
+            "for=1.1.1.1".parse().unwrap(),
+        );
+        req.headers.append(
+            http::header::HeaderName::from_static("forwarded"),
+            "for=2.2.2.2".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("10.1.2.3".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let fwd = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "Forwarded")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            fwd,
+            Some("for=1.1.1.1, for=2.2.2.2, for=10.1.2.3;proto=http"),
+            "every Forwarded field-line from a trusted proxy must be preserved"
+        );
+    }
+
+    #[tokio::test]
     async fn standard_forwarded_ipv6_host_quoted() {
         let f = make_standard_filter(&[]);
         let mut req = crate::test_utils::make_request(http::Method::GET, "/");
@@ -671,6 +751,38 @@ trusted_proxies:
             xff,
             Some("10.1.2.3"),
             "non-UTF-8 XFF should be overwritten with just client IP"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_utf8_xff_field_line_forces_overwrite_even_with_a_valid_line() {
+        // If ANY X-Forwarded-For field-line is non-UTF-8, the whole header is
+        // untrustworthy: drop every line (including the valid one) and overwrite
+        // with just the client IP, rather than preserving the valid line.
+        let f = make_filter(&["10.0.0.0/8"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.append(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            "1.1.1.1".parse().unwrap(),
+        );
+        req.headers.append(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            http::HeaderValue::from_bytes(b"\xff\xfe").unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("10.1.2.3".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let xff = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-For")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            xff,
+            Some("10.1.2.3"),
+            "a non-UTF-8 field-line must drop all lines and overwrite with just the client IP"
         );
     }
 

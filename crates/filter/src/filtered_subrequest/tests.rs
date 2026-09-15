@@ -264,6 +264,48 @@ fn request_sanitization_strips_all_reserved_headers_including_depth() {
 }
 
 #[test]
+fn sanitize_keeps_essential_and_proxy_owned_headers_named_in_connection() {
+    // A client must not be able to delete the proxy's trust/authority
+    // headers by naming them in a Connection token on a filtered
+    // sub-request; only genuinely custom connection-scoped headers go.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::CONNECTION,
+        "x-app-state, host, x-forwarded-for, forwarded".parse().unwrap(),
+    );
+    headers.insert("x-app-state", "drop-me".parse().unwrap());
+    headers.insert(http::header::HOST, "backend.internal".parse().unwrap());
+    headers.insert("x-forwarded-for", "203.0.113.9".parse().unwrap());
+    headers.insert("forwarded", "for=203.0.113.9".parse().unwrap());
+
+    super::sanitize::sanitize_subrequest_headers(&mut headers);
+
+    assert!(
+        !headers.contains_key("x-app-state"),
+        "a custom connection-scoped header is stripped"
+    );
+    assert_eq!(
+        headers.get(http::header::HOST).unwrap(),
+        "backend.internal",
+        "Host must survive a Connection: host token"
+    );
+    assert_eq!(
+        headers.get("x-forwarded-for").unwrap(),
+        "203.0.113.9",
+        "X-Forwarded-For must survive a Connection token"
+    );
+    assert_eq!(
+        headers.get("forwarded").unwrap(),
+        "for=203.0.113.9",
+        "Forwarded must survive a Connection token"
+    );
+    assert!(
+        !headers.contains_key(http::header::CONNECTION),
+        "Connection itself is hop-by-hop and removed"
+    );
+}
+
+#[test]
 fn sanitize_strips_depth_header_for_framework_reinsertion() {
     let mut headers = HeaderMap::new();
     headers.insert(praxis_core::subrequest::DEPTH_HEADER, "spoofed".parse().unwrap());

@@ -35,6 +35,11 @@ const MAX_THREADS: usize = 1_024;
 /// Maximum allowed `upstream_keepalive_pool_size` (10,000 per worker).
 const MAX_KEEPALIVE_POOL_SIZE: usize = 10_000;
 
+/// Maximum `runtime.subrequest_pool_size`. It feeds the same Pingora connector
+/// pool (a `DashMap` + LRU pre-sized to this capacity) as the keepalive pool,
+/// so an out-of-range value aborts the process during connector construction.
+const MAX_SUBREQUEST_POOL_SIZE: usize = 10_000;
+
 /// Minimum allowed `max_memory_bytes` (1 MiB).
 const MIN_MEMORY_BYTES: usize = 1_048_576; // 1 MiB
 
@@ -103,6 +108,7 @@ impl Config {
         validate_keepalive_pool_size(self.runtime.upstream_keepalive_pool_size)?;
         validate_max_memory_bytes(self.runtime.max_memory_bytes)?;
         validate_subrequest_max_connections(self.runtime.subrequest_max_connections)?;
+        validate_subrequest_pool_size(self.runtime.subrequest_pool_size)?;
         validate_subrequest_circuit_breaker(self.runtime.subrequest_circuit_breaker.as_ref())?;
         validate_global_queue_interval(self.runtime.global_queue_interval)?;
         validate_logging(&self.runtime.logging)?;
@@ -336,6 +342,18 @@ fn validate_keepalive_pool_size(pool_size: Option<usize>) -> Result<(), ProxyErr
     {
         return Err(ProxyError::Config(format!(
             "runtime.upstream_keepalive_pool_size ({v}) exceeds maximum ({MAX_KEEPALIVE_POOL_SIZE})"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `runtime.subrequest_pool_size` above the ceiling.
+fn validate_subrequest_pool_size(pool_size: Option<usize>) -> Result<(), ProxyError> {
+    if let Some(v) = pool_size
+        && v > MAX_SUBREQUEST_POOL_SIZE
+    {
+        return Err(ProxyError::Config(format!(
+            "runtime.subrequest_pool_size ({v}) exceeds maximum ({MAX_SUBREQUEST_POOL_SIZE})"
         )));
     }
     Ok(())
@@ -1140,6 +1158,46 @@ listeners:
     filter_chains: [main]
 runtime:
   upstream_keepalive_pool_size: 10000
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_subrequest_pool_size_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  subrequest_pool_size: 10001
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "should reject subrequest pool > 10K: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_subrequest_pool_size_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  subrequest_pool_size: 10000
 filter_chains:
   - name: main
     filters:

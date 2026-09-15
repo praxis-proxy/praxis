@@ -11,21 +11,17 @@ use praxis_core::config::Cluster;
 // WeightedEndpoint
 // -----------------------------------------------------------------------------
 
-/// A deduplicated endpoint carrying its own weight and original index.
+/// A deduplicated endpoint carrying its own weight.
 ///
 /// ```ignore
-/// let ep = WeightedEndpoint { address: "10.0.0.1:80".into(), weight: 3, index: 0, ..Default::default() };
+/// let ep = WeightedEndpoint { address: "10.0.0.1:80".into(), weight: 3, ..Default::default() };
 /// assert_eq!(ep.address.as_ref(), "10.0.0.1:80");
 /// assert_eq!(ep.weight, 3);
-/// assert_eq!(ep.index, 0);
 /// ```
 #[derive(Clone, Debug)]
 pub(crate) struct WeightedEndpoint {
     /// Socket address as `host:port`.
     pub(crate) address: Arc<str>,
-
-    /// Position in the original cluster endpoint list (for health state lookups).
-    pub(crate) index: usize,
 
     /// Relative forwarding weight (>= 1).
     pub(crate) weight: u32,
@@ -44,10 +40,9 @@ impl WeightedEndpoint {
     /// Construct a minimal endpoint for use in tests and strategies that don't
     /// need metadata/zone/priority.
     #[cfg(test)]
-    pub(crate) fn simple(address: Arc<str>, index: usize, weight: u32) -> Self {
+    pub(crate) fn simple(address: Arc<str>, weight: u32) -> Self {
         Self {
             address,
-            index,
             weight,
             metadata: HashMap::new(),
             priority: 0,
@@ -61,11 +56,9 @@ pub(crate) fn build_weighted_endpoints(cluster: &Cluster) -> Vec<WeightedEndpoin
     cluster
         .endpoints
         .iter()
-        .enumerate()
-        .map(|(i, ep)| WeightedEndpoint {
+        .map(|ep| WeightedEndpoint {
             address: Arc::from(ep.address()),
             weight: ep.weight(),
-            index: i,
             metadata: ep.metadata().clone(),
             priority: ep.priority(),
             zone: ep.zone().map(Arc::from),
@@ -113,9 +106,9 @@ mod tests {
             3,
             "should produce one WeightedEndpoint per cluster endpoint"
         );
-        assert_endpoint(&weighted[0], "10.0.0.1:80", 1, 0);
-        assert_endpoint(&weighted[1], "10.0.0.2:80", 3, 1);
-        assert_endpoint(&weighted[2], "10.0.0.3:80", 1, 2);
+        assert_endpoint(&weighted[0], "10.0.0.1:80", 1);
+        assert_endpoint(&weighted[1], "10.0.0.2:80", 3);
+        assert_endpoint(&weighted[2], "10.0.0.3:80", 1);
     }
 
     #[test]
@@ -129,10 +122,9 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    /// Assert a [`WeightedEndpoint`] has the expected address, weight, and index.
-    fn assert_endpoint(ep: &WeightedEndpoint, addr: &str, weight: u32, index: usize) {
-        assert_eq!(ep.address.as_ref(), addr, "address mismatch for index {index}");
+    /// Assert a [`WeightedEndpoint`] has the expected address and weight.
+    fn assert_endpoint(ep: &WeightedEndpoint, addr: &str, weight: u32) {
+        assert_eq!(ep.address.as_ref(), addr, "address mismatch for {addr}");
         assert_eq!(ep.weight, weight, "weight mismatch for {addr}");
-        assert_eq!(ep.index, index, "index mismatch for {addr}");
     }
 }

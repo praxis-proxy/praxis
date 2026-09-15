@@ -56,22 +56,42 @@ fn via_header_value(entry: &'static str) -> http::HeaderValue {
     }
 }
 
+/// Combine existing `Via` field-lines with this proxy's `entry`.
+///
+/// [RFC 9110 Section 7.6.3] treats multiple `Via` field-lines as a
+/// single comma-separated list, so every prior entry is preserved.
+/// Returns `None` when there is no valid chain to keep (absent, empty,
+/// or any non-UTF-8 line), signalling the caller to write the
+/// pre-validated static value outright rather than emit a malformed
+/// header.
+///
+/// [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
+fn combined_via(headers: &http::HeaderMap, entry: &str) -> Option<String> {
+    let mut existing: Vec<&str> = Vec::new();
+    for value in headers.get_all("via") {
+        // A non-UTF-8 line means the chain cannot be rebuilt safely.
+        let text = value.to_str().ok()?;
+        if !text.is_empty() {
+            existing.push(text);
+        }
+    }
+    (!existing.is_empty()).then(|| format!("{}, {entry}", existing.join(", ")))
+}
+
 /// Append a Via entry to a Pingora request header.
 ///
-/// If a valid UTF-8 `Via` header already exists, appends
-/// comma-separated. Non-UTF-8 values are replaced outright
-/// to avoid producing a malformed header.
+/// All existing valid UTF-8 `Via` field-lines are preserved and this
+/// proxy's entry is appended comma-separated (RFC 9110 treats multiple
+/// `Via` field-lines as one list). If any existing line is non-UTF-8,
+/// the header is replaced outright to avoid a malformed value.
 pub(crate) fn append_request_via(req: &mut pingora_http::RequestHeader, upstream_version: Version) {
     let entry = via_value(upstream_version);
-    match req.headers.get("via").and_then(|v| v.to_str().ok()) {
-        Some(existing) if !existing.is_empty() => {
-            debug!(existing, new = %entry, "appending to existing request Via");
-            let _insert = req.insert_header("via", format!("{existing}, {entry}"));
-        },
-        _ => {
-            debug!(via = %entry, "adding request Via header");
-            let _insert = req.insert_header("via", via_header_value(entry));
-        },
+    if let Some(combined) = combined_via(&req.headers, entry) {
+        debug!(via = %combined, "appending to existing request Via");
+        let _insert = req.insert_header("via", combined);
+    } else {
+        debug!(via = %entry, "adding request Via header");
+        let _insert = req.insert_header("via", via_header_value(entry));
     }
 }
 
@@ -82,22 +102,20 @@ pub(crate) fn append_request_via(req: &mut pingora_http::RequestHeader, upstream
 /// i.e. the upstream leg (not the downstream client's version). Callers must
 /// pass the upstream response version accordingly.
 ///
-/// If a valid UTF-8 `Via` header already exists, appends
-/// comma-separated. Non-UTF-8 values are replaced outright
-/// to avoid producing a malformed header.
+/// All existing valid UTF-8 `Via` field-lines are preserved and this
+/// proxy's entry is appended comma-separated (RFC 9110 treats multiple
+/// `Via` field-lines as one list). If any existing line is non-UTF-8,
+/// the header is replaced outright to avoid a malformed value.
 ///
 /// [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
 pub(crate) fn append_response_via(resp: &mut pingora_http::ResponseHeader, upstream_version: Version) {
     let entry = via_value(upstream_version);
-    match resp.headers.get("via").and_then(|v| v.to_str().ok()) {
-        Some(existing) if !existing.is_empty() => {
-            debug!(existing, new = %entry, "appending to existing response Via");
-            let _insert = resp.insert_header("via", format!("{existing}, {entry}"));
-        },
-        _ => {
-            debug!(via = %entry, "adding response Via header");
-            let _insert = resp.insert_header("via", via_header_value(entry));
-        },
+    if let Some(combined) = combined_via(&resp.headers, entry) {
+        debug!(via = %combined, "appending to existing response Via");
+        let _insert = resp.insert_header("via", combined);
+    } else {
+        debug!(via = %entry, "adding response Via header");
+        let _insert = resp.insert_header("via", via_header_value(entry));
     }
 }
 
@@ -226,6 +244,60 @@ mod tests {
             resp.headers.get("via").unwrap(),
             "2 praxis",
             "HTTP/2 response Via should use '2' token"
+        );
+    }
+
+    #[test]
+    fn append_request_via_combines_multiple_field_lines() {
+        let mut req = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        req.append_header("via", "1.0 a").unwrap();
+        req.append_header("via", "1.1 b").unwrap();
+        append_request_via(&mut req, Version::HTTP_11);
+        assert_eq!(
+            req.headers.get("via").unwrap(),
+            "1.0 a, 1.1 b, 1.1 praxis",
+            "all existing request Via field-lines must be preserved"
+        );
+    }
+
+    #[test]
+    fn append_response_via_combines_multiple_field_lines() {
+        let mut resp = pingora_http::ResponseHeader::build(200, None).unwrap();
+        resp.append_header("via", "1.1 a").unwrap();
+        resp.append_header("via", "2 b").unwrap();
+        append_response_via(&mut resp, Version::HTTP_11);
+        assert_eq!(
+            resp.headers.get("via").unwrap(),
+            "1.1 a, 2 b, 1.1 praxis",
+            "all existing response Via field-lines must be preserved"
+        );
+    }
+
+    #[test]
+    fn append_request_via_replaces_when_any_line_non_utf8() {
+        let mut req = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        req.append_header("via", "1.0 a").unwrap();
+        req.append_header("via", HeaderValue::from_bytes(&[0x80, 0xFF]).unwrap())
+            .unwrap();
+        append_request_via(&mut req, Version::HTTP_11);
+        assert_eq!(
+            req.headers.get("via").unwrap(),
+            "1.1 praxis",
+            "a non-UTF-8 field-line forces outright replacement"
+        );
+    }
+
+    #[test]
+    fn append_response_via_replaces_when_any_line_non_utf8() {
+        let mut resp = pingora_http::ResponseHeader::build(200, None).unwrap();
+        resp.append_header("via", "1.0 a").unwrap();
+        resp.append_header("via", HeaderValue::from_bytes(&[0x80, 0xFF]).unwrap())
+            .unwrap();
+        append_response_via(&mut resp, Version::HTTP_11);
+        assert_eq!(
+            resp.headers.get("via").unwrap(),
+            "1.1 praxis",
+            "a non-UTF-8 response field-line forces outright replacement"
         );
     }
 }

@@ -495,6 +495,7 @@ pub(crate) mod test_utils {
             response_body_mode: crate::body::BodyMode::Stream,
             response_header: None,
             response_headers_modified: false,
+            upstream_reached: false,
             rewritten_path: None,
             selected_endpoint_index: None,
             attempted_endpoints: Vec::new(),

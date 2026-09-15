@@ -19,7 +19,7 @@ use super::endpoint::WeightedEndpoint;
 /// relative to the total weight of all (healthy) endpoints. With equal
 /// weights this reduces to uniform random selection.
 pub(crate) struct Random {
-    /// Deduplicated endpoint list with weights and original indices.
+    /// Deduplicated endpoint list with weights.
     endpoints: Vec<WeightedEndpoint>,
 
     /// Sum of all endpoint weights (pre-computed, widened to `usize`).
@@ -56,13 +56,8 @@ impl Random {
         // cumulative bucket. Collecting candidate SmallVecs heap-allocated
         // twice per request past 8 endpoints.
         if let Some(state) = health {
-            let healthy = |ep: &WeightedEndpoint| {
-                state
-                    .endpoints()
-                    .get(ep.index)
-                    .is_some_and(praxis_core::health::EndpointHealth::is_healthy)
-                    && !is_excluded(&ep.address, exclude)
-            };
+            let healthy =
+                |ep: &WeightedEndpoint| state.is_address_healthy(&ep.address) && !is_excluded(&ep.address, exclude);
             let (first, total) = survey(&self.endpoints, healthy);
             if let Some(first) = first {
                 if total > 0 {
@@ -158,7 +153,7 @@ mod tests {
 
     #[test]
     fn single_endpoint_always_selected() {
-        let r = Random::new(vec![ep("10.0.0.1:80", 1, 0)]);
+        let r = Random::new(vec![ep("10.0.0.1:80", 1)]);
         for _ in 0..10 {
             assert_eq!(
                 &*r.select(None, &[]).unwrap(),
@@ -170,11 +165,7 @@ mod tests {
 
     #[test]
     fn distributes_across_endpoints() {
-        let r = Random::new(vec![
-            ep("10.0.0.1:80", 1, 0),
-            ep("10.0.0.2:80", 1, 1),
-            ep("10.0.0.3:80", 1, 2),
-        ]);
+        let r = Random::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1), ep("10.0.0.3:80", 1)]);
 
         let mut counts = std::collections::HashMap::new();
         for _ in 0..300 {
@@ -189,7 +180,7 @@ mod tests {
 
     #[test]
     fn weighted_bias() {
-        let r = Random::new(vec![ep("10.0.0.1:80", 1, 0), ep("10.0.0.2:80", 9, 1)]);
+        let r = Random::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 9)]);
 
         let mut counts = std::collections::HashMap::new();
         for _ in 0..1000 {
@@ -205,7 +196,7 @@ mod tests {
 
     #[test]
     fn skips_unhealthy() {
-        let r = Random::new(vec![ep("10.0.0.1:80", 1, 0), ep("10.0.0.2:80", 1, 1)]);
+        let r = Random::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
         let state = health_state(2);
         state.endpoints()[0].mark_unhealthy();
 
@@ -220,7 +211,7 @@ mod tests {
 
     #[test]
     fn panic_mode_when_all_unhealthy() {
-        let r = Random::new(vec![ep("10.0.0.1:80", 1, 0), ep("10.0.0.2:80", 1, 1)]);
+        let r = Random::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
         let state = health_state(2);
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
@@ -250,7 +241,7 @@ mod tests {
 
     #[test]
     fn all_zero_weight_returns_none() {
-        let r = Random::new(vec![ep("10.0.0.1:80", 0, 0), ep("10.0.0.2:80", 0, 1)]);
+        let r = Random::new(vec![ep("10.0.0.1:80", 0), ep("10.0.0.2:80", 0)]);
         assert!(
             r.select(None, &[]).is_none(),
             "all-zero-weight endpoints should return None"
@@ -259,7 +250,7 @@ mod tests {
 
     #[test]
     fn zero_weight_healthy_returns_first_healthy() {
-        let r = Random::new(vec![ep("10.0.0.1:80", 0, 0), ep("10.0.0.2:80", 5, 1)]);
+        let r = Random::new(vec![ep("10.0.0.1:80", 0), ep("10.0.0.2:80", 5)]);
         let state = health_state(2);
         state.endpoints()[1].mark_unhealthy();
 
@@ -272,7 +263,7 @@ mod tests {
 
     #[test]
     fn pick_exact_bucket_boundaries() {
-        let endpoints = vec![ep("A", 1, 0), ep("B", 3, 1), ep("C", 1, 2)];
+        let endpoints = vec![ep("A", 1), ep("B", 3), ep("C", 1)];
         let all = |_: &WeightedEndpoint| true;
         // total_weight = 5, buckets: A=[0], B=[1,2,3], C=[4]
         assert_eq!(&*pick_where(&endpoints, all, 0, 5).unwrap(), "A", "slot 0 → A");
@@ -295,7 +286,7 @@ mod tests {
 
     #[test]
     fn pick_where_skips_non_candidates() {
-        let endpoints = [ep("A", 2, 0), ep("B", 2, 1), ep("C", 2, 2)];
+        let endpoints = [ep("A", 2), ep("B", 2), ep("C", 2)];
         let skip_b = |ep: &WeightedEndpoint| &*ep.address != "B";
         // candidate subsequence A, C: total_weight = 4, buckets: A=[0,1], C=[2,3]
         assert_eq!(&*pick_where(&endpoints, skip_b, 0, 4).unwrap(), "A", "slot 0 → A");
@@ -308,13 +299,15 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    fn ep(addr: &str, weight: u32, index: usize) -> WeightedEndpoint {
-        WeightedEndpoint::simple(Arc::from(addr), index, weight)
+    fn ep(addr: &str, weight: u32) -> WeightedEndpoint {
+        WeightedEndpoint::simple(Arc::from(addr), weight)
     }
 
     fn health_state(n: usize) -> ClusterHealthState {
         let healths: Vec<_> = std::iter::repeat_with(EndpointHealth::new).take(n).collect();
-        let addrs: Vec<_> = (0..n).map(|i| Arc::from(format!("10.0.0.{i}:80").as_str())).collect();
+        let addrs: Vec<_> = (0..n)
+            .map(|i| Arc::from(format!("10.0.0.{}:80", i + 1).as_str()))
+            .collect();
         Arc::new(ClusterHealthEntry::new(healths, addrs, None, None))
     }
 }

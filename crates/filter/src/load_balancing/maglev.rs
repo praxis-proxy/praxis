@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use praxis_core::health::{ClusterHealthState, EndpointHealth};
+use praxis_core::health::ClusterHealthState;
 
 use super::endpoint::WeightedEndpoint;
 
@@ -35,7 +35,7 @@ const SENTINEL: u32 = u32::MAX;
 /// Endpoints are expanded into `weight` replicas during population, so the
 /// resulting distribution is proportional to endpoint weight.
 pub(crate) struct Maglev {
-    /// Deduplicated endpoint list with weights and original indices.
+    /// Deduplicated endpoint list with weights.
     endpoints: Vec<WeightedEndpoint>,
 
     /// Header whose value is hashed. Falls back to the URI path when `None`
@@ -82,9 +82,7 @@ impl Maglev {
         let start = (fnv1a_seeded(key, 0) as usize) % len;
 
         if let Some(state) = health
-            && let Some(addr) = self.probe(start, exclude, |ep| {
-                state.endpoints().get(ep.index).is_some_and(EndpointHealth::is_healthy)
-            })
+            && let Some(addr) = self.probe(start, exclude, |ep| state.is_address_healthy(&ep.address))
         {
             return Some(addr);
         }
@@ -241,7 +239,7 @@ fn fnv1a_seeded(s: &str, seed: u64) -> u64 {
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use praxis_core::health::ClusterHealthEntry;
+    use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
 
@@ -329,8 +327,8 @@ mod tests {
     #[test]
     fn weight_stability() {
         let eps = vec![
-            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 3),
-            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 3),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
         ];
         let mg = Maglev::new(eps, None);
 
@@ -448,7 +446,7 @@ mod tests {
     /// Build `n` equal-weight endpoints `10.0.0.{i+1}:80`.
     fn endpoints(n: usize) -> Vec<WeightedEndpoint> {
         (0..n)
-            .map(|i| WeightedEndpoint::simple(Arc::from(format!("10.0.0.{}:80", i + 1).as_str()), i, 1))
+            .map(|i| WeightedEndpoint::simple(Arc::from(format!("10.0.0.{}:80", i + 1).as_str()), 1))
             .collect()
     }
 

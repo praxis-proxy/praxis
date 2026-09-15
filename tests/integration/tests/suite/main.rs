@@ -94,6 +94,7 @@ mod tcp_load_balancer;
 mod tls;
 mod upstream_requests_total;
 mod url_rewrite;
+mod url_target_tls;
 mod via;
 mod websocket;
 mod wildcard_routing;

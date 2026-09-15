@@ -79,6 +79,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         pinned_endpoint_address: None,
         time_source: &praxis_core::time::SystemTimeSource,
         upstream: None,
+        upstream_reached: false,
     }
 }
 

@@ -248,16 +248,22 @@ fn diff_request(
 // -----------------------------------------------------------------------------
 
 /// Snapshot response headers into the engine's case-normalized map.
+///
+/// Duplicate field-lines of the same header are comma-joined (RFC 7230 §3.2.2)
+/// instead of collapsed to the last value, so a policy assertion sees the full
+/// header value a spec-compliant recipient would.
 pub(super) fn snapshot_response_headers(headers: &http::HeaderMap) -> HashMap<String, String> {
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            value
-                .to_str()
-                .ok()
-                .map(|v| (name.as_str().to_ascii_lowercase(), v.to_owned()))
-        })
-        .collect()
+    let mut map: HashMap<String, String> = HashMap::new();
+    for (name, value) in headers {
+        let Ok(text) = value.to_str() else { continue };
+        map.entry(name.as_str().to_ascii_lowercase())
+            .and_modify(|acc| {
+                acc.push_str(", ");
+                acc.push_str(text);
+            })
+            .or_insert_with(|| text.to_owned());
+    }
+    map
 }
 
 /// Apply rendered response assertions and return the numbers set and removed.
@@ -422,4 +428,32 @@ fn route_selector_label(route: &ppe::praxis_policy_core::config::RouteEntry) -> 
         }
     }
     "no selector".to_owned()
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_response_headers_comma_joins_duplicate_field_lines() {
+        // Duplicate response field-lines must be comma-joined (RFC 7230 §3.2.2),
+        // not collapsed to the last value, so a policy assertion sees the full
+        // header a spec-compliant recipient would.
+        let mut headers = http::HeaderMap::new();
+        headers.append(http::header::HeaderName::from_static("x-flag"), "a".parse().unwrap());
+        headers.append(http::header::HeaderName::from_static("x-flag"), "b".parse().unwrap());
+
+        let snapshot = snapshot_response_headers(&headers);
+        assert_eq!(
+            snapshot.get("x-flag").map(String::as_str),
+            Some("a, b"),
+            "duplicate response field-lines must be comma-joined, not collapsed to the last value"
+        );
+    }
 }

@@ -82,3 +82,71 @@ pub const HOP_BY_HOP_HEADERS: &[&str] = &[
     "transfer-encoding",
     "upgrade",
 ];
+
+/// Whether a header must never be removed because a client named it in a
+/// `Connection` token.
+///
+/// Covers proxy-owned trust headers (the `x-forwarded-*` family and the
+/// RFC 7239 `Forwarded` header, injected by the forwarded-headers filter),
+/// the reserved internal namespaces ([`is_reserved`]), and the headers
+/// essential to routing and framing (`Host`, `Content-Length`). Both the
+/// main upstream path and filtered sub-requests honor this, so a client
+/// cannot use `Connection: host` (a vhost-selection bypass, malformed per
+/// RFC 9112) or `Connection: x-forwarded-for` (erasing the client address
+/// upstreams rely on) to delete a header the proxy depends on.
+///
+/// Matching is ASCII case-insensitive.
+///
+/// ```
+/// use praxis_core::reserved_headers::is_connection_token_protected;
+/// assert!(is_connection_token_protected("host"));
+/// assert!(is_connection_token_protected("X-Forwarded-For"));
+/// assert!(is_connection_token_protected("forwarded"));
+/// assert!(is_connection_token_protected("content-length"));
+/// assert!(is_connection_token_protected("x-praxis-route"));
+/// assert!(!is_connection_token_protected("x-app-state"));
+/// ```
+pub fn is_connection_token_protected(name: &str) -> bool {
+    name.get(..12)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("x-forwarded-"))
+        || name.eq_ignore_ascii_case("forwarded")
+        || name.eq_ignore_ascii_case("host")
+        || name.eq_ignore_ascii_case("content-length")
+        || is_reserved(name)
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::is_connection_token_protected;
+
+    #[test]
+    fn connection_token_protection_covers_proxy_owned_and_essential() {
+        for protected in [
+            "host",
+            "Host",
+            "content-length",
+            "Content-Length",
+            "x-forwarded-for",
+            "X-Forwarded-Proto",
+            "forwarded",
+            "Forwarded",
+            "x-praxis-route",
+            "x-ext-agent-task",
+        ] {
+            assert!(
+                is_connection_token_protected(protected),
+                "{protected} must be protected from Connection-token stripping"
+            );
+        }
+        for allowed in ["x-app-state", "x-request-id", "cache-control", "x-forward"] {
+            assert!(
+                !is_connection_token_protected(allowed),
+                "{allowed} is an ordinary connection-scoped header and may be stripped"
+            );
+        }
+    }
+}

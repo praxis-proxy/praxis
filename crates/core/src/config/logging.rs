@@ -15,6 +15,12 @@ use tracing_appender::non_blocking::DEFAULT_BUFFERED_LINES_LIMIT;
 /// Default non-blocking queue capacity in lines when `buffer_size` is omitted.
 pub const DEFAULT_BUFFER_SIZE_LINES: usize = DEFAULT_BUFFERED_LINES_LIMIT;
 
+/// Maximum non-blocking queue capacity in lines. The queue is a crossbeam
+/// bounded channel that pre-allocates this many slots, so an unbounded value
+/// would abort the process at logging initialization; 10M lines is far above
+/// any real need.
+const MAX_BUFFER_SIZE_LINES: u32 = 10_000_000;
+
 // -----------------------------------------------------------------------------
 // LoggingConfig
 // -----------------------------------------------------------------------------
@@ -62,10 +68,15 @@ impl LoggingConfig {
     ///
     /// Returns a human-readable message when the configuration is invalid.
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(buffer_size) = self.buffer_size
-            && buffer_size == 0
-        {
-            return Err("runtime.logging.buffer_size must be > 0 when set".to_owned());
+        if let Some(buffer_size) = self.buffer_size {
+            if buffer_size == 0 {
+                return Err("runtime.logging.buffer_size must be > 0 when set".to_owned());
+            }
+            if buffer_size > MAX_BUFFER_SIZE_LINES {
+                return Err(format!(
+                    "runtime.logging.buffer_size ({buffer_size}) exceeds maximum ({MAX_BUFFER_SIZE_LINES})"
+                ));
+            }
         }
 
         match self.output {
@@ -152,6 +163,25 @@ mod tests {
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("buffer_size must be > 0"), "{err}");
+    }
+
+    #[test]
+    fn buffer_size_exceeding_maximum_rejected() {
+        let cfg = LoggingConfig {
+            buffer_size: Some(u32::MAX),
+            ..LoggingConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("exceeds maximum"), "{err}");
+    }
+
+    #[test]
+    fn buffer_size_at_maximum_accepted() {
+        let cfg = LoggingConfig {
+            buffer_size: Some(MAX_BUFFER_SIZE_LINES),
+            ..LoggingConfig::default()
+        };
+        cfg.validate().unwrap();
     }
 
     #[test]

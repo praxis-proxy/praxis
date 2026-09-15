@@ -62,9 +62,10 @@ pub(crate) mod tls_setup;
 
 /// Collected TLS certificate watcher shutdown senders.
 ///
-/// Keeps [`watch::Sender`]s alive so that background [`CertWatcher`]
-/// tasks run until the process exits. Dropping these senders signals
-/// the watchers to stop.
+/// Background [`CertWatcher`] tasks run for the process lifetime. These
+/// [`watch::Sender`]s are held so a watcher can be asked to stop early via
+/// `send(true)`; dropping them does not stop the watchers (they end at process
+/// exit).
 ///
 /// [`watch::Sender`]: tokio::sync::watch::Sender
 /// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
@@ -88,9 +89,10 @@ impl CertWatcherShutdowns {
 pub trait Protocol: Send {
     /// Register this protocol's services. Does not block.
     ///
-    /// Returns any TLS certificate watcher shutdown senders. The
-    /// caller must keep these alive until server shutdown; dropping
-    /// them signals the watcher tasks to stop.
+    /// Returns any TLS certificate watcher shutdown senders. The caller keeps
+    /// these alive to retain the ability to stop a watcher early via
+    /// `send(true)`; the watcher tasks otherwise run for the process lifetime
+    /// (dropping the senders does not stop them).
     ///
     /// # Errors
     ///

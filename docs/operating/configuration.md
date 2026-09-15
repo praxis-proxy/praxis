@@ -77,6 +77,7 @@ continues serving with the old config.
 - Load balancer endpoints and weights
 - Rate limit and circuit breaker settings
 - Health check configuration
+- Log level overrides (`runtime.log_overrides`)
 
 **Requires restart (logged as warning):**
 
@@ -90,8 +91,8 @@ continues serving with the old config.
   config-level TLS changes are not)
 - Startup-only `runtime` settings (`threads`,
   `work_stealing`, `global_queue_interval`,
-  `log_overrides`, `max_connections`,
-  `max_memory_bytes`, `subrequest_pool_size`,
+  `max_connections`, `max_memory_bytes`,
+  `subrequest_pool_size`,
   `subrequest_max_connections`,
   `subrequest_circuit_breaker`, `upstream_ca_file`,
   `upstream_keepalive_pool_size`)
@@ -676,6 +677,18 @@ and [Pipeline Concepts](../architecture/pipeline-concepts.md).
 Per-cluster active HTTP/TCP probes and passive inline
 failure tracking remove unhealthy endpoints from rotation.
 See [health-checks.yaml](../../examples/configs/traffic-management/health-checks.yaml).
+
+The top-level `clusters:` section feeds health checks (and
+the `/api/stats` admin view and startup key-permission
+checks), never proxied traffic: the data path builds its
+upstreams from the clusters defined inline in the
+`load_balancer` or `tcp_load_balancer` filter. A health
+probe uses only a cluster's `endpoints` and its
+`health_check` block, and HTTP/TCP probes connect in
+plaintext, so a top-level cluster's data-path settings
+(`tls`, `retry_policy`, the timeout fields,
+`load_balancer_strategy`) have no effect at all. Configure
+those on the inline load-balancer cluster instead.
 
 ## Failure Mode
 

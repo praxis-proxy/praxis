@@ -150,6 +150,14 @@ fn strip_hop_by_hop_headers(headers: &mut HeaderMap, static_headers: &[&str]) {
     for value in connection_values {
         let Ok(value) = value.to_str() else { continue };
         for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+            // A client-supplied Connection token must not delete headers the
+            // proxy owns (x-forwarded-*, Forwarded, x-praxis-*) or that are
+            // essential to routing/framing (Host, Content-Length); otherwise a
+            // filtered sub-request could be stripped of its authority and trust
+            // headers. Mirrors the main upstream path.
+            if praxis_core::reserved_headers::is_connection_token_protected(token) {
+                continue;
+            }
             headers.remove(token);
         }
     }

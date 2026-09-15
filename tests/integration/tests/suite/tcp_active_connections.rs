@@ -16,7 +16,7 @@ use praxis_test_utils::{free_port, http_get, start_full_proxy, start_tcp_tagged_
 // Helpers
 // -----------------------------------------------------------------------------
 
-fn gauge_value(body: &str, listener: &str) -> Option<f64> {
+pub(crate) fn gauge_value(body: &str, listener: &str) -> Option<f64> {
     body.lines()
         .find(|line| {
             line.starts_with("praxis_tcp_active_connections{") && line.contains(&format!("listener=\"{listener}\""))
@@ -25,13 +25,13 @@ fn gauge_value(body: &str, listener: &str) -> Option<f64> {
         .and_then(|value| value.parse::<f64>().ok())
 }
 
-fn proxy_yaml(proxy_port: u16, admin_port: u16, backend_port: u16) -> String {
+fn proxy_yaml(listener: &str, proxy_port: u16, admin_port: u16, backend_port: u16) -> String {
     format!(
         r#"
 admin:
   address: "127.0.0.1:{admin_port}"
 listeners:
-  - name: tcp-gauge-test
+  - name: {listener}
     address: "127.0.0.1:{proxy_port}"
     protocol: tcp
     upstream: "127.0.0.1:{backend_port}"
@@ -50,7 +50,7 @@ fn tcp_active_connections_rises_while_a_session_is_open() {
     let backend_port = start_tcp_tagged_backend("gauge");
     let proxy_port = free_port();
     let admin_port = free_port();
-    let config = Config::from_yaml(&proxy_yaml(proxy_port, admin_port, backend_port)).unwrap();
+    let config = Config::from_yaml(&proxy_yaml("tcp-gauge-rise", proxy_port, admin_port, backend_port)).unwrap();
     let _proxy = start_full_proxy(&config);
     wait_for_tcp(&format!("127.0.0.1:{proxy_port}"));
     let admin = format!("127.0.0.1:{admin_port}");
@@ -63,7 +63,7 @@ fn tcp_active_connections_rises_while_a_session_is_open() {
     let mut value = None;
     while std::time::Instant::now() < deadline {
         body = http_get(&admin, "/metrics", None).1;
-        value = gauge_value(&body, "tcp-gauge-test");
+        value = gauge_value(&body, "tcp-gauge-rise");
         if value == Some(1.0) {
             break;
         }
@@ -82,7 +82,7 @@ fn tcp_active_connections_returns_to_zero_after_close() {
     let backend_port = start_tcp_tagged_backend("drain");
     let proxy_port = free_port();
     let admin_port = free_port();
-    let config = Config::from_yaml(&proxy_yaml(proxy_port, admin_port, backend_port)).unwrap();
+    let config = Config::from_yaml(&proxy_yaml("tcp-gauge-drain", proxy_port, admin_port, backend_port)).unwrap();
     let _proxy = start_full_proxy(&config);
     wait_for_tcp(&format!("127.0.0.1:{proxy_port}"));
     let admin = format!("127.0.0.1:{admin_port}");
@@ -101,7 +101,7 @@ fn tcp_active_connections_returns_to_zero_after_close() {
     let mut value = None;
     while std::time::Instant::now() < deadline {
         body = http_get(&admin, "/metrics", None).1;
-        value = gauge_value(&body, "tcp-gauge-test");
+        value = gauge_value(&body, "tcp-gauge-drain");
         if value == Some(0.0) {
             break;
         }

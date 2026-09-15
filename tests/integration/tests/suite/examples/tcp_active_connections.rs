@@ -41,18 +41,24 @@ fn tcp_active_connections_example_emits_gauge() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut body = String::new();
+    let mut open = None;
     while std::time::Instant::now() < deadline {
         let (status, scrape) = http_get(&admin, "/metrics", None);
         assert_eq!(status, 200, "/metrics should return 200");
         body = scrape;
-        if body.contains("praxis_tcp_active_connections{listener=\"postgres\"} 1") {
+        // The Prometheus recorder is process-global and the `postgres` listener
+        // name is shared by several example configs, so other tests running
+        // concurrently can push this gauge above 1. Assert our own held
+        // connection is reflected (>= 1) rather than an exact count.
+        open = crate::tcp_active_connections::gauge_value(&body, "postgres");
+        if open.is_some_and(|count| count >= 1.0) {
             break;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(
-        body.contains("praxis_tcp_active_connections{listener=\"postgres\"} 1"),
-        "metrics should show one open connection on the postgres listener: {body}"
+        open.is_some_and(|count| count >= 1.0),
+        "metrics should show the open connection on the postgres listener: {body}"
     );
     drop(held);
 }

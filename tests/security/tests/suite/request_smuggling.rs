@@ -36,7 +36,7 @@ fn conflicting_host_headers_rejected() {
 }
 
 #[test]
-fn duplicate_identical_host_headers_accepted() {
+fn duplicate_identical_host_headers_rejected() {
     let backend_port = start_backend("ok");
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
@@ -51,13 +51,14 @@ fn duplicate_identical_host_headers_accepted() {
          Connection: close\r\n\r\n",
     );
     let status = parse_status(&raw);
-    let body = parse_body(&raw);
 
+    // Pingora 0.9.0 rejects any request carrying more than one Host header
+    // field (RFC 9112 Section 3.2) at the protocol layer, even byte-identical
+    // duplicates, before Praxis's identical-Host canonicalization runs.
     assert_eq!(
-        status, 200,
-        "duplicate identical Host headers should be accepted (got {status})"
+        status, 400,
+        "duplicate Host headers must be rejected with 400, even when identical (got {status})"
     );
-    assert_eq!(body, "ok", "backend should receive the request normally");
 }
 
 /// [RFC 9112 Section 3.2]: HTTP/1.1 requests without a Host

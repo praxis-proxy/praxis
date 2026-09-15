@@ -345,6 +345,46 @@ impl CircuitBreaker {
         drop(inner);
     }
 
+    /// Release the token's in-flight slot without recording an outcome.
+    ///
+    /// Used when the exchange never reached the upstream (rejected or
+    /// aborted before contact), so the request carries no signal about the
+    /// cluster. The in-flight slot is freed so the breaker can still be
+    /// evicted, but the failure streak and any half-open probe state are
+    /// left untouched: a half-open probe token released this way leaves the
+    /// circuit half-open until its probe timeout re-arms recovery, exactly
+    /// as if the probe were still in flight. Prefer this over dropping the
+    /// token, which would leak the in-flight slot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "takes the token by value like record_success/record_failure; a released token is single-use"
+    )]
+    pub fn release(&self, token: CircuitToken) {
+        // Consume the token so it can never be recorded after release; the
+        // generation is irrelevant here because release updates no stats.
+        let CircuitToken { .. } = token;
+        let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
+        inner.release_token();
+        self.store_state_cache(&inner);
+        drop(inner);
+    }
+
+    /// In-flight slot count (probes plus admitted requests), for tests.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    #[cfg(test)]
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    pub fn in_flight(&self) -> u32 {
+        self.inner.lock().expect("circuit breaker lock poisoned").in_flight
+    }
+
     /// Whether the breaker has no request in flight and has been idle for
     /// at least `idle_threshold`, and is therefore safe to evict.
     ///
@@ -550,7 +590,7 @@ impl CircuitBreakerRegistry {
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -642,6 +682,32 @@ mod tests {
         let probe = cb.try_acquire();
         record_failure_from_check(&cb, probe);
         assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn release_frees_probe_without_resolving_it() {
+        // A half-open probe that never reaches the upstream must be released
+        // without deciding recovery: the circuit stays half-open, neither
+        // closed by a false success nor re-opened by a false failure.
+        let cb = CircuitBreaker::new(config(1, 0, 9_999_000));
+        let t = cb.try_acquire();
+        record_failure_from_check(&cb, t);
+        let CircuitCheck::Allowed(probe) = cb.try_acquire() else {
+            panic!("half-open should allow a probe");
+        };
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+        assert_eq!(cb.in_flight(), 1, "the half-open probe occupies the in-flight slot");
+        cb.release(probe);
+        assert_eq!(
+            cb.state(),
+            CircuitState::HalfOpen,
+            "releasing an unreached probe must leave the circuit half-open"
+        );
+        assert_eq!(
+            cb.in_flight(),
+            0,
+            "release must free the in-flight slot so the breaker can later be idle-evicted"
+        );
     }
 
     #[test]

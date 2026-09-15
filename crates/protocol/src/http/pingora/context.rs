@@ -194,6 +194,16 @@ pub struct PingoraRequestCtx {
     /// Uses `VecDeque` so that draining from the front is O(1).
     pub pre_read_body: Option<VecDeque<Bytes>>,
 
+    /// Retained copy of the mutated pre-read body for retry replay.
+    ///
+    /// The first attempt drains `pre_read_body` as it forwards the mutated
+    /// body. A retry replays from Pingora's fixed retry buffer, which holds the
+    /// ORIGINAL (pre-mutation) bytes, while `apply_mutated_content_length`
+    /// re-stamps the mutated length. This retained copy re-seeds `pre_read_body`
+    /// on each retry so the replayed body matches the stamped Content-Length,
+    /// closing a request-smuggling mismatch. Set only when a body writer ran.
+    pub retained_pre_read_body: Option<VecDeque<Bytes>>,
+
     /// Buffer for request body accumulation in [`StreamBuffer`] mode.
     ///
     /// [`StreamBuffer`]: praxis_filter::BodyMode::StreamBuffer
@@ -326,6 +336,14 @@ pub struct PingoraRequestCtx {
 
     /// Saved upstream for retry (cloned before first use).
     pub upstream_for_retry: Option<Upstream>,
+
+    /// Whether the upstream was contacted (a peer was resolved for at least
+    /// one attempt) during this request. Unlike `upstream_for_retry`, which a
+    /// retry decision clears to force reselection, this stays set once the
+    /// upstream has been reached, so response-phase health accounting (passive
+    /// health, circuit breaker) can tell a genuine connect/read failure from a
+    /// request that never reached the cluster. Reset per request.
+    pub upstream_contacted: bool,
 }
 
 /// Build an [`HttpFilterContext`] from a `PingoraRequestCtx`.
@@ -378,6 +396,7 @@ macro_rules! filter_context {
             response_body_mode: $ctx.response_body_mode,
             response_header: $response_header,
             response_headers_modified: false,
+            upstream_reached: $ctx.upstream_contacted,
             rewritten_path: $ctx.rewritten_path.take(),
             selected_endpoint_index: $ctx.selected_endpoint_index,
             attempted_endpoints: std::mem::take(&mut $ctx.attempted_endpoints),
@@ -561,6 +580,7 @@ impl Default for PingoraRequestCtx {
             _active_request: None,
             upstream_connect_start: None,
             pre_read_body: None,
+            retained_pre_read_body: None,
             request_body_buffer: None,
             request_body_bytes: 0,
             request_body_mode: BodyMode::Stream,
@@ -592,6 +612,7 @@ impl Default for PingoraRequestCtx {
             reselect_on_retry: false,
             upstream: None,
             upstream_for_retry: None,
+            upstream_contacted: false,
         }
     }
 }

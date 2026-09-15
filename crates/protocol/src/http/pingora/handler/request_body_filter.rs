@@ -113,7 +113,7 @@ pub(super) async fn execute(
         _ => tracing::error!("unhandled BodyMode variant in request body filter"),
     }
 
-    let (result, request_body_bytes, output) = {
+    let (result, request_body_bytes, rewritten_path, output) = {
         let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -121,9 +121,19 @@ pub(super) async fn execute(
             )
         })?;
         let r = pipeline.execute_http_request_body(&mut fctx, body, end_of_stream).await;
-        (r, fctx.request_body_bytes, BodyFilterOutput::take_from(&mut fctx))
+        (
+            r,
+            fctx.request_body_bytes,
+            fctx.rewritten_path.take(),
+            BodyFilterOutput::take_from(&mut fctx),
+        )
     };
     ctx.request_body_bytes = request_body_bytes;
+    // Restore the rewritten path that filter_context! took from ctx (the
+    // pre-read path restores it too). Request-body filters never set it, so this
+    // round-trips the value unchanged, letting a later retry re-apply the
+    // rewrite instead of forwarding the original path.
+    ctx.rewritten_path = rewritten_path;
     output.write_back(ctx);
 
     match result {

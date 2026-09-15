@@ -57,6 +57,12 @@ pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
 
 /// Apply a rewritten path from the filter pipeline to the upstream request.
 ///
+/// Reads `rewritten_path` without consuming it so the rewrite is
+/// re-applied on every upstream attempt. Pingora restarts each retry
+/// from a fresh clone of the original downstream request, so a consumed
+/// path would leave retried attempts forwarding the original,
+/// un-rewritten path.
+///
 /// Validates that the path starts with `/`, contains no scheme or
 /// authority components, and has no `..` traversal segments before
 /// applying. Returns an error on invalid paths rather than silently
@@ -67,8 +73,8 @@ pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
 ///
 /// Returns a Pingora error if the rewritten path is malformed,
 /// contains traversal, or includes a scheme/authority.
-pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraRequestCtx) -> pingora_core::Result<()> {
-    let Some(new_path) = ctx.rewritten_path.take() else {
+pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
+    let Some(new_path) = ctx.rewritten_path.as_deref() else {
         return Ok(());
     };
 
@@ -206,6 +212,27 @@ pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &Pingor
     };
     let _remove = req.remove_header(&http::header::TRANSFER_ENCODING);
     let _result = req.insert_header(http::header::CONTENT_LENGTH, new_len.to_string());
+}
+
+// -----------------------------------------------------------------------------
+// Retry Body Replay
+// -----------------------------------------------------------------------------
+
+/// Re-seed the mutated request body before a retry attempt replays it.
+///
+/// The first attempt forwards the post-filter body from `pre_read_body`, which
+/// drains as it is written. A retry replays the ORIGINAL body from Pingora's
+/// fixed retry buffer, but [`apply_mutated_content_length`] still stamps the
+/// mutated length; without re-seeding, the replayed body would not match its
+/// `Content-Length` (a request-smuggling gadget). Restore the retained mutated
+/// body so each replay matches the stamped length.
+///
+/// A no-op on the first attempt (`pre_read_body` is still populated) and when
+/// no body writer ran (`retained_pre_read_body` is `None`).
+pub(crate) fn reseed_retry_body(ctx: &mut PingoraRequestCtx) {
+    if ctx.pre_read_body.is_none() && ctx.retained_pre_read_body.is_some() {
+        ctx.pre_read_body = ctx.retained_pre_read_body.clone();
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -526,10 +553,34 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("/rewritten".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx).unwrap();
+        apply_rewritten_path(&mut req, &ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/rewritten", "URI should be rewritten");
-        assert!(ctx.rewritten_path.is_none(), "rewritten_path should be taken");
+        assert_eq!(
+            ctx.rewritten_path.as_deref(),
+            Some("/rewritten"),
+            "rewritten_path is retained so retried attempts re-apply it"
+        );
+    }
+
+    #[test]
+    fn apply_rewritten_path_reapplies_on_retry() {
+        // Pingora restarts each retry from a fresh clone of the original
+        // downstream request, so the rewrite must survive to be re-applied.
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.rewritten_path = Some("/rewritten".to_owned());
+
+        let mut attempt1 = RequestHeader::build("GET", b"/original", None).unwrap();
+        apply_rewritten_path(&mut attempt1, &ctx).unwrap();
+        assert_eq!(attempt1.uri.path(), "/rewritten", "first attempt is rewritten");
+
+        let mut attempt2 = RequestHeader::build("GET", b"/original", None).unwrap();
+        apply_rewritten_path(&mut attempt2, &ctx).unwrap();
+        assert_eq!(
+            attempt2.uri.path(),
+            "/rewritten",
+            "retried attempt must also carry the rewritten path"
+        );
     }
 
     #[test]
@@ -538,7 +589,7 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("/new?x=1".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx).unwrap();
+        apply_rewritten_path(&mut req, &ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/new", "path should be rewritten");
         assert_eq!(req.uri.query(), Some("x=1"), "query should be preserved");
@@ -547,9 +598,9 @@ mod tests {
     #[test]
     fn apply_rewritten_path_noop_when_none() {
         let mut req = RequestHeader::build("GET", b"/keep", None).unwrap();
-        let mut ctx = PingoraRequestCtx::default();
+        let ctx = PingoraRequestCtx::default();
 
-        apply_rewritten_path(&mut req, &mut ctx).unwrap();
+        apply_rewritten_path(&mut req, &ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/keep", "URI should be unchanged when no rewrite");
     }
@@ -561,7 +612,7 @@ mod tests {
         ctx.rewritten_path = Some("http://evil.com/path".to_owned());
 
         assert!(
-            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            apply_rewritten_path(&mut req, &ctx).is_err(),
             "absolute URI should be rejected"
         );
     }
@@ -573,7 +624,7 @@ mod tests {
         ctx.rewritten_path = Some("relative/path".to_owned());
 
         assert!(
-            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            apply_rewritten_path(&mut req, &ctx).is_err(),
             "path without leading slash should be rejected"
         );
     }
@@ -585,7 +636,7 @@ mod tests {
         ctx.rewritten_path = Some("https:///path".to_owned());
 
         assert!(
-            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            apply_rewritten_path(&mut req, &ctx).is_err(),
             "scheme-only URI should be rejected"
         );
     }
@@ -597,7 +648,7 @@ mod tests {
         ctx.rewritten_path = Some("//evil.com/path".to_owned());
 
         assert!(
-            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            apply_rewritten_path(&mut req, &ctx).is_err(),
             "authority-only URI should be rejected"
         );
     }
@@ -608,7 +659,7 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("/valid/path".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx).unwrap();
+        apply_rewritten_path(&mut req, &ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/valid/path", "valid absolute path should be accepted");
     }
@@ -620,7 +671,7 @@ mod tests {
         ctx.rewritten_path = Some("/api/../admin".to_owned());
 
         assert!(
-            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            apply_rewritten_path(&mut req, &ctx).is_err(),
             "path with '..' traversal should be rejected"
         );
     }
@@ -632,7 +683,7 @@ mod tests {
         ctx.rewritten_path = Some("/api/..".to_owned());
 
         assert!(
-            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            apply_rewritten_path(&mut req, &ctx).is_err(),
             "path ending with '..' should be rejected"
         );
     }
@@ -643,7 +694,7 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("/api/..config".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx).unwrap();
+        apply_rewritten_path(&mut req, &ctx).unwrap();
 
         assert_eq!(
             req.uri.path(),
@@ -659,7 +710,7 @@ mod tests {
         ctx.rewritten_path = Some("/api/%2e%2e/admin".to_owned());
 
         assert!(
-            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            apply_rewritten_path(&mut req, &ctx).is_err(),
             "percent-encoded '..' (%2e%2e) should be rejected"
         );
     }
@@ -671,7 +722,7 @@ mod tests {
         ctx.rewritten_path = Some("/api/.%2e/admin".to_owned());
 
         assert!(
-            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            apply_rewritten_path(&mut req, &ctx).is_err(),
             "mixed-encoded '..' (.%2e) should be rejected"
         );
     }
@@ -682,7 +733,7 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("/".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx).unwrap();
+        apply_rewritten_path(&mut req, &ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/", "root path should be accepted");
     }
@@ -1083,6 +1134,55 @@ mod tests {
         assert_eq!(
             req.headers.get("content-length").and_then(|v| v.to_str().ok()),
             Some("1024")
+        );
+    }
+
+    #[test]
+    fn reseed_retry_body_restores_mutated_body_on_retry_only() {
+        // First attempt: pre_read_body still holds the live body, so re-seeding
+        // must leave it untouched rather than overwrite it with the retained copy.
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.pre_read_body = Some(std::collections::VecDeque::from([bytes::Bytes::from_static(
+            b"live-body",
+        )]));
+        ctx.retained_pre_read_body = Some(std::collections::VecDeque::from([bytes::Bytes::from_static(
+            b"mutated-body",
+        )]));
+        reseed_retry_body(&mut ctx);
+        assert_eq!(
+            ctx.pre_read_body.as_ref().and_then(|c| c.front()),
+            Some(&bytes::Bytes::from_static(b"live-body")),
+            "the first attempt must not overwrite the live pre_read_body"
+        );
+
+        // Retry: pre_read_body drained, so it is restored from the retained copy
+        // (matching the mutated Content-Length that gets re-stamped).
+        ctx.pre_read_body = None;
+        reseed_retry_body(&mut ctx);
+        assert_eq!(
+            ctx.pre_read_body.as_ref().and_then(|c| c.front()),
+            Some(&bytes::Bytes::from_static(b"mutated-body")),
+            "a retry must replay the retained mutated body"
+        );
+
+        // A writer that produced an empty body retains an empty deque; a retry
+        // restores Some(empty) so the drain yields no chunk under Content-Length 0.
+        let mut empty = PingoraRequestCtx::default();
+        empty.retained_pre_read_body = Some(std::collections::VecDeque::new());
+        reseed_retry_body(&mut empty);
+        assert_eq!(
+            empty.pre_read_body.as_ref().map(std::collections::VecDeque::len),
+            Some(0),
+            "an empty retained body restores an empty pre_read_body"
+        );
+
+        // No body writer ran (nothing retained): a drained pre_read_body stays None.
+        let mut plain = PingoraRequestCtx::default();
+        plain.retained_pre_read_body = None;
+        reseed_retry_body(&mut plain);
+        assert!(
+            plain.pre_read_body.is_none(),
+            "with no retained body, a retry must not fabricate one"
         );
     }
 

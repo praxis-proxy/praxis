@@ -189,7 +189,17 @@ impl PingoraAdminService {
 
     /// Build the `/ready` response status and body.
     fn ready_response(&self) -> (u16, String) {
-        compute_ready_response(self.health_registry.as_ref(), self.verbose)
+        // Resolve the health registry from the live pipelines (post-reload)
+        // rather than the startup snapshot, exactly as /api/stats does, so
+        // /ready reflects current endpoint health after a config reload
+        // instead of health frozen at the first reload.
+        let registry = match self.pipelines.as_ref() {
+            Some(state) => {
+                stats_admin::resolve_health_registry(self.health_registry.as_ref(), Some(state), &state.meta)
+            },
+            None => self.health_registry.clone(),
+        };
+        compute_ready_response(registry.as_ref(), self.verbose)
     }
 
     /// Dispatch `/api/*` admin routes when configured.
@@ -596,6 +606,7 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+    use crate::http::pingora::health::new_listener_meta_store;
 
     #[tokio::test(start_paused = true)]
     async fn prometheus_upkeep_waits_for_interval_and_does_not_catch_up() {
@@ -626,6 +637,37 @@ mod tests {
 
         shutdown_tx.send(true).unwrap();
         task.await.unwrap();
+    }
+
+    #[test]
+    fn ready_resolves_from_live_pipelines_not_stale_startup_snapshot() {
+        // Regression guard for /ready staleness: after a reload that removed a
+        // cluster's health checks, the startup snapshot stays degraded (503) but
+        // the live pipelines expose no registry. PingoraAdminService::ready_response
+        // must resolve from the live pipelines (=> 200) rather than the frozen
+        // startup snapshot; a positional read of self.health_registry returns 503.
+        let entry = ClusterHealthEntry::new(vec![EndpointHealth::new()], vec![Arc::from("10.0.0.1:80")], None, None);
+        entry.endpoints()[0].mark_unhealthy();
+        let degraded: HealthRegistry = Arc::new([(Arc::from("backend"), Arc::new(entry))].into_iter().collect());
+
+        // Sanity: the startup snapshot alone (no live pipelines) reports 503.
+        let stale = PingoraAdminService::new(Some(Arc::clone(&degraded)), None, None, None, None, false);
+        assert_eq!(
+            stale.ready_response().0,
+            503,
+            "a fully degraded startup snapshot alone is 503"
+        );
+
+        // Live pipelines present but exposing no registry: /ready must be 200,
+        // not the stale 503 frozen in the startup snapshot.
+        let pipelines = Arc::new(crate::ListenerPipelines::new(HashMap::new()));
+        let meta = new_listener_meta_store(HashMap::new());
+        let live = PingoraAdminService::new(Some(degraded), None, Some((pipelines, meta)), None, None, false);
+        assert_eq!(
+            live.ready_response().0,
+            200,
+            "/ready must resolve from live pipelines, not the frozen startup snapshot"
+        );
     }
 
     #[tokio::test(start_paused = true)]

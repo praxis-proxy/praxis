@@ -20,7 +20,7 @@ use super::{endpoint::WeightedEndpoint, hash::fnv1a};
 
 /// Consistent-hash ring with configurable hash function and virtual node density.
 pub(crate) struct RingHash {
-    /// Deduplicated endpoint list with weights and original indices.
+    /// Deduplicated endpoint list with weights.
     endpoints: Vec<WeightedEndpoint>,
 
     /// Header whose value is hashed. Falls back to the URI path when `None`
@@ -106,10 +106,7 @@ impl RingHash {
             let idx = (start + offset) % ring_len;
             let ep_idx = self.ring[idx].1;
             let ep = &self.endpoints[ep_idx];
-            if !super::is_excluded(&ep.address, exclude)
-                && ep.index < state.endpoints().len()
-                && state.endpoints()[ep.index].is_healthy()
-            {
+            if !super::is_excluded(&ep.address, exclude) && state.is_address_healthy(&ep.address) {
                 return Some(Arc::clone(&ep.address));
             }
             let visited = visited.get_or_insert_with(|| smallvec::smallvec![false; self.endpoints.len()]);
@@ -528,8 +525,8 @@ mod tests {
     #[test]
     fn weighted_endpoints_get_more_vnodes() {
         let eps = vec![
-            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
-            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 3),
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 3),
         ];
         let ring = build_ring(&eps, &HashFunction::Fnv1a, 100);
         assert_eq!(ring.len(), 400, "weight 1 + weight 3 = 4 * 100 = 400 vnodes");
@@ -570,7 +567,7 @@ mod tests {
 
     fn endpoints(n: usize) -> Vec<WeightedEndpoint> {
         (0..n)
-            .map(|i| WeightedEndpoint::simple(Arc::from(format!("10.0.0.{}:80", i + 1).as_str()), i, 1))
+            .map(|i| WeightedEndpoint::simple(Arc::from(format!("10.0.0.{}:80", i + 1).as_str()), 1))
             .collect()
     }
 

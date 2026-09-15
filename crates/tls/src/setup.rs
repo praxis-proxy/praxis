@@ -19,7 +19,11 @@ use rustls::{ServerConfig, server::WantsServerCert, version};
 
 use crate::{CipherSuiteId, ClientCertMode, ListenerTls, TlsError, TlsVersion, client_auth};
 
-/// ALPN protocols advertised on every TLS listener.
+/// ALPN protocols advertised on HTTP TLS listeners.
+///
+/// Only advertised when the caller asks for HTTP ALPN. TCP-over-TLS
+/// listeners advertise no ALPN so rustls does not reject a client offering
+/// a non-HTTP protocol.
 fn alpn_protocols() -> Vec<Vec<u8>> {
     vec![b"h2".to_vec(), b"http/1.1".to_vec()]
 }
@@ -50,12 +54,12 @@ fn alpn_protocols() -> Vec<Vec<u8>> {
 /// std::fs::write(&key, b"").unwrap();
 ///
 /// let tls = ListenerTls::new_validated(cert.to_str().unwrap(), key.to_str().unwrap()).unwrap();
-/// let server_config = setup::build_server_config(&tls).unwrap();
+/// let server_config = setup::build_server_config(&tls, true).unwrap();
 /// ```
 ///
 /// [`TlsError`]: crate::TlsError
 /// [`ListenerTls`]: crate::ListenerTls
-pub fn build_server_config(tls: &ListenerTls) -> Result<Arc<ServerConfig>, TlsError> {
+pub fn build_server_config(tls: &ListenerTls, advertise_http_alpn: bool) -> Result<Arc<ServerConfig>, TlsError> {
     let builder = build_server_config_base(tls)?;
 
     let primary = tls.certificates.first().ok_or(TlsError::NoCertificates)?;
@@ -71,7 +75,11 @@ pub fn build_server_config(tls: &ListenerTls) -> Result<Arc<ServerConfig>, TlsEr
         builder.with_cert_resolver(Arc::new(resolver))
     };
 
-    config.alpn_protocols = alpn_protocols();
+    config.alpn_protocols = if advertise_http_alpn {
+        alpn_protocols()
+    } else {
+        Vec::new()
+    };
     Ok(Arc::new(config))
 }
 
@@ -112,7 +120,10 @@ pub struct ReloadableServerConfig {
 /// [`ReloadableCertResolver`]: crate::reload::ReloadableCertResolver
 /// [`ReloadableServerConfig`]: ReloadableServerConfig
 #[cfg(feature = "config-reload")]
-pub fn build_reloadable_server_config(tls: &ListenerTls) -> Result<ReloadableServerConfig, TlsError> {
+pub fn build_reloadable_server_config(
+    tls: &ListenerTls,
+    advertise_http_alpn: bool,
+) -> Result<ReloadableServerConfig, TlsError> {
     let builder = build_config_builder(tls)?;
 
     let (builder, verifier_handle) = if tls.client_cert_mode == ClientCertMode::None {
@@ -132,7 +143,11 @@ pub fn build_reloadable_server_config(tls: &ListenerTls) -> Result<ReloadableSer
     let cert_handle = resolver.arc();
 
     let mut config = builder.with_cert_resolver(Arc::new(resolver));
-    config.alpn_protocols = alpn_protocols();
+    config.alpn_protocols = if advertise_http_alpn {
+        alpn_protocols()
+    } else {
+        Vec::new()
+    };
 
     Ok(ReloadableServerConfig {
         config: Arc::new(config),
@@ -338,11 +353,35 @@ mod tests {
             min_version: None,
         };
 
-        let config = build_server_config(&tls).expect("single-cert build should succeed");
+        let config = build_server_config(&tls, true).expect("single-cert build should succeed");
         assert_eq!(
             config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()],
             "ALPN should include h2 and http/1.1"
+        );
+    }
+
+    #[test]
+    fn build_server_config_tcp_advertises_no_alpn() {
+        let certs = gen_test_certs();
+        let tls = ListenerTls {
+            certificates: vec![CertKeyPair {
+                cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+                default: false,
+                key_path: certs.key_path.to_str().expect("key path").to_owned(),
+                server_names: Vec::new(),
+            }],
+            cipher_suites: None,
+            client_ca: None,
+            client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
+            min_version: None,
+        };
+
+        let config = build_server_config(&tls, false).expect("build should succeed");
+        assert!(
+            config.alpn_protocols.is_empty(),
+            "a TCP-over-TLS listener must advertise no ALPN so non-HTTP clients are not rejected"
         );
     }
 
@@ -372,7 +411,7 @@ mod tests {
             min_version: None,
         };
 
-        let config = build_server_config(&tls).expect("multi-cert build should succeed");
+        let config = build_server_config(&tls, true).expect("multi-cert build should succeed");
         assert_eq!(
             config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()],
@@ -401,7 +440,7 @@ mod tests {
             min_version: None,
         };
 
-        let config = build_server_config(&tls).expect("mTLS require build should succeed");
+        let config = build_server_config(&tls, true).expect("mTLS require build should succeed");
         assert_eq!(
             config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()],
@@ -426,7 +465,7 @@ mod tests {
             min_version: Some(TlsVersion::Tls13),
         };
 
-        let config = build_server_config(&tls).expect("TLS 1.3 build should succeed");
+        let config = build_server_config(&tls, true).expect("TLS 1.3 build should succeed");
         assert_eq!(
             config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()],
@@ -450,7 +489,7 @@ mod tests {
             min_version: None,
         };
 
-        let err = build_server_config(&tls).expect_err("missing cert files should fail");
+        let err = build_server_config(&tls, true).expect_err("missing cert files should fail");
         assert!(
             matches!(err, TlsError::FileLoadError { .. }),
             "error should be FileLoadError, got: {err}"
@@ -468,7 +507,7 @@ mod tests {
             min_version: None,
         };
 
-        let err = build_server_config(&tls).expect_err("empty certificates should fail");
+        let err = build_server_config(&tls, true).expect_err("empty certificates should fail");
         assert!(
             matches!(err, TlsError::NoCertificates),
             "error should be NoCertificates, got: {err}"
@@ -578,7 +617,7 @@ mod tests {
             min_version: None,
         };
 
-        let config = build_server_config(&tls).expect("cipher-suite-restricted build should succeed");
+        let config = build_server_config(&tls, true).expect("cipher-suite-restricted build should succeed");
         assert_eq!(
             config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()],
@@ -709,13 +748,38 @@ mod tests {
             min_version: None,
         };
 
-        let result = build_reloadable_server_config(&tls).expect("reloadable build should succeed");
+        let result = build_reloadable_server_config(&tls, true).expect("reloadable build should succeed");
         assert_eq!(
             result.config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()],
             "ALPN should include h2 and http/1.1"
         );
         assert!(result.verifier_handle.is_none(), "no mTLS means no verifier handle");
+    }
+
+    #[test]
+    #[cfg(feature = "config-reload")]
+    fn build_reloadable_server_config_tcp_advertises_no_alpn() {
+        let certs = gen_test_certs();
+        let tls = ListenerTls {
+            certificates: vec![CertKeyPair {
+                cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+                default: false,
+                key_path: certs.key_path.to_str().expect("key path").to_owned(),
+                server_names: Vec::new(),
+            }],
+            cipher_suites: None,
+            client_ca: None,
+            client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
+            min_version: None,
+        };
+
+        let result = build_reloadable_server_config(&tls, false).expect("reloadable build should succeed");
+        assert!(
+            result.config.alpn_protocols.is_empty(),
+            "a TCP-over-TLS reloadable listener must advertise no ALPN"
+        );
     }
 
     #[test]

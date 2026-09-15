@@ -484,9 +484,10 @@ impl HttpFilter for RouterFilter {
             );
             ctx.metrics_route = Some(resolved.metrics_label.clone());
             ctx.cluster = Some(Arc::clone(&resolved.route.cluster));
-            if let Some(policy) = &resolved.retry_policy {
-                ctx.route_retry_policy = Some(Arc::clone(policy));
-            }
+            // Own the field for the matched route: clear any stale override
+            // from a previous route so a re-route cannot inherit a retry
+            // policy the newly matched route did not declare.
+            ctx.route_retry_policy = resolved.retry_policy.as_ref().map(Arc::clone);
             Ok(FilterAction::Continue)
         } else {
             debug!(path = %path, "no route matched");
