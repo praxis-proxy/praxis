@@ -52,11 +52,11 @@ impl ParsedLlmRequest {
 
     /// Whether the caller asked for a streamed response. Read here
     /// because the upstream may ignore the flag and answer either way.
+    ///
+    /// Every spelling a lax backend coerces counts, not just JSON
+    /// `true` — see [`truthy`].
     pub(super) fn is_streaming(&self) -> bool {
-        self.0
-            .get("stream")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
+        self.0.get("stream").is_some_and(truthy)
     }
 
     /// The configured top-level scalars, keyed for `custom.llm.<name>`.
@@ -64,6 +64,10 @@ impl ParsedLlmRequest {
     /// Scalars only. A parameter that is an object is nothing a rule can
     /// compare, and promoting it would put arbitrary client-supplied
     /// structure in the bag.
+    ///
+    /// A boolean parameter is normalized to a JSON bool, so a rule reads
+    /// the value the upstream would act on rather than the client's
+    /// spelling of it.
     pub(super) fn promoted_params(&self, names: &[String]) -> serde_json::Map<String, serde_json::Value> {
         names
             .iter()
@@ -72,7 +76,7 @@ impl ParsedLlmRequest {
                     .get(name)
                     .filter(|value| !matches!(value, serde_json::Value::Object(_) | serde_json::Value::Array(_)))
                     .filter(|value| !value.is_null())
-                    .map(|value| (name.clone(), value.clone()))
+                    .map(|value| (name.clone(), normalize_param(name, value)))
             })
             .collect()
     }
@@ -111,6 +115,39 @@ impl ParsedLlmRequest {
     pub(super) fn as_value(&self) -> &serde_json::Value {
         &self.0
     }
+}
+
+/// Top-level request fields whose value is semantically a boolean.
+///
+/// Only these are normalized: a numeric field like `n` must stay a
+/// number, or `custom.llm.n > 0` would compare against a bool.
+const BOOLEAN_PARAMS: &[&str] = &["stream"];
+
+/// Whether a request field reads as true in any spelling a backend
+/// would act on.
+///
+/// An OpenAI-compatible backend built on lax deserialization coerces
+/// `"true"` and `1`, so policy has to agree: a rule over
+/// `custom.llm.stream` must fire on whatever the upstream will honor,
+/// not only on JSON `true`.
+fn truthy(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Bool(flag) => *flag,
+        serde_json::Value::Number(number) => number.as_f64().is_some_and(|n| n != 0.0),
+        serde_json::Value::String(text) => {
+            matches!(text.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on")
+        },
+        _ => false,
+    }
+}
+
+/// The value promoted to `custom.llm.<name>`: a boolean field as a JSON
+/// bool, anything else unchanged.
+fn normalize_param(name: &str, value: &serde_json::Value) -> serde_json::Value {
+    if BOOLEAN_PARAMS.contains(&name) {
+        return serde_json::Value::Bool(truthy(value));
+    }
+    value.clone()
 }
 
 /// Append the text `value` carries as a content part.
@@ -167,9 +204,10 @@ impl ParsedLlmResponse {
 
     /// Completion metadata for the `completion.*` bag attributes.
     ///
-    /// Reads both providers' spellings of `usage`. A field neither sent
-    /// is left unset rather than zeroed, so a rule can tell "no usage
-    /// reported" from "zero tokens".
+    /// Reads both providers' spellings of `usage`. `tokens` is unset
+    /// when the response reported no counts at all; once any count is
+    /// present the others default to 0, because `TokenUsage` carries
+    /// three plain `u32`s and cannot record a single field as unset.
     pub(super) fn completion(&self) -> CompletionExtension {
         CompletionExtension {
             model: self
@@ -191,9 +229,10 @@ impl ParsedLlmResponse {
         let total = count(usage, "total_tokens");
         // Anthropic reports the two halves and no total; deriving it
         // keeps one rule (`completion.tokens.total`) working for both.
-        let total = total.or_else(|| match (input, output) {
-            (Some(i), Some(o)) => Some(i.saturating_add(o)),
-            _ => None,
+        // A half the provider omitted counts as 0 rather than voiding the
+        // total: a budget rule reading 0 would admit the response.
+        let total = total.or_else(|| {
+            (input.is_some() || output.is_some()).then(|| input.unwrap_or(0).saturating_add(output.unwrap_or(0)))
         });
         (input.is_some() || output.is_some() || total.is_some()).then(|| TokenUsage {
             input_tokens: input.unwrap_or(0),
@@ -246,11 +285,28 @@ impl ParsedLlmResponse {
 }
 
 /// A `u32` token count, whatever numeric shape the provider used.
+///
+/// Saturates instead of discarding. A count above `u32::MAX`, or a
+/// fractional one, still has to reach a budget rule: dropping it would
+/// leave the field at 0 and admit a response the rule meant to deny.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the value is finite, non-negative, and clamped below u32::MAX before the cast"
+)]
 fn count(usage: &serde_json::Value, field: &str) -> Option<u32> {
-    usage
-        .get(field)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|n| u32::try_from(n).ok())
+    let value = usage.get(field)?;
+    if let Some(exact) = value.as_u64() {
+        return Some(u32::try_from(exact).unwrap_or(u32::MAX));
+    }
+    value.as_f64().filter(|n| n.is_finite() && *n >= 0.0).map(|n| {
+        let ceiled = n.ceil();
+        if ceiled >= f64::from(u32::MAX) {
+            u32::MAX
+        } else {
+            ceiled as u32
+        }
+    })
 }
 
 /// The CMF payload message for an inference response.
@@ -317,7 +373,49 @@ mod tests {
         assert!(request(r#"{"model":"m","stream":true}"#).is_streaming());
         assert!(!request(r#"{"model":"m","stream":false}"#).is_streaming());
         assert!(!request(r#"{"model":"m"}"#).is_streaming());
-        assert!(!request(r#"{"model":"m","stream":"true"}"#).is_streaming());
+    }
+
+    #[test]
+    fn every_spelling_a_backend_honors_reads_as_streaming() {
+        for body in [
+            r#"{"model":"m","stream":"true"}"#,
+            r#"{"model":"m","stream":"TRUE"}"#,
+            r#"{"model":"m","stream":" true "}"#,
+            r#"{"model":"m","stream":"yes"}"#,
+            r#"{"model":"m","stream":"on"}"#,
+            r#"{"model":"m","stream":"1"}"#,
+            r#"{"model":"m","stream":1}"#,
+        ] {
+            assert!(
+                request(body).is_streaming(),
+                "body {body} streams on a lax backend, so policy must read it as streaming",
+            );
+        }
+        for body in [
+            r#"{"model":"m","stream":"false"}"#,
+            r#"{"model":"m","stream":"0"}"#,
+            r#"{"model":"m","stream":0}"#,
+            r#"{"model":"m","stream":"maybe"}"#,
+        ] {
+            assert!(!request(body).is_streaming(), "body {body} must not read as streaming");
+        }
+    }
+
+    #[test]
+    fn a_boolean_param_is_promoted_as_a_bool_whatever_the_client_wrote() {
+        let names = vec!["stream".to_owned(), "n".to_owned()];
+        let promoted = request(r#"{"model":"m","stream":"true","n":1}"#).promoted_params(&names);
+
+        assert_eq!(
+            promoted.get("stream"),
+            Some(&serde_json::json!(true)),
+            "APL reads custom.llm.stream with get_bool, so a string spelling has to arrive as a bool",
+        );
+        assert_eq!(
+            promoted.get("n"),
+            Some(&serde_json::json!(1)),
+            "a numeric param must stay numeric; normalizing it would break an order comparison",
+        );
     }
 
     #[test]
@@ -420,6 +518,50 @@ mod tests {
         assert_eq!(
             tokens.total_tokens, 10,
             "one rule on completion.tokens.total must work for both"
+        );
+    }
+
+    #[test]
+    fn a_partially_reported_usage_still_totals() {
+        let tokens = response(r#"{"usage":{"output_tokens":5000}}"#)
+            .completion()
+            .tokens
+            .unwrap();
+        assert_eq!(
+            (tokens.input_tokens, tokens.output_tokens, tokens.total_tokens),
+            (0, 5000, 5000),
+            "a provider that omits the prompt half must not read as zero total: a budget rule \
+             would admit the response",
+        );
+    }
+
+    #[test]
+    fn out_of_range_counts_saturate_rather_than_vanishing() {
+        let huge = response(r#"{"usage":{"total_tokens":99999999999}}"#)
+            .completion()
+            .tokens
+            .unwrap();
+        assert_eq!(
+            huge.total_tokens,
+            u32::MAX,
+            "clamping keeps a budget rule firing; dropping the field would read as zero",
+        );
+
+        let fractional = response(r#"{"usage":{"total_tokens":1000.4}}"#)
+            .completion()
+            .tokens
+            .unwrap();
+        assert_eq!(
+            fractional.total_tokens, 1001,
+            "a fractional count rounds up, never down"
+        );
+
+        assert!(
+            response(r#"{"usage":{"total_tokens":-5}}"#)
+                .completion()
+                .tokens
+                .is_none(),
+            "a negative count is not a count",
         );
     }
 
