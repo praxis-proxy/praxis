@@ -50,7 +50,7 @@ config_path: /etc/praxis/policy.yaml
 body_access: read_write       # optional; default read_only
 require_protocol_metadata: true    # optional; default true
 init_timeout_secs: 30         # optional; default 30
-max_buffer_bytes: 10485760    # optional; default 10 MiB (read_write only)
+max_buffer_bytes: 10485760    # optional; default 10 MiB (read_write, and any `llm:` policy)
 llm:                          # optional; tunes the inference path
   require_model: true         # optional; default true
   provider: openai            # optional; operator-asserted

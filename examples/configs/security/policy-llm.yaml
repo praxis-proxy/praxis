@@ -16,18 +16,45 @@
 # with no usable `model` is denied by the filter itself (`llm.require_model`,
 # on by default).
 #
+# `config_path` points at the policy document (plugins + `llm:` routes)
+# that the filter loads once at construction. It is operator-supplied,
+# not shipped here: a real policy carries your own issuers, secrets, and
+# per-model allow-lists. See `tests/integration/fixtures/llm-policy.yaml`
+# for the minimal single-HS256-identity-plugin policy the integration
+# test loads — point `config_path` at that file to run this example
+# as-is.
+#
 # Requires building with the `policy-engine` feature, which is off
 # by default:
 #
 # Usage:
 #   cargo run -p praxis-proxy --features policy-engine -- -c examples/configs/security/policy-llm.yaml
 #
-# Exercise:
+# Exercise (assumes the backend at :3000 echoes 200, and `config_path`
+# points at tests/integration/fixtures/llm-policy.yaml):
+#
+#   # 401: no credential — the identity gate runs before the body matters
+#   curl -i -X POST http://localhost:8080/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"gpt-4o-mini","messages":[]}'
+#
+#   # 403: no usable top-level `model` — fails closed (llm.require_model)
+#   curl -i -X POST http://localhost:8080/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"messages":[]}'
+#
+# The remaining paths need an HS256 JWT signed with the fixture's
+# `secret`, for `iss: https://idp.example.com` and
+# `aud: praxis-policy-example`, carrying a `roles` claim. See
+# `mint_fixture_jwt` in
+# `tests/integration/tests/suite/examples/policy_llm.rs` for the exact
+# claim set, then:
+#
 #   # 200: a model the caller's role is allowed to use
 #   curl -H "Authorization: Bearer $JWT" -d '{"model":"gpt-4o-mini","messages":[]}' \
 #     http://localhost:8080/v1/chat/completions
 #
-#   # 403: a model the policy reserves for another role
+#   # 403: a model the policy reserves for the `research` role
 #   curl -H "Authorization: Bearer $JWT" -d '{"model":"gpt-4o","messages":[]}' \
 #     http://localhost:8080/v1/chat/completions
 
