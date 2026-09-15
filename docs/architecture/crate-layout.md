@@ -139,6 +139,7 @@ praxis-filter                   Filter pipeline engine
     │   │   └── request_id      Request correlation ID injection
     │   ├── payload_processing/
     │   │   ├── compression     Response compression (gzip/brotli/zstd)
+    │   │   ├── json_body       JSON Pointer rewrite (request add/remove/replace; response remove/extract)
     │   │   ├── json_body_field JSON body field extraction to headers
     │   │   └── json_rpc        JSON-RPC envelope parsing filter
     │   ├── security/

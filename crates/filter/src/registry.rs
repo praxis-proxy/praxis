@@ -432,8 +432,8 @@ impl FilterRegistry {
 fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     use crate::builtins::{
         AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
-        ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter,
-        PathRewriteFilter, PeerIdentityTrustFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
+        ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonBodyFilter,
+        JsonRpcFilter, PathRewriteFilter, PeerIdentityTrustFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
         StaticResponseFilter, TimeoutFilter, TraceContextFilter, UrlRewriteFilter,
     };
 
@@ -473,6 +473,7 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http(filters, "timeout", TimeoutFilter::from_config);
     register_http(filters, "trace_context", TraceContextFilter::from_config);
     register_http(filters, "url_rewrite", UrlRewriteFilter::from_config);
+    register_http(filters, "json_body", JsonBodyFilter::from_config);
     register_http(filters, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(filters, "json_rpc", JsonRpcFilter::from_config);
     register_http_security(filters, "peer_identity_trust", PeerIdentityTrustFilter::from_config);
@@ -620,6 +621,7 @@ mod tests {
         assert!(names.contains(&"timeout"), "timeout should be registered");
         assert!(names.contains(&"trace_context"), "trace_context should be registered");
         assert!(names.contains(&"url_rewrite"), "url_rewrite should be registered");
+        assert!(names.contains(&"json_body"), "json_body should be registered");
         assert!(
             names.contains(&"json_body_field"),
             "json_body_field should be registered"

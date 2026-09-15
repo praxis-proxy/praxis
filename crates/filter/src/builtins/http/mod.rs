@@ -15,7 +15,7 @@ pub use observability::{
     AccessLogFilter, RequestIdFilter, TraceContextFilter, access_record_already_emitted, bodyless_response,
     emit_access_record, mark_access_record_emitted,
 };
-pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter};
+pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonBodyFilter, JsonBodyOps, JsonRpcFilter};
 #[cfg(feature = "basic-auth-filter")]
 pub use security::BasicAuthFilter;
 pub use security::{

@@ -7,10 +7,19 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    free_port, http_get, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown, start_proxy,
+    free_port, http_get, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
+    start_echo_backend, start_header_echo_backend, start_proxy,
 };
 
 use super::load_example_config;
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+const JSON_BODY_EXAMPLE: &str = "payload-processing/json-body.yaml";
+const JSON_BODY_PAYLOAD: &str =
+    r#"{"model":"old","secret":"s3cret","prompt":"hi","stream":true,"user":{"id":1},"internal":"drop-me"}"#;
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -150,4 +159,106 @@ fn stream_buffer_routes_unknown_action_to_default() {
         "default-hit",
         "unknown action should fall through to default cluster"
     );
+}
+
+#[test]
+fn json_body_rewrites_request_payload() {
+    let backend = start_echo_backend();
+    let proxy_port = free_port();
+    let config = load_example_config(
+        JSON_BODY_EXAMPLE,
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(proxy.addr(), &json_post("/v1/chat", JSON_BODY_PAYLOAD));
+    assert_eq!(parse_status(&raw), 200, "json_body example should return 200");
+    let body = parse_body(&raw);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).unwrap_or_else(|e| panic!("echoed body should be JSON, got {body:?}: {e}"));
+    assert_eq!(parsed["model"], "forced-model", "replace /model");
+    assert_eq!(parsed["tenant"], "acme", "add /tenant");
+    assert_eq!(parsed["prompt"], "hi", "unmatched fields copied");
+    assert_eq!(parsed["stream"], serde_json::json!(true), "unmatched /stream copied");
+    assert_eq!(parsed["user"], serde_json::json!({"id": 1}), "unmatched /user copied");
+    assert_eq!(parsed["original_model"], "old", "extract /model then add from metadata");
+    assert_eq!(
+        parsed["extracted_user"],
+        serde_json::json!({"id": 1}),
+        "structured metadata round-trip: extract /user then add /extracted_user in second filter"
+    );
+    assert_eq!(
+        parsed["extracted_model"], "old",
+        "metadata round-trip: extract /model then add /extracted_model in second filter"
+    );
+    assert!(parsed.get("secret").is_none(), "remove /secret");
+    // response_remove /internal is verified on the response body (the echo
+    // backend includes /internal in its reply; response_remove strips it).
+    assert!(parsed.get("internal").is_none(), "response_remove /internal");
+    // response_extract to metadata and structured_metadata writes to internal
+    // pipeline state with no external observer in the current filter set;
+    // covered by json_body unit tests.
+}
+
+#[test]
+fn json_body_promotes_header_from_extract() {
+    let backend = start_header_echo_backend();
+    let proxy_port = free_port();
+    let backend_port = backend.port();
+    // Minimal config with only request_extract to header — avoids response
+    // json_body ops that would reject the non-JSON header-echo response.
+    let yaml = format!(
+        "\
+listeners:
+  - name: default
+    address: \"127.0.0.1:{proxy_port}\"
+    filter_chains:
+      - chain
+filter_chains:
+  - name: chain
+    filters:
+      - filter: json_body
+        request_extract:
+          - pointer: /stream
+            header: X-Stream
+        on_invalid: reject
+      - filter: router
+        routes:
+          - path_prefix: \"/\"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - \"127.0.0.1:{backend_port}\"
+insecure_options:
+  allow_private_endpoints: true
+"
+    );
+    let config = praxis_core::config::Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(proxy.addr(), &json_post("/v1/chat", JSON_BODY_PAYLOAD));
+    assert_eq!(parse_status(&raw), 200, "header echo should return 200");
+    let body = parse_body(&raw);
+    assert!(
+        body.to_ascii_lowercase().contains("x-stream: true"),
+        "extract /stream to header X-Stream must reach the backend, got headers:\n{body}"
+    );
+}
+
+#[test]
+fn json_body_rejects_invalid_json() {
+    let backend = start_echo_backend();
+    let proxy_port = free_port();
+    let config = load_example_config(
+        JSON_BODY_EXAMPLE,
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(proxy.addr(), &json_post("/v1/chat", "not-json"));
+    assert_eq!(parse_status(&raw), 400, "on_invalid reject should return 400");
 }

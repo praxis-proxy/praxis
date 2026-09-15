@@ -44,6 +44,7 @@ opentelemetry = { workspace = true, optional = true }
 percent-encoding = { workspace = true }
 pingora-core = { workspace = true }
 praxis-core = { workspace = true }
+praxis-simd-scan = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
