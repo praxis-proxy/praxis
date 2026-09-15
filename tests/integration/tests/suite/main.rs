@@ -77,6 +77,7 @@ mod process_logging;
 mod prometheus_metrics;
 mod rate_limit;
 mod retry;
+mod retry_body_rewrite;
 mod route_templates;
 mod routing;
 mod security;
