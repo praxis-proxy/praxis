@@ -4249,7 +4249,8 @@ async fn a_plain_mcp_request_still_takes_the_mcp_path() {
 
 /// The inference path buffers the request body even in `ReadOnly`: there
 /// is no classifier ahead of it to buffer, and the model has to be read
-/// from the whole body.
+/// from the whole body. Its own ceiling bounds it, not the larger
+/// JSON-RPC one.
 #[test]
 fn inference_routes_buffer_the_request_body_in_read_only() {
     let (_dir, path) = write_llm_route_config();
@@ -4257,10 +4258,10 @@ fn inference_routes_buffer_the_request_body_in_read_only() {
         matches!(
             build_filter(path).request_body_mode(),
             BodyMode::StreamBuffer {
-                max_bytes: Some(10_485_760)
+                max_bytes: Some(1_048_576)
             }
         ),
-        "an inference policy must ask for the whole body, bounded by max_buffer_bytes",
+        "an inference policy must ask for the whole body, bounded by llm.max_request_bytes",
     );
 
     let (_dir, path) = write_tool_route_config();
@@ -4268,6 +4269,64 @@ fn inference_routes_buffer_the_request_body_in_read_only() {
         matches!(build_filter(path).request_body_mode(), BodyMode::Stream),
         "an MCP policy keeps streaming: the classifier ahead of it already buffers",
     );
+}
+
+/// The inference ceiling is the one that binds under `read_write`, where
+/// both halves apply: buffering the larger JSON-RPC figure would let an
+/// inference body past the bound the operator set for it.
+#[test]
+fn the_lower_ceiling_binds_when_both_apply() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = PolicyFilter::new(PolicyFilterConfig {
+        config_path: path,
+        allow_private_idp: false,
+        body_access: super::config::BodyAccessMode::ReadWrite,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions {
+            max_request_bytes: 4096,
+            ..Default::default()
+        },
+    })
+    .expect("filter should construct");
+
+    assert!(
+        matches!(
+            filter.request_body_mode(),
+            BodyMode::StreamBuffer { max_bytes: Some(4096) }
+        ),
+        "the smaller of the two ceilings must win",
+    );
+}
+
+/// A ceiling of zero would fail every non-empty body, and one past the
+/// absolute maximum would multiply per-request memory by concurrency.
+/// Both are refused at construction, as the JSON-RPC ceiling's are.
+#[test]
+fn rejects_an_out_of_range_inference_ceiling() {
+    for (max_request_bytes, expected) in [
+        (0, "llm.max_request_bytes must be > 0"),
+        (praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1, "exceeds the maximum"),
+    ] {
+        let (_dir, path) = write_llm_route_config();
+        let err = PolicyFilter::new(PolicyFilterConfig {
+            config_path: path,
+            allow_private_idp: false,
+            body_access: super::config::BodyAccessMode::ReadOnly,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm: super::config::LlmOptions {
+                max_request_bytes,
+                ..Default::default()
+            },
+        })
+        .err()
+        .unwrap_or_else(|| panic!("{max_request_bytes} must be rejected"))
+        .to_string();
+        assert!(err.contains(expected), "got: {err}");
+    }
 }
 
 /// The model the proxy parsed is published as filter metadata, so an

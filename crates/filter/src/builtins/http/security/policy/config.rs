@@ -134,6 +134,21 @@ fn default_true() -> bool {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LlmOptions {
+    /// Ceiling on a buffered inference request body, in bytes.
+    ///
+    /// The inference path buffers in `read_only` too — the model is in
+    /// the body — so it carries its own bound rather than sharing the
+    /// `max_buffer_bytes` figure sized for JSON-RPC tool calls. A body
+    /// over the ceiling is rejected before any filter runs, which is the
+    /// fail-closed answer for one the filter cannot read a model from.
+    ///
+    /// Peak memory is roughly this times the in-flight request count, so
+    /// raise it deliberately. Multimodal requests carrying base64 images,
+    /// long chat histories, and large embeddings inputs all run past the
+    /// 1 MiB default.
+    #[serde(default = "default_llm_max_request_bytes")]
+    pub max_request_bytes: usize,
+
     /// Top-level request fields promoted to `custom.llm.<name>`, so a
     /// rule can read them (`deny(custom.llm.stream)`). Scalars only.
     ///
@@ -174,12 +189,20 @@ pub(crate) struct LlmOptions {
 impl Default for LlmOptions {
     fn default() -> Self {
         Self {
+            max_request_bytes: default_llm_max_request_bytes(),
             promote_params: default_promote_params(),
             provider: None,
             require_model: true,
             require_route: true,
         }
     }
+}
+
+/// Default inference request buffer ceiling. Lower than the JSON-RPC
+/// figure: an inference body needs only the top-level `model` read from
+/// it, and the ceiling is paid per in-flight request.
+fn default_llm_max_request_bytes() -> usize {
+    1_048_576 // 1 MiB
 }
 
 /// The OpenAI / Anthropic sampling fields a rule plausibly keys on.

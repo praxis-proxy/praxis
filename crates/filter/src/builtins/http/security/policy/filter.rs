@@ -234,6 +234,19 @@ impl PolicyFilter {
             )
             .into());
         }
+        // Same bounds for the inference ceiling, which the same pipeline check
+        // likewise never sees.
+        if cfg.llm.max_request_bytes == 0 {
+            return Err("policy: llm.max_request_bytes must be > 0".into());
+        }
+        if cfg.llm.max_request_bytes > praxis_core::config::ABSOLUTE_MAX_BODY_BYTES {
+            return Err(format!(
+                "policy: llm.max_request_bytes ({}) exceeds the maximum ({})",
+                cfg.llm.max_request_bytes,
+                praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+            )
+            .into());
+        }
 
         let yaml = std::fs::read_to_string(&cfg.config_path).map_err(|e| -> FilterError {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
@@ -1480,13 +1493,23 @@ impl HttpFilter for PolicyFilter {
         //
         // The inference path buffers in `ReadOnly` too: the MCP path
         // gets a whole body only because the protocol classifier ahead
-        // of it buffers, and an inference call has no classifier. A
-        // request over the ceiling gets the pipeline's 413, which is the
-        // fail-closed answer for a body the filter cannot read a model
-        // from.
+        // of it buffers, and an inference call has no classifier. It
+        // buffers before the identity gate, since a body hook is where
+        // the model can be read at all, so the ceiling bounds
+        // unauthenticated traffic and is paid per in-flight request —
+        // hence its own smaller `llm.max_request_bytes`. A request over
+        // it gets the pipeline's 413, which is the fail-closed answer
+        // for a body the filter cannot read a model from.
         match self.cfg.body_access {
             BodyAccessMode::ReadOnly if !self.llm_routes => BodyMode::Stream,
-            BodyAccessMode::ReadOnly | BodyAccessMode::ReadWrite => BodyMode::StreamBuffer {
+            BodyAccessMode::ReadOnly => BodyMode::StreamBuffer {
+                max_bytes: Some(self.cfg.llm.max_request_bytes),
+            },
+            // Both halves apply, so take whichever ceiling is lower.
+            BodyAccessMode::ReadWrite if self.llm_routes => BodyMode::StreamBuffer {
+                max_bytes: Some(self.cfg.max_buffer_bytes.min(self.cfg.llm.max_request_bytes)),
+            },
+            BodyAccessMode::ReadWrite => BodyMode::StreamBuffer {
                 max_bytes: Some(self.cfg.max_buffer_bytes),
             },
         }
