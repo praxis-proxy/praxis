@@ -9,7 +9,7 @@ use std::{
     collections::{HashMap, VecDeque},
     net::IpAddr,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use http::{HeaderMap, Method, StatusCode, Uri, header::HeaderName};
@@ -493,6 +493,16 @@ pub struct HttpFilterContext<'a> {
     pub upstream: Option<Upstream>,
 }
 
+/// Leftover per-read timeout a response-body filter asked to apply to
+/// the live streaming body.
+///
+/// Dispatch snapshots `ctx.upstream`'s `read_timeout` into
+/// [`praxis_core::subrequest::SubResponseBody`]. Mutating a reconstructed
+/// `ctx.upstream` later does not change that snapshot, so filters store
+/// leftover budget here and the streaming executor copies it onto the
+/// active read timer.
+struct StreamReadTimeoutCap(Duration);
+
 impl HttpFilterContext<'_> {
     /// Selected cluster name, if any.
     pub fn cluster_name(&self) -> Option<&str> {
@@ -502,6 +512,34 @@ impl HttpFilterContext<'_> {
     /// Upstream peer address, if selected.
     pub fn upstream_addr(&self) -> Option<&str> {
         self.upstream.as_ref().map(|u| &*u.address)
+    }
+
+    /// Cap the live streaming body's next per-chunk read at `timeout`.
+    ///
+    /// Dispatch copies the selected peer's `read_timeout` into the live
+    /// [`SubResponseBody`](praxis_core::subrequest::SubResponseBody). A
+    /// reconstructed `ctx.upstream` is detached from that snapshot, so
+    /// recapping leftover budget on the peer does not change the active
+    /// read timer. Response-body filters call this instead; the streaming
+    /// executor applies the cap after the body-filter pass.
+    ///
+    /// A tighter existing cap is left in place.
+    pub fn cap_stream_read_timeout(&mut self, timeout: Duration) {
+        let next = self
+            .extensions
+            .get::<StreamReadTimeoutCap>()
+            .map_or(timeout, |existing| existing.0.min(timeout));
+        self.extensions.insert(StreamReadTimeoutCap(next));
+    }
+
+    /// Leftover per-read timeout requested during this body-filter pass.
+    pub fn stream_read_timeout_cap(&self) -> Option<Duration> {
+        self.extensions.get::<StreamReadTimeoutCap>().map(|cap| cap.0)
+    }
+
+    /// Take leftover per-read timeout so the streaming executor can apply it.
+    pub(crate) fn take_stream_read_timeout_cap(&mut self) -> Option<Duration> {
+        self.extensions.remove::<StreamReadTimeoutCap>().map(|cap| cap.0)
     }
 
     /// Opaque application protocol of the cluster selected for this exchange.
@@ -1185,6 +1223,41 @@ mod tests {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let ctx = crate::test_utils::make_filter_context(&req);
         assert!(ctx.upstream_addr().is_none(), "upstream addr should be None when unset");
+    }
+
+    #[test]
+    fn cap_stream_read_timeout_tightens_leftover_budget() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.cap_stream_read_timeout(Duration::from_secs(30));
+        ctx.cap_stream_read_timeout(Duration::from_millis(250));
+        assert_eq!(
+            ctx.stream_read_timeout_cap(),
+            Some(Duration::from_millis(250)),
+            "leftover budget must recap the live timer, not a detached peer copy"
+        );
+        assert_eq!(
+            ctx.take_stream_read_timeout_cap(),
+            Some(Duration::from_millis(250)),
+            "the streaming executor must be able to take the leftover cap"
+        );
+        assert!(
+            ctx.stream_read_timeout_cap().is_none(),
+            "taking the cap must not leave it in request extensions"
+        );
+    }
+
+    #[test]
+    fn cap_stream_read_timeout_keeps_a_tighter_existing_cap() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.cap_stream_read_timeout(Duration::from_millis(100));
+        ctx.cap_stream_read_timeout(Duration::from_secs(1));
+        assert_eq!(
+            ctx.stream_read_timeout_cap(),
+            Some(Duration::from_millis(100)),
+            "a tighter existing leftover cap must not be relaxed"
+        );
     }
 
     #[test]

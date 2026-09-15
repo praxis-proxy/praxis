@@ -1107,6 +1107,62 @@ async fn send_streaming_read_timeout_fires_as_io_error() {
     backend.abort();
 }
 
+#[test]
+fn cap_read_timeout_tightens_the_dispatch_snapshot() {
+    let mut body = SubResponseBody::new_done();
+    body.read_timeout = Some(Duration::from_secs(30));
+    body.cap_read_timeout(Duration::from_millis(250));
+    assert_eq!(
+        body.read_timeout,
+        Some(Duration::from_millis(250)),
+        "leftover budget must recap the live body, not a detached peer copy"
+    );
+    drop(body);
+}
+
+#[test]
+fn cap_read_timeout_keeps_a_tighter_existing_snapshot() {
+    let mut body = SubResponseBody::new_done();
+    body.read_timeout = Some(Duration::from_millis(100));
+    body.cap_read_timeout(Duration::from_secs(1));
+    assert_eq!(
+        body.read_timeout,
+        Some(Duration::from_millis(100)),
+        "a tighter existing read timeout must not be relaxed"
+    );
+    drop(body);
+}
+
+#[tokio::test]
+async fn cap_read_timeout_shortens_the_next_chunk_wait() {
+    use std::time::Instant;
+
+    let (mut body, backend) = open_stalled_stream_with_read_timeout(
+        Some(Duration::from_secs(5)),
+        StreamLimits {
+            idle_timeout: Duration::from_secs(30),
+            max_stream_duration: None,
+            max_total_bytes: None,
+        },
+    )
+    .await;
+    assert!(body.next_chunk().await.unwrap().is_some(), "first chunk should arrive");
+    body.cap_read_timeout(Duration::from_millis(50));
+    let started = Instant::now();
+    let err = body.next_chunk().await.unwrap_err();
+    let elapsed = started.elapsed();
+    backend.abort();
+    assert!(
+        matches!(&err, SubRequestError::Io(msg) if msg.contains("read timeout")),
+        "capped leftover budget must still classify as a read timeout, got: {err}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "recapping the live body must shorten the next wait, elapsed={elapsed:?}"
+    );
+    drop(body);
+}
+
 #[tokio::test]
 async fn send_streaming_cancel_after_eof_is_noop() {
     use pingora_core::upstreams::peer::HttpPeer;
@@ -2412,12 +2468,21 @@ async fn send_streaming_with_overflowing_stream_duration_fails() {
 /// Open a streaming exchange against a backend that sends one chunk
 /// and then stalls, returning the live body handle.
 async fn open_stalled_stream(limits: StreamLimits) -> (SubResponseBody, tokio::task::JoinHandle<()>) {
+    open_stalled_stream_with_read_timeout(None, limits).await
+}
+
+/// Like [`open_stalled_stream`], optionally snapshotting a peer `read_timeout`.
+async fn open_stalled_stream_with_read_timeout(
+    read_timeout: Option<Duration>,
+    limits: StreamLimits,
+) -> (SubResponseBody, tokio::task::JoinHandle<()>) {
     use pingora_core::upstreams::peer::HttpPeer;
 
     let (addr, backend) = spawn_stalling_backend().await;
     let connector = SubRequestConnector::new(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let mut peer = HttpPeer::new(addr.to_string(), false, String::new());
+    peer.options.read_timeout = read_timeout;
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/stall".parse().unwrap(),

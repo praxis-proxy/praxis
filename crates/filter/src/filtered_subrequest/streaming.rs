@@ -7,7 +7,10 @@
 //! filters, accumulates state in the owned [`FilteredSubrequestContinuation`],
 //! and runs the completion lifecycle exactly once after upstream EOF.
 
-use std::collections::{HashMap, VecDeque};
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -73,80 +76,86 @@ impl FilteredStreamingBody {
     /// continuation for the next chunk.
     #[expect(clippy::too_many_lines, reason = "context reconstruction requires many fields")]
     fn run_step_body_filters(&mut self, body: &mut Option<Bytes>, end_of_stream: bool) -> Result<(), FilterError> {
-        let cont = &mut self.continuation;
-        let mut ctx = crate::filter::HttpFilterContext {
-            buffered_request_body: None,
-            body_done_indices: std::mem::take(&mut cont.body_done_indices),
-            branch_iterations: HashMap::new(),
-            client_addr: cont.client_addr,
-            cluster: None,
-            current_filter_id: None,
-            downstream_tls: cont.downstream_tls,
-            extensions: std::mem::take(&mut cont.extensions),
-            executed_filter_indices: std::mem::take(&mut cont.executed_filter_indices),
-            extra_request_headers: Vec::new(),
-            filter_metadata: std::mem::take(&mut cont.filter_metadata),
-            filter_results: std::mem::take(&mut cont.filter_results),
-            filter_state: std::mem::take(&mut cont.filter_state),
-            health_registry: cont.pipeline.health_registry(),
-            id_generator: cont.pipeline.id_generator(),
-            kv_stores: cont.pipeline.kv_stores(),
-            metrics_route: None,
-            peer_identity: cont.peer_identity.clone(),
-            prior_pre_read_mutations: Vec::new(),
-            pre_read_mutations: Vec::new(),
-            request: &cont.request_snapshot,
-            request_body_bytes: 0,
-            request_body_mode: cont.pipeline.body_capabilities().request_body_mode,
-            request_headers_to_remove: Vec::new(),
-            request_headers_to_set: Vec::new(),
-            request_start: cont.request_start,
-            response_body_bytes: cont.response_body_bytes,
-            response_body_mode: cont.response_body_mode,
-            response_header: None,
-            response_headers_modified: false,
-            upstream_reached: false,
-            rewritten_path: None,
-            selected_endpoint_index: None,
-            attempted_endpoints: Vec::new(),
-            retry_policy: None,
-            route_retry_policy: None,
-            cluster_retry_state: None,
-            cluster_retry_state_released: false,
-            endpoint_reselector: None,
-            pinned_endpoint_address: None,
-            session_stores: cont.pipeline.session_stores(),
-            structured_metadata: std::mem::take(&mut cont.structured_metadata),
-            subrequest_client: cont.pipeline.subrequest_client(),
-            subrequest_response_mode: crate::context::SubRequestResponseMode::Streaming,
-            time_source: cont.pipeline.time_source(),
-            upstream: None,
+        let remaining_read_timeout;
+        let result = {
+            let cont = &mut self.continuation;
+            let mut ctx = crate::filter::HttpFilterContext {
+                buffered_request_body: None,
+                body_done_indices: std::mem::take(&mut cont.body_done_indices),
+                branch_iterations: HashMap::new(),
+                client_addr: cont.client_addr,
+                cluster: None,
+                current_filter_id: None,
+                downstream_tls: cont.downstream_tls,
+                extensions: std::mem::take(&mut cont.extensions),
+                executed_filter_indices: std::mem::take(&mut cont.executed_filter_indices),
+                extra_request_headers: Vec::new(),
+                filter_metadata: std::mem::take(&mut cont.filter_metadata),
+                filter_results: std::mem::take(&mut cont.filter_results),
+                filter_state: std::mem::take(&mut cont.filter_state),
+                health_registry: cont.pipeline.health_registry(),
+                id_generator: cont.pipeline.id_generator(),
+                kv_stores: cont.pipeline.kv_stores(),
+                metrics_route: None,
+                peer_identity: cont.peer_identity.clone(),
+                prior_pre_read_mutations: Vec::new(),
+                pre_read_mutations: Vec::new(),
+                request: &cont.request_snapshot,
+                request_body_bytes: 0,
+                request_body_mode: cont.pipeline.body_capabilities().request_body_mode,
+                request_headers_to_remove: Vec::new(),
+                request_headers_to_set: Vec::new(),
+                request_start: cont.request_start,
+                response_body_bytes: cont.response_body_bytes,
+                response_body_mode: cont.response_body_mode,
+                response_header: None,
+                response_headers_modified: false,
+                upstream_reached: false,
+                rewritten_path: None,
+                selected_endpoint_index: None,
+                attempted_endpoints: Vec::new(),
+                retry_policy: None,
+                route_retry_policy: None,
+                cluster_retry_state: None,
+                cluster_retry_state_released: false,
+                endpoint_reselector: None,
+                pinned_endpoint_address: None,
+                session_stores: cont.pipeline.session_stores(),
+                structured_metadata: std::mem::take(&mut cont.structured_metadata),
+                subrequest_client: cont.pipeline.subrequest_client(),
+                subrequest_response_mode: crate::context::SubRequestResponseMode::Streaming,
+                time_source: cont.pipeline.time_source(),
+                upstream: None,
+            };
+
+            let result = cont.pipeline.execute_http_response_body_with_response_header(
+                &mut ctx,
+                body,
+                end_of_stream,
+                Some(&cont.response_snapshot),
+            );
+
+            remaining_read_timeout = leftover_stream_read_timeout(&mut ctx);
+
+            cont.body_done_indices = ctx.body_done_indices;
+            cont.executed_filter_indices = ctx.executed_filter_indices;
+            cont.extensions = ctx.extensions;
+            cont.filter_metadata = ctx.filter_metadata;
+            cont.filter_results = ctx.filter_results;
+            cont.filter_state = ctx.filter_state;
+            cont.response_body_bytes = ctx.response_body_bytes;
+            cont.structured_metadata = ctx.structured_metadata;
+
+            result
         };
 
-        let result = cont.pipeline.execute_http_response_body_with_response_header(
-            &mut ctx,
-            body,
-            end_of_stream,
-            Some(&cont.response_snapshot),
-        );
-
-        cont.body_done_indices = ctx.body_done_indices;
-        cont.executed_filter_indices = ctx.executed_filter_indices;
-        cont.extensions = ctx.extensions;
-        cont.filter_metadata = ctx.filter_metadata;
-        cont.filter_results = ctx.filter_results;
-        cont.filter_state = ctx.filter_state;
-        cont.response_body_bytes = ctx.response_body_bytes;
-        cont.structured_metadata = ctx.structured_metadata;
-
-        match result? {
-            crate::actions::FilterAction::Reject(_) => {
-                Err("filtered_subrequest: step body filter rejected during stream"
-                    .to_owned()
-                    .into())
-            },
-            _ => Ok(()),
+        if let crate::actions::FilterAction::Reject(_) = result? {
+            return Err("filtered_subrequest: step body filter rejected during stream"
+                .to_owned()
+                .into());
         }
+        apply_leftover_read_timeout(&mut self.upstream, remaining_read_timeout);
+        Ok(())
     }
 
     /// Run the sub-request's completion lifecycle exactly once.
@@ -301,6 +310,25 @@ impl StreamingResponseBody for FilteredStreamingBody {
 
     fn swap_extensions(&mut self, extensions: &mut RequestExtensions) {
         self.exchange_extensions(extensions);
+    }
+}
+
+/// Leftover per-read timeout from this body-filter pass.
+///
+/// Prefers [`crate::HttpFilterContext::cap_stream_read_timeout`], which recaps
+/// the live body. A reconstructed `ctx.upstream` is only a fallback for
+/// filters that still mutate the detached peer.
+fn leftover_stream_read_timeout(ctx: &mut crate::filter::HttpFilterContext<'_>) -> Option<Duration> {
+    ctx.take_stream_read_timeout_cap()
+        .or_else(|| ctx.upstream.as_ref().and_then(|peer| peer.connection.read_timeout))
+}
+
+/// Copy leftover budget onto the live streaming body after body filters.
+fn apply_leftover_read_timeout(body: &mut Option<Box<SubResponseBody>>, leftover: Option<Duration>) {
+    if let Some(timeout) = leftover
+        && let Some(upstream) = body.as_mut()
+    {
+        upstream.cap_read_timeout(timeout);
     }
 }
 
