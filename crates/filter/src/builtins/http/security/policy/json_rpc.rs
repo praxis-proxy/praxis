@@ -58,6 +58,12 @@ impl ParsedEnvelope {
         self.0.get(name)
     }
 
+    /// A top-level string field of the envelope. Reads the OpenAI-style
+    /// `model` for policy authorization without a second body parse.
+    pub(super) fn string_field(&self, name: &str) -> Option<&str> {
+        self.field(name).and_then(serde_json::Value::as_str)
+    }
+
     /// Consume the envelope, yielding the parsed DOM for rewriting.
     ///
     /// The reserializers mutate the same document this envelope

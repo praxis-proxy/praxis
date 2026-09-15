@@ -301,6 +301,19 @@ impl PolicyFilter {
             );
         }
 
+        // Fail-silent guard for the model-authz opt-in. `authorize_on_model` takes
+        // effect only on the pure-L7 shape (a `global` HTTP policy, no entity
+        // routes); with entity routes or an identity-only policy the flag is
+        // inert, so the model check an operator expected would silently never run.
+        if cfg.authorize_on_model && (!http_global || entity_routes) {
+            tracing::warn!(
+                target: "policy.filter",
+                "`authorize_on_model: true` has no effect unless the policy is pure L7 (a `global` \
+                 HTTP policy with no entity routes): the request body model is NOT authorized \
+                 here. Remove the flag, or move model authorization to a pure-L7 `global` policy.",
+            );
+        }
+
         // Re-parse because the engine does not retain the loaded document.
         let policy_config =
             ppe::praxis_policy_core::config::parse_config(&yaml).map_err(|e: Box<PluginError>| -> FilterError {
@@ -660,14 +673,20 @@ impl PolicyFilter {
     /// HTTP request line + headers into the attribute bag, and evaluate the
     /// `global` policy via the `http.request` hook. A deny maps to a
     /// plain HTTP response ([`super::error::http_authz_rejection`]); an
-    /// identity failure is the usual 401. Authorization runs here (not the
-    /// body phase) because it needs no request body.
+    /// identity failure is the usual 401. Two entry points: the request phase
+    /// with `model` `None`, for a policy that gates on the request line and
+    /// headers alone; and the body phase with `model` `Some`, when
+    /// `authorize_on_model` defers the decision until the body model is parsed.
     #[expect(
         clippy::large_stack_frames,
         clippy::too_many_lines,
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
     )]
-    async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+    async fn on_request_http_authz(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        model: Option<&str>,
+    ) -> Result<FilterAction, FilterError> {
         let headers = Self::snapshot_headers(ctx);
         let identity = match self
             .resolve_identity(ctx, headers.clone(), ENTITY_HTTP, ENTITY_NAME_GLOBAL)
@@ -679,6 +698,21 @@ impl PolicyFilter {
         Self::publish_authenticated_identity(ctx, &identity);
         let mut extensions = Self::extensions_from_identity(&headers, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL);
         Self::attach_http_attributes(ctx, &mut extensions, headers);
+
+        // Server-set model attribute: the parsed body model is exposed to policy
+        // as the typed `llm.model_id` slot, so a rule authorizes on `llm.model_id`
+        // rather than a header. It is set here from the body and never read from
+        // an inbound header, so a caller cannot spoof it. An absent or malformed
+        // model leaves the slot unset, so a membership deny fails closed. `model`
+        // is populated only on the authorize_on_model path.
+        if let Some(model) = model {
+            use ppe::praxis_policy_core::extensions::llm::LLMExtension;
+
+            extensions.llm = Some(Arc::new(LLMExtension {
+                model_id: Some(model.to_owned()),
+                ..Default::default()
+            }));
+        }
 
         // Policy evaluation (APL predicates, Cedar/CEL PDP queries, PII
         // scanning) can be CPU-intensive for complex rule sets or large
@@ -838,6 +872,20 @@ impl PolicyFilter {
         };
         ext.http = Some(Arc::new(http));
     }
+
+    /// Whether the body-model authorization path is active.
+    ///
+    /// Opt-in, and only on the pure-L7 shape (a `global` HTTP policy, no entity
+    /// routes), which is the one path where `on_request` defers to the body
+    /// phase and the model decision runs. Both the request-phase defer and the
+    /// `request_body_mode` `StreamBuffer` forcing key on this, and it stays in
+    /// lockstep with `request_body_access()` returning non-`None` so the body
+    /// phase is scheduled at all. A branch sub-chain runs `on_request` only,
+    /// never body hooks, so this path cannot enforce there: an authorize-on-model
+    /// policy filter must sit at the top level of the chain.
+    fn model_authz_active(&self) -> bool {
+        self.cfg.authorize_on_model && self.http_global && !self.entity_routes
+    }
 }
 
 /// Render a validated claim into the identity projection's string format.
@@ -887,6 +935,16 @@ impl HttpFilter for PolicyFilter {
         // `StreamBuffer` accumulates chunks, calls our filter exactly
         // once at EOS with the full body, and forwards whatever we put
         // back into `body`. `ReadOnly` inherits the default `Stream`.
+        //
+        // Model authorization needs the whole body before the decision, and
+        // StreamBuffer holds the request until end-of-stream, so a deny fires
+        // before the backend is reached. Force it only where the model check runs
+        // (`model_authz_active`); elsewhere it would buffer with no enforcement.
+        if self.model_authz_active() {
+            return BodyMode::StreamBuffer {
+                max_bytes: Some(self.cfg.max_buffer_bytes),
+            };
+        }
         match self.cfg.body_access {
             BodyAccessMode::ReadOnly => BodyMode::Stream,
             BodyAccessMode::ReadWrite => BodyMode::StreamBuffer {
@@ -925,9 +983,15 @@ impl HttpFilter for PolicyFilter {
         // with no body, and no classifier is involved, so this is the
         // efficient path for Praxis as an L7 HTTP proxy.
         if self.http_global && !self.entity_routes {
+            // Model authorization keys on the request body, so defer to the body
+            // phase. Continue here without marking admission so it authorizes at
+            // end-of-stream.
+            if self.cfg.authorize_on_model {
+                return Ok(FilterAction::Continue);
+            }
             // Box the (large CMF-typed) future so it lives on the heap
             // rather than inflating this method's stack frame.
-            let action = Box::pin(self.on_request_http_authz(ctx)).await?;
+            let action = Box::pin(self.on_request_http_authz(ctx, None)).await?;
             if matches!(action, FilterAction::Continue) {
                 Self::mark_admission_complete(ctx);
             }
@@ -966,8 +1030,23 @@ impl HttpFilter for PolicyFilter {
             if Self::admission_complete(ctx) {
                 return Ok(FilterAction::BodyDone);
             }
+            // The pure-L7 decision keys on the request model, so authorize at
+            // end-of-stream once the body is buffered.
+            if self.cfg.authorize_on_model && self.http_global {
+                if !end_of_stream {
+                    return Ok(FilterAction::Continue);
+                }
+                let body_bytes = body.clone().unwrap_or_default();
+                let envelope = ParsedEnvelope::parse(&body_bytes);
+                let action = Box::pin(self.on_request_http_authz(ctx, envelope.string_field("model"))).await?;
+                if matches!(action, FilterAction::Continue) {
+                    Self::mark_admission_complete(ctx);
+                    return Ok(FilterAction::BodyDone);
+                }
+                return Ok(action);
+            }
             let action = if self.http_global {
-                Box::pin(self.on_request_http_authz(ctx)).await?
+                Box::pin(self.on_request_http_authz(ctx, None)).await?
             } else {
                 self.identity_gate(ctx).await?
             };

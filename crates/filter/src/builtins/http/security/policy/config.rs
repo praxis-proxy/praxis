@@ -32,6 +32,10 @@ use serde::Deserialize;
 /// (fail-fast rather than at first request).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent operator-facing config toggles"
+)]
 pub(crate) struct PolicyFilterConfig {
     /// Body-access tier. `ReadOnly` (default) lets APL inspect request
     /// and response bodies for routing / policy decisions but discards
@@ -99,6 +103,22 @@ pub(crate) struct PolicyFilterConfig {
     /// missing entirely.
     #[serde(default = "default_true")]
     pub require_protocol_metadata: bool,
+
+    /// Authorize on the request body `model` field. When `true`, the filter
+    /// buffers the body, defers global HTTP authorization to end-of-stream,
+    /// parses the top-level `model`, and exposes it to policy as the typed
+    /// `llm.model_id` attribute. That attribute is always set server-side from
+    /// the body and never read from an inbound header, so a caller cannot spoof
+    /// it. A deny rule on `llm.model_id` then enforces which models a caller may
+    /// use. Enforcement is fail-closed only under a default-deny rule: a missing
+    /// or malformed body `model` leaves the attribute unset, which a membership
+    /// deny refuses but an allow-by-default rule would admit. Off by default.
+    /// Only the pure-L7 (`global`, no entity routes) path honors it, and only
+    /// when the filter sits at the top level of the chain: inside a conditional
+    /// branch the body phase never runs, so the model would go unchecked. The
+    /// filter warns at startup if the flag is set where it cannot take effect.
+    #[serde(default)]
+    pub authorize_on_model: bool,
 }
 
 /// `#[serde(default = ...)]` requires a free function for primitives

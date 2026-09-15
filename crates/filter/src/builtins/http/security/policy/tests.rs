@@ -245,6 +245,156 @@ global:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+/// Write a pure-L7 global policy that authorizes only when the request body
+/// model is `gpt-4`. Lets a test drive the `authorize_on_model` path and observe
+/// the decision keying on the typed `llm.model_id` slot, not a header.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_l7_model_authz_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+      - cel: {{ expr: "has(llm.model_id) && llm.model_id == 'gpt-4'" }}
+  pdp:
+    - kind: cel
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// A filter with `authorize_on_model` on, otherwise the production defaults.
+fn build_filter_authz_on_model(config_path: String) -> PolicyFilter {
+    let cfg = PolicyFilterConfig {
+        config_path,
+        allow_private_idp: false,
+        body_access: super::config::BodyAccessMode::ReadOnly,
+        require_protocol_metadata: true,
+        authorize_on_model: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+    };
+    PolicyFilter::new(cfg).expect("filter should construct")
+}
+
+/// Drive the pure-L7 authorize-on-model path with `body`, returning the
+/// body-phase action. The request phase defers to the body, and the body phase
+/// at end-of-stream is where the model decision is made.
+async fn dispatch_model_authz(filter: &PolicyFilter, body: &'static [u8]) -> FilterAction {
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+
+    let deferred = filter.on_request(&mut ctx).await.expect("request phase ran");
+    assert!(
+        matches!(deferred, FilterAction::Continue),
+        "authorize_on_model defers the decision to the body phase; got {deferred:?}"
+    );
+    filter
+        .on_request_body(&mut ctx, &mut Some(bytes::Bytes::from_static(body)), true)
+        .await
+        .expect("body phase ran")
+}
+
+/// The permitted model authorizes: the policy keys on the typed `llm.model_id`
+/// the filter set from the request body, not on a header.
+#[tokio::test(flavor = "multi_thread")]
+async fn authorize_on_model_allows_the_permitted_model() {
+    let (_dir, path) = write_l7_model_authz_config();
+    let filter = build_filter_authz_on_model(path);
+
+    let action = dispatch_model_authz(&filter, br#"{"model":"gpt-4","messages":[]}"#).await;
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the permitted model is authorized; got {action:?}"
+    );
+}
+
+/// A different model is denied: the decision follows the body model through
+/// `llm.model_id`.
+#[tokio::test(flavor = "multi_thread")]
+async fn authorize_on_model_denies_a_forbidden_model() {
+    let (_dir, path) = write_l7_model_authz_config();
+    let filter = build_filter_authz_on_model(path);
+
+    let action = dispatch_model_authz(&filter, br#"{"model":"gpt-3.5","messages":[]}"#).await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "a forbidden model is denied; got {action:?}"
+    );
+}
+
+/// A missing body model leaves `llm.model_id` unset, so a membership rule fails
+/// closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn authorize_on_model_fails_closed_without_a_model() {
+    let (_dir, path) = write_l7_model_authz_config();
+    let filter = build_filter_authz_on_model(path);
+
+    let action = dispatch_model_authz(&filter, br#"{"messages":[]}"#).await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "no model must fail closed under a membership rule; got {action:?}"
+    );
+}
+
+/// An empty body carries no `model`, so `llm.model_id` is unset and the
+/// membership rule fails closed. The explicit no-model malformed-body case.
+#[tokio::test(flavor = "multi_thread")]
+async fn authorize_on_model_fails_closed_on_an_empty_body() {
+    let (_dir, path) = write_l7_model_authz_config();
+    let filter = build_filter_authz_on_model(path);
+
+    let action = dispatch_model_authz(&filter, b"{}").await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "an empty body has no model and must fail closed; got {action:?}"
+    );
+}
+
+/// A non-string `model` (here a number) is not a usable model id, so it leaves
+/// the membership rule with nothing to match and fails closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn authorize_on_model_fails_closed_on_a_non_string_model() {
+    let (_dir, path) = write_l7_model_authz_config();
+    let filter = build_filter_authz_on_model(path);
+
+    let action = dispatch_model_authz(&filter, br#"{"model":123}"#).await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "a non-string model must fail closed, not be coerced into a match; got {action:?}"
+    );
+}
+
 /// Write a policy document that declares BOTH a `global` HTTP policy (canonical
 /// `authentication:`/`authorization:` form, admitting only GET) AND an entity
 /// route (the `echo` tool). Derives the combined shape
@@ -818,6 +968,7 @@ fn build_filter(config_path: String) -> PolicyFilter {
         allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
+        authorize_on_model: false,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
     };
@@ -1054,6 +1205,7 @@ fn rejects_zero_max_buffer_bytes() {
         allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
+        authorize_on_model: false,
         init_timeout_secs: 30,
         max_buffer_bytes: 0,
     };
@@ -1071,6 +1223,7 @@ fn rejects_oversized_max_buffer_bytes() {
         allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
+        authorize_on_model: false,
         init_timeout_secs: 30,
         max_buffer_bytes: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1,
     };
@@ -1860,6 +2013,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
         allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: false,
+        authorize_on_model: false,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
     };
@@ -2804,6 +2958,7 @@ async fn response_phase_without_request_identity_fails_closed() {
         allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
+        authorize_on_model: false,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
     };
@@ -3081,6 +3236,7 @@ fn try_build_filter_allowing_private(
         allow_private_idp,
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
+        authorize_on_model: false,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
     })
@@ -3703,6 +3859,7 @@ routes:
         allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
+        authorize_on_model: false,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
     };
