@@ -198,6 +198,9 @@ enum FieldToken {
     SpanId,
     RequestHeader(String),
     ResponseHeader(String),
+    /// A filter-metadata key, e.g. `llm.model`. Proxy-derived, so no
+    /// client can supply the value.
+    Metadata(String),
 }
 
 /// Runtime emit plan built from config.
@@ -551,6 +554,10 @@ impl EmitPlan {
                     let key = format!("response_header.{}", header_json_key(name));
                     record.insert(key, value);
                 },
+                FieldToken::Metadata(key) => {
+                    let value = ctx.get_metadata(key).unwrap_or("-").to_owned();
+                    record.insert(format!("metadata.{key}"), value);
+                },
             }
         }
         record
@@ -666,18 +673,36 @@ fn parse_field_tokens(
     Ok(tokens)
 }
 
-fn parse_scalar_field_token(token: &str) -> Result<FieldToken, FilterError> {
+/// Parse the field tokens that name a subject after a prefix, or `None`
+/// when `token` carries no such prefix.
+fn parse_prefixed_field_token(token: &str) -> Option<Result<FieldToken, FilterError>> {
     if let Some(name) = token.strip_prefix("request_header.") {
-        if name.is_empty() {
-            return Err("access_log: request_header token must include a header name".into());
-        }
-        return Ok(FieldToken::RequestHeader(name.to_ascii_lowercase()));
+        return Some(if name.is_empty() {
+            Err("access_log: request_header token must include a header name".into())
+        } else {
+            Ok(FieldToken::RequestHeader(name.to_ascii_lowercase()))
+        });
     }
     if let Some(name) = token.strip_prefix("response_header.") {
-        if name.is_empty() {
-            return Err("access_log: response_header token must include a header name".into());
-        }
-        return Ok(FieldToken::ResponseHeader(name.to_ascii_lowercase()));
+        return Some(if name.is_empty() {
+            Err("access_log: response_header token must include a header name".into())
+        } else {
+            Ok(FieldToken::ResponseHeader(name.to_ascii_lowercase()))
+        });
+    }
+    if let Some(key) = token.strip_prefix("metadata.") {
+        return Some(if key.is_empty() {
+            Err("access_log: metadata token must include a key".into())
+        } else {
+            Ok(FieldToken::Metadata(key.to_owned()))
+        });
+    }
+    None
+}
+
+fn parse_scalar_field_token(token: &str) -> Result<FieldToken, FilterError> {
+    if let Some(prefixed) = parse_prefixed_field_token(token) {
+        return prefixed;
     }
 
     match token {

@@ -940,8 +940,9 @@ impl PolicyFilter {
             ctx.request_headers_to_remove.push(http::header::ACCEPT_ENCODING);
         }
 
-        // The model reaches later filters and the access log as metadata — a
-        // proxy-derived value, so no client can supply it.
+        // Published as filter metadata, so later filters see it and an
+        // access_log `metadata.llm.model` field can emit it. Metadata rather
+        // than a header, so no client can supply the value.
         ctx.set_metadata("llm.model", model.clone());
         if parsed.is_streaming() {
             ctx.set_metadata("llm.stream", "true");
