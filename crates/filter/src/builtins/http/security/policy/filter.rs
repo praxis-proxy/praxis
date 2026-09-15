@@ -15,8 +15,8 @@ use ppe::praxis_policy_core::{
     cmf::{
         CmfHook, Message, MessagePayload, Role,
         constants::{
-            ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT, HOOK_CMF_PROMPT_PRE_INVOKE,
-            HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_PRE_INVOKE,
+            ENTITY_HTTP, ENTITY_LLM, ENTITY_NAME_GLOBAL, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT,
+            HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_PRE_INVOKE,
         },
     },
     engine::PolicyEngine,
@@ -113,15 +113,20 @@ enum GatedIdentity {
 /// A policy declaring `llm:` routes authorizes inference calls instead,
 /// and needs no classifier: the filter buffers the request body, reads
 /// the top-level `model`, and evaluates it as the `llm` entity via
-/// `cmf.llm_input`. A model no route selects reaches no policy at all,
-/// so such a document needs a catch-all `llm: "*"` route that denies.
+/// `cmf.llm_input`. Three gates fail closed by default: a model no route
+/// selects is denied (`llm.require_route`), a body with no usable `model`
+/// is denied (`llm.require_model`), and a body carrying both a JSON-RPC
+/// envelope and a top-level `model` is denied as ambiguous.
 ///
 /// `body_access: read_write` enables the JSON-RPC re-serialization
 /// round-trip so APL field mutators (`redact()`, `assign()`) rewrite
 /// the upstream request body and the downstream response. It also opens
 /// the inference response half (`cmf.llm_output`), which evaluates
-/// `completion.*` over a non-streamed completion; APL field mutators do
-/// not rewrite inference bodies.
+/// `completion.*` over a completion the upstream sent as one JSON
+/// document; a response streamed as server-sent events is released and
+/// passed through, so a policy that must enforce on the way back denies
+/// `custom.llm.stream` on the way in. APL field mutators do not rewrite
+/// inference bodies.
 ///
 /// Outbound policy calls share the proxy's sub-request limits and circuit
 /// breaker, use HTTP/1.1, and keep a separate 1 MiB response ceiling. TLS
@@ -148,6 +153,7 @@ enum GatedIdentity {
 /// max_buffer_bytes: 10485760    # optional; default 10 MiB (read_write, and any `llm:` policy)
 /// llm:                          # optional; tunes the inference path
 ///   require_model: true         # optional; default true
+///   require_route: true         # optional; default true
 ///   provider: openai            # optional; operator-asserted
 /// ```
 #[expect(
@@ -189,6 +195,10 @@ pub struct PolicyFilter {
     response_assertions: GovernedNames,
     /// Response hook to dispatch when the policy has response work.
     response_hook: Option<&'static str>,
+    /// The loaded policy document, kept so the inference path can ask
+    /// whether a model any route actually selects. Only populated for a
+    /// policy with `llm:` routes.
+    llm_route_table: Option<Arc<ppe::praxis_policy_core::config::PolicyConfig>>,
 }
 
 impl PolicyFilter {
@@ -357,8 +367,9 @@ impl PolicyFilter {
         let response_assertions = GovernedNames::from_config(&policy_config, Direction::Response);
 
         if llm_routes {
-            Self::warn_on_inference_gaps(&policy_config, http_global, cfg.llm.require_model);
+            Self::warn_on_inference_gaps(&policy_config, http_global, &cfg, llm_post);
         }
+        Self::warn_on_inert_inference_defaults(&policy_config, llm_routes);
 
         // Reject controls that cannot reach the writable response-header phase.
         let unreachable = unreachable_response_levels(&policy_config);
@@ -376,6 +387,8 @@ impl PolicyFilter {
         let response_hook =
             (mgr.has_hooks_for(HOOK_HTTP_RESPONSE) || !response_assertions.is_empty()).then_some(HOOK_HTTP_RESPONSE);
 
+        let llm_route_table = llm_routes.then(|| Arc::new(policy_config));
+
         Ok(Self {
             cfg,
             mgr,
@@ -387,6 +400,7 @@ impl PolicyFilter {
             request_assertions,
             response_assertions,
             response_hook,
+            llm_route_table,
         })
     }
 
@@ -410,31 +424,34 @@ impl PolicyFilter {
         (self.llm_routes, self.llm_post)
     }
 
-    /// Warn about the two inference shapes that silently under-enforce.
+    /// Warn about the inference shapes that silently under-enforce.
     ///
     /// `global.defaults.llm` only stacks onto routes; it installs no
-    /// handler. So without a catch-all `llm: "*"` route, an unlisted
-    /// model is evaluated by nothing at all.
+    /// handler. So a model no route selects reaches no rule at all —
+    /// which `llm.require_route` denies by default, and which a
+    /// catch-all `llm: "*"` route covers when it does not.
     fn warn_on_inference_gaps(
         policy_config: &ppe::praxis_policy_core::config::PolicyConfig,
         http_global: bool,
-        require_model: bool,
+        cfg: &PolicyFilterConfig,
+        llm_post: bool,
     ) {
         let has_catch_all = policy_config
             .routes
             .iter()
             .filter_map(|route| route.llm.as_ref())
             .any(selector_matches_any_model);
-        if !has_catch_all {
+        if !has_catch_all && !cfg.llm.require_route {
             tracing::warn!(
                 target: "policy.filter",
-                "policy declares `llm:` routes but no catch-all `llm: \"*\"` route: a model no \
-                 route selects is evaluated by no policy at all and is admitted. Add a catch-all \
-                 route that denies, so an unlisted model fails closed.",
+                "policy declares `llm:` routes, no catch-all `llm: \"*\"` route, and \
+                 `llm.require_route: false`: a model no route selects is evaluated by no policy at \
+                 all and is admitted. Keep `llm.require_route: true` (default) to fail closed, or \
+                 add a catch-all route that denies.",
             );
             Self::warn_on_list_form_catch_all(policy_config);
         }
-        if http_global && !require_model {
+        if http_global && !cfg.llm.require_model {
             tracing::warn!(
                 target: "policy.filter",
                 "policy declares `llm:` routes AND a `global` HTTP policy with \
@@ -443,6 +460,50 @@ impl PolicyFilter {
                  Keep `llm.require_model: true` (default) to fail closed.",
             );
         }
+        if llm_post {
+            Self::warn_on_inference_response_gaps(cfg);
+        }
+    }
+
+    /// Warn about the two ways response-phase `llm:` rules do not run.
+    fn warn_on_inference_response_gaps(cfg: &PolicyFilterConfig) {
+        if !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy declares response-phase `llm:` rules (`post_invocation`) but \
+                 `body_access` is `read_only`, which does not buffer the response: those rules \
+                 will never run. Set `body_access: read_write` to enable them.",
+            );
+        }
+        tracing::warn!(
+            target: "policy.filter",
+            "policy declares response-phase `llm:` rules: a response the upstream streams as \
+             server-sent events carries no single completion, so those rules cannot run for it. \
+             Deny `custom.llm.stream` in the request phase for the models this policy must \
+             enforce on the way back.",
+        );
+    }
+
+    /// Warn when a policy carries `global.defaults.llm` but no `llm:`
+    /// route.
+    ///
+    /// The defaults layer stacks onto routes rather than installing one,
+    /// so on its own it enforces nothing — and being outside the
+    /// `llm_routes` guard is the point: such a policy has no `llm:`
+    /// route to trigger that guard.
+    fn warn_on_inert_inference_defaults(
+        policy_config: &ppe::praxis_policy_core::config::PolicyConfig,
+        llm_routes: bool,
+    ) {
+        if llm_routes || !policy_config.global.defaults.contains_key(ENTITY_LLM) {
+            return;
+        }
+        tracing::warn!(
+            target: "policy.filter",
+            "policy declares `global.defaults.llm` but no `llm:` route: the defaults layer only \
+             stacks onto routes, so no inference call is evaluated. Add an `llm:` route (a \
+             catch-all `llm: \"*\"` at minimum) for the defaults to apply to.",
+        );
     }
 
     /// Name the near miss behind a missing catch-all: an `llm:` selector
@@ -788,6 +849,21 @@ impl PolicyFilter {
         model: String,
     ) -> Result<FilterAction, FilterError> {
         let (entity_type, hook_name) = llm_entity_pre();
+
+        // A model no route selects would reach no rule at all, so admitting it
+        // would admit it unevaluated. Refuse before identity even runs: there
+        // is no policy to consult for it.
+        if self.cfg.llm.require_route && !self.llm_route_selects(&model) {
+            tracing::debug!(
+                target: "policy.filter",
+                model = %model,
+                "no `llm:` route selects this model; denying (fail-closed). Add a route for it, \
+                 a catch-all `llm: \"*\"`, or set `llm.require_route: false` to admit it \
+                 unevaluated.",
+            );
+            return Ok(FilterAction::Reject(llm_deny_rejection(Some(&no_route_violation()))));
+        }
+
         let headers = Self::snapshot_headers(ctx);
 
         let identity = match self.resolve_identity(ctx, headers.clone(), entity_type, &model).await {
@@ -874,6 +950,21 @@ impl PolicyFilter {
         tracing::trace!(target: "policy.filter", model = %model, "inference allow");
         Self::mark_admission_complete(ctx);
         Ok(FilterAction::BodyDone)
+    }
+
+    /// Whether any `llm:` route the policy declares selects `model`.
+    ///
+    /// Asks the engine's own resolver, so a route matches here exactly
+    /// when it would match at dispatch.
+    fn llm_route_selects(&self, model: &str) -> bool {
+        let Some(config) = self.llm_route_table.as_ref() else {
+            return false;
+        };
+        ppe::praxis_policy_core::config::resolve_route(
+            config,
+            ppe::praxis_policy_core::config::RouteQuery::named(ENTITY_LLM, model),
+        )
+        .is_some()
     }
 
     /// Put the model, provider, and promoted sampling parameters where
@@ -1325,6 +1416,21 @@ fn missing_model_violation() -> PluginViolation {
     PluginViolation::new("llm.model_missing", "request body carries no usable top-level `model`")
 }
 
+/// The violation reported when no `llm:` route selects the model.
+fn no_route_violation() -> PluginViolation {
+    PluginViolation::new("llm.no_route", "no policy route permits this model")
+}
+
+/// The violation reported when a request carries both a JSON-RPC
+/// envelope and a top-level `model`, so which entity governs it is
+/// ambiguous.
+fn ambiguous_entity_violation() -> PluginViolation {
+    PluginViolation::new(
+        "llm.ambiguous_entity",
+        "request carries both a JSON-RPC envelope and a top-level `model`",
+    )
+}
+
 /// The violation reported when the response phase cannot find the
 /// identity the request phase stashed. Shared by the MCP and inference
 /// post paths, which both fail closed on it.
@@ -1494,7 +1600,11 @@ impl HttpFilter for PolicyFilter {
                     return Box::pin(self.dispatch_llm_request(ctx, &parsed, model)).await;
                 }
             }
-            if self.mcp_routes && self.cfg.require_protocol_metadata {
+            // A policy that also declares `llm:` routes cannot tell a broken
+            // chain from a request that simply is not an MCP call, so the more
+            // specific missing-model verdict wins over the classifier
+            // diagnosis. A pure MCP policy still fails closed on the chain.
+            if self.mcp_routes && !self.llm_routes && self.cfg.require_protocol_metadata {
                 tracing::error!(
                     target: "policy.filter",
                     "policy declares entity routes (tool/prompt/resource) which require a protocol \
@@ -1518,6 +1628,27 @@ impl HttpFilter for PolicyFilter {
             tracing::trace!(target: "policy.filter", "request carries no entity coordinates; no CMF dispatch");
             return self.complete_gated_admission(ctx).await;
         };
+
+        // Both coordinate systems at once. `mcp.method` is derived from the
+        // body by a classifier ahead of this filter, so a body that also
+        // carries a top-level `model` leaves it genuinely undecidable which
+        // entity governs — and guessing either way picks a rule the operator
+        // did not write for this request. Refuse.
+        if self.llm_routes
+            && ParsedLlmRequest::parse(body.as_ref().unwrap_or(&EMPTY_BODY))
+                .model()
+                .is_some()
+        {
+            tracing::warn!(
+                target: "policy.filter",
+                protocol_method = %method,
+                "request carries both a JSON-RPC envelope and a top-level `model`; denying \
+                 (fail-closed) rather than choosing between the MCP and inference entity",
+            );
+            return Ok(FilterAction::Reject(llm_deny_rejection(Some(
+                &ambiguous_entity_violation(),
+            ))));
+        }
         let Some((entity_type, hook_name)) = entity_for_protocol_method(&method) else {
             tracing::trace!(
                 target: "policy.filter",

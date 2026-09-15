@@ -3862,6 +3862,47 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+/// Write a policy document with one named `llm:` route and no catch-all,
+/// so an unlisted model reaches no rule at all.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_llm_and_tool_config_without_catch_all() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+routes:
+  - llm: allowed-model
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
 /// Write a policy document with response-phase inference policy: the
 /// catch-all `llm:` route admits the request and denies on the way back
 /// when the completion reports more than 100 total tokens.
@@ -4035,6 +4076,70 @@ async fn a_body_with_no_usable_model_fails_closed() {
     }
 }
 
+/// A model no `llm:` route selects is denied before identity even runs:
+/// there is no rule to consult for it, so admitting it would admit it
+/// unevaluated. This is the fail-closed default that makes a catch-all
+/// route optional rather than load-bearing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_no_route_selects_is_denied() {
+    let (_dir, path) = write_llm_and_tool_config_without_catch_all();
+    let filter = build_filter(path);
+
+    let action = dispatch_inference_as(&filter, "alice", r#"{"model":"unlisted-model","messages":[]}"#).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("a model outside every route must be denied; got {action:?}");
+    };
+    assert!(
+        rejection
+            .headers
+            .iter()
+            .any(|(name, value)| name == "X-Policy-Violation" && value == "llm.no_route"),
+        "the deny must say no route covers the model; got {:?}",
+        rejection.headers,
+    );
+}
+
+/// `require_route: false` is the opt-out: an unlisted model is admitted
+/// unevaluated, which is the pre-existing posture.
+#[tokio::test(flavor = "multi_thread")]
+async fn require_route_false_admits_a_model_no_route_selects() {
+    let (_dir, path) = write_llm_and_tool_config_without_catch_all();
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            require_route: false,
+            ..Default::default()
+        },
+    );
+
+    let action = dispatch_inference_as(&filter, "alice", r#"{"model":"unlisted-model","messages":[]}"#).await;
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "with the gate off an unlisted model takes the identity-only path; got {action:?}",
+    );
+}
+
+/// A catch-all route still selects every model, so `require_route` never
+/// fires for a policy that has one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_catch_all_route_satisfies_the_route_requirement() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+
+    let action = dispatch_inference_as(&filter, "alice", r#"{"model":"other-model","messages":[]}"#).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("the catch-all denies this model by policy; got {action:?}");
+    };
+    assert!(
+        rejection
+            .headers
+            .iter()
+            .any(|(name, value)| name == "X-Policy-Violation" && value == "model_not_allowed"),
+        "the catch-all's own rule must decide it, not the route gate; got {:?}",
+        rejection.headers,
+    );
+}
+
 /// `require_model: false` is the opt-out: an unattributable request
 /// falls through to the policy's other paths instead of denying.
 #[tokio::test(flavor = "multi_thread")]
@@ -4055,12 +4160,15 @@ async fn require_model_false_admits_a_request_with_no_model() {
     );
 }
 
-/// Classifier metadata wins: a request the classifier claimed is
-/// evaluated against its MCP route even when the body also carries a
-/// top-level `model`, so a crafted body cannot redirect an MCP call onto
-/// the inference path.
+/// A body carrying both coordinate systems is refused rather than
+/// silently assigned to one of them.
+///
+/// `mcp.method` is derived from the body by a classifier ahead of this
+/// filter, so a request that also carries a top-level `model` leaves it
+/// undecidable which entity governs — and picking either applies a rule
+/// the operator did not write for this request.
 #[tokio::test(flavor = "multi_thread")]
-async fn mcp_classification_takes_precedence_over_a_model_in_the_body() {
+async fn a_body_carrying_both_entity_coordinates_is_denied() {
     let (_dir, path) = write_llm_and_tool_config();
     let filter = build_filter(path);
 
@@ -4081,10 +4189,47 @@ async fn mcp_classification_takes_precedence_over_a_model_in_the_body() {
         .on_request_body(&mut ctx, &mut Some(body), true)
         .await
         .expect("filter ran");
+    let FilterAction::Reject(rejection) = action else {
+        panic!("an ambiguous body must be denied; got {action:?}");
+    };
+    assert!(
+        rejection
+            .headers
+            .iter()
+            .any(|(name, value)| name == "X-Policy-Violation" && value == "llm.ambiguous_entity"),
+        "the deny must name the ambiguity, not a route decision; got {:?}",
+        rejection.headers,
+    );
+}
+
+/// A plain MCP request still takes the MCP path when the same policy
+/// declares both families: only a body carrying both coordinate systems
+/// is ambiguous.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_mcp_request_still_takes_the_mcp_path() {
+    let (_dir, path) = write_llm_and_tool_config();
+    let filter = build_filter(path);
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let body = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
+    );
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(body), true)
+        .await
+        .expect("filter ran");
     assert!(
         matches!(action, FilterAction::BodyDone),
-        "the tool route must decide this request; the inference catch-all would have denied it \
-         on the body's `model`. Got {action:?}",
+        "the tool route must decide a request with no top-level `model`; got {action:?}",
     );
 }
 

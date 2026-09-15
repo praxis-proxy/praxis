@@ -67,24 +67,31 @@
 //! operator-asserted, and `llm.promote_params` names the sampling parameters
 //! that reach the bag as `custom.llm.*`.
 //!
-//! Two consequences worth knowing before writing such a policy:
+//! Three fail-closed gates, all on by default:
 //!
-//! - **A model no `llm:` route selects is evaluated by nothing.** `global.defaults.llm` stacks onto routes rather than
-//!   installing one, so an unlisted model is admitted unless the policy ends with a catch-all `llm: "*"` route that
-//!   denies. The filter warns at startup when one is missing.
-//! - **A body carrying no usable `model` is denied** (`llm.require_model`, on by default) rather than admitted
-//!   unevaluated.
+//! - **A model no `llm:` route selects is denied** (`llm.require_route`). `global.defaults.llm` stacks onto routes
+//!   rather than installing one, so such a model would otherwise reach no rule at all. A catch-all `llm: "*"` route
+//!   makes every model selected, which is the other way to cover it.
+//! - **A body carrying no usable `model` is denied** (`llm.require_model`) rather than admitted unevaluated.
+//! - **A body carrying both a JSON-RPC envelope and a top-level `model` is denied** (`llm.ambiguous_entity`). Since
+//!   `mcp.method` is itself derived from the body by the classifier, such a request leaves it undecidable which entity
+//!   governs, and choosing either would apply a rule the operator did not write for it. A plain MCP request — no
+//!   top-level `model` — still takes the MCP path.
 //!
-//! A request the classifier claimed (`mcp.method` present) is evaluated as that
-//! MCP entity, so a crafted `model` field cannot move an MCP call onto the
-//! inference path. See `examples/configs/security/policy-llm.yaml`.
+//! See `examples/configs/security/policy-llm.yaml`.
 //!
 //! Under `body_access: read_write` the response half evaluates the policy's
 //! `post_invocation` rules over the completion the upstream reported
-//! (`completion.model`, `completion.tokens.*`, `completion.stop_reason`). A
-//! streamed response carries no single completion to evaluate, so it is passed
-//! through untouched; a policy that needs post-invocation enforcement denies
-//! `custom.llm.stream` on the way in. APL field mutators do not rewrite
+//! (`completion.model`, `completion.tokens.*`, `completion.stop_reason`). What
+//! the upstream actually sent decides whether those rules run: a response
+//! streamed as server-sent events carries no single completion, so it is
+//! released and passed through, while a request that merely asked to stream but
+//! was answered with one JSON document is still evaluated. A policy that must
+//! enforce on the way back therefore denies `custom.llm.stream` on the way in;
+//! the filter warns at startup to that effect. A response the filter cannot
+//! read at all — a `Content-Encoding` it does not decode — is denied rather
+//! than admitted, and the request half strips `accept-encoding` upstream so
+//! that case stays rare. APL field mutators do not rewrite
 //! inference bodies in either direction — a CMF message carries one text slot
 //! per part, so a multi-turn chat or a multi-choice completion cannot
 //! round-trip losslessly; the filter warns and ships the original bytes rather
@@ -152,6 +159,9 @@
 //! | Inference policy deny (`pre_invocation`) | Plain HTTP response (default 403) carrying `{"error":{"message","type","code"}}` — what an OpenAI-style SDK parses — overridable by the policy's `denyWith`, plus `X-Policy-Violation: <code>`. A pending approval sets `type` to `policy_pending` and carries the elicitation bundle in `error.details`. |
 //! | Inference policy deny (`post_invocation`) | **The response body only.** Status and headers are already on the wire by the time `cmf.llm_output` runs, so the client sees the upstream's status (commonly `200`) with the `{"error":{...}}` envelope as the body, fitted to the committed `Content-Length` — and NO `X-Policy-Violation` header. The policy's `denyWith` cannot change the status here either. Treat a post-invocation deny as a body-level control, not an HTTP-level one. |
 //! | Inference request with no usable `model` | The `pre_invocation` shape, with violation code `llm.model_missing` (`llm.require_model`, on by default). |
+//! | Inference request no `llm:` route selects | The same shape, with violation code `llm.no_route` (`llm.require_route`, on by default). |
+//! | Inference request carrying both entity coordinates | The same shape, with violation code `llm.ambiguous_entity`. |
+//! | Inference response the filter cannot read | The response body is replaced with the envelope, violation code `llm.response_unreadable`. |
 //!
 //! Any violation carrying a `proto_error_code` overrides `-32001` on the
 //! wire, and its `details` map is merged into `error.data`; the pending

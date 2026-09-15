@@ -94,7 +94,8 @@ pub(crate) struct PolicyFilterConfig {
     /// (tool/prompt/resource). A pure-L7 (`global`-only) or identity-only
     /// policy never reaches this gate — `on_request_body` returns
     /// `BodyDone` before it, so the flag has no effect there. Nor does an
-    /// inference-only (`llm:`) policy, whose gate is `llm.require_model`.
+    /// inference-only (`llm:`) policy, whose gates are `llm.require_model`
+    /// and `llm.require_route`.
     ///
     /// Note: JSON-RPC methods that legitimately carry no entity (e.g.
     /// `tools/list`, `initialize`, `prompts/list`) still pass —
@@ -159,6 +160,15 @@ pub(crate) struct LlmOptions {
     /// let it fall through to the policy's other paths instead.
     #[serde(default = "default_true")]
     pub require_model: bool,
+
+    /// Deny a model no `llm:` route selects.
+    ///
+    /// On by default. `global.defaults.llm` stacks onto routes rather
+    /// than installing one, so without this a model outside the policy's
+    /// routes reaches no rule at all and is admitted. Set `false` only
+    /// to admit unlisted models deliberately.
+    #[serde(default = "default_true")]
+    pub require_route: bool,
 }
 
 impl Default for LlmOptions {
@@ -167,6 +177,7 @@ impl Default for LlmOptions {
             promote_params: default_promote_params(),
             provider: None,
             require_model: true,
+            require_route: true,
         }
     }
 }
