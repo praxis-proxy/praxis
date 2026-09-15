@@ -697,6 +697,7 @@ impl FilteredSubrequestExecutor {
             };
             let mut framework_headers = FrameworkHeaders::new();
             framework_headers.set_depth(self.depth + 1);
+            filter_ctx.apply_trace_propagation(&mut framework_headers);
             let transport_budget = step_budget
                 .checked_sub(step_started.elapsed())
                 .unwrap_or(Duration::ZERO);
