@@ -36,11 +36,32 @@
 //! semantics all need to line up). The two `entity_for_protocol_method*`
 //! functions are the closed switch — anything not listed falls
 //! through to the identity-only path.
+//!
+//! # The inference entity
+//!
+//! The `llm` entity is the one entity not keyed by a JSON-RPC method: the
+//! filter parses the model out of the request body and uses it as the
+//! entity name — see [`llm`](super::llm).
+//!
+//! | Source | Entity type | Pre-hook |
+//! |---|---|---|
+//! | body `model` | llm | `cmf.llm_input` |
 
 use ppe::praxis_policy_core::cmf::constants::{
-    ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL, HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE,
-    HOOK_CMF_RESOURCE_POST_FETCH, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
+    ENTITY_LLM, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL, HOOK_CMF_LLM_INPUT, HOOK_CMF_PROMPT_POST_INVOKE,
+    HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE,
+    HOOK_CMF_TOOL_PRE_INVOKE,
 };
+
+// -----------------------------------------------------------------------------
+// Inference
+// -----------------------------------------------------------------------------
+
+/// Entity coordinates for an inference call's request phase. The entity
+/// name is the model the proxy parsed, not a constant.
+pub(super) const fn llm_entity_pre() -> (&'static str, &'static str) {
+    (ENTITY_LLM, HOOK_CMF_LLM_INPUT)
+}
 
 // -----------------------------------------------------------------------------
 // Pre-phase

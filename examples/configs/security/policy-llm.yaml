@@ -1,0 +1,64 @@
+# Inference Authorization (experimental)
+#
+# Authorizes OpenAI-style inference calls on the model in the request body. The
+# `policy` filter loads a policy that declares `llm:` routes, so it buffers the
+# request, reads the top-level `model`, and evaluates that model against the
+# policy — `require`/`deny` rules keyed on `llm.model_id`, the caller's identity,
+# and the promoted sampling parameters (`custom.llm.*`).
+#
+# The model is parsed by the proxy from the body the backend will parse, so a
+# client header cannot make policy authorize a different model than the one
+# served. No protocol classifier is needed: inference calls carry no JSON-RPC
+# envelope, and the filter attributes them itself.
+#
+# A model that no `llm:` route selects is evaluated by no policy at all, so the
+# policy document must end with a catch-all `llm: "*"` route that denies. A body
+# with no usable `model` is denied by the filter itself (`llm.require_model`,
+# on by default).
+#
+# Requires building with the `policy-engine` feature, which is off
+# by default:
+#
+# Usage:
+#   cargo run -p praxis-proxy --features policy-engine -- -c examples/configs/security/policy-llm.yaml
+#
+# Exercise:
+#   # 200: a model the caller's role is allowed to use
+#   curl -H "Authorization: Bearer $JWT" -d '{"model":"gpt-4o-mini","messages":[]}' \
+#     http://localhost:8080/v1/chat/completions
+#
+#   # 403: a model the policy reserves for another role
+#   curl -H "Authorization: Bearer $JWT" -d '{"model":"gpt-4o","messages":[]}' \
+#     http://localhost:8080/v1/chat/completions
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # Inference authorization. `config_path` points at the policy document,
+      # whose `llm:` routes are what switch this path on. The optional `llm:`
+      # block only tunes it.
+      - filter: policy
+        config_path: /etc/praxis/llm-policy.yaml
+        llm:
+          require_model: true # optional; default true — deny a body with no model
+          provider: openai # optional; recorded on `llm.provider`
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: inference
+
+      - filter: load_balancer
+        clusters:
+          - name: inference
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

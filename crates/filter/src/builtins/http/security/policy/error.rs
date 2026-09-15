@@ -44,6 +44,12 @@ pub(super) const VIOLATION_HEADER: &str = "X-Policy-Violation";
 const FALLBACK_DENY_ENVELOPE: &[u8] =
     br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"denied by gateway","data":{"violation":"gateway.unknown"}}}"#;
 
+/// The inference-path twin of [`FALLBACK_DENY_ENVELOPE`]: a static,
+/// always-valid provider error envelope, used only if serializing the
+/// dynamic one ever fails.
+const FALLBACK_LLM_DENY_ENVELOPE: &[u8] =
+    br#"{"error":{"message":"denied by gateway","type":"policy_violation","code":"gateway.unknown"}}"#;
+
 // -----------------------------------------------------------------------------
 // auth_rejection (transport-level deny — HTTP 401)
 // -----------------------------------------------------------------------------
@@ -185,16 +191,88 @@ pub(super) fn json_rpc_error_envelope_bytes(
 /// map: `http.status` (default 403), `http.body` (default
 /// `"<code>: <reason>"`), and `http.headers`. Header names/values
 /// containing control characters are dropped as defense-in-depth against
-/// response splitting (plan R21). Always stamps [`VIOLATION_HEADER`].
+/// response splitting. Always stamps [`VIOLATION_HEADER`].
+pub(super) fn http_authz_rejection(violation: Option<&PluginViolation>) -> Rejection {
+    let (code, reason) = deny_identity(violation);
+    let default_body = Bytes::from(format!("{code}: {reason}").into_bytes());
+    deny_with_rejection(violation, default_body)
+}
+
+// -----------------------------------------------------------------------------
+// llm_deny_rejection (inference deny — OpenAI-shaped error response)
+// -----------------------------------------------------------------------------
+
+/// Build the rejection for a denied inference call.
+///
+/// An inference client is an OpenAI-style SDK, not a JSON-RPC one: it
+/// reads the HTTP status and parses `error.message` out of the body. So
+/// this is a plain HTTP deny (403 by default) carrying the provider
+/// error envelope, and the policy's `denyWith` overrides status, body,
+/// and headers exactly as it does on the generic-HTTP path.
+pub(super) fn llm_deny_rejection(violation: Option<&PluginViolation>) -> Rejection {
+    deny_with_rejection(violation, llm_error_envelope_bytes(violation))
+}
+
+/// Build only the OpenAI-shaped error envelope bytes.
+///
+/// Used by [`llm_deny_rejection`] and by the response phase, where the
+/// status and headers are already on the wire and the body is the one
+/// thing left to replace.
+///
+/// ```json
+/// {"error":{"message":"<reason>","type":"policy_violation","code":"<violation code>"}}
+/// ```
+///
+/// `type` becomes `policy_pending` and the violation's `details` ride in
+/// `error.details` when the violation carries a `proto_error_code` — a
+/// suspended human-in-the-loop approval is a retryable state, not a flat
+/// deny, and the client needs the elicitation bundle to retry.
+pub(super) fn llm_error_envelope_bytes(violation: Option<&PluginViolation>) -> Bytes {
+    let (code, reason) = deny_identity(violation);
+    let pending = violation.is_some_and(|v| v.proto_error_code.is_some());
+
+    let mut error = serde_json::Map::new();
+    error.insert("message".to_owned(), serde_json::Value::String(reason));
+    error.insert(
+        "type".to_owned(),
+        serde_json::Value::String(if pending { "policy_pending" } else { "policy_violation" }.to_owned()),
+    );
+    error.insert("code".to_owned(), serde_json::Value::String(code));
+    if pending && let Some(details) = violation.map(|v| &v.details).filter(|d| !d.is_empty()) {
+        let details: serde_json::Map<String, serde_json::Value> =
+            details.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        error.insert("details".to_owned(), serde_json::Value::Object(details));
+    }
+
+    let body = serde_json::json!({ "error": serde_json::Value::Object(error) });
+    // Built from owned values, so serialization is infallible in
+    // practice; a deny path must never emit an empty (fail-open) body if
+    // that ever changes.
+    Bytes::from(serde_json::to_vec(&body).unwrap_or_else(|_| FALLBACK_LLM_DENY_ENVELOPE.to_vec()))
+}
+
+/// The violation's `(code, reason)`, or the generic deny pair.
+fn deny_identity(violation: Option<&PluginViolation>) -> (String, String) {
+    violation.map_or_else(
+        || ("policy.deny".to_owned(), "access denied".to_owned()),
+        |v| (v.code.clone(), v.reason.clone()),
+    )
+}
+
+/// Build a plain-HTTP deny carrying `default_body`, with the transpiled
+/// `denyWith` on the violation's `details` overriding status
+/// (`http.status`, default 403), body (`http.body`), and headers
+/// (`http.headers`).
+///
+/// Header names/values containing control characters are dropped as
+/// defense-in-depth against response splitting. Always stamps
+/// [`VIOLATION_HEADER`].
 #[expect(
     clippy::too_many_lines,
     reason = "linear denyWith mapping with per-header validation"
 )]
-pub(super) fn http_authz_rejection(violation: Option<&PluginViolation>) -> Rejection {
-    let (code, reason) = match violation {
-        Some(v) => (v.code.clone(), v.reason.clone()),
-        None => ("policy.deny".to_owned(), "access denied".to_owned()),
-    };
+fn deny_with_rejection(violation: Option<&PluginViolation>, default_body: Bytes) -> Rejection {
+    let (code, _reason) = deny_identity(violation);
     let details = violation.map(|v| &v.details);
 
     let status = details
@@ -207,11 +285,11 @@ pub(super) fn http_authz_rejection(violation: Option<&PluginViolation>) -> Rejec
     let body = details
         .and_then(|d| d.get("http.body"))
         .and_then(serde_json::Value::as_str)
-        .map_or_else(|| format!("{code}: {reason}"), str::to_owned);
+        .map_or(default_body, |b| Bytes::from(b.to_owned().into_bytes()));
 
     let mut rejection = Rejection::status(status)
         .with_header(VIOLATION_HEADER, code)
-        .with_body(Bytes::from(body.into_bytes()));
+        .with_body(body);
 
     if let Some(headers) = details
         .and_then(|d| d.get("http.headers"))

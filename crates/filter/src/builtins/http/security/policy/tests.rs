@@ -820,6 +820,7 @@ fn build_filter(config_path: String) -> PolicyFilter {
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
     };
     PolicyFilter::new(cfg).expect("filter should construct")
 }
@@ -1056,6 +1057,7 @@ fn rejects_zero_max_buffer_bytes() {
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 0,
+        llm: super::config::LlmOptions::default(),
     };
     let err = match PolicyFilter::new(cfg) {
         Ok(_) => panic!("zero max_buffer_bytes must be rejected"),
@@ -1073,6 +1075,7 @@ fn rejects_oversized_max_buffer_bytes() {
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1,
+        llm: super::config::LlmOptions::default(),
     };
     let err = match PolicyFilter::new(cfg) {
         Ok(_) => panic!("oversized max_buffer_bytes must be rejected"),
@@ -1862,6 +1865,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
         require_protocol_metadata: false,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
     };
     let filter = PolicyFilter::new(cfg).expect("filter should construct");
 
@@ -2806,6 +2810,7 @@ async fn response_phase_without_request_identity_fails_closed() {
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
     };
     let filter = PolicyFilter::new(cfg).expect("filter should construct");
 
@@ -3083,6 +3088,7 @@ fn try_build_filter_allowing_private(
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
     })
 }
 
@@ -3705,6 +3711,7 @@ routes:
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
     };
     let err = PolicyFilter::new(cfg)
         .err()
@@ -3756,5 +3763,350 @@ async fn the_response_half_is_gated_on_the_policy_declaring_one() {
         Some("http.response"),
         "a declared response contract opens the half; the engine applies a \
          contract at every return site of the hook, registered handler or not",
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Inference (LLM) authorization
+// -----------------------------------------------------------------------------
+
+/// Write a policy document whose only routes are `llm:` routes: one
+/// per-model route admitting an authenticated caller, and the catch-all
+/// that makes every other model deny. No MCP entity routes, so the
+/// filter must reach the inference path with no classifier in the chain.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_llm_route_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+routes:
+  - llm: allowed-model
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - "deny('model is not permitted', 'model_not_allowed')"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Write a policy document that declares BOTH an `llm:` route and an MCP
+/// tool route, so classification precedence is observable.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_llm_and_tool_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - "deny('model is not permitted', 'model_not_allowed')"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Build a `PolicyFilter` with inference options the caller chooses.
+fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) -> PolicyFilter {
+    PolicyFilter::new(PolicyFilterConfig {
+        config_path,
+        allow_private_idp: false,
+        body_access: super::config::BodyAccessMode::ReadOnly,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+        llm,
+    })
+    .expect("filter should construct")
+}
+
+/// Drive one inference request through the body phase as `subject`,
+/// with no classifier metadata — exactly what an OpenAI-style call
+/// reaching the filter looks like.
+async fn dispatch_inference_as(filter: &PolicyFilter, subject: &str, body: &str) -> FilterAction {
+    let token = mint_jwt(&standard_claims(subject));
+    let mut req = make_request(Method::POST, "/v1/chat/completions");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    filter
+        .on_request_body(&mut ctx, &mut Some(bytes::Bytes::from(body.to_owned())), true)
+        .await
+        .expect("filter ran")
+}
+
+/// A policy whose only routes are `llm:` routes still derives the
+/// entity shape — authorization runs at the body phase — and reports the
+/// inference half so the body is buffered and the model read from it.
+#[test]
+fn derives_the_inference_shape_for_an_llm_only_policy() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+    assert_eq!(
+        filter.derived_shape(),
+        (false, true),
+        "`llm:` routes are entity routes: authorization belongs at the body phase",
+    );
+    assert!(
+        filter.derived_llm_routes(),
+        "and it reports the inference half, so the body is buffered and the model read from it",
+    );
+}
+
+/// An inference policy needs no protocol classifier: with
+/// `require_protocol_metadata` at its default, a request carrying no
+/// `mcp.method` is authorized against its `llm:` route rather than
+/// rejected as a misconfigured chain.
+#[tokio::test(flavor = "multi_thread")]
+async fn inference_request_is_authorized_without_classifier_metadata() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+
+    let action = dispatch_inference_as(&filter, "alice", r#"{"model":"allowed-model","messages":[]}"#).await;
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the per-model route must admit an authenticated caller with no classifier in the chain; got {action:?}",
+    );
+}
+
+/// The catch-all `llm:` route denies a model no route names, and the
+/// denial reaches the client as a provider-shaped HTTP error rather than
+/// a JSON-RPC envelope.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_outside_the_policy_is_denied_with_a_provider_error() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+
+    let action = dispatch_inference_as(&filter, "alice", r#"{"model":"other-model","messages":[]}"#).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("a model the policy excludes must be denied; got {action:?}");
+    };
+    assert_eq!(rejection.status, 403, "an inference client expects a real HTTP status");
+    assert!(
+        rejection
+            .headers
+            .iter()
+            .any(|(name, value)| name == "X-Policy-Violation" && value == "model_not_allowed"),
+        "the violation code must be on the response for audit pipelines; got {:?}",
+        rejection.headers,
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&rejection.body.expect("deny body")).expect("deny body is JSON");
+    assert_eq!(body["error"]["code"], "model_not_allowed");
+    assert_eq!(body["error"]["type"], "policy_violation");
+    assert_eq!(
+        body["error"]["message"], "model is not permitted",
+        "an OpenAI SDK surfaces error.message, so the policy's reason has to land there",
+    );
+}
+
+/// A body the filter cannot read a model from is denied while the policy
+/// declares `llm:` routes: an unattributable request must not be
+/// admitted unevaluated.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_with_no_usable_model_fails_closed() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+
+    for body in [r#"{"messages":[]}"#, r#"{"model":42}"#, r#"{"model":""}"#, "not json"] {
+        let action = dispatch_inference_as(&filter, "alice", body).await;
+        let FilterAction::Reject(rejection) = action else {
+            panic!("body {body} must be denied; got {action:?}");
+        };
+        assert!(
+            rejection
+                .headers
+                .iter()
+                .any(|(name, value)| name == "X-Policy-Violation" && value == "llm.model_missing"),
+            "body {body} must deny with the missing-model violation; got {:?}",
+            rejection.headers,
+        );
+    }
+}
+
+/// `require_model: false` is the opt-out: an unattributable request
+/// falls through to the policy's other paths instead of denying.
+#[tokio::test(flavor = "multi_thread")]
+async fn require_model_false_admits_a_request_with_no_model() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            require_model: false,
+            ..Default::default()
+        },
+    );
+
+    let action = dispatch_inference_as(&filter, "alice", r#"{"messages":[]}"#).await;
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "with the gate off, a body carrying no model takes the identity-only path; got {action:?}",
+    );
+}
+
+/// Classifier metadata wins: a request the classifier claimed is
+/// evaluated against its MCP route even when the body also carries a
+/// top-level `model`, so a crafted body cannot redirect an MCP call onto
+/// the inference path.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_classification_takes_precedence_over_a_model_in_the_body() {
+    let (_dir, path) = write_llm_and_tool_config();
+    let filter = build_filter(path);
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let body = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}},"model":"other-model"}"#,
+    );
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(body), true)
+        .await
+        .expect("filter ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the tool route must decide this request; the inference catch-all would have denied it \
+         on the body's `model`. Got {action:?}",
+    );
+}
+
+/// The inference path buffers the request body even in `ReadOnly`: there
+/// is no classifier ahead of it to buffer, and the model has to be read
+/// from the whole body.
+#[test]
+fn inference_routes_buffer_the_request_body_in_read_only() {
+    let (_dir, path) = write_llm_route_config();
+    assert!(
+        matches!(
+            build_filter(path).request_body_mode(),
+            BodyMode::StreamBuffer {
+                max_bytes: Some(10_485_760)
+            }
+        ),
+        "an inference policy must ask for the whole body, bounded by max_buffer_bytes",
+    );
+
+    let (_dir, path) = write_tool_route_config();
+    assert!(
+        matches!(build_filter(path).request_body_mode(), BodyMode::Stream),
+        "an MCP policy keeps streaming: the classifier ahead of it already buffers",
+    );
+}
+
+/// The model the proxy parsed is published as filter metadata, so an
+/// access log or a later filter can see it. It is metadata rather than a
+/// header, so no client can supply it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_parsed_model_reaches_filter_metadata() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::POST, "/v1/chat/completions");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    let body = bytes::Bytes::from_static(br#"{"model":"allowed-model","stream":true,"messages":[]}"#);
+
+    drop(
+        filter
+            .on_request_body(&mut ctx, &mut Some(body), true)
+            .await
+            .expect("filter ran"),
+    );
+
+    assert_eq!(ctx.get_metadata("llm.model"), Some("allowed-model"));
+    assert_eq!(
+        ctx.get_metadata("llm.stream"),
+        Some("true"),
+        "the streaming flag is recorded so the response half can skip an SSE body",
+    );
+}
+
+/// Identity still gates the inference path: a request with no token is
+/// rejected before any route is consulted.
+#[tokio::test(flavor = "multi_thread")]
+async fn inference_request_without_a_token_is_rejected_by_identity() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+
+    let req = make_request(Method::POST, "/v1/chat/completions");
+    let mut ctx = make_filter_context(&req);
+    let body = bytes::Bytes::from_static(br#"{"model":"allowed-model","messages":[]}"#);
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(body), true)
+        .await
+        .expect("filter ran");
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
+        "an unauthenticated inference call is an identity failure, not a policy deny; got {action:?}",
     );
 }
