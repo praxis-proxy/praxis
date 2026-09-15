@@ -4179,11 +4179,30 @@ fn build_read_write_filter(config_path: String) -> PolicyFilter {
     .expect("filter should construct")
 }
 
+/// Drive the request phase of an inference call the fixtures admit.
+async fn admit_inference(filter: &PolicyFilter, ctx: &mut crate::HttpFilterContext<'_>) {
+    let mut request = Some(bytes::Bytes::from_static(INFERENCE_REQUEST));
+    drop(
+        filter
+            .on_request_body(ctx, &mut request, true)
+            .await
+            .expect("request phase ran"),
+    );
+}
+
+/// A minimal chat request the inference fixtures admit.
+const INFERENCE_REQUEST: &[u8] = br#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
+
 /// A completion inside the policy's token budget.
 const WITHIN_BUDGET_RESPONSE: &str = r#"{"model":"gpt-4o","usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10},"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}"#;
 
-/// A completion over it.
-const OVER_BUDGET_RESPONSE: &str = r#"{"usage":{"total_tokens":9999}}"#;
+/// A completion over it. Sized like a real one, so a deny envelope fits
+/// inside the committed `Content-Length`.
+const OVER_BUDGET_RESPONSE: &str = r#"{"model":"gpt-4o","usage":{"prompt_tokens":5000,"completion_tokens":4999,"total_tokens":9999},"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"a long answer"}}]}"#;
+
+/// A completion over the budget whose body is far too short to hold a
+/// full deny envelope.
+const TINY_OVER_BUDGET_RESPONSE: &str = r#"{"usage":{"total_tokens":9999}}"#;
 
 /// A response body that is not a JSON document at all.
 const NON_JSON_RESPONSE: &str = "upstream failure, not JSON";
@@ -4225,6 +4244,150 @@ async fn inference_round_trip(
             .expect("response phase ran"),
     );
     body.expect("response body")
+}
+
+/// A deny that cannot fit the committed `Content-Length` sheds its
+/// optional parts instead of being cut mid-token. Truncated JSON reads
+/// to an SDK as a transport failure rather than the refusal it is, so
+/// whatever survives has to parse.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deny_too_large_for_the_committed_length_stays_valid_json() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_read_write_filter(path);
+
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        TINY_OVER_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+
+    assert_eq!(
+        body.len(),
+        TINY_OVER_BUDGET_RESPONSE.len(),
+        "the body must still match the Content-Length already on the wire",
+    );
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or_else(|e| panic!("a deny body must parse; got {body:?} ({e})"));
+    assert!(
+        parsed.is_object(),
+        "the degraded envelope must still be a JSON object; got {body:?}",
+    );
+}
+
+/// A content-encoded completion is one the filter cannot read, and the
+/// client picked the encoding — so it fails closed rather than skipping
+/// the policy. Otherwise `Accept-Encoding: gzip`, which most HTTP
+/// clients send by default, would be a one-header bypass.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_content_encoded_completion_fails_closed() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response
+        .headers
+        .insert("content-encoding", HeaderValue::from_static("gzip"));
+    ctx.response_header = Some(&mut response);
+
+    // Within budget, so only the encoding can account for a deny.
+    let mut body = Some(bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()));
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+
+    let served = body.expect("response body");
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("deny body is JSON");
+    assert_eq!(
+        parsed["error"]["code"], "llm.response_unreadable",
+        "an encoded completion must not skip the response-phase policy; got {served:?}",
+    );
+}
+
+/// The request half strips `accept-encoding` when the policy has
+/// post-invocation work, so the completion arrives as plain JSON and the
+/// response half can read it.
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_encoding_is_stripped_when_the_policy_evaluates_completions() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+
+    assert!(
+        ctx.request_headers_to_remove.contains(&http::header::ACCEPT_ENCODING),
+        "the upstream must be asked for plain JSON; got {:?}",
+        ctx.request_headers_to_remove,
+    );
+}
+
+/// A policy with no response half leaves `accept-encoding` alone: there
+/// is no completion to read, so there is no reason to cost the upstream
+/// its compression.
+#[tokio::test(flavor = "multi_thread")]
+async fn accept_encoding_survives_a_request_only_inference_policy() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::POST, "/v1/chat/completions");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    let mut request = Some(bytes::Bytes::from_static(br#"{"model":"allowed-model","messages":[]}"#));
+    drop(
+        filter
+            .on_request_body(&mut ctx, &mut request, true)
+            .await
+            .expect("request phase ran"),
+    );
+
+    assert!(
+        !ctx.request_headers_to_remove.contains(&http::header::ACCEPT_ENCODING),
+        "a pre-invocation-only policy reads no completion, so compression should survive",
+    );
+}
+
+/// An SSE response is released on its first chunk rather than buffered
+/// to end-of-stream. `read_write` buffers every response, so without the
+/// release the caller's stream would arrive in one piece at the end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    admit_inference(&filter, &mut ctx).await;
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("text/event-stream"));
+    ctx.response_header = Some(&mut response);
+
+    let mut first = Some(bytes::Bytes::from_static(b"data: {\"delta\":\"hi\"}\n\n"));
+    let action = filter
+        .on_response_body(&mut ctx, &mut first, false)
+        .expect("response phase ran");
+    assert!(
+        matches!(action, FilterAction::Release),
+        "a mid-stream SSE chunk must release the buffer, not be held to EOS; got {action:?}",
+    );
 }
 
 /// The response half evaluates the policy's `post_invocation` rules
@@ -4271,6 +4434,10 @@ async fn a_completion_within_budget_reaches_the_client_unchanged() {
 /// A streamed response carries no single completion to evaluate, so the
 /// response half stands aside rather than buffering SSE frames waiting
 /// for one. The client gets the upstream bytes.
+///
+/// What the upstream sent decides this, not what the request asked for:
+/// a request that set `stream: true` and was answered with one JSON
+/// document still carries a completion, so it is still evaluated.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_streamed_response_skips_the_response_half() {
     let (_dir, path) = write_llm_post_config();
@@ -4283,12 +4450,11 @@ async fn a_streamed_response_skips_the_response_half() {
         "application/json",
     )
     .await;
+    let parsed: serde_json::Value = serde_json::from_slice(&requested).expect("deny body is JSON");
     assert_eq!(
-        requested,
-        bytes::Bytes::from_static(OVER_BUDGET_RESPONSE.as_bytes()),
-        "a caller that asked for a stream must not be denied on a completion the filter never \
-         saw; this is the same over-budget usage the deny case uses, so only the streaming flag \
-         accounts for the pass-through",
+        parsed["error"]["code"], "completion_too_long",
+        "asking to stream must not skip post-invocation policy when the upstream answered with \
+         one JSON completion; otherwise `stream: true` is a one-word bypass. Got {requested:?}",
     );
 
     let sse = inference_round_trip(

@@ -230,15 +230,72 @@ pub(super) fn llm_deny_rejection(violation: Option<&PluginViolation>) -> Rejecti
 pub(super) fn llm_error_envelope_bytes(violation: Option<&PluginViolation>) -> Bytes {
     let (code, reason) = deny_identity(violation);
     let pending = violation.is_some_and(|v| v.proto_error_code.is_some());
+    let details = pending
+        .then(|| violation.map(|v| &v.details).filter(|d| !d.is_empty()))
+        .flatten();
+    llm_envelope(&reason, pending, &code, details)
+}
 
+/// Build the OpenAI-shaped error envelope, no larger than `max_len`.
+///
+/// The response phase replaces a body whose `Content-Length` is already
+/// committed, so an envelope that does not fit gets truncated — and
+/// truncated JSON is unparseable, which an SDK reports as a transport
+/// failure rather than the deny it is. Shed the optional parts in order
+/// instead, and fall back to the smallest valid envelope.
+pub(super) fn llm_error_envelope_bytes_within(violation: Option<&PluginViolation>, max_len: usize) -> Bytes {
+    let full = llm_error_envelope_bytes(violation);
+    if full.len() <= max_len {
+        return full;
+    }
+
+    let (code, reason) = deny_identity(violation);
+    let pending = violation.is_some_and(|v| v.proto_error_code.is_some());
+
+    // Drop `details` first: the elicitation bundle is the largest optional
+    // part and a client can re-fetch it.
+    let bare = llm_envelope(&reason, pending, &code, None);
+    if bare.len() <= max_len {
+        return bare;
+    }
+
+    // Then shrink the human-readable message to whatever budget is left.
+    let overhead = llm_envelope("", pending, &code, None).len();
+    if let Some(budget) = max_len.checked_sub(overhead) {
+        let shrunk = llm_envelope(truncate_on_char_boundary(&reason, budget), pending, &code, None);
+        if shrunk.len() <= max_len {
+            return shrunk;
+        }
+    }
+
+    // Last resorts. Each is valid JSON, so a client still parses a body
+    // rather than reporting a malformed response.
+    let code_only = serde_json::json!({ "error": { "code": code } });
+    let code_only = serde_json::to_vec(&code_only).unwrap_or_else(|_| b"{}".to_vec());
+    if code_only.len() <= max_len {
+        return Bytes::from(code_only);
+    }
+    if max_len >= 2 {
+        return Bytes::from_static(b"{}");
+    }
+    Bytes::new()
+}
+
+/// Assemble the envelope from its parts.
+fn llm_envelope(
+    message: &str,
+    pending: bool,
+    code: &str,
+    details: Option<&std::collections::HashMap<String, serde_json::Value>>,
+) -> Bytes {
     let mut error = serde_json::Map::new();
-    error.insert("message".to_owned(), serde_json::Value::String(reason));
+    error.insert("message".to_owned(), serde_json::Value::String(message.to_owned()));
     error.insert(
         "type".to_owned(),
         serde_json::Value::String(if pending { "policy_pending" } else { "policy_violation" }.to_owned()),
     );
-    error.insert("code".to_owned(), serde_json::Value::String(code));
-    if pending && let Some(details) = violation.map(|v| &v.details).filter(|d| !d.is_empty()) {
+    error.insert("code".to_owned(), serde_json::Value::String(code.to_owned()));
+    if let Some(details) = details {
         let details: serde_json::Map<String, serde_json::Value> =
             details.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         error.insert("details".to_owned(), serde_json::Value::Object(details));
@@ -249,6 +306,32 @@ pub(super) fn llm_error_envelope_bytes(violation: Option<&PluginViolation>) -> B
     // practice; a deny path must never emit an empty (fail-open) body if
     // that ever changes.
     Bytes::from(serde_json::to_vec(&body).unwrap_or_else(|_| FALLBACK_LLM_DENY_ENVELOPE.to_vec()))
+}
+
+/// The longest prefix of `text` that fits `budget` bytes without
+/// splitting a character.
+fn truncate_on_char_boundary(text: &str, budget: usize) -> &str {
+    if text.len() <= budget {
+        return text;
+    }
+    let mut end = budget;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.get(..end).unwrap_or("")
+}
+
+/// The body the policy's `denyWith` asks for, when it names one.
+///
+/// The response phase can still choose the body even though status and
+/// headers are already committed, so an operator's `http.body` is
+/// honored there too.
+pub(super) fn deny_with_body(violation: Option<&PluginViolation>) -> Option<Bytes> {
+    violation
+        .map(|v| &v.details)
+        .and_then(|d| d.get("http.body"))
+        .and_then(serde_json::Value::as_str)
+        .map(|body| Bytes::from(body.to_owned().into_bytes()))
 }
 
 /// The violation's `(code, reason)`, or the generic deny pair.

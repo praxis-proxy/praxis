@@ -37,8 +37,8 @@ use super::{
     },
     config::{BodyAccessMode, PolicyFilterConfig},
     error::{
-        VIOLATION_HEADER, auth_rejection, json_rpc_error_envelope_bytes, json_rpc_error_rejection, llm_deny_rejection,
-        llm_error_envelope_bytes,
+        VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
+        llm_deny_rejection, llm_error_envelope_bytes_within,
     },
     json_rpc::{
         ParsedEnvelope, build_content_for_method, build_response_content_for_method, reserialize_json_rpc_body,
@@ -801,10 +801,7 @@ impl PolicyFilter {
         Self::attach_http_attributes(ctx, &mut extensions, headers);
         self.attach_llm_attributes(&mut extensions, parsed, &model);
         ctx.extensions.insert(ResolvedIdentity(identity));
-        ctx.extensions.insert(InferenceRequest {
-            model: model.clone(),
-            streaming: parsed.is_streaming(),
-        });
+        ctx.extensions.insert(InferenceRequest { model: model.clone() });
 
         let payload = MessagePayload {
             message: request_message(parsed),
@@ -858,6 +855,15 @@ impl PolicyFilter {
             );
         }
 
+        // A response the filter cannot read is a response it cannot evaluate,
+        // so when the policy has post-invocation work, ask the upstream for
+        // plain JSON. Otherwise a client sets `Accept-Encoding: gzip` — which
+        // most HTTP clients send by default — and the completion arrives as
+        // bytes the response half skips.
+        if self.llm_post {
+            ctx.request_headers_to_remove.push(http::header::ACCEPT_ENCODING);
+        }
+
         // The model reaches later filters and the access log as metadata — a
         // proxy-derived value, so no client can supply it.
         ctx.set_metadata("llm.model", model.clone());
@@ -908,6 +914,32 @@ impl PolicyFilter {
         };
 
         let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
+
+        // A content-encoded body is readable in principle but not by this
+        // filter, and the client chose the encoding — so admitting it would let
+        // one request header skip the policy. Fail closed instead. The request
+        // half strips `accept-encoding` when the policy has post-invocation
+        // work, so reaching this means the upstream encoded unbidden.
+        if let Some(encoding) = Self::response_content_encoding(ctx) {
+            tracing::warn!(
+                target: "policy.filter",
+                model = %model,
+                encoding = %encoding,
+                "inference response is content-encoded and cannot be evaluated; failing closed \
+                 (replacing the response body with the deny envelope)",
+            );
+            let violation = PluginViolation::new(
+                "llm.response_unreadable",
+                "inference response is content-encoded and cannot be evaluated",
+            );
+            *body = Some(llm_deny_body(
+                Some(&violation),
+                body_bytes.len(),
+                "content-encoded inference response",
+            ));
+            return Ok(FilterAction::Continue);
+        }
+
         let parsed = ParsedLlmResponse::parse(&body_bytes);
         if !parsed.is_object() {
             tracing::debug!(
@@ -931,10 +963,9 @@ impl PolicyFilter {
                  (replacing inference response body with deny envelope)",
             );
             let violation = post_phase_identity_unavailable_violation();
-            *body = Some(fit_to_original_length(
-                llm_error_envelope_bytes(Some(&violation)),
+            *body = Some(llm_deny_body(
+                Some(&violation),
                 body_bytes.len(),
-                "llm",
                 "post-phase identity failure",
             ));
             return Ok(FilterAction::Continue);
@@ -972,10 +1003,9 @@ impl PolicyFilter {
                 violation = ?cmf_result.violation,
                 "inference post-phase deny — replacing response body with the provider error envelope",
             );
-            *body = Some(fit_to_original_length(
-                llm_error_envelope_bytes(cmf_result.violation.as_ref()),
+            *body = Some(llm_deny_body(
+                cmf_result.violation.as_ref(),
                 body_bytes.len(),
-                "llm",
                 "inference post-phase deny",
             ));
             return Ok(FilterAction::Continue);
@@ -999,13 +1029,14 @@ impl PolicyFilter {
     /// The model to evaluate this response against, or `None` when there
     /// is no response-phase work.
     ///
-    /// A streamed response is `None`: SSE frames are not one JSON
-    /// document, so there is no completion to evaluate, and waiting for
-    /// one would defeat streaming. A policy needing post-invocation
-    /// enforcement denies `custom.llm.stream` on the way in.
+    /// Only what the upstream actually sent decides this. A request that
+    /// asked to stream but was answered with one JSON document still
+    /// carries a completion, so it is still evaluated; a policy that
+    /// wants no streaming at all denies `custom.llm.stream` on the way
+    /// in. SSE frames, by contrast, are not one JSON document.
     fn llm_response_model(ctx: &HttpFilterContext<'_>) -> Option<String> {
         let inference = ctx.extensions.get::<InferenceRequest>()?;
-        if inference.streaming || Self::response_is_event_stream(ctx) {
+        if Self::response_is_event_stream(ctx) {
             tracing::debug!(
                 target: "policy.filter",
                 model = %inference.model,
@@ -1016,13 +1047,33 @@ impl PolicyFilter {
         Some(inference.model.clone())
     }
 
+    /// Whether this response is a streamed inference response the filter
+    /// will not evaluate, so the buffer can be handed back.
+    fn inference_response_is_streamed(&self, ctx: &HttpFilterContext<'_>) -> bool {
+        self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() && Self::response_is_event_stream(ctx)
+    }
+
     /// Whether the upstream is streaming this response as server-sent events.
     fn response_is_event_stream(ctx: &HttpFilterContext<'_>) -> bool {
+        Self::response_header_value(ctx, &http::header::CONTENT_TYPE)
+            .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/event-stream"))
+    }
+
+    /// The response's `Content-Encoding`, when it names a real encoding.
+    ///
+    /// `identity` is no encoding, so it reads as absent.
+    fn response_content_encoding(ctx: &HttpFilterContext<'_>) -> Option<String> {
+        Self::response_header_value(ctx, &http::header::CONTENT_ENCODING)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty() && value != "identity")
+    }
+
+    /// One response header as a string, when the response carries it.
+    fn response_header_value<'h>(ctx: &'h HttpFilterContext<'_>, name: &http::header::HeaderName) -> Option<&'h str> {
         ctx.response_header
             .as_ref()
-            .and_then(|response| response.headers.get(http::header::CONTENT_TYPE))
+            .and_then(|response| response.headers.get(name))
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/event-stream"))
     }
 
     /// Generic-HTTP (L7) authorization: resolve identity, populate the
@@ -1252,8 +1303,20 @@ pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
 struct InferenceRequest {
     /// The model parsed from the request body.
     model: String,
-    /// Whether the caller asked for a streamed response.
-    streaming: bool,
+}
+
+/// The body a denied inference response carries, sized to the committed
+/// `Content-Length`.
+///
+/// The response phase can only replace the body, so it has to fit what
+/// the client was already promised. An operator's `denyWith` body wins
+/// when it fits; otherwise the envelope sheds its optional parts rather
+/// than being truncated into JSON no SDK can parse.
+fn llm_deny_body(violation: Option<&PluginViolation>, original_len: usize, reason: &str) -> Bytes {
+    let chosen = deny_with_body(violation)
+        .filter(|body| body.len() <= original_len)
+        .unwrap_or_else(|| llm_error_envelope_bytes_within(violation, original_len));
+    fit_to_original_length(chosen, original_len, "llm", reason)
 }
 
 /// The violation reported when a policy declares `llm:` routes and the
@@ -1646,6 +1709,14 @@ impl HttpFilter for PolicyFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
+        // A streamed inference response has no completion to evaluate, so hand
+        // the buffer back on the first chunk instead of holding chunks to
+        // end-of-stream. `read_write` buffers every response, so without this
+        // the caller's stream would arrive in one piece at the end — and a long
+        // generation would trip the buffer ceiling.
+        if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) && self.inference_response_is_streamed(ctx) {
+            return Ok(FilterAction::Release);
+        }
         if !end_of_stream {
             return Ok(FilterAction::Continue);
         }
