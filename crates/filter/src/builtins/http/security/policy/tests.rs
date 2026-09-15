@@ -3961,6 +3961,15 @@ fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) ->
     .expect("filter should construct")
 }
 
+/// Whether `rejection` carries `name: value`, matching the name
+/// case-insensitively as HTTP does.
+fn has_header(rejection: &crate::Rejection, name: &str, value: &str) -> bool {
+    rejection
+        .headers
+        .iter()
+        .any(|(header, held)| header.eq_ignore_ascii_case(name) && held == value)
+}
+
 /// Drive one inference request through the body phase as `subject`,
 /// with no classifier metadata — exactly what an OpenAI-style call
 /// reaching the filter looks like.
@@ -4034,6 +4043,11 @@ async fn a_model_outside_the_policy_is_denied_with_a_provider_error() {
         panic!("a model the policy excludes must be denied; got {action:?}");
     };
     assert_eq!(rejection.status, 403, "an inference client expects a real HTTP status");
+    assert!(
+        has_header(&rejection, "content-type", "application/json"),
+        "an SDK parses error.message out of the body, so the media type has to be named; got {:?}",
+        rejection.headers,
+    );
     assert!(
         rejection
             .headers

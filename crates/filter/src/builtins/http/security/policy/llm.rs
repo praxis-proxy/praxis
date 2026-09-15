@@ -23,6 +23,15 @@ use ppe::praxis_policy_core::{
 };
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Longest `model` the filter treats as usable. Matches the filter
+/// metadata value ceiling, so an accepted model always reaches
+/// `llm.model`.
+const MAX_MODEL_BYTES: usize = 256;
+
+// -----------------------------------------------------------------------------
 // Request side
 // -----------------------------------------------------------------------------
 
@@ -36,18 +45,21 @@ impl ParsedLlmRequest {
         Self(serde_json::from_slice(body).unwrap_or(serde_json::Value::Null))
     }
 
-    /// The top-level `model`, when it is a non-empty string.
+    /// The top-level `model`, when it is a usable string.
     ///
     /// Anything else is `None` — a request the caller cannot attribute to
-    /// a model. Control characters are rejected too: the value becomes
+    /// a model. Control characters are rejected because the value becomes
     /// the entity name, so it reaches route matching, audit records and
-    /// log lines, and no real model identifier carries them.
+    /// log lines, and no real model identifier carries them. So is
+    /// anything past [`MAX_MODEL_BYTES`], which the metadata bag would
+    /// drop anyway: better an unattributable request that fails closed
+    /// than an authorized one whose model went unrecorded.
     pub(super) fn model(&self) -> Option<&str> {
         self.0
             .get("model")
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
-            .filter(|model| !model.is_empty() && !model.chars().any(char::is_control))
+            .filter(|model| !model.is_empty() && model.len() <= MAX_MODEL_BYTES && !model.chars().any(char::is_control))
     }
 
     /// Whether the caller asked for a streamed response. Read here
@@ -356,6 +368,24 @@ mod tests {
         ] {
             assert_eq!(request(body).model(), None, "body {body} must not yield a model");
         }
+    }
+
+    #[test]
+    fn an_over_long_model_is_not_usable() {
+        let at_limit = "m".repeat(MAX_MODEL_BYTES);
+        assert_eq!(
+            request(&format!(r#"{{"model":"{at_limit}"}}"#)).model(),
+            Some(at_limit.as_str()),
+            "a model at the metadata ceiling is still usable",
+        );
+
+        let over_limit = "m".repeat(MAX_MODEL_BYTES + 1);
+        assert_eq!(
+            request(&format!(r#"{{"model":"{over_limit}"}}"#)).model(),
+            None,
+            "past the ceiling the model would not reach `llm.model`, so the request must fail \
+             closed rather than be authorized with no record of what it asked for",
+        );
     }
 
     #[test]

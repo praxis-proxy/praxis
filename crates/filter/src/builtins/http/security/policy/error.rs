@@ -195,7 +195,7 @@ pub(super) fn json_rpc_error_envelope_bytes(
 pub(super) fn http_authz_rejection(violation: Option<&PluginViolation>) -> Rejection {
     let (code, reason) = deny_identity(violation);
     let default_body = Bytes::from(format!("{code}: {reason}").into_bytes());
-    deny_with_rejection(violation, default_body)
+    deny_with_rejection(&code, violation.map(|v| &v.details), default_body, None)
 }
 
 // -----------------------------------------------------------------------------
@@ -210,7 +210,13 @@ pub(super) fn http_authz_rejection(violation: Option<&PluginViolation>) -> Rejec
 /// error envelope, and the policy's `denyWith` overrides status, body,
 /// and headers exactly as it does on the generic-HTTP path.
 pub(super) fn llm_deny_rejection(violation: Option<&PluginViolation>) -> Rejection {
-    deny_with_rejection(violation, llm_error_envelope_bytes(violation))
+    let (code, _reason) = deny_identity(violation);
+    deny_with_rejection(
+        &code,
+        violation.map(|v| &v.details),
+        llm_error_envelope_bytes(violation),
+        Some("application/json"),
+    )
 }
 
 /// Build only the OpenAI-shaped error envelope bytes.
@@ -343,9 +349,12 @@ fn deny_identity(violation: Option<&PluginViolation>) -> (String, String) {
 }
 
 /// Build a plain-HTTP deny carrying `default_body`, with the transpiled
-/// `denyWith` on the violation's `details` overriding status
-/// (`http.status`, default 403), body (`http.body`), and headers
-/// (`http.headers`).
+/// `denyWith` in `details` overriding status (`http.status`, default
+/// 403), body (`http.body`), and headers (`http.headers`).
+///
+/// `default_content_type` is stamped only when `denyWith` names no
+/// `Content-Type` of its own, so an operator keeps the last word without
+/// the response carrying the field twice.
 ///
 /// Header names/values containing control characters are dropped as
 /// defense-in-depth against response splitting. Always stamps
@@ -354,10 +363,12 @@ fn deny_identity(violation: Option<&PluginViolation>) -> (String, String) {
     clippy::too_many_lines,
     reason = "linear denyWith mapping with per-header validation"
 )]
-fn deny_with_rejection(violation: Option<&PluginViolation>, default_body: Bytes) -> Rejection {
-    let (code, _reason) = deny_identity(violation);
-    let details = violation.map(|v| &v.details);
-
+fn deny_with_rejection(
+    code: &str,
+    details: Option<&std::collections::HashMap<String, serde_json::Value>>,
+    default_body: Bytes,
+    default_content_type: Option<&str>,
+) -> Rejection {
     let status = details
         .and_then(|d| d.get("http.status"))
         .and_then(serde_json::Value::as_u64)
@@ -370,9 +381,23 @@ fn deny_with_rejection(violation: Option<&PluginViolation>, default_body: Bytes)
         .and_then(serde_json::Value::as_str)
         .map_or(default_body, |b| Bytes::from(b.to_owned().into_bytes()));
 
+    let deny_with_headers = details
+        .and_then(|d| d.get("http.headers"))
+        .and_then(serde_json::Value::as_object);
+
     let mut rejection = Rejection::status(status)
-        .with_header(VIOLATION_HEADER, code)
+        .with_header(VIOLATION_HEADER, code.to_owned())
         .with_body(body);
+
+    // A body an SDK is expected to parse needs its media type named, but
+    // the policy's own header wins if it sets one.
+    if let Some(content_type) = default_content_type {
+        let overridden = deny_with_headers
+            .is_some_and(|headers| headers.keys().any(|name| name.eq_ignore_ascii_case("content-type")));
+        if !overridden {
+            rejection = rejection.with_header("Content-Type", content_type.to_owned());
+        }
+    }
 
     if let Some(headers) = details
         .and_then(|d| d.get("http.headers"))
