@@ -12,10 +12,11 @@
 //! re-entrance bounded by an iteration limit).
 //!
 //! Branch sub-chains run only during the request phase (`on_request`);
-//! their `on_request_body` and `on_response_body` hooks are not
-//! executed, so body-transforming filters belong on the main pipeline
-//! path. This module defines only the config surface; validation lives
-//! in `crate::config::validate::branch_chain` and execution in the
+//! their `on_request_body`, `on_response_body`, and
+//! `on_selected_upstream_request_body` hooks are not executed, so
+//! body-transforming filters belong on the main pipeline path. This
+//! module defines only the config surface; validation lives in
+//! `crate::config::validate::branch_chain` and execution in the
 //! `praxis-filter` pipeline.
 
 use serde::Deserialize;

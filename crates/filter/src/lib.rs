@@ -63,7 +63,10 @@ mod results;
 pub mod sse;
 mod tcp_filter;
 
-pub use actions::{FilterAction, Rejection, StreamingResponseBody, StreamingTerminalResponse, TerminalResponse};
+pub use actions::{
+    FilterAction, Rejection, SelectedUpstreamBodyOutcome, StreamingResponseBody, StreamingTerminalResponse,
+    TerminalResponse,
+};
 pub use any_filter::AnyFilter;
 pub use binding::{ChainBindingContext, ChainBindingHttpFactory};
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
