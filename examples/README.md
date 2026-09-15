@@ -132,6 +132,7 @@ page.
 | [peer-identity-trust.yaml](configs/security/peer-identity-trust.yaml) | Validates downstream mTLS peer identity against a set of trusted peers |
 | [policy-assertions.yaml](configs/security/policy-assertions.yaml) | Projects policy-derived identity into request headers and removes credentials that should not reach the upstream |
 | [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the Praxis Policy Engine |
+| [policy-llm.yaml](configs/security/policy-llm.yaml) | Authorizes OpenAI-style inference calls on the model in the request body |
 | [policy.yaml](configs/security/policy.yaml) | Embeds the Praxis Policy Engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting |
 
 ### Traffic Management

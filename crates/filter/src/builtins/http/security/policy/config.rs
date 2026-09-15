@@ -61,9 +61,11 @@ pub(crate) struct PolicyFilterConfig {
     /// Maximum request/response body bytes buffered in `ReadWrite`
     /// mode. `ReadWrite` uses `StreamBuffer` to accumulate the whole
     /// body before APL field mutators run; without a cap an oversized
-    /// payload could exhaust memory. Ignored in `ReadOnly` mode, which
-    /// streams. The pipeline rejects an unbounded buffer at config
-    /// load, so this always carries a concrete ceiling.
+    /// payload could exhaust memory. Also the ceiling on the inference
+    /// path, which buffers in `ReadOnly` too — the model is in the body.
+    /// Otherwise ignored in `ReadOnly` mode, which streams. The pipeline
+    /// rejects an unbounded buffer at config load, so this always
+    /// carries a concrete ceiling.
     #[serde(default = "default_max_buffer_bytes")]
     pub max_buffer_bytes: usize,
 
@@ -88,10 +90,11 @@ pub(crate) struct PolicyFilterConfig {
     /// traffic through the `policy` filter for identity-only
     /// enforcement (legacy behavior).
     ///
-    /// Only consulted when the loaded policy declares entity routes
+    /// Only consulted when the loaded policy declares MCP entity routes
     /// (tool/prompt/resource). A pure-L7 (`global`-only) or identity-only
     /// policy never reaches this gate — `on_request_body` returns
-    /// `BodyDone` before it, so the flag has no effect there.
+    /// `BodyDone` before it, so the flag has no effect there. Nor does an
+    /// inference-only (`llm:`) policy, whose gate is `llm.require_model`.
     ///
     /// Note: JSON-RPC methods that legitimately carry no entity (e.g.
     /// `tools/list`, `initialize`, `prompts/list`) still pass —
@@ -99,12 +102,79 @@ pub(crate) struct PolicyFilterConfig {
     /// missing entirely.
     #[serde(default = "default_true")]
     pub require_protocol_metadata: bool,
+
+    /// Tuning for the inference authorization path. The policy document
+    /// declaring `llm:` routes is what switches that path on, not this
+    /// block.
+    #[serde(default)]
+    pub llm: LlmOptions,
 }
 
 /// `#[serde(default = ...)]` requires a free function for primitives
 /// without a `Default` impl that returns the desired value.
 fn default_true() -> bool {
     true
+}
+
+// -----------------------------------------------------------------------------
+// LlmOptions
+// -----------------------------------------------------------------------------
+
+/// Tuning for the inference authorization path — the `llm:` routes a
+/// policy document declares.
+///
+/// ```yaml
+/// llm:
+///   require_model: true
+///   provider: openai
+///   promote_params: [stream, max_tokens]
+/// ```
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LlmOptions {
+    /// Deny a request whose body carries no usable top-level `model`.
+    ///
+    /// On by default: such a request cannot be matched to an `llm:`
+    /// route, so admitting it would admit it unevaluated. Set `false` to
+    /// let it fall through to the policy's other paths instead.
+    #[serde(default = "default_true")]
+    pub require_model: bool,
+
+    /// Provider recorded on `llm.provider`. Operator-asserted: the
+    /// upstream is chosen after this filter runs, so there is nothing to
+    /// infer one from.
+    #[serde(default)]
+    pub provider: Option<String>,
+
+    /// Top-level request fields promoted to `custom.llm.<name>`, so a
+    /// rule can read them (`deny(custom.llm.stream)`). Scalars only.
+    #[serde(default = "default_promote_params")]
+    pub promote_params: Vec<String>,
+}
+
+impl Default for LlmOptions {
+    fn default() -> Self {
+        Self {
+            require_model: true,
+            provider: None,
+            promote_params: default_promote_params(),
+        }
+    }
+}
+
+/// The OpenAI / Anthropic sampling fields a rule plausibly keys on.
+fn default_promote_params() -> Vec<String> {
+    [
+        "stream",
+        "max_tokens",
+        "max_completion_tokens",
+        "temperature",
+        "top_p",
+        "n",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect()
 }
 
 /// Default upper bound on `PolicyEngine::initialize` (seconds).

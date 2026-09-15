@@ -205,6 +205,13 @@ These two concepts are distinct, take care to not conflate them.
   and the router matches those headers to select
   clusters (routing). Branch chains split pipelines
   (pipelining).
+- **The inference path is proxy-parsed, not
+  classified**: the `policy` filter attributes an
+  OpenAI-style call to a model by reading the
+  top-level `model` out of the buffered body itself
+  (no classifier, no header), then dispatches PPE's
+  `cmf.llm_input`. Classifier metadata still wins
+  where it exists.
 - **Branch on filter results**: branch chains split
   or rejoin request-phase pipelines based on filter
   results (`on_result`). See

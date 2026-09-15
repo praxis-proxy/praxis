@@ -144,7 +144,8 @@ deployment guidance.
   or inline values; client credential stripping
 - **Policy engine** (`policy`, experimental, feature
   `policy-engine`): JWT identity, route policy, PII
-  scanning, audit
+  scanning, audit, and inference authorization on the
+  model in the request body
 
 ## Observability
 

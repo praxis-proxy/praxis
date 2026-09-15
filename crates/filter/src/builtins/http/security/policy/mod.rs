@@ -27,7 +27,7 @@
 //! # Where it sits in the chain
 //!
 //! The evaluation shape is derived from the loaded policy. A policy that
-//! declares entity routes (tool/prompt/resource) consumes metadata produced
+//! declares MCP entity routes (tool/prompt/resource) consumes metadata produced
 //! by a protocol classifier filter (available in the `praxis-ai` package),
 //! so that filter must run before it:
 //!
@@ -54,6 +54,41 @@
 //! default), a request that reaches `policy` without `mcp.method` is
 //! rejected — catching a chain that is missing the protocol classifier filter or has
 //! it ordered after `policy`.
+//!
+//! # Inference calls
+//!
+//! A policy that declares `llm:` routes authorizes inference calls, and needs
+//! no classifier: an OpenAI-style call carries no JSON-RPC envelope, so the
+//! filter buffers the request body and reads the top-level `model` itself. That
+//! model is the entity name and `llm.model_id`, and the route is dispatched as
+//! `cmf.llm_input`. Reading it from the body rather than a header is the
+//! security property: policy authorizes the model the backend will be asked
+//! for, and no client-supplied header can disagree. `llm.provider` is
+//! operator-asserted, and `llm.promote_params` names the sampling parameters
+//! that reach the bag as `custom.llm.*`.
+//!
+//! Two consequences worth knowing before writing such a policy:
+//!
+//! - **A model no `llm:` route selects is evaluated by nothing.** `global.defaults.llm` stacks onto routes rather than
+//!   installing one, so an unlisted model is admitted unless the policy ends with a catch-all `llm: "*"` route that
+//!   denies. The filter warns at startup when one is missing.
+//! - **A body carrying no usable `model` is denied** (`llm.require_model`, on by default) rather than admitted
+//!   unevaluated.
+//!
+//! A request the classifier claimed (`mcp.method` present) is evaluated as that
+//! MCP entity, so a crafted `model` field cannot move an MCP call onto the
+//! inference path. See `examples/configs/security/policy-llm.yaml`.
+//!
+//! Under `body_access: read_write` the response half evaluates the policy's
+//! `post_invocation` rules over the completion the upstream reported
+//! (`completion.model`, `completion.tokens.*`, `completion.stop_reason`). A
+//! streamed response carries no single completion to evaluate, so it is passed
+//! through untouched; a policy that needs post-invocation enforcement denies
+//! `custom.llm.stream` on the way in. APL field mutators do not rewrite
+//! inference bodies in either direction — a CMF message carries one text slot
+//! per part, so a multi-turn chat or a multi-choice completion cannot
+//! round-trip losslessly; the filter warns and ships the original bytes rather
+//! than a partial redaction.
 //!
 //! # The policy document
 //!
@@ -114,6 +149,8 @@
 //! | Policy suspend (human-in-the-loop approval pending) | HTTP 200 with a JSON-RPC error envelope carrying the violation's `proto_error_code` (`-32120`) instead of the generic deny code, plus the elicitation bundle (`elicitation_id` / `approver` / `expires_at` / `channel`) in `error.data` — a distinct code so the client can retry rather than treat it as a flat deny. |
 //! | Generic-HTTP (L7) policy deny | Plain HTTP response (default 403) with status / body / headers from the policy's `denyWith`, plus `X-Policy-Violation: <code>` — a non-MCP client gets a real HTTP status, not a JSON-RPC envelope. |
 //! | Missing `mcp.method` metadata | HTTP 500 (server-side misconfiguration; protocol classifier filter from `praxis-ai` missing or misordered). |
+//! | Inference policy deny | Plain HTTP response (default 403) carrying `{"error":{"message","type","code"}}` — what an OpenAI-style SDK parses — overridable by the policy's `denyWith`, plus `X-Policy-Violation: <code>`. A pending approval sets `type` to `policy_pending` and carries the elicitation bundle in `error.details`. |
+//! | Inference request with no usable `model` | The same shape, with violation code `llm.model_missing` (`llm.require_model`, on by default). |
 //!
 //! Any violation carrying a `proto_error_code` overrides `-32001` on the
 //! wire, and its `details` map is merged into `error.data`; the pending
@@ -129,6 +166,7 @@
 //!
 //! - `examples/configs/security/policy.yaml` for a runnable filter config.
 //! - `examples/configs/security/policy-http.yaml` for a pure-L7 (generic-HTTP) authorization config.
+//! - `examples/configs/security/policy-llm.yaml` for inference (model) authorization.
 //! - The HR demo in the praxis-demos repository for an end-to-end walkthrough (identity, Cedar and CEL PDPs,
 //!   delegation, redaction, PII scanning, session taint).
 
@@ -139,6 +177,7 @@ mod error;
 mod filter;
 mod host_plugins;
 mod json_rpc;
+mod llm;
 mod shared_connector;
 mod transport;
 

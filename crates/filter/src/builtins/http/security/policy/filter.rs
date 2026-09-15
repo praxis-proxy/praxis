@@ -15,13 +15,13 @@ use ppe::praxis_policy_core::{
     cmf::{
         CmfHook, Message, MessagePayload, Role,
         constants::{
-            ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_PRE_FETCH,
-            HOOK_CMF_TOOL_PRE_INVOKE,
+            ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT, HOOK_CMF_PROMPT_PRE_INVOKE,
+            HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_PRE_INVOKE,
         },
     },
     engine::PolicyEngine,
     error::{PluginError, PluginViolation},
-    extensions::MetaExtension,
+    extensions::{LLMExtension, MetaExtension},
     hooks::Extensions,
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
@@ -32,13 +32,19 @@ use super::{
         GovernedNames, apply_request_assertions, apply_response_assertions, snapshot_response_headers,
         unreachable_response_levels,
     },
-    common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
+    common_message_format::{
+        entity_for_protocol_method, entity_for_protocol_method_post, llm_entity_post, llm_entity_pre,
+    },
     config::{BodyAccessMode, PolicyFilterConfig},
-    error::{VIOLATION_HEADER, auth_rejection, json_rpc_error_envelope_bytes, json_rpc_error_rejection},
+    error::{
+        VIOLATION_HEADER, auth_rejection, json_rpc_error_envelope_bytes, json_rpc_error_rejection, llm_deny_rejection,
+        llm_error_envelope_bytes,
+    },
     json_rpc::{
         ParsedEnvelope, build_content_for_method, build_response_content_for_method, reserialize_json_rpc_body,
         reserialize_json_rpc_response_body,
     },
+    llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
 };
 use crate::{
     AuthenticatedIdentity, FilterAction, FilterError, Rejection,
@@ -96,9 +102,18 @@ enum GatedIdentity {
 /// audience-scoped tokens (RFC 8693) that the allow path attaches as
 /// upstream headers.
 ///
+/// A policy declaring `llm:` routes authorizes inference calls instead,
+/// and needs no classifier: the filter buffers the request body, reads
+/// the top-level `model`, and evaluates it as the `llm` entity via
+/// `cmf.llm_input`. A model no route selects reaches no policy at all,
+/// so such a document needs a catch-all `llm: "*"` route that denies.
+///
 /// `body_access: read_write` enables the JSON-RPC re-serialization
 /// round-trip so APL field mutators (`redact()`, `assign()`) rewrite
-/// the upstream request body and the downstream response.
+/// the upstream request body and the downstream response. It also opens
+/// the inference response half (`cmf.llm_output`), which evaluates
+/// `completion.*` over a non-streamed completion; APL field mutators do
+/// not rewrite inference bodies.
 ///
 /// Outbound policy calls share the proxy's sub-request limits and circuit
 /// breaker, use HTTP/1.1, and keep a separate 1 MiB response ceiling. TLS
@@ -123,7 +138,15 @@ enum GatedIdentity {
 /// require_protocol_metadata: true    # optional; default true
 /// init_timeout_secs: 30         # optional; default 30
 /// max_buffer_bytes: 10485760    # optional; default 10 MiB (read_write only)
+/// llm:                          # optional; tunes the inference path
+///   require_model: true         # optional; default true
+///   provider: openai            # optional; operator-asserted
 /// ```
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts derived from the policy document; they combine rather than \
+              enumerate, so a state machine would not model them"
+)]
 pub struct PolicyFilter {
     /// Filter-level configuration parsed from the YAML block. Held so
     /// `request_body_access` / `request_body_mode` / their response
@@ -140,10 +163,18 @@ pub struct PolicyFilter {
     /// `on_request` over `http.*` + identity — no classifier, no body.
     http_global: bool,
     /// Derived from the loaded policy: it declares per-entity routes
-    /// (tool/prompt/resource). When true, authorization runs at the body
-    /// phase after classification, and a missing `mcp.method` fails
-    /// closed (the classifier is required).
+    /// (tool/prompt/resource/llm). When true, authorization runs at the
+    /// body phase, once the request is attributed to an entity.
     entity_routes: bool,
+    /// Derived from the loaded policy: it declares MCP entity routes, so
+    /// a classifier is required. Gates `require_protocol_metadata`.
+    mcp_routes: bool,
+    /// Derived from the loaded policy: it declares `llm:` routes, so the
+    /// request body is buffered and the model read out of it.
+    llm_routes: bool,
+    /// Derived from the loaded policy: it declares response-phase `llm:`
+    /// policy (`cmf.llm_output`).
+    llm_post: bool,
     /// Header names governed by request assertions.
     request_assertions: GovernedNames,
     /// Header names governed by response assertions.
@@ -278,9 +309,12 @@ impl PolicyFilter {
         // needs no operator-set mode. `has_hooks_for` reports whether a hook
         // was wired by the policy (registered handler or route annotation).
         let http_global = mgr.has_hooks_for(HOOK_HTTP_REQUEST);
-        let entity_routes = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
+        let mcp_routes = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_PROMPT_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_RESOURCE_PRE_FETCH);
+        let llm_routes = mgr.has_hooks_for(HOOK_CMF_LLM_INPUT);
+        let llm_post = mgr.has_hooks_for(HOOK_CMF_LLM_OUTPUT);
+        let entity_routes = mcp_routes || llm_routes;
 
         // Fail-silent guard. A policy with both a `global` HTTP policy and
         // entity routes is the normal "global baseline layer + entity routes"
@@ -290,7 +324,7 @@ impl PolicyFilter {
         // disabled that gate, non-classified requests are admitted
         // identity-only and are NOT evaluated against the global HTTP policy —
         // a silent skip. Make that specific misconfiguration loud at startup.
-        if http_global && entity_routes && !cfg.require_protocol_metadata {
+        if http_global && mcp_routes && !cfg.require_protocol_metadata {
             tracing::warn!(
                 target: "policy.filter",
                 "policy declares a `global` HTTP policy AND entity routes with \
@@ -314,6 +348,10 @@ impl PolicyFilter {
         let request_assertions = GovernedNames::from_config(&policy_config, Direction::Request);
         let response_assertions = GovernedNames::from_config(&policy_config, Direction::Response);
 
+        if llm_routes {
+            Self::warn_on_inference_gaps(&policy_config, http_global, cfg.llm.require_model);
+        }
+
         // Reject controls that cannot reach the writable response-header phase.
         let unreachable = unreachable_response_levels(&policy_config);
         if !unreachable.is_empty() {
@@ -335,6 +373,9 @@ impl PolicyFilter {
             mgr,
             http_global,
             entity_routes,
+            mcp_routes,
+            llm_routes,
+            llm_post,
             request_assertions,
             response_assertions,
             response_hook,
@@ -352,6 +393,47 @@ impl PolicyFilter {
     #[cfg(test)]
     pub(super) fn derived_shape(&self) -> (bool, bool) {
         (self.http_global, self.entity_routes)
+    }
+
+    /// Test accessor for the inference half of the derived shape:
+    /// `(llm_routes, llm_post)`.
+    #[cfg(test)]
+    pub(super) fn derived_llm_shape(&self) -> (bool, bool) {
+        (self.llm_routes, self.llm_post)
+    }
+
+    /// Warn about the two inference shapes that silently under-enforce.
+    ///
+    /// `global.defaults.llm` only stacks onto routes; it installs no
+    /// handler. So without a catch-all `llm: "*"` route, an unlisted
+    /// model is evaluated by nothing at all.
+    fn warn_on_inference_gaps(
+        policy_config: &ppe::praxis_policy_core::config::PolicyConfig,
+        http_global: bool,
+        require_model: bool,
+    ) {
+        let has_catch_all = policy_config
+            .routes
+            .iter()
+            .filter_map(|route| route.llm.as_ref())
+            .any(selector_matches_any_model);
+        if !has_catch_all {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy declares `llm:` routes but no catch-all `llm: \"*\"` route: a model no \
+                 route selects is evaluated by no policy at all and is admitted. Add a catch-all \
+                 route that denies, so an unlisted model fails closed.",
+            );
+        }
+        if http_global && !require_model {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy declares `llm:` routes AND a `global` HTTP policy with \
+                 `llm.require_model: false`: a request whose body carries no usable `model` is \
+                 admitted identity-only and is NOT evaluated against the global HTTP policy. \
+                 Keep `llm.require_model: true` (default) to fail closed.",
+            );
+        }
     }
 
     /// Praxis-side factory hook, wired via `register_http` in
@@ -656,6 +738,264 @@ impl PolicyFilter {
         Ok(FilterAction::Continue)
     }
 
+    /// Authorize an inference call: resolve identity against the `llm`
+    /// entity coordinates, populate the typed LLM slot, and evaluate the
+    /// policy's `llm:` routes via `cmf.llm_input`.
+    ///
+    /// `model` was parsed from the body the backend will parse, so a
+    /// client header cannot redirect the decision onto another model.
+    #[expect(
+        clippy::large_stack_frames,
+        clippy::too_many_lines,
+        reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
+    )]
+    async fn dispatch_llm_request(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        parsed: &ParsedLlmRequest,
+        model: String,
+    ) -> Result<FilterAction, FilterError> {
+        let (entity_type, hook_name) = llm_entity_pre();
+        let headers = Self::snapshot_headers(ctx);
+
+        let identity = match self.resolve_identity(ctx, headers.clone(), entity_type, &model).await {
+            Ok(id) => id,
+            Err(rej) => return Ok(FilterAction::Reject(rej)),
+        };
+        Self::take_gated_identity(ctx);
+        Self::publish_authenticated_identity(ctx, &identity);
+
+        let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &model);
+        Self::attach_http_attributes(ctx, &mut extensions, headers);
+        self.attach_llm_attributes(&mut extensions, parsed, &model);
+        ctx.extensions.insert(ResolvedIdentity(identity));
+        ctx.extensions.insert(InferenceRequest {
+            model: model.clone(),
+            streaming: parsed.is_streaming(),
+        });
+
+        let payload = MessagePayload {
+            message: request_message(parsed),
+        };
+        let mgr = Arc::clone(&self.mgr);
+        let handle = tokio::runtime::Handle::current();
+        let cmf_result = tokio::task::spawn_blocking(move || {
+            handle.block_on(async {
+                let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
+                r
+            })
+        })
+        .await
+        .map_err(|e| -> FilterError { format!("policy: inference request-phase hook task failed: {e}").into() })?;
+
+        if !cmf_result.continue_processing {
+            tracing::debug!(target: "policy.filter", model = %model, "inference deny");
+            return Ok(FilterAction::Reject(llm_deny_rejection(cmf_result.violation.as_ref())));
+        }
+
+        let attached = attach_delegated_tokens(ctx, cmf_result.modified_extensions.as_ref());
+        if attached > 0 {
+            tracing::debug!(
+                target: "policy.filter",
+                count = attached,
+                "attached delegated tokens to upstream request (inference)",
+            );
+        }
+        // Apply assertions after delegation so strip rules govern delegated headers.
+        let (set, removed) =
+            apply_request_assertions(ctx, cmf_result.modified_extensions.as_ref(), &self.request_assertions);
+        if set > 0 || removed > 0 {
+            tracing::debug!(
+                target: "policy.filter",
+                set, removed,
+                "applied request assertions to upstream request (inference)",
+            );
+        }
+
+        // APL field mutators do not round-trip an inference body: a CMF message
+        // carries one text slot per part and the write-back reaches only the
+        // first, so a multi-turn chat cannot be rewritten losslessly. Ship the
+        // original rather than a half-redacted body, and tell the operator
+        // their mutator did nothing.
+        if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) && cmf_result.modified_payload.is_some() {
+            tracing::warn!(
+                target: "policy.filter",
+                model = %model,
+                "policy mutated the inference request payload, but request-body rewriting is not \
+                 supported on the inference path; the upstream receives the original body",
+            );
+        }
+
+        // The model reaches later filters and the access log as metadata — a
+        // proxy-derived value, so no client can supply it.
+        ctx.set_metadata("llm.model", model.clone());
+        if parsed.is_streaming() {
+            ctx.set_metadata("llm.stream", "true");
+        }
+
+        tracing::trace!(target: "policy.filter", model = %model, "inference allow");
+        Self::mark_admission_complete(ctx);
+        Ok(FilterAction::BodyDone)
+    }
+
+    /// Put the model, provider, and promoted sampling parameters where
+    /// APL reads them (`llm.*`, `custom.llm.*`).
+    fn attach_llm_attributes(&self, ext: &mut Extensions, parsed: &ParsedLlmRequest, model: &str) {
+        ext.llm = Some(Arc::new(LLMExtension {
+            model_id: Some(model.to_owned()),
+            provider: self.cfg.llm.provider.clone(),
+            capabilities: Vec::new(),
+        }));
+
+        let promoted = parsed.promoted_params(&self.cfg.llm.promote_params);
+        if promoted.is_empty() {
+            return;
+        }
+        let mut custom = ext.custom.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
+        custom.insert("llm".to_owned(), serde_json::Value::Object(promoted));
+        ext.custom = Some(Arc::new(custom));
+    }
+
+    /// Evaluate the policy's response-phase `llm:` rules over a buffered
+    /// inference response (`cmf.llm_output`).
+    ///
+    /// Reuses the model and identity the request phase recorded, and adds
+    /// the `completion.*` attributes the response reports. A deny can
+    /// only replace the body — status and headers are already sent.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear response-phase flow (skip checks, rebuild identity, dispatch, deny); splitting obscures it"
+    )]
+    fn dispatch_llm_response(
+        &self,
+        ctx: &HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<FilterAction, FilterError> {
+        let Some(model) = Self::llm_response_model(ctx) else {
+            return Ok(FilterAction::Continue);
+        };
+
+        let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
+        let parsed = ParsedLlmResponse::parse(&body_bytes);
+        if !parsed.is_object() {
+            tracing::debug!(
+                target: "policy.filter",
+                model = %model,
+                "inference response body is not a JSON object; skipping the response-phase policy",
+            );
+            return Ok(FilterAction::Continue);
+        }
+
+        let (entity_type, hook_name) = llm_entity_post();
+        let headers = Self::snapshot_headers(ctx);
+        let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
+            // Fail closed, as the MCP post path does: a response that can no
+            // longer be attributed to a request-phase identity would skip
+            // whatever response-side policy the operator configured.
+            tracing::error!(
+                target: "policy.filter",
+                model = %model,
+                "no request-phase identity stashed; failing closed \
+                 (replacing inference response body with deny envelope)",
+            );
+            let violation = PluginViolation::new(
+                "identity.post_phase_unavailable",
+                "no request-phase identity available for response processing",
+            );
+            *body = Some(fit_to_original_length(
+                llm_error_envelope_bytes(Some(&violation)),
+                body_bytes.len(),
+                "llm",
+                "post-phase identity failure",
+            ));
+            return Ok(FilterAction::Continue);
+        };
+
+        let mut extensions = Self::extensions_from_identity(&headers, identity, entity_type, &model);
+        extensions.llm = Some(Arc::new(LLMExtension {
+            model_id: Some(model.clone()),
+            provider: self.cfg.llm.provider.clone(),
+            capabilities: Vec::new(),
+        }));
+        extensions.completion = Some(Arc::new(parsed.completion()));
+
+        let payload = MessagePayload {
+            message: response_message(&parsed),
+        };
+        let mgr = Arc::clone(&self.mgr);
+        let handle = tokio::runtime::Handle::current();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tokio::task::spawn_blocking(move || {
+            let result = handle.block_on(async move {
+                let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
+                r
+            });
+            drop(tx.send(result));
+        });
+        let cmf_result = rx.recv().map_err(|_recv| -> FilterError {
+            "policy: inference response-phase dispatch failed (spawn_blocking channel closed)".into()
+        })?;
+
+        if !cmf_result.continue_processing {
+            tracing::warn!(
+                target: "policy.filter",
+                model = %model,
+                violation = ?cmf_result.violation,
+                "inference post-phase deny — replacing response body with the provider error envelope",
+            );
+            *body = Some(fit_to_original_length(
+                llm_error_envelope_bytes(cmf_result.violation.as_ref()),
+                body_bytes.len(),
+                "llm",
+                "inference post-phase deny",
+            ));
+            return Ok(FilterAction::Continue);
+        }
+
+        // Response-body rewriting is the twin of the request-side limit: the
+        // projection reaches one text part, so a multi-choice completion
+        // cannot round-trip. Ship the upstream body rather than a partial
+        // redaction.
+        if cmf_result.modified_payload.is_some() {
+            tracing::warn!(
+                target: "policy.filter",
+                model = %model,
+                "policy mutated the inference response payload, but response-body rewriting is not \
+                 supported on the inference path; the client receives the upstream body",
+            );
+        }
+        Ok(FilterAction::Continue)
+    }
+
+    /// The model to evaluate this response against, or `None` when there
+    /// is no response-phase work.
+    ///
+    /// A streamed response is `None`: SSE frames are not one JSON
+    /// document, so there is no completion to evaluate, and waiting for
+    /// one would defeat streaming. A policy needing post-invocation
+    /// enforcement denies `custom.llm.stream` on the way in.
+    fn llm_response_model(ctx: &HttpFilterContext<'_>) -> Option<String> {
+        let inference = ctx.extensions.get::<InferenceRequest>()?;
+        if inference.streaming || Self::response_is_event_stream(ctx) {
+            tracing::debug!(
+                target: "policy.filter",
+                model = %inference.model,
+                "streamed inference response; skipping the response-phase policy",
+            );
+            return None;
+        }
+        Some(inference.model.clone())
+    }
+
+    /// Whether the upstream is streaming this response as server-sent events.
+    fn response_is_event_stream(ctx: &HttpFilterContext<'_>) -> bool {
+        ctx.response_header
+            .as_ref()
+            .and_then(|response| response.headers.get(http::header::CONTENT_TYPE))
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/event-stream"))
+    }
+
     /// Generic-HTTP (L7) authorization: resolve identity, populate the
     /// HTTP request line + headers into the attribute bag, and evaluate the
     /// `global` policy via the `http.request` hook. A deny maps to a
@@ -840,6 +1180,18 @@ impl PolicyFilter {
     }
 }
 
+/// Whether an `llm:` selector is the catch-all that makes an unlisted
+/// model reach a policy at all.
+///
+/// Only a bare `*` qualifies: a prefix glob (`gpt-*`) leaves every other
+/// vendor's model unevaluated, which is the gap the caller warns about.
+fn selector_matches_any_model(selector: &ppe::praxis_policy_core::config::StringOrList) -> bool {
+    matches!(
+        selector,
+        ppe::praxis_policy_core::config::StringOrList::Single(pattern) if pattern.as_str() == "*"
+    )
+}
+
 /// Render a validated claim into the identity projection's string format.
 ///
 /// Strings remain unquoted; other values use compact JSON.
@@ -851,6 +1203,26 @@ fn flatten_claim(value: &serde_json::Value) -> String {
 ///
 /// Typed storage avoids serializing credentials and revalidating expired tokens.
 pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
+
+/// What the request phase learned about an inference call, for the
+/// response half — which must not re-derive it: the model policy
+/// authorized is the one the request carried.
+struct InferenceRequest {
+    /// The model parsed from the request body.
+    model: String,
+    /// Whether the caller asked for a streamed response.
+    streaming: bool,
+}
+
+/// Stand-in for a body-less request, so the parser can be handed a
+/// `&Bytes` without allocating per request.
+static EMPTY_BODY: Bytes = Bytes::new();
+
+/// The violation reported when a policy declares `llm:` routes and the
+/// request body carries no usable model.
+fn missing_model_violation() -> PluginViolation {
+    PluginViolation::new("llm.model_missing", "request body carries no usable top-level `model`")
+}
 
 #[async_trait]
 impl HttpFilter for PolicyFilter {
@@ -887,9 +1259,16 @@ impl HttpFilter for PolicyFilter {
         // `StreamBuffer` accumulates chunks, calls our filter exactly
         // once at EOS with the full body, and forwards whatever we put
         // back into `body`. `ReadOnly` inherits the default `Stream`.
+        //
+        // The inference path buffers in `ReadOnly` too: the MCP path
+        // gets a whole body only because the protocol classifier ahead
+        // of it buffers, and an inference call has no classifier. A
+        // request over the ceiling gets the pipeline's 413, which is the
+        // fail-closed answer for a body the filter cannot read a model
+        // from.
         match self.cfg.body_access {
-            BodyAccessMode::ReadOnly => BodyMode::Stream,
-            BodyAccessMode::ReadWrite => BodyMode::StreamBuffer {
+            BodyAccessMode::ReadOnly if !self.llm_routes => BodyMode::Stream,
+            BodyAccessMode::ReadOnly | BodyAccessMode::ReadWrite => BodyMode::StreamBuffer {
                 max_bytes: Some(self.cfg.max_buffer_bytes),
             },
         }
@@ -984,16 +1363,27 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Continue);
         }
 
-        // This policy declares entity routes (tool/prompt/resource), so it
-        // needs the request classified into an entity before authorization.
-        // Missing `mcp.method` means the protocol classifier filter (from
-        // praxis-ai) did not run before us — the classifier is absent or
-        // ordered after `policy` in the chain. Fail closed so the misconfig is
-        // loud at the first request. Operators intentionally running this
-        // policy for identity-only enforcement can opt out via
-        // `require_protocol_metadata: false`.
+        // This policy declares entity routes, so it needs the request
+        // attributed to an entity before authorization. An MCP entity comes
+        // from classifier metadata; an inference entity comes from the model
+        // in the body, which the proxy parses itself.
+        //
+        // Missing `mcp.method` on a policy with MCP routes means the protocol
+        // classifier filter (from praxis-ai) did not run before us — the
+        // classifier is absent or ordered after `policy` in the chain. Fail
+        // closed so the misconfig is loud at the first request. Operators
+        // intentionally running this policy for identity-only enforcement can
+        // opt out via `require_protocol_metadata: false`.
         let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
-            if self.cfg.require_protocol_metadata {
+            // Classifier metadata wins where it exists, so the inference path
+            // is only reached for traffic no classifier claimed.
+            if self.llm_routes {
+                let parsed = ParsedLlmRequest::parse(body.as_ref().unwrap_or(&EMPTY_BODY));
+                if let Some(model) = parsed.model().map(str::to_owned) {
+                    return Box::pin(self.dispatch_llm_request(ctx, &parsed, model)).await;
+                }
+            }
+            if self.mcp_routes && self.cfg.require_protocol_metadata {
                 tracing::error!(
                     target: "policy.filter",
                     "policy declares entity routes (tool/prompt/resource) which require a protocol \
@@ -1003,7 +1393,18 @@ impl HttpFilter for PolicyFilter {
                 );
                 return Ok(FilterAction::Reject(missing_protocol_metadata_rejection()));
             }
-            tracing::trace!(target: "policy.filter", "no mcp.method in metadata; no CMF dispatch");
+            if self.llm_routes && self.cfg.llm.require_model {
+                tracing::debug!(
+                    target: "policy.filter",
+                    "policy declares `llm:` routes but the request body carries no usable top-level \
+                     `model`; denying (fail-closed). Set `llm.require_model: false` to admit such a \
+                     request on this policy's other paths.",
+                );
+                return Ok(FilterAction::Reject(llm_deny_rejection(Some(
+                    &missing_model_violation(),
+                ))));
+            }
+            tracing::trace!(target: "policy.filter", "request carries no entity coordinates; no CMF dispatch");
             return self.complete_gated_admission(ctx).await;
         };
         let Some((entity_type, hook_name)) = entity_for_protocol_method(&method) else {
@@ -1206,9 +1607,15 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Continue);
         }
         // No point doing anything if the operator hasn't opted into
-        // response rewriting.
+        // response rewriting. The inference post hook rides the same opt-in:
+        // `read_write` is what puts the response body in a buffer for it to
+        // read, and the default streaming posture stays untouched.
         if !matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) {
             return Ok(FilterAction::Continue);
+        }
+
+        if self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() {
+            return self.dispatch_llm_response(ctx, body);
         }
 
         // The protocol classifier filter stashes method/name during the request
