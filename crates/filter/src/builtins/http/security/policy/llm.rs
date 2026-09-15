@@ -268,24 +268,6 @@ pub(super) fn response_message(parsed: &ParsedLlmResponse) -> Message {
 mod tests {
     use super::*;
 
-    fn request(json: &str) -> ParsedLlmRequest {
-        ParsedLlmRequest::parse(&Bytes::from(json.to_owned()))
-    }
-
-    fn response(json: &str) -> ParsedLlmResponse {
-        ParsedLlmResponse::parse(&Bytes::from(json.to_owned()))
-    }
-
-    fn texts(parts: &[ContentPart]) -> Vec<String> {
-        parts
-            .iter()
-            .filter_map(|part| match part {
-                ContentPart::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
     #[test]
     fn reads_top_level_model() {
         assert_eq!(request(r#"{"model":"gpt-4o"}"#).model(), Some("gpt-4o"));
@@ -508,5 +490,27 @@ mod tests {
             response_message(&response(r#"{"model":"m"}"#)).role,
             Role::Assistant
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    fn request(json: &str) -> ParsedLlmRequest {
+        ParsedLlmRequest::parse(&Bytes::from(json.to_owned()))
+    }
+
+    fn response(json: &str) -> ParsedLlmResponse {
+        ParsedLlmResponse::parse(&Bytes::from(json.to_owned()))
+    }
+
+    fn texts(parts: &[ContentPart]) -> Vec<String> {
+        parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }

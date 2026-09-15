@@ -127,18 +127,24 @@ fn default_true() -> bool {
 /// llm:
 ///   require_model: true
 ///   provider: openai
+///   # Replaces the default list; name every field a rule reads.
 ///   promote_params: [stream, max_tokens]
 /// ```
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LlmOptions {
-    /// Deny a request whose body carries no usable top-level `model`.
+    /// Top-level request fields promoted to `custom.llm.<name>`, so a
+    /// rule can read them (`deny(custom.llm.stream)`). Scalars only.
     ///
-    /// On by default: such a request cannot be matched to an `llm:`
-    /// route, so admitting it would admit it unevaluated. Set `false` to
-    /// let it fall through to the policy's other paths instead.
-    #[serde(default = "default_true")]
-    pub require_model: bool,
+    /// Setting this REPLACES the default list rather than extending it.
+    /// The default is `[stream, max_tokens, max_completion_tokens,
+    /// temperature, top_p, n]`, so an operator who sets
+    /// `promote_params: [max_tokens]` silently stops promoting `stream`
+    /// — and a rule reading `custom.llm.stream` then never fires. Name
+    /// every field the policy's rules read, including the ones the
+    /// default already covered.
+    #[serde(default = "default_promote_params")]
+    pub promote_params: Vec<String>,
 
     /// Provider recorded on `llm.provider`. Operator-asserted: the
     /// upstream is chosen after this filter runs, so there is nothing to
@@ -146,23 +152,29 @@ pub(crate) struct LlmOptions {
     #[serde(default)]
     pub provider: Option<String>,
 
-    /// Top-level request fields promoted to `custom.llm.<name>`, so a
-    /// rule can read them (`deny(custom.llm.stream)`). Scalars only.
-    #[serde(default = "default_promote_params")]
-    pub promote_params: Vec<String>,
+    /// Deny a request whose body carries no usable top-level `model`.
+    ///
+    /// On by default: such a request cannot be matched to an `llm:`
+    /// route, so admitting it would admit it unevaluated. Set `false` to
+    /// let it fall through to the policy's other paths instead.
+    #[serde(default = "default_true")]
+    pub require_model: bool,
 }
 
 impl Default for LlmOptions {
     fn default() -> Self {
         Self {
-            require_model: true,
-            provider: None,
             promote_params: default_promote_params(),
+            provider: None,
+            require_model: true,
         }
     }
 }
 
 /// The OpenAI / Anthropic sampling fields a rule plausibly keys on.
+///
+/// An operator-supplied `promote_params` replaces this list wholesale;
+/// see [`LlmOptions::promote_params`].
 fn default_promote_params() -> Vec<String> {
     [
         "stream",

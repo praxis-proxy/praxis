@@ -54,6 +54,14 @@ use crate::{
 };
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Stand-in for a body-less request, so the parser can be handed a
+/// `&Bytes` without allocating per request.
+static EMPTY_BODY: Bytes = Bytes::new();
+
+// -----------------------------------------------------------------------------
 // PolicyFilter
 // -----------------------------------------------------------------------------
 
@@ -137,7 +145,7 @@ enum GatedIdentity {
 /// body_access: read_write       # optional; default read_only
 /// require_protocol_metadata: true    # optional; default true
 /// init_timeout_secs: 30         # optional; default 30
-/// max_buffer_bytes: 10485760    # optional; default 10 MiB (read_write only)
+/// max_buffer_bytes: 10485760    # optional; default 10 MiB (read_write, and any `llm:` policy)
 /// llm:                          # optional; tunes the inference path
 ///   require_model: true         # optional; default true
 ///   provider: openai            # optional; operator-asserted
@@ -424,6 +432,7 @@ impl PolicyFilter {
                  route selects is evaluated by no policy at all and is admitted. Add a catch-all \
                  route that denies, so an unlisted model fails closed.",
             );
+            Self::warn_on_list_form_catch_all(policy_config);
         }
         if http_global && !require_model {
             tracing::warn!(
@@ -432,6 +441,29 @@ impl PolicyFilter {
                  `llm.require_model: false`: a request whose body carries no usable `model` is \
                  admitted identity-only and is NOT evaluated against the global HTTP policy. \
                  Keep `llm.require_model: true` (default) to fail closed.",
+            );
+        }
+    }
+
+    /// Name the near miss behind a missing catch-all: an `llm:` selector
+    /// written as a list containing `"*"`.
+    ///
+    /// The engine matches a list selector by exact name, so such a route
+    /// selects only a model literally named `*`. Without this the
+    /// caller's warning reads as false to an operator who already wrote
+    /// `llm: ["*"]`.
+    fn warn_on_list_form_catch_all(policy_config: &ppe::praxis_policy_core::config::PolicyConfig) {
+        let has_list_form = policy_config
+            .routes
+            .iter()
+            .filter_map(|route| route.llm.as_ref())
+            .any(selector_lists_any_model_literal);
+        if has_list_form {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy declares an `llm:` route whose selector is a LIST containing \"*\": a list \
+                 selector matches model names exactly, so that route selects only a model literally \
+                 named `*`. Write the catch-all as the bare string `llm: \"*\"`.",
             );
         }
     }
@@ -898,10 +930,7 @@ impl PolicyFilter {
                 "no request-phase identity stashed; failing closed \
                  (replacing inference response body with deny envelope)",
             );
-            let violation = PluginViolation::new(
-                "identity.post_phase_unavailable",
-                "no request-phase identity available for response processing",
-            );
+            let violation = post_phase_identity_unavailable_violation();
             *body = Some(fit_to_original_length(
                 llm_error_envelope_bytes(Some(&violation)),
                 body_bytes.len(),
@@ -1192,6 +1221,19 @@ fn selector_matches_any_model(selector: &ppe::praxis_policy_core::config::String
     )
 }
 
+/// Whether an `llm:` selector is the near miss: a list containing `"*"`.
+///
+/// The engine matches a list selector by exact name, so such a route
+/// selects only a model literally named `*` — it is not a catch-all, and
+/// an operator who wrote it deserves to be told why.
+fn selector_lists_any_model_literal(selector: &ppe::praxis_policy_core::config::StringOrList) -> bool {
+    matches!(
+        selector,
+        ppe::praxis_policy_core::config::StringOrList::List(patterns)
+            if patterns.iter().any(|pattern| pattern.as_str() == "*")
+    )
+}
+
 /// Render a validated claim into the identity projection's string format.
 ///
 /// Strings remain unquoted; other values use compact JSON.
@@ -1214,14 +1256,20 @@ struct InferenceRequest {
     streaming: bool,
 }
 
-/// Stand-in for a body-less request, so the parser can be handed a
-/// `&Bytes` without allocating per request.
-static EMPTY_BODY: Bytes = Bytes::new();
-
 /// The violation reported when a policy declares `llm:` routes and the
 /// request body carries no usable model.
 fn missing_model_violation() -> PluginViolation {
     PluginViolation::new("llm.model_missing", "request body carries no usable top-level `model`")
+}
+
+/// The violation reported when the response phase cannot find the
+/// identity the request phase stashed. Shared by the MCP and inference
+/// post paths, which both fail closed on it.
+fn post_phase_identity_unavailable_violation() -> PluginViolation {
+    PluginViolation::new(
+        "identity.post_phase_unavailable",
+        "no request-phase identity available for response processing",
+    )
 }
 
 #[async_trait]
@@ -1659,10 +1707,7 @@ impl HttpFilter for PolicyFilter {
                  (replacing response body with deny envelope)",
             );
             let request_id = parsed.id_value();
-            let violation = PluginViolation::new(
-                "identity.post_phase_unavailable",
-                "no request-phase identity available for response processing",
-            );
+            let violation = post_phase_identity_unavailable_violation();
             let envelope = json_rpc_error_envelope_bytes(Some(&violation), &request_id);
             *body = Some(fit_to_original_length(
                 envelope,
