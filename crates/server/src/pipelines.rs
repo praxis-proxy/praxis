@@ -69,19 +69,6 @@ pub fn build_subrequest_client(config: &Config) -> SubRequestClient {
     SubRequestClient::with_max_response_bytes(connector, ceiling)
 }
 
-/// Register the connector the policy engine's outbound calls borrow.
-///
-/// Call before resolving pipelines because filter initialization may issue
-/// policy HTTP requests.
-#[cfg(feature = "policy-engine")]
-fn register_policy_connector(client: &SubRequestClient) {
-    praxis_filter::set_policy_subrequest_connector(client.connector());
-}
-
-/// No policy engine is compiled in, so there is nothing to register.
-#[cfg(not(feature = "policy-engine"))]
-fn register_policy_connector(_client: &SubRequestClient) {}
-
 // -----------------------------------------------------------------------------
 // Pipeline Resolution
 // -----------------------------------------------------------------------------
@@ -165,8 +152,11 @@ pub(crate) fn resolve_pipelines_with_composition(
 ) -> Result<ListenerPipelines, Box<dyn std::error::Error + Send + Sync>> {
     // Before any pipeline is built: a policy filter fetches JWKS while it is
     // being constructed below. This sits here rather than in the wrapper so
-    // the composition path registers too.
-    register_policy_connector(subrequest_client);
+    // the composition path registers too. Unconditional: the setter is a no-op
+    // without `policy-engine`, and gating it on this crate's own feature missed
+    // builds where a dependency turned the filter on through feature
+    // unification.
+    praxis_filter::set_policy_subrequest_connector(subrequest_client.connector());
 
     let chains: HashMap<&str, &[_]> = config
         .filter_chains

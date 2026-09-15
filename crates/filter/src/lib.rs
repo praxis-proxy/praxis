@@ -58,6 +58,7 @@ pub(crate) mod load_balancing;
 mod metrics;
 pub(crate) mod path_match;
 mod pipeline;
+mod policy_connector;
 mod registry;
 mod results;
 pub mod sse;
@@ -78,9 +79,7 @@ pub use builtins::{
     normalize_rewritten_path,
 };
 #[cfg(feature = "policy-engine")]
-pub use builtins::{
-    PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory, set_policy_subrequest_connector,
-};
+pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{
     HttpFilterContext, PendingHeaderResult, Request, Response, StreamTermination, StreamTerminationCause,
@@ -102,6 +101,9 @@ pub use pipeline::{
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
     subrequest::{IterationState, NextIterationBody},
 };
+#[cfg(feature = "policy-engine")]
+pub use policy_connector::registered_policy_subrequest_connector;
+pub use policy_connector::set_policy_subrequest_connector;
 pub use praxis_core::{
     config::{FailureMode, FilterEntry},
     subrequest::{StreamLimits, StreamingSubResponse, SubRequest, SubResponse, SubResponseBody},

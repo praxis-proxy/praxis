@@ -50,6 +50,7 @@ path = "benches/router_lookup.rs"
 harness = false
 
 # Lets the policy filter be compiled into the benchmark binaries so the policy
-# hot path can be measured. Off by default, matching the filter crate.
+# hot path can be measured. Opted into explicitly so a plain bench build
+# stays lean; `make test-integration` builds these with --all-features.
 [features]
 policy-engine = ["praxis-filter/policy-engine"]

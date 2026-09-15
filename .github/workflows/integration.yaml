@@ -48,3 +48,9 @@ jobs:
 
       - name: Integration tests
         run: make test-integration
+
+      # Benches are compile-only here (never run), so skip them on PRs
+      # and only verify they still build on pushes to main.
+      - name: Build benches
+        if: ${{ github.event_name == 'push' }}
+        run: make build-benches

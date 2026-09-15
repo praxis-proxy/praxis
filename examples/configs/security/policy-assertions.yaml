@@ -1,4 +1,4 @@
-# Identity assertions at the wire boundary (experimental)
+# Identity assertions at the wire boundary
 #
 # Projects policy-derived identity into request headers and removes credentials
 # that should not reach the upstream.
@@ -10,11 +10,8 @@
 # These headers are unsigned and require a trusted proxy-to-upstream boundary.
 # Client values under asserted names are replaced rather than forwarded.
 #
-# Requires building with the `policy-engine` feature, which is off
-# by default:
-#
 # Usage:
-#   cargo run -p praxis-proxy --features policy-engine -- -c examples/configs/security/policy-assertions.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/security/policy-assertions.yaml
 
 listeners:
   - name: default

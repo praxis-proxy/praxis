@@ -14,7 +14,7 @@ publish = true
 name = "praxis_filter"
 
 [features]
-default = []
+default = ["policy-engine"]
 policy-engine = [
     "dep:ppe",
 ]
