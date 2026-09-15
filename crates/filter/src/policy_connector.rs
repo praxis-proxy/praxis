@@ -43,6 +43,17 @@ pub fn set_policy_subrequest_connector(connector: &SubRequestConnector) {
     let _ = connector;
 }
 
+/// The connector a host registered, if this build can hold one.
+///
+/// Exists so a host can verify its registration was retained. Not part of the
+/// stable API.
+#[cfg(feature = "policy-engine")]
+#[doc(hidden)]
+#[must_use]
+pub fn registered_policy_subrequest_connector() -> Option<SubRequestConnector> {
+    shared_policy_connector()
+}
+
 /// The registered connector and the slot holding it.
 ///
 /// Gated so a policy-free build never stores a connector: a stored clone owns
@@ -140,10 +151,6 @@ mod storage {
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests {
-    /// The policy-free build keeps the hook callable — a host registers without
-    /// knowing whether feature unification turned the engine on. There is
-    /// nothing to observe afterwards: the storage module is compiled out, so
-    /// the connector is dropped here rather than parked in a static.
     #[cfg(not(feature = "policy-engine"))]
     #[test]
     fn registering_without_the_policy_engine_is_accepted_and_stores_nothing() {

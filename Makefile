@@ -126,6 +126,7 @@ release:
 check:
 	cargo check --workspace
 	cargo check -p praxis-proxy --no-default-features
+	cargo check -p praxis-proxy --no-default-features --features config-reload,admin-api
 	cargo check -p praxis-proxy-filter --no-default-features
 
 clean:
@@ -251,7 +252,9 @@ container-run: | require-container-engine
 #   test-conformance  RFC conformance (needs the h2spec binary)
 test: test-unit
 
-# Everything outside tests/, one pass, every feature on.
+# Everything outside tests/, one pass, every feature on, then the filter
+# crate's lean config: --all-features compiles out the tests that only exist
+# without `policy-engine`, so nothing else ever runs them.
 test-unit:
 	cargo test --workspace --all-features \
 		--exclude praxis-tests-schema \
@@ -262,6 +265,7 @@ test-unit:
 		--exclude praxis-test-utils \
 		--exclude praxis-tests-benches \
 		$(_NOCAPTURE)
+	cargo test -p praxis-proxy-filter --no-default-features $(_NOCAPTURE)
 
 test-schema:
 	cargo test -p praxis-tests-schema $(_NOCAPTURE)
@@ -317,6 +321,7 @@ bench: $(VEGETA) $(FORTIO_DEP)
 lint:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cargo clippy -p praxis-proxy --no-default-features --all-targets -- -D warnings
+	cargo clippy -p praxis-proxy --no-default-features --features config-reload,admin-api --all-targets -- -D warnings
 	cargo clippy -p praxis-proxy-filter --no-default-features --all-targets -- -D warnings
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
 	cargo machete

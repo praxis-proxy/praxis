@@ -27,6 +27,8 @@ use crate::startup_checks::insecure_warn;
 use crate::startup_checks::warn_admin_configured_without_feature;
 #[cfg(feature = "experimental")]
 use crate::startup_checks::warn_experimental_features;
+#[cfg(not(feature = "policy-engine"))]
+use crate::startup_checks::warn_policy_filter_without_feature;
 use crate::{
     composition::{PipelineComposition, RegistryContext, ServerComposition},
     pipelines::resolve_pipelines_with_composition,
@@ -251,6 +253,8 @@ fn build_server_state(
     // reuse it across reloads. The factory is synchronous and side-effect-free.
     let (registry_factory, pipeline_composition) = composition.into_parts();
     let registry = registry_factory(&RegistryContext::new(&subrequest_client)).unwrap_or_else(|e| fatal(&e));
+    #[cfg(not(feature = "policy-engine"))]
+    warn_policy_filter_without_feature(&registry);
 
     let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
 
