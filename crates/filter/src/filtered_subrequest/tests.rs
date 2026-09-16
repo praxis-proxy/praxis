@@ -643,6 +643,301 @@ async fn run_returns_buffered_for_locally_produced_response() {
     );
 }
 
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_falls_back_to_next_staged_address_on_connection_refusal() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    // A hostname that resolved to several addresses stages the full validated
+    // set alongside the pinned primary. The low-level transport dials each in
+    // turn until one connects; the executor must preserve that fallback rather
+    // than giving up after the first refusal. Bind then drop a listener to
+    // obtain an address that is guaranteed unused (refuses connections), and
+    // spawn a live backend as the second address.
+    let dead = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let (live_addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+
+    // The outbound chain carries no upstream-selecting filter: the destination
+    // is seeded from the staged upstream, so the chain runs the request straight
+    // to transport against the staged address set.
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("[]").unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    // Pin the primary address to the dead endpoint (as `from_prepared_target`
+    // would) and stage the whole resolver-ordered set so the executor can
+    // advance past the refusal to the live backend without re-resolving DNS.
+    let staged = super::StagedUpstream(praxis_core::connectivity::Upstream {
+        address: Arc::from(dead.to_string().as_str()),
+        authority: None,
+        connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+    });
+    let fallback = super::StagedUpstreamFallback(vec![dead, live_addr]);
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(staged);
+    extensions.insert(fallback);
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let response = match executor
+        .run(&pipeline, &request, extensions, deadline)
+        .await
+        .expect("run should fall back to the live address and return its response")
+    {
+        crate::CalloutResponse::Buffered(response) => response,
+        crate::CalloutResponse::Streaming { .. } => {
+            panic!("a buffered outbound chain must not produce a streaming response")
+        },
+    };
+    backend.abort();
+
+    assert_eq!(
+        response.status, 200,
+        "a connection refusal on the pinned primary must fall back to the next \
+         validated address, whose live backend returns 200"
+    );
+    assert_eq!(
+        response.body,
+        bytes::Bytes::from_static(b"ok"),
+        "the response must come from the live fallback backend"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// StagedUpstream / StagedUpstreamFallback::from_prepared_target
+// ---------------------------------------------------------------------------
+//
+// IP-literal URLs skip DNS, so these constructor tests are hermetic. The
+// zero-address error branch in `StagedUpstream::from_prepared_target` (mod.rs)
+// is deliberately not exercised: it is unreachable through the public API. The
+// only public constructor of `PreparedTarget` is `prepare_url_target`, which
+// returns `Err(UrlTargetError::Resolve(Empty))` before building the target when
+// resolution yields no addresses, and `PreparedTarget::new` is `pub(crate)`.
+// The branch is retained as defense in depth; reaching it would require adding
+// test-only public surface to `praxis-core`.
+
+#[tokio::test]
+async fn staged_upstream_from_prepared_target_non_tls_has_no_tls() {
+    use std::time::{Duration, Instant};
+
+    // A plain-`http` target must pin the transport address to the first
+    // resolved address, carry the URL authority as the HTTP `Host`, and derive
+    // no TLS material.
+    let target = praxis_core::connectivity::prepare_url_target(
+        "http://127.0.0.1:9/health",
+        Instant::now() + Duration::from_secs(5),
+        |_addrs| Ok(()),
+    )
+    .await
+    .expect("preparing an IP-literal http URL must succeed");
+
+    let staged = super::StagedUpstream::from_prepared_target(&target)
+        .expect("a target with a resolved address must build a staged upstream");
+
+    assert_eq!(
+        &*staged.0.address, "127.0.0.1:9",
+        "the transport address must pin to the target's first resolved address"
+    );
+    assert_eq!(
+        staged.0.authority.as_ref().expect("Host authority must be set"),
+        "127.0.0.1:9",
+        "the Host authority must be the URL authority"
+    );
+    assert!(
+        staged.0.tls.is_none(),
+        "a plain-http target must derive no TLS material"
+    );
+}
+
+#[tokio::test]
+async fn staged_upstream_from_prepared_target_tls_derives_sni() {
+    use std::time::{Duration, Instant};
+
+    // An `https` target must derive cached TLS material whose SNI is the URL
+    // host.
+    let target = praxis_core::connectivity::prepare_url_target(
+        "https://127.0.0.1:8443/v1/messages",
+        Instant::now() + Duration::from_secs(5),
+        |_addrs| Ok(()),
+    )
+    .await
+    .expect("preparing an IP-literal https URL must succeed");
+
+    let staged =
+        super::StagedUpstream::from_prepared_target(&target).expect("a TLS target must build a staged upstream");
+
+    assert_eq!(&*staged.0.address, "127.0.0.1:8443");
+    let tls = staged
+        .0
+        .tls
+        .as_ref()
+        .expect("an https target must derive cached TLS material");
+    assert_eq!(tls.sni(), Some("127.0.0.1"), "the derived SNI must be the URL host");
+}
+
+#[tokio::test]
+async fn staged_upstream_fallback_from_prepared_target_captures_addresses() {
+    use std::time::{Duration, Instant};
+
+    // The fallback set must mirror the target's resolved addresses in resolver
+    // order (a single IP literal here), so the executor can advance the DNS
+    // fallback without re-resolving.
+    let target = praxis_core::connectivity::prepare_url_target(
+        "http://127.0.0.1:9/health",
+        Instant::now() + Duration::from_secs(5),
+        |_addrs| Ok(()),
+    )
+    .await
+    .expect("preparing an IP-literal http URL must succeed");
+
+    let fallback = super::StagedUpstreamFallback::from_prepared_target(&target);
+
+    assert_eq!(
+        fallback.addresses(),
+        target.addresses(),
+        "the fallback set must capture the target's resolved addresses in order"
+    );
+    assert_eq!(
+        fallback.addresses(),
+        &["127.0.0.1:9".parse::<std::net::SocketAddr>().unwrap()],
+        "an IP-literal target must resolve to exactly its literal address"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test Utilities: upstream re-pin regression harness
+// ---------------------------------------------------------------------------
+
+// A malicious outbound-chain filter that rewrites `ctx.upstream` during the
+// request phase to redirect the callout at a different authority — the exact
+// credential-exfiltration move the executor's post-request re-pin defeats.
+struct UpstreamHijackFilter {
+    redirect_to: std::net::SocketAddr,
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for UpstreamHijackFilter {
+    fn name(&self) -> &'static str {
+        "test_upstream_hijack"
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        ctx.upstream = Some(praxis_core::connectivity::Upstream {
+            address: std::sync::Arc::from(self.redirect_to.to_string().as_str()),
+            authority: None,
+            connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_re_pins_staged_upstream_over_chain_filter_rewrite() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    // Two distinguishable live backends: the staged destination and the
+    // attacker's. The outbound chain filter rewrites `ctx.upstream` to the
+    // attacker during `on_request`; the executor's post-request re-pin must
+    // restore the staged address, so the response can only come from the staged
+    // backend. Without the re-pin, the callout would dial the attacker and
+    // return "hijack" — the credential-exfiltration path the invariant blocks.
+    let (staged_addr, staged_backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nstaged").await;
+    let (attacker_addr, attacker_backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nhijack").await;
+
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_upstream_hijack",
+            crate::FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(UpstreamHijackFilter {
+                    redirect_to: attacker_addr,
+                }))
+            })),
+        )
+        .unwrap();
+
+    // The outbound chain carries only the hijack filter: the destination is
+    // seeded from the staged upstream, and the re-pin overrides whatever the
+    // chain wrote before transport.
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("- filter: test_upstream_hijack").unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    let staged = super::StagedUpstream(praxis_core::connectivity::Upstream {
+        address: Arc::from(staged_addr.to_string().as_str()),
+        authority: None,
+        connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+    });
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(staged);
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let response = match executor
+        .run(&pipeline, &request, extensions, deadline)
+        .await
+        .expect("run should dial the staged address and return its response")
+    {
+        crate::CalloutResponse::Buffered(response) => response,
+        crate::CalloutResponse::Streaming { .. } => {
+            panic!("a buffered outbound chain must not produce a streaming response")
+        },
+    };
+    staged_backend.abort();
+    attacker_backend.abort();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body,
+        bytes::Bytes::from_static(b"staged"),
+        "the executor must re-pin the staged address after the request phase, so a \
+         chain filter's `ctx.upstream` rewrite cannot redirect the callout to the \
+         attacker backend"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test Utilities: session-store propagation recorder
 // ---------------------------------------------------------------------------
@@ -1472,6 +1767,83 @@ async fn run_streaming_yields_upstream_chunks_for_clean_eof() {
     backend.abort();
 
     assert_eq!(payload, b"hello", "the upstream chunk must be delivered on a clean EOF");
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_streaming_falls_back_to_next_staged_address_on_connection_refusal() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    // The streaming transport arm has its own peer loop and send path, distinct
+    // from the buffered arm, so it needs its own fallback regression (see
+    // `run_falls_back_to_next_staged_address_on_connection_refusal` for the
+    // buffered sibling). Bind then drop a listener for a guaranteed-unused
+    // address that refuses connections, and spawn a live chunked backend as the
+    // second staged address.
+    let dead = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let (live_addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+
+    // Select streaming mode but resolve no upstream through the chain: the
+    // destination is seeded from the staged upstream, so the streaming request
+    // runs straight to transport against the staged address set.
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("- filter: test_streaming_selector\n").unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let executor = streaming_executor(1_048_576);
+
+    // Pin the primary address to the dead endpoint and stage the whole
+    // resolver-ordered set so the streaming arm advances past the refusal to the
+    // live backend without re-resolving DNS.
+    let staged = super::StagedUpstream(praxis_core::connectivity::Upstream {
+        address: Arc::from(dead.to_string().as_str()),
+        authority: None,
+        connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+    });
+    let fallback = super::StagedUpstreamFallback(vec![dead, live_addr]);
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(staged);
+    extensions.insert(fallback);
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, extensions, deadline)
+        .await
+        .expect("streaming callout should fall back to the live address and open")
+    {
+        crate::CalloutResponse::Streaming { response, body } => {
+            assert_eq!(
+                response.status, 200,
+                "a connection refusal on the pinned primary must fall back to the \
+                 next validated address, whose live backend responds 200"
+            );
+            body
+        },
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+
+    let payload = drain(&mut body).await.expect("streaming body should drain cleanly");
+    backend.abort();
+
+    assert_eq!(
+        payload, b"hello",
+        "the streamed body must come from the live fallback backend"
+    );
 }
 
 #[tokio::test]

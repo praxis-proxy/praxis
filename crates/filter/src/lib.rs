@@ -95,7 +95,10 @@ pub use factory::{
     tcp_builtin,
 };
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
-pub use filtered_subrequest::{CalloutOutcome, CalloutResponse, FilteredSubrequestExecutor, SubrequestRuntime};
+pub use filtered_subrequest::{
+    CalloutOutcome, CalloutResponse, FilteredSubrequestExecutor, StagedUpstream, StagedUpstreamFallback,
+    SubrequestRuntime,
+};
 pub use pipeline::{
     FilterPipeline, PipelineExtension,
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
