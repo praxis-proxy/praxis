@@ -37,6 +37,14 @@ pub enum TlsError {
         path: String,
     },
 
+    /// TLS client configuration construction failed (e.g. malformed CA bundle,
+    /// client cert/key mismatch, or an unsupported protocol version).
+    #[error("TLS client config error: {detail}")]
+    ClientConfigError {
+        /// Underlying error description.
+        detail: String,
+    },
+
     /// `build_client_verifier` was called with `ClientCertMode::None`.
     #[error("build_client_verifier must not be called with client_cert_mode=None")]
     ClientVerifierNotRequired,

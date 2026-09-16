@@ -55,6 +55,14 @@ pub struct ListenerTls {
     #[serde(skip_serializing_if = "is_default_cert_mode")]
     pub client_cert_mode: ClientCertMode,
 
+    /// SPIFFE IDs authorized at a [`ClientCertMode::RequireNamed`] handshake.
+    ///
+    /// Empty accepts any valid X.509-SVID leaf the client CA vouches for.
+    /// Otherwise the peer's SPIFFE ID must be a member, matched exactly, trust
+    /// domain included. Only meaningful with `RequireNamed`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_spiffe_ids: Vec<String>,
+
     /// Certificate hot-reload via filesystem watching.
     ///
     /// Defaults to enabled for single-cert listeners (`None` is
@@ -89,6 +97,10 @@ struct ListenerTlsRaw {
     #[serde(default)]
     client_cert_mode: ClientCertMode,
 
+    /// SPIFFE IDs authorized at a `RequireNamed` handshake.
+    #[serde(default)]
+    trusted_spiffe_ids: Vec<String>,
+
     /// Enable certificate hot-reload.
     #[serde(default)]
     hot_reload: Option<bool>,
@@ -107,6 +119,7 @@ impl<'de> Deserialize<'de> for ListenerTls {
             cipher_suites: raw.cipher_suites,
             client_ca: raw.client_ca,
             client_cert_mode: raw.client_cert_mode,
+            trusted_spiffe_ids: raw.trusted_spiffe_ids,
             hot_reload: raw.hot_reload,
             min_version: raw.min_version,
         };
@@ -152,6 +165,7 @@ impl ListenerTls {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -213,6 +227,8 @@ impl ListenerTls {
             });
         }
 
+        self.validate_trusted_spiffe_ids()?;
+
         if self.hot_reload == Some(true) && self.certificates.len() > 1 {
             return Err(TlsError::HotReloadMultipleCerts);
         }
@@ -226,6 +242,30 @@ impl ListenerTls {
             }
         }
 
+        Ok(())
+    }
+
+    /// Validate the SPIFFE name allowlist.
+    ///
+    /// The allowlist is only consulted under [`ClientCertMode::RequireNamed`],
+    /// so a non-empty list under any other mode is rejected rather than left
+    /// silently unenforced. Each entry must be a leaf SPIFFE ID.
+    fn validate_trusted_spiffe_ids(&self) -> Result<(), TlsError> {
+        if self.trusted_spiffe_ids.is_empty() {
+            return Ok(());
+        }
+        if self.client_cert_mode != ClientCertMode::RequireNamed {
+            return Err(TlsError::ServerConfigError {
+                detail: "trusted_spiffe_ids requires client_cert_mode: require_named".to_owned(),
+            });
+        }
+        for (i, id) in self.trusted_spiffe_ids.iter().enumerate() {
+            if !crate::spiffe::is_leaf_spiffe_id(id) {
+                return Err(TlsError::ServerConfigError {
+                    detail: format!("trusted_spiffe_ids[{i}] '{id}' is not a valid leaf SPIFFE ID"),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -300,6 +340,15 @@ pub enum ClientCertMode {
 
     /// Require a valid client certificate; reject connections without one.
     Require,
+
+    /// Require a valid client certificate that names its bearer.
+    ///
+    /// The certificate must carry exactly one SPIFFE URI SAN. One
+    /// certificate authority signs every peer in a mesh, so a chain
+    /// that validates proves membership; the name is what tells two
+    /// members apart. Rejecting here ends the handshake, so an unnamed
+    /// peer never sends a request.
+    RequireNamed,
 }
 
 // -----------------------------------------------------------------------------
@@ -439,6 +488,61 @@ mod tests {
             ..ListenerTls::new_validated(&tmp.cert, &tmp.key).unwrap()
         };
         assert!(tls.validate().is_ok(), "mode=none should not require client_ca");
+    }
+
+    /// Build a validated listener with the given mode + allowlist over a real CA.
+    fn listener_with_allowlist(mode: ClientCertMode, ids: &[&str]) -> Result<(), TlsError> {
+        let tmp = temp_cert_key_ca();
+        let tls = ListenerTls {
+            client_ca: Some(CaConfig {
+                ca_path: tmp.ca.clone(),
+                crl_paths: Vec::new(),
+            }),
+            client_cert_mode: mode,
+            trusted_spiffe_ids: ids.iter().map(|s| (*s).to_owned()).collect(),
+            ..ListenerTls::new_validated(&tmp.cert, &tmp.key).unwrap()
+        };
+        tls.validate()
+    }
+
+    #[test]
+    fn require_named_with_a_valid_allowlist_is_accepted() {
+        listener_with_allowlist(
+            ClientCertMode::RequireNamed,
+            &[
+                "spiffe://grid.internal/site/pool-a",
+                "spiffe://grid.internal/site/pool-b",
+            ],
+        )
+        .expect("a valid allowlist under require_named validates");
+    }
+
+    #[test]
+    fn require_named_with_an_empty_allowlist_is_accepted() {
+        listener_with_allowlist(ClientCertMode::RequireNamed, &[])
+            .expect("an empty allowlist under require_named is the accept-any default");
+    }
+
+    #[test]
+    fn an_allowlist_without_require_named_is_rejected() {
+        let err = listener_with_allowlist(ClientCertMode::Require, &["spiffe://grid.internal/site/pool-a"])
+            .expect_err("an allowlist under a non-require_named mode is rejected");
+        assert!(
+            err.to_string().contains("require_named"),
+            "error should point at require_named: {err}"
+        );
+    }
+
+    #[test]
+    fn an_invalid_id_in_the_allowlist_is_rejected() {
+        // A bare trust domain is a valid SPIFFE ID but not a leaf (no path),
+        // so it cannot name a workload and is rejected.
+        let err = listener_with_allowlist(ClientCertMode::RequireNamed, &["spiffe://grid.internal"])
+            .expect_err("a non-leaf SPIFFE ID is rejected");
+        assert!(
+            err.to_string().contains("not a valid leaf SPIFFE ID"),
+            "error should explain the invalid leaf id: {err}"
+        );
     }
 
     #[test]

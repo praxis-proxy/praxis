@@ -149,7 +149,8 @@ impl VerifierState {
     /// Build a state from a verifier and the mode it was built with.
     pub(crate) fn new(verifier: Arc<dyn ClientCertVerifier>, mode: ClientCertMode) -> Self {
         Self {
-            mandatory: mode == ClientCertMode::Require,
+            // RequireNamed also mandates a cert, else a certless peer passes on reload.
+            mandatory: matches!(mode, ClientCertMode::Require | ClientCertMode::RequireNamed),
             verifier,
         }
     }
@@ -176,12 +177,14 @@ impl VerifierState {
 ///     "/etc/ssl/client-ca.pem",
 ///     ClientCertMode::Require,
 ///     &[],
+///     &[],
 /// )?;
 /// // Later, when CRL changes:
 /// verifier.reload(
 ///     "/etc/ssl/client-ca.pem",
 ///     ClientCertMode::Require,
 ///     &["/etc/ssl/crl.pem".to_owned()],
+///     &[],
 /// )?;
 /// ```
 ///
@@ -205,8 +208,13 @@ impl ReloadableClientVerifier {
     /// Returns [`TlsError`] if the CA or CRL files cannot be loaded.
     ///
     /// [`TlsError`]: crate::TlsError
-    pub fn new(ca_path: &str, mode: ClientCertMode, crl_paths: &[String]) -> Result<Self, TlsError> {
-        let verifier = client_auth::build_client_verifier(ca_path, mode, crl_paths)?;
+    pub fn new(
+        ca_path: &str,
+        mode: ClientCertMode,
+        crl_paths: &[String],
+        trusted_spiffe_ids: &[String],
+    ) -> Result<Self, TlsError> {
+        let verifier = client_auth::build_client_verifier(ca_path, mode, crl_paths, trusted_spiffe_ids)?;
         let root_hints = verifier.root_hint_subjects().to_vec();
         Ok(Self {
             inner: Arc::new(ArcSwap::from_pointee(VerifierState::new(verifier, mode))),
@@ -224,8 +232,15 @@ impl ReloadableClientVerifier {
     /// Returns [`TlsError`] if the CA or CRL files cannot be loaded.
     ///
     /// [`TlsError`]: crate::TlsError
-    pub fn reload(&self, ca_path: &str, mode: ClientCertMode, crl_paths: &[String]) -> Result<(), TlsError> {
-        let verifier = client_auth::build_client_verifier(ca_path, mode, crl_paths)?;
+    pub fn reload(
+        &self,
+        ca_path: &str,
+        mode: ClientCertMode,
+        crl_paths: &[String],
+        trusted_spiffe_ids: &[String],
+    ) -> Result<(), TlsError> {
+        let verifier = client_auth::build_client_verifier(ca_path, mode, crl_paths, trusted_spiffe_ids)?;
+        // Swap the whole state, so the id-set and roots replace atomically.
         self.inner.store(Arc::new(VerifierState::new(verifier, mode)));
         tracing::info!(ca_path, "client verifier hot-reloaded successfully");
         Ok(())
@@ -460,7 +475,7 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path");
 
-        let verifier = ReloadableClientVerifier::new(ca_path, ClientCertMode::Require, &[])
+        let verifier = ReloadableClientVerifier::new(ca_path, ClientCertMode::Require, &[], &[])
             .expect("valid CA should produce a verifier");
         assert!(
             verifier.client_auth_mandatory(),
@@ -479,7 +494,7 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path");
 
-        let verifier = ReloadableClientVerifier::new(ca_path, ClientCertMode::Request, &[])
+        let verifier = ReloadableClientVerifier::new(ca_path, ClientCertMode::Request, &[], &[])
             .expect("valid CA should produce a verifier");
         assert!(
             !verifier.client_auth_mandatory(),
@@ -493,11 +508,12 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path");
 
-        let verifier = ReloadableClientVerifier::new(ca_path, ClientCertMode::Request, &[]).expect("initial verifier");
+        let verifier =
+            ReloadableClientVerifier::new(ca_path, ClientCertMode::Request, &[], &[]).expect("initial verifier");
         assert!(!verifier.client_auth_mandatory(), "request mode starts non-mandatory");
 
         verifier
-            .reload(ca_path, ClientCertMode::Require, &[])
+            .reload(ca_path, ClientCertMode::Require, &[], &[])
             .expect("reload to require should succeed");
         assert!(
             verifier.client_auth_mandatory(),
@@ -505,7 +521,7 @@ mod tests {
         );
 
         verifier
-            .reload(ca_path, ClientCertMode::Request, &[])
+            .reload(ca_path, ClientCertMode::Request, &[], &[])
             .expect("reload back to request should succeed");
         assert!(
             !verifier.client_auth_mandatory(),
@@ -519,14 +535,15 @@ mod tests {
         let ca1 = gen_ca_file();
         let ca1_path = ca1.ca_path.to_str().expect("ca1 path");
 
-        let verifier = ReloadableClientVerifier::new(ca1_path, ClientCertMode::Require, &[]).expect("initial verifier");
+        let verifier =
+            ReloadableClientVerifier::new(ca1_path, ClientCertMode::Require, &[], &[]).expect("initial verifier");
         let schemes_before = verifier.supported_verify_schemes();
 
         let ca2 = gen_ca_file();
         let ca2_path = ca2.ca_path.to_str().expect("ca2 path");
 
         verifier
-            .reload(ca2_path, ClientCertMode::Require, &[])
+            .reload(ca2_path, ClientCertMode::Require, &[], &[])
             .expect("reload should succeed");
         let schemes_after = verifier.supported_verify_schemes();
 
@@ -542,10 +559,11 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path");
 
-        let verifier = ReloadableClientVerifier::new(ca_path, ClientCertMode::Require, &[]).expect("initial verifier");
+        let verifier =
+            ReloadableClientVerifier::new(ca_path, ClientCertMode::Require, &[], &[]).expect("initial verifier");
         let hints_before = verifier.root_hint_subjects().len();
 
-        let err = verifier.reload("/nonexistent/ca.pem", ClientCertMode::Require, &[]);
+        let err = verifier.reload("/nonexistent/ca.pem", ClientCertMode::Require, &[], &[]);
         assert!(err.is_err(), "reload with bad path should fail");
         assert_eq!(
             verifier.root_hint_subjects().len(),
@@ -564,7 +582,8 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path");
 
-        let verifier = ReloadableClientVerifier::new(ca_path, ClientCertMode::Require, &[]).expect("verifier creation");
+        let verifier =
+            ReloadableClientVerifier::new(ca_path, ClientCertMode::Require, &[], &[]).expect("verifier creation");
         let dbg = format!("{verifier:?}");
         assert!(
             dbg.contains("ReloadableClientVerifier"),
@@ -578,7 +597,8 @@ mod tests {
         let ca1 = gen_ca_file();
         let ca1_path = ca1.ca_path.to_str().expect("ca1 path");
 
-        let verifier = ReloadableClientVerifier::new(ca1_path, ClientCertMode::Require, &[]).expect("initial verifier");
+        let verifier =
+            ReloadableClientVerifier::new(ca1_path, ClientCertMode::Require, &[], &[]).expect("initial verifier");
         let handle = verifier.arc();
         let state_before = handle.load_full();
         assert!(
@@ -589,7 +609,7 @@ mod tests {
         let ca2 = gen_ca_file();
         let ca2_path = ca2.ca_path.to_str().expect("ca2 path");
         verifier
-            .reload(ca2_path, ClientCertMode::Require, &[])
+            .reload(ca2_path, ClientCertMode::Require, &[], &[])
             .expect("reload should succeed");
 
         let state_after = handle.load_full();

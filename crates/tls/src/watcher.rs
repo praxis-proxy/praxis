@@ -61,6 +61,10 @@ pub struct ClientVerifierReload {
     /// Client certificate verification mode.
     pub mode: ClientCertMode,
 
+    /// SPIFFE IDs authorized at a `RequireNamed` handshake. Empty accepts any
+    /// valid X.509-SVID leaf.
+    pub trusted_spiffe_ids: Vec<String>,
+
     /// Handle to atomically swap the inner verifier state.
     pub swap_handle: Arc<ArcSwap<crate::reload::VerifierState>>,
 }
@@ -341,7 +345,7 @@ fn reload_client_verifier(reload: Option<&ClientVerifierReload>) -> bool {
         return true;
     };
 
-    match crate::client_auth::build_client_verifier(&cfg.ca_path, cfg.mode, &cfg.crl_paths) {
+    match crate::client_auth::build_client_verifier(&cfg.ca_path, cfg.mode, &cfg.crl_paths, &cfg.trusted_spiffe_ids) {
         Ok(verifier) => {
             cfg.swap_handle
                 .store(Arc::new(crate::reload::VerifierState::new(verifier, cfg.mode)));
@@ -649,13 +653,14 @@ mod tests {
         let ca_path = ca.ca_path.to_str().expect("ca path").to_owned();
         let ca_dir = parent_dir(&ca_path);
 
-        let verifier = crate::reload::ReloadableClientVerifier::new(&ca_path, ClientCertMode::Require, &[])
+        let verifier = crate::reload::ReloadableClientVerifier::new(&ca_path, ClientCertMode::Require, &[], &[])
             .expect("verifier creation");
 
         let reload = Some(ClientVerifierReload {
             ca_path: ca_path.clone(),
             crl_paths: vec!["/etc/ssl/crl.pem".to_owned()],
             mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
             swap_handle: verifier.arc(),
         });
 

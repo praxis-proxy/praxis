@@ -24,9 +24,13 @@ arc-swap = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 rustls = { workspace = true }
 serde = { workspace = true }
+spiffe = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"], optional = true }
 tracing = { workspace = true }
+# Parsing only: the `verify`/`ring` features stay off so all crypto goes through
+# the injected rustls provider (FIPS). Do not enable them here.
+x509-parser = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

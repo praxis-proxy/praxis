@@ -137,6 +137,7 @@ impl CaConfig {
             }
             warn_if_symlink(&field, crl_path);
         }
+
         Ok(())
     }
 }

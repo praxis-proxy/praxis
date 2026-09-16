@@ -3310,10 +3310,12 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde",
+ "spiffe",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "x509-parser",
  "yaml_serde",
  "zeroize",
 ]
@@ -4580,6 +4582,15 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spiffe"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7d0a770f9a8571eb96f9c319b3b55dd7118e3047bd3629b894882506b9e8295"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]

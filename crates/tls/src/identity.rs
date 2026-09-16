@@ -11,8 +11,6 @@
 /// authenticated peer without parsing certificates themselves.
 ///
 /// Fields are extracted from Pingora's SSL digest during request setup.
-/// SAN (Subject Alternative Name) and SPIFFE identity parsing are not
-/// yet included and are planned for a follow-up.
 ///
 /// ```
 /// use praxis_tls::TlsPeerIdentity;

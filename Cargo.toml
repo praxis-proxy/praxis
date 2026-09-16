@@ -83,6 +83,8 @@ subtle = "2.6.1"
 rcgen = "0.14.10"
 regex = "1.13.1"
 rustls = "0.23.45"
+x509-parser = "0.18.1"
+spiffe = { version = "0.16.1", default-features = false }
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 syn = { version = "3.0.5", features = ["full", "extra-traits", "visit"] }

@@ -132,8 +132,12 @@ pub fn build_reloadable_server_config(
         let ca_cfg = tls.client_ca.as_ref().ok_or(TlsError::MissingClientCa {
             mode: tls.client_cert_mode,
         })?;
-        let verifier =
-            crate::reload::ReloadableClientVerifier::new(&ca_cfg.ca_path, tls.client_cert_mode, &ca_cfg.crl_paths)?;
+        let verifier = crate::reload::ReloadableClientVerifier::new(
+            &ca_cfg.ca_path,
+            tls.client_cert_mode,
+            &ca_cfg.crl_paths,
+            &tls.trusted_spiffe_ids,
+        )?;
         let handle = verifier.arc();
         (builder.with_client_cert_verifier(Arc::new(verifier)), Some(handle))
     };
@@ -208,7 +212,12 @@ fn build_server_config_base(
         let ca_cfg = tls.client_ca.as_ref().ok_or(TlsError::MissingClientCa {
             mode: tls.client_cert_mode,
         })?;
-        let verifier = client_auth::build_client_verifier(&ca_cfg.ca_path, tls.client_cert_mode, &ca_cfg.crl_paths)?;
+        let verifier = client_auth::build_client_verifier(
+            &ca_cfg.ca_path,
+            tls.client_cert_mode,
+            &ca_cfg.crl_paths,
+            &tls.trusted_spiffe_ids,
+        )?;
         Ok(builder.with_client_cert_verifier(verifier))
     }
 }
@@ -349,6 +358,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -374,6 +384,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -407,6 +418,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -436,6 +448,7 @@ mod tests {
                 crl_paths: Vec::new(),
             }),
             client_cert_mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -461,6 +474,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: Some(TlsVersion::Tls13),
         };
@@ -485,6 +499,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -503,6 +518,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -526,6 +542,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -550,6 +567,7 @@ mod tests {
                 crl_paths: Vec::new(),
             }),
             client_cert_mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -568,6 +586,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: Some(TlsVersion::Tls13),
         };
@@ -594,6 +613,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -613,6 +633,7 @@ mod tests {
             cipher_suites: Some(vec![CipherSuiteId::Tls13Aes256GcmSha384]),
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -724,6 +745,7 @@ mod tests {
             cipher_suites: Some(vec![CipherSuiteId::Tls13Aes256GcmSha384]),
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -744,6 +766,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
@@ -771,6 +794,7 @@ mod tests {
             cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
             hot_reload: None,
             min_version: None,
         };
