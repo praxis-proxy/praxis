@@ -73,10 +73,13 @@
 //!   rather than installing one, so such a model would otherwise reach no rule at all. A catch-all `llm: "*"` route
 //!   makes every model selected, which is the other way to cover it.
 //! - **A body carrying no usable `model` is denied** (`llm.require_model`) rather than admitted unevaluated.
-//! - **A body carrying both a JSON-RPC envelope and a top-level `model` is denied** (`llm.ambiguous_entity`). Since
-//!   `mcp.method` is itself derived from the body by the classifier, such a request leaves it undecidable which entity
-//!   governs, and choosing either would apply a rule the operator did not write for it. A plain MCP request — no
-//!   top-level `model` — still takes the MCP path.
+//! - **A body carrying both a JSON-RPC envelope and a top-level `model` is denied** (`llm.ambiguous_entity`), whether
+//!   or not a classifier claimed it. Since `mcp.method` is itself derived from the body by the classifier, such a
+//!   request leaves it undecidable which entity governs, and choosing either would apply a rule the operator did not
+//!   write for it. A plain MCP request — no top-level `model` — still takes the MCP path, and an unclassified one still
+//!   reports the missing classifier rather than being read as an inference call.
+//! - **A body past `llm.max_request_bytes` is denied** (HTTP 413, `llm.body_too_large`). The pipeline keeps the largest
+//!   buffer any filter asked for, so the ceiling is re-checked against what arrived.
 //!
 //! This authorizes the APIs that name the model in the body — OpenAI chat and
 //! legacy completions, embeddings, and Anthropic messages. An API that names it
@@ -86,9 +89,10 @@
 //! denied for carrying none. Do not front one with this path; route it to a
 //! listener or chain that does not.
 //!
-//! A method that carries no body is not an inference call, so a discovery
+//! A request that carries no body is not an inference call, so a discovery
 //! `GET /v1/models` or a CORS preflight skips these gates. Identity still
-//! governs it.
+//! governs it. Both the method and the body have to agree — a `GET` that does
+//! carry a body is still evaluated, since some backends read one.
 //!
 //! See `examples/configs/security/policy-llm.yaml`.
 //!
@@ -173,6 +177,7 @@
 //! | Inference request with no usable `model` | The `pre_invocation` shape, with violation code `llm.model_missing` (`llm.require_model`, on by default). |
 //! | Inference request no `llm:` route selects | The same shape, with violation code `llm.no_route` (`llm.require_route`, on by default). |
 //! | Inference request carrying both entity coordinates | The same shape, with violation code `llm.ambiguous_entity`. |
+//! | Inference request past `llm.max_request_bytes` | HTTP 413 with the provider error envelope, violation code `llm.body_too_large`. |
 //! | Inference response the filter cannot read | The response body is replaced with the envelope, violation code `llm.response_unreadable`. |
 //!
 //! Any violation carrying a `proto_error_code` overrides `-32001` on the

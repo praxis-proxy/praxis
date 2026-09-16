@@ -352,8 +352,13 @@ impl PolicyFilter {
         let mcp_routes = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_PROMPT_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_RESOURCE_PRE_FETCH);
-        let llm_routes = mgr.has_hooks_for(HOOK_CMF_LLM_INPUT);
         let llm_post = mgr.has_hooks_for(HOOK_CMF_LLM_OUTPUT);
+        // Either half activates the inference path. A route declaring only
+        // `post_invocation` wires `cmf.llm_output` alone, and keying off the
+        // input hook would leave `entity_routes` false — so the request phase
+        // would never stash the model and the response phase would exit before
+        // dispatching. The policy would load and enforce nothing.
+        let llm_routes = mgr.has_hooks_for(HOOK_CMF_LLM_INPUT) || llm_post;
         let entity_routes = mcp_routes || llm_routes;
 
         // Fail-silent guard. A policy with both a `global` HTTP policy and
@@ -1177,7 +1182,7 @@ impl PolicyFilter {
     /// Whether the upstream is streaming this response as server-sent events.
     fn response_is_event_stream(ctx: &HttpFilterContext<'_>) -> bool {
         Self::response_header_value(ctx, &http::header::CONTENT_TYPE)
-            .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/event-stream"))
+            .is_some_and(|value| media_type_is(value, "text/event-stream"))
     }
 
     /// The response's `Content-Encoding`, when it names a real encoding.
@@ -1187,6 +1192,26 @@ impl PolicyFilter {
         Self::response_header_value(ctx, &http::header::CONTENT_ENCODING)
             .map(|value| value.trim().to_ascii_lowercase())
             .filter(|value| !value.is_empty() && value != "identity")
+    }
+
+    /// Reject a buffered inference body past the configured ceiling.
+    ///
+    /// `request_body_mode` asks the pipeline for that ceiling, but the
+    /// pipeline keeps the largest buffer any filter requested, so another
+    /// buffering filter can widen it. Re-check what actually arrived, or
+    /// the knob is a request rather than a bound.
+    fn reject_oversized_inference_body(&self, body: Option<&Bytes>) -> Option<Rejection> {
+        let len = body.map_or(0, Bytes::len);
+        if len <= self.cfg.llm.max_request_bytes {
+            return None;
+        }
+        tracing::warn!(
+            target: "policy.filter",
+            len,
+            ceiling = self.cfg.llm.max_request_bytes,
+            "inference request body exceeds `llm.max_request_bytes`; denying. Another filter in              the chain buffered more than this filter asked for.",
+        );
+        Some(oversized_body_rejection())
     }
 
     /// One response header as a string, when the response carries it.
@@ -1440,23 +1465,52 @@ fn llm_deny_body(violation: Option<&PluginViolation>, original_len: usize, reaso
     fit_to_original_length(chosen, original_len, "llm", reason)
 }
 
-/// Whether this request's method can carry a body at all, and so could
-/// be an inference call.
+/// Whether `header` names exactly `media_type`, ignoring any parameters
+/// and case.
 ///
-/// `DELETE` is included: it is unusual but permitted to carry one. The
-/// excluded methods are the ones for which a body is meaningless, so a
-/// discovery `GET` or a CORS preflight is never asked for a model.
-fn request_may_carry_a_body(ctx: &HttpFilterContext<'_>) -> bool {
-    !matches!(
+/// A prefix test would let a longer type that merely starts the same way
+/// — `text/event-streamx` — pass for the real one, which on the response
+/// path would skip the whole response half.
+fn media_type_is(header: &str, media_type: &str) -> bool {
+    header
+        .split(';')
+        .next()
+        .is_some_and(|essence| essence.trim().eq_ignore_ascii_case(media_type))
+}
+
+/// Whether this request carries no body, and so cannot be an inference
+/// call.
+///
+/// Both halves have to agree. The method must be one for which a body is
+/// meaningless — `DELETE` is excluded from that list, being unusual but
+/// permitted to carry one — and the body must actually be empty, because
+/// some backends read a body on `GET` and admitting one unevaluated would
+/// be a way past every inference gate.
+fn carries_no_body(ctx: &HttpFilterContext<'_>, body: Option<&Bytes>) -> bool {
+    let bodyless_method = matches!(
         ctx.request.method,
         http::Method::GET | http::Method::HEAD | http::Method::OPTIONS | http::Method::TRACE | http::Method::CONNECT
-    )
+    );
+    bodyless_method && body.is_none_or(Bytes::is_empty)
 }
 
 /// The violation reported when a policy declares `llm:` routes and the
 /// request body carries no usable model.
 fn missing_model_violation() -> PluginViolation {
     PluginViolation::new("llm.model_missing", "request body carries no usable top-level `model`")
+}
+
+/// Rejection for an inference body past `llm.max_request_bytes`. A real
+/// HTTP 413, since the client can act on it by sending less.
+fn oversized_body_rejection() -> Rejection {
+    let violation = PluginViolation::new(
+        "llm.body_too_large",
+        "inference request body exceeds the configured ceiling",
+    );
+    Rejection::status(413)
+        .with_header(VIOLATION_HEADER, violation.code.clone())
+        .with_header("Content-Type", "application/json")
+        .with_body(llm_error_envelope_bytes_within(Some(&violation), usize::MAX))
 }
 
 /// The violation reported when no `llm:` route selects the model.
@@ -1646,30 +1700,62 @@ impl HttpFilter for PolicyFilter {
         // intentionally running this policy for identity-only enforcement can
         // opt out via `require_protocol_metadata: false`.
         let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
-            // A request whose method carries no body is not an inference call,
-            // so the inference gates do not apply to it — a discovery call like
+            // A request carrying no body is not an inference call, so the
+            // inference gates do not apply to it — a discovery call like
             // `GET /v1/models`, or a CORS preflight, would otherwise be refused
-            // for carrying no model. Identity still governs it.
-            if self.llm_routes && !request_may_carry_a_body(ctx) {
+            // for carrying no model. Identity still governs it. Both the method
+            // and the body have to agree: some backends read a body on `GET`,
+            // and admitting one unevaluated would be a way past every gate.
+            if self.llm_routes
+                && let Some(rejection) = self.reject_oversized_inference_body(body.as_ref())
+            {
+                return Ok(FilterAction::Reject(rejection));
+            }
+            if self.llm_routes && carries_no_body(ctx, body.as_ref()) {
                 tracing::trace!(
                     target: "policy.filter",
-                    "request method carries no body; no inference dispatch",
+                    "request carries no body; no inference dispatch",
                 );
                 return self.complete_gated_admission(ctx).await;
             }
-            // Classifier metadata wins where it exists, so the inference path
-            // is only reached for traffic no classifier claimed.
-            if self.llm_routes {
-                let parsed = ParsedLlmRequest::parse(body.as_ref().unwrap_or(&EMPTY_BODY));
-                if let Some(model) = parsed.model().map(str::to_owned) {
-                    return Box::pin(self.dispatch_llm_request(ctx, &parsed, model)).await;
+
+            // No classifier claimed this request, so the filter attributes the
+            // body itself. A JSON-RPC envelope means it should have been
+            // claimed: with a `model` too it is ambiguous, and without one it is
+            // an MCP call the classifier missed. Neither is ours to authorize as
+            // an inference call.
+            let parsed = self
+                .llm_routes
+                .then(|| ParsedLlmRequest::parse(body.as_ref().unwrap_or(&EMPTY_BODY)));
+            let carries_envelope = parsed.as_ref().is_some_and(ParsedLlmRequest::carries_json_rpc_envelope);
+
+            if let Some(parsed) = parsed.as_ref() {
+                match (carries_envelope, parsed.model().map(str::to_owned)) {
+                    (true, Some(_)) => {
+                        tracing::warn!(
+                            target: "policy.filter",
+                            "request carries both a JSON-RPC envelope and a top-level `model` and no \
+                             classifier claimed it; denying (fail-closed) rather than choosing \
+                             between the MCP and inference entity",
+                        );
+                        return Ok(FilterAction::Reject(llm_deny_rejection(Some(
+                            &ambiguous_entity_violation(),
+                        ))));
+                    },
+                    (false, Some(model)) => {
+                        return Box::pin(self.dispatch_llm_request(ctx, parsed, model)).await;
+                    },
+                    // An envelope with no model falls through to the classifier
+                    // gate, which is the accurate diagnosis for it.
+                    (_, None) => {},
                 }
             }
-            // A policy that also declares `llm:` routes cannot tell a broken
-            // chain from a request that simply is not an MCP call, so the more
-            // specific missing-model verdict wins over the classifier
-            // diagnosis. A pure MCP policy still fails closed on the chain.
-            if self.mcp_routes && !self.llm_routes && self.cfg.require_protocol_metadata {
+
+            // A body carrying an envelope is one the classifier should have
+            // claimed, so report the chain. A policy with `llm:` routes whose
+            // body carries no envelope gets the more specific missing-model
+            // verdict below instead.
+            if self.mcp_routes && (!self.llm_routes || carries_envelope) && self.cfg.require_protocol_metadata {
                 tracing::error!(
                     target: "policy.filter",
                     "policy declares entity routes (tool/prompt/resource) which require a protocol \

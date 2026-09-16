@@ -62,6 +62,18 @@ impl ParsedLlmRequest {
             .filter(|model| !model.is_empty() && model.len() <= MAX_MODEL_BYTES && !model.chars().any(char::is_control))
     }
 
+    /// Whether the body carries a JSON-RPC envelope, and so is a request
+    /// some classifier should have claimed rather than an inference call.
+    ///
+    /// Either marker counts. A body with both an envelope and a `model`
+    /// is ambiguous; one with an envelope and no `model` is an MCP call
+    /// the classifier did not attribute.
+    pub(super) fn carries_json_rpc_envelope(&self) -> bool {
+        ["jsonrpc", "method"]
+            .iter()
+            .any(|key| self.0.get(key).is_some_and(serde_json::Value::is_string))
+    }
+
     /// Whether the caller asked for a streamed response. Read here
     /// because the upstream may ignore the flag and answer either way.
     ///

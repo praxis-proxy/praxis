@@ -3866,6 +3866,49 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+
+/// Write a policy whose `llm:` route declares only `post_invocation`, so
+/// only `cmf.llm_output` is wired. Such a policy must still activate the
+/// inference path, or it loads and enforces nothing.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_llm_post_only_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+routes:
+  - llm: "*"
+    authorization:
+      post_invocation:
+        - "completion.tokens.total > 100: deny('completion too long', 'completion_too_long')"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
 /// Write a policy document with a field mutator on an `llm:` route, in
 /// both directions. The inference path cannot round-trip a body, so the
 /// mutator must be inert rather than half-applied.
@@ -4733,6 +4776,199 @@ async fn a_field_mutator_leaves_an_inference_response_untouched() {
         body,
         bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()),
         "the client must receive the upstream body, not a partial redaction",
+    );
+}
+
+
+/// An `llm:` route declaring only `post_invocation` wires just
+/// `cmf.llm_output`, and must still activate the inference path. Keying
+/// activation off the input hook alone left `entity_routes` false, so the
+/// request phase never stashed the model and the response phase exited
+/// before dispatching — the policy loaded and enforced nothing.
+#[test]
+fn a_post_only_inference_policy_is_active() {
+    let (_dir, path) = write_llm_post_only_config();
+    let filter = build_read_write_filter(path);
+    assert_eq!(
+        filter.derived_shape(),
+        (false, true),
+        "a post-only `llm:` policy declares entity routes, so authorization belongs at the body phase",
+    );
+    assert_eq!(filter.derived_llm_shape(), (true, true));
+}
+
+/// And it enforces end to end: the request is admitted, the completion is
+/// evaluated, and an over-budget one is denied.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_only_inference_policy_denies_an_over_budget_completion() {
+    let (_dir, path) = write_llm_post_only_config();
+    let filter = build_read_write_filter(path);
+
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        OVER_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("deny body is JSON");
+    assert_eq!(
+        parsed["error"]["code"], "completion_too_long",
+        "a post-only policy must reach its response rule; got {body:?}",
+    );
+}
+
+/// With no classifier metadata, a JSON-RPC body carrying a top-level
+/// `model` must not be authorized as an inference call. Reaching the LLM
+/// path here would step around the classifier gate that exists to catch a
+/// missing or misordered classifier.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unclassified_json_rpc_body_with_a_model_is_denied() {
+    let (_dir, path) = write_llm_and_tool_config();
+    let filter = build_filter(path);
+
+    let action = dispatch_inference_as(
+        &filter,
+        "alice",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"},"model":"allowed-model"}"#,
+    )
+    .await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("an unclassified body carrying both coordinates must be denied; got {action:?}");
+    };
+    assert!(
+        has_header(&rejection, "x-policy-violation", "llm.ambiguous_entity"),
+        "the deny must name the ambiguity rather than authorizing the model; got {:?}",
+        rejection.headers,
+    );
+}
+
+/// A JSON-RPC body with no `model` and no classifier metadata is an MCP
+/// call the classifier failed to claim, so a mixed policy reports the
+/// chain rather than the more specific missing-model verdict.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unclassified_json_rpc_body_reports_the_classifier() {
+    let (_dir, path) = write_llm_and_tool_config();
+    let filter = build_filter(path);
+
+    let action = dispatch_inference_as(
+        &filter,
+        "alice",
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#,
+    )
+    .await;
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 500),
+        "a mixed policy must still fail closed on a missing classifier; got {action:?}",
+    );
+}
+
+/// A bodyless method carrying a body is still an inference call. Some
+/// backends read a body on `GET`, so classifying by method alone would
+/// admit one past every gate.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_get_carrying_a_body_is_still_evaluated() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::GET, "/v1/chat/completions");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    let mut body = Some(bytes::Bytes::from_static(br#"{"model":"other-model","messages":[]}"#));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("filter ran");
+    let FilterAction::Reject(rejection) = action else {
+        panic!("a GET carrying a model must be evaluated, not waved through; got {action:?}");
+    };
+    assert!(
+        has_header(&rejection, "x-policy-violation", "model_not_allowed"),
+        "the catch-all must decide it; got {:?}",
+        rejection.headers,
+    );
+}
+
+/// A content type that merely starts with the SSE type is not SSE. A
+/// prefix test let an upstream skip the whole response half by naming
+/// `text/event-streamx`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_type_sharing_the_sse_prefix_is_not_treated_as_sse() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_read_write_filter(path);
+
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        OVER_BUDGET_RESPONSE,
+        "text/event-streamx",
+    )
+    .await;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("deny body is JSON");
+    assert_eq!(
+        parsed["error"]["code"], "completion_too_long",
+        "only the real SSE type may skip the response half; got {body:?}",
+    );
+}
+
+/// The real SSE type still skips it, parameters and casing included.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sse_type_skips_the_response_half_with_parameters() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_read_write_filter(path);
+
+    for content_type in [
+        "text/event-stream",
+        "text/event-stream; charset=utf-8",
+        "TEXT/EVENT-STREAM",
+    ] {
+        let body = inference_round_trip(
+            &filter,
+            r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+            OVER_BUDGET_RESPONSE,
+            content_type,
+        )
+        .await;
+        assert_eq!(
+            body,
+            bytes::Bytes::from_static(OVER_BUDGET_RESPONSE.as_bytes()),
+            "content type {content_type} names SSE, so the response half must stand aside",
+        );
+    }
+}
+
+/// The ceiling is re-checked against what arrived, not just requested of
+/// the pipeline: the pipeline keeps the largest buffer any filter asked
+/// for, so another filter can widen it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_past_the_inference_ceiling_is_rejected() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            max_request_bytes: 64,
+            ..Default::default()
+        },
+    );
+
+    let padding = "x".repeat(256);
+    let body = format!(r#"{{"model":"allowed-model","messages":[],"pad":"{padding}"}}"#);
+    let action = dispatch_inference_as(&filter, "alice", &body).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("a body past the ceiling must be rejected; got {action:?}");
+    };
+    assert_eq!(rejection.status, 413, "the client can act on this by sending less");
+    assert!(
+        has_header(&rejection, "x-policy-violation", "llm.body_too_large"),
+        "got {:?}",
+        rejection.headers,
     );
 }
 

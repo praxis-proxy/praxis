@@ -151,9 +151,13 @@ pub(crate) struct LlmOptions {
     /// base64 images, long chat histories, and large embeddings inputs
     /// are the ones that run large.
     ///
-    /// A body over the ceiling is rejected before any filter runs, which
-    /// is the fail-closed answer for one the filter cannot read a model
-    /// from.
+    /// A body over the ceiling is rejected — normally by the pipeline
+    /// before any filter runs, and otherwise by this filter, which
+    /// re-checks what actually arrived. The re-check matters because the
+    /// pipeline keeps the largest buffer any filter asked for, so another
+    /// buffering filter in the chain would otherwise widen this one.
+    /// Either way an HTTP 413 is the fail-closed answer for a body too
+    /// large to read a model from.
     #[serde(default = "default_llm_max_request_bytes")]
     pub max_request_bytes: usize,
 
