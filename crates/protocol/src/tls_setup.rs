@@ -64,6 +64,7 @@ pub(crate) fn build_tls_settings(
                     ca_path: ca_cfg.ca_path.clone(),
                     crl_paths: ca_cfg.crl_paths.clone(),
                     mode: tls.client_cert_mode,
+                    trusted_spiffe_ids: tls.trusted_spiffe_ids.clone(),
                     swap_handle: handle,
                 })
         });
