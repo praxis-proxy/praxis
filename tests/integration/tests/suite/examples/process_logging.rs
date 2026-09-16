@@ -7,9 +7,10 @@ use std::{
     fs, io,
     net::TcpStream,
     process::{Command, Stdio},
+    time::Duration,
 };
 
-use praxis_test_utils::{example_config_path, free_port, patch_yaml, praxis_bin, wait_for_tcp};
+use praxis_test_utils::{example_config_path, free_port, patch_yaml, praxis_bin, wait_for_http};
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -70,17 +71,25 @@ fn process_logging_writes_to_file() {
         .spawn()
         .expect("spawn praxis");
 
-    wait_for_tcp(&format!("127.0.0.1:{port}"));
+    // Wait for a served HTTP response, not merely an accepted socket: the
+    // listener backlog accepts before the service is handling requests, so a
+    // TCP-only gate lets the request below race startup.
+    wait_for_http(&format!("127.0.0.1:{port}"));
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+    drop(stream.set_read_timeout(Some(Duration::from_secs(10))));
     io::Write::write_all(
         &mut stream,
         b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     )
     .expect("write request");
     let mut buf = Vec::new();
-    let _read = io::Read::read_to_end(&mut stream, &mut buf);
-    assert!(String::from_utf8_lossy(&buf).contains("200"));
+    io::Read::read_to_end(&mut stream, &mut buf).expect("read response");
+    let response = String::from_utf8_lossy(&buf);
+    assert!(
+        response.contains("200"),
+        "the example serves a static 200; got {response:?}",
+    );
 
     stop_child(child);
 
