@@ -182,6 +182,44 @@ pub enum FilterAction {
 }
 
 // -----------------------------------------------------------------------------
+// SelectedUpstreamBodyOutcome
+// -----------------------------------------------------------------------------
+
+/// Result of a filter's selected-upstream request-body processing.
+///
+/// The selected-upstream request-body phase runs after the request phase
+/// has chosen an upstream cluster, over the fully buffered request body.
+/// Unlike [`FilterAction`], it has no streaming controls ([`Release`],
+/// [`BodyDone`]) and no terminal-response variants: the body is already
+/// complete and the phase either forwards it (unchanged or modified in
+/// place) with [`Continue`], or aborts with a [`Rejection`] via
+/// [`Reject`].
+///
+/// ```
+/// use praxis_filter::{Rejection, SelectedUpstreamBodyOutcome};
+///
+/// let outcome = SelectedUpstreamBodyOutcome::Continue;
+/// assert!(matches!(outcome, SelectedUpstreamBodyOutcome::Continue));
+///
+/// let reject = SelectedUpstreamBodyOutcome::Reject(Rejection::status(413));
+/// assert!(matches!(reject, SelectedUpstreamBodyOutcome::Reject(r) if r.status == 413));
+/// ```
+///
+/// [`Release`]: FilterAction::Release
+/// [`BodyDone`]: FilterAction::BodyDone
+/// [`Continue`]: SelectedUpstreamBodyOutcome::Continue
+/// [`Reject`]: SelectedUpstreamBodyOutcome::Reject
+#[derive(Debug)]
+#[must_use]
+pub enum SelectedUpstreamBodyOutcome {
+    /// Continue to the next selected-upstream request-body filter.
+    Continue,
+
+    /// Stop processing and respond with the given rejection.
+    Reject(Rejection),
+}
+
+// -----------------------------------------------------------------------------
 // Rejection
 // -----------------------------------------------------------------------------
 
