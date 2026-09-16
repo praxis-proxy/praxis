@@ -187,6 +187,25 @@ fn a_reserved_model_is_denied_for_a_caller_without_the_role() {
     );
 }
 
+/// The role-gated route is declared in list form, so both names it lists
+/// must select it — not just the first.
+#[test]
+fn every_model_a_list_route_names_is_selected() {
+    let backend = start_backend_with_shutdown("ok");
+    let proxy_port = free_port();
+    let config = load_example(proxy_port, backend_map(backend.port()));
+    let proxy = start_proxy(&config);
+
+    let token = mint_fixture_jwt("research-bot", &["research"]);
+    let raw = post_completion(proxy.addr(), Some(&token), r#"{"model":"o3","messages":[]}"#);
+
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "the second name in the list route must select it too; raw response:\n{raw}",
+    );
+}
+
 #[test]
 fn a_model_no_route_names_is_denied_by_the_catch_all() {
     let backend = start_backend_with_shutdown("ok");

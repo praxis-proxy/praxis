@@ -467,6 +467,19 @@ mod tests {
     }
 
     #[test]
+    fn a_configured_list_replaces_the_defaults_rather_than_extending_them() {
+        let parsed = request(r#"{"model":"m","stream":true,"max_tokens":16}"#);
+        let promoted = parsed.promoted_params(&["max_tokens".to_owned()]);
+
+        assert_eq!(promoted.get("max_tokens"), Some(&serde_json::json!(16)));
+        assert!(
+            !promoted.contains_key("stream"),
+            "naming only max_tokens drops `stream`, which the default covered — the operator has \
+             to list every field their rules read",
+        );
+    }
+
+    #[test]
     fn builds_content_from_openai_chat_messages() {
         let parsed = request(
             r#"{"model":"gpt-4o","messages":[

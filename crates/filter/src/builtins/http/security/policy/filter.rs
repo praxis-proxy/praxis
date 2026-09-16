@@ -6,7 +6,10 @@
 //! credentials, scan for PII, emit audit records, and optionally
 //! rewrite request/response bodies.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -199,6 +202,12 @@ pub struct PolicyFilter {
     /// whether a model any route actually selects. Only populated for a
     /// policy with `llm:` routes.
     llm_route_table: Option<Arc<ppe::praxis_policy_core::config::PolicyConfig>>,
+    /// Whether the operator has already been told a mutator cannot
+    /// rewrite an inference request body. The condition is per-request
+    /// but the misconfiguration is not, so say it once.
+    llm_request_mutator_warned: AtomicBool,
+    /// The response-phase twin of `llm_request_mutator_warned`.
+    llm_response_mutator_warned: AtomicBool,
 }
 
 impl PolicyFilter {
@@ -414,6 +423,8 @@ impl PolicyFilter {
             response_assertions,
             response_hook,
             llm_route_table,
+            llm_request_mutator_warned: AtomicBool::new(false),
+            llm_response_mutator_warned: AtomicBool::new(false),
         })
     }
 
@@ -935,12 +946,16 @@ impl PolicyFilter {
         // first, so a multi-turn chat cannot be rewritten losslessly. Ship the
         // original rather than a half-redacted body, and tell the operator
         // their mutator did nothing.
-        if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) && cmf_result.modified_payload.is_some() {
+        if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
+            && cmf_result.modified_payload.is_some()
+            && !self.llm_request_mutator_warned.swap(true, Ordering::Relaxed)
+        {
             tracing::warn!(
                 target: "policy.filter",
                 model = %model,
                 "policy mutated the inference request payload, but request-body rewriting is not \
-                 supported on the inference path; the upstream receives the original body",
+                 supported on the inference path; the upstream receives the original body. \
+                 Reported once per filter instance.",
             );
         }
 
@@ -1120,12 +1135,13 @@ impl PolicyFilter {
         // projection reaches one text part, so a multi-choice completion
         // cannot round-trip. Ship the upstream body rather than a partial
         // redaction.
-        if cmf_result.modified_payload.is_some() {
+        if cmf_result.modified_payload.is_some() && !self.llm_response_mutator_warned.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 target: "policy.filter",
                 model = %model,
                 "policy mutated the inference response payload, but response-body rewriting is not \
-                 supported on the inference path; the client receives the upstream body",
+                 supported on the inference path; the client receives the upstream body. \
+                 Reported once per filter instance.",
             );
         }
         Ok(FilterAction::Continue)

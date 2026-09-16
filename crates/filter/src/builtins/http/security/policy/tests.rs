@@ -3852,10 +3852,102 @@ routes:
     authorization:
       pre_invocation:
         - "require(authenticated)"
+      post_invocation:
+        - "completion.tokens.total > 100: deny('completion too long', 'completion_too_long')"
   - llm: "*"
     authorization:
       pre_invocation:
         - "deny('model is not permitted', 'model_not_allowed')"
+      post_invocation:
+        - "completion.tokens.total > 100: deny('completion too long', 'completion_too_long')"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Write a policy document with a field mutator on an `llm:` route, in
+/// both directions. The inference path cannot round-trip a body, so the
+/// mutator must be inert rather than half-applied.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_llm_mutator_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+routes:
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+    args:
+      messages: "redact(authenticated)"
+    result:
+      content: "redact(authenticated)"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Write a policy document whose catch-all denies only when
+/// `llm.provider` reads the operator-asserted value, so the rule firing
+/// proves the config reached the attribute bag.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_llm_provider_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+routes:
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - "llm.provider == 'contoso': deny('provider reached the bag', 'provider_seen')"
 "#
     );
     std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
@@ -4201,6 +4293,47 @@ async fn a_bodyless_request_still_needs_a_token() {
     );
 }
 
+/// The configured `llm.provider` reaches the attribute bag, so a rule
+/// can key on it. Proven by a rule that fires only for the configured
+/// value: without the plumbing the comparison would not match and the
+/// request would be admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_configured_provider_reaches_the_attribute_bag() {
+    let (_dir, path) = write_llm_provider_config();
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            provider: Some("contoso".to_owned()),
+            ..Default::default()
+        },
+    );
+
+    let action = dispatch_inference_as(&filter, "alice", r#"{"model":"any-model","messages":[]}"#).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("the provider-keyed rule must fire; got {action:?}");
+    };
+    assert!(
+        has_header(&rejection, "x-policy-violation", "provider_seen"),
+        "`llm.provider` must be readable by a rule; got {:?}",
+        rejection.headers,
+    );
+}
+
+/// With no `provider` configured the same rule does not fire, so the
+/// test above is measuring the config rather than a rule that always
+/// matches.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unset_provider_leaves_the_attribute_absent() {
+    let (_dir, path) = write_llm_provider_config();
+    let filter = build_filter(path);
+
+    let action = dispatch_inference_as(&filter, "alice", r#"{"model":"any-model","messages":[]}"#).await;
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "an absent provider must not match the comparison; got {action:?}",
+    );
+}
+
 /// `require_model: false` is the opt-out: an unattributable request
 /// falls through to the policy's other paths instead of denying.
 #[tokio::test(flavor = "multi_thread")]
@@ -4455,6 +4588,9 @@ async fn admit_inference(filter: &PolicyFilter, ctx: &mut crate::HttpFilterConte
     );
 }
 
+/// A chat request whose prompt a field mutator would redact.
+const MUTATED_REQUEST: &[u8] = br#"{"model":"gpt-4o","messages":[{"role":"user","content":"secret"}]}"#;
+
 /// A minimal chat request the inference fixtures admit.
 const INFERENCE_REQUEST: &[u8] = br#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
 
@@ -4538,6 +4674,52 @@ async fn a_deny_too_large_for_the_committed_length_stays_valid_json() {
     assert!(
         parsed.is_object(),
         "the degraded envelope must still be a JSON object; got {body:?}",
+    );
+}
+
+/// An APL field mutator cannot round-trip an inference body — a CMF
+/// message carries one text slot per part — so the filter ships the
+/// original bytes rather than a half-redacted body.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_field_mutator_leaves_an_inference_request_untouched() {
+    let (_dir, path) = write_llm_mutator_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    let mut request = Some(bytes::Bytes::from_static(MUTATED_REQUEST));
+    drop(
+        filter
+            .on_request_body(&mut ctx, &mut request, true)
+            .await
+            .expect("request phase ran"),
+    );
+    assert_eq!(
+        request.expect("request body"),
+        bytes::Bytes::from_static(MUTATED_REQUEST),
+        "the upstream must receive the original body, not a partial redaction",
+    );
+}
+
+/// The response-side twin: a `result:` mutator likewise cannot round-trip
+/// a completion, so the client receives the upstream bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_field_mutator_leaves_an_inference_response_untouched() {
+    let (_dir, path) = write_llm_mutator_config();
+    let filter = build_read_write_filter(path);
+
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"secret"}]}"#,
+        WITHIN_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+
+    assert_eq!(
+        body,
+        bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()),
+        "the client must receive the upstream body, not a partial redaction",
     );
 }
 
@@ -4752,6 +4934,15 @@ async fn a_non_json_response_body_passes_through() {
     )
     .await;
     assert_eq!(body, bytes::Bytes::from_static(NON_JSON_RESPONSE.as_bytes()));
+}
+
+/// The mixed fixture declares `post_invocation` on both routes, so the
+/// test below exercises the `InferenceRequest` half of the response-half
+/// guard rather than a trivially-false conjunction.
+#[test]
+fn the_mixed_fixture_opens_the_inference_response_half() {
+    let (_dir, path) = write_llm_and_tool_config();
+    assert_eq!(build_read_write_filter(path).derived_llm_shape(), (true, true));
 }
 
 /// An MCP response still takes the JSON-RPC post path when the same
