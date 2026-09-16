@@ -143,8 +143,13 @@ deployment guidance.
   into upstream request headers with environment variable
   or inline values; client credential stripping
 - **Policy engine** (`policy`, feature `policy-engine`,
-  on by default): JWT identity, route policy, PII
-  scanning, audit, and inference authorization on the
+  on by default): independently validated user, agent,
+  and workload identity; APL authorization with
+  pluggable decision points (Cedar, CEL, OPA) including
+  relationship-based; RFC 8693 delegation scoping a
+  token per upstream; field redaction and session taint
+  across tool calls; out-of-band approval; an audit
+  event per decision; and inference authorization on the
   model in the request body
 
 ## Observability
