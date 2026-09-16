@@ -215,17 +215,48 @@ impl IterativeRequestRouterFilter {
     /// pipelines fail to build.
     pub fn from_config(value: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", value)?;
-        Self::from_parsed_config(cfg, &FilterRegistry::with_builtins())
+        Self::from_parsed_config(
+            cfg,
+            &FilterRegistry::with_builtins(),
+            &praxis_core::config::InsecureOptions::default(),
+        )
     }
 
     /// Create from YAML config, resolving step filters through the
     /// registry that owns the containing pipeline.
+    ///
+    /// Test-only convenience over [`from_config_with_registry_and_insecure`]
+    /// using the strict default [`InsecureOptions`]; the real server path builds
+    /// through that method, which threads the operator's declared posture into
+    /// step-pipeline construction.
+    ///
+    /// [`InsecureOptions`]: praxis_core::config::InsecureOptions
+    /// [`from_config_with_registry_and_insecure`]: Self::from_config_with_registry_and_insecure
+    #[cfg(test)]
     pub(crate) fn from_config_with_registry(
         value: &serde_yaml::Value,
         registry: &FilterRegistry,
     ) -> Result<Box<dyn HttpFilter>, FilterError> {
+        Self::from_config_with_registry_and_insecure(value, registry, &praxis_core::config::InsecureOptions::default())
+    }
+
+    /// Registry factory: create from YAML config, resolving step filters through
+    /// the containing registry and gating each step's inline outbound clusters by
+    /// the operator's declared `insecure` posture.
+    ///
+    /// This is the entry point the [`FilterRegistry`] invokes for the real
+    /// listener build, where `insecure` carries the operator's actual
+    /// [`InsecureOptions`] (SSRF/TLS-verify/private-upstream toggles) rather than
+    /// an unconditional strict default.
+    ///
+    /// [`InsecureOptions`]: praxis_core::config::InsecureOptions
+    pub(crate) fn from_config_with_registry_and_insecure(
+        value: &serde_yaml::Value,
+        registry: &FilterRegistry,
+        insecure: &praxis_core::config::InsecureOptions,
+    ) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", value)?;
-        Self::from_parsed_config(cfg, registry)
+        Self::from_parsed_config(cfg, registry, insecure)
     }
 
     /// Validate parsed configuration and build each step pipeline.
@@ -233,6 +264,7 @@ impl IterativeRequestRouterFilter {
     fn from_parsed_config(
         cfg: IterativeRequestRouterConfig,
         registry: &FilterRegistry,
+        insecure: &praxis_core::config::InsecureOptions,
     ) -> Result<Box<dyn HttpFilter>, FilterError> {
         config::validate(&cfg)?;
         let timeout = Duration::from_millis(cfg.timeout_ms);
@@ -256,17 +288,13 @@ impl IterativeRequestRouterFilter {
             // e.g. `openai_web_search`) nested in a step resolves its inline
             // `outbound_chain` at construction time instead of being rejected by
             // the plain build path. Steps reference their outbound chains inline,
-            // so an empty top-level chain map suffices; build-time inline-cluster
-            // SSRF/TLS gating uses the strict default posture (the operator's real
-            // posture propagates to the bound pipeline at runtime via
-            // `apply_insecure_options`).
+            // so an empty top-level chain map suffices. Build-time inline-cluster
+            // SSRF/TLS gating uses the operator's declared posture (`insecure`),
+            // threaded from the containing build so a nested outbound chain is
+            // held to the same rules as a top-level one — runtime
+            // `apply_insecure_options` runs too late to undo a build rejection.
             let step_chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
-            let pipeline = FilterPipeline::build_with_chains(
-                &mut entries,
-                registry,
-                &step_chains,
-                &praxis_core::config::InsecureOptions::default(),
-            )?;
+            let pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &step_chains, insecure)?;
             let ordering_errors =
                 pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
             if !ordering_errors.is_empty() {

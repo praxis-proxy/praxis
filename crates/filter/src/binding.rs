@@ -195,6 +195,14 @@ impl<'a> ChainBindingContext<'a> {
         self.registry
     }
 
+    /// The operator's declared insecure posture, threaded so a registry factory
+    /// that builds nested step pipelines (e.g. `iterative_request_router`) gates
+    /// their inline outbound clusters by the same SSRF/TLS-verify rules as the
+    /// containing build, rather than an unconditional strict default.
+    pub(crate) fn insecure_options(&self) -> &'a InsecureOptions {
+        self.insecure
+    }
+
     /// Resolve a chain reference into a prebuilt outbound [`FilterPipeline`].
     ///
     /// Named references resolve against the top-level `filter_chains`; inline

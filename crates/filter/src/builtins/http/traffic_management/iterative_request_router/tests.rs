@@ -3885,3 +3885,137 @@ steps:
         "a max-iterations early exit must not leak the prior step's application_provider to the parent"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Step outbound-chain SSRF gating honors the operator's posture
+// ---------------------------------------------------------------------------
+
+/// A chain-binding filter that binds its configured `outbound_chain` into a
+/// prebuilt pipeline at construction time. Nested inside an IRR step, it lets a
+/// test prove the step build gates the bound chain's inline clusters by the
+/// operator's declared posture rather than an unconditional strict default.
+struct OutboundCalloutFilter {
+    outbound: std::sync::Arc<crate::FilterPipeline>,
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for OutboundCalloutFilter {
+    fn name(&self) -> &'static str {
+        "test_outbound_callout"
+    }
+
+    fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        self.outbound.referenced_files()
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+/// Registry with a chain-binding `test_outbound_callout` filter that resolves
+/// its inline `outbound_chain` via the binding context.
+fn outbound_callout_registry() -> crate::FilterRegistry {
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register_chain_binding(
+            "test_outbound_callout",
+            std::sync::Arc::new(|config: &serde_yaml::Value, ctx: &crate::ChainBindingContext<'_>| {
+                let raw = config
+                    .get("outbound_chain")
+                    .cloned()
+                    .ok_or_else(|| crate::FilterError::from("missing outbound_chain"))?;
+                let chain_ref: praxis_core::config::ChainRef = serde_yaml::from_value(raw)
+                    .map_err(|e| crate::FilterError::from(format!("bad outbound_chain: {e}")))?;
+                let outbound = ctx.bind_chain(&chain_ref)?;
+                let filter: Box<dyn crate::HttpFilter> = Box::new(OutboundCalloutFilter {
+                    outbound: std::sync::Arc::new(outbound),
+                });
+                Ok(filter)
+            }),
+        )
+        .unwrap();
+    registry
+}
+
+/// IRR config whose single step nests a chain-binding callout binding an
+/// outbound chain with a loopback inline cluster, plus the step's own
+/// router + `load_balancer` (loopback too, to show step clusters are not gated).
+fn step_with_outbound_loopback_yaml() -> serde_yaml::Value {
+    serde_yaml::from_str(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_outbound_callout
+        outbound_chain:
+          name: outbound
+          filters:
+            - filter: load_balancer
+              clusters:
+                - name: web
+                  endpoints:
+                    - address: \"127.0.0.1:80\"
+      - filter: router
+        routes:
+          - path_prefix: \"/\"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - \"127.0.0.1:9\"
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap()
+}
+
+#[test]
+fn step_outbound_chain_ssrf_endpoint_rejected_by_default() {
+    // A chain-binding filter nested in an IRR step binds an outbound subrequest
+    // chain whose inline cluster resolves to a loopback address. Under the
+    // strict default posture the step build must reject it with the same SSRF
+    // gate a top-level chain uses. The step's own load_balancer is also loopback
+    // and builds fine in other tests, so the rejection proves the *outbound*
+    // chain is gated — not the step's own clusters.
+    let registry = outbound_callout_registry();
+    let yaml = step_with_outbound_loopback_yaml();
+
+    let err = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry)
+        .err()
+        .expect("strict default posture must reject the outbound chain's loopback endpoint");
+    assert!(
+        err.to_string().contains("sensitive address"),
+        "an IRR step's outbound-chain endpoint resolving to a sensitive address must be rejected \
+         unless insecure_options.allow_private_endpoints is set: {err}"
+    );
+}
+
+#[test]
+fn step_outbound_chain_ssrf_endpoint_allowed_with_flag() {
+    // The same step must build once the operator opts in to private endpoints,
+    // proving the gate is threaded from the declared posture into step-pipeline
+    // construction and is not an unconditional rejection. `lb_without_router` is
+    // skipped so the lone load_balancer in the outbound chain does not fail for
+    // an unrelated ordering reason.
+    let registry = outbound_callout_registry();
+    let yaml = step_with_outbound_loopback_yaml();
+
+    let insecure = praxis_core::config::InsecureOptions {
+        allow_private_endpoints: true,
+        skip_pipeline_checks: praxis_core::config::SkipPipelineChecks {
+            lb_without_router: true,
+            ..praxis_core::config::SkipPipelineChecks::default()
+        },
+        ..praxis_core::config::InsecureOptions::default()
+    };
+    super::IterativeRequestRouterFilter::from_config_with_registry_and_insecure(&yaml, &registry, &insecure)
+        .expect("an IRR step whose outbound chain opts in to a private endpoint must build");
+}
