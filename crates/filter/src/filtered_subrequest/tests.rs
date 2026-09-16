@@ -621,6 +621,86 @@ async fn run_returns_buffered_for_locally_produced_response() {
     );
 }
 
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_falls_back_to_next_staged_address_on_connection_refusal() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    // A hostname that resolved to several addresses stages the full validated
+    // set alongside the pinned primary. The low-level transport dials each in
+    // turn until one connects; the executor must preserve that fallback rather
+    // than giving up after the first refusal. Bind then drop a listener to
+    // obtain an address that is guaranteed unused (refuses connections), and
+    // spawn a live backend as the second address.
+    let dead = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let (live_addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+
+    // The outbound chain carries no upstream-selecting filter: the destination
+    // is seeded from the staged upstream, so the chain runs the request straight
+    // to transport against the staged address set.
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("[]").unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    // Pin the primary address to the dead endpoint (as `from_prepared_target`
+    // would) and stage the whole resolver-ordered set so the executor can
+    // advance past the refusal to the live backend without re-resolving DNS.
+    let staged = super::StagedUpstream(praxis_core::connectivity::Upstream {
+        address: Arc::from(dead.to_string().as_str()),
+        authority: None,
+        connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+    });
+    let fallback = super::StagedUpstreamFallback(vec![dead, live_addr]);
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(staged);
+    extensions.insert(fallback);
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let response = match executor
+        .run(&pipeline, &request, extensions, deadline)
+        .await
+        .expect("run should fall back to the live address and return its response")
+    {
+        crate::CalloutResponse::Buffered(response) => response,
+        crate::CalloutResponse::Streaming { .. } => {
+            panic!("a buffered outbound chain must not produce a streaming response")
+        },
+    };
+    backend.abort();
+
+    assert_eq!(
+        response.status, 200,
+        "a connection refusal on the pinned primary must fall back to the next \
+         validated address, whose live backend returns 200"
+    );
+    assert_eq!(
+        response.body,
+        bytes::Bytes::from_static(b"ok"),
+        "the response must come from the live fallback backend"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test Utilities: session-store propagation recorder
 // ---------------------------------------------------------------------------
@@ -1385,6 +1465,83 @@ async fn run_streaming_yields_upstream_chunks_for_clean_eof() {
     backend.abort();
 
     assert_eq!(payload, b"hello", "the upstream chunk must be delivered on a clean EOF");
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_streaming_falls_back_to_next_staged_address_on_connection_refusal() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    // The streaming transport arm has its own peer loop and send path, distinct
+    // from the buffered arm, so it needs its own fallback regression (see
+    // `run_falls_back_to_next_staged_address_on_connection_refusal` for the
+    // buffered sibling). Bind then drop a listener for a guaranteed-unused
+    // address that refuses connections, and spawn a live chunked backend as the
+    // second staged address.
+    let dead = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let (live_addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+
+    // Select streaming mode but resolve no upstream through the chain: the
+    // destination is seeded from the staged upstream, so the streaming request
+    // runs straight to transport against the staged address set.
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("- filter: test_streaming_selector\n").unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let executor = streaming_executor(1_048_576);
+
+    // Pin the primary address to the dead endpoint and stage the whole
+    // resolver-ordered set so the streaming arm advances past the refusal to the
+    // live backend without re-resolving DNS.
+    let staged = super::StagedUpstream(praxis_core::connectivity::Upstream {
+        address: Arc::from(dead.to_string().as_str()),
+        authority: None,
+        connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+    });
+    let fallback = super::StagedUpstreamFallback(vec![dead, live_addr]);
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(staged);
+    extensions.insert(fallback);
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, extensions, deadline)
+        .await
+        .expect("streaming callout should fall back to the live address and open")
+    {
+        crate::CalloutResponse::Streaming { response, body } => {
+            assert_eq!(
+                response.status, 200,
+                "a connection refusal on the pinned primary must fall back to the \
+                 next validated address, whose live backend responds 200"
+            );
+            body
+        },
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+
+    let payload = drain(&mut body).await.expect("streaming body should drain cleanly");
+    backend.abort();
+
+    assert_eq!(
+        payload, b"hello",
+        "the streamed body must come from the live fallback backend"
+    );
 }
 
 #[tokio::test]

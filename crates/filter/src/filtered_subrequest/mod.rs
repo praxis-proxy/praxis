@@ -13,10 +13,13 @@
 //!
 //! The executor owns three transient extension mechanisms end-to-end —
 //! [`RetainedFilterResults`], [`PendingStreamChunks`], and
-//! [`StreamTermination`] — and recognizes one framework-defined caller-staged
-//! channel, [`PendingCredentials`]: it drains that channel and materializes each
+//! [`StreamTermination`] — and recognizes two framework-defined caller-staged
+//! channels: [`PendingCredentials`], which it drains to materialize each
 //! authority-bound secret only after resolving the destination (see
-//! [`DeferredCredential`](crate::DeferredCredential)). It otherwise never
+//! [`DeferredCredential`](crate::DeferredCredential)), and [`StagedUpstream`],
+//! which it drains to seed the sub-request's upstream before the request phase so
+//! a callout can dial a known destination without an upstream-selecting filter.
+//! It otherwise never
 //! inspects caller-injected extension types. Callers that stash their own state
 //! in the request extensions recover it from
 //! [`FilteredSubrequestError::into_parts`],
@@ -45,6 +48,7 @@ mod tests;
 mod transport;
 
 use std::{
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -54,7 +58,11 @@ use std::{
 
 use bytes::Bytes;
 use http::HeaderMap;
-use praxis_core::subrequest::{FrameworkHeaders, StreamLimits, SubResponseBody};
+use praxis_core::{
+    config::{CachedClusterTls, ClusterTls},
+    connectivity::{ConnectionOptions, PreparedTarget, Upstream},
+    subrequest::{FrameworkHeaders, StreamLimits, SubRequestError, SubResponseBody},
+};
 use tracing::{Instrument as _, warn};
 
 use self::{
@@ -286,6 +294,87 @@ pub enum CalloutResponse {
         /// [`next_chunk`]: crate::StreamingResponseBody::next_chunk
         body: Box<dyn crate::StreamingResponseBody>,
     },
+}
+
+/// A pre-resolved upstream a callout stages so the executor dials a specific
+/// destination without the outbound chain needing an upstream-selecting filter.
+///
+/// A chain-binding callout that already knows its destination — for example a
+/// provider URL prepared via [`prepare_url_target`] — stages one of these in the
+/// request extensions it passes to [`run`](FilteredSubrequestExecutor::run). The
+/// executor seeds [`HttpFilterContext::upstream`](crate::HttpFilterContext) from
+/// it before the request phase, so the outbound chain carries only cross-cutting
+/// filters (observability, security, credentials) and never has to resolve a
+/// cluster. Central SSRF, TLS/SNI, and Host enforcement still apply at transport
+/// time exactly as for a chain-resolved upstream.
+///
+/// [`prepare_url_target`]: praxis_core::connectivity::prepare_url_target
+pub struct StagedUpstream(pub Upstream);
+
+impl StagedUpstream {
+    /// Build a staged upstream from a [`PreparedTarget`].
+    ///
+    /// The transport address is pinned to the first address the target resolved
+    /// (so the executor dials the same endpoint the SSRF validation hook saw,
+    /// closing the resolve-then-dial race), the HTTP `Host` authority is the
+    /// URL's authority, and TLS/SNI are derived from the URL scheme and host.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the target resolved no addresses or its TLS
+    /// material cannot be prepared.
+    pub fn from_prepared_target(target: &PreparedTarget) -> Result<Self, FilterError> {
+        let address = target
+            .addresses()
+            .first()
+            .ok_or_else(|| -> FilterError { "filtered_subrequest: prepared target resolved no addresses".into() })?;
+        let tls = if target.is_tls() {
+            let cluster_tls = ClusterTls {
+                sni: Some(target.sni().to_owned()),
+                ..ClusterTls::default()
+            };
+            Some(
+                CachedClusterTls::try_from_config(&cluster_tls)
+                    .map_err(|error| -> FilterError { format!("filtered_subrequest: invalid TLS: {error}").into() })?,
+            )
+        } else {
+            None
+        };
+        Ok(Self(Upstream {
+            address: Arc::from(address.to_string().as_str()),
+            authority: Some(target.host_authority().clone()),
+            connection: Arc::new(ConnectionOptions::default()),
+            tls,
+        }))
+    }
+}
+
+/// Caller-staged multi-address fallback set for a [`StagedUpstream`].
+///
+/// [`StagedUpstream`] pins the sub-request's primary transport address (the
+/// first address its [`PreparedTarget`] resolved), which closes the
+/// resolve-then-dial SSRF race. When a hostname resolved to several addresses,
+/// staging this alongside it lets the executor advance past a connection
+/// refusal to the next validated address — preserving the DNS fallback the
+/// low-level transport performs — without ever re-resolving DNS. Every address
+/// was SSRF-validated together by the same preparation hook, and each literal
+/// is re-checked at connect time, so dialing any of them is safe. Absent this
+/// extension (or with a single address), the executor dials the single staged
+/// upstream exactly as before.
+pub struct StagedUpstreamFallback(Vec<SocketAddr>);
+
+impl StagedUpstreamFallback {
+    /// Capture every address a [`PreparedTarget`] resolved, in resolver order.
+    #[must_use]
+    pub fn from_prepared_target(target: &PreparedTarget) -> Self {
+        Self(target.addresses().to_vec())
+    }
+
+    /// The validated fallback addresses, in resolver order.
+    #[must_use]
+    pub fn addresses(&self) -> &[SocketAddr] {
+        &self.0
+    }
 }
 
 /// No-op retained-state accounting for callers that keep no cross-sub-request
@@ -566,6 +655,32 @@ impl FilteredSubrequestExecutor {
         filter_ctx.extensions = std::mem::take(&mut extensions);
         filter_ctx.extensions.insert(RetainedFilterResults::default());
         filter_ctx.enable_stream_chunk_emission(self.max_state_bytes);
+        // A callout may stage a pre-resolved upstream (for example a URL prepared
+        // via `prepare_url_target`) so the executor dials a specific destination
+        // without the outbound chain needing an upstream-selecting filter. Seed it
+        // before the request phase so chain filters observe the resolved upstream
+        // and the central SSRF/TLS/Host enforcement at `build_peer` still applies.
+        //
+        // Keep a copy so the destination can be re-pinned after the request phase:
+        // a chain filter may observe the seeded upstream but must not be able to
+        // retarget a callout that already resolved and validated its destination.
+        // Without the re-pin a filter could redirect the dial — and any body-borne
+        // credential (e.g. Tavily's key) — to an authority the callout never
+        // prepared. `Upstream` is `Arc`-backed, so the clone is a refcount bump.
+        let pinned_upstream = filter_ctx.extensions.remove::<StagedUpstream>().map(|staged| staged.0);
+        if let Some(upstream) = &pinned_upstream {
+            filter_ctx.upstream = Some(upstream.clone());
+        }
+        // A callout may additionally stage the full validated address set so a
+        // connection refusal on the pinned primary address falls back to the
+        // next resolved address (matching the low-level transport's DNS
+        // behavior) without re-resolving. Every address was SSRF-validated
+        // together by the same preparation hook.
+        let fallback_addresses = filter_ctx
+            .extensions
+            .remove::<StagedUpstreamFallback>()
+            .map(|fallback| fallback.0)
+            .unwrap_or_default();
 
         let step_budget = remaining.min(self.step_timeout);
         let step_started = Instant::now();
@@ -627,6 +742,15 @@ impl FilteredSubrequestExecutor {
                 }
             }
 
+            // Re-pin the staged upstream: the request phase may have let a chain
+            // filter observe (and try to rewrite) `ctx.upstream`, but a resolved
+            // callout must dial only the destination it prepared. Reasserting here
+            // overrides any mid-chain rewrite so a staged credential — a header
+            // credential, or for a body-authenticated provider the request body
+            // itself — can only ever reach the authority it was prepared for.
+            if let Some(upstream) = &pinned_upstream {
+                filter_ctx.upstream = Some(upstream.clone());
+            }
             let upstream = filter_ctx.upstream.as_ref().ok_or_else(|| -> FilterError {
                 format!("filtered_subrequest: step '{label}' did not resolve an upstream").into()
             })?;
@@ -645,7 +769,24 @@ impl FilteredSubrequestExecutor {
                 .clone()
                 .unwrap_or_else(|| Arc::clone(&destination_authority));
             in_transport_inner.store(true, Ordering::Release);
-            let peer = build_peer(upstream, pipeline.allow_private_upstreams()).await;
+            // Build one transport peer per validated address so a connection
+            // refusal can fall back to the next. With no staged fallback set (or
+            // a single address) this is exactly the prior single-peer dial: the
+            // seeded upstream address — a pinned literal on the staged path, or a
+            // cluster-resolved hostname on the non-staged path — resolved once.
+            // Each fallback peer reuses the seeded upstream's authority, TLS, and
+            // connection options; only the transport socket address varies.
+            let peers = if fallback_addresses.len() > 1 {
+                let mut built = Vec::with_capacity(fallback_addresses.len());
+                for address in &fallback_addresses {
+                    let mut per_address = upstream.clone();
+                    per_address.address = Arc::from(address.to_string().as_str());
+                    built.push(build_peer(&per_address, pipeline.allow_private_upstreams()).await);
+                }
+                built
+            } else {
+                vec![build_peer(upstream, pipeline.allow_private_upstreams()).await]
+            };
             apply_request_header_mutations(&mut sub_headers, &filter_ctx);
             // Mirror the normal proxy path (`apply_authority_override`): a
             // configured authority override becomes the upstream Host,
@@ -724,13 +865,35 @@ impl FilteredSubrequestExecutor {
                             pipeline.body_capabilities().response_body_mode,
                         ),
                     };
-                    let response = match peer {
-                        Ok(peer) => self
-                            .client
-                            .send_streaming(&peer, &request, transport_budget, limits, Some(&framework_headers))
-                            .await,
-                        Err(error) => Err(praxis_core::subrequest::SubRequestError::Connect(error.to_string())),
-                    };
+                    let mut response =
+                        Err(SubRequestError::Connect("filtered_subrequest: no addresses to dial".to_owned()));
+                    for peer in &peers {
+                        // Recompute the remaining budget before every fallback
+                        // attempt so a slow-but-not-refused earlier address cannot
+                        // hand each later attempt the full step budget again; the
+                        // absolute step deadline bounds all attempts together (the
+                        // outer `tokio::time::timeout` is the hard backstop).
+                        let attempt_budget = step_deadline
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or(Duration::ZERO);
+                        if attempt_budget.is_zero() {
+                            break;
+                        }
+                        response = match peer {
+                            Ok(peer) => self
+                                .client
+                                .send_streaming(peer, &request, attempt_budget, limits.clone(), Some(&framework_headers))
+                                .await,
+                            Err(error) => Err(SubRequestError::Connect(error.to_string())),
+                        };
+                        // Advance to the next validated address only on a
+                        // connection refusal; any other outcome (a response, or a
+                        // substantive transport error) is final.
+                        if matches!(response, Err(SubRequestError::Connect(_))) {
+                            continue;
+                        }
+                        break;
+                    }
                     in_transport_inner.store(false, Ordering::Release);
                     match response {
                         Ok(response) => {
@@ -801,32 +964,61 @@ impl FilteredSubrequestExecutor {
                     }
                 },
                 SubRequestResponseMode::Buffered => {
-                    let (mut response, origin, transport_error) = match peer {
-                        Ok(peer) => match self
-                            .client
-                            .execute(&peer, &request, self.max_response_bytes, transport_budget, Some(&framework_headers))
-                            .await
-                        {
-                            Ok(response) => (response, ResponseOrigin::Upstream, None),
-                            Err(error) => {
-                                let (status, kind) = classify_transport_failure(&error);
-                                warn!(step = label, %error, status, "filtered sub-request buffered transport failure");
-                                (
-                                    SubResponse { status, headers: HeaderMap::new(), body: Bytes::new() },
-                                    ResponseOrigin::Transport,
-                                    Some(kind),
-                                )
+                    let mut attempt = None;
+                    for peer in &peers {
+                        // Recompute the remaining budget before every fallback
+                        // attempt (see the streaming arm). If the step deadline is
+                        // already reached, stop dialing and fall through to the
+                        // `attempt.unwrap_or_else(...)` synthesized failure below.
+                        let attempt_budget = step_deadline
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or(Duration::ZERO);
+                        if attempt_budget.is_zero() {
+                            break;
+                        }
+                        let outcome = match peer {
+                            Ok(peer) => match self
+                                .client
+                                .execute(peer, &request, self.max_response_bytes, attempt_budget, Some(&framework_headers))
+                                .await
+                            {
+                                Ok(response) => (response, ResponseOrigin::Upstream, None),
+                                Err(error) => {
+                                    let (status, kind) = classify_transport_failure(&error);
+                                    warn!(step = label, %error, status, "filtered sub-request buffered transport failure");
+                                    let response =
+                                        SubResponse { status, headers: HeaderMap::new(), body: Bytes::new() };
+                                    if matches!(error, SubRequestError::Connect(_)) {
+                                        // Connection refused/unreachable: remember
+                                        // it and try the next validated address.
+                                        attempt = Some((response, ResponseOrigin::Transport, Some(kind)));
+                                        continue;
+                                    }
+                                    (response, ResponseOrigin::Transport, Some(kind))
+                                },
                             },
-                        },
-                        Err(error) => {
-                            warn!(step = label, %error, status = 502_u16, "filtered sub-request buffered transport failure");
-                            (
-                                SubResponse { status: 502, headers: HeaderMap::new(), body: Bytes::new() },
-                                ResponseOrigin::Transport,
-                                Some(TransportFailure::Connect),
-                            )
-                        },
-                    };
+                            Err(error) => {
+                                warn!(step = label, %error, status = 502_u16, "filtered sub-request buffered transport failure");
+                                // Peer construction failed (resolution/SSRF):
+                                // remember it and try the next validated address.
+                                attempt = Some((
+                                    SubResponse { status: 502, headers: HeaderMap::new(), body: Bytes::new() },
+                                    ResponseOrigin::Transport,
+                                    Some(TransportFailure::Connect),
+                                ));
+                                continue;
+                            },
+                        };
+                        attempt = Some(outcome);
+                        break;
+                    }
+                    let (mut response, origin, transport_error) = attempt.unwrap_or_else(|| {
+                        (
+                            SubResponse { status: 502, headers: HeaderMap::new(), body: Bytes::new() },
+                            ResponseOrigin::Transport,
+                            Some(TransportFailure::Connect),
+                        )
+                    });
                     in_transport_inner.store(false, Ordering::Release);
                     sanitize_subresponse_headers(&mut response.headers);
                     response_header.status = http::StatusCode::from_u16(response.status)

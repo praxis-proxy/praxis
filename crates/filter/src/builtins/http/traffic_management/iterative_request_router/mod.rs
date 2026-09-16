@@ -251,7 +251,22 @@ impl IterativeRequestRouterFilter {
             let name: Arc<str> = Arc::from(step.name.as_str());
 
             let mut entries: Vec<FilterEntry> = step.filters.into_iter().collect();
-            let pipeline = FilterPipeline::build(&mut entries, registry)?;
+            // Build the step pipeline chain-aware so a chain-binding filter (an
+            // application callout that owns a prebuilt outbound subrequest chain,
+            // e.g. `openai_web_search`) nested in a step resolves its inline
+            // `outbound_chain` at construction time instead of being rejected by
+            // the plain build path. Steps reference their outbound chains inline,
+            // so an empty top-level chain map suffices; build-time inline-cluster
+            // SSRF/TLS gating uses the strict default posture (the operator's real
+            // posture propagates to the bound pipeline at runtime via
+            // `apply_insecure_options`).
+            let step_chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
+            let pipeline = FilterPipeline::build_with_chains(
+                &mut entries,
+                registry,
+                &step_chains,
+                &praxis_core::config::InsecureOptions::default(),
+            )?;
             let ordering_errors =
                 pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
             if !ordering_errors.is_empty() {
