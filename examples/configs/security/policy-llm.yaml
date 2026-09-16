@@ -1,4 +1,4 @@
-# Inference Authorization (experimental)
+# Inference Authorization
 #
 # Authorizes body-addressed inference requests against `llm:` policy routes.
 # The proxy reads the top-level `model`; missing, unlisted, and ambiguous

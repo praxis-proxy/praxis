@@ -3,8 +3,8 @@
 
 //! `PolicyFilter` — embeds the policy engine in-process to resolve and
 //! validate identity, evaluate APL routes, optionally mint delegated
-//! credentials, scan for PII, emit audit records, and optionally
-//! rewrite request/response bodies.
+//! credentials, run the host plugins a policy names, emit audit records,
+//! and optionally rewrite request/response bodies.
 
 use std::sync::{
     Arc,
@@ -90,10 +90,11 @@ enum GatedIdentity {
     Subject(AuthenticatedIdentity),
 }
 
-/// Embeds the Praxis Policy Engine in-process to enforce multi-source JWT
-/// identity, APL route policy, RFC 8693 token exchange, PII
-/// scanning, audit emission, and (under `body_access: read_write`)
-/// request / response body rewriting.
+/// Embeds the Praxis Policy Engine in-process to enforce multi-source
+/// identity, APL route policy, RFC 8693 token exchange, field redaction,
+/// session taint, audit emission, and (under `body_access: read_write`)
+/// request / response body rewriting. Content scanning is a host plugin
+/// the engine dispatches, not a bundled one.
 ///
 /// Registered under the YAML filter name `policy`. The `policy-engine`
 /// cargo feature is on by default; `--no-default-features` leaves the

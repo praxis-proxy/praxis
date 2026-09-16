@@ -3,10 +3,12 @@
 
 //! The `policy` security filter — Praxis's in-process policy engine.
 //!
-//! Embeds the Praxis Policy Engine in-process to enforce multi-source JWT
+//! Embeds the Praxis Policy Engine in-process to enforce multi-source
 //! identity, APL (Authorization Policy Logic) route policy, RFC 8693 token
-//! exchange, PII scanning, audit emission, and (under
-//! `body_access: read_write`) request / response body rewriting.
+//! exchange, field redaction, session taint, audit emission, and (under
+//! `body_access: read_write`) request / response body rewriting. Content
+//! scanning is a host plugin: the engine dispatches it, and a policy that
+//! wants one names its `kind:`.
 //! Everything runs as linked Rust crates — no sidecar, no FFI.
 //!
 //! Compiled in and registered under the YAML name `policy` by default.
