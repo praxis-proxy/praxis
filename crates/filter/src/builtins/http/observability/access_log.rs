@@ -1161,6 +1161,60 @@ conditions:
     }
 
     #[test]
+    fn metadata_token_parses_its_key() {
+        let token = parse_scalar_field_token("metadata.llm.model").unwrap();
+        assert!(
+            matches!(&token, FieldToken::Metadata(key) if key == "llm.model"),
+            "the dotted key is taken whole; got {token:?}",
+        );
+    }
+
+    #[test]
+    fn metadata_token_rejects_an_empty_key() {
+        let err = parse_scalar_field_token("metadata.").expect_err("should fail");
+        assert!(err.to_string().contains("metadata token"), "got: {err}");
+    }
+
+    #[test]
+    fn metadata_keys_are_case_sensitive_unlike_header_names() {
+        // Header tokens lowercase their name; a metadata key is an exact
+        // lookup into the bag, so it must survive as written.
+        let token = parse_scalar_field_token("metadata.LLM.Model").unwrap();
+        assert!(matches!(&token, FieldToken::Metadata(key) if key == "LLM.Model"));
+    }
+
+    #[test]
+    fn build_record_emits_filter_metadata() {
+        let plan = EmitPlan {
+            fields: vec![FieldToken::Metadata("llm.model".to_owned())],
+            is_default: false,
+        };
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("llm.model", "gpt-4o");
+
+        let record = plan.build_record(&ctx, 200, None, 0);
+        assert_eq!(record.get("metadata.llm.model"), Some(&"gpt-4o".to_owned()));
+    }
+
+    #[test]
+    fn build_record_dashes_absent_metadata() {
+        let plan = EmitPlan {
+            fields: vec![FieldToken::Metadata("llm.model".to_owned())],
+            is_default: false,
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+
+        let record = plan.build_record(&ctx, 200, None, 0);
+        assert_eq!(
+            record.get("metadata.llm.model"),
+            Some(&"-".to_owned()),
+            "an unset key reads as absent, matching the header tokens",
+        );
+    }
+
+    #[test]
     fn build_record_trace_id_defaults_to_dash_without_span() {
         let plan = EmitPlan {
             fields: vec![FieldToken::TraceId, FieldToken::SpanId],

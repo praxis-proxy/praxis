@@ -1123,7 +1123,7 @@ impl PolicyFilter {
             target: "policy.filter",
             len,
             ceiling = self.cfg.llm.max_request_bytes,
-            "inference request body exceeds `llm.max_request_bytes`; denying. Another filter in              the chain buffered more than this filter asked for.",
+            "inference request body exceeds `llm.max_request_bytes`; denying. Another filter in the chain buffered more than this filter asked for.",
         );
         Some(oversized_body_rejection())
     }
