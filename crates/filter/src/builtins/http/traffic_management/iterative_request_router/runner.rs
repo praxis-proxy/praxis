@@ -105,7 +105,7 @@ impl From<TransportFailure> for config::TransportErrorKind {
             TransportFailure::Connect => config::TransportErrorKind::Connect,
             TransportFailure::Io => config::TransportErrorKind::Io,
             TransportFailure::DeadlineExceeded => config::TransportErrorKind::DeadlineExceeded,
-            TransportFailure::ResponseTooLarge => config::TransportErrorKind::ResponseTooLarge,
+            TransportFailure::ResponseTooLarge { .. } => config::TransportErrorKind::ResponseTooLarge,
         }
     }
 }

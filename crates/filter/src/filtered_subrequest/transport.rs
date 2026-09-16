@@ -60,7 +60,13 @@ pub(super) fn classify_transport_failure(error: &SubRequestError) -> (u16, Trans
         SubRequestError::CircuitOpen { .. } => (503, TransportFailure::CircuitOpen),
         SubRequestError::Connect(_) => (502, TransportFailure::Connect),
         SubRequestError::DeadlineExceeded => (504, TransportFailure::DeadlineExceeded),
-        SubRequestError::ResponseTooLarge { .. } => (502, TransportFailure::ResponseTooLarge),
+        SubRequestError::ResponseTooLarge { actual, limit } => (
+            502,
+            TransportFailure::ResponseTooLarge {
+                actual: *actual,
+                limit: *limit,
+            },
+        ),
         _ => (502, TransportFailure::Io),
     }
 }
@@ -73,7 +79,7 @@ pub(super) fn stream_termination_cause(kind: TransportFailure) -> StreamTerminat
         TransportFailure::Connect => StreamTerminationCause::Connect,
         TransportFailure::Io => StreamTerminationCause::Io,
         TransportFailure::DeadlineExceeded => StreamTerminationCause::DeadlineExceeded,
-        TransportFailure::ResponseTooLarge => StreamTerminationCause::ResponseTooLarge,
+        TransportFailure::ResponseTooLarge { .. } => StreamTerminationCause::ResponseTooLarge,
     }
 }
 

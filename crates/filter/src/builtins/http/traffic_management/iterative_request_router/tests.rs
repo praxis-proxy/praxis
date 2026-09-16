@@ -2317,7 +2317,10 @@ fn transport_failure_maps_to_matching_config_kind() {
             config::TransportErrorKind::DeadlineExceeded,
         ),
         (
-            TransportFailure::ResponseTooLarge,
+            TransportFailure::ResponseTooLarge {
+                actual: 200,
+                limit: 100,
+            },
             config::TransportErrorKind::ResponseTooLarge,
         ),
     ];

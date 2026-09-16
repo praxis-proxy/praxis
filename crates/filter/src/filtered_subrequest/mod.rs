@@ -61,7 +61,7 @@ use self::{
     context::{SubrequestRuntimeResources, build_sub_filter_context},
     sanitize::{
         apply_pre_read_header_mutations, apply_request_header_mutations, body_exceeds_limit, ensure_destination_host,
-        response_body_exceeds_limits, sanitize_subrequest_headers, sanitize_subresponse_headers, set_authority_host,
+        response_body_overflow_limit, sanitize_subrequest_headers, sanitize_subresponse_headers, set_authority_host,
         streaming_transport_limit, strip_reserved_headers, subresponse_from_rejection,
     },
     transport::{build_peer, classify_transport_failure, stream_termination_cause},
@@ -123,7 +123,26 @@ pub(crate) enum TransportFailure {
     /// The transport deadline was exceeded.
     DeadlineExceeded,
     /// The response exceeded the configured size limit.
-    ResponseTooLarge,
+    ResponseTooLarge {
+        /// Observed cumulative body size that tripped the limit.
+        actual: usize,
+        /// The effective limit that was exceeded.
+        limit: usize,
+    },
+}
+
+/// Typed detail for a response that exceeded its configured size ceiling.
+///
+/// Carried across the executor's public boundary so a caller can classify an
+/// oversized response and map it to its own status (for example HTTP 413)
+/// instead of the opaque gateway response [`run`](FilteredSubrequestExecutor::run)
+/// synthesizes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResponseTooLargeInfo {
+    /// Observed size that tripped the limit, when known.
+    pub(crate) actual: Option<usize>,
+    /// The effective limit that was exceeded.
+    pub(crate) limit: usize,
 }
 
 /// Owned downstream request attributes carried into a filtered sub-request.
@@ -204,12 +223,18 @@ pub(crate) struct FilteredSubrequestError {
     error: FilterError,
     /// Caller-owned extensions recovered from the nested filter context.
     extensions: RequestExtensions,
+    /// Typed response-size-overflow detail, when this error is an overflow.
+    too_large: Option<ResponseTooLargeInfo>,
 }
 
 impl FilteredSubrequestError {
     /// Build an error before a nested filter context exists.
     fn new(error: FilterError, extensions: RequestExtensions) -> Self {
-        Self { error, extensions }
+        Self {
+            error,
+            extensions,
+            too_large: None,
+        }
     }
 
     /// Recover caller-owned extensions from a failed nested context.
@@ -224,7 +249,24 @@ impl FilteredSubrequestError {
         Self::new(error, std::mem::take(&mut ctx.extensions))
     }
 
+    /// Attach the typed overflow detail carried by a response-size-limit breach.
+    #[must_use]
+    fn with_too_large(mut self, info: ResponseTooLargeInfo) -> Self {
+        self.too_large = Some(info);
+        self
+    }
+
+    /// The typed overflow detail, when this error is a response-size breach.
+    pub(crate) fn too_large(&self) -> Option<ResponseTooLargeInfo> {
+        self.too_large
+    }
+
     /// Split the error from the extensions its caller must restore.
+    ///
+    /// The typed overflow detail is intentionally dropped here: string-based
+    /// callers (the iterative request router's `IrrStepRunner`) keep their
+    /// existing behavior, while callers that need the classification read it
+    /// through [`too_large`](Self::too_large) first.
     pub(crate) fn into_parts(self) -> (FilterError, RequestExtensions) {
         (self.error, self.extensions)
     }
@@ -242,6 +284,19 @@ enum RawResponse {
         body: Box<SubResponseBody>,
         /// Header-time transition metadata.
         outcome: SubrequestOutcome,
+    },
+    /// An executor-side body-limit check tripped after the response transition.
+    ///
+    /// Carried out of the timed block (rather than returned as an error inline)
+    /// so the shared post-processing path attaches the typed overflow detail to
+    /// [`FilteredSubrequestError`] uniformly.
+    ResponseTooLarge {
+        /// Observed body size that tripped the limit.
+        actual: usize,
+        /// The effective limit that was exceeded.
+        limit: usize,
+        /// Human-readable message preserved for string-based callers.
+        message: &'static str,
     },
 }
 
@@ -285,6 +340,36 @@ pub enum CalloutResponse {
         ///
         /// [`next_chunk`]: crate::StreamingResponseBody::next_chunk
         body: Box<dyn crate::StreamingResponseBody>,
+    },
+}
+
+/// The classified outcome of a callout run.
+///
+/// Additive companion to [`CalloutResponse`], returned by
+/// [`run_classified`](FilteredSubrequestExecutor::run_classified). It preserves
+/// the typed response-size-overflow classification that
+/// [`run`](FilteredSubrequestExecutor::run) collapses into a generic gateway
+/// response, so a caller can map an oversized response to its own status (for
+/// example HTTP 413) instead of an opaque 502. The overflow classification is
+/// exposed directly — never inferred from a `502` status.
+///
+/// Marked `#[non_exhaustive]` so future classified outcomes can be added
+/// without breaking downstream `match` arms.
+#[non_exhaustive]
+pub enum CalloutOutcome {
+    /// The outbound chain produced a response — buffered or streaming.
+    Response(CalloutResponse),
+    /// The response exceeded the configured size limit before delivery.
+    ///
+    /// Covers both a transport-level overflow (the upstream body exceeded the
+    /// per-response ceiling mid-download) and an executor-side body-limit breach
+    /// (a response-body filter grew the body past the ceiling). The
+    /// response-filter lifecycle runs in both cases before this is surfaced.
+    ResponseTooLarge {
+        /// Observed size that tripped the limit, when known.
+        actual: Option<usize>,
+        /// The effective limit that was exceeded.
+        limit: usize,
     },
 }
 
@@ -491,17 +576,90 @@ impl FilteredSubrequestExecutor {
             deadline,
             extensions,
         };
-        let OpenedSubrequest { continuation, kind } =
-            self.execute(input).await.map_err(|error| error.into_parts().0)?;
+        let opened = self.execute(input).await.map_err(|error| error.into_parts().0)?;
+        Ok(self.callout_response_from(opened))
+    }
+
+    /// Run `request` through `pipeline` and return a *classified* outcome.
+    ///
+    /// Additive companion to [`run`](Self::run) for callers that must
+    /// distinguish an oversized response from other results. It behaves exactly
+    /// like `run` for every response the outbound chain produces, but instead of
+    /// collapsing a response-size overflow into a synthesized gateway response it
+    /// returns [`CalloutOutcome::ResponseTooLarge`] carrying the observed size
+    /// (when known) and the tripped limit. Both the transport-level overflow
+    /// (upstream body over the per-response ceiling) and the executor-side
+    /// body-limit breach (a response-body filter grew the body past the ceiling)
+    /// are covered, and the response-filter lifecycle runs in both cases.
+    ///
+    /// A genuine upstream `502` is delivered as
+    /// [`CalloutOutcome::Response`] — overflow is never inferred from status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] under the same conditions as [`run`](Self::run),
+    /// except that a response-size overflow is reported as
+    /// [`CalloutOutcome::ResponseTooLarge`] rather than an error.
+    #[expect(clippy::large_futures, reason = "delegates to the full step future")]
+    #[expect(
+        clippy::large_stack_frames,
+        reason = "delegates to execute, which reconstructs a full filter context"
+    )]
+    pub async fn run_classified(
+        &self,
+        pipeline: &Arc<FilterPipeline>,
+        request: &SubRequest,
+        extensions: RequestExtensions,
+        deadline: Instant,
+    ) -> Result<CalloutOutcome, FilterError> {
+        let input = FilteredSubrequestInput {
+            pipeline,
+            request,
+            label: "callout",
+            iteration: 0,
+            deadline,
+            extensions,
+        };
+        match self.execute(input).await {
+            Ok(opened) => {
+                // A transport-level overflow rides in the completed outcome's
+                // transport classification; surface it as the typed outcome
+                // rather than the synthesized gateway response `run` returns.
+                if let OpenedResponse::Complete(outcome) = &opened.kind
+                    && let Some(TransportFailure::ResponseTooLarge { actual, limit }) = outcome.transport_error
+                {
+                    return Ok(CalloutOutcome::ResponseTooLarge {
+                        actual: Some(actual),
+                        limit,
+                    });
+                }
+                Ok(CalloutOutcome::Response(self.callout_response_from(opened)))
+            },
+            // An executor-side body-limit breach carries the typed detail on the
+            // error; every other error stays a plain `FilterError`.
+            Err(error) => match error.too_large() {
+                Some(info) => Ok(CalloutOutcome::ResponseTooLarge {
+                    actual: info.actual,
+                    limit: info.limit,
+                }),
+                None => Err(error.into_parts().0),
+            },
+        }
+    }
+
+    /// Map an opened sub-request onto the buffered/streaming callout response,
+    /// shared by [`run`](Self::run) and [`run_classified`](Self::run_classified).
+    fn callout_response_from(&self, opened: OpenedSubrequest) -> CalloutResponse {
+        let OpenedSubrequest { continuation, kind } = opened;
         match kind {
-            OpenedResponse::Complete(outcome) => Ok(CalloutResponse::Buffered(outcome.response)),
-            OpenedResponse::Streaming { body, outcome } => Ok(CalloutResponse::Streaming {
+            OpenedResponse::Complete(outcome) => CalloutResponse::Buffered(outcome.response),
+            OpenedResponse::Streaming { body, outcome } => CalloutResponse::Streaming {
                 response: outcome.response,
                 body: Box::new(CalloutStreamingBody::new(
                     FilteredStreamingBody::new(body, continuation),
                     self.max_response_bytes,
                 )),
-            }),
+            },
         }
     }
 
@@ -841,12 +999,16 @@ impl FilteredSubrequestExecutor {
                         return Ok(RawResponse::Rejected(Rejection::status(413)));
                     }
                     let mut body = Some(std::mem::take(&mut response.body));
-                    if response_body_exceeds_limits(
+                    if let Some(limit) = response_body_overflow_limit(
                         pipeline.body_capabilities().response_body_mode,
                         self.max_response_bytes,
                         body.as_ref().map_or(0, Bytes::len),
                     ) {
-                        return Err("filtered_subrequest: step response exceeds configured body limit".into());
+                        return Ok(RawResponse::ResponseTooLarge {
+                            actual: body.as_ref().map_or(0, Bytes::len),
+                            limit,
+                            message: "filtered_subrequest: step response exceeds configured body limit",
+                        });
                     }
                     let body_action = pipeline.execute_http_response_body(&mut filter_ctx, &mut body, true)?;
                     if let FilterAction::Reject(rejection) = body_action {
@@ -855,15 +1017,16 @@ impl FilteredSubrequestExecutor {
                     if self.accounting.exceeds_limit(&filter_ctx.extensions) {
                         return Ok(RawResponse::Rejected(Rejection::status(413)));
                     }
-                    if response_body_exceeds_limits(
+                    if let Some(limit) = response_body_overflow_limit(
                         pipeline.body_capabilities().response_body_mode,
                         self.max_response_bytes,
                         body.as_ref().map_or(0, Bytes::len),
                     ) {
-                        return Err(
-                            "filtered_subrequest: transformed step response exceeds configured body limit"
-                                .into(),
-                        );
+                        return Ok(RawResponse::ResponseTooLarge {
+                            actual: body.as_ref().map_or(0, Bytes::len),
+                            limit,
+                            message: "filtered_subrequest: transformed step response exceeds configured body limit",
+                        });
                     }
                     response.body = body.unwrap_or_default();
                     if let Some(metadata) = filter_ctx.response_header.as_deref() {
@@ -927,14 +1090,34 @@ impl FilteredSubrequestExecutor {
                     .into();
                 return Err(FilteredSubrequestError::capture(error, &mut filter_ctx));
             }
-            if completion_body
-                .as_ref()
-                .is_some_and(|body| body.len() > self.max_response_bytes)
-            {
-                let error = "filtered_subrequest: abnormal completion exceeds response body limit"
-                    .to_owned()
-                    .into();
-                return Err(FilteredSubrequestError::capture(error, &mut filter_ctx));
+            // Mirror the two buffered overflow sites: the effective ceiling is the
+            // smaller of `max_response_bytes` and the pipeline's response body mode.
+            //
+            // Reachability invariant — today this collapses to `max_response_bytes`.
+            // A `StreamBuffer` response mode is rejected before streaming is selected
+            // (the guard at the top of the streaming arm), and a `SizeLimit` mode only
+            // arises when no response-body filter runs — in which case nothing writes
+            // `completion_body` and it stays empty. So the only mode under which a
+            // completion body can exist is `Stream`, for which the helper returns
+            // exactly `max_response_bytes`. Routing through the shared helper keeps all
+            // three sites uniform and correct-by-construction should that guard ever
+            // be relaxed to admit a tighter response mode here.
+            if let Some(limit) = response_body_overflow_limit(
+                pipeline.body_capabilities().response_body_mode,
+                self.max_response_bytes,
+                completion_body.as_ref().map_or(0, Bytes::len),
+            ) {
+                let error = FilteredSubrequestError::capture(
+                    "filtered_subrequest: abnormal completion exceeds response body limit"
+                        .to_owned()
+                        .into(),
+                    &mut filter_ctx,
+                )
+                .with_too_large(ResponseTooLargeInfo {
+                    actual: Some(completion_body.as_ref().map_or(0, Bytes::len)),
+                    limit,
+                });
+                return Err(error);
             }
             outcome.response.body = completion_body.unwrap_or_default();
         }
@@ -970,6 +1153,17 @@ impl FilteredSubrequestExecutor {
                     headers: outcome.response.headers.clone(),
                 };
                 (OpenedResponse::Streaming { body, outcome }, snapshot, false)
+            },
+            // An executor-side body-limit breach carries the typed overflow
+            // detail out as an error, uniformly with the transport path. The
+            // response-filter lifecycle already ran before the breach.
+            RawResponse::ResponseTooLarge { actual, limit, message } => {
+                let error = FilteredSubrequestError::capture(message.to_owned().into(), &mut filter_ctx)
+                    .with_too_large(ResponseTooLargeInfo {
+                        actual: Some(actual),
+                        limit,
+                    });
+                return Err(error);
             },
         };
         let request_snapshot = crate::Request {
