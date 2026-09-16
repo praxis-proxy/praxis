@@ -4154,6 +4154,53 @@ async fn a_catch_all_route_satisfies_the_route_requirement() {
     );
 }
 
+/// A method that carries no body is not an inference call, so the
+/// inference gates stand aside — a discovery `GET /v1/models` or a CORS
+/// preflight must not be refused for carrying no model. Identity still
+/// governs it, so an authenticated caller is admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bodyless_request_is_not_asked_for_a_model() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+
+    let token = mint_jwt(&standard_claims("alice"));
+    for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
+        let mut req = make_request(method.clone(), "/v1/models");
+        req.headers.insert(
+            "Authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+        );
+        let mut ctx = make_filter_context(&req);
+        let action = filter
+            .on_request_body(&mut ctx, &mut None, true)
+            .await
+            .expect("filter ran");
+        assert!(
+            matches!(action, FilterAction::BodyDone),
+            "{method} carries no body, so it must not be denied for carrying no model; got {action:?}",
+        );
+    }
+}
+
+/// The identity gate still applies to a bodyless request: standing aside
+/// from the inference gates is not standing aside from authentication.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_bodyless_request_still_needs_a_token() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter(path);
+
+    let req = make_request(Method::GET, "/v1/models");
+    let mut ctx = make_filter_context(&req);
+    let action = filter
+        .on_request_body(&mut ctx, &mut None, true)
+        .await
+        .expect("filter ran");
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
+        "an unauthenticated discovery call is still an identity failure; got {action:?}",
+    );
+}
+
 /// `require_model: false` is the opt-out: an unattributable request
 /// falls through to the policy's other paths instead of denying.
 #[tokio::test(flavor = "multi_thread")]

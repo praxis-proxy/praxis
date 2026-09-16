@@ -38,15 +38,18 @@ global:
   authorization:
     pre_invocation:
       - "require(authenticated)"
+      # Refuse a streamed request for every model, not just one: the
+      # response half cannot evaluate SSE frames, so a policy that needs
+      # post-invocation enforcement has to close the stream up front. On
+      # `global` it stacks onto every `llm:` route below.
+      - "custom.llm.stream: deny('streaming is not permitted', 'stream_not_allowed')"
 
 routes:
-  # Open to any authenticated caller, but not to a streamed request:
-  # the response half cannot evaluate SSE frames, so a policy that
-  # needs post-invocation enforcement refuses the stream up front.
+  # Open to any authenticated caller.
   - llm: gpt-4o-mini
     authorization:
       pre_invocation:
-        - "custom.llm.stream: deny('streaming is not permitted', 'stream_not_allowed')"
+        - "require(authenticated)"
 
   # Reserved for the research role.
   - llm: [gpt-4o, o3]
@@ -54,8 +57,9 @@ routes:
       pre_invocation:
         - "require(role.research)"
 
-  # Fail closed for every model not named above. Without this route an
-  # unlisted model would reach no policy at all.
+  # Fail closed for every model not named above. `llm.require_route`
+  # would refuse an unlisted model anyway; this route shapes the refusal
+  # the client sees and keeps the policy's intent on the page.
   - llm: "*"
     authorization:
       pre_invocation:

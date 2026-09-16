@@ -21,11 +21,18 @@
 //! * **Deny (no model)** — a body the filter cannot attribute to a model fails closed before any route runs.
 //! * **Deny (identity)** — a request with no `Authorization` header is rejected at the identity gate (HTTP 401), before
 //!   the body matters.
+//! * **Deny (every model)** — the `global` stream deny covers the role-gated route too, not only the model whose
+//!   comment describes it.
+//! * **Deny (coerced spelling)** — `"stream": "true"`, which a lax backend honors, is refused as well, so the deny
+//!   cannot be stepped around by changing the wire type.
+//! * **Allow (bodyless)** — `GET /v1/models` reaches the backend: a method carrying no body is not an inference call,
+//!   so the inference gates stand aside while identity still governs it.
 //!
 //! Together these prove the model reaching policy is the one the backend
 //! would serve, that per-model routes and the catch-all both enforce,
-//! and that a denial is shaped for an inference client rather than a
-//! JSON-RPC one.
+//! that a denial is shaped for an inference client rather than a JSON-RPC
+//! one, and that neither a discovery call nor a re-spelled flag slips
+//! past.
 
 use std::{
     collections::HashMap,
@@ -252,6 +259,90 @@ fn a_body_with_no_model_fails_closed() {
     );
     assert!(
         raw.to_lowercase().contains("x-policy-violation: llm.model_missing"),
+        "raw response:\n{raw}",
+    );
+}
+
+/// A discovery call carries no body, so it is not an inference call and
+/// the inference gates stand aside. Without this an OpenAI-compatible
+/// client's first request — listing models — would be refused for
+/// carrying no model.
+#[test]
+fn a_discovery_call_reaches_the_backend() {
+    let backend = start_backend_with_shutdown("ok");
+    let proxy_port = free_port();
+    let config = load_example(proxy_port, backend_map(backend.port()));
+    let proxy = start_proxy(&config);
+
+    let token = mint_fixture_jwt("support-bot", &["support"]);
+    let raw = http_send(
+        proxy.addr(),
+        &format!(
+            "GET /v1/models HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Authorization: Bearer {token}\r\n\
+             Connection: close\r\n\
+             \r\n",
+        ),
+    );
+
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "a bodyless discovery call must not be denied for carrying no model; raw response:\n{raw}",
+    );
+}
+
+/// The stream deny sits on `global`, so it covers the role-gated route
+/// too — not just the one model whose comment described it.
+#[test]
+fn streaming_is_refused_for_every_model() {
+    let backend = start_backend_with_shutdown("ok");
+    let proxy_port = free_port();
+    let config = load_example(proxy_port, backend_map(backend.port()));
+    let proxy = start_proxy(&config);
+
+    let token = mint_fixture_jwt("research-bot", &["research"]);
+    let raw = post_completion(
+        proxy.addr(),
+        Some(&token),
+        r#"{"model":"gpt-4o","stream":true,"messages":[]}"#,
+    );
+
+    assert_eq!(
+        parse_status(&raw),
+        403,
+        "the role-gated route must refuse a stream as well; raw response:\n{raw}",
+    );
+    assert!(
+        raw.to_lowercase().contains("x-policy-violation: stream_not_allowed"),
+        "raw response:\n{raw}",
+    );
+}
+
+/// A client spelling of the streaming flag a lax backend would honor is
+/// refused too, so the deny cannot be stepped around with `"true"`.
+#[test]
+fn a_string_spelled_stream_flag_is_also_refused() {
+    let backend = start_backend_with_shutdown("ok");
+    let proxy_port = free_port();
+    let config = load_example(proxy_port, backend_map(backend.port()));
+    let proxy = start_proxy(&config);
+
+    let token = mint_fixture_jwt("support-bot", &["support"]);
+    let raw = post_completion(
+        proxy.addr(),
+        Some(&token),
+        r#"{"model":"gpt-4o-mini","stream":"true","messages":[]}"#,
+    );
+
+    assert_eq!(
+        parse_status(&raw),
+        403,
+        "`\"true\"` streams on a lax backend, so policy has to refuse it; raw response:\n{raw}",
+    );
+    assert!(
+        raw.to_lowercase().contains("x-policy-violation: stream_not_allowed"),
         "raw response:\n{raw}",
     );
 }

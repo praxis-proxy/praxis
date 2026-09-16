@@ -11,10 +11,20 @@
 # served. No protocol classifier is needed: inference calls carry no JSON-RPC
 # envelope, and the filter attributes them itself.
 #
-# A model that no `llm:` route selects is evaluated by no policy at all, so the
-# policy document must end with a catch-all `llm: "*"` route that denies. A body
-# with no usable `model` is denied by the filter itself (`llm.require_model`,
-# on by default).
+# Three gates fail closed by default: a model no `llm:` route selects is denied
+# (`llm.require_route`), a body with no usable `model` is denied
+# (`llm.require_model`), and a body carrying both a JSON-RPC envelope and a
+# top-level `model` is denied as ambiguous.
+#
+# This authorizes the APIs that name the model in the body. An API that names it
+# in the URL instead — Azure OpenAI's
+# `/openai/deployments/{deployment}/chat/completions`, Bedrock's
+# `/model/{id}/invoke` — carries no top-level `model`, so every such request
+# would be denied for carrying none. The router below is scoped to the
+# body-addressed paths for that reason.
+#
+# A method that carries no body is not an inference call, so `GET /v1/models`
+# and CORS preflights skip these gates. Identity still governs them.
 #
 # `config_path` points at the policy document (plugins + `llm:` routes)
 # that the filter loads once at construction. It is operator-supplied,
@@ -76,9 +86,11 @@ filter_chains:
           require_model: true # optional; default true — deny a body with no model
           provider: openai # optional; recorded on `llm.provider`
 
+      # Scoped to the body-addressed inference APIs: this path reads the model
+      # out of the body, so a URL-addressed provider must not be routed here.
       - filter: router
         routes:
-          - path_prefix: "/"
+          - path_prefix: "/v1/"
             cluster: inference
 
       - filter: load_balancer

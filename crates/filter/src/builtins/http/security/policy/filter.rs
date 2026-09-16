@@ -1424,6 +1424,19 @@ fn llm_deny_body(violation: Option<&PluginViolation>, original_len: usize, reaso
     fit_to_original_length(chosen, original_len, "llm", reason)
 }
 
+/// Whether this request's method can carry a body at all, and so could
+/// be an inference call.
+///
+/// `DELETE` is included: it is unusual but permitted to carry one. The
+/// excluded methods are the ones for which a body is meaningless, so a
+/// discovery `GET` or a CORS preflight is never asked for a model.
+fn request_may_carry_a_body(ctx: &HttpFilterContext<'_>) -> bool {
+    !matches!(
+        ctx.request.method,
+        http::Method::GET | http::Method::HEAD | http::Method::OPTIONS | http::Method::TRACE | http::Method::CONNECT
+    )
+}
+
 /// The violation reported when a policy declares `llm:` routes and the
 /// request body carries no usable model.
 fn missing_model_violation() -> PluginViolation {
@@ -1616,6 +1629,17 @@ impl HttpFilter for PolicyFilter {
         // intentionally running this policy for identity-only enforcement can
         // opt out via `require_protocol_metadata: false`.
         let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
+            // A request whose method carries no body is not an inference call,
+            // so the inference gates do not apply to it — a discovery call like
+            // `GET /v1/models`, or a CORS preflight, would otherwise be refused
+            // for carrying no model. Identity still governs it.
+            if self.llm_routes && !request_may_carry_a_body(ctx) {
+                tracing::trace!(
+                    target: "policy.filter",
+                    "request method carries no body; no inference dispatch",
+                );
+                return self.complete_gated_admission(ctx).await;
+            }
             // Classifier metadata wins where it exists, so the inference path
             // is only reached for traffic no classifier claimed.
             if self.llm_routes {

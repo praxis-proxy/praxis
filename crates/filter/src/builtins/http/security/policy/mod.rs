@@ -78,6 +78,18 @@
 //!   governs, and choosing either would apply a rule the operator did not write for it. A plain MCP request — no
 //!   top-level `model` — still takes the MCP path.
 //!
+//! This authorizes the APIs that name the model in the body — OpenAI chat and
+//! legacy completions, embeddings, and Anthropic messages. An API that names it
+//! in the URL instead (Azure OpenAI's
+//! `/openai/deployments/{deployment}/chat/completions`, Bedrock's
+//! `/model/{id}/invoke`) carries no top-level `model`, so every such request is
+//! denied for carrying none. Do not front one with this path; route it to a
+//! listener or chain that does not.
+//!
+//! A method that carries no body is not an inference call, so a discovery
+//! `GET /v1/models` or a CORS preflight skips these gates. Identity still
+//! governs it.
+//!
 //! See `examples/configs/security/policy-llm.yaml`.
 //!
 //! Under `body_access: read_write` the response half evaluates the policy's
