@@ -58,14 +58,8 @@ pub(crate) struct PolicyFilterConfig {
     #[serde(default = "default_init_timeout_secs")]
     pub init_timeout_secs: u64,
 
-    /// Maximum request/response body bytes buffered in `ReadWrite`
-    /// mode. `ReadWrite` uses `StreamBuffer` to accumulate the whole
-    /// body before APL field mutators run; without a cap an oversized
-    /// payload could exhaust memory. Also the ceiling on the inference
-    /// path, which buffers in `ReadOnly` too — the model is in the body.
-    /// Otherwise ignored in `ReadOnly` mode, which streams. The pipeline
-    /// rejects an unbounded buffer at config load, so this always
-    /// carries a concrete ceiling.
+    /// Maximum request or response body size in `ReadWrite` mode.
+    /// Also used as the default inference request limit.
     #[serde(default = "default_max_buffer_bytes")]
     pub max_buffer_bytes: usize,
 
@@ -90,12 +84,8 @@ pub(crate) struct PolicyFilterConfig {
     /// traffic through the `policy` filter for identity-only
     /// enforcement (legacy behavior).
     ///
-    /// Only consulted when the loaded policy declares MCP entity routes
-    /// (tool/prompt/resource). A pure-L7 (`global`-only) or identity-only
-    /// policy never reaches this gate — `on_request_body` returns
-    /// `BodyDone` before it, so the flag has no effect there. Nor does an
-    /// inference-only (`llm:`) policy, whose gates are `llm.require_model`
-    /// and `llm.require_route`.
+    /// Only applies to policies with MCP entity routes. Inference routes
+    /// use their own gates instead.
     ///
     /// Note: JSON-RPC methods that legitimately carry no entity (e.g.
     /// `tools/list`, `initialize`, `prompts/list`) still pass —
@@ -104,9 +94,7 @@ pub(crate) struct PolicyFilterConfig {
     #[serde(default = "default_true")]
     pub require_protocol_metadata: bool,
 
-    /// Tuning for the inference authorization path. The policy document
-    /// declaring `llm:` routes is what switches that path on, not this
-    /// block.
+    /// Inference authorization options.
     #[serde(default)]
     pub llm: LlmOptions,
 }
@@ -121,8 +109,7 @@ fn default_true() -> bool {
 // LlmOptions
 // -----------------------------------------------------------------------------
 
-/// Tuning for the inference authorization path — the `llm:` routes a
-/// policy document declares.
+/// Inference authorization options for `llm:` routes.
 ///
 /// ```yaml
 /// llm:
@@ -134,66 +121,30 @@ fn default_true() -> bool {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LlmOptions {
-    /// Ceiling on a buffered inference request body, in bytes.
-    ///
-    /// Defaults to the same figure as `max_buffer_bytes`, so an existing
-    /// deployment keeps the ceiling it had. It is a separate knob because
-    /// the two bound different things: the inference path buffers in
-    /// `read_only` too — the model is in the body — and it buffers at the
-    /// body phase, which is the earliest point the model can be read,
-    /// so this ceiling is what a caller can make the proxy hold before
-    /// identity has been resolved.
-    ///
-    /// Peak memory is roughly this times the in-flight request count.
-    /// Tune it *down* to bound that exposure without shrinking the
-    /// JSON-RPC ceiling; raise it only if inference payloads need more
-    /// than `max_buffer_bytes` allows. Multimodal requests carrying
-    /// base64 images, long chat histories, and large embeddings inputs
-    /// are the ones that run large.
-    ///
-    /// A body over the ceiling is rejected — normally by the pipeline
-    /// before any filter runs, and otherwise by this filter, which
-    /// re-checks what actually arrived. The re-check matters because the
-    /// pipeline keeps the largest buffer any filter asked for, so another
-    /// buffering filter in the chain would otherwise widen this one.
-    /// Either way an HTTP 413 is the fail-closed answer for a body too
-    /// large to read a model from.
+    /// Maximum buffered inference request size, in bytes.
+    /// Requests over this limit receive HTTP 413.
     #[serde(default = "default_llm_max_request_bytes")]
     pub max_request_bytes: usize,
 
-    /// Top-level request fields promoted to `custom.llm.<name>`, so a
-    /// rule can read them (`deny(custom.llm.stream)`). Scalars only.
-    ///
-    /// Setting this REPLACES the default list rather than extending it.
-    /// The default is `[stream, max_tokens, max_completion_tokens,
-    /// temperature, top_p, n]`, so an operator who sets
-    /// `promote_params: [max_tokens]` silently stops promoting `stream`
-    /// — and a rule reading `custom.llm.stream` then never fires. Name
-    /// every field the policy's rules read, including the ones the
-    /// default already covered.
+    /// Top-level scalar fields promoted to `custom.llm.<name>`.
+    /// A configured list replaces the defaults.
     #[serde(default = "default_promote_params")]
     pub promote_params: Vec<String>,
 
-    /// Provider recorded on `llm.provider`. Operator-asserted: the
-    /// upstream is chosen after this filter runs, so there is nothing to
-    /// infer one from.
+    /// Operator-supplied provider recorded on `llm.provider`.
     #[serde(default)]
     pub provider: Option<String>,
 
     /// Deny a request whose body carries no usable top-level `model`.
     ///
-    /// On by default: such a request cannot be matched to an `llm:`
-    /// route, so admitting it would admit it unevaluated. Set `false` to
-    /// let it fall through to the policy's other paths instead.
+    /// Enabled by default. When disabled, the request falls through to
+    /// other policy paths.
     #[serde(default = "default_true")]
     pub require_model: bool,
 
     /// Deny a model no `llm:` route selects.
     ///
-    /// On by default. `global.defaults.llm` stacks onto routes rather
-    /// than installing one, so without this a model outside the policy's
-    /// routes reaches no rule at all and is admitted. Set `false` only
-    /// to admit unlisted models deliberately.
+    /// Enabled by default. Disable only to admit unlisted models.
     #[serde(default = "default_true")]
     pub require_route: bool,
 }
@@ -210,18 +161,12 @@ impl Default for LlmOptions {
     }
 }
 
-/// Default inference request buffer ceiling: the same as the JSON-RPC
-/// one, so adding an `llm:` policy to a chain does not change the
-/// ceiling it already had. Deliberately delegated rather than repeating
-/// the literal, so the two cannot drift apart.
+/// Return the default inference request limit.
 fn default_llm_max_request_bytes() -> usize {
     default_max_buffer_bytes()
 }
 
-/// The OpenAI / Anthropic sampling fields a rule plausibly keys on.
-///
-/// An operator-supplied `promote_params` replaces this list wholesale;
-/// see [`LlmOptions::promote_params`].
+/// Return the default promoted inference parameters.
 fn default_promote_params() -> Vec<String> {
     [
         "stream",

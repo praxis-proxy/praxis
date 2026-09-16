@@ -1,38 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Functional integration test for the experimental inference
-//! authorization example (`examples/configs/security/policy-llm.yaml`).
-//!
-//! Exercises the `policy` filter's inference path end-to-end against the
-//! fixture's `llm:` routes, with no protocol classifier in the chain —
-//! which is the point: an OpenAI-style call carries no JSON-RPC
-//! envelope, so the proxy reads the model out of the request body
-//! itself. Cases:
-//!
-//! * **Allow** — a model the caller may use resolves identity, matches its `llm:` route, and reaches the backend (HTTP
-//!   200).
-//! * **Allow (role-gated)** — a reserved model passes for a caller carrying the required role.
-//! * **Deny (role-gated)** — the same model is refused for a caller without it.
-//! * **Deny (catch-all)** — a model no route names is refused by the catch-all, with the policy's `denyWith` status,
-//!   body, and header.
-//! * **Deny (promoted parameter)** — `stream: true` is refused by a rule over `custom.llm.stream`, proving the sampling
-//!   parameters reach the attribute bag.
-//! * **Deny (no model)** — a body the filter cannot attribute to a model fails closed before any route runs.
-//! * **Deny (identity)** — a request with no `Authorization` header is rejected at the identity gate (HTTP 401), before
-//!   the body matters.
-//! * **Deny (every model)** — the `global` stream deny covers the role-gated route too, not only the model whose
-//!   comment describes it.
-//! * **Deny (coerced spelling)** — `"stream": "true"`, which a lax backend honors, is refused as well, so the deny
-//!   cannot be stepped around by changing the wire type.
-//! * **Allow (bodyless)** — `GET /v1/models` reaches the backend: a method carrying no body is not an inference call,
-//!   so the inference gates stand aside while identity still governs it.
-//!
-//! Together these prove the model reaching policy is the one the backend
-//! would serve, that per-model routes and the catch-all both enforce,
-//! that a denial is shaped for an inference client rather than a JSON-RPC
-//! one, and that neither a discovery call nor a re-spelled flag slips
-//! past.
+//! Functional tests for the inference authorization example.
 
 use std::{
     collections::HashMap,
@@ -45,14 +14,11 @@ use praxis_test_utils::{
     example_config_path, free_port, http_send, parse_status, patch_yaml, start_backend_with_shutdown, start_proxy,
 };
 
-// Identity parameters mirrored from
-// `tests/integration/fixtures/llm-policy.yaml`.
 const FIXTURE_ISSUER: &str = "https://idp.example.com";
 const FIXTURE_AUDIENCE: &str = "praxis-policy-example";
 const FIXTURE_SECRET: &str = "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT";
 
-/// Mint an HS256 JWT accepted by the fixture's `jwt-user` plugin,
-/// carrying `roles` so the fixture's role-gated route can select on it.
+/// Mint a JWT accepted by the inference policy fixture.
 fn mint_fixture_jwt(subject: &str, roles: &[&str]) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -75,11 +41,10 @@ fn mint_fixture_jwt(subject: &str, roles: &[&str]) -> String {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Test Utilities
 // -----------------------------------------------------------------------------
 
-/// Load the inference example, rewrite the operator `config_path` to the
-/// in-repo fixture, and patch ports.
+/// Load the inference example with test paths and ports.
 #[expect(clippy::needless_pass_by_value, reason = "callers construct the map inline")]
 fn load_example(proxy_port: u16, port_map: HashMap<&str, u16>) -> Config {
     let praxis_yaml_path = example_config_path("security/policy-llm.yaml");
@@ -95,8 +60,7 @@ fn backend_map(port: u16) -> HashMap<&'static str, u16> {
     HashMap::from([("127.0.0.1:3000", port)])
 }
 
-/// Send one chat-completions request, optionally authenticated, and
-/// return the raw response.
+/// Send a chat-completions request and return the raw response.
 fn post_completion(addr: &str, token: Option<&str>, body: &str) -> String {
     let authorization = token.map_or_else(String::new, |t| format!("Authorization: Bearer {t}\r\n"));
     http_send(
@@ -187,8 +151,6 @@ fn a_reserved_model_is_denied_for_a_caller_without_the_role() {
     );
 }
 
-/// The role-gated route is declared in list form, so both names it lists
-/// must select it — not just the first.
 #[test]
 fn every_model_a_list_route_names_is_selected() {
     let backend = start_backend_with_shutdown("ok");
@@ -282,10 +244,6 @@ fn a_body_with_no_model_fails_closed() {
     );
 }
 
-/// A discovery call carries no body, so it is not an inference call and
-/// the inference gates stand aside. Without this an OpenAI-compatible
-/// client's first request — listing models — would be refused for
-/// carrying no model.
 #[test]
 fn a_discovery_call_reaches_the_backend() {
     let backend = start_backend_with_shutdown("ok");
@@ -312,8 +270,6 @@ fn a_discovery_call_reaches_the_backend() {
     );
 }
 
-/// The stream deny sits on `global`, so it covers the role-gated route
-/// too — not just the one model whose comment described it.
 #[test]
 fn streaming_is_refused_for_every_model() {
     let backend = start_backend_with_shutdown("ok");
@@ -339,8 +295,6 @@ fn streaming_is_refused_for_every_model() {
     );
 }
 
-/// A client spelling of the streaming flag a lax backend would honor is
-/// refused too, so the deny cannot be stepped around with `"true"`.
 #[test]
 fn a_string_spelled_stream_flag_is_also_refused() {
     let backend = start_backend_with_shutdown("ok");

@@ -37,15 +37,7 @@
 //! functions are the closed switch — anything not listed falls
 //! through to the identity-only path.
 //!
-//! # The inference entity
-//!
-//! The `llm` entity is the one entity not keyed by a JSON-RPC method: the
-//! filter parses the model out of the request body and uses it as the
-//! entity name — see [`llm`](super::llm).
-//!
-//! | Source | Entity type | Pre-hook | Post-hook |
-//! |---|---|---|---|
-//! | body `model` | llm | `cmf.llm_input` | `cmf.llm_output` |
+//! Inference requests use the body model as the `llm` entity name.
 
 use ppe::praxis_policy_core::cmf::constants::{
     ENTITY_LLM, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT,
@@ -57,13 +49,12 @@ use ppe::praxis_policy_core::cmf::constants::{
 // Inference
 // -----------------------------------------------------------------------------
 
-/// Entity coordinates for an inference call's request phase. The entity
-/// name is the model the proxy parsed, not a constant.
+/// Return the inference request entity type and hook.
 pub(super) const fn llm_entity_pre() -> (&'static str, &'static str) {
     (ENTITY_LLM, HOOK_CMF_LLM_INPUT)
 }
 
-/// Post-phase mirror of [`llm_entity_pre`].
+/// Return the inference response entity type and hook.
 pub(super) const fn llm_entity_post() -> (&'static str, &'static str) {
     (ENTITY_LLM, HOOK_CMF_LLM_OUTPUT)
 }

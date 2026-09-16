@@ -57,61 +57,18 @@
 //!
 //! # Inference calls
 //!
-//! A policy that declares `llm:` routes authorizes inference calls, and needs
-//! no classifier: an OpenAI-style call carries no JSON-RPC envelope, so the
-//! filter buffers the request body and reads the top-level `model` itself. That
-//! model is the entity name and `llm.model_id`, and the route is dispatched as
-//! `cmf.llm_input`. Reading it from the body rather than a header is the
-//! security property: policy authorizes the model the backend will be asked
-//! for, and no client-supplied header can disagree. `llm.provider` is
-//! operator-asserted, and `llm.promote_params` names the sampling parameters
-//! that reach the bag as `custom.llm.*`.
-//!
-//! Three fail-closed gates, all on by default:
-//!
-//! - **A model no `llm:` route selects is denied** (`llm.require_route`). `global.defaults.llm` stacks onto routes
-//!   rather than installing one, so such a model would otherwise reach no rule at all. A catch-all `llm: "*"` route
-//!   makes every model selected, which is the other way to cover it.
-//! - **A body carrying no usable `model` is denied** (`llm.require_model`) rather than admitted unevaluated.
-//! - **A body carrying both a JSON-RPC envelope and a top-level `model` is denied** (`llm.ambiguous_entity`), whether
-//!   or not a classifier claimed it. Since `mcp.method` is itself derived from the body by the classifier, such a
-//!   request leaves it undecidable which entity governs, and choosing either would apply a rule the operator did not
-//!   write for it. A plain MCP request — no top-level `model` — still takes the MCP path, and an unclassified one still
-//!   reports the missing classifier rather than being read as an inference call.
-//! - **A body past `llm.max_request_bytes` is denied** (HTTP 413, `llm.body_too_large`). The pipeline keeps the largest
-//!   buffer any filter asked for, so the ceiling is re-checked against what arrived.
-//!
-//! This authorizes the APIs that name the model in the body — OpenAI chat and
-//! legacy completions, embeddings, and Anthropic messages. An API that names it
-//! in the URL instead (Azure OpenAI's
-//! `/openai/deployments/{deployment}/chat/completions`, Bedrock's
-//! `/model/{id}/invoke`) carries no top-level `model`, so every such request is
-//! denied for carrying none. Do not front one with this path; route it to a
-//! listener or chain that does not.
-//!
-//! A request that carries no body is not an inference call, so a discovery
-//! `GET /v1/models` or a CORS preflight skips these gates. Identity still
-//! governs it. Both the method and the body have to agree — a `GET` that does
-//! carry a body is still evaluated, since some backends read one.
+//! Policies with `llm:` routes authorize the top-level request `model` through
+//! `cmf.llm_input`; no protocol classifier is required. Missing and unlisted
+//! models fail closed by default, conflicting JSON-RPC and inference
+//! coordinates are denied, and `llm.max_request_bytes` bounds buffering.
+//! Bodyless requests remain subject to identity policy but skip inference
+//! routing. APIs that identify the model only in the URL are unsupported.
 //!
 //! See `examples/configs/security/policy-llm.yaml`.
 //!
-//! Under `body_access: read_write` the response half evaluates the policy's
-//! `post_invocation` rules over the completion the upstream reported
-//! (`completion.model`, `completion.tokens.*`, `completion.stop_reason`). What
-//! the upstream actually sent decides whether those rules run: a response
-//! streamed as server-sent events carries no single completion, so it is
-//! released and passed through, while a request that merely asked to stream but
-//! was answered with one JSON document is still evaluated. A policy that must
-//! enforce on the way back therefore denies `custom.llm.stream` on the way in;
-//! the filter warns at startup to that effect. A response the filter cannot
-//! read at all — a `Content-Encoding` it does not decode — is denied rather
-//! than admitted, and the request half strips `accept-encoding` upstream so
-//! that case stays rare. APL field mutators do not rewrite
-//! inference bodies in either direction — a CMF message carries one text slot
-//! per part, so a multi-turn chat or a multi-choice completion cannot
-//! round-trip losslessly; the filter warns and ships the original bytes rather
-//! than a partial redaction.
+//! With `body_access: read_write`, `cmf.llm_output` evaluates non-streaming
+//! JSON responses. Encoded responses fail closed; SSE responses pass through.
+//! APL field mutators do not rewrite inference bodies in either direction.
 //!
 //! # The policy document
 //!
@@ -172,13 +129,9 @@
 //! | Policy suspend (human-in-the-loop approval pending) | HTTP 200 with a JSON-RPC error envelope carrying the violation's `proto_error_code` (`-32120`) instead of the generic deny code, plus the elicitation bundle (`elicitation_id` / `approver` / `expires_at` / `channel`) in `error.data` — a distinct code so the client can retry rather than treat it as a flat deny. |
 //! | Generic-HTTP (L7) policy deny | Plain HTTP response (default 403) with status / body / headers from the policy's `denyWith`, plus `X-Policy-Violation: <code>` — a non-MCP client gets a real HTTP status, not a JSON-RPC envelope. |
 //! | Missing `mcp.method` metadata | HTTP 500 (server-side misconfiguration; protocol classifier filter from `praxis-ai` missing or misordered). |
-//! | Inference policy deny (`pre_invocation`) | Plain HTTP response (default 403) carrying `{"error":{"message","type","code"}}` — what an OpenAI-style SDK parses — overridable by the policy's `denyWith`, plus `X-Policy-Violation: <code>`. A pending approval sets `type` to `policy_pending` and carries the elicitation bundle in `error.details`. |
-//! | Inference policy deny (`post_invocation`) | **The response body only.** Status and headers are already on the wire by the time `cmf.llm_output` runs, so the client sees the upstream's status (commonly `200`) with the `{"error":{...}}` envelope as the body, fitted to the committed `Content-Length` — and NO `X-Policy-Violation` header. The policy's `denyWith` cannot change the status here either. Treat a post-invocation deny as a body-level control, not an HTTP-level one. |
-//! | Inference request with no usable `model` | The `pre_invocation` shape, with violation code `llm.model_missing` (`llm.require_model`, on by default). |
-//! | Inference request no `llm:` route selects | The same shape, with violation code `llm.no_route` (`llm.require_route`, on by default). |
-//! | Inference request carrying both entity coordinates | The same shape, with violation code `llm.ambiguous_entity`. |
-//! | Inference request past `llm.max_request_bytes` | HTTP 413 with the provider error envelope, violation code `llm.body_too_large`. |
-//! | Inference response the filter cannot read | The response body is replaced with the envelope, violation code `llm.response_unreadable`. |
+//! | Inference request deny | Plain HTTP response with an OpenAI-compatible error envelope and `X-Policy-Violation`. |
+//! | Inference response deny | The response body is replaced; the committed status and headers cannot change. |
+//! | Oversized inference request | HTTP 413 with violation code `llm.body_too_large`. |
 //!
 //! Any violation carrying a `proto_error_code` overrides `-32001` on the
 //! wire, and its `details` map is merged into `error.data`; the pending

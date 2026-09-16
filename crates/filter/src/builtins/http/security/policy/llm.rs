@@ -1,20 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Inference body parsing + typed CMF content builders.
-//!
-//! | Read | Used for |
-//! |---|---|
-//! | top-level `model` | the entity name and `llm.model_id` |
-//! | top-level `stream` | skipping the response phase for SSE |
-//! | configured scalars | `custom.llm.<name>` bag attributes |
-//! | `messages` / `prompt` / `system` | the CMF message a scanner reads |
-//! | `usage` / `finish_reason` | the `completion.*` bag attributes |
-//!
-//! Every OpenAI and Anthropic shape carries `model` at the top level, so
-//! authorization needs no per-API mode. Prompt text is best-effort by
-//! contrast: an unrecognized shape yields no content and the route still
-//! authorizes on `llm.model_id`.
+//! Inference request and response parsing for CMF policy evaluation.
 
 use bytes::Bytes;
 use ppe::praxis_policy_core::{
@@ -26,17 +13,14 @@ use ppe::praxis_policy_core::{
 // Constants
 // -----------------------------------------------------------------------------
 
-/// Longest `model` the filter treats as usable. Matches the filter
-/// metadata value ceiling, so an accepted model always reaches
-/// `llm.model`.
+/// Maximum model identifier length accepted by filter metadata.
 const MAX_MODEL_BYTES: usize = 256;
 
 // -----------------------------------------------------------------------------
 // Request side
 // -----------------------------------------------------------------------------
 
-/// An inference request body, parsed once for the whole phase: every
-/// reader below walks the same document.
+/// A parsed inference request body.
 pub(super) struct ParsedLlmRequest(serde_json::Value);
 
 impl ParsedLlmRequest {
@@ -47,13 +31,7 @@ impl ParsedLlmRequest {
 
     /// The top-level `model`, when it is a usable string.
     ///
-    /// Anything else is `None` — a request the caller cannot attribute to
-    /// a model. Control characters are rejected because the value becomes
-    /// the entity name, so it reaches route matching, audit records and
-    /// log lines, and no real model identifier carries them. So is
-    /// anything past [`MAX_MODEL_BYTES`], which the metadata bag would
-    /// drop anyway: better an unattributable request that fails closed
-    /// than an authorized one whose model went unrecorded.
+    /// Empty, overlong, and control-character-bearing values are rejected.
     pub(super) fn model(&self) -> Option<&str> {
         self.0
             .get("model")
@@ -62,36 +40,20 @@ impl ParsedLlmRequest {
             .filter(|model| !model.is_empty() && model.len() <= MAX_MODEL_BYTES && !model.chars().any(char::is_control))
     }
 
-    /// Whether the body carries a JSON-RPC envelope, and so is a request
-    /// some classifier should have claimed rather than an inference call.
-    ///
-    /// Either marker counts. A body with both an envelope and a `model`
-    /// is ambiguous; one with an envelope and no `model` is an MCP call
-    /// the classifier did not attribute.
+    /// Whether the body carries a JSON-RPC `jsonrpc` or `method` marker.
     pub(super) fn carries_json_rpc_envelope(&self) -> bool {
         ["jsonrpc", "method"]
             .iter()
             .any(|key| self.0.get(key).is_some_and(serde_json::Value::is_string))
     }
 
-    /// Whether the caller asked for a streamed response. Read here
-    /// because the upstream may ignore the flag and answer either way.
-    ///
-    /// Every spelling a lax backend coerces counts, not just JSON
-    /// `true` — see [`truthy`].
+    /// Whether the body requests a streamed response.
     pub(super) fn is_streaming(&self) -> bool {
         self.0.get("stream").is_some_and(truthy)
     }
 
-    /// The configured top-level scalars, keyed for `custom.llm.<name>`.
-    ///
-    /// Scalars only. A parameter that is an object is nothing a rule can
-    /// compare, and promoting it would put arbitrary client-supplied
-    /// structure in the bag.
-    ///
-    /// A boolean parameter is normalized to a JSON bool, so a rule reads
-    /// the value the upstream would act on rather than the client's
-    /// spelling of it.
+    /// Return configured scalar fields keyed for `custom.llm.<name>`.
+    /// Boolean fields are normalized before promotion.
     pub(super) fn promoted_params(&self, names: &[String]) -> serde_json::Map<String, serde_json::Value> {
         names
             .iter()
@@ -105,9 +67,7 @@ impl ParsedLlmRequest {
             .collect()
     }
 
-    /// The CMF content a `cmf.llm_input` handler evaluates: one text
-    /// part per prompt-bearing field, in wire order, so a scanner sees
-    /// the whole prompt rather than the last turn.
+    /// Build CMF text parts from prompt-bearing fields in wire order.
     pub(super) fn content(&self) -> Vec<ContentPart> {
         let mut parts = Vec::new();
 
@@ -125,8 +85,6 @@ impl ParsedLlmRequest {
             }
         }
 
-        // Legacy completions. Also an array of prompts, which the
-        // multimodal walker already handles.
         if let Some(prompt) = self.0.get("prompt") {
             push_text(&mut parts, prompt);
         }
@@ -141,19 +99,10 @@ impl ParsedLlmRequest {
     }
 }
 
-/// Top-level request fields whose value is semantically a boolean.
-///
-/// Only these are normalized: a numeric field like `n` must stay a
-/// number, or `custom.llm.n > 0` would compare against a bool.
+/// Top-level request fields with boolean semantics.
 const BOOLEAN_PARAMS: &[&str] = &["stream"];
 
-/// Whether a request field reads as true in any spelling a backend
-/// would act on.
-///
-/// An OpenAI-compatible backend built on lax deserialization coerces
-/// `"true"` and `1`, so policy has to agree: a rule over
-/// `custom.llm.stream` must fire on whatever the upstream will honor,
-/// not only on JSON `true`.
+/// Whether a request field uses a commonly coerced true value.
 fn truthy(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Bool(flag) => *flag,
@@ -165,8 +114,7 @@ fn truthy(value: &serde_json::Value) -> bool {
     }
 }
 
-/// The value promoted to `custom.llm.<name>`: a boolean field as a JSON
-/// bool, anything else unchanged.
+/// Normalize a promoted boolean field and clone other scalar values.
 fn normalize_param(name: &str, value: &serde_json::Value) -> serde_json::Value {
     if BOOLEAN_PARAMS.contains(&name) {
         return serde_json::Value::Bool(truthy(value));
@@ -174,10 +122,7 @@ fn normalize_param(name: &str, value: &serde_json::Value) -> serde_json::Value {
     value.clone()
 }
 
-/// Append the text `value` carries as a content part.
-///
-/// A message's `content` is either a string or the multimodal array of
-/// `{type, text}` parts; anything carrying no text contributes nothing.
+/// Append text from a string or multimodal content array.
 fn push_text(parts: &mut Vec<ContentPart>, value: &serde_json::Value) {
     match value {
         serde_json::Value::String(text) => {
@@ -220,18 +165,12 @@ impl ParsedLlmResponse {
         Self(serde_json::from_slice(body).unwrap_or(serde_json::Value::Null))
     }
 
-    /// Whether the body parsed to a JSON object at all. A response the
-    /// caller cannot read has no completion to evaluate.
+    /// Whether the body is a JSON object.
     pub(super) fn is_object(&self) -> bool {
         self.0.is_object()
     }
 
-    /// Completion metadata for the `completion.*` bag attributes.
-    ///
-    /// Reads both providers' spellings of `usage`. `tokens` is unset
-    /// when the response reported no counts at all; once any count is
-    /// present the others default to 0, because `TokenUsage` carries
-    /// three plain `u32`s and cannot record a single field as unset.
+    /// Build metadata for the `completion.*` attributes.
     pub(super) fn completion(&self) -> CompletionExtension {
         CompletionExtension {
             model: self
@@ -251,10 +190,7 @@ impl ParsedLlmResponse {
         let input = count(usage, "prompt_tokens").or_else(|| count(usage, "input_tokens"));
         let output = count(usage, "completion_tokens").or_else(|| count(usage, "output_tokens"));
         let total = count(usage, "total_tokens");
-        // Anthropic reports the two halves and no total; deriving it
-        // keeps one rule (`completion.tokens.total`) working for both.
-        // A half the provider omitted counts as 0 rather than voiding the
-        // total: a budget rule reading 0 would admit the response.
+        // Anthropic omits the total, so derive it for provider-neutral rules.
         let total = total.or_else(|| {
             (input.is_some() || output.is_some()).then(|| input.unwrap_or(0).saturating_add(output.unwrap_or(0)))
         });
@@ -265,8 +201,7 @@ impl ParsedLlmResponse {
         })
     }
 
-    /// Why generation stopped. An unrecognized reason is left unset
-    /// rather than mapped to a plausible neighbour.
+    /// Map a recognized provider stop reason to CMF.
     fn stop_reason(&self) -> Option<StopReason> {
         let raw = self
             .0
@@ -308,11 +243,7 @@ impl ParsedLlmResponse {
     }
 }
 
-/// A `u32` token count, whatever numeric shape the provider used.
-///
-/// Saturates instead of discarding. A count above `u32::MAX`, or a
-/// fractional one, still has to reach a budget rule: dropping it would
-/// leave the field at 0 and admit a response the rule meant to deny.
+/// Read a token count, rounding up fractions and saturating at `u32::MAX`.
 #[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,

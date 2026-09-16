@@ -1,19 +1,5 @@
-# Policy fixture for the `security/policy-llm.yaml` example integration
-# test. The example points `config_path` at an operator-supplied
-# deployment path; the test rewrites that to this file so the policy
-# filter constructs without shipping a policy under examples/.
-#
-# Shape: one HS256 JWT identity plugin (fail-closed) plus `llm:` routes
-# — a per-model route, a role-gated one, and the catch-all that makes
-# an unlisted model deny. Because the routes are `llm:` routes, the
-# filter parses the model out of the request body and dispatches
-# `cmf.llm_input`; no protocol classifier is involved.
-#
-# The `denyWith` on the catch-all proves an operator can shape the
-# refusal an inference client sees.
-#
-# Production deployments swap HS256 for RS256 + JWKS and source the
-# per-caller model allow-list from an attribute file.
+# Policy fixture for the inference authorization example.
+# Production deployments should replace the shared secret with RS256 and JWKS.
 
 plugins:
   - name: jwt-user
@@ -38,10 +24,7 @@ global:
   authorization:
     pre_invocation:
       - "require(authenticated)"
-      # Refuse a streamed request for every model, not just one: the
-      # response half cannot evaluate SSE frames, so a policy that needs
-      # post-invocation enforcement has to close the stream up front. On
-      # `global` it stacks onto every `llm:` route below.
+      # Response policy cannot evaluate SSE frames, so reject streaming first.
       - "custom.llm.stream: deny('streaming is not permitted', 'stream_not_allowed')"
 
 routes:
@@ -57,9 +40,7 @@ routes:
       pre_invocation:
         - "require(role.research)"
 
-  # Fail closed for every model not named above. `llm.require_route`
-  # would refuse an unlisted model anyway; this route shapes the refusal
-  # the client sees and keeps the policy's intent on the page.
+  # Shape the denial for models not named above.
   - llm: "*"
     authorization:
       pre_invocation:

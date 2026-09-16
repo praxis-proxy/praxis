@@ -198,8 +198,7 @@ enum FieldToken {
     SpanId,
     RequestHeader(String),
     ResponseHeader(String),
-    /// A filter-metadata key, e.g. `llm.model`. Proxy-derived, so no
-    /// client can supply the value.
+    /// A filter-metadata key, such as `llm.model`.
     Metadata(String),
 }
 
@@ -673,8 +672,7 @@ fn parse_field_tokens(
     Ok(tokens)
 }
 
-/// Parse the field tokens that name a subject after a prefix, or `None`
-/// when `token` carries no such prefix.
+/// Parse a prefixed field token.
 fn parse_prefixed_field_token(token: &str) -> Option<Result<FieldToken, FilterError>> {
     if let Some(name) = token.strip_prefix("request_header.") {
         return Some(if name.is_empty() {

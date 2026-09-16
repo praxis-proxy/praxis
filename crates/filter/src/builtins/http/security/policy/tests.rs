@@ -3770,10 +3770,7 @@ async fn the_response_half_is_gated_on_the_policy_declaring_one() {
 // Inference (LLM) authorization
 // -----------------------------------------------------------------------------
 
-/// Write a policy document whose only routes are `llm:` routes: one
-/// per-model route admitting an authenticated caller, and the catch-all
-/// that makes every other model deny. No MCP entity routes, so the
-/// filter must reach the inference path with no classifier in the chain.
+/// Write a policy with named and catch-all inference routes.
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
@@ -3817,8 +3814,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a policy document that declares BOTH an `llm:` route and an MCP
-/// tool route, so classification precedence is observable.
+/// Write a policy with inference and MCP tool routes.
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
@@ -3867,9 +3863,7 @@ routes:
 }
 
 
-/// Write a policy whose `llm:` route declares only `post_invocation`, so
-/// only `cmf.llm_output` is wired. Such a policy must still activate the
-/// inference path, or it loads and enforces nothing.
+/// Write a policy with only an inference response hook.
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
@@ -3909,9 +3903,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a policy document with a field mutator on an `llm:` route, in
-/// both directions. The inference path cannot round-trip a body, so the
-/// mutator must be inert rather than half-applied.
+/// Write an inference policy with request and response field mutators.
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
@@ -3955,9 +3947,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a policy document whose catch-all denies only when
-/// `llm.provider` reads the operator-asserted value, so the rule firing
-/// proves the config reached the attribute bag.
+/// Write a policy that denies a configured inference provider.
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
@@ -3997,8 +3987,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a policy document with one named `llm:` route and no catch-all,
-/// so an unlisted model reaches no rule at all.
+/// Write a policy with one named inference route and no catch-all.
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
@@ -4038,9 +4027,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a policy document with response-phase inference policy: the
-/// catch-all `llm:` route admits the request and denies on the way back
-/// when the completion reports more than 100 total tokens.
+/// Write a policy that denies large inference responses.
 #[expect(
     clippy::too_many_lines,
     reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
@@ -4082,7 +4069,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Build a `PolicyFilter` with inference options the caller chooses.
+/// Build a policy filter with custom inference options.
 fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) -> PolicyFilter {
     PolicyFilter::new(PolicyFilterConfig {
         config_path,
@@ -4096,8 +4083,7 @@ fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) ->
     .expect("filter should construct")
 }
 
-/// Whether `rejection` carries `name: value`, matching the name
-/// case-insensitively as HTTP does.
+/// Whether a rejection contains the requested header.
 fn has_header(rejection: &crate::Rejection, name: &str, value: &str) -> bool {
     rejection
         .headers
@@ -4105,9 +4091,7 @@ fn has_header(rejection: &crate::Rejection, name: &str, value: &str) -> bool {
         .any(|(header, held)| header.eq_ignore_ascii_case(name) && held == value)
 }
 
-/// Drive one inference request through the body phase as `subject`,
-/// with no classifier metadata — exactly what an OpenAI-style call
-/// reaching the filter looks like.
+/// Run an authenticated inference request through the body phase.
 async fn dispatch_inference_as(filter: &PolicyFilter, subject: &str, body: &str) -> FilterAction {
     let token = mint_jwt(&standard_claims(subject));
     let mut req = make_request(Method::POST, "/v1/chat/completions");
@@ -4122,9 +4106,6 @@ async fn dispatch_inference_as(filter: &PolicyFilter, subject: &str, body: &str)
         .expect("filter ran")
 }
 
-/// A policy whose only routes are `llm:` routes still derives the
-/// entity shape — authorization runs at the body phase — and reports the
-/// inference half so the body is buffered and the model read from it.
 #[test]
 fn derives_the_inference_shape_for_an_llm_only_policy() {
     let (_dir, path) = write_llm_route_config();
@@ -4141,18 +4122,12 @@ fn derives_the_inference_shape_for_an_llm_only_policy() {
     );
 }
 
-/// A policy declaring `post_invocation` on an `llm:` route opens the
-/// inference response half.
 #[test]
 fn derives_the_inference_response_half_when_the_policy_declares_one() {
     let (_dir, path) = write_llm_post_config();
     assert_eq!(build_filter(path).derived_llm_shape(), (true, true));
 }
 
-/// An inference policy needs no protocol classifier: with
-/// `require_protocol_metadata` at its default, a request carrying no
-/// `mcp.method` is authorized against its `llm:` route rather than
-/// rejected as a misconfigured chain.
 #[tokio::test(flavor = "multi_thread")]
 async fn inference_request_is_authorized_without_classifier_metadata() {
     let (_dir, path) = write_llm_route_config();
@@ -4165,9 +4140,6 @@ async fn inference_request_is_authorized_without_classifier_metadata() {
     );
 }
 
-/// The catch-all `llm:` route denies a model no route names, and the
-/// denial reaches the client as a provider-shaped HTTP error rather than
-/// a JSON-RPC envelope.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_model_outside_the_policy_is_denied_with_a_provider_error() {
     let (_dir, path) = write_llm_route_config();
@@ -4201,9 +4173,6 @@ async fn a_model_outside_the_policy_is_denied_with_a_provider_error() {
     );
 }
 
-/// A body the filter cannot read a model from is denied while the policy
-/// declares `llm:` routes: an unattributable request must not be
-/// admitted unevaluated.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_body_with_no_usable_model_fails_closed() {
     let (_dir, path) = write_llm_route_config();
@@ -4225,10 +4194,6 @@ async fn a_body_with_no_usable_model_fails_closed() {
     }
 }
 
-/// A model no `llm:` route selects is denied before identity even runs:
-/// there is no rule to consult for it, so admitting it would admit it
-/// unevaluated. This is the fail-closed default that makes a catch-all
-/// route optional rather than load-bearing.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_model_no_route_selects_is_denied() {
     let (_dir, path) = write_llm_and_tool_config_without_catch_all();
@@ -4248,8 +4213,6 @@ async fn a_model_no_route_selects_is_denied() {
     );
 }
 
-/// `require_route: false` is the opt-out: an unlisted model is admitted
-/// unevaluated, which is the pre-existing posture.
 #[tokio::test(flavor = "multi_thread")]
 async fn require_route_false_admits_a_model_no_route_selects() {
     let (_dir, path) = write_llm_and_tool_config_without_catch_all();
@@ -4268,8 +4231,6 @@ async fn require_route_false_admits_a_model_no_route_selects() {
     );
 }
 
-/// A catch-all route still selects every model, so `require_route` never
-/// fires for a policy that has one.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_catch_all_route_satisfies_the_route_requirement() {
     let (_dir, path) = write_llm_route_config();
@@ -4289,10 +4250,6 @@ async fn a_catch_all_route_satisfies_the_route_requirement() {
     );
 }
 
-/// A method that carries no body is not an inference call, so the
-/// inference gates stand aside — a discovery `GET /v1/models` or a CORS
-/// preflight must not be refused for carrying no model. Identity still
-/// governs it, so an authenticated caller is admitted.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bodyless_request_is_not_asked_for_a_model() {
     let (_dir, path) = write_llm_route_config();
@@ -4317,8 +4274,6 @@ async fn a_bodyless_request_is_not_asked_for_a_model() {
     }
 }
 
-/// The identity gate still applies to a bodyless request: standing aside
-/// from the inference gates is not standing aside from authentication.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bodyless_request_still_needs_a_token() {
     let (_dir, path) = write_llm_route_config();
@@ -4336,10 +4291,6 @@ async fn a_bodyless_request_still_needs_a_token() {
     );
 }
 
-/// The configured `llm.provider` reaches the attribute bag, so a rule
-/// can key on it. Proven by a rule that fires only for the configured
-/// value: without the plumbing the comparison would not match and the
-/// request would be admitted.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_configured_provider_reaches_the_attribute_bag() {
     let (_dir, path) = write_llm_provider_config();
@@ -4362,9 +4313,6 @@ async fn the_configured_provider_reaches_the_attribute_bag() {
     );
 }
 
-/// With no `provider` configured the same rule does not fire, so the
-/// test above is measuring the config rather than a rule that always
-/// matches.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unset_provider_leaves_the_attribute_absent() {
     let (_dir, path) = write_llm_provider_config();
@@ -4377,8 +4325,6 @@ async fn an_unset_provider_leaves_the_attribute_absent() {
     );
 }
 
-/// `require_model: false` is the opt-out: an unattributable request
-/// falls through to the policy's other paths instead of denying.
 #[tokio::test(flavor = "multi_thread")]
 async fn require_model_false_admits_a_request_with_no_model() {
     let (_dir, path) = write_llm_route_config();
@@ -4397,13 +4343,6 @@ async fn require_model_false_admits_a_request_with_no_model() {
     );
 }
 
-/// A body carrying both coordinate systems is refused rather than
-/// silently assigned to one of them.
-///
-/// `mcp.method` is derived from the body by a classifier ahead of this
-/// filter, so a request that also carries a top-level `model` leaves it
-/// undecidable which entity governs — and picking either applies a rule
-/// the operator did not write for this request.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_body_carrying_both_entity_coordinates_is_denied() {
     let (_dir, path) = write_llm_and_tool_config();
@@ -4439,9 +4378,6 @@ async fn a_body_carrying_both_entity_coordinates_is_denied() {
     );
 }
 
-/// A plain MCP request still takes the MCP path when the same policy
-/// declares both families: only a body carrying both coordinate systems
-/// is ambiguous.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plain_mcp_request_still_takes_the_mcp_path() {
     let (_dir, path) = write_llm_and_tool_config();
@@ -4470,11 +4406,6 @@ async fn a_plain_mcp_request_still_takes_the_mcp_path() {
     );
 }
 
-/// The inference path buffers the request body even in `ReadOnly`: there
-/// is no classifier ahead of it to buffer, and the model has to be read
-/// from the whole body. Its own ceiling bounds it, which by default is
-/// the same figure as the JSON-RPC one — adding an `llm:` policy must not
-/// change the ceiling a chain already had.
 #[test]
 fn inference_routes_buffer_the_request_body_in_read_only() {
     let (_dir, path) = write_llm_route_config();
@@ -4495,9 +4426,6 @@ fn inference_routes_buffer_the_request_body_in_read_only() {
     );
 }
 
-/// The two ceilings default to the same figure, so adding an `llm:`
-/// policy to a chain does not shrink the body it already accepted. The
-/// separate knob exists to be tuned, not to change behavior on upgrade.
 #[test]
 fn the_inference_ceiling_defaults_to_the_json_rpc_one() {
     let cfg = super::config::LlmOptions::default();
@@ -4507,9 +4435,6 @@ fn the_inference_ceiling_defaults_to_the_json_rpc_one() {
     );
 }
 
-/// The inference ceiling is the one that binds under `read_write`, where
-/// both halves apply: buffering the larger JSON-RPC figure would let an
-/// inference body past the bound the operator set for it.
 #[test]
 fn the_lower_ceiling_binds_when_both_apply() {
     let (_dir, path) = write_llm_route_config();
@@ -4536,9 +4461,6 @@ fn the_lower_ceiling_binds_when_both_apply() {
     );
 }
 
-/// A ceiling of zero would fail every non-empty body, and one past the
-/// absolute maximum would multiply per-request memory by concurrency.
-/// Both are refused at construction, as the JSON-RPC ceiling's are.
 #[test]
 fn rejects_an_out_of_range_inference_ceiling() {
     for (max_request_bytes, expected) in [
@@ -4565,9 +4487,6 @@ fn rejects_an_out_of_range_inference_ceiling() {
     }
 }
 
-/// The model the proxy parsed is published as filter metadata, so an
-/// access log or a later filter can see it. It is metadata rather than a
-/// header, so no client can supply it.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_parsed_model_reaches_filter_metadata() {
     let (_dir, path) = write_llm_route_config();
@@ -4597,8 +4516,6 @@ async fn the_parsed_model_reaches_filter_metadata() {
     );
 }
 
-/// Identity still gates the inference path: a request with no token is
-/// rejected before any route is consulted.
 #[tokio::test(flavor = "multi_thread")]
 async fn inference_request_without_a_token_is_rejected_by_identity() {
     let (_dir, path) = write_llm_route_config();
@@ -4618,8 +4535,7 @@ async fn inference_request_without_a_token_is_rejected_by_identity() {
     );
 }
 
-/// Build a `read_write` filter, the tier that buffers the response body
-/// and so is the one the inference response half rides.
+/// Build a read-write inference policy filter.
 fn build_read_write_filter(config_path: String) -> PolicyFilter {
     PolicyFilter::new(PolicyFilterConfig {
         config_path,
@@ -4633,7 +4549,7 @@ fn build_read_write_filter(config_path: String) -> PolicyFilter {
     .expect("filter should construct")
 }
 
-/// Drive the request phase of an inference call the fixtures admit.
+/// Run an inference request admitted by the test policy.
 async fn admit_inference(filter: &PolicyFilter, ctx: &mut crate::HttpFilterContext<'_>) {
     let mut request = Some(bytes::Bytes::from_static(INFERENCE_REQUEST));
     drop(
@@ -4644,32 +4560,28 @@ async fn admit_inference(filter: &PolicyFilter, ctx: &mut crate::HttpFilterConte
     );
 }
 
-/// A chat request whose prompt a field mutator would redact.
+/// Return a chat request containing redactable text.
 const MUTATED_REQUEST: &[u8] = br#"{"model":"gpt-4o","messages":[{"role":"user","content":"secret"}]}"#;
 
-/// A minimal chat request the inference fixtures admit.
+/// Return a minimal admitted chat request.
 const INFERENCE_REQUEST: &[u8] = br#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#;
 
-/// A completion inside the policy's token budget.
+/// Return a completion within the token budget.
 const WITHIN_BUDGET_RESPONSE: &str = r#"{"model":"gpt-4o","usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10},"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}"#;
 
-/// A completion over it. Sized like a real one, so a deny envelope fits
-/// inside the committed `Content-Length`.
+/// Return a completion over the token budget.
 const OVER_BUDGET_RESPONSE: &str = r#"{"model":"gpt-4o","usage":{"prompt_tokens":5000,"completion_tokens":4999,"total_tokens":9999},"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"a long answer"}}]}"#;
 
-/// A completion over the budget whose body is far too short to hold a
-/// full deny envelope.
+/// Return a short completion over the token budget.
 const TINY_OVER_BUDGET_RESPONSE: &str = r#"{"usage":{"total_tokens":9999}}"#;
 
-/// A response body that is not a JSON document at all.
+/// Return a non-JSON response body.
 const NON_JSON_RESPONSE: &str = "upstream failure, not JSON";
 
-/// A JSON-RPC tool result, long enough to survive the MCP post path's
-/// length-fitting round-trip.
+/// Return a JSON-RPC tool result.
 const MCP_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok, with enough room for the round-trip"}]}}"#;
 
-/// Run an inference request and then its response through `filter`,
-/// returning the body the client would receive.
+/// Run an inference request and response through the filter.
 async fn inference_round_trip(
     filter: &PolicyFilter,
     request_body: &'static str,
@@ -4703,10 +4615,6 @@ async fn inference_round_trip(
     body.expect("response body")
 }
 
-/// A deny that cannot fit the committed `Content-Length` sheds its
-/// optional parts instead of being cut mid-token. Truncated JSON reads
-/// to an SDK as a transport failure rather than the refusal it is, so
-/// whatever survives has to parse.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deny_too_large_for_the_committed_length_stays_valid_json() {
     let (_dir, path) = write_llm_post_config();
@@ -4733,9 +4641,6 @@ async fn a_deny_too_large_for_the_committed_length_stays_valid_json() {
     );
 }
 
-/// An APL field mutator cannot round-trip an inference body — a CMF
-/// message carries one text slot per part — so the filter ships the
-/// original bytes rather than a half-redacted body.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_field_mutator_leaves_an_inference_request_untouched() {
     let (_dir, path) = write_llm_mutator_config();
@@ -4757,8 +4662,6 @@ async fn a_field_mutator_leaves_an_inference_request_untouched() {
     );
 }
 
-/// The response-side twin: a `result:` mutator likewise cannot round-trip
-/// a completion, so the client receives the upstream bytes.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_field_mutator_leaves_an_inference_response_untouched() {
     let (_dir, path) = write_llm_mutator_config();
@@ -4780,11 +4683,6 @@ async fn a_field_mutator_leaves_an_inference_response_untouched() {
 }
 
 
-/// An `llm:` route declaring only `post_invocation` wires just
-/// `cmf.llm_output`, and must still activate the inference path. Keying
-/// activation off the input hook alone left `entity_routes` false, so the
-/// request phase never stashed the model and the response phase exited
-/// before dispatching — the policy loaded and enforced nothing.
 #[test]
 fn a_post_only_inference_policy_is_active() {
     let (_dir, path) = write_llm_post_only_config();
@@ -4797,8 +4695,6 @@ fn a_post_only_inference_policy_is_active() {
     assert_eq!(filter.derived_llm_shape(), (true, true));
 }
 
-/// And it enforces end to end: the request is admitted, the completion is
-/// evaluated, and an over-budget one is denied.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_post_only_inference_policy_denies_an_over_budget_completion() {
     let (_dir, path) = write_llm_post_only_config();
@@ -4819,10 +4715,6 @@ async fn a_post_only_inference_policy_denies_an_over_budget_completion() {
     );
 }
 
-/// With no classifier metadata, a JSON-RPC body carrying a top-level
-/// `model` must not be authorized as an inference call. Reaching the LLM
-/// path here would step around the classifier gate that exists to catch a
-/// missing or misordered classifier.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unclassified_json_rpc_body_with_a_model_is_denied() {
     let (_dir, path) = write_llm_and_tool_config();
@@ -4844,9 +4736,6 @@ async fn an_unclassified_json_rpc_body_with_a_model_is_denied() {
     );
 }
 
-/// A JSON-RPC body with no `model` and no classifier metadata is an MCP
-/// call the classifier failed to claim, so a mixed policy reports the
-/// chain rather than the more specific missing-model verdict.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_unclassified_json_rpc_body_reports_the_classifier() {
     let (_dir, path) = write_llm_and_tool_config();
@@ -4864,9 +4753,6 @@ async fn an_unclassified_json_rpc_body_reports_the_classifier() {
     );
 }
 
-/// A bodyless method carrying a body is still an inference call. Some
-/// backends read a body on `GET`, so classifying by method alone would
-/// admit one past every gate.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_get_carrying_a_body_is_still_evaluated() {
     let (_dir, path) = write_llm_route_config();
@@ -4895,9 +4781,6 @@ async fn a_get_carrying_a_body_is_still_evaluated() {
     );
 }
 
-/// A content type that merely starts with the SSE type is not SSE. A
-/// prefix test let an upstream skip the whole response half by naming
-/// `text/event-streamx`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_type_sharing_the_sse_prefix_is_not_treated_as_sse() {
     let (_dir, path) = write_llm_post_config();
@@ -4918,7 +4801,6 @@ async fn a_type_sharing_the_sse_prefix_is_not_treated_as_sse() {
     );
 }
 
-/// The real SSE type still skips it, parameters and casing included.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sse_type_skips_the_response_half_with_parameters() {
     let (_dir, path) = write_llm_post_config();
@@ -4944,9 +4826,6 @@ async fn the_sse_type_skips_the_response_half_with_parameters() {
     }
 }
 
-/// The ceiling is re-checked against what arrived, not just requested of
-/// the pipeline: the pipeline keeps the largest buffer any filter asked
-/// for, so another filter can widen it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_body_past_the_inference_ceiling_is_rejected() {
     let (_dir, path) = write_llm_route_config();
@@ -4972,10 +4851,6 @@ async fn a_body_past_the_inference_ceiling_is_rejected() {
     );
 }
 
-/// A content-encoded completion is one the filter cannot read, and the
-/// client picked the encoding — so it fails closed rather than skipping
-/// the policy. Otherwise `Accept-Encoding: gzip`, which most HTTP
-/// clients send by default, would be a one-header bypass.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_content_encoded_completion_fails_closed() {
     let (_dir, path) = write_llm_post_config();
@@ -4994,7 +4869,6 @@ async fn a_content_encoded_completion_fails_closed() {
         .insert("content-encoding", HeaderValue::from_static("gzip"));
     ctx.response_header = Some(&mut response);
 
-    // Within budget, so only the encoding can account for a deny.
     let mut body = Some(bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()));
     drop(
         filter
@@ -5010,9 +4884,6 @@ async fn a_content_encoded_completion_fails_closed() {
     );
 }
 
-/// The request half strips `accept-encoding` when the policy has
-/// post-invocation work, so the completion arrives as plain JSON and the
-/// response half can read it.
 #[tokio::test(flavor = "multi_thread")]
 async fn accept_encoding_is_stripped_when_the_policy_evaluates_completions() {
     let (_dir, path) = write_llm_post_config();
@@ -5029,9 +4900,6 @@ async fn accept_encoding_is_stripped_when_the_policy_evaluates_completions() {
     );
 }
 
-/// A policy with no response half leaves `accept-encoding` alone: there
-/// is no completion to read, so there is no reason to cost the upstream
-/// its compression.
 #[tokio::test(flavor = "multi_thread")]
 async fn accept_encoding_survives_a_request_only_inference_policy() {
     let (_dir, path) = write_llm_route_config();
@@ -5058,9 +4926,6 @@ async fn accept_encoding_survives_a_request_only_inference_policy() {
     );
 }
 
-/// An SSE response is released on its first chunk rather than buffered
-/// to end-of-stream. `read_write` buffers every response, so without the
-/// release the caller's stream would arrive in one piece at the end.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
     let (_dir, path) = write_llm_post_config();
@@ -5086,9 +4951,6 @@ async fn a_streamed_response_releases_the_buffer_on_the_first_chunk() {
     );
 }
 
-/// The response half evaluates the policy's `post_invocation` rules
-/// against the completion the upstream reported: an over-budget
-/// completion is replaced with the provider error envelope.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_over_budget_completion_is_replaced_with_a_provider_error() {
     let (_dir, path) = write_llm_post_config();
@@ -5110,7 +4972,6 @@ async fn an_over_budget_completion_is_replaced_with_a_provider_error() {
     );
 }
 
-/// A completion inside the budget reaches the client untouched.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_completion_within_budget_reaches_the_client_unchanged() {
     let (_dir, path) = write_llm_post_config();
@@ -5127,13 +4988,6 @@ async fn a_completion_within_budget_reaches_the_client_unchanged() {
     assert_eq!(body, bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()));
 }
 
-/// A streamed response carries no single completion to evaluate, so the
-/// response half stands aside rather than buffering SSE frames waiting
-/// for one. The client gets the upstream bytes.
-///
-/// What the upstream sent decides this, not what the request asked for:
-/// a request that set `stream: true` and was answered with one JSON
-/// document still carries a completion, so it is still evaluated.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_streamed_response_skips_the_response_half() {
     let (_dir, path) = write_llm_post_config();
@@ -5167,9 +5021,6 @@ async fn a_streamed_response_skips_the_response_half() {
     );
 }
 
-/// A response body the filter cannot read as a JSON document carries no
-/// completion to evaluate; it passes through rather than denying on
-/// attributes that are simply absent.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_json_response_body_passes_through() {
     let (_dir, path) = write_llm_post_config();
@@ -5185,18 +5036,12 @@ async fn a_non_json_response_body_passes_through() {
     assert_eq!(body, bytes::Bytes::from_static(NON_JSON_RESPONSE.as_bytes()));
 }
 
-/// The mixed fixture declares `post_invocation` on both routes, so the
-/// test below exercises the `InferenceRequest` half of the response-half
-/// guard rather than a trivially-false conjunction.
 #[test]
 fn the_mixed_fixture_opens_the_inference_response_half() {
     let (_dir, path) = write_llm_and_tool_config();
     assert_eq!(build_read_write_filter(path).derived_llm_shape(), (true, true));
 }
 
-/// An MCP response still takes the JSON-RPC post path when the same
-/// policy declares both families — the inference half only claims
-/// responses to requests it authorized.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_inference_response_half_does_not_claim_mcp_responses() {
     let (_dir, path) = write_llm_and_tool_config();
