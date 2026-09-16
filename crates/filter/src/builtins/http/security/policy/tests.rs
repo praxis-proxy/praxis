@@ -3070,14 +3070,18 @@ fn try_build_filter(config_path: String) -> Result<PolicyFilter, crate::FilterEr
 ///
 /// Registers a shared connector first, so the transport these filters
 /// install takes the same path a server does instead of falling back to a
-/// private pool. The holder is set-once per process, so a connector another
-/// test registered first is equally good here — the point is that one is
-/// registered at all.
+/// private pool. Any registered connector will do here — the point is that
+/// one is registered at all — but the registration is a process-wide
+/// last-wins slot, so this holds the lock across the construction that reads
+/// it back rather than overwriting what a concurrent test is asserting on.
 fn try_build_filter_allowing_private(
     config_path: String,
     allow_private_idp: bool,
 ) -> Result<PolicyFilter, crate::FilterError> {
-    super::set_policy_subrequest_connector(&praxis_core::subrequest::SubRequestConnector::new(
+    let _guard = crate::policy_connector::REGISTRATION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    crate::set_policy_subrequest_connector(&praxis_core::subrequest::SubRequestConnector::new(
         praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE,
         None,
     ));

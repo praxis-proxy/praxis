@@ -18,11 +18,13 @@ use tracing::{Instrument as _, debug, info_span, trace, warn};
 use super::{check_failure_mode, filter::PipelineFilter};
 use crate::{
     FilterError,
-    actions::{FilterAction, Rejection},
+    actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
     condition::{should_execute_from, should_execute_response_ref},
     context::{EffectiveHeaders, HttpFilterContext, Response},
-    metrics::{PHASE_REQUEST, PHASE_RESPONSE, STREAM_BODY, STREAM_HEADERS, record_filter_duration},
+    metrics::{
+        PHASE_REQUEST, PHASE_RESPONSE, PHASE_SELECTED_UPSTREAM, STREAM_BODY, STREAM_HEADERS, record_filter_duration,
+    },
 };
 
 // -----------------------------------------------------------------------------
@@ -159,6 +161,43 @@ pub(super) fn dispatch_body_result(
             Ok(BodyFilterOutcome::Continue)
         },
     }
+}
+
+/// Classify a selected-upstream body filter result, logging on reject/error.
+///
+/// When `failure_mode` is [`FailureMode::Open`], errors are logged as
+/// warnings and the filter is treated as if it returned
+/// [`SelectedUpstreamBodyOutcome::Continue`].
+pub(super) fn dispatch_selected_upstream_body_result(
+    result: Result<SelectedUpstreamBodyOutcome, FilterError>,
+    filter_name: &str,
+    failure_mode: FailureMode,
+) -> Result<SelectedUpstreamBodyOutcome, FilterError> {
+    match result {
+        Ok(SelectedUpstreamBodyOutcome::Continue) => Ok(SelectedUpstreamBodyOutcome::Continue),
+        Ok(SelectedUpstreamBodyOutcome::Reject(rejection)) => {
+            warn!(
+                filter = filter_name,
+                status = rejection.status,
+                "selected-upstream request body rejected by filter"
+            );
+            Ok(SelectedUpstreamBodyOutcome::Reject(rejection))
+        },
+        Err(e) => {
+            check_failure_mode(filter_name, e, "selected-upstream request body", failure_mode)?;
+            Ok(SelectedUpstreamBodyOutcome::Continue)
+        },
+    }
+}
+
+/// Record a selected-upstream body result on the span's `filter.result` field.
+fn record_selected_upstream_result(span: &tracing::Span, result: &Result<SelectedUpstreamBodyOutcome, FilterError>) {
+    let label = match result {
+        Ok(SelectedUpstreamBodyOutcome::Continue) => "continue",
+        Ok(SelectedUpstreamBodyOutcome::Reject(_)) => "reject",
+        Err(_) => "error",
+    };
+    span.record("filter.result", label);
 }
 
 /// Returns `true` if the filter should be skipped due to
@@ -319,6 +358,50 @@ pub(super) async fn run_request_body_filter(
     .instrument(filter_span)
     .await;
     dispatch_body_result(body_result, http_filter.name(), "request body", failure_mode)
+}
+
+/// Run a single selected-upstream request body filter hook with tracing
+/// and metrics.
+///
+/// Mirrors [`run_request_body_filter`], but for the post-selection phase:
+/// the hook receives the fully buffered body and returns the reduced
+/// [`SelectedUpstreamBodyOutcome`] (continue or reject), so there is no
+/// `end_of_stream` argument and no release/body-done handling.
+pub(super) async fn run_selected_upstream_request_body_filter(
+    http_filter: &dyn crate::filter::HttpFilter,
+    ctx: &mut HttpFilterContext<'_>,
+    body: &mut Option<Bytes>,
+    failure_mode: FailureMode,
+    metrics_enabled: bool,
+) -> Result<SelectedUpstreamBodyOutcome, FilterError> {
+    let filter_span = info_span!(
+        "filter",
+        "otel.name" = %format_args!("filter:{}:selected_upstream_request_body", http_filter.name()),
+        "filter.name" = http_filter.name(),
+        "filter.phase" = "selected_upstream_request_body",
+        "filter.result" = tracing::field::Empty,
+    );
+    let body_result = async {
+        trace!("on_selected_upstream_request_body");
+        let result = if metrics_enabled {
+            let start = std::time::Instant::now();
+            let result = http_filter.on_selected_upstream_request_body(ctx, body).await;
+            record_filter_duration(
+                http_filter.name(),
+                PHASE_SELECTED_UPSTREAM,
+                STREAM_BODY,
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        } else {
+            http_filter.on_selected_upstream_request_body(ctx, body).await
+        };
+        record_selected_upstream_result(&tracing::Span::current(), &result);
+        result
+    }
+    .instrument(filter_span)
+    .await;
+    dispatch_selected_upstream_body_result(body_result, http_filter.name(), failure_mode)
 }
 
 /// Run a single response body filter hook with tracing and metrics.

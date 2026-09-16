@@ -34,6 +34,28 @@ fn counter_value(body: &str, endpoint: &str) -> Option<f64> {
         .and_then(|value| value.parse::<f64>().ok())
 }
 
+/// Poll `/metrics` until the upstream counter for `endpoint` reaches
+/// `at_least`, returning the final value and the last scrape body.
+///
+/// The counter is recorded from the proxy's `logging` hook, which runs after
+/// the client has already received its response, so a scrape taken immediately
+/// after the requests can observe fewer increments than were issued. Waiting
+/// for the value (not merely the series' presence) removes that race.
+fn wait_for_counter(admin: &str, endpoint: &str, at_least: f64) -> (f64, String) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut body = String::new();
+    let mut value = 0.0;
+    while std::time::Instant::now() < deadline {
+        body = http_get(admin, "/metrics", None).1;
+        value = counter_value(&body, endpoint).unwrap_or(0.0);
+        if value >= at_least {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    (value, body)
+}
+
 fn proxy_yaml(proxy_port: u16, admin_port: u16, backend_port: u16) -> String {
     format!(
         r#"
@@ -102,8 +124,12 @@ fn upstream_requests_total_counts_once_per_request() {
     let admin = format!("127.0.0.1:{admin_port}");
     wait_for_tcp(&admin);
 
-    // free_port can hand a later test a port an earlier backend used, so the
-    // endpoint series may already carry a value; compare the delta.
+    // The counter is recorded from the proxy's `logging` hook, which runs after
+    // the client already has its response, so a scrape taken right after the
+    // requests can still be short a count. Wait for the value to catch up
+    // rather than for the series to merely appear. The before/after delta is
+    // defensive: this test's backend port is unique, so `before` is normally
+    // zero.
     let endpoint = format!("127.0.0.1:{}", backend.port());
     let before = counter_value(&http_get(&admin, "/metrics", None).1, &endpoint).unwrap_or(0.0);
 
@@ -112,8 +138,7 @@ fn upstream_requests_total_counts_once_per_request() {
         assert_eq!(status, 200, "proxy request should succeed");
     }
 
-    let body = wait_for_metric(&admin, &format!("endpoint=\"{endpoint}\""));
-    let after = counter_value(&body, &endpoint).unwrap_or(0.0);
+    let (after, body) = wait_for_counter(&admin, &endpoint, before + 4.0);
     assert!(
         (after - before - 4.0).abs() < f64::EPSILON,
         "four requests must count exactly four, not once per upstream attempt:\n{body}"

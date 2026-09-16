@@ -1,4 +1,4 @@
-# Generic-HTTP authorization (experimental)
+# Generic-HTTP authorization
 #
 # Generic-HTTP authorization for non-MCP traffic using the Praxis Policy Engine. The `policy` filter loads a policy that declares only a `global`
 # HTTP policy (no entity routes), so it authorizes at the HTTP layer: it
@@ -6,11 +6,8 @@
 # request line, headers, and identity claims. Denials become plain HTTP
 # responses (with a custom `denyWith` status/body/headers).
 #
-# Requires building with the `policy-engine` feature, which is off
-# by default:
-#
 # Usage:
-#   cargo run -p praxis-proxy --features policy-engine -- -c examples/configs/security/policy-http.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/security/policy-http.yaml
 
 listeners:
   - name: default

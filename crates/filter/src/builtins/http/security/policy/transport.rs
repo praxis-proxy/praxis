@@ -33,7 +33,7 @@ use praxis_core::{
     subrequest::{SubRequest, SubRequestClient, SubRequestConnector, SubRequestError, SubResponse},
 };
 
-use super::shared_connector::shared_policy_connector;
+use crate::policy_connector::shared_policy_connector;
 
 /// Isolates policy connections from cluster-specific TLS state.
 ///

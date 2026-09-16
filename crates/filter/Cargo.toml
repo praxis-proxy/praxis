@@ -14,7 +14,7 @@ publish = true
 name = "praxis_filter"
 
 [features]
-default = []
+default = ["policy-engine"]
 policy-engine = [
     "dep:ppe",
 ]
@@ -37,6 +37,7 @@ async-trait = { workspace = true }
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true }
 ppe = { workspace = true, optional = true }
+parking_lot = { workspace = true }
 dashmap = { workspace = true }
 http = { workspace = true }
 metrics = { workspace = true }

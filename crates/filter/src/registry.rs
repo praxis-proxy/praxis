@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use praxis_core::config::InsecureOptions;
+
 use crate::{
     any_filter::AnyFilter,
     binding::{ChainBindingContext, ChainBindingHttpFactory},
@@ -66,8 +68,16 @@ enum RegisteredFilterFactory {
 
 /// Factory for a built-in HTTP filter that resolves nested filters
 /// against its containing registry.
-type RegistryHttpFilterFactory =
-    fn(&serde_yaml::Value, &FilterRegistry) -> Result<Box<dyn crate::filter::HttpFilter>, FilterError>;
+///
+/// The [`InsecureOptions`] argument carries the operator's declared security
+/// posture so a factory that builds nested step pipelines gates their inline
+/// outbound clusters (SSRF/TLS-verify) by the containing build's real posture
+/// rather than an unconditional strict default.
+type RegistryHttpFilterFactory = fn(
+    &serde_yaml::Value,
+    &FilterRegistry,
+    &InsecureOptions,
+) -> Result<Box<dyn crate::filter::HttpFilter>, FilterError>;
 
 impl RegisteredFilterFactory {
     /// Instantiate the registered filter without an outbound-chain binding
@@ -82,7 +92,13 @@ impl RegisteredFilterFactory {
     fn create(&self, config: &serde_yaml::Value, registry: &FilterRegistry) -> Result<AnyFilter, FilterError> {
         match self {
             Self::Standard(factory) => factory.create(config),
-            Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, registry)?)),
+            // No binding context here, so no operator posture is available: nested
+            // step pipelines are gated by the strict default. The real server path
+            // builds through `create_with_binding`, which threads the declared
+            // posture from the [`ChainBindingContext`].
+            Self::HttpWithRegistry(factory) => {
+                Ok(AnyFilter::Http(factory(config, registry, &InsecureOptions::default())?))
+            },
             Self::ChainBinding(_) => Err(FilterError::from(
                 "this filter binds an outbound subrequest chain and must be built via \
                  FilterPipeline::build_with_chains",
@@ -100,7 +116,7 @@ impl RegisteredFilterFactory {
     ) -> Result<AnyFilter, FilterError> {
         match self {
             Self::Standard(factory) => factory.create(config),
-            Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, registry)?)),
+            Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, registry, ctx.insecure_options())?)),
             Self::ChainBinding(factory) => Ok(AnyFilter::Http(factory(config, ctx)?)),
         }
     }
@@ -460,7 +476,7 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http_with_registry(
         filters,
         "iterative_request_router",
-        crate::builtins::IterativeRequestRouterFilter::from_config_with_registry,
+        crate::builtins::IterativeRequestRouterFilter::from_config_with_registry_and_insecure,
     );
     register_http(filters, "load_balancer", crate::LoadBalancerFilter::from_config);
     register_http(filters, "path_rewrite", PathRewriteFilter::from_config);

@@ -438,17 +438,21 @@ invocation in seconds.
 | Label | Values |
 | -------- | ------------------------------ |
 | `filter` | Filter name (e.g. `router`, `rate_limiter`, `access_log`) |
-| `phase` | `request` or `response` |
+| `phase` | `request`, `selected_upstream`, or `response` |
 | `stream` | `headers` or `body` |
 
-The four hook combinations are:
+The five hook combinations are:
 
 | Phase + Stream | Hook |
 | -------------------- | -------------------- |
 | `request` + `headers` | `on_request` |
 | `request` + `body` | `on_request_body` |
+| `selected_upstream` + `body` | `on_selected_upstream_request_body` |
 | `response` + `headers` | `on_response` |
 | `response` + `body` | `on_response_body` |
+
+`selected_upstream` pairs only with `body`; the phase
+has no header hook.
 
 Enabling `filter_duration` without `admin.address`
 records metrics internally but does not expose them.

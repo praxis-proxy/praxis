@@ -142,8 +142,8 @@ deployment guidance.
 - **Credential injection**: per-cluster API key injection
   into upstream request headers with environment variable
   or inline values; client credential stripping
-- **Policy engine** (`policy`, experimental, feature
-  `policy-engine`): JWT identity, route policy, PII
+- **Policy engine** (`policy`, feature `policy-engine`,
+  on by default): JWT identity, route policy, PII
   scanning, audit, and inference authorization on the
   model in the request body
 

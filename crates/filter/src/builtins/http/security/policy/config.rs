@@ -9,9 +9,9 @@ use serde::Deserialize;
 // PolicyFilterConfig
 // -----------------------------------------------------------------------------
 
-/// Configuration block for the experimental `policy` filter, which
-/// embeds the Praxis Policy Engine in-process (gated behind the
-/// `policy-engine` feature, off by default).
+/// Configuration block for the `policy` filter, which embeds the Praxis
+/// Policy Engine in-process (gated behind the `policy-engine` feature,
+/// on by default).
 ///
 /// Praxis filter configs are flat: the filter's typed fields sit
 /// directly under the `- filter:` entry alongside the structural keys

@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Lock-free token bucket for rate limiting.
+//! Token bucket for rate limiting.
 
-use std::{
-    fmt,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::fmt;
+
+use parking_lot::Mutex;
 
 // -----------------------------------------------------------------------------
 // TokenBucket
 // -----------------------------------------------------------------------------
 
-/// Token bucket for lock-free rate limiting.
+/// Token bucket for rate limiting.
 ///
 /// # Example
 ///
@@ -23,11 +22,17 @@ use std::{
 /// assert!(bucket.try_acquire(10.0, 5.0, 0).is_some());
 /// ```
 pub(crate) struct TokenBucket {
-    /// Last refill timestamp in nanoseconds since epoch.
-    last_refill: AtomicU64,
+    /// Compound bucket state that must be updated atomically.
+    state: Mutex<TokenBucketState>,
+}
 
-    /// Current tokens stored as `f64::to_bits`.
-    tokens: AtomicU64,
+/// Mutable state for a [`TokenBucket`].
+struct TokenBucketState {
+    /// Last refill timestamp in nanoseconds since epoch.
+    last_refill: u64,
+
+    /// Current token count.
+    tokens: f64,
 }
 
 impl TokenBucket {
@@ -42,8 +47,10 @@ impl TokenBucket {
     /// ```
     pub(crate) fn new(burst: f64) -> Self {
         Self {
-            tokens: AtomicU64::new(burst.to_bits()),
-            last_refill: AtomicU64::new(0),
+            state: Mutex::new(TokenBucketState {
+                tokens: burst,
+                last_refill: 0,
+            }),
         }
     }
 
@@ -52,62 +59,50 @@ impl TokenBucket {
     /// Returns `Some(remaining)` on success, `None` when the bucket
     /// is empty.
     ///
-    /// # Precision
-    ///
-    /// There is a brief over-issue window between the `tokens` CAS
-    /// and the `last_refill` update under contention. This is a
-    /// known limitation of the lock-free design. Rate limiting is
-    /// approximate by nature, and the burst cap bounds the impact.
+    /// Refill and consumption are serialized because the token count and
+    /// timestamp form one logical state transition.
     pub(crate) fn try_acquire(&self, rate: f64, burst: f64, now_nanos: u64) -> Option<f64> {
-        loop {
-            let old_tokens_bits = self.tokens.load(Ordering::Acquire);
-            let old_refill = self.last_refill.load(Ordering::Acquire);
-
-            let mut tokens = f64::from_bits(old_tokens_bits);
-
-            let elapsed_nanos = now_nanos.saturating_sub(old_refill);
-            if elapsed_nanos > 0 {
-                let elapsed_secs = nanos_to_secs(elapsed_nanos);
-                tokens = (tokens + elapsed_secs * rate).min(burst);
-            }
-
-            if tokens < 1.0 {
-                return None;
-            }
-
-            let new_tokens = tokens - 1.0;
-            let new_bits = new_tokens.to_bits();
-
-            if self
-                .tokens
-                .compare_exchange_weak(old_tokens_bits, new_bits, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                self.last_refill.fetch_max(now_nanos, Ordering::Release);
-                return Some(new_tokens);
-            }
+        let mut state = self.lock_state();
+        let mut tokens = state.tokens;
+        let elapsed_nanos = now_nanos.saturating_sub(state.last_refill);
+        if elapsed_nanos > 0 {
+            let elapsed_secs = nanos_to_secs(elapsed_nanos);
+            tokens = (tokens + elapsed_secs * rate).min(burst);
         }
+
+        if tokens < 1.0 {
+            return None;
+        }
+
+        state.tokens = tokens - 1.0;
+        state.last_refill = state.last_refill.max(now_nanos);
+        Some(state.tokens)
     }
 
     /// Read the last refill timestamp in nanoseconds.
     pub(crate) fn last_refill_nanos(&self) -> u64 {
-        self.last_refill.load(Ordering::Acquire)
+        self.lock_state().last_refill
     }
 
     /// Read current token count without modification.
     pub(crate) fn current_tokens(&self, rate: f64, burst: f64, now_nanos: u64) -> f64 {
-        let tokens = f64::from_bits(self.tokens.load(Ordering::Acquire));
-        let last = self.last_refill.load(Ordering::Acquire);
-        let elapsed_secs = nanos_to_secs(now_nanos.saturating_sub(last));
-        (tokens + elapsed_secs * rate).min(burst)
+        let state = self.lock_state();
+        let elapsed_secs = nanos_to_secs(now_nanos.saturating_sub(state.last_refill));
+        (state.tokens + elapsed_secs * rate).min(burst)
+    }
+
+    /// Lock the compound state for one consistent bucket operation.
+    fn lock_state(&self) -> parking_lot::MutexGuard<'_, TokenBucketState> {
+        self.state.lock()
     }
 }
 
 impl fmt::Debug for TokenBucket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.lock_state();
         f.debug_struct("TokenBucket")
-            .field("tokens", &f64::from_bits(self.tokens.load(Ordering::Relaxed)))
-            .field("last_refill", &self.last_refill.load(Ordering::Relaxed))
+            .field("tokens", &state.tokens)
+            .field("last_refill", &state.last_refill)
             .finish()
     }
 }
@@ -154,6 +149,11 @@ fn nanos_to_secs(nanos: u64) -> f64 {
     reason = "tests"
 )]
 mod tests {
+    use std::{
+        sync::{Arc, Barrier},
+        thread,
+    };
+
     use super::*;
 
     #[test]
@@ -242,6 +242,22 @@ mod tests {
     }
 
     #[test]
+    fn failed_acquisition_does_not_mutate_state() {
+        let bucket = TokenBucket::new(1.0);
+        assert!(bucket.try_acquire(1.0, 1.0, 0).is_some());
+        assert!(bucket.try_acquire(1.0, 1.0, 500_000_000).is_none());
+        assert_eq!(
+            bucket.last_refill_nanos(),
+            0,
+            "a failed acquisition must not advance the refill timestamp"
+        );
+        assert!(
+            (bucket.current_tokens(1.0, 1.0, 500_000_000) - 0.5).abs() < 0.01,
+            "a failed acquisition must not consume the fractional refill"
+        );
+    }
+
+    #[test]
     fn concurrent_fetch_max_monotonicity() {
         use std::{sync::Arc, thread};
 
@@ -273,7 +289,10 @@ mod tests {
     #[test]
     fn concurrent_acquire_total_tokens_bounded() {
         use std::{
-            sync::{Arc, atomic::AtomicUsize},
+            sync::{
+                Arc,
+                atomic::{AtomicUsize, Ordering},
+            },
             thread,
         };
 
@@ -303,6 +322,44 @@ mod tests {
             100,
             "exactly 100 tokens should be acquired from a burst-100 bucket at rate=0"
         );
+    }
+
+    #[test]
+    fn concurrent_refill_never_duplicates_a_capped_token() {
+        const CALLERS: usize = 8;
+        const ROUNDS: usize = 64;
+
+        for round in 0..ROUNDS {
+            let bucket = Arc::new(TokenBucket::new(1.0));
+            assert!(
+                bucket.try_acquire(1.0, 1.0, 0).is_some(),
+                "round {round}: initial burst token should be available"
+            );
+            let ready = Arc::new(Barrier::new(CALLERS));
+            let acquired = count_concurrent_acquisitions(&bucket, &ready, CALLERS);
+            assert_eq!(
+                acquired, 1,
+                "round {round}: a burst-1 bucket should admit exactly its one accrued token"
+            );
+        }
+    }
+
+    fn count_concurrent_acquisitions(bucket: &Arc<TokenBucket>, ready: &Arc<Barrier>, callers: usize) -> usize {
+        let handles: Vec<_> = std::iter::repeat_with(|| {
+            let bucket = Arc::clone(bucket);
+            let ready = Arc::clone(ready);
+            thread::spawn(move || {
+                ready.wait();
+                bucket.try_acquire(1.0, 1.0, 1_000_000_000).is_some()
+            })
+        })
+        .take(callers)
+        .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| usize::from(handle.join().unwrap()))
+            .sum()
     }
 
     #[test]

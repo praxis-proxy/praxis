@@ -35,6 +35,18 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// to debounce (500ms) and apply the reload.
 const RELOAD_SETTLE: Duration = Duration::from_millis(1500);
 
+/// Worker threads per proxy spawned by the test harness.
+///
+/// Production auto-detects (`RuntimeOptions::threads == 0` maps to
+/// the CPU count). The integration suite spawns hundreds of proxies
+/// that run in parallel on a shared CI runner, so auto-detect gives
+/// every proxy a full CPU-count worker pool and badly oversubscribes
+/// the box, inflating startup, handshake, and request latency. Cap
+/// each test proxy to a small fixed pool instead; the async runtime
+/// still multiplexes many connections per worker. A test that sets
+/// `runtime.threads` explicitly keeps its own value.
+const TEST_WORKER_THREADS: usize = 2;
+
 /// Path to the `praxis` binary for subprocess integration tests.
 ///
 /// Uses `CARGO_BIN_EXE_praxis` when set; otherwise resolves under
@@ -212,7 +224,11 @@ impl Drop for ProxyGuard {
 ///
 /// [`Server`]: pingora_core::server::Server
 fn build_pingora_server(config: &Config, registry: &FilterRegistry) -> pingora_core::server::Server {
-    let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &RuntimeOptions::default());
+    let runtime = RuntimeOptions {
+        threads: TEST_WORKER_THREADS,
+        ..RuntimeOptions::default()
+    };
+    let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &runtime);
 
     let mut cert_shutdowns = Vec::new();
     for listener in &config.listeners {
@@ -342,7 +358,13 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
         praxis_protocol::http::pingora::health::cluster_meta_from_config(config),
     );
 
-    let mut runtime = praxis_core::PingoraServerRuntime::new(config);
+    // Cap worker threads for the full-proxy path too: PingoraServerRuntime
+    // derives its thread count from config.runtime.threads.
+    let mut capped = config.clone();
+    if capped.runtime.threads == 0 {
+        capped.runtime.threads = TEST_WORKER_THREADS;
+    }
+    let mut runtime = praxis_core::PingoraServerRuntime::new(&capped);
 
     if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Http) {
         let _ = Box::new(PingoraHttp)
@@ -522,7 +544,12 @@ impl ReloadableProxyGuard {
 ///
 /// [`ReloadableProxyGuard::reload`]: ReloadableProxyGuard::reload
 pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
-    let config = Config::from_yaml(yaml).expect("test config should parse");
+    let mut config = Config::from_yaml(yaml).expect("test config should parse");
+    // Cap worker threads for the reloadable path: run_server builds the
+    // initial runtime from this config's runtime.threads.
+    if config.runtime.threads == 0 {
+        config.runtime.threads = TEST_WORKER_THREADS;
+    }
     let addr = config
         .listeners
         .first()

@@ -51,6 +51,10 @@ pub struct BodyCapabilities {
     /// Whether any response condition references headers.
     pub any_response_condition_uses_headers: bool,
 
+    /// Whether any filter writes to the request body during the
+    /// selected-upstream phase.
+    pub any_selected_upstream_request_body_writer: bool,
+
     /// Whether any filter needs request body access.
     pub needs_request_body: bool,
 
@@ -59,6 +63,10 @@ pub struct BodyCapabilities {
 
     /// Whether any filter needs response body access.
     pub needs_response_body: bool,
+
+    /// Whether any filter needs the request body during the
+    /// selected-upstream phase.
+    pub needs_selected_upstream_request_body: bool,
 
     /// Resolved request body mode (`StreamBuffer` if any filter requires it).
     pub request_body_mode: BodyMode,
@@ -76,6 +84,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "exhaustive per-field default no-op assertions")]
     fn body_capabilities_default_is_no_op() {
         let caps = BodyCapabilities::default();
 
@@ -92,6 +101,14 @@ mod tests {
         assert!(
             !caps.any_response_body_writer,
             "default caps should have no response body writer"
+        );
+        assert!(
+            !caps.needs_selected_upstream_request_body,
+            "default caps should not need selected-upstream request body"
+        );
+        assert!(
+            !caps.any_selected_upstream_request_body_writer,
+            "default caps should have no selected-upstream request body writer"
         );
         assert!(
             !caps.needs_request_context,

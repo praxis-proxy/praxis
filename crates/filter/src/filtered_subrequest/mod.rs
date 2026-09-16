@@ -13,10 +13,13 @@
 //!
 //! The executor owns three transient extension mechanisms end-to-end —
 //! [`RetainedFilterResults`], [`PendingStreamChunks`], and
-//! [`StreamTermination`] — and recognizes one framework-defined caller-staged
-//! channel, [`PendingCredentials`]: it drains that channel and materializes each
+//! [`StreamTermination`] — and recognizes two framework-defined caller-staged
+//! channels: [`PendingCredentials`], which it drains to materialize each
 //! authority-bound secret only after resolving the destination (see
-//! [`DeferredCredential`](crate::DeferredCredential)). It otherwise never
+//! [`DeferredCredential`](crate::DeferredCredential)), and [`StagedUpstream`],
+//! which it drains to seed the sub-request's upstream before the request phase so
+//! a callout can dial a known destination without an upstream-selecting filter.
+//! It otherwise never
 //! inspects caller-injected extension types. Callers that stash their own state
 //! in the request extensions recover it from
 //! [`FilteredSubrequestError::into_parts`],
@@ -45,6 +48,7 @@ mod tests;
 mod transport;
 
 use std::{
+    net::SocketAddr,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -54,14 +58,18 @@ use std::{
 
 use bytes::Bytes;
 use http::HeaderMap;
-use praxis_core::subrequest::{FrameworkHeaders, StreamLimits, SubResponseBody};
+use praxis_core::{
+    config::{CachedClusterTls, ClusterTls},
+    connectivity::{ConnectionOptions, PreparedTarget, Upstream},
+    subrequest::{FrameworkHeaders, StreamLimits, SubRequestError, SubResponseBody},
+};
 use tracing::{Instrument as _, warn};
 
 use self::{
     context::{SubrequestRuntimeResources, build_sub_filter_context},
     sanitize::{
         apply_pre_read_header_mutations, apply_request_header_mutations, body_exceeds_limit, ensure_destination_host,
-        response_body_exceeds_limits, sanitize_subrequest_headers, sanitize_subresponse_headers, set_authority_host,
+        response_body_overflow_limit, sanitize_subrequest_headers, sanitize_subresponse_headers, set_authority_host,
         streaming_transport_limit, strip_reserved_headers, subresponse_from_rejection,
     },
     transport::{build_peer, classify_transport_failure, stream_termination_cause},
@@ -123,7 +131,26 @@ pub(crate) enum TransportFailure {
     /// The transport deadline was exceeded.
     DeadlineExceeded,
     /// The response exceeded the configured size limit.
-    ResponseTooLarge,
+    ResponseTooLarge {
+        /// Observed cumulative body size that tripped the limit.
+        actual: usize,
+        /// The effective limit that was exceeded.
+        limit: usize,
+    },
+}
+
+/// Typed detail for a response that exceeded its configured size ceiling.
+///
+/// Carried across the executor's public boundary so a caller can classify an
+/// oversized response and map it to its own status (for example HTTP 413)
+/// instead of the opaque gateway response [`run`](FilteredSubrequestExecutor::run)
+/// synthesizes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResponseTooLargeInfo {
+    /// Observed size that tripped the limit, when known.
+    pub(crate) actual: Option<usize>,
+    /// The effective limit that was exceeded.
+    pub(crate) limit: usize,
 }
 
 /// Owned downstream request attributes carried into a filtered sub-request.
@@ -204,12 +231,18 @@ pub(crate) struct FilteredSubrequestError {
     error: FilterError,
     /// Caller-owned extensions recovered from the nested filter context.
     extensions: RequestExtensions,
+    /// Typed response-size-overflow detail, when this error is an overflow.
+    too_large: Option<ResponseTooLargeInfo>,
 }
 
 impl FilteredSubrequestError {
     /// Build an error before a nested filter context exists.
     fn new(error: FilterError, extensions: RequestExtensions) -> Self {
-        Self { error, extensions }
+        Self {
+            error,
+            extensions,
+            too_large: None,
+        }
     }
 
     /// Recover caller-owned extensions from a failed nested context.
@@ -224,7 +257,24 @@ impl FilteredSubrequestError {
         Self::new(error, std::mem::take(&mut ctx.extensions))
     }
 
+    /// Attach the typed overflow detail carried by a response-size-limit breach.
+    #[must_use]
+    fn with_too_large(mut self, info: ResponseTooLargeInfo) -> Self {
+        self.too_large = Some(info);
+        self
+    }
+
+    /// The typed overflow detail, when this error is a response-size breach.
+    pub(crate) fn too_large(&self) -> Option<ResponseTooLargeInfo> {
+        self.too_large
+    }
+
     /// Split the error from the extensions its caller must restore.
+    ///
+    /// The typed overflow detail is intentionally dropped here: string-based
+    /// callers (the iterative request router's `IrrStepRunner`) keep their
+    /// existing behavior, while callers that need the classification read it
+    /// through [`too_large`](Self::too_large) first.
     pub(crate) fn into_parts(self) -> (FilterError, RequestExtensions) {
         (self.error, self.extensions)
     }
@@ -242,6 +292,19 @@ enum RawResponse {
         body: Box<SubResponseBody>,
         /// Header-time transition metadata.
         outcome: SubrequestOutcome,
+    },
+    /// An executor-side body-limit check tripped after the response transition.
+    ///
+    /// Carried out of the timed block (rather than returned as an error inline)
+    /// so the shared post-processing path attaches the typed overflow detail to
+    /// [`FilteredSubrequestError`] uniformly.
+    ResponseTooLarge {
+        /// Observed body size that tripped the limit.
+        actual: usize,
+        /// The effective limit that was exceeded.
+        limit: usize,
+        /// Human-readable message preserved for string-based callers.
+        message: &'static str,
     },
 }
 
@@ -286,6 +349,117 @@ pub enum CalloutResponse {
         /// [`next_chunk`]: crate::StreamingResponseBody::next_chunk
         body: Box<dyn crate::StreamingResponseBody>,
     },
+}
+
+/// The classified outcome of a callout run.
+///
+/// Additive companion to [`CalloutResponse`], returned by
+/// [`run_classified`](FilteredSubrequestExecutor::run_classified). It preserves
+/// the typed response-size-overflow classification that
+/// [`run`](FilteredSubrequestExecutor::run) collapses into a generic gateway
+/// response, so a caller can map an oversized response to its own status (for
+/// example HTTP 413) instead of an opaque 502. The overflow classification is
+/// exposed directly — never inferred from a `502` status.
+///
+/// Marked `#[non_exhaustive]` so future classified outcomes can be added
+/// without breaking downstream `match` arms.
+#[non_exhaustive]
+pub enum CalloutOutcome {
+    /// The outbound chain produced a response — buffered or streaming.
+    Response(CalloutResponse),
+    /// The response exceeded the configured size limit before delivery.
+    ///
+    /// Covers both a transport-level overflow (the upstream body exceeded the
+    /// per-response ceiling mid-download) and an executor-side body-limit breach
+    /// (a response-body filter grew the body past the ceiling). The
+    /// response-filter lifecycle runs in both cases before this is surfaced.
+    ResponseTooLarge {
+        /// Observed size that tripped the limit, when known.
+        actual: Option<usize>,
+        /// The effective limit that was exceeded.
+        limit: usize,
+    },
+}
+
+/// A pre-resolved upstream a callout stages so the executor dials a specific
+/// destination without the outbound chain needing an upstream-selecting filter.
+///
+/// A chain-binding callout that already knows its destination — for example a
+/// provider URL prepared via [`prepare_url_target`] — stages one of these in the
+/// request extensions it passes to [`run`](FilteredSubrequestExecutor::run). The
+/// executor seeds [`HttpFilterContext::upstream`](crate::HttpFilterContext) from
+/// it before the request phase, so the outbound chain carries only cross-cutting
+/// filters (observability, security, credentials) and never has to resolve a
+/// cluster. Central SSRF, TLS/SNI, and Host enforcement still apply at transport
+/// time exactly as for a chain-resolved upstream.
+///
+/// [`prepare_url_target`]: praxis_core::connectivity::prepare_url_target
+pub struct StagedUpstream(pub Upstream);
+
+impl StagedUpstream {
+    /// Build a staged upstream from a [`PreparedTarget`].
+    ///
+    /// The transport address is pinned to the first address the target resolved
+    /// (so the executor dials the same endpoint the SSRF validation hook saw,
+    /// closing the resolve-then-dial race), the HTTP `Host` authority is the
+    /// URL's authority, and TLS/SNI are derived from the URL scheme and host.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the target resolved no addresses or its TLS
+    /// material cannot be prepared.
+    pub fn from_prepared_target(target: &PreparedTarget) -> Result<Self, FilterError> {
+        let address = target
+            .addresses()
+            .first()
+            .ok_or_else(|| -> FilterError { "filtered_subrequest: prepared target resolved no addresses".into() })?;
+        let tls = if target.is_tls() {
+            let cluster_tls = ClusterTls {
+                sni: Some(target.sni().to_owned()),
+                ..ClusterTls::default()
+            };
+            Some(
+                CachedClusterTls::try_from_config(&cluster_tls)
+                    .map_err(|error| -> FilterError { format!("filtered_subrequest: invalid TLS: {error}").into() })?,
+            )
+        } else {
+            None
+        };
+        Ok(Self(Upstream {
+            address: Arc::from(address.to_string().as_str()),
+            authority: Some(target.host_authority().clone()),
+            connection: Arc::new(ConnectionOptions::default()),
+            tls,
+        }))
+    }
+}
+
+/// Caller-staged multi-address fallback set for a [`StagedUpstream`].
+///
+/// [`StagedUpstream`] pins the sub-request's primary transport address (the
+/// first address its [`PreparedTarget`] resolved), which closes the
+/// resolve-then-dial SSRF race. When a hostname resolved to several addresses,
+/// staging this alongside it lets the executor advance past a connection
+/// refusal to the next validated address — preserving the DNS fallback the
+/// low-level transport performs — without ever re-resolving DNS. Every address
+/// was SSRF-validated together by the same preparation hook, and each literal
+/// is re-checked at connect time, so dialing any of them is safe. Absent this
+/// extension (or with a single address), the executor dials the single staged
+/// upstream exactly as before.
+pub struct StagedUpstreamFallback(Vec<SocketAddr>);
+
+impl StagedUpstreamFallback {
+    /// Capture every address a [`PreparedTarget`] resolved, in resolver order.
+    #[must_use]
+    pub fn from_prepared_target(target: &PreparedTarget) -> Self {
+        Self(target.addresses().to_vec())
+    }
+
+    /// The validated fallback addresses, in resolver order.
+    #[must_use]
+    pub fn addresses(&self) -> &[SocketAddr] {
+        &self.0
+    }
 }
 
 /// No-op retained-state accounting for callers that keep no cross-sub-request
@@ -491,17 +665,159 @@ impl FilteredSubrequestExecutor {
             deadline,
             extensions,
         };
-        let OpenedSubrequest { continuation, kind } =
-            self.execute(input).await.map_err(|error| error.into_parts().0)?;
+        let opened = self.execute(input).await.map_err(|error| error.into_parts().0)?;
+        Ok(self.callout_response_from(opened))
+    }
+
+    /// Run `request` through `pipeline` and return a *classified* outcome.
+    ///
+    /// Additive companion to [`run`](Self::run) for callers that must
+    /// distinguish an oversized response from other results. It behaves exactly
+    /// like `run` for every response the outbound chain produces, but instead of
+    /// collapsing a response-size overflow into a synthesized gateway response it
+    /// returns [`CalloutOutcome::ResponseTooLarge`] carrying the observed size
+    /// (when known) and the tripped limit. Both the transport-level overflow
+    /// (upstream body over the per-response ceiling) and the executor-side
+    /// body-limit breach (a response-body filter grew the body past the ceiling)
+    /// are covered, and the response-filter lifecycle runs in both cases.
+    ///
+    /// A genuine upstream `502` is delivered as
+    /// [`CalloutOutcome::Response`] — overflow is never inferred from status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] under the same conditions as [`run`](Self::run),
+    /// except that a response-size overflow is reported as
+    /// [`CalloutOutcome::ResponseTooLarge`] rather than an error.
+    ///
+    /// # Examples
+    ///
+    /// Like [`run`](Self::run), but the caller matches a [`CalloutOutcome`].
+    /// Because the enum is `#[non_exhaustive]` a wildcard arm is required — here
+    /// it also absorbs the streaming response shape. As in the `run` example the
+    /// pipeline and client are built directly and a `static_response` filter
+    /// answers locally, so the example runs without an upstream.
+    ///
+    /// ```
+    /// use std::{
+    ///     sync::Arc,
+    ///     time::{Duration, Instant},
+    /// };
+    ///
+    /// use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    /// use praxis_filter::{
+    ///     CalloutOutcome, CalloutResponse, FilterEntry, FilterPipeline, FilterRegistry,
+    ///     FilteredSubrequestExecutor, RequestExtensions, SubRequest, SubrequestRuntime,
+    /// };
+    ///
+    /// let rt = tokio::runtime::Builder::new_current_thread()
+    ///     .enable_all()
+    ///     .build()
+    ///     .unwrap();
+    /// rt.block_on(async {
+    ///     let registry = FilterRegistry::with_builtins();
+    ///     let mut chain: Vec<FilterEntry> = serde_yaml::from_str(
+    ///         "- filter: static_response\n  status: 200\n  body: hello from the outbound chain\n",
+    ///     )
+    ///     .unwrap();
+    ///     let outbound = Arc::new(FilterPipeline::build(&mut chain, &registry).unwrap());
+    ///
+    ///     let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    ///     let downstream = SubrequestRuntime::new(None, false, None, Instant::now());
+    ///     let executor = FilteredSubrequestExecutor::for_callout(
+    ///         client,
+    ///         downstream,
+    ///         0,                      // sub-request nesting depth
+    ///         1 << 20,                // 1 MiB response ceiling
+    ///         Duration::from_secs(5), // per-sub-request step timeout
+    ///     );
+    ///
+    ///     let request = SubRequest {
+    ///         method: http::Method::GET,
+    ///         uri: http::Uri::from_static("/"),
+    ///         headers: http::HeaderMap::new(),
+    ///         body: bytes::Bytes::new(),
+    ///     };
+    ///     let deadline = Instant::now() + Duration::from_secs(5);
+    ///     match executor
+    ///         .run_classified(&outbound, &request, RequestExtensions::default(), deadline)
+    ///         .await
+    ///         .expect("the outbound chain produces a response")
+    ///     {
+    ///         CalloutOutcome::Response(CalloutResponse::Buffered(response)) => {
+    ///             assert_eq!(response.status, 200);
+    ///             assert_eq!(&response.body[..], b"hello from the outbound chain");
+    ///         },
+    ///         CalloutOutcome::ResponseTooLarge { actual, limit } => {
+    ///             unreachable!("within the {limit}-byte ceiling (saw {actual:?})")
+    ///         },
+    ///         // `CalloutOutcome` is `#[non_exhaustive]`: downstream callers must
+    ///         // keep a wildcard arm so added outcomes — and the streaming
+    ///         // response shape — stay forward-compatible.
+    ///         _ => unreachable!("static_response yields a buffered response"),
+    ///     }
+    /// });
+    /// ```
+    #[expect(clippy::large_futures, reason = "delegates to the full step future")]
+    #[expect(
+        clippy::large_stack_frames,
+        reason = "delegates to execute, which reconstructs a full filter context"
+    )]
+    pub async fn run_classified(
+        &self,
+        pipeline: &Arc<FilterPipeline>,
+        request: &SubRequest,
+        extensions: RequestExtensions,
+        deadline: Instant,
+    ) -> Result<CalloutOutcome, FilterError> {
+        let input = FilteredSubrequestInput {
+            pipeline,
+            request,
+            label: "callout",
+            iteration: 0,
+            deadline,
+            extensions,
+        };
+        match self.execute(input).await {
+            Ok(opened) => {
+                // A transport-level overflow rides in the completed outcome's
+                // transport classification; surface it as the typed outcome
+                // rather than the synthesized gateway response `run` returns.
+                if let OpenedResponse::Complete(outcome) = &opened.kind
+                    && let Some(TransportFailure::ResponseTooLarge { actual, limit }) = outcome.transport_error
+                {
+                    return Ok(CalloutOutcome::ResponseTooLarge {
+                        actual: Some(actual),
+                        limit,
+                    });
+                }
+                Ok(CalloutOutcome::Response(self.callout_response_from(opened)))
+            },
+            // An executor-side body-limit breach carries the typed detail on the
+            // error; every other error stays a plain `FilterError`.
+            Err(error) => match error.too_large() {
+                Some(info) => Ok(CalloutOutcome::ResponseTooLarge {
+                    actual: info.actual,
+                    limit: info.limit,
+                }),
+                None => Err(error.into_parts().0),
+            },
+        }
+    }
+
+    /// Map an opened sub-request onto the buffered/streaming callout response,
+    /// shared by [`run`](Self::run) and [`run_classified`](Self::run_classified).
+    fn callout_response_from(&self, opened: OpenedSubrequest) -> CalloutResponse {
+        let OpenedSubrequest { continuation, kind } = opened;
         match kind {
-            OpenedResponse::Complete(outcome) => Ok(CalloutResponse::Buffered(outcome.response)),
-            OpenedResponse::Streaming { body, outcome } => Ok(CalloutResponse::Streaming {
+            OpenedResponse::Complete(outcome) => CalloutResponse::Buffered(outcome.response),
+            OpenedResponse::Streaming { body, outcome } => CalloutResponse::Streaming {
                 response: outcome.response,
                 body: Box::new(CalloutStreamingBody::new(
                     FilteredStreamingBody::new(body, continuation),
                     self.max_response_bytes,
                 )),
-            }),
+            },
         }
     }
 
@@ -566,6 +882,32 @@ impl FilteredSubrequestExecutor {
         filter_ctx.extensions = std::mem::take(&mut extensions);
         filter_ctx.extensions.insert(RetainedFilterResults::default());
         filter_ctx.enable_stream_chunk_emission(self.max_state_bytes);
+        // A callout may stage a pre-resolved upstream (for example a URL prepared
+        // via `prepare_url_target`) so the executor dials a specific destination
+        // without the outbound chain needing an upstream-selecting filter. Seed it
+        // before the request phase so chain filters observe the resolved upstream
+        // and the central SSRF/TLS/Host enforcement at `build_peer` still applies.
+        //
+        // Keep a copy so the destination can be re-pinned after the request phase:
+        // a chain filter may observe the seeded upstream but must not be able to
+        // retarget a callout that already resolved and validated its destination.
+        // Without the re-pin a filter could redirect the dial — and any body-borne
+        // credential (e.g. Tavily's key) — to an authority the callout never
+        // prepared. `Upstream` is `Arc`-backed, so the clone is a refcount bump.
+        let pinned_upstream = filter_ctx.extensions.remove::<StagedUpstream>().map(|staged| staged.0);
+        if let Some(upstream) = &pinned_upstream {
+            filter_ctx.upstream = Some(upstream.clone());
+        }
+        // A callout may additionally stage the full validated address set so a
+        // connection refusal on the pinned primary address falls back to the
+        // next resolved address (matching the low-level transport's DNS
+        // behavior) without re-resolving. Every address was SSRF-validated
+        // together by the same preparation hook.
+        let fallback_addresses = filter_ctx
+            .extensions
+            .remove::<StagedUpstreamFallback>()
+            .map(|fallback| fallback.0)
+            .unwrap_or_default();
 
         let step_budget = remaining.min(self.step_timeout);
         let step_started = Instant::now();
@@ -627,6 +969,15 @@ impl FilteredSubrequestExecutor {
                 }
             }
 
+            // Re-pin the staged upstream: the request phase may have let a chain
+            // filter observe (and try to rewrite) `ctx.upstream`, but a resolved
+            // callout must dial only the destination it prepared. Reasserting here
+            // overrides any mid-chain rewrite so a staged credential — a header
+            // credential, or for a body-authenticated provider the request body
+            // itself — can only ever reach the authority it was prepared for.
+            if let Some(upstream) = &pinned_upstream {
+                filter_ctx.upstream = Some(upstream.clone());
+            }
             let upstream = filter_ctx.upstream.as_ref().ok_or_else(|| -> FilterError {
                 format!("filtered_subrequest: step '{label}' did not resolve an upstream").into()
             })?;
@@ -645,7 +996,24 @@ impl FilteredSubrequestExecutor {
                 .clone()
                 .unwrap_or_else(|| Arc::clone(&destination_authority));
             in_transport_inner.store(true, Ordering::Release);
-            let peer = build_peer(upstream, pipeline.allow_private_upstreams()).await;
+            // Build one transport peer per validated address so a connection
+            // refusal can fall back to the next. With no staged fallback set (or
+            // a single address) this is exactly the prior single-peer dial: the
+            // seeded upstream address — a pinned literal on the staged path, or a
+            // cluster-resolved hostname on the non-staged path — resolved once.
+            // Each fallback peer reuses the seeded upstream's authority, TLS, and
+            // connection options; only the transport socket address varies.
+            let peers = if fallback_addresses.len() > 1 {
+                let mut built = Vec::with_capacity(fallback_addresses.len());
+                for address in &fallback_addresses {
+                    let mut per_address = upstream.clone();
+                    per_address.address = Arc::from(address.to_string().as_str());
+                    built.push(build_peer(&per_address, pipeline.allow_private_upstreams()).await);
+                }
+                built
+            } else {
+                vec![build_peer(upstream, pipeline.allow_private_upstreams()).await]
+            };
             apply_request_header_mutations(&mut sub_headers, &filter_ctx);
             // Mirror the normal proxy path (`apply_authority_override`): a
             // configured authority override becomes the upstream Host,
@@ -724,13 +1092,35 @@ impl FilteredSubrequestExecutor {
                             pipeline.body_capabilities().response_body_mode,
                         ),
                     };
-                    let response = match peer {
-                        Ok(peer) => self
-                            .client
-                            .send_streaming(&peer, &request, transport_budget, limits, Some(&framework_headers))
-                            .await,
-                        Err(error) => Err(praxis_core::subrequest::SubRequestError::Connect(error.to_string())),
-                    };
+                    let mut response =
+                        Err(SubRequestError::Connect("filtered_subrequest: no addresses to dial".to_owned()));
+                    for peer in &peers {
+                        // Recompute the remaining budget before every fallback
+                        // attempt so a slow-but-not-refused earlier address cannot
+                        // hand each later attempt the full step budget again; the
+                        // absolute step deadline bounds all attempts together (the
+                        // outer `tokio::time::timeout` is the hard backstop).
+                        let attempt_budget = step_deadline
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or(Duration::ZERO);
+                        if attempt_budget.is_zero() {
+                            break;
+                        }
+                        response = match peer {
+                            Ok(peer) => self
+                                .client
+                                .send_streaming(peer, &request, attempt_budget, limits.clone(), Some(&framework_headers))
+                                .await,
+                            Err(error) => Err(SubRequestError::Connect(error.to_string())),
+                        };
+                        // Advance to the next validated address only on a
+                        // connection refusal; any other outcome (a response, or a
+                        // substantive transport error) is final.
+                        if matches!(response, Err(SubRequestError::Connect(_))) {
+                            continue;
+                        }
+                        break;
+                    }
                     in_transport_inner.store(false, Ordering::Release);
                     match response {
                         Ok(response) => {
@@ -801,32 +1191,61 @@ impl FilteredSubrequestExecutor {
                     }
                 },
                 SubRequestResponseMode::Buffered => {
-                    let (mut response, origin, transport_error) = match peer {
-                        Ok(peer) => match self
-                            .client
-                            .execute(&peer, &request, self.max_response_bytes, transport_budget, Some(&framework_headers))
-                            .await
-                        {
-                            Ok(response) => (response, ResponseOrigin::Upstream, None),
-                            Err(error) => {
-                                let (status, kind) = classify_transport_failure(&error);
-                                warn!(step = label, %error, status, "filtered sub-request buffered transport failure");
-                                (
-                                    SubResponse { status, headers: HeaderMap::new(), body: Bytes::new() },
-                                    ResponseOrigin::Transport,
-                                    Some(kind),
-                                )
+                    let mut attempt = None;
+                    for peer in &peers {
+                        // Recompute the remaining budget before every fallback
+                        // attempt (see the streaming arm). If the step deadline is
+                        // already reached, stop dialing and fall through to the
+                        // `attempt.unwrap_or_else(...)` synthesized failure below.
+                        let attempt_budget = step_deadline
+                            .checked_duration_since(Instant::now())
+                            .unwrap_or(Duration::ZERO);
+                        if attempt_budget.is_zero() {
+                            break;
+                        }
+                        let outcome = match peer {
+                            Ok(peer) => match self
+                                .client
+                                .execute(peer, &request, self.max_response_bytes, attempt_budget, Some(&framework_headers))
+                                .await
+                            {
+                                Ok(response) => (response, ResponseOrigin::Upstream, None),
+                                Err(error) => {
+                                    let (status, kind) = classify_transport_failure(&error);
+                                    warn!(step = label, %error, status, "filtered sub-request buffered transport failure");
+                                    let response =
+                                        SubResponse { status, headers: HeaderMap::new(), body: Bytes::new() };
+                                    if matches!(error, SubRequestError::Connect(_)) {
+                                        // Connection refused/unreachable: remember
+                                        // it and try the next validated address.
+                                        attempt = Some((response, ResponseOrigin::Transport, Some(kind)));
+                                        continue;
+                                    }
+                                    (response, ResponseOrigin::Transport, Some(kind))
+                                },
                             },
-                        },
-                        Err(error) => {
-                            warn!(step = label, %error, status = 502_u16, "filtered sub-request buffered transport failure");
-                            (
-                                SubResponse { status: 502, headers: HeaderMap::new(), body: Bytes::new() },
-                                ResponseOrigin::Transport,
-                                Some(TransportFailure::Connect),
-                            )
-                        },
-                    };
+                            Err(error) => {
+                                warn!(step = label, %error, status = 502_u16, "filtered sub-request buffered transport failure");
+                                // Peer construction failed (resolution/SSRF):
+                                // remember it and try the next validated address.
+                                attempt = Some((
+                                    SubResponse { status: 502, headers: HeaderMap::new(), body: Bytes::new() },
+                                    ResponseOrigin::Transport,
+                                    Some(TransportFailure::Connect),
+                                ));
+                                continue;
+                            },
+                        };
+                        attempt = Some(outcome);
+                        break;
+                    }
+                    let (mut response, origin, transport_error) = attempt.unwrap_or_else(|| {
+                        (
+                            SubResponse { status: 502, headers: HeaderMap::new(), body: Bytes::new() },
+                            ResponseOrigin::Transport,
+                            Some(TransportFailure::Connect),
+                        )
+                    });
                     in_transport_inner.store(false, Ordering::Release);
                     sanitize_subresponse_headers(&mut response.headers);
                     response_header.status = http::StatusCode::from_u16(response.status)
@@ -841,12 +1260,16 @@ impl FilteredSubrequestExecutor {
                         return Ok(RawResponse::Rejected(Rejection::status(413)));
                     }
                     let mut body = Some(std::mem::take(&mut response.body));
-                    if response_body_exceeds_limits(
+                    if let Some(limit) = response_body_overflow_limit(
                         pipeline.body_capabilities().response_body_mode,
                         self.max_response_bytes,
                         body.as_ref().map_or(0, Bytes::len),
                     ) {
-                        return Err("filtered_subrequest: step response exceeds configured body limit".into());
+                        return Ok(RawResponse::ResponseTooLarge {
+                            actual: body.as_ref().map_or(0, Bytes::len),
+                            limit,
+                            message: "filtered_subrequest: step response exceeds configured body limit",
+                        });
                     }
                     let body_action = pipeline.execute_http_response_body(&mut filter_ctx, &mut body, true)?;
                     if let FilterAction::Reject(rejection) = body_action {
@@ -855,15 +1278,16 @@ impl FilteredSubrequestExecutor {
                     if self.accounting.exceeds_limit(&filter_ctx.extensions) {
                         return Ok(RawResponse::Rejected(Rejection::status(413)));
                     }
-                    if response_body_exceeds_limits(
+                    if let Some(limit) = response_body_overflow_limit(
                         pipeline.body_capabilities().response_body_mode,
                         self.max_response_bytes,
                         body.as_ref().map_or(0, Bytes::len),
                     ) {
-                        return Err(
-                            "filtered_subrequest: transformed step response exceeds configured body limit"
-                                .into(),
-                        );
+                        return Ok(RawResponse::ResponseTooLarge {
+                            actual: body.as_ref().map_or(0, Bytes::len),
+                            limit,
+                            message: "filtered_subrequest: transformed step response exceeds configured body limit",
+                        });
                     }
                     response.body = body.unwrap_or_default();
                     if let Some(metadata) = filter_ctx.response_header.as_deref() {
@@ -927,14 +1351,34 @@ impl FilteredSubrequestExecutor {
                     .into();
                 return Err(FilteredSubrequestError::capture(error, &mut filter_ctx));
             }
-            if completion_body
-                .as_ref()
-                .is_some_and(|body| body.len() > self.max_response_bytes)
-            {
-                let error = "filtered_subrequest: abnormal completion exceeds response body limit"
-                    .to_owned()
-                    .into();
-                return Err(FilteredSubrequestError::capture(error, &mut filter_ctx));
+            // Mirror the two buffered overflow sites: the effective ceiling is the
+            // smaller of `max_response_bytes` and the pipeline's response body mode.
+            //
+            // Reachability invariant — today this collapses to `max_response_bytes`.
+            // A `StreamBuffer` response mode is rejected before streaming is selected
+            // (the guard at the top of the streaming arm), and a `SizeLimit` mode only
+            // arises when no response-body filter runs — in which case nothing writes
+            // `completion_body` and it stays empty. So the only mode under which a
+            // completion body can exist is `Stream`, for which the helper returns
+            // exactly `max_response_bytes`. Routing through the shared helper keeps all
+            // three sites uniform and correct-by-construction should that guard ever
+            // be relaxed to admit a tighter response mode here.
+            if let Some(limit) = response_body_overflow_limit(
+                pipeline.body_capabilities().response_body_mode,
+                self.max_response_bytes,
+                completion_body.as_ref().map_or(0, Bytes::len),
+            ) {
+                let error = FilteredSubrequestError::capture(
+                    "filtered_subrequest: abnormal completion exceeds response body limit"
+                        .to_owned()
+                        .into(),
+                    &mut filter_ctx,
+                )
+                .with_too_large(ResponseTooLargeInfo {
+                    actual: Some(completion_body.as_ref().map_or(0, Bytes::len)),
+                    limit,
+                });
+                return Err(error);
             }
             outcome.response.body = completion_body.unwrap_or_default();
         }
@@ -970,6 +1414,17 @@ impl FilteredSubrequestExecutor {
                     headers: outcome.response.headers.clone(),
                 };
                 (OpenedResponse::Streaming { body, outcome }, snapshot, false)
+            },
+            // An executor-side body-limit breach carries the typed overflow
+            // detail out as an error, uniformly with the transport path. The
+            // response-filter lifecycle already ran before the breach.
+            RawResponse::ResponseTooLarge { actual, limit, message } => {
+                let error = FilteredSubrequestError::capture(message.to_owned().into(), &mut filter_ctx)
+                    .with_too_large(ResponseTooLargeInfo {
+                        actual: Some(actual),
+                        limit,
+                    });
+                return Err(error);
             },
         };
         let request_snapshot = crate::Request {

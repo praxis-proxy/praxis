@@ -369,7 +369,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "benchmarks"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "chrono",
  "serde",
@@ -521,9 +521,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "camino"
-version = "1.2.5"
+version = "1.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb1307f12aa967b5a58416e87b3653360e0fd614a016b6e970db08fecbb1b80d"
+checksum = "bbbad30e4b4c14a39e3cc8aed085a12a327257c316619c93581e017bc52be591"
 dependencies = [
  "serde_core",
 ]
@@ -3163,7 +3163,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "async-trait",
  "cargo_metadata",
@@ -3185,7 +3185,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-core"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "bytes",
  "chrono",
@@ -3218,7 +3218,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-filter"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3232,6 +3232,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry_sdk",
+ "parking_lot",
  "percent-encoding",
  "praxis-policy",
  "praxis-proxy-core",
@@ -3258,7 +3259,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-protocol"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3287,7 +3288,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-tls"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "arc-swap",
  "notify",
@@ -3305,7 +3306,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-test-utils"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3331,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-benches"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "criterion",
  "http",
@@ -3343,7 +3344,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-conformance"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "h2",
  "http",
@@ -3356,7 +3357,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-integration"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3387,7 +3388,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-resilience"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "async-trait",
  "benchmarks",
@@ -3403,7 +3404,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-schema"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3418,7 +3419,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-security"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-filter",
@@ -4705,7 +4706,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5696,7 +5697,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "benchmarks",
  "chrono",
