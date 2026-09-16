@@ -161,7 +161,7 @@ jobs:
           persist-credentials: false
 
       - name: Check coverage
-        uses: praxis-proxy/conventions/.github/actions/coverage-check@9e4a1eec33475d18854e7ad182d15c98f84fa8b7 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/coverage-check@b702da784117b57488343273579932c3d432fa32 # v0.1.0
 
   # ----------------------------------------------------------------------------
   # Beta/Nightly canary
@@ -226,7 +226,7 @@ jobs:
           password: ${{ github.token }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Extract metadata
         id: meta
