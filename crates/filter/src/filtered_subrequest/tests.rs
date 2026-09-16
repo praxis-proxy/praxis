@@ -216,6 +216,18 @@ fn transformed_response_must_remain_within_all_limits() {
         None,
         "a body within every limit must not overflow"
     );
+    // A `SizeLimit` tighter than the global ceiling is the reported limit.
+    assert_eq!(
+        super::sanitize::response_body_overflow_limit(crate::BodyMode::SizeLimit { max_bytes: 3 }, 4, 4),
+        Some(3),
+        "a SizeLimit tighter than the global ceiling must be the reported limit"
+    );
+    // `StreamBuffer` with no mode ceiling falls back to the global ceiling.
+    assert_eq!(
+        super::sanitize::response_body_overflow_limit(crate::BodyMode::StreamBuffer { max_bytes: None }, 4, 5),
+        Some(4),
+        "StreamBuffer with no mode limit falls back to the global ceiling"
+    );
 }
 
 #[test]

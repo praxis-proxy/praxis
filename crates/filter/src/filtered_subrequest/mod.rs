@@ -600,6 +600,75 @@ impl FilteredSubrequestExecutor {
     /// Returns [`FilterError`] under the same conditions as [`run`](Self::run),
     /// except that a response-size overflow is reported as
     /// [`CalloutOutcome::ResponseTooLarge`] rather than an error.
+    ///
+    /// # Examples
+    ///
+    /// Like [`run`](Self::run), but the caller matches a [`CalloutOutcome`].
+    /// Because the enum is `#[non_exhaustive]` a wildcard arm is required — here
+    /// it also absorbs the streaming response shape. As in the `run` example the
+    /// pipeline and client are built directly and a `static_response` filter
+    /// answers locally, so the example runs without an upstream.
+    ///
+    /// ```
+    /// use std::{
+    ///     sync::Arc,
+    ///     time::{Duration, Instant},
+    /// };
+    ///
+    /// use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    /// use praxis_filter::{
+    ///     CalloutOutcome, CalloutResponse, FilterEntry, FilterPipeline, FilterRegistry,
+    ///     FilteredSubrequestExecutor, RequestExtensions, SubRequest, SubrequestRuntime,
+    /// };
+    ///
+    /// let rt = tokio::runtime::Builder::new_current_thread()
+    ///     .enable_all()
+    ///     .build()
+    ///     .unwrap();
+    /// rt.block_on(async {
+    ///     let registry = FilterRegistry::with_builtins();
+    ///     let mut chain: Vec<FilterEntry> = serde_yaml::from_str(
+    ///         "- filter: static_response\n  status: 200\n  body: hello from the outbound chain\n",
+    ///     )
+    ///     .unwrap();
+    ///     let outbound = Arc::new(FilterPipeline::build(&mut chain, &registry).unwrap());
+    ///
+    ///     let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    ///     let downstream = SubrequestRuntime::new(None, false, None, Instant::now());
+    ///     let executor = FilteredSubrequestExecutor::for_callout(
+    ///         client,
+    ///         downstream,
+    ///         0,                      // sub-request nesting depth
+    ///         1 << 20,                // 1 MiB response ceiling
+    ///         Duration::from_secs(5), // per-sub-request step timeout
+    ///     );
+    ///
+    ///     let request = SubRequest {
+    ///         method: http::Method::GET,
+    ///         uri: http::Uri::from_static("/"),
+    ///         headers: http::HeaderMap::new(),
+    ///         body: bytes::Bytes::new(),
+    ///     };
+    ///     let deadline = Instant::now() + Duration::from_secs(5);
+    ///     match executor
+    ///         .run_classified(&outbound, &request, RequestExtensions::default(), deadline)
+    ///         .await
+    ///         .expect("the outbound chain produces a response")
+    ///     {
+    ///         CalloutOutcome::Response(CalloutResponse::Buffered(response)) => {
+    ///             assert_eq!(response.status, 200);
+    ///             assert_eq!(&response.body[..], b"hello from the outbound chain");
+    ///         },
+    ///         CalloutOutcome::ResponseTooLarge { actual, limit } => {
+    ///             unreachable!("within the {limit}-byte ceiling (saw {actual:?})")
+    ///         },
+    ///         // `CalloutOutcome` is `#[non_exhaustive]`: downstream callers must
+    ///         // keep a wildcard arm so added outcomes — and the streaming
+    ///         // response shape — stay forward-compatible.
+    ///         _ => unreachable!("static_response yields a buffered response"),
+    ///     }
+    /// });
+    /// ```
     #[expect(clippy::large_futures, reason = "delegates to the full step future")]
     #[expect(
         clippy::large_stack_frames,
