@@ -77,12 +77,10 @@ struct TrustedPeerConfig {
 /// All configured fields on an entry must match the peer identity
 /// for that entry to accept the request.
 ///
-/// `cert_digest` (the SHA-256 hex digest of the peer certificate)
-/// is the strongest static match field. `organization` and
-/// `serial_number` are weaker and are primarily useful for
-/// bootstrap or controlled test configurations where cert digests
-/// are not known ahead of time. SAN/SPIFFE identity matching is
-/// planned for a follow-up.
+/// SPIFFE identity is authorized earlier, at the mutual-TLS handshake
+/// (`RequireNamed` listener mode), so it is not a match field here.
+/// `cert_digest` and `serial_number` pin a specific certificate;
+/// `organization` is useful for bootstrap and controlled tests.
 ///
 /// # YAML configuration
 ///
