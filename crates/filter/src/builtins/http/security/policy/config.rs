@@ -136,16 +136,24 @@ fn default_true() -> bool {
 pub(crate) struct LlmOptions {
     /// Ceiling on a buffered inference request body, in bytes.
     ///
-    /// The inference path buffers in `read_only` too — the model is in
-    /// the body — so it carries its own bound rather than sharing the
-    /// `max_buffer_bytes` figure sized for JSON-RPC tool calls. A body
-    /// over the ceiling is rejected before any filter runs, which is the
-    /// fail-closed answer for one the filter cannot read a model from.
+    /// Defaults to the same figure as `max_buffer_bytes`, so an existing
+    /// deployment keeps the ceiling it had. It is a separate knob because
+    /// the two bound different things: the inference path buffers in
+    /// `read_only` too — the model is in the body — and it buffers at the
+    /// body phase, which is the earliest point the model can be read,
+    /// so this ceiling is what a caller can make the proxy hold before
+    /// identity has been resolved.
     ///
-    /// Peak memory is roughly this times the in-flight request count, so
-    /// raise it deliberately. Multimodal requests carrying base64 images,
-    /// long chat histories, and large embeddings inputs all run past the
-    /// 1 MiB default.
+    /// Peak memory is roughly this times the in-flight request count.
+    /// Tune it *down* to bound that exposure without shrinking the
+    /// JSON-RPC ceiling; raise it only if inference payloads need more
+    /// than `max_buffer_bytes` allows. Multimodal requests carrying
+    /// base64 images, long chat histories, and large embeddings inputs
+    /// are the ones that run large.
+    ///
+    /// A body over the ceiling is rejected before any filter runs, which
+    /// is the fail-closed answer for one the filter cannot read a model
+    /// from.
     #[serde(default = "default_llm_max_request_bytes")]
     pub max_request_bytes: usize,
 
@@ -198,11 +206,12 @@ impl Default for LlmOptions {
     }
 }
 
-/// Default inference request buffer ceiling. Lower than the JSON-RPC
-/// figure: an inference body needs only the top-level `model` read from
-/// it, and the ceiling is paid per in-flight request.
+/// Default inference request buffer ceiling: the same as the JSON-RPC
+/// one, so adding an `llm:` policy to a chain does not change the
+/// ceiling it already had. Deliberately delegated rather than repeating
+/// the literal, so the two cannot drift apart.
 fn default_llm_max_request_bytes() -> usize {
-    1_048_576 // 1 MiB
+    default_max_buffer_bytes()
 }
 
 /// The OpenAI / Anthropic sampling fields a rule plausibly keys on.

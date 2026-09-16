@@ -4429,8 +4429,9 @@ async fn a_plain_mcp_request_still_takes_the_mcp_path() {
 
 /// The inference path buffers the request body even in `ReadOnly`: there
 /// is no classifier ahead of it to buffer, and the model has to be read
-/// from the whole body. Its own ceiling bounds it, not the larger
-/// JSON-RPC one.
+/// from the whole body. Its own ceiling bounds it, which by default is
+/// the same figure as the JSON-RPC one — adding an `llm:` policy must not
+/// change the ceiling a chain already had.
 #[test]
 fn inference_routes_buffer_the_request_body_in_read_only() {
     let (_dir, path) = write_llm_route_config();
@@ -4438,7 +4439,7 @@ fn inference_routes_buffer_the_request_body_in_read_only() {
         matches!(
             build_filter(path).request_body_mode(),
             BodyMode::StreamBuffer {
-                max_bytes: Some(1_048_576)
+                max_bytes: Some(10_485_760)
             }
         ),
         "an inference policy must ask for the whole body, bounded by llm.max_request_bytes",
@@ -4448,6 +4449,18 @@ fn inference_routes_buffer_the_request_body_in_read_only() {
     assert!(
         matches!(build_filter(path).request_body_mode(), BodyMode::Stream),
         "an MCP policy keeps streaming: the classifier ahead of it already buffers",
+    );
+}
+
+/// The two ceilings default to the same figure, so adding an `llm:`
+/// policy to a chain does not shrink the body it already accepted. The
+/// separate knob exists to be tuned, not to change behavior on upgrade.
+#[test]
+fn the_inference_ceiling_defaults_to_the_json_rpc_one() {
+    let cfg = super::config::LlmOptions::default();
+    assert_eq!(
+        cfg.max_request_bytes, 10_485_760,
+        "a deployment that set neither knob must keep the ceiling it had",
     );
 }
 

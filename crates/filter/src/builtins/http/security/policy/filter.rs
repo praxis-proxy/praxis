@@ -1523,12 +1523,13 @@ impl HttpFilter for PolicyFilter {
         // The inference path buffers in `ReadOnly` too: the MCP path
         // gets a whole body only because the protocol classifier ahead
         // of it buffers, and an inference call has no classifier. It
-        // buffers before the identity gate, since a body hook is where
-        // the model can be read at all, so the ceiling bounds
-        // unauthenticated traffic and is paid per in-flight request —
-        // hence its own smaller `llm.max_request_bytes`. A request over
-        // it gets the pipeline's 413, which is the fail-closed answer
-        // for a body the filter cannot read a model from.
+        // buffers at the body phase, the earliest point the model can be
+        // read, so its ceiling is what a caller can make the proxy hold
+        // before identity is resolved — a different exposure from the
+        // JSON-RPC one, hence a separate `llm.max_request_bytes` an
+        // operator can lower on its own. A request over the ceiling gets
+        // the pipeline's 413, which is the fail-closed answer for a body
+        // the filter cannot read a model from.
         match self.cfg.body_access {
             BodyAccessMode::ReadOnly if !self.llm_routes => BodyMode::Stream,
             BodyAccessMode::ReadOnly => BodyMode::StreamBuffer {
