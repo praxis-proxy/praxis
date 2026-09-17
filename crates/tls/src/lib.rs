@@ -26,7 +26,7 @@
 //!   [`CachedClientCert`]).
 //! - Peer identity extracted from client certificates ([`TlsPeerIdentity`]).
 //!
-//! Certificate hot-reload support (the [`reload`] and [`watcher`]
+//! Certificate hot-reload support (the `reload` and `watcher`
 //! modules) is gated behind the `config-reload` feature.
 
 mod cached;

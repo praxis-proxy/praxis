@@ -55,7 +55,7 @@ pub struct ListenerTls {
     #[serde(skip_serializing_if = "is_default_cert_mode")]
     pub client_cert_mode: ClientCertMode,
 
-    /// SPIFFE IDs authorized at a [`ClientCertMode::RequireNamed`] handshake.
+    /// SPIFFE IDs authorized at a `ClientCertMode::RequireNamed` handshake.
     ///
     /// Empty accepts any valid X.509-SVID leaf the client CA vouches for.
     /// Otherwise the peer's SPIFFE ID must be a member, matched exactly, trust

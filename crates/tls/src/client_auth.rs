@@ -4,11 +4,9 @@
 //! Client certificate verifier construction for listener mTLS.
 //!
 //! When the `config-reload` feature is enabled and a listener uses
-//! [`ReloadableClientVerifier`], CRL and CA files are monitored
+//! `ReloadableClientVerifier`, CRL and CA files are monitored
 //! for changes and the verifier is atomically rebuilt on disk
 //! modifications.
-//!
-//! [`ReloadableClientVerifier`]: crate::reload::ReloadableClientVerifier
 
 use std::sync::Arc;
 
@@ -36,7 +34,7 @@ use crate::{ClientCertMode, TlsError};
 /// When `crl_paths` is non-empty, the verifier checks presented client
 /// certificates against the provided CRLs and rejects revoked certificates.
 ///
-/// For [`ClientCertMode::RequireNamed`], `trusted_spiffe_ids` is the set of
+/// For `ClientCertMode::RequireNamed`, `trusted_spiffe_ids` is the set of
 /// SPIFFE IDs authorized at the handshake. An empty set accepts any valid
 /// X.509-SVID leaf; a non-empty set requires the peer's SPIFFE ID to be a member.
 ///
