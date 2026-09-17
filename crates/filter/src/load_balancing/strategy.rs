@@ -508,9 +508,6 @@ mod tests {
             WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
         ]
     }
-    /// Upstream's retry engine excludes already-attempted endpoints. The
-    /// strategies added here must honour that contract too, or a retry lands
-    /// straight back on the endpoint that just failed.
     #[test]
     #[expect(clippy::too_many_lines, reason = "table-driven over four strategy configs")]
     fn new_strategies_skip_excluded_endpoints() {

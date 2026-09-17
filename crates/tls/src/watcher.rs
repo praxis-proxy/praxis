@@ -417,9 +417,14 @@ mod tests {
     fn shutdown_change_decisions() {
         assert!(matches!(on_shutdown_change(true, true), ShutdownAction::Shutdown));
         assert!(matches!(on_shutdown_change(true, false), ShutdownAction::KeepPolling));
-        // A dropped sender (changed() -> Err) must stop polling, not spin.
-        assert!(matches!(on_shutdown_change(false, false), ShutdownAction::StopPolling));
-        assert!(matches!(on_shutdown_change(false, true), ShutdownAction::StopPolling));
+        assert!(
+            matches!(on_shutdown_change(false, false), ShutdownAction::StopPolling),
+            "a dropped sender must stop polling, not spin"
+        );
+        assert!(
+            matches!(on_shutdown_change(false, true), ShutdownAction::StopPolling),
+            "a dropped sender must stop polling, not spin"
+        );
     }
 
     #[test]

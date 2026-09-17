@@ -221,9 +221,9 @@ fn handle_list(registry: &KvStoreRegistry, store: &str) -> Response<Vec<u8>> {
 /// # Deprecation
 ///
 /// Prefer passing `kv_registry` to [`add_admin_endpoints_to_pingora_server`]
-/// instead. This function creates a separate Pingora `Service` that
-/// binds to the same port via `SO_REUSEPORT`, causing non-deterministic
-/// connection routing that breaks health probes.
+/// instead. It creates a separate Pingora `Service` that binds to the
+/// same port via `SO_REUSEPORT`, causing non-deterministic connection
+/// routing that breaks health probes.
 ///
 /// [`add_admin_endpoints_to_pingora_server`]: crate::http::pingora::health::add_admin_endpoints_to_pingora_server
 #[deprecated(note = "pass KvStoreRegistry to add_admin_endpoints_to_pingora_server instead")]
@@ -537,7 +537,7 @@ mod tests {
     async fn dispatch_put_rejects_invalid_utf8_body() {
         let registry = make_registry_with("test", &[]);
         let mut raw = b"PUT /api/kv/test/bin HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n".to_vec();
-        raw.extend_from_slice(&[0xC3, 0x28]); // invalid UTF-8 sequence
+        raw.extend_from_slice(&[0xC3, 0x28]);
         let mut session = session_for(raw).await;
         let resp = dispatch_kv_request(&registry, &mut session).await;
         assert_eq!(resp.status().as_u16(), 400, "invalid UTF-8 body must return 400");
@@ -558,7 +558,6 @@ mod tests {
     #[tokio::test]
     async fn dispatch_put_maps_truncated_body_to_502() {
         let registry = make_registry_with("test", &[]);
-        // Content-Length promises 10 bytes but the connection closes after 3.
         let mut session =
             session_for(b"PUT /api/kv/test/cut HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc".to_vec()).await;
         let resp = dispatch_kv_request(&registry, &mut session).await;

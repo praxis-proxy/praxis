@@ -331,8 +331,6 @@ mod tests {
             }
         });
 
-        // Accept so the probe is in-flight, cancel, then drop the socket so the
-        // probe fails quickly — the cancelled generation must not record it.
         let (socket, _peer) = listener.accept().await.unwrap();
         shutdown.cancel();
         drop(socket);

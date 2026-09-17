@@ -292,8 +292,6 @@ impl KvStoreRegistry {
 
     /// Get an existing store or create a new empty one.
     ///
-    /// Only logs when a new store is actually created.
-    ///
     /// ```
     /// use praxis_core::kv::KvStoreRegistry;
     ///

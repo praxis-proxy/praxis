@@ -25,7 +25,7 @@ The resolved value must be a single `host:port` authority. If no trusted value i
 | `source_header` | string | yes | The request header to read the upstream endpoint address from. |
 | `status_on_required_failure` | integer | no | HTTP status code for required-mode routing failures. Only used when `required: true`. Defaults to 500. Compositions with required external processing typically set 503. |
 | `strip_header` | bool | no | Whether to remove the source header after reading it. |
-| `tls` | ClusterTls | no | Optional TLS settings for selected upstreams. Certificates and keys are loaded and parsed once when the filter is constructed, never on a request path. |
+| `tls` | ClusterTls | no | Optional TLS settings for selected upstreams. |
 | `tls.ca` | CaConfig | no | Custom CA. |
 | `tls.ca.ca_path` | string | yes | Path to the PEM CA certificate file. |
 | `tls.ca.crl_paths` | string[] | no | Paths to PEM-encoded certificate revocation list (CRL) files. Applies only to **listener** client authentication: the client verifier checks presented client certificates against these CRLs and rejects revoked ones. Upstream (cluster) CRL checking is not implemented, so `crl_paths` under `clusters[].tls.ca` is rejected at config validation rather than being silently ignored. |

@@ -8,9 +8,7 @@
 //! Pingora lifecycle phases (request, request body, response,
 //! response body, logging).
 //!
-//! The framework has no knowledge of what filters store in it. The
-//! cost when unused is an empty [`HashMap`] (zero allocations, no
-//! overhead on existing filter chains).
+//! The framework has no knowledge of what filters store in it.
 //!
 //! Only one value per concrete type can be stored. Filters must use
 //! private newtypes for their state, not bare types like
@@ -42,7 +40,7 @@ use std::{
 /// inspect it through the getters below. The type deliberately does not
 /// implement serialization so wire adapters must choose an explicit output
 /// format rather than serializing authentication state wholesale.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthenticatedIdentity {
     /// Stable identifier of the authenticated subject.
     subject_id: String,
@@ -127,7 +125,7 @@ impl AuthenticatedIdentity {
 /// [`HttpFilterContext::publish_selected_application`]: crate::HttpFilterContext::publish_selected_application
 /// [`HttpFilterContext::selected_application_protocol`]: crate::HttpFilterContext::selected_application_protocol
 /// [`HttpFilterContext::selected_application_provider`]: crate::HttpFilterContext::selected_application_provider
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SelectedClusterApplication {
     /// Opaque application protocol of the selected cluster, if tagged.
     protocol: Option<Arc<str>>,
@@ -199,8 +197,7 @@ impl RequestExtensions {
     /// # Panics
     ///
     /// Cannot panic in practice: the value was just inserted with
-    /// the correct type. The `expect` guards against impossible
-    /// `TypeId` collisions in the standard library.
+    /// the correct type.
     pub fn get_or_insert_with<T: Send + Sync + 'static>(&mut self, f: impl FnOnce() -> T) -> &mut T {
         #[expect(clippy::expect_used, reason = "downcast cannot fail after typed insert")]
         self.0

@@ -32,7 +32,7 @@ const MAX_HOSTNAME_LEN: usize = 253;
 /// assert_eq!(validate_dns_label(""), Err(DnsLabelError::EmptyLabel));
 /// assert_eq!(validate_dns_label("ok"), Ok(()));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DnsLabelError {
     /// The label is empty (zero bytes).
     #[error("label is empty")]
@@ -70,7 +70,7 @@ pub enum DnsLabelError {
 ///     Err(DnsHostnameError::Label(DnsLabelError::EmptyLabel)),
 /// );
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DnsHostnameError {
     /// The total hostname exceeds 253 bytes.
     #[error("exceeds 253 characters")]
@@ -253,7 +253,6 @@ mod tests {
 
     #[test]
     fn accept_hostname_at_253_bytes() {
-        // 63 + 1 + 63 + 1 + 63 + 1 + 61 = 253
         let hostname = format!(
             "{}.{}.{}.{}",
             "a".repeat(63),

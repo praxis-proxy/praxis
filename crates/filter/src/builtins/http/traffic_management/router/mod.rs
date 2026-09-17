@@ -107,16 +107,13 @@ struct ResolvedRoute {
     /// The original route configuration.
     route: Route,
 
-    /// Optional JSON aliases configured on this route.
     /// Pre-computed `route` label (Exact: bare path; Prefix: `path*`).
     metrics_label: ::metrics::SharedString,
     /// For wildcard hosts (e.g. `*.example.com`), the pre-lowercased
     /// suffix with leading dot: `.example.com`. `None` for exact hosts
     /// or routes without a host constraint.
     wildcard_suffix: Option<String>,
-    /// The route's retry policy pre-wrapped in an `Arc` at build time, so a
-    /// matched request only bumps a refcount instead of deep-cloning the
-    /// policy's status-code and condition vectors.
+    /// The route's retry policy, pre-wrapped in an `Arc` at build time.
     retry_policy: Option<Arc<praxis_core::config::RetryPolicy>>,
 }
 
@@ -409,9 +406,7 @@ fn resolve_routes(routes: Vec<RouterRouteConfig>) -> Vec<ResolvedRoute> {
 
 /// Exact → bare path; Prefix → `path*`.
 ///
-/// Labels are interned to `&'static str` so the 2-3 `SharedString` clones
-/// each routed request makes (context propagation, metrics record) are
-/// pointer copies instead of deep String clones.
+/// Labels are interned to `&'static str` shared across reloads.
 fn path_match_metrics_label(path_match: &PathMatch) -> ::metrics::SharedString {
     match path_match {
         PathMatch::Exact { path } => ::metrics::SharedString::const_str(intern_route_label(path)),

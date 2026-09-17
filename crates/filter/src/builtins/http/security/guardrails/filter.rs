@@ -78,8 +78,7 @@ pub struct GuardrailsFilter {
     /// Whether any rule targets the body (pre-computed at init).
     pub(super) needs_body: bool,
 
-    /// Whether any body rule is a `Contains` match (pre-computed at
-    /// init), so the per-body lowercase decision costs no rule scan.
+    /// Whether any body rule is a `Contains` match (pre-computed at init).
     pub(super) has_body_contains: bool,
 
     /// Reject bodies exceeding the inspection buffer limit.
@@ -171,10 +170,6 @@ impl GuardrailsFilter {
     }
 
     /// Check all body-targeted rules against the request body.
-    ///
-    /// Lowercases the body once for all `Contains` rules to avoid
-    /// re-allocating per rule. Only allocates when at least one
-    /// body-targeted `Contains` rule exists.
     fn check_body(&self, body: &str) -> bool {
         let body_lower = self.has_body_contains.then(|| body.to_lowercase());
         for rule in &self.rules {

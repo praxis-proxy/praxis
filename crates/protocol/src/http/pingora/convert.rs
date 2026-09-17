@@ -255,11 +255,6 @@ mod tests {
 
     #[test]
     fn rejection_header_strips_mixed_case_reserved_from_string_list() {
-        // A filter (static_response, rate_limit, policy, ...) can supply a
-        // response header with arbitrary case via Rejection::with_header, which
-        // lands in the string-list branch. The reserved check must be
-        // case-insensitive so a mixed-case X-Praxis-*/X-Ext-* header cannot
-        // slip past it (pingora preserves original casing on HTTP/1.1).
         let rejection = Rejection::status(403)
             .with_header("X-Praxis-Route", "internal-cluster")
             .with_header("X-Ext-Agent-Task", "meta")
@@ -313,8 +308,6 @@ mod tests {
 
     #[test]
     fn invalid_rejection_status_falls_back_to_500() {
-        // Bypass the validating constructor to model a hostile custom
-        // filter handing the converter an out-of-range status.
         let rejection = Rejection {
             body: None,
             headers: Vec::new(),

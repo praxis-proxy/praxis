@@ -156,17 +156,14 @@ mod tests {
         let generator = IdGenerator::with_seed(0);
         let ts = FixedTimeSource::new(Duration::from_secs(0));
 
-        // Advance counter past 48-bit boundary
         generator.counter.store(COUNTER_MASK, Ordering::Relaxed);
         let id = generator.generate(&ts);
 
-        // Counter should be COUNTER_MASK (all 1s in 48 bits)
         assert!(
             id.ends_with("ffffffffffff"),
             "counter at 48-bit max should show 12 hex f's, got: {id}"
         );
 
-        // Next generate wraps to 0
         let id_next = generator.generate(&ts);
         assert!(
             id_next.ends_with("000000000000"),

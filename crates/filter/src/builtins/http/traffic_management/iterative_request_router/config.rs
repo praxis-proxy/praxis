@@ -7,9 +7,9 @@ use serde::Deserialize;
 
 use crate::FilterError;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Default maximum iterations.
 const DEFAULT_MAX_ITERATIONS: u32 = 10;
@@ -32,9 +32,9 @@ const DEFAULT_MAX_STATE_BYTES: usize = 52_428_800; // 50 MiB
 /// Maximum iterative depth for loop prevention.
 const MAX_DEPTH: u8 = 3;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Config Types
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Top-level config for the iterative request router.
 ///
@@ -165,7 +165,7 @@ pub(crate) struct StepTransition {
 }
 
 /// Where the step's response originated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ResponseOrigin {
     /// A real HTTP response from the upstream.
@@ -177,7 +177,7 @@ pub(crate) enum ResponseOrigin {
 }
 
 /// Classification of transport-level failures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TransportErrorKind {
     /// All concurrency slots were busy and the admission wait timed out.
@@ -195,9 +195,9 @@ pub(crate) enum TransportErrorKind {
     ResponseTooLarge,
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Validation
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Validate the iterative request router config.
 ///
@@ -481,9 +481,9 @@ pub(crate) fn max_depth() -> u8 {
     MAX_DEPTH
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Defaults
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Serde default for `max_iterations`.
 fn default_max_iterations() -> u32 {

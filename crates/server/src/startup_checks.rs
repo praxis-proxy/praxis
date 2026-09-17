@@ -364,9 +364,9 @@ pub(crate) fn warn_policy_filter_without_feature(registry: &praxis_filter::Filte
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -555,9 +555,6 @@ mod tests {
         std::fs::write(&cert_path, "fake-cert").expect("write cert");
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
-        // The client_cert lives on a load_balancer declared inside an INLINE
-        // branch chain — a typed FilterEntry field the raw config walk never
-        // sees. It must warn exactly like a top-level cluster key.
         let config = Config::from_yaml(&format!(
             r#"
 listeners:
@@ -628,9 +625,6 @@ insecure_options:
         std::fs::write(&cert_path, "fake-cert").expect("write cert");
         std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
 
-        // The client cert lives on the typed top-level `clusters:` list, not
-        // inline in a load-balancer filter, exercising the typed loop rather
-        // than the raw-config walk.
         let config = Config::from_yaml(&format!(
             r#"
 listeners:
@@ -807,9 +801,9 @@ insecure_options:
         );
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /// Registry standing in for a build where feature unification turned the
     /// `policy` filter on behind this crate's back.

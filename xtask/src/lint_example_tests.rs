@@ -6,24 +6,24 @@
 
 use clap::Parser;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Allowlist
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Example configs that are intentionally exempt from the integration test
 /// requirement. Each entry must have a justification. Shrink this list over
 /// time by adding tests.
 const SKIP: &[&str] = &[
-    // --- Operations: runtime/container configs that don't exercise filters ---
+    // Operations: runtime/container configs that don't exercise filters
     "operations/container-default.yaml",
     "operations/log-overrides.yaml",
-    // --- Payload processing ---
+    // Payload processing
     "payload-processing/compression.yaml",
     "payload-processing/stream-buffer.yaml",
-    // --- Pipeline ---
+    // Pipeline
     "pipeline/composed-chains.yaml",
     "pipeline/failure-mode.yaml",
-    // --- Protocols: TLS/mTLS variants requiring cert infrastructure ---
+    // Protocols: TLS/mTLS variants requiring cert infrastructure
     "protocols/mixed-protocol.yaml",
     "protocols/tcp-proxy.yaml",
     "protocols/tcp-timeouts.yaml",
@@ -40,26 +40,26 @@ const SKIP: &[&str] = &[
     "protocols/tls-version-constraint.yaml",
     "protocols/upstream-ca-file.yaml",
     "protocols/upstream-tls.yaml",
-    // --- Security: configs needing specialized test harness ---
+    // Security: configs needing specialized test harness
     "security/cors.yaml",
     "security/downstream-read-timeout.yaml",
     "security/forwarded-headers.yaml",
-    // --- Traffic management ---
+    // Traffic management
     "traffic-management/rate-limiting.yaml",
     "traffic-management/timeout.yaml",
 ];
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // CLI Arguments
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// CLI arguments for `cargo xtask lint-example-tests`.
 #[derive(Parser)]
 pub(crate) struct Args;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Entry Point
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Verify that every example config under `examples/configs/` is referenced by
 /// at least one test file under `tests/`.
@@ -96,9 +96,9 @@ pub(crate) fn run(_args: Args) {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // File Collection
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Collect all `.yaml` file paths relative to `root`.
 fn collect_yaml_files(root: &std::path::Path) -> Vec<String> {
@@ -149,9 +149,9 @@ fn workspace_root() -> std::path::PathBuf {
         .to_owned()
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

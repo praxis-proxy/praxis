@@ -279,7 +279,9 @@ mod tests {
 
     use super::*;
 
-    // ---- Config validation ----
+    // -------------------------------------------------------------------------
+    // Config validation
+    // -------------------------------------------------------------------------
 
     #[test]
     fn empty_trusted_peers_rejected() {
@@ -388,7 +390,9 @@ mod tests {
         .unwrap();
     }
 
-    // ---- Trust decisions ----
+    // -------------------------------------------------------------------------
+    // Trust decisions
+    // -------------------------------------------------------------------------
 
     #[tokio::test]
     async fn no_peer_identity_rejects() {
@@ -514,7 +518,9 @@ mod tests {
         );
     }
 
-    // ---- Test Utilities ----
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
 
     fn parse(yaml: &str) -> Result<Box<dyn HttpFilter>, FilterError> {
         let val: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();

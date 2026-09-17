@@ -261,7 +261,7 @@ impl FilterPipeline {
     /// Runs after the request phase has selected an upstream cluster, over
     /// the fully buffered request body (`body`). Only filters that
     /// executed during the request phase participate: one that branch
-    /// control flow skipped over — via `SkipTo` or a terminal branch — is
+    /// control flow skipped over (via `SkipTo` or a terminal branch) is
     /// skipped here too, mirroring the request- and response-body phases.
     /// Conditions are not re-evaluated; this phase reuses the request
     /// phase's [`executed_filter_indices`] gating. Short-circuits on the
@@ -445,8 +445,8 @@ fn request_phase_tracked(ctx: &HttpFilterContext<'_>, filter_count: usize) -> bo
 /// also be bypassed for body hooks.
 ///
 /// Mirrors the rule [`execute_http_response`] applies to response
-/// headers: a filter that branch control flow skipped over — via
-/// `SkipTo` or a terminal branch — has not seen the request, so handing
+/// headers: a filter that branch control flow skipped over (via
+/// `SkipTo` or a terminal branch) has not seen the request, so handing
 /// it the body would run half a filter's lifecycle.
 ///
 /// [`execute_http_response`]: FilterPipeline::execute_http_response

@@ -24,10 +24,6 @@ use crate::{
 };
 
 /// Streaming body implementation for a filtered sub-request's response.
-///
-/// The `upstream` field is `Option<SubResponseBody>` because
-/// `SubResponseBody::cancel()` consumes `self`. Standard Rust
-/// pattern: `.take()` to move it out for cancellation.
 pub(crate) struct FilteredStreamingBody {
     /// Upstream streaming body handle. `None` after cancellation.
     upstream: Option<Box<SubResponseBody>>,
@@ -69,11 +65,6 @@ impl FilteredStreamingBody {
     }
 
     /// Run the sub-request's response-body filters on a single chunk.
-    ///
-    /// Reconstructs a temporary `HttpFilterContext` from the
-    /// continuation's owned state, runs the pipeline's body
-    /// execution, then writes state changes back to the
-    /// continuation for the next chunk.
     #[expect(clippy::too_many_lines, reason = "context reconstruction requires many fields")]
     fn run_step_body_filters(&mut self, body: &mut Option<Bytes>, end_of_stream: bool) -> Result<(), FilterError> {
         let remaining_read_timeout;

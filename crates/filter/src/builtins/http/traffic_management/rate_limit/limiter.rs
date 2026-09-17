@@ -51,7 +51,7 @@ impl RateLimitFilter {
     }
 
     /// Numeric form of [`rate_limit_values`], for the hot response path:
-    /// `(remaining, reset_unix, retry_secs)` with no String staging.
+    /// `(remaining, reset_unix, retry_secs)`.
     ///
     /// [`rate_limit_values`]: Self::rate_limit_values
     #[expect(

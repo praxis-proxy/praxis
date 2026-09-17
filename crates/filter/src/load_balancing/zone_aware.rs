@@ -26,10 +26,10 @@ pub(crate) struct ZoneAware {
     /// Strategy built from all endpoints (cross-zone fallback).
     all_strategy: Box<Strategy>,
 
-    /// Indices of local-zone endpoints in the health state array.
+    /// Addresses of local-zone endpoints.
     local_addresses: Vec<Arc<str>>,
 
-    /// Total number of endpoints (for health percentage calculation).
+    /// Number of local-zone endpoints (for the health percentage calculation).
     local_count: usize,
 
     /// Minimum percentage of healthy local endpoints before spilling.
@@ -177,7 +177,6 @@ mod tests {
         let state = health_state(4);
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
-        // Only 1/3 local healthy = 33% < 70% threshold → spill
 
         let mut seen = HashSet::new();
         for _ in 0..20 {
@@ -201,7 +200,6 @@ mod tests {
 
         let state = health_state(4);
         state.endpoints()[0].mark_unhealthy();
-        // 2/3 local healthy = 66% >= 50% threshold → stay local
 
         let mut seen = HashSet::new();
         for _ in 0..20 {

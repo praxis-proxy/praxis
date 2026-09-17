@@ -27,7 +27,7 @@ Streaming steps remain pull-based. Header-safe failover rules run before any byt
 | `steps[].filters[].filter` | string | yes | Filter type name (e.g. `"router"`, `"load_balancer"`, or a custom name). |
 | `steps[].filters[].branch_chains` | BranchChainConfig[] | no | Optional branch chains evaluated after this filter based on filter result conditions. |
 | `steps[].filters[].branch_chains[].name` | string | yes | Globally unique name for this branch. |
-| `steps[].filters[].branch_chains[].chains` | (object \| string)[] | yes | Chains to execute when triggered. Named refs or inline definitions, concatenated in order. |
+| `steps[].filters[].branch_chains[].chains` | (`Inline` \| `Named`)[] | yes | Chains to execute when triggered. Named refs or inline definitions, concatenated in order. |
 | `steps[].filters[].branch_chains[].chains[].name` | string | yes | Globally unique chain name. |
 | `steps[].filters[].branch_chains[].chains[].filters` | FilterEntry[] | yes | Ordered list of filters. |
 | `steps[].filters[].branch_chains[].max_iterations` | integer | no | Maximum re-entrance iterations. Required when `rejoin` targets the branch point or an earlier filter. Validation rejects backward rejoin without this field. |

@@ -177,11 +177,6 @@ fn from_config_empty_routes_rejected() {
 
 #[test]
 fn from_config_rejects_route_retry_timeout_of_zero() {
-    // The router builds core Route values via RouterRouteConfigRaw::try_from,
-    // which runs Route::validate_semantics -> RetryPolicy::validate_timeout_bounds.
-    // A route-level retry timeout of 0 (which would zero every upstream attempt's
-    // timeouts, or disable retries) must be rejected at config load just like a
-    // cluster-level retry policy -- the router path must not bypass the bound.
     let yaml = serde_yaml::from_str::<serde_yaml::Value>(
         r#"
             routes:
@@ -264,9 +259,6 @@ async fn on_request_sets_cluster_on_match() {
 
 #[tokio::test]
 async fn on_request_clears_stale_route_retry_policy_on_reroute() {
-    // A router matching a route WITH a retry policy sets it; a second router
-    // matching a route WITHOUT one must clear the stale override, so a
-    // re-route cannot inherit a retry policy it never declared.
     let with_policy = RouterFilter::from_config(
         &serde_yaml::from_str::<serde_yaml::Value>(
             r#"
@@ -1326,9 +1318,6 @@ async fn on_request_rewritten_path_no_match_still_rejects() {
 
 #[tokio::test]
 async fn on_request_rewritten_path_with_query_matches_exact_route() {
-    // A rewrite filter stores "<path>?<query>" in rewritten_path. The router
-    // must match on the path only; otherwise a query-bearing request misses
-    // the exact route and is silently diverted to the catch-all.
     let router = make_router(vec![exact_route("/v1/users", "users"), prefix_route("/", "default")]);
     let req = crate::test_utils::make_request(http::Method::GET, "/api/v1/users?page=2");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -1918,8 +1907,6 @@ fn json_alias_max_bytes_at_upper_bound_passes_bounds_check() {
     )
     .unwrap_err();
 
-    // Exactly at the upper bound clears the bounds check, so the only
-    // remaining objection is that the feature is not implemented.
     assert!(
         err.to_string().contains("not applied to routing decisions"),
         "upper bound should clear the size check and fail only on the feature gate: {err}"

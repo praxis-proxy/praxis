@@ -191,7 +191,6 @@ mod tests {
         let state = health_state(4);
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
-        // Primary tier: 0/2 healthy = 0% < 71% → spill
 
         let mut seen = HashSet::new();
         for _ in 0..10 {
@@ -211,10 +210,6 @@ mod tests {
             ep("10.0.0.3:80", 1),
             ep("10.0.0.4:80", 1),
         ];
-        // Factor 400 → threshold 25%; tier 1 with 1/2 healthy (50%) passes it,
-        // so raise the bar: factor 100 → threshold 100%. Tier 0 has 0/2 and
-        // tier 1 has 1/2 healthy: no tier meets capacity, but panic mode must
-        // still prefer tier 1's healthy endpoint over dead tier 0.
         let pl = PriorityLevels::new(endpoints, &SimpleStrategy::RoundRobin, 100);
 
         let state = health_state(4);
@@ -240,12 +235,10 @@ mod tests {
             ep("10.0.0.3:80", 0),
             ep("10.0.0.4:80", 1),
         ];
-        // overprovisioning=200 → threshold is 100/200 = 50%
         let pl = PriorityLevels::new(endpoints, &SimpleStrategy::RoundRobin, 200);
 
         let state = health_state(4);
         state.endpoints()[0].mark_unhealthy();
-        // Primary: 2/3 healthy = 66% >= 50% → stay
 
         let mut seen = HashSet::new();
         for _ in 0..20 {
@@ -266,9 +259,6 @@ mod tests {
         let state = health_state(3);
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
-        // Tier 0: 0/1 healthy → spill
-        // Tier 1: 0/1 healthy → spill
-        // Tier 2: 1/1 healthy → use
 
         let addr = pl.select(None, Some(&state), &[]).unwrap();
         assert_eq!(&*addr, "10.0.0.3:80", "should reach third-priority tier");

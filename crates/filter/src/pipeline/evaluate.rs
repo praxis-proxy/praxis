@@ -43,10 +43,6 @@ use crate::{
 // -----------------------------------------------------------------------------
 
 /// Evaluate all branches on a filter, executing matching ones.
-///
-/// The branch-free case — the overwhelmingly common one — takes a
-/// synchronous fast path with no boxed future: only nested branch
-/// recursion (via [`evaluate_branches_boxed`]) pays a heap allocation.
 pub(crate) async fn evaluate_branches(
     branches: &[ResolvedBranch],
     ctx: &mut HttpFilterContext<'_>,
@@ -610,10 +606,6 @@ mod tests {
     async fn sibling_branch_condition_survives_earlier_branch_execution() {
         let counter_a = Arc::new(AtomicUsize::new(0));
         let counter_b = Arc::new(AtomicUsize::new(0));
-        // Two conditional branches on the same host result, both rejoining
-        // at `next`. Executing the first branch's chain clears
-        // ctx.filter_results after its filter runs; the second branch's
-        // condition must still see the host filter's snapshot.
         let branches = vec![
             make_branch(
                 "first",

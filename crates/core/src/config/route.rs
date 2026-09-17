@@ -468,9 +468,12 @@ cluster: "backend"
 
     #[test]
     fn empty_prefix_is_match_all() {
-        // The documented match-all prefix stays valid.
         let route: Route = serde_yaml::from_str("path_prefix: \"\"\ncluster: backend\n").unwrap();
-        assert_eq!(route.path_match.value(), "");
+        assert_eq!(
+            route.path_match.value(),
+            "",
+            "the documented match-all prefix stays valid"
+        );
     }
 
     #[test]

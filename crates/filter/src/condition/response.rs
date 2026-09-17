@@ -37,9 +37,8 @@ pub fn should_execute_response(conditions: &[ResponseCondition], resp: &Response
     should_execute_response_ref(conditions, resp.status, &resp.headers)
 }
 
-/// Evaluate response conditions against borrowed status and headers.
+/// Evaluate response conditions against a borrowed status code and [`HeaderMap`].
 ///
-/// Avoids cloning the [`HeaderMap`] by accepting borrows directly.
 /// [`should_execute_response`] delegates here.
 ///
 /// ```

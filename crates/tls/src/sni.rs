@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Zero-copy `ClientHello` SNI parser for TLS 1.0-1.3.
+//! `ClientHello` SNI parser for TLS 1.0-1.3.
 //!
 //! Extracts the Server Name Indication (SNI) hostname from the
 //! beginning of a TLS `ClientHello` message without performing a
@@ -624,9 +624,6 @@ mod tests {
 
     #[test]
     fn fragmented_non_client_hello_rejected() {
-        // Handshake type 2 (ServerHello) with its 4-byte header split across
-        // two TLS records: the fast path sees an incomplete header and defers
-        // to reassembly, which must still reject the wrong handshake type.
         let mut buf = vec![22, 3, 3, 0, 2, 2, 0];
         buf.extend_from_slice(&[22, 3, 3, 0, 2, 0, 0]);
         assert_eq!(
@@ -1150,9 +1147,6 @@ mod tests {
 
     #[test]
     fn client_hello_header_split_across_records_parses_sni() {
-        // The first record carries only half of the 4-byte handshake
-        // header, so reassembly must accumulate the header itself across
-        // record boundaries before it can size the message.
         let ext = build_sni_extension("split.example.org");
         let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
         let handshake = build_handshake_message(&hello);
@@ -1168,8 +1162,6 @@ mod tests {
 
     #[test]
     fn reassembler_trickle_matches_one_shot_parse() {
-        // Feeding the buffer one byte at a time must produce exactly the
-        // one-shot parse_sni result, scanning each byte once.
         let ext = build_sni_extension("trickle.example.com");
         let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
         let handshake = build_handshake_message(&hello);
@@ -1199,8 +1191,6 @@ mod tests {
 
     #[test]
     fn reassembler_rejects_non_client_hello_like_one_shot() {
-        // Handshake type 2 split across records: the reassembler must
-        // classify it exactly as the stateless path does.
         let mut buf = wrap_fragment_in_record(&[2, 0]);
         buf.extend_from_slice(&wrap_fragment_in_record(&[0, 0]));
         let mut reassembler = SniReassembler::new();
@@ -1227,10 +1217,6 @@ mod tests {
 
     #[test]
     fn reassembler_reservation_bounded_by_supplied_bytes() {
-        // A 9-byte record claiming the maximum u24 handshake length
-        // (16 MiB) must not drive the accumulator's capacity past the
-        // bytes actually supplied: the length field is attacker-chosen
-        // while the caller's peek cap bounds real data.
         let buf = [22, 3, 1, 0, 4, HANDSHAKE_TYPE_CLIENT_HELLO, 0xFF, 0xFF, 0xFF];
         let mut reassembler = SniReassembler::new();
         assert!(
@@ -1251,7 +1237,6 @@ mod tests {
         let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
         let handshake = build_handshake_message(&hello);
         let split = handshake.len() / 2;
-        // Only the first fragment record is present; the tail has not arrived.
         let buf = wrap_fragment_in_record(&handshake[..split]);
         assert_eq!(
             parse_sni(&buf),
@@ -1267,7 +1252,6 @@ mod tests {
         let handshake = build_handshake_message(&hello);
         let split = handshake.len() / 2;
         let mut buf = wrap_fragment_in_record(&handshake[..split]);
-        // Follow the partial handshake with an application-data record (type 23).
         buf.extend_from_slice(&[23, 0x03, 0x01, 0x00, 0x01, 0x00]);
         assert_eq!(
             parse_sni(&buf),

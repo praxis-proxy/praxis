@@ -18,8 +18,8 @@
 //!    branches.
 //!
 //! A shared `next_filter_id` counter threads through all recursive
-//! calls so every filter instance — including those inside branches
-//! — gets a globally unique ID.
+//! calls so every filter instance (including those inside branches)
+//! gets a globally unique ID.
 //!
 //! ## Two kinds of "name"
 //!
@@ -50,7 +50,7 @@ use tracing::debug;
 /// that product: a small config (e.g. 8 named references per branch, 10 levels
 /// deep) expands to ~10^9 filter instances, exhausting memory at startup or on
 /// hot reload. Outbound binding recurses through the same expansion, so the
-/// budget is shared across the whole build — not reset per bound pipeline —
+/// budget is shared across the whole build (not reset per bound pipeline),
 /// and counting materialized instances against this ceiling fails such a
 /// config fast instead.
 const MAX_PIPELINE_FILTER_INSTANCES: usize = 100_000;
@@ -714,10 +714,6 @@ mod tests {
 
     #[test]
     fn named_ref_fanout_is_bounded() {
-        // A chain whose filter fans out over `refs` named references, nested a
-        // few levels deep, expands multiplicatively. This stays within the
-        // depth limit and per-level branch/filter limits, but the instance
-        // product must be caught before it exhausts memory.
         fn fanout_chain(target: &str, refs: usize, branch: &str) -> Vec<FilterEntry> {
             vec![FilterEntry {
                 branch_chains: Some(vec![BranchChainConfig {
@@ -744,7 +740,6 @@ mod tests {
             ("c2", c2.as_slice()),
             ("c3", c3.as_slice()),
         ]);
-        // ~20^4 = 160k instances, over the 100k ceiling.
         let mut top = fanout_chain("c3", 20, "b0");
         let err = resolve_chain_filters(&mut top, &registry, &chains, 0, &InsecureOptions::default()).unwrap_err();
         assert!(

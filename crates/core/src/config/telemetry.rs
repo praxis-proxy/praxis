@@ -672,7 +672,6 @@ otlp_headers:
 
     #[test]
     fn resolve_uses_config_service_name_over_env() {
-        // When config has a value, it should always be used regardless of env.
         let config = TelemetryConfig {
             service_name: Some("from-config".to_owned()),
             ..Default::default()

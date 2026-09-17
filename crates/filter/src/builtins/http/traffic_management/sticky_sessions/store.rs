@@ -431,16 +431,20 @@ mod tests {
         thread::sleep(Duration::from_millis(1));
         store.put("b", "ep2".into());
 
-        // Access "a" to make it recent
         drop(store.get("a"));
         thread::sleep(Duration::from_millis(1));
 
-        // Insert "c" — should evict "b" (least recently accessed)
         store.put("c", "ep3".into());
 
-        assert!(store.get("a").is_some());
-        assert!(store.get("b").is_none());
-        assert!(store.get("c").is_some());
+        assert!(
+            store.get("a").is_some(),
+            "recently-accessed 'a' should survive eviction"
+        );
+        assert!(
+            store.get("b").is_none(),
+            "least-recently-accessed 'b' should be evicted"
+        );
+        assert!(store.get("c").is_some(), "newly inserted 'c' should be present");
     }
 
     #[test]
@@ -467,7 +471,6 @@ mod tests {
         let store = SessionStore::new(100, Duration::from_millis(50), EvictionPolicy::Lru);
         store.put("sess1", "10.0.0.1:80".into());
 
-        // Access every 30ms — each access should reset the 50ms idle timeout
         for _ in 0..5 {
             thread::sleep(Duration::from_millis(30));
             assert!(
@@ -476,7 +479,6 @@ mod tests {
             );
         }
 
-        // Now wait past the full TTL without accessing
         thread::sleep(Duration::from_millis(60));
         assert!(
             store.get("sess1").is_none(),
@@ -486,9 +488,6 @@ mod tests {
 
     #[test]
     fn queue_eviction_always_finds_a_victim() {
-        // Every at-capacity insert must evict exactly one entry, including
-        // long past the initial seed (the queue keeps pace with inserts and
-        // lazily discards stale entries).
         let cap = (EVICTION_SECOND_CHANCES as u64) * 3;
         let store = SessionStore::new(cap, Duration::from_secs(3600), EvictionPolicy::Lru);
         for i in 0..cap {
@@ -506,10 +505,6 @@ mod tests {
 
     #[test]
     fn eviction_queue_stays_bounded_under_below_capacity_churn() {
-        // Below capacity nothing pops the queue, while removals (expiry on
-        // access, sweeps, explicit removes) leave stale queue entries behind.
-        // Churn of short-lived keys must not grow the queue without bound:
-        // the put-side compaction caps it at twice the capacity bound.
         let cap = 8_u64;
         let store = SessionStore::new(cap, Duration::from_secs(3600), EvictionPolicy::Lru);
         for i in 0..200 {
@@ -526,12 +521,6 @@ mod tests {
 
     #[test]
     fn eviction_queue_stays_bounded_under_recurring_key_churn() {
-        // A key removed and re-put pushes a NEW queue occurrence while the
-        // stale one lingers — and the key is live whenever compaction runs
-        // (compaction happens inside its own put). Compaction must drop the
-        // stale occurrences by generation, or recurring-key churn (expiry
-        // then re-put of the same session keys) grows the queue without
-        // bound and the over-threshold retain turns O(n)-per-insert.
         let cap = 8_u64;
         let store = SessionStore::new(cap, Duration::from_secs(3600), EvictionPolicy::Lru);
         for _ in 0..1_000 {
@@ -547,10 +536,6 @@ mod tests {
 
     #[test]
     fn stale_queue_occurrence_does_not_evict_recreated_entry() {
-        // Queue: a(stale), victim, a(live). Under the TTL policy the oldest
-        // CREATED entry is "victim"; the stale occurrence of "a" (removed
-        // and re-put) must be discarded by generation, not treated as "a"'s
-        // creation age — else the recently re-created "a" is evicted first.
         let store = SessionStore::new(2, Duration::from_secs(3600), EvictionPolicy::Ttl);
         store.put("a", "ep1".into());
         store.put("victim", "ep2".into());
@@ -571,9 +556,6 @@ mod tests {
 
     #[test]
     fn hot_entries_bounded_second_chances_still_evict() {
-        // Every entry has been accessed since enqueue, so all are second-
-        // chance candidates under LRU; the chance budget must bound the loop
-        // and still evict exactly one entry.
         let store = SessionStore::new(2, Duration::from_secs(3600), EvictionPolicy::Lru);
         store.put("a", "ep1".into());
         store.put("b", "ep2".into());
@@ -587,13 +569,10 @@ mod tests {
 
     #[test]
     fn ttl_policy_evicts_oldest_created_exactly() {
-        // Under the TTL policy queue order is creation order, so the oldest
-        // created entry is evicted even when it was accessed most recently.
         let store = SessionStore::new(2, Duration::from_secs(3600), EvictionPolicy::Ttl);
         store.put("old", "ep1".into());
         thread::sleep(Duration::from_millis(1));
         store.put("young", "ep2".into());
-        // Access "old" — irrelevant for TTL eviction order.
         drop(store.get("old"));
 
         store.put("newer", "ep3".into());
@@ -604,11 +583,6 @@ mod tests {
 
     #[test]
     fn eviction_at_capacity_is_bounded_not_linear() {
-        // Fill a large store to capacity with distinct keys, then perform many
-        // more evicting inserts. With any per-insert map scan this is O(n)
-        // per insert (full scan: ~2e8 comparisons; positional skip: ~4.5e7
-        // iterator steps — both multi-second); queue eviction is amortized
-        // O(1) per insert and completes near-instantly.
         let cap = 30_000_u64;
         let store = SessionStore::new(cap, Duration::from_secs(3600), EvictionPolicy::Lru);
         for i in 0..cap {

@@ -228,8 +228,6 @@ mod tests {
         );
     }
 
-    /// Two listeners can share a filter chain. The document must be reported once
-    /// so the watcher does not hash and watch it twice.
     #[test]
     fn referenced_files_dedupes_a_document_shared_by_two_listeners() {
         let shared = "/etc/praxis/shared.yaml";

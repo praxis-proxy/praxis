@@ -358,8 +358,6 @@ fn eviction_does_not_rescan_within_the_interval() {
     let after_first = state.buckets.len();
     assert!(after_first < count, "first pass should reclaim");
 
-    // Refill so a second pass would have something to do, then confirm
-    // the interval gate keeps it from running.
     for i in 0..100 {
         let ip: IpAddr = format!("172.16.{}.{}", i / 256, i % 256).parse().unwrap();
         state.buckets.insert(ip, TokenBucket::new(burst));
@@ -512,8 +510,6 @@ fn eviction_reclaims_below_soft_cap() {
 
     filter.maybe_evict(&state, idle_nanos);
 
-    // A pass evicts everything eligible, so one pass is enough. The
-    // entries here are uniformly stale, so the map drains completely.
     assert!(
         state.buckets.len() <= MAX_PER_IP_ENTRIES,
         "a single eviction pass should bring the map to or below the soft cap, got {}",

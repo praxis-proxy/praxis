@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! `cargo xtask debug` — run praxis with dev settings.
+//! `cargo xtask debug`: run praxis with dev settings.
 
 use clap::Parser;
 

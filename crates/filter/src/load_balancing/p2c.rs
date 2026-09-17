@@ -34,8 +34,7 @@ use super::endpoint::WeightedEndpoint;
 /// ```
 pub(crate) struct PowerOfTwoChoices {
     /// Per-endpoint active-request counters, positionally aligned with
-    /// `endpoints` so selection indexes instead of hashing the address
-    /// string on every load and increment.
+    /// `endpoints`.
     counters: Vec<AtomicUsize>,
 
     /// Address-to-position lookup for [`release`], the only entry point
@@ -181,10 +180,7 @@ impl PowerOfTwoChoices {
     }
 
     /// Candidate positions in one pass: healthy-and-not-excluded when
-    /// any endpoint is healthy, else all not-excluded (panic mode). The
-    /// old shape collected the healthy set and then re-collected it
-    /// through the exclusion filter — two passes and, past the inline
-    /// capacity, two heap allocations per request.
+    /// any endpoint is healthy, else all not-excluded (panic mode).
     fn candidate_positions(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> SmallVec<[usize; 8]> {
         if let Some(state) = health {
             let mut candidates: SmallVec<[usize; 8]> = SmallVec::new();

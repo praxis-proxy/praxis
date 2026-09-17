@@ -166,9 +166,6 @@ body: '{"ok": true}'
 
     #[tokio::test]
     async fn bodyless_204_carries_no_body() {
-        // A 204 with no configured body must not carry a body, so no
-        // Content-Length is attached downstream: RFC 9110 forbids a body (and
-        // Content-Length) on a 204 response.
         let yaml = serde_yaml::from_str::<serde_yaml::Value>("status: 204").unwrap();
         let filter = StaticResponseFilter::from_config(&yaml).unwrap();
         let req = crate::test_utils::make_request(http::Method::GET, "/");
@@ -179,7 +176,10 @@ body: '{"ok": true}'
             panic!("static_response should reject with the configured status");
         };
         assert_eq!(rejection.status, 204, "status should be 204");
-        assert!(rejection.body.is_none(), "a bodyless 204 must not carry a body");
+        assert!(
+            rejection.body.is_none(),
+            "a bodyless 204 must not carry a body: RFC 9110 forbids a body on a 204 response"
+        );
     }
 
     #[test]

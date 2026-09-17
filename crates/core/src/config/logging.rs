@@ -31,7 +31,7 @@ const MAX_BUFFER_SIZE_LINES: u32 = 10_000_000;
 /// at `file_path`; rotation and retention are delegated to the platform
 /// (journald, `logrotate`, container log drivers), or log to `stdout`/`stderr`
 /// and let the platform capture it.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     /// Log destination (`stdout`, `stderr`, or `file`).
@@ -113,7 +113,7 @@ impl LoggingConfig {
 // -----------------------------------------------------------------------------
 
 /// Process log destination.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogOutput {
     /// Standard output.

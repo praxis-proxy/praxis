@@ -442,9 +442,6 @@ mod tests {
 
     #[test]
     fn snapshot_response_headers_comma_joins_duplicate_field_lines() {
-        // Duplicate response field-lines must be comma-joined (RFC 7230 §3.2.2),
-        // not collapsed to the last value, so a policy assertion sees the full
-        // header a spec-compliant recipient would.
         let mut headers = http::HeaderMap::new();
         headers.append(http::header::HeaderName::from_static("x-flag"), "a".parse().unwrap());
         headers.append(http::header::HeaderName::from_static("x-flag"), "b".parse().unwrap());

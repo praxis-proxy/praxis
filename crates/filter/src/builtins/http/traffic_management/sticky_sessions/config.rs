@@ -17,8 +17,8 @@ const MAX_ENTRIES_UPPER_BOUND: u64 = 200_000;
 /// Uses `#[serde(tag = "type")]` so the YAML discriminator is `type: cookie`,
 /// `type: header`, or `type: learn`. Each variant carries only the fields
 /// relevant to that mode, eliminating conditionally-required `Option` fields.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case", tag = "type")]
 pub(crate) enum PersistenceConfig {
     /// Proxy-managed session cookie.
     Cookie {
@@ -89,7 +89,7 @@ impl SameSite {
 // -----------------------------------------------------------------------------
 
 /// Configurable attributes for the session cookie.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CookieAttributes {
     /// `Domain` attribute.

@@ -119,9 +119,7 @@ pub struct CorsFilter {
     /// Pre-joined `Access-Control-Allow-Headers` value.
     headers_header: String,
 
-    /// Pre-validated `Access-Control-Expose-Headers` value, so allowed
-    /// responses clone (a refcount bump) instead of re-parsing the
-    /// config-stable list.
+    /// Pre-validated `Access-Control-Expose-Headers` value.
     expose_header_value: Option<HeaderValue>,
 
     /// Pre-formatted `Access-Control-Max-Age` value.

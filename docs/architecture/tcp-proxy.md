@@ -96,7 +96,7 @@ in `praxis-tls`. Three outcomes:
 | `NeedMore` | Grow buffer, read again             |
 | `NotTls`   | Truncate buffer, return None + bytes|
 
-The parser is zero-copy: it walks the TLS record
+The parser walks the TLS record
 header, handshake header, `ClientHello` fixed
 fields, skips variable-length fields (session ID,
 cipher suites, compression), and iterates extensions

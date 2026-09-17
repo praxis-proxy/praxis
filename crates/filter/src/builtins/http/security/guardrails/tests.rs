@@ -68,9 +68,6 @@ async fn header_contains_rejects_match() {
 
 #[tokio::test]
 async fn header_contains_rejects_non_utf8_near_miss() {
-    // A non-UTF-8 (obs-text) header value must not slip past a blocking rule:
-    // `bad-bot\xFF` was previously dropped by to_str(), failing the rule open
-    // while the upstream reads it as `bad-bot`.
     let f = make_filter(vec![header_contains("user-agent", "bad-bot")]);
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
@@ -86,10 +83,6 @@ async fn header_contains_rejects_non_utf8_near_miss() {
 
 #[tokio::test]
 async fn non_ascii_rule_fails_closed_on_undecodable_header() {
-    // A Latin-1 encoding of a non-ASCII pattern (`bäd` sent as `b\xE4d`)
-    // lossily decodes to `b\u{FFFD}d`, which can never match the pattern —
-    // yet a Latin-1-lenient upstream reads the original. A non-ASCII rule
-    // meeting an undecodable value must fail closed.
     let f = make_filter(vec![header_contains("user-agent", "b\u{e4}d")]);
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
@@ -105,9 +98,6 @@ async fn non_ascii_rule_fails_closed_on_undecodable_header() {
 
 #[tokio::test]
 async fn non_ascii_pattern_rule_fails_closed_on_undecodable_header() {
-    // Same fail-closed posture as the contains case, via the regex matcher:
-    // a non-ASCII pattern can never faithfully match a lossily-decoded
-    // value, so an undecodable value must trigger the rule.
     let f = make_filter(vec![header_pattern("user-agent", "b\u{e4}d")]);
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
@@ -123,8 +113,6 @@ async fn non_ascii_pattern_rule_fails_closed_on_undecodable_header() {
 
 #[tokio::test]
 async fn pii_rule_evaluates_faithfully_on_undecodable_header() {
-    // Built-in PII patterns are ASCII, so a PII rule evaluates the lossily
-    // decoded value faithfully — an unrelated non-UTF-8 value must pass.
     let f = make_filter(vec![header_pii("user-agent", &[PiiKind::Email])]);
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
@@ -140,9 +128,6 @@ async fn pii_rule_evaluates_faithfully_on_undecodable_header() {
 
 #[tokio::test]
 async fn ascii_rule_allows_unrelated_undecodable_header() {
-    // ASCII patterns evaluate faithfully over lossily-decoded values (the
-    // replacement character can never synthesize ASCII pattern bytes), so an
-    // unrelated non-UTF-8 value must NOT be rejected — no false positives.
     let f = make_filter(vec![header_contains("user-agent", "bad-bot")]);
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
@@ -482,8 +467,6 @@ async fn flag_action_body_continues_on_match() {
 
 #[tokio::test]
 async fn flag_header_block_not_downgraded_by_body_pass() {
-    // Header rule flags the request; body rule does not match. The body
-    // phase must not overwrite the header phase's "blocked" with "passed".
     let f = make_flag_filter(vec![header_contains("x-bad", "yes"), body_contains("DROP TABLE")]);
     let mut req = crate::test_utils::make_request(http::Method::POST, "/api");
     req.headers.insert("x-bad", "yes".parse().unwrap());
@@ -591,7 +574,6 @@ async fn pii_credit_card_rejects_mastercard_2series_low_boundary() {
     let req = crate::test_utils::make_request(http::Method::POST, "/api");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    // 2221 is the lowest valid 2-series Mastercard prefix.
     let mut body = Some(Bytes::from_static(b"card: 2221-0000-0000-0000"));
     let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(
@@ -606,7 +588,6 @@ async fn pii_credit_card_rejects_mastercard_2series_high_boundary() {
     let req = crate::test_utils::make_request(http::Method::POST, "/api");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    // 2720 is the highest valid 2-series Mastercard prefix.
     let mut body = Some(Bytes::from_static(b"card: 2720-0000-0000-0000"));
     let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(

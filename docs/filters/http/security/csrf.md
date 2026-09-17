@@ -7,9 +7,7 @@ CSRF protection filter that validates request origins against a trusted allowlis
 
 ## Configuration Notes
 
-Safe methods (GET, HEAD, OPTIONS by default) bypass the check. State-changing methods require a matching `Origin` or `Referer` header.
-
-State-changing methods require an `Origin` or `Referer` header matching the trusted origins. Rejected requests receive 403 Forbidden.
+Safe methods (GET, HEAD, OPTIONS by default) bypass the check. State-changing methods require an `Origin` or `Referer` header matching the trusted origins; rejected requests receive 403 Forbidden.
 
 A bare wildcard (`"*"`) cannot be mixed with other origins.
 

@@ -7,9 +7,9 @@ use benchmarks::result::{ComparativeResults, ScenarioResults};
 
 use super::cli::CompareArgs;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Maximum coefficient of variation allowed before skipping comparison.
 const STABILITY_CV: f64 = 0.15;

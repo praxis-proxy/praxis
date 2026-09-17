@@ -162,8 +162,7 @@ pub(crate) fn metric_labels() -> &'static MetricLabelsConfig {
 
 /// Build a label set, dropping the dimensions that are disabled.
 ///
-/// Only reached when at least one dimension is off; the all-enabled path
-/// uses the static-label macro form and allocates nothing.
+/// Only reached when at least one dimension is off.
 fn selected_labels(pairs: &[(&'static str, Option<SharedString>)]) -> Vec<Label> {
     pairs
         .iter()
@@ -224,7 +223,7 @@ pub(crate) fn is_recorder_installed() -> bool {
 // -----------------------------------------------------------------------------
 
 /// Parsed operational counters for [`collect_stats_metrics`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct StatsMetricsSnapshot {
     /// In-flight HTTP requests per listener (`praxis_http_active_requests`).
     pub http_active_by_listener: std::collections::HashMap<String, u64>,
@@ -423,9 +422,8 @@ pub fn method_label(method: &str) -> &'static str {
 
 /// Labels for a completed HTTP request.
 ///
-/// Static labels (`method`, `status_class`) use `&'static str`
-/// so the metrics facade can intern them without per-request allocation.
-/// `cluster` and `route` are dynamic [`SharedString`] values.
+/// `method` and `status_class` are static; `cluster` and `route`
+/// are dynamic [`SharedString`] values.
 ///
 /// [`SharedString`]: ::metrics::SharedString
 pub(crate) struct RequestMetricLabels {
@@ -482,9 +480,8 @@ pub(crate) fn record_request_metrics(labels: RequestMetricLabels, duration_secs:
 
 /// Record request metrics with the full default label set.
 ///
-/// Kept on the static-label macro form so the default configuration emits
-/// exactly the series it did before label selection existed, with no
-/// per-request allocation.
+/// Emits exactly the series the default configuration produced before
+/// label selection existed.
 fn record_request_metrics_all_labels(labels: RequestMetricLabels, duration_secs: f64) {
     let cluster = labels.cluster;
     let route = labels.route;
@@ -935,7 +932,6 @@ mod tests {
 
     #[test]
     fn record_helpers_noop_without_recorder() {
-        // Must not panic when the Prometheus recorder is absent.
         record_overload_reject(OVERLOAD_REASON_MEMORY);
         record_upstream_connect_failure(cluster_none());
         record_error(ERROR_TYPE_INTERNAL);

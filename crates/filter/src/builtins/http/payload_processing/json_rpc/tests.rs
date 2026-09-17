@@ -127,9 +127,6 @@ fn reject_zero_max_batch_size() {
 
 #[test]
 fn reject_max_batch_size_above_ceiling() {
-    // The limit is also the parser's per-request capture retention
-    // bound, so an unbounded value would put peak memory in the hands
-    // of whoever wrote the config. Reject it at config time.
     let yaml: serde_yaml::Value = serde_yaml::from_str(&format!("max_batch_size: {}", MAX_BATCH_SIZE + 1)).unwrap();
     let err = JsonRpcFilter::from_config(&yaml)
         .err()
@@ -489,12 +486,6 @@ fn batch_exceeding_max_size_rejected() {
 
 #[test]
 fn oversized_batch_reports_exact_count_without_retaining_items() {
-    // A batch far larger than max_batch_size must be rejected with the
-    // true element count, and the parser must not retain a capture per
-    // element on the way there: `[0,0,...]` is ~2 bytes per element but
-    // each retained capture is an order of magnitude larger, so an
-    // unbounded push amplifies the buffered body into a much larger
-    // transient allocation for a request that is rejected anyway.
     let config = make_config_with_batch_limit(1);
     let body = scalar_batch_body(OVERSIZED_BATCH_ITEMS);
 
@@ -508,8 +499,6 @@ fn oversized_batch_reports_exact_count_without_retaining_items() {
         "oversized batch must report the exact element count and limit: got {err:?}"
     );
 
-    // Structural half of the guard: the capture the rejection is made
-    // from holds at most max_batch_size items regardless of array size.
     let (items, len) = capture_batch(&body, &config);
     assert_eq!(len, OVERSIZED_BATCH_ITEMS, "the true element count must be preserved");
     assert_eq!(
@@ -520,8 +509,6 @@ fn oversized_batch_reports_exact_count_without_retaining_items() {
 
 #[test]
 fn batch_capture_is_bounded_at_every_limit() {
-    // The bound holds for any limit, and an in-limit batch is still
-    // captured in full so the first-valid scan has every item.
     for max_batch_size in [1, 2, 4, 5, 6, 10] {
         let config = make_config_with_batch_limit(max_batch_size);
         let (items, len) = capture_batch(&scalar_batch_body(5), &config);
@@ -539,9 +526,6 @@ fn batch_capture_is_bounded_at_every_limit() {
 
 #[test]
 fn reject_policy_retains_no_batch_captures() {
-    // BatchPolicy::Reject decides on the element count alone and never
-    // reads a capture, so retaining any is pure attacker-controlled
-    // memory cost, the very amplification this guard exists to stop.
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
     let (items, len) = capture_batch(&scalar_batch_body(OVERSIZED_BATCH_ITEMS), &config);
 
@@ -555,9 +539,6 @@ fn reject_policy_retains_no_batch_captures() {
 
 #[test]
 fn reject_policy_still_rejects_batches_without_captures() {
-    // Retaining nothing must not change what the reject policy does:
-    // a non-empty batch is still UnsupportedBatch and an empty one is
-    // still EmptyBatch, both decided on the element count.
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
 
     let err = parse_json_rpc_envelope(br#"[{"jsonrpc":"2.0","method":"a","id":1}]"#, &config)
@@ -576,11 +557,6 @@ fn reject_policy_still_rejects_batches_without_captures() {
 
 #[test]
 fn batch_at_exact_max_size_keeps_its_last_item() {
-    // Behavioural boundary for the retention bound: at exactly
-    // max_batch_size the LAST capture is the one an off-by-one drops,
-    // so make it the only valid JSON-RPC message in the batch. A test
-    // whose first item is valid short-circuits at index 0 and cannot
-    // see a dropped tail.
     const LIMIT: usize = 8;
     let config = make_config_with_batch_limit(LIMIT);
 
@@ -606,9 +582,6 @@ fn batch_at_exact_max_size_keeps_its_last_item() {
 
 #[test]
 fn oversized_batch_of_objects_is_rejected_by_count() {
-    // The bound must not depend on item shape: nested objects and
-    // arrays past the cap are drained rather than retained, and the
-    // element count stays exact.
     let config = make_config_with_batch_limit(2);
     let item = r#"{"jsonrpc":"2.0","method":"m","id":1,"params":{"a":[1,2,{"b":3}]}}"#;
     let body = format!("[{}]", vec![item; 50].join(","));
@@ -629,9 +602,6 @@ fn oversized_batch_of_objects_is_rejected_by_count() {
 
 #[test]
 fn oversized_batch_with_trailing_content_is_still_invalid_json() {
-    // Draining past the cap must keep scanning every byte: trailing
-    // content after the array is still caught by `de.end()`, so a
-    // truncating short-circuit cannot smuggle a malformed body through.
     let config = make_config_with_batch_limit(1);
     let body = format!("{} trailing", scalar_batch_body(64));
 
@@ -685,20 +655,16 @@ async fn extracts_method_from_request() {
 
 #[tokio::test]
 async fn promotes_once_across_chunk_and_eos() {
-    // A body delivered as a pre-EOS chunk then the full body at EOS must
-    // promote exactly one set of headers, not one per invocation.
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let json = br#"{"jsonrpc":"2.0","method":"service/invoke","id":"req-123"}"#;
 
-    // Pre-EOS pass: buffering, no promotion.
     let mut partial = Some(Bytes::from_static(json));
     let a1 = filter.on_request_body(&mut ctx, &mut partial, false).await.unwrap();
     assert!(matches!(a1, FilterAction::Continue), "pre-EOS should continue");
     assert!(ctx.extra_request_headers.is_empty(), "no promotion before EOS");
 
-    // EOS pass with the full buffer: promote exactly once.
     let mut full = Some(Bytes::from_static(json));
     let a2 = filter.on_request_body(&mut ctx, &mut full, true).await.unwrap();
     assert!(matches!(a2, FilterAction::Release), "EOS should release");
@@ -1083,11 +1049,6 @@ fn shallow_nested_params_accepted() {
 
 #[test]
 fn deep_nested_params_rejected() {
-    // The streaming parser caps ignored-subtree nesting at MAX_ENVELOPE_DEPTH,
-    // matching the recursion limit the old `from_slice::<Value>` DOM parser
-    // enforced. Without the bound, `IgnoredAny` accepted arbitrarily deep
-    // `params` and promoted the envelope; a security-adjacent classifier must
-    // fail closed on pathological input instead.
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let body = deep_params_body(300);
     let err = parse_json_rpc_envelope(&body, &config).expect_err("deep nesting must be rejected");
@@ -1099,9 +1060,6 @@ fn deep_nested_params_rejected() {
 
 #[test]
 fn deep_nested_params_streaming_matches_dom() {
-    // Regression guard for the IgnoredAny-unbounded divergence: a body the DOM
-    // path rejects for excessive depth must also be rejected by the streaming
-    // path, so the two JSON-RPC parse paths agree on accept/reject.
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let body = deep_params_body(300);
     let dom_rejects = serde_json::from_slice::<serde_json::Value>(&body).is_err();
@@ -1115,7 +1073,6 @@ fn deep_nested_params_streaming_matches_dom() {
 
 #[test]
 fn deep_nested_id_rejected() {
-    // A container-valued `id` nested past the cap is bounded on the id path too.
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let mut s = String::from(r#"{"jsonrpc":"2.0","method":"m","id":"#);
     s.push_str(&"[".repeat(300));
@@ -1130,7 +1087,6 @@ fn deep_nested_id_rejected() {
 
 #[test]
 fn deep_nested_object_params_rejected() {
-    // Exercises BoundedIgnore::visit_map's depth guard (objects, not arrays).
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let mut s = String::from(r#"{"jsonrpc":"2.0","method":"m","id":1,"params":"#);
     s.push_str(&r#"{"a":"#.repeat(300));
@@ -1145,8 +1101,6 @@ fn deep_nested_object_params_rejected() {
 
 #[test]
 fn ignored_params_scalars_and_containers_are_accepted() {
-    // Exercises every reachable BoundedIgnore arm (bool, i64, u64, f64, str,
-    // unit/null, map, seq) via the ignored `params` value.
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     for params in [
         "true",
@@ -1172,7 +1126,6 @@ fn ignored_params_scalars_and_containers_are_accepted() {
 
 #[test]
 fn id_variants_are_classified() {
-    // Exercises IdVisitor scalar arms (str, i64, u64, f64, unit).
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     for (id, kind) in [
         (r#""abc""#, JsonRpcIdKind::String),
@@ -1192,7 +1145,6 @@ fn id_variants_are_classified() {
 
 #[test]
 fn container_and_bool_ids_are_invalid() {
-    // Exercises IdVisitor::visit_map / visit_seq / visit_bool -> RawId::Invalid.
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     for id in [r#"{"a":1}"#, "[1,2]", "true"] {
         let body = format!(r#"{{"jsonrpc":"2.0","method":"m","id":{id}}}"#);
@@ -1206,8 +1158,6 @@ fn container_and_bool_ids_are_invalid() {
 
 #[test]
 fn non_string_version_is_treated_as_missing() {
-    // Exercises VersionVisitor non-string arms (i64, bool, map, seq) ->
-    // RawVersion::Missing -> handle_non_json_rpc (Continue -> Ok(None)).
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     for v in ["2", "true", r#"{"x":1}"#, "[1]"] {
         let body = format!(r#"{{"jsonrpc":{v},"method":"m","id":1}}"#);
@@ -1218,8 +1168,6 @@ fn non_string_version_is_treated_as_missing() {
 
 #[test]
 fn non_string_method_variants_are_invalid() {
-    // Exercises MethodVisitor non-string arms (i64, bool, map, seq, unit) ->
-    // RawMethod::NotString -> InvalidMethod.
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     for m in ["1", "true", r#"{"x":1}"#, "[1]", "null"] {
         let body = format!(r#"{{"jsonrpc":"2.0","method":{m},"id":1}}"#);
@@ -1233,8 +1181,6 @@ fn non_string_method_variants_are_invalid() {
 
 #[test]
 fn batch_first_skips_non_object_items() {
-    // Exercises ItemVisitor scalar/seq arms: non-object batch items are
-    // captured as None and skipped; the first valid object wins.
     let config = make_config(BatchPolicy::First, OnInvalidBehavior::Continue);
     let body = br#"[1, "x", [1,2], {"jsonrpc":"2.0","method":"picked","id":1}]"#;
     let env = parse_json_rpc_envelope(body, &config)
@@ -1246,12 +1192,7 @@ fn batch_first_skips_non_object_items() {
 
 #[test]
 fn escaped_strings_hit_owned_visit_string_arms() {
-    // serde_json yields an owned String (visit_string, not the borrowed
-    // visit_str) when a JSON string carries an escape sequence. Use escaped
-    // jsonrpc/method/id so the *_string visitor arms are exercised.
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
-    // 2.0 unescapes to an owned "2.0"; method "a\nb"; id "x\ty" -- each
-    // carries an escape so serde_json calls visit_string, not visit_str.
     let body = br#"{"jsonrpc":"2.0","method":"a\nb","id":"x\ty"}"#;
     let env = parse_json_rpc_envelope(body, &config)
         .unwrap()
@@ -1263,7 +1204,6 @@ fn escaped_strings_hit_owned_visit_string_arms() {
 
 #[test]
 fn root_scalars_are_not_json_rpc() {
-    // Exercises TopVisitor scalar arms -> RawTop::Other -> handle_non_json_rpc.
     let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     for root in [r#""s""#, "42", "1.5", "true", "null"] {
         let out = parse_json_rpc_envelope(root.as_bytes(), &config).unwrap();
@@ -1277,8 +1217,6 @@ fn root_scalars_are_not_json_rpc() {
 
 #[tokio::test]
 async fn strips_forged_headers_on_valid_json_rpc() {
-    // A classified JSON-RPC request must remove any client-supplied copies
-    // of the promotion headers before adding the body-derived values.
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -1287,9 +1225,6 @@ async fn strips_forged_headers_on_valid_json_rpc() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::Release));
 
-    // The configured header names should appear in the remove list so
-    // client-supplied copies are stripped before the promoted values
-    // are added.
     let remove_names: Vec<&str> = ctx
         .request_headers_to_remove
         .iter()
@@ -1308,7 +1243,6 @@ async fn strips_forged_headers_on_valid_json_rpc() {
         "X-Json-Rpc-Kind should be in the remove list: {remove_names:?}"
     );
 
-    // Promoted values should still be present in extra_request_headers.
     assert_promoted_header(&ctx, "X-Json-Rpc-Method", "service/invoke");
     assert_promoted_header(&ctx, "X-Json-Rpc-Id", "req-123");
     assert_promoted_header(&ctx, "X-Json-Rpc-Kind", "request");
@@ -1316,9 +1250,6 @@ async fn strips_forged_headers_on_valid_json_rpc() {
 
 #[tokio::test]
 async fn strips_forged_headers_on_non_json_rpc_body() {
-    // A non-JSON-RPC request must strip the configured promotion headers
-    // even though the classifier does not promote anything. Without this,
-    // a forged X-Json-Rpc-Method passes through unchanged.
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/test");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -1329,8 +1260,6 @@ async fn strips_forged_headers_on_non_json_rpc_body() {
         "non-JSON body should continue"
     );
 
-    // Even though no promotion happened, the remove list should contain
-    // the configured header names to strip any client-supplied forgeries.
     let remove_names: Vec<&str> = ctx
         .request_headers_to_remove
         .iter()
@@ -1349,7 +1278,6 @@ async fn strips_forged_headers_on_non_json_rpc_body() {
         "non-JSON-RPC request must still strip X-Json-Rpc-Kind: {remove_names:?}"
     );
 
-    // No promotion should have occurred.
     assert!(
         ctx.extra_request_headers.is_empty(),
         "non-JSON body should not promote any headers"
@@ -1358,7 +1286,6 @@ async fn strips_forged_headers_on_non_json_rpc_body() {
 
 #[tokio::test]
 async fn strips_forged_headers_on_none_body() {
-    // Even with no body at all, configured headers should be stripped.
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/test");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -1379,8 +1306,6 @@ async fn strips_forged_headers_on_none_body() {
 
 #[tokio::test]
 async fn strips_forged_headers_with_custom_header_names() {
-    // Custom header names configured by the operator should also be
-    // stripped from inbound requests.
     let filter = JsonRpcFilter {
         config: super::config::JsonRpcConfig {
             batch_policy: BatchPolicy::Reject,
@@ -1415,7 +1340,6 @@ async fn strips_forged_headers_with_custom_header_names() {
 
 #[tokio::test]
 async fn no_strip_before_end_of_stream() {
-    // Pre-EOS calls should not strip headers (the strip happens at EOS).
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
     let mut ctx = crate::test_utils::make_filter_context(&req);

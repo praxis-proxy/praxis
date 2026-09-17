@@ -206,12 +206,10 @@ pub struct FilterEntry {
 
     /// Filter-specific configuration passed to the factory function.
     ///
-    /// Populated on deserialize by the hand-written [`Deserialize`] impl
-    /// below, which collects every YAML key not handled by the named fields
-    /// above (`filter`, `branch_chains`, `conditions`, `name`,
-    /// `response_conditions`, `failure_mode`). `#[serde(flatten)]` is retained
-    /// only so serialization round-trips those keys back out. A misspelled
-    /// known field (e.g., `failuremode`) is silently absorbed here;
+    /// Holds every YAML key not handled by the named fields above
+    /// (`filter`, `branch_chains`, `conditions`, `name`,
+    /// `response_conditions`, `failure_mode`). A misspelled known field
+    /// (e.g. `failuremode`) is silently absorbed here;
     /// [`warn_config_typos`] detects near-matches.
     ///
     /// [`warn_config_typos`]: FilterEntry::warn_config_typos
@@ -237,8 +235,7 @@ impl FilterEntry {
     ///
     /// Because `FilterEntry` uses `#[serde(flatten)]`, a misspelled
     /// known field (e.g. `failuremode` instead of `failure_mode`) is
-    /// silently absorbed into the catch-all `config: Value`. This
-    /// method detects near-matches and emits a warning.
+    /// silently absorbed into the catch-all `config: Value`.
     pub fn warn_config_typos(&self) {
         let Some(map) = self.config.as_mapping() else {
             return;

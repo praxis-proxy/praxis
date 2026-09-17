@@ -11,9 +11,9 @@ use super::{
 };
 use crate::factory::parse_filter_config;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Config Validation
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn valid_minimal_config() {
@@ -525,9 +525,9 @@ steps:
     assert!(config::validate(&cfg).is_ok(), "multi-step config should be valid");
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Filter Construction
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn from_config_builds_filter() {
@@ -582,9 +582,9 @@ steps:
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Transition Evaluation
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn transition_default_returns_done() {
@@ -704,9 +704,9 @@ fn transition_first_match_wins() {
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Response Building
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn build_terminal_preserves_status() {
@@ -773,9 +773,9 @@ fn build_terminal_preserves_headers() {
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Streaming Validation
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 #[expect(clippy::too_many_lines, reason = "YAML config literal")]
@@ -928,15 +928,15 @@ fn streaming_runtime_guard_accepts_default_transition() {
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Test Utilities
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 struct StreamingSelectorFilter;
 
 struct UndeclaredStreamingSelectorFilter;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 struct ParentExtension(&'static str);
 
 struct StepErrorFilter;
@@ -1142,9 +1142,9 @@ fn make_local_outcome(status: u16) -> super::StepOutcome {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // parse_depth
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn parse_depth_missing_header() {
@@ -1194,18 +1194,18 @@ fn parse_depth_empty_string() {
     assert_eq!(super::parse_depth(&req), 0, "empty should return 0");
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // max_depth
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn max_depth_is_three() {
     assert_eq!(config::max_depth(), 3, "max_depth should be 3");
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Config Validation - Boundaries
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn accepts_max_iterations_one() {
@@ -1431,9 +1431,9 @@ steps:
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Serde Defaults
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn serde_default_max_iterations() {
@@ -1521,9 +1521,9 @@ steps:
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // deny_unknown_fields
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn rejects_unknown_top_level_key() {
@@ -1588,9 +1588,9 @@ steps:
     assert!(result.is_err(), "unknown transition key should be rejected");
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Trait Methods
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn request_body_access_returns_read_only() {
@@ -1644,9 +1644,9 @@ steps:
     assert!(result.is_err(), "validation failure should propagate");
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // on_request
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[tokio::test]
 async fn on_request_depth_exceeded() {
@@ -1956,9 +1956,9 @@ fn start_unit_stream_backend() -> u16 {
     port
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // on_request_body - not end_of_stream
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[tokio::test]
 async fn on_request_body_not_end_of_stream() {
@@ -1973,9 +1973,9 @@ async fn on_request_body_not_end_of_stream() {
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Transition Evaluation - Additional
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn transition_status_and_filter_both_match() {
@@ -2294,16 +2294,14 @@ fn transition_transport_origin_matches_any_transport_error() {
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Transport Failure -> Config Kind Bridge
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn transport_failure_maps_to_matching_config_kind() {
     use crate::filtered_subrequest::TransportFailure;
-    // Each executor-internal failure must map to the config kind that a
-    // `transport_error` transition branch matches on. A mis-mapping here would
-    // leave classify + transition tests green while breaking branch selection.
+
     let cases = [
         (
             TransportFailure::AdmissionTimeout,
@@ -2325,13 +2323,17 @@ fn transport_failure_maps_to_matching_config_kind() {
         ),
     ];
     for (failure, expected) in cases {
-        assert_eq!(config::TransportErrorKind::from(failure), expected);
+        assert_eq!(
+            config::TransportErrorKind::from(failure),
+            expected,
+            "each executor transport failure must map to the config kind its transition branch matches on"
+        );
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // build_terminal_response - Additional
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn build_terminal_empty_body_has_no_body() {
@@ -2464,9 +2466,9 @@ steps:
     assert!(error.to_string().contains("failure_mode: open"));
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Additional Test Utility
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Build YAML with `n` steps chained s0 -> s1 -> ... -> s(n-1).
 fn build_n_step_yaml(n: usize) -> serde_yaml::Value {
@@ -2506,14 +2508,14 @@ steps:
     super::IterativeRequestRouterFilter::from_config(&yaml).unwrap()
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Runtime Iteration Tests
 //
 // These exercise `run_iterations` end-to-end against raw in-process
 // TCP backends, covering the buffered and streaming dispatch paths,
 // transport failure classification, timeout handling, and header
 // mutation plumbing.
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Spawn a raw HTTP/1.1 backend that serves `response` verbatim to
 /// every accepted connection until aborted.
@@ -2993,7 +2995,6 @@ async fn iteration_streaming_body_surfaces_upstream_error() {
         let (mut socket, _) = listener.accept().await.unwrap();
         let mut buf = vec![0_u8; 8192];
         let _bytes_read = socket.read(&mut buf).await;
-        // Chunked framing promising more data, then a hard close mid-chunk.
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nff\r\npartial")
             .await
@@ -3302,9 +3303,9 @@ steps:
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Response Body Mode Limits
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Filter whose response body mode is a small `StreamBuffer` ceiling,
 /// without streaming selection.
@@ -3371,9 +3372,9 @@ steps:
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Runtime Streaming Guards
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Filter that selects streaming at runtime WITHOUT declaring the
 /// capability, bypassing config-time validation the way a dynamically
@@ -3632,12 +3633,12 @@ steps:
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Selected Cluster Application Isolation Across Steps
 //
 // A single `RequestExtensions` is threaded across steps, so a step must
 // not observe the cluster application metadata published by a prior step.
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Shared slot recording the selected cluster application a probe filter
 /// observed from inside an IRR step, so the test can assert on it afterward.
@@ -3889,9 +3890,9 @@ steps:
     );
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Step outbound-chain SSRF gating honors the operator's posture
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// A chain-binding filter that binds its configured `outbound_chain` into a
 /// prebuilt pipeline at construction time. Nested inside an IRR step, it lets a
@@ -3982,12 +3983,6 @@ steps:
 
 #[test]
 fn step_outbound_chain_ssrf_endpoint_rejected_by_default() {
-    // A chain-binding filter nested in an IRR step binds an outbound subrequest
-    // chain whose inline cluster resolves to a loopback address. Under the
-    // strict default posture the step build must reject it with the same SSRF
-    // gate a top-level chain uses. The step's own load_balancer is also loopback
-    // and builds fine in other tests, so the rejection proves the *outbound*
-    // chain is gated — not the step's own clusters.
     let registry = outbound_callout_registry();
     let yaml = step_with_outbound_loopback_yaml();
 
@@ -4003,11 +3998,6 @@ fn step_outbound_chain_ssrf_endpoint_rejected_by_default() {
 
 #[test]
 fn step_outbound_chain_ssrf_endpoint_allowed_with_flag() {
-    // The same step must build once the operator opts in to private endpoints,
-    // proving the gate is threaded from the declared posture into step-pipeline
-    // construction and is not an unconditional rejection. `lb_without_router` is
-    // skipped so the lone load_balancer in the outbound chain does not fail for
-    // an unrelated ordering reason.
     let registry = outbound_callout_registry();
     let yaml = step_with_outbound_loopback_yaml();
 

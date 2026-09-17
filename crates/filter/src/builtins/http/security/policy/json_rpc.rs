@@ -22,13 +22,8 @@ use ppe::praxis_policy_core::cmf::{
 
 /// A JSON-RPC body parsed once per filter phase.
 ///
-/// The request- and response-phase paths each needed the body's `id`
-/// (twice, on deny paths), `params`/`result`, and the rewrite base —
-/// previously each helper re-parsed the full body from bytes, up to
-/// three O(body) DOM materializations per phase. Parsing once and
-/// passing this around removes the repeats; a missing or malformed
-/// body parses to `Null`, reproducing every helper's old independent
-/// fallback exactly.
+/// A missing or malformed body parses to `Null`, so every accessor
+/// falls back to its empty form.
 pub(super) struct ParsedEnvelope(serde_json::Value);
 
 impl ParsedEnvelope {
@@ -60,11 +55,8 @@ impl ParsedEnvelope {
 
     /// Consume the envelope, yielding the parsed DOM for rewriting.
     ///
-    /// The reserializers mutate the same document this envelope
-    /// already parsed; re-parsing the body bytes for them would be a
-    /// second O(body) pass. A malformed body is `Null` here, and
-    /// `Null.get_mut(..)` short-circuits the rewrite exactly like the
-    /// old failed re-parse did.
+    /// A malformed body is `Null` here, so a reserializer's
+    /// `get_mut(..)` short-circuits and the rewrite is skipped.
     pub(super) fn into_value(self) -> serde_json::Value {
         self.0
     }

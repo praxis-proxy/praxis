@@ -99,8 +99,7 @@ impl CredentialInjectionFilter {
     /// Create from YAML config.
     ///
     /// Resolves all credentials (inline or from environment
-    /// variables) at construction time so that per-request
-    /// processing is a simple map lookup.
+    /// variables) at construction time.
     ///
     /// ```
     /// use praxis_filter::CredentialInjectionFilter;

@@ -646,8 +646,6 @@ mod tests {
         let mut upstream = pingora_http::ResponseHeader::build(200, Some(1)).unwrap();
         drop(upstream.insert_header("x-old", "v"));
 
-        // Mirror what the response phase does: copy the map out, let a filter
-        // swap one name for another, then write back through the rebuild.
         let mut taken = upstream.headers.clone();
         taken.remove("x-old");
         taken.insert("x-new", "v".parse().unwrap());
@@ -666,7 +664,6 @@ mod tests {
         )
         .unwrap();
 
-        // Serialising exercises the name-map zip that aborts on desync.
         let mut buf = bytes::BytesMut::new();
         upstream.header_to_h1_wire(&mut buf);
         let wire = String::from_utf8_lossy(&buf);

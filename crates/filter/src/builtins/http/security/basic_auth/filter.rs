@@ -125,8 +125,7 @@ pub struct BasicAuthFilter {
 }
 
 impl BasicAuthFilter {
-    /// Resolves inline credentials at construction time so that
-    /// per-request processing is a simple map lookup.
+    /// Resolves inline credentials at construction time.
     ///
     /// # Errors
     ///
@@ -195,11 +194,6 @@ impl HttpFilter for BasicAuthFilter {
 
 /// Decode a `Basic` Authorization header into the decoded credential
 /// string and the index of its first colon.
-///
-/// Returning positions instead of copying both halves spares two
-/// String allocations per attempt; the caller borrows the username
-/// and password from the returned buffer. Runs entirely before any
-/// comparison, so the constant-time verification is untouched.
 fn decode_basic_credentials(header: &http::HeaderValue) -> Option<(String, usize)> {
     let auth_str = header.to_str().ok()?;
 

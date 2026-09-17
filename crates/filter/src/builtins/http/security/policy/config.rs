@@ -87,7 +87,7 @@ pub(crate) struct PolicyFilterConfig {
     /// Only applies to policies with MCP entity routes. Inference routes
     /// use their own gates instead.
     ///
-    /// Note: JSON-RPC methods that legitimately carry no entity (e.g.
+    /// JSON-RPC methods that legitimately carry no entity (e.g.
     /// `tools/list`, `initialize`, `prompts/list`) still pass —
     /// `require_protocol_metadata` only rejects when the metadata is
     /// missing entirely.
@@ -99,8 +99,7 @@ pub(crate) struct PolicyFilterConfig {
     pub llm: LlmOptions,
 }
 
-/// `#[serde(default = ...)]` requires a free function for primitives
-/// without a `Default` impl that returns the desired value.
+/// Default for `require_protocol_metadata`.
 fn default_true() -> bool {
     true
 }

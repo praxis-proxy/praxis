@@ -160,13 +160,8 @@ impl PingoraTcpProxy {
 
     /// Run bidirectional forwarding, returning the close reason.
     ///
-    /// Byte counts are accumulated into `counters` as the copy progresses,
-    /// so they remain exact when `copy_bidirectional` is cancelled by a
-    /// shutdown, idle timeout, or max-duration force-close, which are
-    /// exactly the long-lived sessions whose throughput matters most. The
-    /// reason lets the
-    /// `connection_close` log distinguish a force-close from a genuine
-    /// completion.
+    /// The reason lets the `connection_close` log distinguish a force-close
+    /// from a genuine completion.
     #[expect(clippy::too_many_arguments, reason = "per-connection forwarding state")]
     async fn forward(
         &self,
@@ -642,8 +637,7 @@ fn handle_sni_read(buf: &mut Vec<u8>, filled: usize, reassembler: &mut Option<sn
 
 /// Attempt to parse SNI from the filled portion of the buffer.
 ///
-/// The first attempt uses the stateless parser (zero-copy for the
-/// dominant whole-hello-in-one-read case); an incomplete result then
+/// The first attempt uses the stateless parser; an incomplete result
 /// switches to the resumable reassembler for later reads.
 #[expect(clippy::indexing_slicing, reason = "filled <= buf.len() maintained by caller")]
 fn try_parse_sni(buf: &[u8], filled: usize, reassembler: &mut Option<sni::SniReassembler>) -> SniPeekResult {
@@ -716,7 +710,7 @@ fn extract_addrs(session: &Stream) -> (String, String) {
 }
 
 /// Why a forwarded TCP connection closed, for the `connection_close` log.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TcpCloseReason {
     /// `copy_bidirectional` completed normally (both directions saw EOF).
     Completed,
@@ -1202,9 +1196,6 @@ mod tests {
         let disconnects = Arc::new(AtomicUsize::new(0));
         let pipeline = counting_selector_reject_pipeline(&connects, &disconnects);
 
-        // The selector picks an upstream (the real load balancer would
-        // increment its in-flight counter here); the ACL filter after it then
-        // rejects the connection.
         let result = resolve_connect_result(&pipeline, &mut make_tcp_ctx("db"), "192.0.2.7:9999").await;
 
         assert!(result.is_none(), "the ACL filter should reject the connection");
@@ -1213,10 +1204,6 @@ mod tests {
             1,
             "the selecting filter must run its connect hook exactly once"
         );
-        // The release path must run the paired disconnect hook; that is what
-        // decrements the least-connections counter the selector incremented.
-        // Asserting on the hook (rather than a follow-up selection) keeps the
-        // test independent of the load balancer's tie-break ordering.
         assert_eq!(
             disconnects.load(Ordering::SeqCst),
             1,

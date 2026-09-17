@@ -361,7 +361,7 @@ mod tests {
     use crate::composition::ServerComposition;
 
     /// A marker resource a composed extension injects into per-request state.
-    #[derive(Clone, PartialEq, Eq, Debug)]
+    #[derive(Clone, Debug, Eq, PartialEq)]
     struct ReloadMarker(u8);
 
     impl PipelineExtension for ReloadMarker {
@@ -507,7 +507,6 @@ filter_chains:
         let health_registry: HealthRegistry = Arc::new(HashMap::new());
         let subrequest_client = empty_subrequest_client();
 
-        // v1: a one-filter outbound chain behind the chain-binding callout.
         let old_config = Config::from_yaml(
             r#"
 listeners:
@@ -536,8 +535,6 @@ filter_chains:
         )
         .unwrap();
 
-        // The initial build must already have driven the KV and session
-        // registries into the bound outbound pipeline.
         let after_build = injections.lock().unwrap().clone();
         let build_count = after_build.len();
         assert!(
@@ -549,8 +546,6 @@ filter_chains:
 
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
 
-        // v2 (a reload): the outbound chain gains a second filter, forcing a
-        // genuine re-bind of a freshly constructed outbound pipeline.
         let new_config = Config::from_yaml(
             r#"
 listeners:
@@ -594,12 +589,9 @@ filter_chains:
         )
         .unwrap();
 
-        // The ArcSwap swap installed a rebuilt pipeline...
         let new_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
         assert_ne!(old_ptr, new_ptr, "reload must swap in a rebuilt pipeline");
 
-        // ...and the reload's configure pass re-injected KV and session stores
-        // into the newly bound outbound pipeline, not just the top-level one.
         let after_reload = injections.lock().unwrap().clone();
         assert!(
             after_reload.len() > build_count,
@@ -1496,9 +1488,6 @@ filter_chains:
             praxis_protocol::http::pingora::health::cluster_meta_from_config(&two),
         );
 
-        // First reload (new=one, old=two) removes the 'legacy' listener;
-        // its pipeline stays pinned to the now probe-less first-generation
-        // registry while 'web' swaps to a fresh one.
         reload_pipelines(
             &one,
             &two,
@@ -1515,12 +1504,8 @@ filter_chains:
         )
         .unwrap();
 
-        // The frozen registry accumulates a stale verdict.
         stale_health.get("backend").unwrap().endpoints()[0].mark_unhealthy();
 
-        // The next reload must carry state from the current generation
-        // (via 'web', all healthy), never from the removed listener's
-        // frozen registry.
         reload_pipelines(
             &one,
             &one,
@@ -1602,11 +1587,6 @@ filter_chains:
 
     #[test]
     fn reload_reuses_provided_registry_including_custom_filters() {
-        // The registry carries a custom filter name unknown to the built-ins.
-        // If reload rebuilt a built-ins-only registry instead of reusing the one
-        // handed to it, resolving a config that references the custom filter
-        // would fail with "unknown filter type". A successful reload proves the
-        // custom registry survives reload.
         let mut registry = FilterRegistry::with_builtins();
         registry
             .register(

@@ -203,15 +203,17 @@ fn handle_header_response_records_session() {
 
 #[test]
 fn put_update_replaces_endpoint_without_duplicate_entry() {
-    // An update must replace the endpoint in place (single map entry, single
-    // eviction-queue position) under the TTL policy.
     let store = SessionStore::new(100, Duration::from_millis(500), config::EvictionPolicy::Ttl);
     store.put("key1", "ep1".into());
     std::thread::sleep(Duration::from_millis(10));
     store.put("key1", "ep2".into());
 
-    assert_eq!(store.get("key1").as_deref(), Some("ep2"));
-    assert_eq!(store.len(), 1);
+    assert_eq!(
+        store.get("key1").as_deref(),
+        Some("ep2"),
+        "an update must replace the endpoint in place"
+    );
+    assert_eq!(store.len(), 1, "an update must not create a duplicate entry");
 }
 
 #[test]
@@ -222,15 +224,16 @@ fn opportunistic_sweep_fires_after_half_ttl() {
 
     std::thread::sleep(Duration::from_millis(25));
 
-    // "a" and "b" are expired; the next get (miss) should trigger a sweep
-    assert!(store.get("a").is_none());
-    // Sweep should have cleaned up "b" as well
-    assert_eq!(store.len(), 0);
+    assert!(
+        store.get("a").is_none(),
+        "an expired entry should miss and trigger an opportunistic sweep"
+    );
+    assert_eq!(store.len(), 0, "the sweep should also remove the other expired entry");
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Regression tests for review fixes
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// A cookie-mode cluster config for response-handling tests.
 fn cookie_cfg() -> Arc<ClusterSessionConfig> {
@@ -259,7 +262,6 @@ fn cookie_response_does_not_adopt_unknown_client_value() {
         http::HeaderValue::from_static("_praxis_route=attacker-chosen"),
     );
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    // on_request records the extracted key when no binding exists.
     ctx.set_metadata(META_SESSION_KEY, "attacker-chosen");
     let mut resp = crate::test_utils::make_response();
     ctx.response_header = Some(&mut resp);
@@ -333,8 +335,6 @@ fn learn_response_repins_existing_binding_after_failover() {
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.set_metadata(META_SESSION_KEY, "sess1");
-    // Upstream response carries no Set-Cookie: backends issue the session
-    // cookie once, so a failed-over session must re-pin from metadata.
     let mut resp = crate::test_utils::make_response();
     ctx.response_header = Some(&mut resp);
 
@@ -383,7 +383,6 @@ fn registry_preserves_store_across_reload_when_config_unchanged() {
     let first = registry.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
     first.put("sess1", Arc::from("10.0.0.1:80"));
 
-    // A rebuilt pipeline resolves the store again with identical bounds.
     let second = registry.get_or_create("backend", 100, Duration::from_secs(3600), config::EvictionPolicy::Lru);
     assert!(
         Arc::ptr_eq(&first, &second),
@@ -395,7 +394,6 @@ fn registry_preserves_store_across_reload_when_config_unchanged() {
         "session bindings must survive a reload"
     );
 
-    // Changed bounds get a fresh store (bindings intentionally dropped).
     let third = registry.get_or_create("backend", 100, Duration::from_secs(60), config::EvictionPolicy::Lru);
     assert!(!Arc::ptr_eq(&first, &third), "changed config must replace the store");
     assert!(third.get("sess1").is_none(), "replaced store starts empty");
@@ -404,7 +402,6 @@ fn registry_preserves_store_across_reload_when_config_unchanged() {
 #[test]
 fn find_request_cookie_checks_all_cookie_headers() {
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
-    // HTTP/2 clients may split cookies across multiple `cookie` fields.
     req.headers
         .append(http::header::COOKIE, http::HeaderValue::from_static("other=1"));
     req.headers.append(

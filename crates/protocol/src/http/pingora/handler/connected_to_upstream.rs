@@ -48,8 +48,8 @@ pub(super) fn execute(reused: bool, peer: &HttpPeer, digest: Option<&Digest>, ct
 
 /// Extract the upstream address string and port from an [`HttpPeer`].
 ///
-/// For inet sockets, returns the IP string and port. For unix domain
-/// sockets, returns the path and port 0.
+/// Inet sockets yield the IP string and port; other socket types
+/// yield `"unix"` and port 0.
 fn peer_address_and_port(peer: &HttpPeer) -> (String, u16) {
     match peer._address.as_inet() {
         Some(inet) => (inet.ip().to_string(), inet.port()),

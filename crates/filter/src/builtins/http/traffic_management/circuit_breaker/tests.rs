@@ -133,7 +133,6 @@ async fn on_request_rejects_when_open() {
     let filter = make_filter(1, 9999);
     let req = crate::test_utils::make_request(http::Method::GET, "/");
 
-    // Record a failure to trip the circuit.
     let mut resp = crate::test_utils::make_response();
     resp.status = http::StatusCode::INTERNAL_SERVER_ERROR;
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -143,7 +142,6 @@ async fn on_request_rejects_when_open() {
     ctx.response_header = Some(&mut resp);
     drop(filter.on_response(&mut ctx).await.unwrap());
 
-    // Next request should be rejected.
     let mut ctx2 = crate::test_utils::make_filter_context(&req);
     ctx2.cluster = Some(Arc::from("backend"));
     ctx2.current_filter_id = Some(0);
@@ -212,7 +210,6 @@ async fn on_response_success_resets_failures() {
     let filter = make_filter(2, 30);
     let req = crate::test_utils::make_request(http::Method::GET, "/");
 
-    // One failure.
     let mut resp = crate::test_utils::make_response();
     resp.status = http::StatusCode::INTERNAL_SERVER_ERROR;
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -222,7 +219,6 @@ async fn on_response_success_resets_failures() {
     ctx.response_header = Some(&mut resp);
     drop(filter.on_response(&mut ctx).await.unwrap());
 
-    // One success (resets counter).
     let mut resp2 = crate::test_utils::make_response();
     resp2.status = http::StatusCode::OK;
     let mut ctx2 = crate::test_utils::make_filter_context(&req);
@@ -232,7 +228,6 @@ async fn on_response_success_resets_failures() {
     ctx2.response_header = Some(&mut resp2);
     drop(filter.on_response(&mut ctx2).await.unwrap());
 
-    // Another failure (counter is 1, not 2).
     let mut resp3 = crate::test_utils::make_response();
     resp3.status = http::StatusCode::INTERNAL_SERVER_ERROR;
     let mut ctx3 = crate::test_utils::make_filter_context(&req);
@@ -257,7 +252,6 @@ async fn clusters_are_isolated() {
     let filter = make_two_cluster_filter(1, 9999);
     let req = crate::test_utils::make_request(http::Method::GET, "/");
 
-    // Trip cluster-a.
     let mut resp = crate::test_utils::make_response();
     resp.status = http::StatusCode::INTERNAL_SERVER_ERROR;
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -295,8 +289,6 @@ async fn on_response_no_header_with_upstream_reached_records_failure() {
     ctx.cluster = Some(Arc::from("backend"));
     ctx.current_filter_id = Some(0);
     drop(filter.on_request(&mut ctx).await.unwrap());
-    // Upstream was contacted but returned no response header: a real
-    // connect/read failure, which must trip the circuit.
     ctx.upstream_reached = true;
     drop(filter.on_response(&mut ctx).await.unwrap());
 
@@ -315,8 +307,6 @@ async fn on_response_no_header_without_upstream_does_not_trip() {
     let filter = make_filter(1, 9999);
     let req = crate::test_utils::make_request(http::Method::GET, "/");
 
-    // A request rejected or aborted before the upstream was contacted leaves
-    // upstream_reached = false; the breaker must not record a failure.
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.cluster = Some(Arc::from("backend"));
     ctx.current_filter_id = Some(0);

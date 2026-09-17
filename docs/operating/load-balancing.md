@@ -34,11 +34,8 @@ endpoint receives traffic proportional to its weight.
 This is the simplest strategy and works well when
 backends are homogeneous and request cost is uniform.
 
-The selector maintains an atomic counter. On each
-request, it increments the counter and maps the
-result into a cumulative weight bucket to find the
-target endpoint. With equal weights, this produces
-an even 1:1:1 distribution.
+With equal weights, this produces an even 1:1:1
+distribution.
 
 ```yaml
 clusters:
@@ -61,16 +58,7 @@ accumulates in-flight requests without relief.
 ## Least Connections
 
 Routes each request to the endpoint with the fewest
-active in-flight requests. An atomic counter per
-endpoint tracks active requests, incrementing on
-selection and decrementing when the response arrives.
-
-Selection uses an optimistic compare-and-swap loop:
-the selector scans for the minimum-loaded endpoint,
-then atomically increments its counter. If another
-thread selected the same endpoint between the scan
-and the CAS, the selector rescans and retries. This
-is lock-free and scales well under concurrency.
+active in-flight requests.
 
 When two endpoints have equal connection counts, the
 one with the higher weight wins the tie.
@@ -100,17 +88,8 @@ fewer in-flight requests. This achieves
 near-optimal load distribution with O(1) selection
 cost, regardless of the number of endpoints.
 
-Random sampling uses a deterministic linear
-congruential generator (LCG) - no system entropy is
-needed. The two samples are mapped through
-cumulative weight buckets, so higher-weight endpoints
-occupy more of the sampling space and are chosen
-more often.
-
-Healthy candidates are collected into a `SmallVec`
-with an inline capacity of 8, avoiding heap
-allocation for clusters with up to 8 healthy
-endpoints.
+Higher-weight endpoints occupy more of the sampling
+space and are chosen more often.
 
 ```yaml
 clusters:

@@ -78,12 +78,6 @@ pub(super) fn compute_body_capabilities(filters: &[PipelineFilter]) -> BodyCapab
 }
 
 /// Precompute the pipeline indices of filters that declared body access.
-///
-/// The body-chunk loops run once per chunk; declared access is a
-/// per-filter constant, so walking only these indices skips every
-/// non-body filter without per-chunk predicate checks or virtual
-/// calls — a pipeline with two body filters among forty no longer
-/// iterates the other thirty-eight on every chunk.
 pub(super) fn body_filter_indices(filters: &[PipelineFilter]) -> (Vec<usize>, Vec<usize>) {
     let mut request = Vec::new();
     let mut response = Vec::new();
@@ -103,11 +97,9 @@ pub(super) fn body_filter_indices(filters: &[PipelineFilter]) -> (Vec<usize>, Ve
 /// Precompute the pipeline indices of filters that declared
 /// selected-upstream request-body access.
 ///
-/// Like [`body_filter_indices`], but for the selected-upstream phase:
-/// walking only these indices lets that phase skip every non-participant
-/// without per-filter predicate checks. Top-level only — branch filters
-/// never run body hooks, so a selected-upstream declaration inside a
-/// branch is rejected at build time rather than collected here.
+/// Top-level only: branch filters never run body hooks, so a
+/// selected-upstream declaration inside a branch is rejected at build
+/// time rather than collected here.
 pub(super) fn selected_upstream_request_body_indices(filters: &[PipelineFilter]) -> Vec<usize> {
     let mut indices = Vec::new();
     for (idx, pf) in filters.iter().enumerate() {
@@ -172,8 +164,8 @@ fn accumulate_request_body(caps: &mut BodyCapabilities, filter: &dyn crate::filt
 /// Accumulate selected-upstream request body capabilities from a single filter.
 ///
 /// A participating filter contributes to the *global* request-body
-/// capabilities — `needs_request_body`, the request-body writer flag, and
-/// the effective `request_body_mode` — because the selected-upstream phase
+/// capabilities (`needs_request_body`, the request-body writer flag, and
+/// the effective `request_body_mode`) because the selected-upstream phase
 /// operates on the same buffered request body: the pipeline must buffer it
 /// (a bounded `StreamBuffer`) for the phase to have anything to run on. It
 /// also sets selected-specific flags so downstream layers can skip the
@@ -205,7 +197,7 @@ fn accumulate_selected_upstream_request_body(caps: &mut BodyCapabilities, filter
 /// The phase needs the complete body, so any declaration that is not
 /// already a bounded `StreamBuffer` is promoted to one capped at the
 /// absolute ceiling. Validation rejects such declarations, but the
-/// capability computation stays safe on its own — it never yields an
+/// capability computation stays safe on its own: it never yields an
 /// unbuffered or unbounded mode for a selected-upstream participant.
 fn selected_upstream_body_mode(filter: &dyn crate::filter::HttpFilter) -> BodyMode {
     match filter.request_body_mode() {
@@ -689,9 +681,6 @@ mod tests {
 
     #[test]
     fn body_caps_selected_upstream_defensive_ceiling() {
-        // A participant whose declared mode is not a bounded StreamBuffer is
-        // rejected by validation, but capability accumulation still promotes
-        // to the finite absolute ceiling rather than an unbounded buffer.
         let filter = PipelineFilter::new(
             0,
             AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {

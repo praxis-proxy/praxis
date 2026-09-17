@@ -128,9 +128,6 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &PingoraRequest
 /// - **URI authority**: Defence-in-depth for absolute-form requests whose URI already contains an authority. Without
 ///   this, a pre-existing URI authority could survive into the upstream request if Pingora's internal flow changes.
 ///
-/// The authority `HeaderValue` is pre-parsed at cluster build
-/// time, so this path performs no string-to-header conversion.
-///
 /// Called after hop-by-hop and reserved-header stripping so that
 /// a downstream-supplied `Host` value cannot survive into the
 /// upstream request when an override is configured.
@@ -565,8 +562,6 @@ mod tests {
 
     #[test]
     fn apply_rewritten_path_reapplies_on_retry() {
-        // Pingora restarts each retry from a fresh clone of the original
-        // downstream request, so the rewrite must survive to be re-applied.
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("/rewritten".to_owned());
 
@@ -824,9 +819,6 @@ mod tests {
 
     #[test]
     fn duplicate_upgrade_headers_strip_all() {
-        // Two separate `Upgrade` headers (`websocket` then `h2c`) must not be
-        // treated as a WebSocket upgrade: reading only the first value would
-        // preserve the whole multi-valued header and smuggle the h2c token.
         let mut req = RequestHeader::build("GET", b"/", None).unwrap();
         let _ws = req.append_header("upgrade".to_owned(), "websocket".to_owned());
         let _h2c = req.append_header("upgrade".to_owned(), "h2c".to_owned());
@@ -1099,10 +1091,6 @@ mod tests {
 
     #[test]
     fn mutated_content_length_strips_restored_chunked_framing() {
-        // A chunked inbound request through a body-mutating StreamBuffer
-        // pipeline: strip_hop_by_hop re-adds Transfer-Encoding, then the
-        // content-length mutation must remove it — emitting both is a
-        // request-smuggling gadget (RFC 9112 §6.2).
         let mut req = make_request(&[("transfer-encoding", "chunked")]);
         strip_hop_by_hop(&mut req, false);
         assert_eq!(
@@ -1139,8 +1127,6 @@ mod tests {
 
     #[test]
     fn reseed_retry_body_restores_mutated_body_on_retry_only() {
-        // First attempt: pre_read_body still holds the live body, so re-seeding
-        // must leave it untouched rather than overwrite it with the retained copy.
         let mut ctx = PingoraRequestCtx::default();
         ctx.pre_read_body = Some(std::collections::VecDeque::from([bytes::Bytes::from_static(
             b"live-body",
@@ -1155,8 +1141,6 @@ mod tests {
             "the first attempt must not overwrite the live pre_read_body"
         );
 
-        // Retry: pre_read_body drained, so it is restored from the retained copy
-        // (matching the mutated Content-Length that gets re-stamped).
         ctx.pre_read_body = None;
         reseed_retry_body(&mut ctx);
         assert_eq!(
@@ -1165,8 +1149,6 @@ mod tests {
             "a retry must replay the retained mutated body"
         );
 
-        // A writer that produced an empty body retains an empty deque; a retry
-        // restores Some(empty) so the drain yields no chunk under Content-Length 0.
         let mut empty = PingoraRequestCtx::default();
         empty.retained_pre_read_body = Some(std::collections::VecDeque::new());
         reseed_retry_body(&mut empty);
@@ -1176,7 +1158,6 @@ mod tests {
             "an empty retained body restores an empty pre_read_body"
         );
 
-        // No body writer ran (nothing retained): a drained pre_read_body stays None.
         let mut plain = PingoraRequestCtx::default();
         plain.retained_pre_read_body = None;
         reseed_retry_body(&mut plain);

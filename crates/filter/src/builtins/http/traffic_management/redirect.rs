@@ -305,10 +305,6 @@ fn validate_allowed_hosts(hosts: &[String]) -> Result<(), FilterError> {
 /// Supports exact (case-insensitive) matches and wildcard prefixes.
 /// A pattern `*.example.com` matches `sub.example.com` and
 /// `a.b.example.com`, as well as the bare domain `example.com`.
-/// `allowed` entries are pre-lowercased at config load, so matching is a
-/// case-insensitive compare against the raw host with no per-request
-/// allocation (the old shape lowercased the host, every pattern, and
-/// built a dotted-suffix String per wildcard entry on every request).
 fn host_matches_allowlist(host: &str, allowed: &[String]) -> bool {
     allowed.iter().any(|pattern| {
         if let Some(suffix) = pattern.strip_prefix("*.") {

@@ -363,7 +363,7 @@ pub struct RetryPolicy {
     /// Endpoint reselection on retry is enabled only for configured
     /// policies; the legacy default preserves the historical
     /// retry-same-endpoint semantics.
-    #[serde(skip_deserializing, skip_serializing, default = "configured_true")]
+    #[serde(default = "configured_true", skip_deserializing, skip_serializing)]
     pub configured: bool,
 
     /// Token-bucket retry budget.

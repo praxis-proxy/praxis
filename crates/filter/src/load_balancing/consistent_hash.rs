@@ -51,8 +51,8 @@ impl ConsistentHash {
 
     /// Hash the key and return the corresponding healthy endpoint.
     ///
-    /// Skips unhealthy endpoints by probing adjacent ring slots, falling
-    /// back to the original selection if all are unhealthy.
+    /// Skips unhealthy endpoints, falling back to the original selection if
+    /// all are unhealthy.
     pub(crate) fn select(
         &self,
         hash_key: Option<&str>,
@@ -83,7 +83,7 @@ impl ConsistentHash {
     /// Bounded by distinct endpoints rather than ring entries (the
     /// ring-hash precedent): with every endpoint rejected, walking the
     /// weight-expanded ring would revisit each endpoint once per unit of
-    /// weight — per request, exactly during a full-cluster outage.
+    /// weight, per request, during a full-cluster outage.
     #[expect(clippy::indexing_slicing, reason = "ring indices are bounded via modulo")]
     fn probe(
         &self,

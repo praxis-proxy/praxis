@@ -23,10 +23,6 @@ use crate::any_filter::AnyFilter;
 // -----------------------------------------------------------------------------
 
 /// A filter with its conditions and branches.
-///
-/// Replaces the `ConditionalFilter` tuple alias with a
-/// named struct that also carries branch chains and an
-/// optional user-assigned name.
 pub(crate) struct PipelineFilter {
     /// Optional user-assigned name for rejoin targeting.
     ///
@@ -57,8 +53,8 @@ pub(crate) struct PipelineFilter {
     /// Assigned monotonically during pipeline build across all
     /// filters including branch sub-chains. Used as the key in
     /// [`HttpFilterContext::filter_state`] so that multiple
-    /// instances of the same filter type — and filters in
-    /// different branch levels — get independent state.
+    /// instances of the same filter type (and filters in
+    /// different branch levels) get independent state.
     ///
     /// [`HttpFilterContext::filter_state`]: crate::HttpFilterContext::filter_state
     pub(crate) filter_id: usize,

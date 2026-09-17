@@ -223,7 +223,6 @@ fn joined_field_lines(headers: &http::HeaderMap, name: &str) -> Option<String> {
 ///
 /// IPv6 addresses require quoting because `:` and `[]` are
 /// not valid `token` characters. IPv4 addresses are bare tokens.
-/// Writing into the caller's buffer avoids staging a String per header.
 ///
 /// [RFC 7239 Section 6]: https://datatracker.ietf.org/doc/html/rfc7239#section-6
 fn write_for_param(out: &mut String, ip: &IpAddr) {
@@ -756,9 +755,6 @@ trusted_proxies:
 
     #[tokio::test]
     async fn non_utf8_xff_field_line_forces_overwrite_even_with_a_valid_line() {
-        // If ANY X-Forwarded-For field-line is non-UTF-8, the whole header is
-        // untrustworthy: drop every line (including the valid one) and overwrite
-        // with just the client IP, rather than preserving the valid line.
         let f = make_filter(&["10.0.0.0/8"]);
         let mut req = crate::test_utils::make_request(http::Method::GET, "/");
         req.headers.append(

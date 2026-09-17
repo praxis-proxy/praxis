@@ -249,9 +249,6 @@ mod tests {
 
     #[test]
     fn read_config_file_rejects_non_regular_file() {
-        // A directory (like a character device or FIFO) is not a regular file.
-        // Special files such as /dev/zero report size 0 to metadata() and would
-        // otherwise be read without bound; the is_file() guard rejects them all.
         let dir = tempfile::TempDir::new().expect("tempdir");
         let err = read_config_file(dir.path()).expect_err("non-regular file must be rejected");
         assert!(
@@ -288,7 +285,6 @@ mod tests {
 
     #[test]
     fn accept_anchor_without_alias() {
-        // An anchor with no matching alias expands nothing and is allowed.
         reject_yaml_aliases("a: &a x\nlisteners: []\n").expect("unused anchor should pass");
     }
 
@@ -300,29 +296,23 @@ mod tests {
 
     #[test]
     fn accept_bare_asterisk_value() {
-        // `*` not followed by an anchor-name char is not an alias node.
         reject_yaml_aliases("wildcard: /*\n").expect("glob-like value should pass");
     }
 
     #[test]
     fn reject_alias_after_mid_scalar_apostrophe() {
-        // A plain-scalar apostrophe is not a quote opener; the alias
-        // after it must still be caught.
         let err = reject_yaml_aliases("a: &a x\nb: [don't, *a]\n");
         assert!(err.is_err(), "alias after mid-scalar apostrophe should be rejected");
     }
 
     #[test]
     fn reject_alias_after_mid_scalar_hash() {
-        // `#` without preceding whitespace is scalar content, not a
-        // comment; the alias after it must still be caught.
         let err = reject_yaml_aliases("a: &a x\nb: [a#b, *a]\n");
         assert!(err.is_err(), "alias after mid-scalar hash should be rejected");
     }
 
     #[test]
     fn accept_escaped_quote_in_double_quoted_scalar() {
-        // `\"` does not close the string, so the `*` stays inside it.
         reject_yaml_aliases("k: \"a\\\" *not-an-alias b\"\n").expect("escaped quote should not end the string");
     }
 
@@ -353,7 +343,6 @@ mod tests {
 
     #[test]
     fn alias_check_ignores_unparseable_non_alias_yaml() {
-        // No alias node present; the real parse error is reported later.
         reject_yaml_aliases("{{{{invalid yaml").expect("non-alias garbage passes the alias check");
     }
 

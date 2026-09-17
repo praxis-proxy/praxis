@@ -14,9 +14,9 @@ use bytes::Bytes;
 use http::HeaderMap;
 use praxis_core::subrequest::{SubRequest, SubResponse};
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Maximum response body size (10 MiB) to prevent unbounded
 /// memory growth from sub-request responses.
@@ -30,9 +30,9 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 10_485_760; // 10 MiB
 /// [`FrameworkHeaders::set_depth`]: praxis_core::subrequest::FrameworkHeaders::set_depth
 pub(crate) use praxis_core::subrequest::DEPTH_HEADER;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Types
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Per-request accumulator for state that persists across
 /// iterations of the iterative request router.
@@ -161,9 +161,9 @@ pub(crate) fn default_max_response_bytes() -> usize {
     DEFAULT_MAX_RESPONSE_BYTES
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

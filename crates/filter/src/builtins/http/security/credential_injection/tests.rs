@@ -416,7 +416,6 @@ clusters:
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.cluster = Some(Arc::from("provider-a"));
 
-    // Upstream echoes the injected credential back in its response.
     let mut resp = crate::test_utils::make_response();
     resp.headers
         .insert(http::header::AUTHORIZATION, "Bearer sk-test-key".parse().unwrap());
@@ -449,8 +448,6 @@ clusters:
     );
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    // Routed to a cluster this filter has no entry for: leave the response
-    // alone, even if it carries an Authorization header of its own.
     ctx.cluster = Some(Arc::from("other-cluster"));
 
     let mut resp = crate::test_utils::make_response();

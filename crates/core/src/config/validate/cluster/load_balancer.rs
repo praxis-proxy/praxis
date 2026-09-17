@@ -192,8 +192,6 @@ mod tests {
 
     #[test]
     fn reject_priority_sub_100_overprovisioning() {
-        // healthy% >= 100/factor is unsatisfiable for factors below 100, so
-        // every request would take the panic path.
         let cluster = cluster_with_strategy(LoadBalancerStrategy::Parameterised(ParameterisedStrategy::Priority(
             PriorityOpts {
                 inner_strategy: SimpleStrategy::default(),

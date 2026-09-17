@@ -28,7 +28,7 @@ use crate::FilterError;
 /// Canonicalization makes credential matching robust to the incidental
 /// differences (host casing, an implicit port) that would otherwise let a
 /// credential silently fail to match the destination it was issued for.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Eq, PartialEq)]
 struct CanonicalAuthority {
     /// Lowercased host (DNS name or IP literal, IPv6 without brackets).
     host: Box<str>,
@@ -518,8 +518,6 @@ mod tests {
 
     #[test]
     fn credential_authority_match_is_case_insensitive() {
-        // DNS names are case-insensitive, so a credential bound to a mixed-case
-        // authority must still match a canonicalized lowercase destination.
         let cred = credential("API.Example.COM:443", "Bearer sk-secret");
         let mut headers = HeaderMap::new();
 
@@ -533,9 +531,6 @@ mod tests {
 
     #[test]
     fn credential_host_wildcard_matches_any_port() {
-        // The explicit host-only opt-in: one credential authorized for every
-        // port on its host, so a backend reachable on 443 and 8443 needs a
-        // single binding rather than one per port.
         let cred = DeferredCredential::new_host_wildcard(
             "api.example.com",
             HeaderName::from_static("authorization"),
@@ -560,9 +555,6 @@ mod tests {
 
     #[test]
     fn deferred_credential_host_wildcard_rejects_port() {
-        // A port on a wildcard host is a mistake: the caller meant an exact
-        // authority. Reject it rather than silently binding to a host that can
-        // never match (the F7 footgun in wildcard clothing).
         let err = DeferredCredential::new_host_wildcard(
             "api.example.com:443",
             HeaderName::from_static("authorization"),
@@ -578,9 +570,6 @@ mod tests {
 
     #[test]
     fn credential_uses_transport_port_when_authority_omits_it() {
-        // A cluster with a bare authority override (`api.example.com`) whose
-        // transport carries the port: the logical authority inherits the
-        // transport's port, so a credential bound to `host:port` still matches.
         let mut pending = PendingCredentials::new();
         pending.push(credential("api.example.com:443", "Bearer sk-secret"));
         let mut headers = HeaderMap::new();
@@ -596,7 +585,6 @@ mod tests {
             "a bare logical authority must inherit the transport port to match a :443 credential"
         );
 
-        // A transport on a different port must not satisfy a :443 credential.
         let mut pending = PendingCredentials::new();
         pending.push(credential("api.example.com:443", "Bearer sk-secret"));
         let mut headers = HeaderMap::new();
@@ -627,9 +615,6 @@ mod tests {
 
     #[test]
     fn deferred_credential_rejects_host_header() {
-        // Injection happens after sanitization, so a credential naming `Host`
-        // would overwrite the authority-pinned Host and retarget the request to
-        // an attacker-chosen destination *after* it was authorized.
         let err = DeferredCredential::new(
             "api.example.com:443",
             HeaderName::from_static("host"),
@@ -645,8 +630,6 @@ mod tests {
 
     #[test]
     fn deferred_credential_rejects_framing_and_hop_by_hop_headers() {
-        // Re-introducing a framing or connection-scoped header past sanitization
-        // could resurrect a request-smuggling boundary the sanitizer stripped.
         for name in [
             "content-length",
             "transfer-encoding",
@@ -677,8 +660,6 @@ mod tests {
 
     #[test]
     fn credential_matches_bracketed_ipv6_authority() {
-        // `[::1]:443` takes the bracketed-with-port branch in `split_host_port`:
-        // the host keeps its colons, the port is parsed after `]`.
         let cred = credential("[::1]:443", "Bearer sk-secret");
         let mut headers = HeaderMap::new();
 
@@ -693,8 +674,6 @@ mod tests {
 
     #[test]
     fn credential_host_wildcard_matches_bracketed_ipv6_any_port() {
-        // `[::1]` is the bracketed-without-port branch: a valid wildcard host
-        // that must match the IPv6 literal on every port.
         let cred = DeferredCredential::new_host_wildcard(
             "[::1]",
             HeaderName::from_static("authorization"),
@@ -713,9 +692,6 @@ mod tests {
 
     #[test]
     fn credential_host_wildcard_accepts_unbracketed_ipv6() {
-        // `::1` (unbracketed) keeps its colons in the host part, so `canonical_host`
-        // falls through to the bare-host branch and accepts it as a wildcard that
-        // still matches the canonicalized (bracket-stripped) destination host.
         let cred =
             DeferredCredential::new_host_wildcard("::1", HeaderName::from_static("authorization"), "Bearer sk-secret")
                 .expect("an unbracketed IPv6 literal is accepted as a wildcard host");
@@ -729,9 +705,6 @@ mod tests {
 
     #[test]
     fn deferred_credential_rejects_unbracketed_ipv6_authority() {
-        // `::1` has no separable port (its trailing `:1` is part of the literal),
-        // so an exact authority binding is ambiguous and must be rejected — the
-        // caller must bracket it (`[::1]:443`) or use a host wildcard.
         let err = DeferredCredential::new("::1", HeaderName::from_static("authorization"), "Bearer sk-secret")
             .err()
             .expect("an unbracketed IPv6 literal carries no separable port and must be rejected");
@@ -743,9 +716,6 @@ mod tests {
 
     #[test]
     fn deferred_credential_rejects_bracketed_ipv6_without_port() {
-        // `[::1]` takes the bracketed-without-port branch in `split_host_port`,
-        // yielding a host with no port; an exact binding still needs an explicit
-        // port, so it must be rejected just like the unbracketed literal.
         let err = DeferredCredential::new("[::1]", HeaderName::from_static("authorization"), "Bearer sk-secret")
             .err()
             .expect("a bracketed IPv6 literal without a port must be rejected");
@@ -757,9 +727,6 @@ mod tests {
 
     #[test]
     fn deferred_credential_host_wildcard_rejects_bracketed_ipv6_with_port() {
-        // A bracketed IPv6 literal carrying a port hits the bracket branch of
-        // `canonical_host`: a wildcard host must not include a port (the caller
-        // meant an exact authority), so it is rejected.
         let err = DeferredCredential::new_host_wildcard(
             "[::1]:443",
             HeaderName::from_static("authorization"),
@@ -775,10 +742,8 @@ mod tests {
 
     #[test]
     fn inject_warns_and_drops_when_prevalidated_value_regresses() {
-        // Force the "unreachable" invariant-violation branch by constructing a
-        // credential whose value bypasses `build`'s up-front validation. Injection
-        // must degrade to a no-op AND narrate the broken invariant at warn level,
-        // never silently drop — and the diagnostic must never leak the secret.
+        // Construct directly, bypassing `build`'s validation, to reach the
+        // invariant-violation branch `inject_canonical` guards against.
         let cred = DeferredCredential {
             scope: CredentialScope::Authority(parse_canonical("api.example.com:443", None).expect("valid authority")),
             header: HeaderName::from_static("authorization"),

@@ -156,9 +156,6 @@ struct EndpointSelectorConfig {
     strip_header: bool,
 
     /// Optional TLS settings for selected upstreams.
-    ///
-    /// Certificates and keys are loaded and parsed once when the
-    /// filter is constructed, never on a request path.
     #[serde(default)]
     tls: Option<ClusterTls>,
 }
@@ -230,9 +227,7 @@ pub struct EndpointSelectorFilter {
 
     /// Pre-parsed TLS material for selected upstreams.
     ///
-    /// `None` selects plaintext. Configured certificates and keys are
-    /// cached at filter construction, so request handling only clones
-    /// this already parsed state.
+    /// `None` selects plaintext.
     tls: Option<CachedClusterTls>,
 }
 

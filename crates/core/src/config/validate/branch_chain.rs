@@ -1252,11 +1252,6 @@ filter_chains:
 
         use crate::config::FilterEntry;
 
-        // 17 filters x 16 branches = 272 uniquely-named branches, each pointing
-        // at a known named chain so only branch names count toward the total.
-        // This exceeds MAX_TOTAL_BRANCHES; the entry-level validator must reject
-        // it exactly as the whole-config pass does, so an outbound chain cannot
-        // bypass the ceiling by never appearing in Config::filter_chains.
         let mut yaml = String::new();
         let mut n = 0;
         for _ in 0..17 {
@@ -1283,9 +1278,6 @@ filter_chains:
 
         use crate::config::FilterEntry;
 
-        // A single filter with 17 branch chains exceeds MAX_BRANCHES_PER_FILTER.
-        // Already enforced via collect_branch_names; this documents that the
-        // per-filter cardinality cap is not bypassed on the entry-level path.
         let mut yaml = String::from("- filter: headers\n  branch_chains:\n");
         for n in 0..17 {
             writeln!(yaml, "    - name: br_{n}\n      chains: [utility]").unwrap();
@@ -1306,9 +1298,6 @@ filter_chains:
 
         use crate::config::FilterEntry;
 
-        // A branch whose on_result declares an empty filter is rejected via
-        // validate_branch. This documents that the on_result condition checks are
-        // not bypassed on the entry-level path.
         let entries: Vec<FilterEntry> = serde_yaml::from_str(
             "
 - filter: headers
@@ -1336,10 +1325,6 @@ filter_chains:
 
         use crate::config::FilterEntry;
 
-        // The listener entries define two branches: one resolving against a known
-        // named chain (contributes only its branch name) and one with an inline
-        // sub-chain (contributes both the branch name and the inline name). Named
-        // refs resolve to already-counted top-level chains, so they are not counted.
         let entries: Vec<FilterEntry> = serde_yaml::from_str(
             "
 - filter: headers
@@ -1354,8 +1339,6 @@ filter_chains:
 ",
         )
         .unwrap();
-        // A named chain that itself defines a branch: config-wide counting must
-        // count it too, on top of the listener's own branches.
         let utility: Vec<FilterEntry> = serde_yaml::from_str(
             "
 - filter: headers
@@ -1368,8 +1351,6 @@ filter_chains:
         let chains: [&[FilterEntry]; 1] = [utility.as_slice()];
         let known: HashSet<&str> = HashSet::from(["utility"]);
 
-        // br_named + br_inline + sub (entries) + u_br (named chain) = 4; the chain
-        // name `utility` is not counted, and named refs are ignored.
         assert_eq!(
             super::count_build_branches(&entries, &chains, &known),
             4,
@@ -1383,11 +1364,6 @@ filter_chains:
 
         use crate::config::FilterEntry;
 
-        // A chain defining 10 branches. On its own (prior 0) it passes and the
-        // cumulative total is returned. With enough prior branches from elsewhere
-        // in the same build, the same chain pushes the cumulative total past the
-        // ceiling and is rejected — proving the ceiling bounds the whole build, not
-        // each chain in isolation.
         let mut yaml = String::from("- filter: headers\n  branch_chains:\n");
         for n in 0..10 {
             writeln!(yaml, "    - name: br_{n}\n      chains: [utility]").unwrap();

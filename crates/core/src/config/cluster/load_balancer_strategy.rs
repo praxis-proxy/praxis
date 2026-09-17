@@ -622,8 +622,6 @@ priority:
 
     #[test]
     fn unknown_strategy_option_names_the_bad_key() {
-        // A typo'd option key must be rejected by name, not swallowed by
-        // the untagged wrapper into a generic "did not match any variant".
         let yaml = "ring_hash:\n  virtual_node: 5\n";
         let err = serde_yaml::from_str::<LoadBalancerStrategy>(yaml).unwrap_err();
         let msg = err.to_string();
@@ -651,9 +649,12 @@ priority:
 
     #[test]
     fn simple_strategy_in_map_form_still_parses() {
-        // The single-key null-map form (as used by example configs) stays valid.
         let strategy: LoadBalancerStrategy = serde_yaml::from_str("least_connections: ~\n").unwrap();
-        assert_eq!(strategy, LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections));
+        assert_eq!(
+            strategy,
+            LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
+            "the single-key null-map form (as used by example configs) stays valid"
+        );
     }
 
     #[test]

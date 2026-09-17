@@ -1475,12 +1475,6 @@ mod tests {
 
     #[tokio::test]
     async fn reject_after_selection_writes_back_cluster_for_release() {
-        // A filter ordered after the load balancer that rejects must still
-        // leave the selected cluster on the context. The context macro
-        // consumes ctx.cluster when building each phase's filter context, so
-        // without the write-back the response/logging phase sees cluster =
-        // None and can never release the retry lease or in-flight slot the
-        // load balancer acquired.
         let mut ctx = make_ctx();
         ctx.cluster = Some(Arc::from("backend"));
 

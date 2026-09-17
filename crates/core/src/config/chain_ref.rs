@@ -41,7 +41,7 @@ use super::filters::FilterEntry;
 /// assert!(matches!(inline, ChainRef::Inline { ref name, .. } if name == "inline_chain"));
 /// ```
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
-#[serde(untagged, try_from = "ChainRefRaw")]
+#[serde(try_from = "ChainRefRaw", untagged)]
 pub enum ChainRef {
     /// Inline chain definition.
     Inline {

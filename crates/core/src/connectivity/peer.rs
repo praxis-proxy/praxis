@@ -196,7 +196,7 @@ fn owned_from_arc(err: &AddressResolutionError) -> AddressResolutionError {
 
 /// Resolve an upstream `host:port` to a single preferred address.
 ///
-/// Literal socket addresses take the allocation-free fast path. Hostnames use a
+/// Literal socket addresses take the fast path. Hostnames use a
 /// bounded process-wide cache and the detached-owner single-flight, resolving
 /// the host to its complete set and applying the requested port.
 ///
@@ -217,7 +217,7 @@ pub async fn resolve_address(address: &str) -> Result<SocketAddr, AddressResolut
 ///
 /// Results retain resolver order (unlike [`resolve_address`], which prefers
 /// IPv4) and are cached. Callers must validate each address before dialing it.
-/// Literal socket addresses take the allocation-free fast path.
+/// Literal socket addresses take the fast path.
 ///
 /// # Errors
 ///
@@ -508,9 +508,9 @@ fn select_preferred_address(addrs: &[SocketAddr], address: &str) -> Result<Socke
         .ok_or_else(|| AddressResolutionError::Empty(address.to_owned()))
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Connection Options
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Apply configured connection timeouts to an [`HttpPeer`].
 ///
@@ -532,9 +532,9 @@ pub fn apply_connection_options(peer: &mut HttpPeer, opts: &ConnectionOptions) {
     peer.options.write_timeout = opts.write_timeout;
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // TLS
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Apply pre-cached TLS settings to an [`HttpPeer`].
 ///
@@ -589,9 +589,9 @@ pub fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora
     pingora_core::utils::tls::CertKey::new(cached.cert_der().to_vec(), cached.key_der().to_vec())
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // SNI
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Whether a URI host is an IP literal rather than a DNS name.
 ///
@@ -641,9 +641,9 @@ pub fn derive_sni(address: &str) -> String {
     host.to_owned()
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -684,9 +684,6 @@ mod tests {
 
     #[tokio::test]
     async fn checked_resolution_allows_literal_private_address() {
-        // Literal addresses cannot be substituted by a resolver, and are
-        // gated at config time instead; the runtime check must not break
-        // the ordinary `127.0.0.1:port` upstream.
         let addr = resolve_address_checked("127.0.0.1:8080", false)
             .await
             .expect("a literal address must bypass the private-IP check");
@@ -695,8 +692,6 @@ mod tests {
 
     #[tokio::test]
     async fn checked_resolution_rechecks_the_cached_answer() {
-        // The positive DNS cache pins an answer for its TTL, so the check
-        // must run per call rather than only on a cache miss.
         resolve_address("localhost:8127")
             .await
             .expect("localhost must resolve via the hosts file");
@@ -820,9 +815,6 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_misses_coalesce_into_one_resolution() {
-        // All tasks race the same uncached hostname; single-flight means
-        // they either win the gate or wait and hit the cache — every task
-        // must still get the same answer.
         let tasks: Vec<_> = std::iter::repeat_with(|| tokio::spawn(resolve_address("localhost:8124")))
             .take(8)
             .collect();
@@ -870,7 +862,6 @@ mod tests {
     #[tokio::test]
     async fn resolve_host_cached_is_case_folded() {
         resolve_host_cached("localhost").await.expect("resolve lowercase");
-        // A differently-cased host must hit the same cache entry.
         assert!(
             lookup_cached("LOCALHOST").is_some(),
             "case-folded host must share the cache entry"
@@ -930,9 +921,9 @@ mod tests {
             .expect_err("a bare host with no port must be rejected");
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     use std::sync::{
         Arc as StdArc,
@@ -1037,7 +1028,6 @@ mod tests {
         lookup.release.notify_waiters();
         for t in tasks {
             let err = t.await.unwrap().expect_err("every waiter gets the error");
-            // The io::Error OS code must survive the Arc fan-out + reconstruction.
             assert!(matches!(err, AddressResolutionError::Resolve { .. }), "got {err}");
             if let AddressResolutionError::Resolve { source, .. } = &err {
                 assert_eq!(source.raw_os_error(), Some(111), "raw_os_error must survive fan-out");
@@ -1059,7 +1049,7 @@ mod tests {
     async fn zero_address_answer_is_negatively_cached() {
         let host = "empty.praxis-sf-test.invalid";
         let lookup = ControlledLookup::new(Behavior::Empty);
-        lookup.release.notify_one(); // store a permit; the owner consumes it at the gate
+        lookup.release.notify_one();
         let err = resolve_host_cached_with(host, &lookup)
             .await
             .expect_err("empty → error");
@@ -1084,8 +1074,6 @@ mod tests {
             "a panic must not be cached (positive or negative)"
         );
 
-        // A subsequent caller must spawn a FRESH owner and re-resolve, not
-        // coalesce onto a dead channel.
         let healthy = ControlledLookup::new(Behavior::Ok(vec!["9.9.9.9".parse().unwrap()]));
         healthy.release.notify_one();
         let ips = resolve_host_cached_with(host, &healthy).await.expect("re-resolves");
@@ -1123,14 +1111,13 @@ mod tests {
             tokio::spawn(async move { resolve_host_cached_with(host, &l).await })
         };
         await_lookup_started(&lookup.calls).await;
-        waiter.abort(); // cancel the caller that spawned the owner
+        waiter.abort();
         drop(waiter.await);
         assert!(
             dns_inflight().contains_key(&cache_key(host)),
             "the detached owner must survive caller cancellation"
         );
         lookup.release.notify_waiters();
-        // The owner still completes and populates the cache.
         for _ in 0..1_000 {
             if lookup_cached(host).is_some() {
                 break;

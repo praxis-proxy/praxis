@@ -37,8 +37,8 @@ use crate::{FilterError, any_filter::AnyFilter, registry::FilterRegistry};
 impl FilterPipeline {
     /// Build a pipeline by instantiating each filter entry via the registry.
     ///
-    /// Conditions are moved out of entries via [`mem::take`] to avoid
-    /// cloning. After this call, each entry's condition vecs are empty.
+    /// Conditions are moved out of `entries`; after this call, each entry's
+    /// condition vecs are empty.
     ///
     /// # Errors
     ///

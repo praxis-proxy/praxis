@@ -83,9 +83,9 @@ impl CompiledRule {
     /// the match outcome and any PII kind together.
     ///
     /// For [`RuleMatcher::Contains`], pass a pre-lowercased
-    /// haystack via `lowered` to avoid re-allocating per rule.
-    /// When `lowered` is `None`, the haystack is lowercased
-    /// inline (suitable for short header values).
+    /// haystack via `lowered`. When `lowered` is `None`, the
+    /// haystack is lowercased inline (suitable for short header
+    /// values).
     pub(super) fn eval(&self, haystack: &str, lowered: Option<&str>) -> RuleEval {
         match &self.matcher {
             RuleMatcher::Contains(needle) => {

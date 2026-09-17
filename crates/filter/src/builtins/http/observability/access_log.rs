@@ -384,7 +384,7 @@ impl AccessLogFilter {
         emit_projected_record(&record);
     }
 
-    /// Default ten-field emit path (unchanged from pre-#799 behaviour).
+    /// Default ten-field emit path.
     fn emit_default(ctx: &HttpFilterContext<'_>, status: u16, duration_ms: u64) {
         let path = sanitize_for_log(ctx.request.uri.path());
         let client_ip = ctx.client_addr.map(|a| a.to_string()).unwrap_or_default();
@@ -1646,10 +1646,6 @@ conditions:
 
     #[test]
     fn no_record_work_when_info_level_disabled() {
-        // With the access-log level disabled, maybe_emit must return before
-        // building the record. The emitted-marker is the observable proxy: the
-        // old code always marked (after a discarded info!), the guard returns
-        // before marking.
         let yaml: serde_yaml::Value = serde_yaml::from_str("fields: [method, path, status]").unwrap();
         let filter = test_filter(&yaml);
         let req = crate::test_utils::make_request(http::Method::GET, "/api/thing");

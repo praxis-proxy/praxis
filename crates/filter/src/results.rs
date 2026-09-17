@@ -153,9 +153,7 @@ impl FilterResultSet {
 
 /// Whether a filter's result set contains a specific key-value pair.
 ///
-/// Looks up `filter_name` in the results map, then checks whether
-/// the result set contains `key` with value `value`. Used by both
-/// branch chain evaluation and step transition matching.
+/// Used by both branch chain evaluation and step transition matching.
 ///
 /// ```
 /// use std::collections::HashMap;

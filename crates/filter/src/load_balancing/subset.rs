@@ -32,7 +32,7 @@ pub(crate) struct Subset {
     /// Fallback behavior when the subset is empty.
     fallback_policy: SubsetFallbackPolicy,
 
-    /// Indices of the matched subset endpoints in the health state array.
+    /// Addresses of the matched subset endpoints.
     subset_addresses: Vec<Arc<str>>,
 }
 
@@ -260,7 +260,6 @@ mod tests {
         );
 
         let state = health_state(4);
-        // Mark both canary endpoints unhealthy.
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
 

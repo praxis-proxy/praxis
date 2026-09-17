@@ -663,8 +663,6 @@ mod tests {
 
     #[test]
     fn runtime_log_overrides_change_does_not_warn() {
-        // log_overrides is applied on reload via refresh_baseline, so changing
-        // it must not warn that a restart is required.
         let old = config_with_runtime("");
         let new = config_with_runtime("runtime:\n  log_overrides:\n    praxis_filter: debug\n");
         let warnings = capture_warnings(|| detect_startup_only_runtime_changes(&old, &new));

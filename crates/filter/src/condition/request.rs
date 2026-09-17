@@ -455,7 +455,6 @@ mod tests {
 
     #[test]
     fn should_execute_from_overlay_sees_added_header() {
-        // The request has no x-gate, but the overlay source does.
         let req = make_request(Method::GET, "/", HeaderMap::new());
         let source = MockSource::with(&[("x-gate", "on")]);
         let run = should_execute_from(&[when(header_match(&[("x-gate", "on")]))], &req, &source).unwrap();
@@ -464,7 +463,6 @@ mod tests {
 
     #[test]
     fn should_execute_from_overlay_remove_masks_original() {
-        // The request has x-gate, but the overlay masks it (returns None).
         let mut headers = HeaderMap::new();
         headers.insert("x-gate", HeaderValue::from_static("on"));
         let req = make_request(Method::GET, "/", headers);
@@ -487,7 +485,6 @@ mod tests {
     #[test]
     fn should_execute_from_invalid_condition_name_is_no_match() {
         let req = make_request(Method::GET, "/", HeaderMap::new());
-        // A space makes the name invalid; it can never equal a real header.
         let run = should_execute_from(&[when(header_match(&[("x gate", "on")]))], &req, &req).unwrap();
         assert!(!run, "an invalid condition header name should be a no-match");
     }
@@ -644,8 +641,6 @@ mod tests {
         }
 
         proptest! {
-            /// `when` and `unless` with the same predicate are exact
-            /// complements for any request.
             #[test]
             fn when_unless_duality(m in predicate(), p in path()) {
                 let req = make_request(Method::GET, &p, HeaderMap::new());
@@ -655,8 +650,6 @@ mod tests {
                 );
             }
 
-            /// A `path_prefix`-only predicate agrees with the shared
-            /// segment-boundary matcher.
             #[test]
             fn path_prefix_agrees_with_path_match(prefix in path(), p in path()) {
                 let req = make_request(Method::GET, &p, HeaderMap::new());
@@ -666,7 +659,6 @@ mod tests {
                 );
             }
 
-            /// An exact-path predicate matches exactly its own path.
             #[test]
             fn exact_path_matches_only_itself(a in path(), b in path()) {
                 let req = make_request(Method::GET, &a, HeaderMap::new());

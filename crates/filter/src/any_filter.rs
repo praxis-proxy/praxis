@@ -196,8 +196,6 @@ mod tests {
         );
     }
 
-    /// TCP filters have no external-config surface, so the variant answers empty
-    /// without consulting the inner filter.
     #[test]
     fn tcp_variant_has_no_referenced_files() {
         let f = AnyFilter::Tcp(Box::new(StubTcpFilter));

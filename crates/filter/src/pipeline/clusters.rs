@@ -22,7 +22,7 @@ use super::filter::PipelineFilter;
 ///
 /// Recurses into branch sub-chains: a cluster selected inside a branch is
 /// assigned to `ctx.cluster` when the branch runs, so it must be checked
-/// against the load balancers just like a top-level selection — otherwise a
+/// against the load balancers just like a top-level selection. Otherwise a
 /// branch selecting an undefined cluster passes the build and 502s at request
 /// time.
 pub(super) fn extract_selected_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
@@ -66,7 +66,7 @@ pub(super) fn level_selected_clusters(filters: &[PipelineFilter]) -> HashSet<Str
 /// branches (`condition: None`) hung off *unconditional* host filters (no
 /// filter conditions), recursively. Such a branch always fires and its filters
 /// run against the same `ctx`, so a load balancer inside it sets `ctx.upstream`
-/// for the enclosing selection exactly like a top-level one — an inlined chain
+/// for the enclosing selection exactly like a top-level one, an inlined chain
 /// in all but syntax. A *conditional* branch (or one on a conditional host) is
 /// excluded: it may not run, so its load balancer cannot be relied on to serve
 /// an enclosing selection.
@@ -238,8 +238,6 @@ mod tests {
 
     #[test]
     fn reachable_folds_unconditional_branch_lb() {
-        // An unconditional branch on an unconditional host always runs, so its
-        // LB is reachable for the enclosing scope.
         let filters = vec![host_with(None, vec![lb_filter(&["x"])])];
         assert!(
             reachable_lb_clusters(&filters).contains("x"),
@@ -249,7 +247,6 @@ mod tests {
 
     #[test]
     fn reachable_excludes_conditional_branch_lb() {
-        // A conditional branch may not fire, so its LB is not reachable.
         let filters = vec![host_with(Some(cond()), vec![lb_filter(&["x"])])];
         assert!(
             !reachable_lb_clusters(&filters).contains("x"),
@@ -259,8 +256,6 @@ mod tests {
 
     #[test]
     fn reachable_excludes_branch_lb_on_conditional_host() {
-        // Even an unconditional branch is unreachable when its host filter is
-        // conditional (the host, and thus the branch, may be skipped).
         let mut host = noop_filter("headers");
         host.conditions = vec![Condition::When(ConditionMatch {
             path: None,
@@ -293,7 +288,6 @@ mod tests {
 
     #[test]
     fn reachable_stops_folding_at_conditional_nesting() {
-        // Outer unconditional, inner conditional: the inner LB is unreachable.
         let inner = host_with(Some(cond()), vec![lb_filter(&["deep"])]);
         let outer = host_with(None, vec![inner]);
         assert!(

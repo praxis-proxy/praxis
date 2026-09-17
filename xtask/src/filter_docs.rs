@@ -19,9 +19,9 @@ use std::{
 use clap::Parser;
 use quote::ToTokens as _;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // CLI Arguments
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// CLI arguments for `cargo xtask generate-filter-docs`.
 #[derive(Parser)]
@@ -31,9 +31,9 @@ pub(crate) struct GenerateArgs;
 #[derive(Parser)]
 pub(crate) struct LintArgs;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Entry Points
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Generate all per-filter doc files and the reference index.
 pub(crate) fn generate(_args: GenerateArgs) {
@@ -108,9 +108,9 @@ fn collect_stale_doc_paths(root: &Path, docs_dir: &Path, all_filters: &[FilterEn
     stale
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Data Types
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// A filter with its location metadata for output path construction.
 struct FilterEntry {
@@ -155,7 +155,7 @@ struct FieldInfo {
 }
 
 /// How a field must appear in YAML.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequiredKind {
     /// Field must be present.
     Yes,
@@ -317,9 +317,9 @@ impl FilterInfo {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Discovery
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Parse shared config types that built-in filters reference.
 fn parse_shared_config_items(root: &Path) -> ModuleItems {
@@ -378,9 +378,9 @@ fn discover_all_filters(root: &Path, shared_items: &ModuleItems) -> Vec<FilterEn
     entries
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Filter Extraction
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Extract all filters from a category directory using anchor-based discovery.
 fn extract_filters(category_dir: &Path, shared_items: &ModuleItems) -> Vec<FilterInfo> {
@@ -736,9 +736,9 @@ fn collect_rs_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // syn Parsing
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Parse a syn file and accumulate config structs and enums into `out`.
 fn parse_file_items(file: &syn::File, out: &mut ModuleItems) {
@@ -976,9 +976,9 @@ fn select_config<'a>(items: &'a ModuleItems, config_type: Option<&str>) -> Optio
     items.configs.iter().find(|c| c.name == type_name)
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Attribute Helpers
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Check if attributes include `#[derive(..., Deserialize)]`.
 fn derives_deserialize(attrs: &[syn::Attribute]) -> bool {
@@ -1307,9 +1307,9 @@ fn to_camel_case(s: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // YAML Example Extraction
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Extract YAML example blocks from a full doc comment.
 ///
@@ -1379,9 +1379,9 @@ fn is_yaml_fence_start(line: &str) -> bool {
     line.starts_with("```yaml") || line.starts_with("```yml")
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Type Rendering
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Return whether a type path is `Option<T>`.
 fn is_option_type(ty: &syn::Type) -> bool {
@@ -1558,9 +1558,9 @@ fn extract_angle_bracket_args(segment: &syn::PathSegment) -> Vec<syn::Type> {
     Vec::new()
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Markdown Rendering
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Extract the first paragraph from a doc comment.
 fn first_paragraph(doc: &str) -> String {
@@ -1811,9 +1811,9 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Stale File Management
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Remove generated doc files that no longer correspond to a filter.
 fn remove_stale_docs(root: &Path, docs_dir: &Path, entries: &[FilterEntry]) {
@@ -1902,9 +1902,9 @@ fn remove_empty_dir(path: &Path) {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Utilities
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Append strings from `items` to `target`, preserving first occurrence order.
 fn append_unique(target: &mut Vec<String>, items: Vec<String>) {
@@ -1974,9 +1974,9 @@ fn relative_path(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_owned()
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[expect(
@@ -2267,9 +2267,6 @@ mod tests {
 
     #[test]
     fn manual_deserialize_enum_still_renders_variants() {
-        // An enum whose Deserialize is hand-written (e.g. to preserve
-        // deny_unknown_fields diagnostics) must still be harvested and
-        // render its YAML alternatives, not fall back to the type name.
         let source = concat!(
             "#[derive(Serialize)] #[serde(untagged)] enum LoadBalancerStrategy ",
             "{ Simple(SimpleStrategy), Parameterised(ParameterisedStrategy) }",
@@ -2687,9 +2684,9 @@ mod tests {
         assert_eq!(render_type(&f64_ty, &enums), "number", "floats");
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /// Build a sample [`FilterEntry`] for rendering tests.
     fn sample_filter_entry() -> FilterEntry {

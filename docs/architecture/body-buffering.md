@@ -132,7 +132,7 @@ a byte ceiling:
   `BodyBufferOverflow` if `total_bytes + chunk.len()`
   exceeds `max_bytes`.
 - `freeze()` concatenates all chunks into a single
-  `Bytes`. Single-chunk case avoids allocation.
+  `Bytes`.
 
 The handler creates a `BodyBuffer` lazily on the
 first chunk and stores it in the request context

@@ -208,12 +208,10 @@ pub struct RateLimitFilter {
     /// Pre-formatted burst value for the `X-RateLimit-Limit` header.
     pub(self) burst_string: String,
 
-    /// Pre-validated burst value, so the config-stable limit header
-    /// costs a refcount clone per response instead of a re-parse.
+    /// Pre-validated `X-RateLimit-Limit` header value.
     pub(self) burst_value: http::header::HeaderValue,
 
-    /// Pre-built `X-RateLimit-*` header names, so the response path inserts
-    /// them without re-validating the constant names on every response.
+    /// Pre-built `X-RateLimit-Limit` header name.
     pub(self) header_limit: http::header::HeaderName,
     /// Pre-built `X-RateLimit-Remaining` header name.
     pub(self) header_remaining: http::header::HeaderName,

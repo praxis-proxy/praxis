@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! `cargo xtask benchmark flamegraph` — CPU profiling with flamegraphs.
+//! `cargo xtask benchmark flamegraph`: CPU profiling with flamegraphs.
 
 use std::{
     io::Write as _,
@@ -119,8 +119,8 @@ fn build_profiling_binary() -> PathBuf {
 // Orchestration
 // -----------------------------------------------------------------------------
 
-/// Run profiling workflow: start backend, start Praxis,
-/// warmup, attach perf, run measurement, generate flamegraph.
+/// Run the profiling workflow: load Praxis under perf and render
+/// the flamegraph.
 async fn run_profiling(args: &Args, binary: PathBuf) {
     let tmpdir = tempfile::TempDir::new().expect("failed to create tempdir");
     let config_path = tmpdir.path().join("praxis.yaml");

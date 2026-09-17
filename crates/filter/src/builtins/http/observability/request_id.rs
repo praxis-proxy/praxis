@@ -279,8 +279,6 @@ mod tests {
             http::header::HeaderValue::from_static("from-client"),
         );
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        // Filter state is keyed by the executing filter's id, which the
-        // pipeline sets around each hook.
         ctx.current_filter_id = Some(0);
         drop(filter.on_request(&mut ctx).await.unwrap());
 

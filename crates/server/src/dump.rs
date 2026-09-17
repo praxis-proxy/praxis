@@ -780,7 +780,6 @@ filter_chains:
 
     #[test]
     fn redact_credential_header_value_in_request_set() {
-        // Mirrors the `headers` filter shape: request_set: [{name, value}].
         let mut value: serde_yaml::Value = serde_yaml::from_str(
             "request_set:\n  - name: Authorization\n    value: Bearer sekret\n  - name: X-Trace\n    value: keep-me",
         )

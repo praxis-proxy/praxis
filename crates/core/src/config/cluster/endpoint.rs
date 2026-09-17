@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 ///     zone: "us-east-1a"
 /// ```
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(untagged, try_from = "EndpointRaw")]
+#[serde(try_from = "EndpointRaw", untagged)]
 pub enum Endpoint {
     /// Plain `host:port` string; weight is implicitly 1.
     Simple(String),

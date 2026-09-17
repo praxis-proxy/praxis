@@ -30,8 +30,7 @@ use tracing::Span;
 pub struct PingoraRequestCtx {
     /// Connection permit from the per-listener semaphore.
     ///
-    /// Held for the lifetime of the request. RAII drop
-    /// releases the permit when the context is dropped,
+    /// Held for the request's lifetime; released on drop,
     /// including error and timeout paths.
     pub _connection_permit: Option<OwnedSemaphorePermit>,
 
@@ -53,8 +52,7 @@ pub struct PingoraRequestCtx {
     pub cluster: Option<Arc<str>>,
 
     /// Cached per-filter body-done indices. Swapped into each
-    /// [`HttpFilterContext`] and written back after execution so
-    /// that the heap allocation is reused across pipeline phases.
+    /// [`HttpFilterContext`] and written back after execution.
     ///
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
     pub cached_body_done_indices: Vec<bool>,
@@ -67,20 +65,17 @@ pub struct PingoraRequestCtx {
 
     /// Whether the downstream connection uses TLS.
     ///
-    /// Derived from the Pingora session's SSL digest during
-    /// `request_filter`. Used by the forwarded headers filter
-    /// to set `X-Forwarded-Proto` correctly for HTTP/1.1
+    /// Set during `request_filter`. Used by the forwarded headers
+    /// filter to set `X-Forwarded-Proto` correctly for HTTP/1.1
     /// connections where the URI lacks a scheme.
     pub downstream_tls: bool,
 
     /// Verified downstream TLS peer identity.
     ///
-    /// Set once from the SSL digest in `request_filter` before
-    /// the first filter runs.  Shared via [`Arc`] with each
-    /// `HttpFilterContext` (an `Arc` clone per phase, not a deep
-    /// copy per body chunk) so it is available in both pre-read
-    /// body phases and the main filter pipeline.  `None` for
-    /// non-mTLS or no-client-cert connections.
+    /// Set once in `request_filter` before the first filter runs.
+    /// Shared via [`Arc`] with each `HttpFilterContext`, so it is
+    /// available in both pre-read body phases and the main filter
+    /// pipeline. `None` for non-mTLS or no-client-cert connections.
     pub peer_identity: Option<Arc<praxis_tls::TlsPeerIdentity>>,
 
     /// Whether the connection was upgraded via 101 Switching Protocols.
@@ -162,8 +157,7 @@ pub struct PingoraRequestCtx {
 
     /// Pre-built [`SharedString`] for the metrics cluster label.
     ///
-    /// Cached when `metrics_cluster` is set so that
-    /// `emit_request_metrics` avoids an `Arc` clone per request.
+    /// Cached when `metrics_cluster` is set.
     ///
     /// [`SharedString`]: ::metrics::SharedString
     pub metrics_cluster_shared: Option<::metrics::SharedString>,
@@ -190,8 +184,6 @@ pub struct PingoraRequestCtx {
     /// selection) so that body-based routing can influence `upstream_peer`.
     /// The `request_body_filter` hook then forwards these stored chunks
     /// instead of reading from the session.
-    ///
-    /// Uses `VecDeque` so that draining from the front is O(1).
     pub pre_read_body: Option<VecDeque<Bytes>>,
 
     /// Retained copy of the mutated pre-read body for retry replay.
@@ -447,10 +439,6 @@ impl PingoraRequestCtx {
 
     /// Build an [`HttpFilterContext`] from the stored [`request_snapshot`].
     ///
-    /// Uses disjoint field borrowing so that `request_snapshot` is
-    /// borrowed immutably while `cluster` and `upstream` are taken
-    /// mutably.
-    ///
     /// Returns `None` when `request_snapshot` is not set.
     ///
     /// ```
@@ -502,8 +490,8 @@ impl PingoraRequestCtx {
     /// [`pinned_pipeline`]. All subsequent hooks should call
     /// [`pipeline`] instead of re-loading from the [`ArcSwap`].
     ///
-    /// Called once by `request_filter` in both body-capable and
-    /// no-body handlers.
+    /// Called by `early_request_filter` before compression negotiation;
+    /// repeated calls in later hooks reuse the same generation.
     ///
     /// [`ArcSwap`]: arc_swap::ArcSwap
     /// [`pinned_pipeline`]: Self::pinned_pipeline
@@ -976,12 +964,6 @@ mod tests {
 
     #[test]
     fn stamp_error_type_is_first_write_wins() {
-        // A single request can pass through more than one classification
-        // site (for example a request-filter reject followed by the
-        // terminal fail_to_proxy hook). The first stamp must win so the
-        // recorded cause is stable; the once-per-request increment in the
-        // logging hook is what keeps one error from being multiplied across
-        // a retry fan-out.
         let mut ctx = PingoraRequestCtx::default();
         ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
         ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_INTERNAL);

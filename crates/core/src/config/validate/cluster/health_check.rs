@@ -361,10 +361,6 @@ mod tests {
 
     #[test]
     fn tls_cluster_with_http_probe_is_non_fatal() {
-        // A TLS cluster with a plaintext HTTP probe warns (the probe cannot
-        // handshake a TLS backend) but must not fail validation, so an existing
-        // deployment still boots. This guards the wiring: a future change that
-        // rejected the mismatch instead of warning would break this.
         let yaml = r#"
 listeners:
   - name: web

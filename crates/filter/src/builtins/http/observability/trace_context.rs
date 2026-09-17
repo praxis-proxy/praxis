@@ -529,7 +529,6 @@ mod tests {
 
         assert!(matches!(action, FilterAction::Continue), "should continue");
 
-        // Should have removed incoming traceparent and added a new one
         let traceparent = find_extra_header(&ctx, "traceparent").expect("traceparent should be injected");
         let tp = Traceparent::parse(&traceparent).expect("injected traceparent should be well-formed");
         assert_eq!(tp.trace_flags, "01", "new trace should be sampled");

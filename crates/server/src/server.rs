@@ -783,7 +783,6 @@ filter_chains:
         assert!(!registry.is_empty(), "health-checked clusters must register");
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         spawn_health_check_tasks(&config, registry, &health_shutdown);
-        // Cancel promptly so the dedicated runtime exits.
         health_shutdown.lock().expect("health shutdown lock").cancel();
     }
 

@@ -305,7 +305,7 @@ pub fn parse_json_rpc_value(
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Utilities
 // -----------------------------------------------------------------------------
 
 /// Parse a batch array according to the configured policy.

@@ -270,9 +270,6 @@ mod tests {
 
     #[test]
     fn unparseable_der_cert_is_not_reported_as_key_mismatch() {
-        // A well-formed PEM wrapper around non-DER bytes parses past the PEM
-        // layer and only fails at keys_match; the error must not claim a
-        // certificate/key mismatch, which would misdirect the operator.
         let certs = gen_test_certs();
         let dir = tempfile::TempDir::new().expect("tempdir");
         let bad_cert = dir.path().join("bad-der.pem");

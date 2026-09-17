@@ -237,11 +237,9 @@ impl<'ctx> ValidatorContext<'ctx> {
 
 /// The reload-durable half of a [`ServerComposition`].
 ///
-/// Holds the pipeline-extension factories and validators, wrapped in `Arc`s so
-/// they can be cheaply carried into the hot-reload watcher and applied on every
-/// rebuild. Cloning shares the same factories. The default value applies no
-/// extensions and no validators, which is what the standard non-embedded server
-/// uses.
+/// Holds the pipeline-extension factories and validators, applied on every
+/// rebuild. The default value applies no extensions and no validators, which
+/// is what the standard non-embedded server uses.
 #[derive(Clone, Default)]
 pub(crate) struct PipelineComposition {
     /// Factories producing a fresh extension per listener pipeline.
@@ -439,7 +437,7 @@ mod tests {
     use super::*;
 
     /// A marker resource inserted into per-request extensions.
-    #[derive(Clone, PartialEq, Eq, Debug)]
+    #[derive(Clone, Debug, Eq, PartialEq)]
     struct Marker(u8);
 
     impl PipelineExtension for Marker {
@@ -482,8 +480,6 @@ mod tests {
         let observed = Arc::new(AtomicUsize::new(0));
         let observed_in_factory = Arc::clone(&observed);
         let composition = ServerComposition::with_registry_factory(move |ctx| {
-            // Record the client's address: the connector is opaque, so we prove
-            // the exact server-owned client is exposed rather than a value copy.
             observed_in_factory.store(std::ptr::from_ref(ctx.subrequest_client()).addr(), Ordering::SeqCst);
             Ok(FilterRegistry::with_builtins())
         });

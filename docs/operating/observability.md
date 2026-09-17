@@ -376,10 +376,6 @@ increment one series and decrement another, leaving
 both stranded; changing the label set requires a
 restart.
 
-Leaving every dimension enabled (the default) takes
-an allocation-free path through the recorders, so the
-setting costs nothing when unused.
-
 ### Route Label Templating
 
 By default the `route` label is the router's
@@ -414,11 +410,6 @@ Matching rules:
 - A path matching no template keeps the router's
   pattern, or `"unknown"` when no route matched.
   Raw paths are never used as label values.
-
-Templates are compiled at startup and indexed by
-segment count, so matching costs one walk of the
-request's path segments with no allocation and no
-regular expressions.
 
 ### Filter Duration Histograms
 

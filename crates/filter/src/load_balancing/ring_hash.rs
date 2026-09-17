@@ -58,8 +58,8 @@ impl RingHash {
 
     /// Hash the key and return the corresponding healthy endpoint.
     ///
-    /// Uses binary search on the sorted ring to find the first virtual node
-    /// with a hash >= the key hash. Probes clockwise to skip unhealthy endpoints.
+    /// Skips unhealthy endpoints, falling back to a hashed position when every
+    /// endpoint is unhealthy.
     pub(crate) fn select(
         &self,
         hash_key: Option<&str>,
@@ -406,8 +406,6 @@ mod tests {
         assert_eq!(first, second, "same key should always select same endpoint (xxhash)");
     }
 
-    /// Known-answer vectors from the reference `xxHash64` implementation
-    /// (seed 0), covering the <4B, 4–31B, and ≥32B code paths.
     #[test]
     fn xxhash64_known_answers() {
         assert_eq!(xxhash64(""), 0xEF46_DB37_51D8_E999);
@@ -421,9 +419,6 @@ mod tests {
         );
     }
 
-    /// Known-answer vectors from the reference `MurmurHash3` `x64_128`
-    /// implementation (seed 0, lower 64 bits), covering tail-only and
-    /// full-block code paths.
     #[test]
     fn murmur3_known_answers() {
         assert_eq!(murmur3_64(""), 0x0);
@@ -437,7 +432,6 @@ mod tests {
         );
     }
 
-    /// Known-answer vectors for FNV-1a 64.
     #[test]
     fn fnv1a_known_answers() {
         assert_eq!(fnv1a(""), 0xCBF2_9CE4_8422_2325);
@@ -534,13 +528,15 @@ mod tests {
 
     #[test]
     fn xxhash64_reference_vector_empty() {
-        // Canonical XXH64("", seed=0) from the xxHash specification.
-        assert_eq!(xxhash64(""), 0xEF46_DB37_51D8_E999);
+        assert_eq!(
+            xxhash64(""),
+            0xEF46_DB37_51D8_E999,
+            "canonical XXH64(\"\", seed=0) from the xxHash specification"
+        );
     }
 
     #[test]
     fn xxhash64_deterministic() {
-        // Same input must always produce the same output across calls.
         let inputs = ["a", "abc", "Hello, world!", "abcdefghijklmnopqrstuvwxyz012345"];
         for input in inputs {
             let first = xxhash64(input);

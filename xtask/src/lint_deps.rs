@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! `cargo xtask lint-deps` — enforce three-component semver in workspace
+//! `cargo xtask lint-deps`: enforce three-component semver in workspace
 //! dependencies and workspace inheritance in member manifests.
 
 use clap::Parser;

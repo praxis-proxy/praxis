@@ -88,11 +88,10 @@ pub struct Listener {
 
     /// Session timeout in milliseconds for TCP forwarding sessions.
     ///
-    /// When set, the entire `copy_bidirectional` call is wrapped in
-    /// a hard deadline. Active connections are terminated after this
-    /// duration regardless of whether data is in flight. Only
-    /// applies to `protocol: tcp` listeners. Defaults to 300,000 ms
-    /// (5 minutes) for TCP listeners when not set.
+    /// When set, active connections are terminated after this duration
+    /// regardless of whether data is in flight. Only applies to
+    /// `protocol: tcp` listeners. Defaults to 300,000 ms (5 minutes)
+    /// for TCP listeners when not set.
     #[serde(default)]
     pub tcp_session_timeout_ms: Option<u64>,
 

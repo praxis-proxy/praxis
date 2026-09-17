@@ -227,22 +227,19 @@ mod tests {
     #[test]
     fn max_tokens_uses_percent_of_active() {
         let b = budget(20.0, 10);
-        // 100 active * 20% = 20, which is > floor of 10
-        assert_eq!(b.max_tokens(100), 20);
+        assert_eq!(b.max_tokens(100), 20, "100 active * 20% = 20, above the floor of 10");
     }
 
     #[test]
     fn max_tokens_respects_floor() {
         let b = budget(20.0, 10);
-        // 10 active * 20% = 2, floored to 10
-        assert_eq!(b.max_tokens(10), 10);
+        assert_eq!(b.max_tokens(10), 10, "10 active * 20% = 2, floored to 10");
     }
 
     #[test]
     fn try_acquire_decrements() {
         let b = budget(100.0, 5);
-        // starts with min_retries_per_second tokens
-        assert_eq!(b.available(), 5);
+        assert_eq!(b.available(), 5, "budget starts with min_retries_per_second tokens");
         assert!(b.try_acquire());
         assert_eq!(b.available(), 4);
     }
@@ -272,8 +269,11 @@ mod tests {
         assert_eq!(state.active_requests.load(Ordering::Relaxed), 1);
         state.leave();
         assert_eq!(state.active_requests.load(Ordering::Relaxed), 0);
-        // leave at zero is a no-op
         state.leave();
-        assert_eq!(state.active_requests.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            state.active_requests.load(Ordering::Relaxed),
+            0,
+            "leave at zero is a no-op"
+        );
     }
 }

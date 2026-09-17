@@ -226,7 +226,7 @@ Source: `request_body_filter.rs`
 Converts the pipeline's `Upstream` into a Pingora
 `HttpPeer`. On the first call, moves `ctx.upstream`
 into `ctx.upstream_for_retry`; on retries, reuses the
-saved copy without cloning.
+saved copy.
 
 **DNS resolution** uses a process-wide cache (60s TTL,
 1024-entry cap) with IPv4 preference. Direct

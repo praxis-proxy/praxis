@@ -145,8 +145,6 @@ pub trait HttpFilter: Send + Sync {
     fn visit_nested_pipelines(&mut self, _visitor: &mut dyn FnMut(&mut FilterPipeline)) {}
 
     /// Called for each response, in reverse pipeline order.
-    ///
-    /// Default: [`FilterAction::Continue`]
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let _ = ctx;
         Ok(FilterAction::Continue)
@@ -255,8 +253,7 @@ pub trait HttpFilter: Send + Sync {
     ///
     /// The config watcher uses this to decide which files should trigger a
     /// reload. A filter whose configuration lives entirely inside the Praxis
-    /// config has nothing to declare, which is why the default is empty and why
-    /// adding this is additive for every existing filter.
+    /// config has nothing to declare.
     ///
     /// Paths are returned as configured, not canonicalized: the watcher does its
     /// own resolution because it has to handle symlinks and relative paths
@@ -268,7 +265,7 @@ pub trait HttpFilter: Send + Sync {
     /// Apply global [`InsecureOptions`] to this filter.
     ///
     /// Filters that support insecure overrides (e.g. CSRF
-    /// log-only mode) override this. Default: no-op.
+    /// log-only mode) override this.
     ///
     /// [`InsecureOptions`]: praxis_core::config::InsecureOptions
     fn apply_insecure_options(&self, _options: &InsecureOptions) {}
@@ -444,8 +441,6 @@ mod tests {
         );
     }
 
-    /// The empty default is what makes `referenced_files` additive: a filter that
-    /// predates it declares nothing.
     #[test]
     fn default_referenced_files_is_empty() {
         let filter = MinimalFilter;

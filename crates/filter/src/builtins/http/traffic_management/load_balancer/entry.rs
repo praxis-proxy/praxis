@@ -32,11 +32,9 @@ type RetryMemoSlot = Option<(Arc<RetryPolicy>, Arc<RetryPolicy>)>;
 pub(super) struct ClusterEntry {
     /// Pre-parsed upstream authority override as a [`HeaderValue`].
     /// `None` means forward the downstream `Host` header unchanged.
-    /// Parsed at config load time to avoid per-request conversion.
     pub(super) authority: Option<HeaderValue>,
 
-    /// Connection options derived from the cluster config, [`Arc`]-wrapped
-    /// to avoid per-request cloning.
+    /// Connection options derived from the cluster config.
     pub(super) opts: Arc<ConnectionOptions>,
 
     /// The load-balancing strategy for this cluster.
@@ -58,17 +56,11 @@ pub(super) struct ClusterEntry {
     pub(super) retry_state: Arc<ClusterRetryState>,
 
     /// One-slot memo of the last route-override retry merge, keyed by
-    /// the route policy's [`Arc`] identity. Route policies are
-    /// config-stable [`Arc`]s cloned per request from router config, so
-    /// requests flowing through one route hit the memo instead of
-    /// re-allocating the merged policy each time; holding the route
-    /// [`Arc`] both keys the cache and pins its address against reuse.
+    /// the route policy's [`Arc`] identity.
     merged_retry_memo: ArcSwap<RetryMemoSlot>,
 
-    /// Lazily built reselector for the common case — no hash key, no
-    /// route retry override. The reselector is stateless config data,
-    /// so one shared instance serves every such request instead of a
-    /// fresh allocation per request.
+    /// Lazily built reselector for the common case: no hash key, no
+    /// route retry override.
     default_reselector: std::sync::OnceLock<Arc<EndpointReselector>>,
 }
 
@@ -104,10 +96,6 @@ impl ClusterEntry {
 
     /// Merge the route-level retry override onto this cluster's policy,
     /// memoizing the last merge by the route policy's [`Arc`] identity.
-    ///
-    /// A memo hit costs one lock-free load and a refcount bump; a miss
-    /// (first request, or the route's policy changed) re-runs
-    /// [`RetryPolicy::merge_override`] and replaces the slot.
     pub(super) fn merged_retry_policy(&self, route: &Arc<RetryPolicy>) -> Arc<RetryPolicy> {
         let cached = self.merged_retry_memo.load();
         if let Some((cached_route, merged)) = cached.as_ref()

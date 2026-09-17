@@ -22,7 +22,7 @@ pub(crate) struct Random {
     /// Deduplicated endpoint list with weights.
     endpoints: Vec<WeightedEndpoint>,
 
-    /// Sum of all endpoint weights (pre-computed, widened to `usize`).
+    /// Sum of all endpoint weights.
     total_weight: usize,
 
     /// Deterministic RNG state.
@@ -100,10 +100,6 @@ fn survey(
 
 /// Map a random value to a candidate endpoint via cumulative weight
 /// buckets, walking only endpoints that pass `candidate`.
-///
-/// Bucket layout matches the old collect-then-pick shape exactly: the
-/// candidate subsequence keeps endpoint order, so the same draw lands
-/// in the same bucket.
 #[expect(clippy::cast_possible_truncation, reason = "modulo total_weight bounds the result")]
 fn pick_where(
     endpoints: &[WeightedEndpoint],
@@ -265,13 +261,11 @@ mod tests {
     fn pick_exact_bucket_boundaries() {
         let endpoints = vec![ep("A", 1), ep("B", 3), ep("C", 1)];
         let all = |_: &WeightedEndpoint| true;
-        // total_weight = 5, buckets: A=[0], B=[1,2,3], C=[4]
         assert_eq!(&*pick_where(&endpoints, all, 0, 5).unwrap(), "A", "slot 0 → A");
         assert_eq!(&*pick_where(&endpoints, all, 1, 5).unwrap(), "B", "slot 1 → B");
         assert_eq!(&*pick_where(&endpoints, all, 2, 5).unwrap(), "B", "slot 2 → B");
         assert_eq!(&*pick_where(&endpoints, all, 3, 5).unwrap(), "B", "slot 3 → B");
         assert_eq!(&*pick_where(&endpoints, all, 4, 5).unwrap(), "C", "slot 4 → C");
-        // values beyond total_weight wrap via modulo
         assert_eq!(
             &*pick_where(&endpoints, all, 5, 5).unwrap(),
             "A",
@@ -288,7 +282,6 @@ mod tests {
     fn pick_where_skips_non_candidates() {
         let endpoints = [ep("A", 2), ep("B", 2), ep("C", 2)];
         let skip_b = |ep: &WeightedEndpoint| &*ep.address != "B";
-        // candidate subsequence A, C: total_weight = 4, buckets: A=[0,1], C=[2,3]
         assert_eq!(&*pick_where(&endpoints, skip_b, 0, 4).unwrap(), "A", "slot 0 → A");
         assert_eq!(&*pick_where(&endpoints, skip_b, 1, 4).unwrap(), "A", "slot 1 → A");
         assert_eq!(&*pick_where(&endpoints, skip_b, 2, 4).unwrap(), "C", "slot 2 → C");

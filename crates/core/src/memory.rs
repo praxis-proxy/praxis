@@ -58,9 +58,7 @@ pub fn is_exceeded() -> bool {
 /// RSS-based memory pressure detector with cached sampling.
 ///
 /// Reads `/proc/self/status` at most every `CHECK_INTERVAL_MS`
-/// and compares RSS against a fixed threshold. All fields are
-/// atomic for lock-free concurrent access from multiple worker
-/// threads.
+/// and compares RSS against a fixed threshold.
 ///
 /// ```
 /// use praxis_core::memory::MemoryPressure;
@@ -226,13 +224,18 @@ mod tests {
 
     #[test]
     fn sample_staleness_handles_forward_and_backward_clock() {
-        // Fresh within the interval: not stale.
-        assert!(!is_sample_stale(1_000, 1_000 + CHECK_INTERVAL_MS - 1));
-        // Interval elapsed: stale.
-        assert!(is_sample_stale(1_000, 1_000 + CHECK_INTERVAL_MS));
-        // Clock stepped backward: stale, so sampling resumes instead of
-        // freezing until the wall clock climbs back past the last sample.
-        assert!(is_sample_stale(1_000, 500));
+        assert!(
+            !is_sample_stale(1_000, 1_000 + CHECK_INTERVAL_MS - 1),
+            "a sample within the interval is fresh"
+        );
+        assert!(
+            is_sample_stale(1_000, 1_000 + CHECK_INTERVAL_MS),
+            "a sample is stale once the interval has elapsed"
+        );
+        assert!(
+            is_sample_stale(1_000, 500),
+            "a backward clock step forces a refresh instead of freezing sampling"
+        );
     }
 
     #[test]

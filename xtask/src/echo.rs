@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! `cargo xtask echo` — quick HTTP test server.
+//! `cargo xtask echo`: quick HTTP test server.
 
 use clap::Parser;
 use praxis_core::config::{

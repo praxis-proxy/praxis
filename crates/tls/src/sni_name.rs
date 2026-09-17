@@ -30,7 +30,7 @@ use crate::dns::DnsLabelError;
 /// assert_eq!(validate("example.com"), Ok(()));
 /// assert_eq!(validate("*.example.com"), Ok(()));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SniNameError {
     /// The name is empty.
     #[error("must not be empty")]
@@ -217,7 +217,6 @@ mod tests {
 
     #[test]
     fn reject_overlong_wildcard_hostname() {
-        // 2 (`*.`) + 252 = 254 > 253; the suffix alone would pass
         let name = format!("*.{}.example.com", "a".repeat(240));
         assert!(name.len() > 253);
         assert_eq!(validate(&name), Err(SniNameError::TooLong));
@@ -240,21 +239,17 @@ mod tests {
         }
 
         proptest! {
-            /// Every generated well-formed hostname validates.
             #[test]
             fn valid_hostnames_pass(name in hostname()) {
                 prop_assert_eq!(validate(&name), Ok(()));
             }
 
-            /// A leading wildcard on a valid hostname stays valid.
             #[test]
             fn wildcard_prefix_stays_valid(name in hostname()) {
                 let wildcard = format!("*.{name}");
                 prop_assert_eq!(validate(&wildcard), Ok(()));
             }
 
-            /// A wildcard anywhere but the complete leftmost label is
-            /// rejected.
             #[test]
             fn non_leftmost_wildcard_rejected(head in label(), tail in hostname()) {
                 let mid = format!("{head}.*.{tail}");
@@ -263,7 +258,6 @@ mod tests {
                 prop_assert_eq!(validate(&fused), Err(SniNameError::InvalidWildcard));
             }
 
-            /// Underscores are never valid in any label position.
             #[test]
             fn underscore_rejected(a in label(), b in label()) {
                 let name = format!("{a}_{b}.example.com");

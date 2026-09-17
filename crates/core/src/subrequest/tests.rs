@@ -9,7 +9,9 @@ use http::HeaderMap;
 use super::{internals::*, types::*};
 use crate::circuit::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitCheck, PeerKey};
 
-// -- Metrics test utilities -----------------------------------------------
+// -----------------------------------------------------------------------------
+// Metrics test utilities
+// -----------------------------------------------------------------------------
 
 fn install_metrics_recorder() -> &'static metrics_exporter_prometheus::PrometheusHandle {
     use std::sync::OnceLock;
@@ -25,7 +27,9 @@ fn render_metrics() -> String {
     install_metrics_recorder().render()
 }
 
-// -- SubRequestConnector ------------------------------------------------
+// -----------------------------------------------------------------------------
+// SubRequestConnector
+// -----------------------------------------------------------------------------
 
 #[test]
 fn clone_shares_same_arc() {
@@ -115,7 +119,9 @@ fn clone_shares_admission_semaphore() {
     );
 }
 
-// -- SubRequest / SubResponse -------------------------------------------
+// -----------------------------------------------------------------------------
+// SubRequest / SubResponse
+// -----------------------------------------------------------------------------
 
 #[test]
 fn subrequest_clone_preserves_fields() {
@@ -142,7 +148,9 @@ fn subresponse_clone_preserves_fields() {
     assert_eq!(cloned.body, Bytes::from_static(b"world"));
 }
 
-// -- SubRequestClient ---------------------------------------------------
+// -----------------------------------------------------------------------------
+// SubRequestClient
+// -----------------------------------------------------------------------------
 
 #[test]
 fn client_wraps_connector() {
@@ -166,7 +174,9 @@ fn client_clone_shares_connector() {
     );
 }
 
-// -- SubRequestError ----------------------------------------------------
+// -----------------------------------------------------------------------------
+// SubRequestError
+// -----------------------------------------------------------------------------
 
 #[test]
 fn subrequest_error_invalid_request_display() {
@@ -233,7 +243,9 @@ fn subrequest_error_stream_idle_timeout_display() {
     assert!(msg.contains("30s"), "should include duration: {msg}");
 }
 
-// -- classify_timeout ---------------------------------------------------
+// -----------------------------------------------------------------------------
+// classify_timeout
+// -----------------------------------------------------------------------------
 
 #[test]
 fn classify_timeout_deadline_binding_when_no_configured_timeout() {
@@ -295,7 +307,9 @@ fn classify_timeout_io_includes_phase() {
     }
 }
 
-// -- Header sanitization ------------------------------------------------
+// -----------------------------------------------------------------------------
+// Header sanitization
+// -----------------------------------------------------------------------------
 
 /// Which of `headers`' names survive the request-direction predicate.
 fn surviving_request_headers(headers: &HeaderMap) -> Vec<String> {
@@ -351,9 +365,6 @@ fn nominated_tokens_match_case_insensitively() {
 
 #[test]
 fn connection_token_cannot_strip_a_protected_forwarding_header() {
-    // A client-supplied `Connection` token naming a proxy-owned forwarding
-    // header must not delete it from the sub-request (same rule as the main
-    // upstream path and filtered sub-requests).
     let mut headers = HeaderMap::new();
     headers.insert("connection", "x-forwarded-for, host".parse().unwrap());
     let nominated = connection_nominated_tokens(&headers);
@@ -366,7 +377,6 @@ fn connection_token_cannot_strip_a_protected_forwarding_header() {
         !is_boundary_stripped(&"host".parse().unwrap(), &nominated),
         "a Connection token must not strip host"
     );
-    // A genuine custom hop-by-hop token is still stripped.
     assert!(
         is_request_stripped(
             &"x-custom".parse().unwrap(),
@@ -380,7 +390,9 @@ fn connection_token_cannot_strip_a_protected_forwarding_header() {
     );
 }
 
-// -- Helpers ------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
 
 #[test]
 fn empty_entity_methods_get_explicit_framing() {
@@ -431,7 +443,9 @@ fn ensure_host_header_uses_peer_address_without_overwriting_explicit_host() {
     assert_eq!(explicit.headers.get(http::header::HOST).unwrap(), "model.example");
 }
 
-// -- Integration-style tests --------------------------------------------
+// -----------------------------------------------------------------------------
+// Integration-style tests
+// -----------------------------------------------------------------------------
 
 #[tokio::test]
 async fn deadline_bounds_the_complete_exchange() {
@@ -513,7 +527,9 @@ async fn try_acquire_permit_returns_none_without_limit() {
     drop(result);
 }
 
-// -- Client ceiling -------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Client ceiling
+// -----------------------------------------------------------------------------
 
 #[test]
 fn client_with_custom_ceiling() {
@@ -533,7 +549,9 @@ fn client_default_ceiling_is_absolute_max() {
     );
 }
 
-// -- Response header sanitization -----------------------------------------
+// -----------------------------------------------------------------------------
+// Response header sanitization
+// -----------------------------------------------------------------------------
 
 #[test]
 fn response_predicate_strips_hop_by_hop_headers() {
@@ -557,7 +575,9 @@ fn response_predicate_strips_hop_by_hop_headers() {
     );
 }
 
-// -- Reserved header sanitization ------------------------------------------
+// -----------------------------------------------------------------------------
+// Reserved header sanitization
+// -----------------------------------------------------------------------------
 
 #[test]
 fn predicate_strips_reserved_internal_prefixes() {
@@ -590,7 +610,9 @@ fn predicate_keeps_all_safe_headers() {
     );
 }
 
-// -- Connector configured_max_connections ---------------------------------
+// -----------------------------------------------------------------------------
+// Connector configured_max_connections
+// -----------------------------------------------------------------------------
 
 #[test]
 fn connector_stores_configured_max_connections() {
@@ -608,7 +630,9 @@ fn connector_stores_configured_max_connections() {
     assert_eq!(unbounded.configured_max_connections(), None, "accessor matches field");
 }
 
-// -- SubRequestConnectorOptions -----------------------------------------------
+// -----------------------------------------------------------------------------
+// SubRequestConnectorOptions
+// -----------------------------------------------------------------------------
 
 #[test]
 fn with_options_creates_connector() {
@@ -647,7 +671,9 @@ fn with_options_circuit_breaker_enabled() {
     assert!(connector.has_circuit_breaker(), "accessor reflects the wired registry");
 }
 
-// -- CircuitGuard outcome classification ------------------------------------
+// -----------------------------------------------------------------------------
+// CircuitGuard outcome classification
+// -----------------------------------------------------------------------------
 
 fn test_registry(threshold: u32) -> CircuitBreakerRegistry {
     CircuitBreakerRegistry::new(CircuitBreakerConfig {
@@ -748,7 +774,9 @@ fn circuit_guard_drop_without_finalize_records_failure() {
     );
 }
 
-// -- SubRequestError (CircuitOpen) ------------------------------------------
+// -----------------------------------------------------------------------------
+// SubRequestError (CircuitOpen)
+// -----------------------------------------------------------------------------
 
 #[test]
 fn subrequest_error_circuit_open_display() {
@@ -760,7 +788,9 @@ fn subrequest_error_circuit_open_display() {
     assert!(msg.contains("127.0.0.1:8080"), "should include peer address: {msg}");
 }
 
-// -- Framework headers ------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Framework headers
+// -----------------------------------------------------------------------------
 
 #[test]
 fn is_transport_header_rejects_hop_by_hop_and_framing() {
@@ -833,7 +863,9 @@ fn framework_headers_set_depth_zero() {
     assert_eq!(value, "0");
 }
 
-// -- StreamLimits ----------------------------------------------------------
+// -----------------------------------------------------------------------------
+// StreamLimits
+// -----------------------------------------------------------------------------
 
 #[test]
 fn stream_limits_fields_are_accessible() {
@@ -858,7 +890,9 @@ fn stream_limits_no_optional_bounds() {
     assert!(limits.max_total_bytes.is_none());
 }
 
-// -- StreamingSubResponse --------------------------------------------------
+// -----------------------------------------------------------------------------
+// StreamingSubResponse
+// -----------------------------------------------------------------------------
 
 #[test]
 fn streaming_sub_response_exposes_status_and_headers() {
@@ -877,7 +911,9 @@ fn streaming_sub_response_exposes_status_and_headers() {
     drop(resp);
 }
 
-// -- SubResponseBody -------------------------------------------------------
+// -----------------------------------------------------------------------------
+// SubResponseBody
+// -----------------------------------------------------------------------------
 
 #[tokio::test]
 async fn sub_response_body_done_returns_none() {
@@ -888,7 +924,9 @@ async fn sub_response_body_done_returns_none() {
     assert!(matches!(result, Ok(None)), "done body should return Ok(None)");
 }
 
-// -- Streaming tests -------------------------------------------------------
+// -----------------------------------------------------------------------------
+// Streaming tests
+// -----------------------------------------------------------------------------
 
 // Test Utilities
 
@@ -1514,7 +1552,6 @@ async fn send_streaming_backpressure_blocks_producer() {
             .await
             .unwrap();
 
-    // Read one chunk then stall — producer should block on TCP backpressure.
     let first = body.next_chunk().await.unwrap().expect("first chunk");
     assert!(!first.is_empty());
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1525,7 +1562,6 @@ async fn send_streaming_backpressure_blocks_producer() {
         "producer should be blocked by TCP backpressure, but sent {sent_while_stalled}/{chunk_count}"
     );
 
-    // Drain remaining — all data must arrive.
     let mut total_bytes = first.len();
     while let Some(chunk) = body.next_chunk().await.unwrap() {
         total_bytes += chunk.len();
@@ -1688,7 +1724,9 @@ async fn send_streaming_circuit_half_open_probe_recovers() {
     handle.abort();
 }
 
-// -- HTTP/2 cleartext (prior-knowledge) helpers ----------------------------
+// -----------------------------------------------------------------------------
+// HTTP/2 cleartext (prior-knowledge) helpers
+// -----------------------------------------------------------------------------
 
 #[expect(clippy::too_many_lines, reason = "H2 server setup")]
 async fn spawn_h2_backend(
@@ -1833,7 +1871,6 @@ async fn send_streaming_h2_cleartext_cancel_resets_stream_and_connection_survive
         max_total_bytes: None,
     };
 
-    // First request — cancel mid-stream.
     let StreamingSubResponse { status, body, .. } =
         Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits.clone(), None))
             .await
@@ -1851,7 +1888,6 @@ async fn send_streaming_h2_cleartext_cancel_resets_stream_and_connection_survive
         "server must observe the RST_STREAM from the cancelled stream"
     );
 
-    // Second request on same connection must succeed.
     let StreamingSubResponse { status, mut body, .. } =
         Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
             .await
@@ -1978,7 +2014,6 @@ async fn send_streaming_h1_incomplete_body_not_reused() {
         max_total_bytes: None,
     };
 
-    // First request — will get an incomplete body.
     let StreamingSubResponse { mut body, .. } =
         Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits.clone(), None))
             .await
@@ -1989,7 +2024,6 @@ async fn send_streaming_h1_incomplete_body_not_reused() {
     assert!(result.is_err(), "incomplete body should produce an error");
     drop(body);
 
-    // Second request must open a new connection.
     let StreamingSubResponse { mut body, .. } =
         Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
             .await
@@ -2062,7 +2096,6 @@ async fn send_streaming_h1_cancel_does_not_reuse_connection() {
         max_total_bytes: None,
     };
 
-    // First request — cancel mid-stream.
     let StreamingSubResponse { mut body, .. } =
         Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits.clone(), None))
             .await
@@ -2090,7 +2123,9 @@ async fn send_streaming_h1_cancel_does_not_reuse_connection() {
     handle.abort();
 }
 
-// -- Header-time completion (204, incomplete) --------------------------------
+// -----------------------------------------------------------------------------
+// Header-time completion (204, incomplete)
+// -----------------------------------------------------------------------------
 
 async fn spawn_204_backend() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     use tokio::io::AsyncWriteExt as _;
@@ -2145,7 +2180,9 @@ async fn send_streaming_204_returns_done_body() {
     backend.abort();
 }
 
-// -- Framework headers in streaming -----------------------------------------
+// -----------------------------------------------------------------------------
+// Framework headers in streaming
+// -----------------------------------------------------------------------------
 
 async fn spawn_echo_headers_backend() -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
     use tokio::io::AsyncWriteExt as _;
@@ -2213,7 +2250,9 @@ async fn send_streaming_propagates_framework_headers() {
     );
 }
 
-// -- Client hardening paths -------------------------------------------------
+// -----------------------------------------------------------------------------
+// Client hardening paths
+// -----------------------------------------------------------------------------
 
 /// A no-op HTTP peer for constructing client calls.
 fn peer_for(addr: std::net::SocketAddr) -> pingora_core::upstreams::peer::HttpPeer {
@@ -2463,7 +2502,9 @@ async fn send_streaming_with_overflowing_stream_duration_fails() {
     assert!(deadline_exceeded, "an unrepresentable stream deadline must fail");
 }
 
-// -- Streaming body limit enforcement ---------------------------------------
+// -----------------------------------------------------------------------------
+// Streaming body limit enforcement
+// -----------------------------------------------------------------------------
 
 /// Open a streaming exchange against a backend that sends one chunk
 /// and then stalls, returning the live body handle.

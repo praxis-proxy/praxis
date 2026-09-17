@@ -17,8 +17,7 @@ use super::ConnectionOptions;
 /// An upstream endpoint to proxy requests to.
 ///
 /// TLS material (CA certs, client cert/key) is pre-parsed at config
-/// time and cached in [`CachedClusterTls`], eliminating per-connection
-/// filesystem I/O.
+/// time and cached in [`CachedClusterTls`].
 ///
 /// ```
 /// use std::sync::Arc;
@@ -47,8 +46,6 @@ pub struct Upstream {
     ///
     /// When set, the proxy sends this value as the upstream HTTP/1.1
     /// `Host` header instead of forwarding the downstream value.
-    /// Parsed at config load time to avoid per-request `HeaderValue`
-    /// conversion.
     pub authority: Option<HeaderValue>,
 
     /// Connection tuning for this upstream.

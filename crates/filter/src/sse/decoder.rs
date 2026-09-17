@@ -81,7 +81,7 @@ impl Default for SseLimits {
 /// discards earlier records from the same chunk. A limit violation poisons the
 /// decoder; an `error` of `Finished` instead signals a `push` after `finish` and
 /// does not poison.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Eq, PartialEq)]
 #[must_use]
 pub struct SseBatch {
     /// Records completed by this call, in order. Each was terminated by a blank
@@ -199,11 +199,6 @@ impl SseDecoder {
 
     /// Feed one body chunk; returns the records it completed and an optional
     /// error.
-    ///
-    /// Takes the chunk as [`Bytes`] — the type Pingora hands body filters — so a
-    /// later revision can return field values as zero-copy `slice_ref`s into the
-    /// chunk without another public signature change. The current implementation
-    /// still copies field values out of the byte slice.
     pub fn push(&mut self, chunk: &Bytes) -> SseBatch {
         if let DecoderState::Finished = self.state {
             return SseBatch {
@@ -861,8 +856,6 @@ mod tests {
             ..SseLimits::default()
         };
         let mut decoder = SseDecoder::with_limits(limits);
-        // The first field commits (allocating `fields`) and the second line is
-        // still buffered in `line_buf` when the record-size limit trips.
         let batch = decoder.push(&to_bytes(b"data: aaaa\ndata: bbbb\n\n"));
         assert!(
             matches!(batch.error, Some(SseDecodeError::RecordTooLarge { .. })),
@@ -1018,8 +1011,6 @@ mod tests {
             &[0xEF, 0xBB, 0xBF, b'd', b'a', b't', b'a', b':', b' ', b'z', b'\n', b'\n'],
             b"data: a\rid: 1\r\r",
             &[b'd', b'a', b't', b'a', b':', b' ', 0xFF, 0xFE, b'\n', b'\n'],
-            // Unterminated inputs: finish yields a trailing record, exercising
-            // the records-vs-trailing split-invariance the change introduced.
             b"data: hello",
             b"event: e\ndata: a\ndata: b",
             b"data: first\n\ndata: second",

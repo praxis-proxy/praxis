@@ -250,9 +250,6 @@ mod tests {
 
     #[test]
     fn tcp_listener_unknown_chain_skipped_without_panic() {
-        // A TCP listener referencing a chain name that does not exist must
-        // not derail cluster validation: the unknown chain contributes no
-        // clusters and the listener's cluster is then reported as undefined.
         let listener: Listener = serde_yaml::from_str(
             "name: t\naddress: \"127.0.0.1:19999\"\nprotocol: tcp\ncluster: pool\nfilter_chains: [missing]\n",
         )

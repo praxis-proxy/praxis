@@ -375,8 +375,6 @@ mod tests {
 
     #[test]
     fn declares_chunked_framing_handles_obs_text_bytes() {
-        // A value with an obs-text byte in an earlier token must still be
-        // detected as chunked, matching Pingora's byte-level framing.
         let mut obs = HeaderMap::new();
         obs.insert(
             http::header::TRANSFER_ENCODING,
@@ -483,10 +481,6 @@ mod tests {
 
     #[test]
     fn duplicate_upgrade_headers_are_not_websocket() {
-        // A client sending `Upgrade: websocket` followed by `Upgrade: h2c`
-        // must not be treated as a clean WebSocket upgrade: reading only the
-        // first value would preserve the whole (multi-valued) Upgrade header
-        // and smuggle the h2c token to the backend.
         let mut headers = HeaderMap::new();
         headers.append("upgrade", "websocket".parse().unwrap());
         headers.append("upgrade", "h2c".parse().unwrap());
@@ -498,7 +492,6 @@ mod tests {
 
     #[test]
     fn duplicate_upgrade_headers_websocket_first_or_last() {
-        // Order must not matter: h2c before or after websocket both fail.
         let mut headers = HeaderMap::new();
         headers.append("upgrade", "h2c".parse().unwrap());
         headers.append("upgrade", "websocket".parse().unwrap());
@@ -514,8 +507,6 @@ mod tests {
             removed: vec![],
             headers: HeaderMap::new(),
         };
-        // A client asks to strip its own X-App-State plus Praxis-owned and
-        // essential headers named in the Connection token.
         let values = vec![http::HeaderValue::from_static(
             "x-app-state, x-forwarded-for, forwarded, x-praxis-route, host, content-length",
         )];

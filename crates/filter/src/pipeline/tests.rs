@@ -119,9 +119,6 @@ fn build_stops_on_first_error() {
 
 #[tokio::test]
 async fn terminal_branch_without_response_fails_closed() {
-    // A `terminal`/`client` rejoin whose sub-chain produces no response must
-    // stop the pipeline with a 500, not proxy upstream while skipping the
-    // filters after the branch point (the historical bypass).
     let after_ran = Arc::new(AtomicUsize::new(0));
     let mut branching = PipelineFilter::new(
         0,
@@ -558,6 +555,25 @@ fn body_capabilities_detects_request_body_writer() {
 }
 
 #[test]
+fn request_body_reset_preserves_other_completion_flags() {
+    let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![
+        Box::new(PassthroughFilter),
+        Box::new(BodyUppercaseFilter),
+        Box::new(ResponseBodyInspectorFilter { chunks }),
+    ]);
+    let mut body_done = [true; 3];
+
+    pipeline.clear_request_body_done(&mut body_done);
+
+    assert_eq!(
+        body_done,
+        [true, false, true],
+        "only request-body completion flags should reset"
+    );
+}
+
+#[test]
 fn body_capabilities_detects_response_body() {
     let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
     let pipeline = make_pipeline(vec![Box::new(ResponseBodyInspectorFilter { chunks })]);
@@ -846,8 +862,6 @@ async fn execute_selected_upstream_request_body_skips_filters_not_executed_in_re
     ]);
     let req = crate::test_utils::make_request(Method::POST, "/upload");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    // Mark the request phase as tracked, with the recorder (index 1)
-    // skipped over — as a SkipTo or terminal branch would leave it.
     ctx.executed_filter_indices = vec![true, false];
 
     let mut body = Some(Bytes::from_static(b"payload"));
@@ -2526,9 +2540,6 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
 
 #[tokio::test]
 async fn body_hooks_run_for_every_filter_before_the_request_phase() {
-    // A StreamBuffer pre-read runs body hooks before execute_http_request
-    // has populated executed_filter_indices. Nothing is known to be
-    // skipped yet, so every eligible filter must still run.
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let pipeline = with_body_indices(FilterPipeline {
@@ -2745,10 +2756,6 @@ async fn branch_filter_failure_mode_closed_propagates_its_error() {
 
 #[tokio::test]
 async fn reenter_short_circuit_still_runs_on_response() {
-    // A ReEnter that loops back must not clear executed_filter_indices: a
-    // filter reached on the first pass but short-circuited (here: a reject)
-    // before being reached again on the second pass must still run its
-    // on_response. Clearing the indices dropped it.
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     let calls = Arc::new(AtomicUsize::new(0));
 
@@ -3351,10 +3358,6 @@ fn body_done_response_body_skips_filter_on_subsequent_chunks() {
 
 #[tokio::test]
 async fn request_body_done_does_not_suppress_response_body() {
-    // A filter with both request- and response-body access that finishes the
-    // request body (BodyDone) must still run its response-body hook. The two
-    // loops share body_done_indices; the response header phase resets it at
-    // the request -> response boundary.
     let responses = Arc::new(std::sync::Mutex::new(Vec::new()));
     let pipeline = make_pipeline(vec![Box::new(RequestBodyDoneWithResponseFilter {
         responses: Arc::clone(&responses),
@@ -3371,7 +3374,6 @@ async fn request_body_done_does_not_suppress_response_body() {
             .unwrap(),
     );
 
-    // Response header phase resets body-done tracking at the boundary.
     drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
 
     let mut resp_body = Some(Bytes::from_static(b"resp"));
@@ -3485,8 +3487,6 @@ fn referenced_files_collects_from_every_declaring_filter() {
     );
 }
 
-/// A filter with no external config must not contribute, so the watcher does not
-/// hash or watch files nothing reads.
 #[test]
 fn referenced_files_skips_filters_that_declare_nothing() {
     let pipeline = make_pipeline(vec![
@@ -3501,9 +3501,6 @@ fn referenced_files_skips_filters_that_declare_nothing() {
     );
 }
 
-/// Duplicates survive at this level on purpose: de-duplication belongs to
-/// `ListenerPipelines::referenced_files`, which sees every listener. Collapsing
-/// here would hide a shared document from that caller.
 #[test]
 fn referenced_files_keeps_duplicates_for_the_caller_to_dedupe() {
     let shared = "/etc/praxis/shared.yaml";
@@ -4580,8 +4577,6 @@ async fn body_condition_without_promotion_skips_gated() {
 #[tokio::test]
 async fn body_condition_promoter_after_gated_skips() {
     let ran = Arc::new(AtomicBool::new(false));
-    // Promoter is ordered AFTER the gated filter, so the gate is not yet set
-    // when the gated filter's condition is evaluated.
     let pipeline = make_pipeline_with_conditions(vec![
         (
             Box::new(GatedRecordingBodyFilter { ran: Arc::clone(&ran) }),
@@ -5725,9 +5720,6 @@ impl HttpFilter for TerminalDouble {
 
 #[test]
 fn terminal_filters_detects_filter_nested_in_branch() {
-    // A terminal filter buried inside a branch sub-chain must be reported. The
-    // top-level-only scan would miss it, letting it activate and drop its
-    // terminal response at runtime inside an outbound chain.
     let mut parent = make_pipeline(vec![Box::new(CountingFilter {
         counter: Arc::new(AtomicUsize::new(0)),
     })]);
@@ -5752,10 +5744,6 @@ fn terminal_filters_detects_filter_nested_in_branch() {
 
 #[test]
 fn set_session_stores_propagates_into_branch_nested_pipelines() {
-    // A nested-pipeline filter placed INSIDE a branch sub-chain, not at the top
-    // level. Runtime-resource setters route through `visit_nested_pipelines`,
-    // which must descend into branch sub-chains so a branch-contained callout's
-    // bound outbound pipeline receives resources too — not just top-level ones.
     let branch_filter = NestedPipelineFilter {
         nested: make_pipeline(vec![]),
     };
@@ -5777,9 +5765,6 @@ fn set_session_stores_propagates_into_branch_nested_pipelines() {
 
     parent.set_session_stores(Arc::new(crate::SessionStoreRegistry::new()));
 
-    // Observe the branch-nested embedded pipeline directly — reach into the
-    // branch filter and query its own nested pipeline — so the assertion does
-    // not depend on the very traversal under test.
     let mut nested_has_stores = false;
     if let AnyFilter::Http(filter) = &mut parent.filters[0].branches[0].filters[0].filter {
         filter.visit_nested_pipelines(&mut |pipeline| {

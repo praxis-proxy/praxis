@@ -219,8 +219,7 @@ enum Operation {
     StripQueryParams(HashSet<String>),
 
     /// Append query parameters.
-    /// Pre-encoded `k=v&k2=v2` suffix, percent-encoded once at config
-    /// load so per-request application is a single sized copy.
+    /// Pre-encoded `k=v&k2=v2` suffix, percent-encoded once at config load.
     AddQueryParams(String),
 }
 
@@ -416,8 +415,7 @@ fn strip_params(qs: &str, remove: &HashSet<String>) -> String {
         .join("&")
 }
 
-/// Append a pre-encoded parameter suffix to a query string in one
-/// sized copy (encoding happened once at config load).
+/// Append a pre-encoded parameter suffix to a query string.
 fn append_encoded_params(qs: &str, encoded: &str) -> String {
     if encoded.is_empty() {
         return qs.to_owned();

@@ -593,7 +593,7 @@ impl PolicyFilter {
     /// Resolve identity by invoking the identity hook chain. Returns the
     /// resolved [`IdentityPayload`] (subject / client / workload / raw
     /// credentials / delegation) or a rejection when no identity
-    /// continues. Cheap — the JWT verifier hits its in-process key cache.
+    /// continues.
     #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
     async fn resolve_identity(
         &self,
@@ -2202,9 +2202,6 @@ mod tests {
 
     #[test]
     fn snapshot_headers_comma_joins_duplicate_field_lines() {
-        // A client that sends the same identity header twice must not be
-        // able to hide a value from the policy engine: both lines are
-        // combined so an equality check fails closed against the spoof.
         let mut req = crate::test_utils::make_request(http::Method::GET, "/");
         req.headers
             .append(http::header::HeaderName::from_static("x-role"), "user".parse().unwrap());

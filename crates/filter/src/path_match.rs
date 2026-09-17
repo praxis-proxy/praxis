@@ -114,8 +114,6 @@ mod tests {
         }
 
         proptest! {
-            /// A match implies the path literally starts with the
-            /// trimmed prefix.
             #[test]
             fn match_implies_starts_with(p in path(), prefix in path()) {
                 if path_prefix_matches(&p, &prefix) {
@@ -124,7 +122,6 @@ mod tests {
                 }
             }
 
-            /// A trailing slash on the prefix never changes the result.
             #[test]
             fn trailing_slash_equivalence(p in path(), prefix in path()) {
                 prop_assert_eq!(
@@ -133,8 +130,6 @@ mod tests {
                 );
             }
 
-            /// Every prefix matches itself and any segment extension
-            /// of itself.
             #[test]
             fn prefix_matches_own_extensions(prefix in path(), seg in segment()) {
                 let extended = format!("{prefix}/{seg}");
@@ -142,23 +137,18 @@ mod tests {
                 prop_assert!(path_prefix_matches(&extended, &prefix));
             }
 
-            /// A non-boundary extension (no `/` separator) never
-            /// matches.
             #[test]
             fn non_boundary_extension_never_matches(prefix in path(), tail in "[a-z0-9]{1,8}") {
                 let extended = format!("{prefix}{tail}");
                 prop_assert!(!path_prefix_matches(&extended, &prefix));
             }
 
-            /// Extending a prefix by a segment strictly increases its
-            /// specificity.
             #[test]
             fn specificity_monotonic(prefix in path(), seg in segment()) {
                 let extended = format!("{prefix}/{seg}");
                 prop_assert!(path_prefix_specificity(&extended) > path_prefix_specificity(&prefix));
             }
 
-            /// Matching never panics on arbitrary inputs.
             #[test]
             fn never_panics(p in "\\PC{0,32}", prefix in "\\PC{0,32}") {
                 let _ = path_prefix_matches(&p, &prefix);

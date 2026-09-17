@@ -66,8 +66,6 @@ impl EndpointHealth {
 
     /// Returns `true` if the endpoint is considered healthy.
     ///
-    /// Lock-free; reads a cached [`AtomicBool`].
-    ///
     /// ```
     /// use praxis_core::health::EndpointHealth;
     ///

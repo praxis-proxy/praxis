@@ -65,8 +65,8 @@ impl Maglev {
 
     /// Hash the key and return the corresponding healthy endpoint.
     ///
-    /// Skips unhealthy and excluded endpoints by probing adjacent table slots,
-    /// falling back to the original selection if all are unhealthy.
+    /// Skips unhealthy and excluded endpoints, falling back to the original
+    /// selection if all are unhealthy.
     pub(crate) fn select(
         &self,
         hash_key: Option<&str>,
@@ -96,8 +96,8 @@ impl Maglev {
     /// The probe is bounded by distinct endpoints rather than table
     /// slots (the ring-hash precedent): with every endpoint rejected,
     /// walking all 65k slots would revisit each endpoint's slots
-    /// thousands of times — hundreds of microseconds per request exactly
-    /// during a full-cluster outage.
+    /// thousands of times, hundreds of microseconds per request, during
+    /// a full-cluster outage.
     #[expect(
         clippy::indexing_slicing,
         reason = "table slot and owner index are in bounds by construction"
@@ -355,7 +355,6 @@ mod tests {
         let keys: Vec<String> = (0..10_000).map(|i| format!("/k-{i}")).collect();
         let before: Vec<Arc<str>> = keys.iter().map(|k| four.select(Some(k), None, &[]).unwrap()).collect();
 
-        // Drop the 4th backend (10.0.0.4:80).
         let three = Maglev::new(endpoints(3), None);
 
         let dropped: Arc<str> = Arc::from("10.0.0.4:80");
@@ -363,7 +362,7 @@ mod tests {
         let mut reassigned = 0_usize;
         for (k, prev) in keys.iter().zip(&before) {
             if *prev == dropped {
-                continue; // These must move; not counted.
+                continue;
             }
             survivors += 1;
             if four.select(Some(k), None, &[]).unwrap() != three.select(Some(k), None, &[]).unwrap() {
@@ -396,9 +395,6 @@ mod tests {
         let four = Maglev::new(endpoints(4), None);
         let added: Arc<str> = Arc::from("10.0.0.4:80");
 
-        // Keys that don't land on the newly-added backend should almost all
-        // stay on the backend they had before (Maglev's minimal-disruption
-        // property, in the scale-up direction).
         let mut stayed_existing = 0_usize;
         let mut reassigned = 0_usize;
         for i in 0..10_000 {
@@ -406,7 +402,7 @@ mod tests {
             let before = three.select(Some(&k), None, &[]).unwrap();
             let after = four.select(Some(&k), None, &[]).unwrap();
             if after == added {
-                continue; // Expected to move onto the new backend.
+                continue;
             }
             stayed_existing += 1;
             if before != after {

@@ -22,7 +22,7 @@ use crate::{config::Config, errors::ProxyError};
 // -----------------------------------------------------------------------------
 
 /// Admin log-level API errors mapped to HTTP status codes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LogLevelError {
     /// Client error (400).
     BadRequest(String),
@@ -70,7 +70,7 @@ pub struct PutLogLevelRequest {
 }
 
 /// One active runtime overlay returned by `GET /api/log-level`.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct LogLevelOverlayView {
     /// Module target; absent for global overlays.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,7 +82,7 @@ pub struct LogLevelOverlayView {
 }
 
 /// `GET /api/log-level` response body.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct LogLevelStateResponse {
     /// Startup baseline rebuilt from `RUST_LOG` + `runtime.log_overrides`.
     pub baseline_directive: String,
@@ -387,7 +387,7 @@ pub(crate) fn validate_put_request(module: Option<&str>, level: &str, duration_s
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Utilities
 // -----------------------------------------------------------------------------
 
 /// Map an optional module target to the overlay map key.
@@ -510,8 +510,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn failed_reload_rolls_back_overlay() {
-        // A reload handle whose layer was never installed (and is dropped)
-        // makes reload_locked fail, exercising the rollback path.
         let (filter_layer, reload_handle) = reload::Layer::new(EnvFilter::new("info"));
         drop(filter_layer);
         let state = LogLevelState::new("info".to_owned(), reload_handle);
@@ -537,7 +535,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn stale_revert_does_not_evict_newer_overlay() {
-        // Fresh state so overlay generations are deterministic (0, then 1).
         let (filter_layer, reload_handle) = reload::Layer::new(EnvFilter::new("info"));
         let _ = Box::leak(Box::new(tracing_subscriber::registry().with(filter_layer)));
         let state = LogLevelState::new("info".to_owned(), reload_handle);
@@ -551,8 +548,6 @@ mod tests {
         state.apply_put(&put("debug")).expect("first put (generation 0)");
         state.apply_put(&put("trace")).expect("second put (generation 1)");
 
-        // The first overlay's revert timer firing late (its abort may have lost
-        // the race with its own wakeup) must not evict the newer overlay.
         state.revert_target("praxis_filter", 0);
         let snap = state.snapshot();
         let overlay = snap
@@ -564,7 +559,6 @@ mod tests {
             "a stale-generation revert must not evict the newer overlay: {snap:?}"
         );
 
-        // The current-generation revert does remove it.
         state.revert_target("praxis_filter", 1);
         assert!(
             state

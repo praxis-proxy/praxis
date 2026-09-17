@@ -313,8 +313,6 @@ mod tests {
 
     #[test]
     fn data_single_field_shares_backing_storage() {
-        // A heap value: copying would reallocate to a new address, so pointer
-        // equality is what proves the sole-data path shares the field's buffer.
         let value = Bytes::from(b"only".to_vec());
         let value_ptr = value.as_ptr();
         let record = SseRecord::from_fields(vec![SseField::Data(value)]);

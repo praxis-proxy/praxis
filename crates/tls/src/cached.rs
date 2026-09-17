@@ -277,9 +277,6 @@ pub struct CachedClusterTls {
     client_cert: Option<Arc<CachedClientCert>>,
 
     /// SNI hostname for outbound connections.
-    ///
-    /// [`Arc<str>`] so the per-request clone in the load balancer's
-    /// upstream construction is reference-counted, not reallocated.
     sni: Option<Arc<str>>,
 
     /// Whether to verify upstream certificates.
@@ -335,10 +332,6 @@ impl CachedClusterTls {
     }
 
     /// Set the SNI hostname.
-    ///
-    /// Accepts anything convertible into `Arc<str>`; pass a `&str` to
-    /// allocate the shared buffer once rather than building a `String`
-    /// first and copying it.
     pub fn set_sni<S: Into<Arc<str>>>(&mut self, sni: S) {
         self.sni = Some(sni.into());
     }

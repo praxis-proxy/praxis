@@ -240,8 +240,6 @@ pub(super) enum HeaderFilterOutcome {
     Rejected(Rejection),
 
     /// Filter produced a complete terminal response (request phase only).
-    /// Boxed end-to-end so the ~100-byte payload is neither unboxed here
-    /// nor re-boxed by the caller.
     TerminalResponse(Box<crate::actions::TerminalResponse>),
 
     /// Filter produced a streaming terminal response (request phase only).

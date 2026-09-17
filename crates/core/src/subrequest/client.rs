@@ -22,9 +22,9 @@ use super::{
 };
 use crate::circuit::{CircuitCheck, PeerKey};
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // SubRequestClient
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Maximum number of 1xx interim responses tolerated before a final
 /// response, bounding a pathological upstream that only emits interim
@@ -138,7 +138,9 @@ impl SubRequestClient {
         let mut bounded_peer = peer.clone();
         clamp_peer_timeouts(&mut bounded_peer, timeout);
 
-        // -- 1. Validate request (before any circuit/admission state) --
+        // ---------------------------------------------------------------------
+        // 1. Validate request (before any circuit/admission state)
+        // ---------------------------------------------------------------------
         let path = request
             .uri
             .path_and_query()
@@ -170,7 +172,9 @@ impl SubRequestClient {
             let _cl = req_header.insert_header("Content-Length", request.body.len().to_string());
         }
 
-        // -- 2. Circuit precheck --
+        // ---------------------------------------------------------------------
+        // 2. Circuit precheck
+        // ---------------------------------------------------------------------
         let peer_key: Option<PeerKey> = bounded_peer
             .address()
             .as_inet()
@@ -183,14 +187,18 @@ impl SubRequestClient {
             return Err(SubRequestError::CircuitOpen { peer: key.to_string() });
         }
 
-        // -- 3. Admission --
+        // ---------------------------------------------------------------------
+        // 3. Admission
+        // ---------------------------------------------------------------------
         let admission_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         if admission_budget.is_zero() {
             return Err(SubRequestError::DeadlineExceeded);
         }
         let permit = self.connector.try_acquire_permit(admission_budget).await?;
 
-        // -- 4. Circuit try_acquire --
+        // ---------------------------------------------------------------------
+        // 4. Circuit try_acquire
+        // ---------------------------------------------------------------------
         let circuit_guard = match (&self.connector.circuit_breakers, peer_key) {
             (Some(registry), Some(key)) => match registry.try_acquire(key.clone()) {
                 CircuitCheck::Rejected => {
@@ -201,7 +209,9 @@ impl SubRequestClient {
             _ => None,
         };
 
-        // -- 5. Connect + I/O --
+        // ---------------------------------------------------------------------
+        // 5. Connect + I/O
+        // ---------------------------------------------------------------------
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Err(SubRequestError::DeadlineExceeded);
@@ -258,7 +268,9 @@ impl SubRequestClient {
             .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.write_timeout, "write"))?
             .map_err(|e| SubRequestError::Io(e.to_string()))?;
 
-        // -- 6. Read the response header, skipping 1xx interim responses --
+        // ---------------------------------------------------------------------
+        // 6. Read the response header, skipping 1xx interim responses
+        // ---------------------------------------------------------------------
         //
         // Pingora's H1 client reads exactly one header block per call and does
         // not advance past an informational (1xx) response; its body reader is
@@ -322,7 +334,9 @@ impl SubRequestClient {
             resp_headers.append(name.clone(), value.clone());
         }
 
-        // -- 7. Return RawExchange --
+        // ---------------------------------------------------------------------
+        // 7. Return RawExchange
+        // ---------------------------------------------------------------------
         histogram!(SUBREQUEST_HEADER_DURATION_SECONDS).record(exchange_started.elapsed().as_secs_f64());
 
         Ok(RawExchange {
@@ -583,9 +597,9 @@ impl SubRequestClient {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Private Utilities
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Tear down an abnormally terminated header exchange: drop the circuit
 /// guard (recording a failure via its `Drop` impl), discard the session,

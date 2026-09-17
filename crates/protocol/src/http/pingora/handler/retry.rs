@@ -294,9 +294,7 @@ mod tests {
             percent: praxis_core::config::BudgetPercent::try_from(0.0).unwrap(),
             min_retries_per_second: 0,
         };
-        // min_rps 0 and percent 0 → max_tokens = 0, starts with 0 tokens
         let state = ClusterRetryState::new(Some(&cfg));
-        // Force tokens to 0
         while state.budget().try_acquire() {}
         let ctx = ctx_idempotent();
         let policy = RetryPolicy {

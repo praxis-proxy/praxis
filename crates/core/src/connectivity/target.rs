@@ -638,11 +638,12 @@ mod tests {
 
     #[test]
     fn query_only_url_gets_root_path() {
-        // A query with no path: `path_and_query().as_str()` yields `?token=x`
-        // (no leading slash), which is not a valid standalone origin-form URI.
-        // The empty path must default to `/`, giving `/?token=x`.
         let p = parse_ok("https://api.example.com?token=x");
-        assert_eq!(p.origin_form.to_string(), "/?token=x");
+        assert_eq!(
+            p.origin_form.to_string(),
+            "/?token=x",
+            "a query-only URL must default the empty path to `/`"
+        );
     }
 
     #[test]
@@ -707,12 +708,13 @@ mod tests {
 
     #[test]
     fn rejects_bracketed_ipv4_literal() {
-        // Brackets denote an IPv6 literal (RFC 3986); an IPv4 address in
-        // brackets would produce the malformed Host `[127.0.0.1]`.
-        assert!(matches!(
-            parse_target("https://[127.0.0.1]/"),
-            Err(InvalidTarget::InvalidHost(t)) if t == "127.0.0.1"
-        ));
+        assert!(
+            matches!(
+                parse_target("https://[127.0.0.1]/"),
+                Err(InvalidTarget::InvalidHost(t)) if t == "127.0.0.1"
+            ),
+            "brackets denote an IPv6 literal per RFC 3986; a bracketed IPv4 is malformed"
+        );
     }
 
     #[test]
@@ -737,12 +739,10 @@ mod tests {
     #[test]
     fn parse_errors_never_contain_the_input_url() {
         let url = "ftp://secret-user@host/path?token=abc";
-        // Fragment/userinfo are checked before scheme? userinfo present here.
         let err = parse_target(url).unwrap_err();
         assert!(!err.to_string().contains("secret-user"));
         assert!(!err.to_string().contains("token=abc"));
 
-        // A Malformed-producing input must not leak the raw URL, path, or query.
         let malformed = "https://exa mple.com/secret-path?q=leak";
         let merr = parse_target(malformed).unwrap_err();
         assert!(
@@ -755,7 +755,9 @@ mod tests {
         assert!(!disp.contains("q=leak"), "Malformed Display leaked query: {disp}");
     }
 
-    // ===== Test Utilities =====
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
 
     use pingora_core::upstreams::peer::{Peer as _, Scheme};
 
@@ -839,11 +841,12 @@ mod tests {
     #[test]
     #[should_panic(expected = "non-empty SNI")]
     fn peer_for_refuses_empty_tls_sni() {
-        // Fail-closed construction guards the pingora SkipAll footgun.
         drop(peer_for("10.0.0.1:443".parse().unwrap(), true, ""));
     }
 
-    // ===== Test Utilities =====
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
 
     use std::sync::{
         Arc as StdArc,
@@ -970,9 +973,6 @@ mod tests {
 
     #[tokio::test]
     async fn dns_host_resolving_to_empty_set_yields_resolve_empty() {
-        // A resolver that returns zero addresses for a DNS host must produce a
-        // clean typed Resolve(Empty) error (the defensive post-dedup check), not
-        // a target with no peers.
         let fake = FakeResolver::ok(vec![]);
         let err = prepare_url_target_with_resolver("http://empty-set.test/", far_deadline(), |_| Ok(()), &fake)
             .await
@@ -987,8 +987,8 @@ mod tests {
     #[tokio::test]
     async fn complete_set_reaches_hook_normalized_and_deduped() {
         let fake = FakeResolver::ok(vec![
-            "::ffff:1.2.3.4".parse().unwrap(), // IPv4-mapped → unwrapped
-            "1.2.3.4".parse().unwrap(),        // duplicate after unwrap → removed
+            "::ffff:1.2.3.4".parse().unwrap(),
+            "1.2.3.4".parse().unwrap(),
             "9.9.9.9".parse().unwrap(),
         ]);
         let target = prepare_url_target_with_resolver("https://h.example.com/", far_deadline(), |_| Ok(()), &fake)
@@ -1065,10 +1065,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn deadline_checkpoint_before_validate_fires() {
-        // Paused clock: checkpoints 1-2 pass (future deadline), the resolver
-        // advances the clock past the deadline and returns Ok immediately, so
-        // timeout_at yields Ok — then checkpoint 3 must catch the expiry and the
-        // hook must NOT run.
         let deadline = Instant::now() + Duration::from_secs(30);
         let fake =
             FakeResolver::ok(vec!["1.2.3.4".parse().unwrap()]).with_delay(FakeDelay::Advance(Duration::from_secs(31)));
@@ -1098,8 +1094,6 @@ mod tests {
         reason = "synchronous hook intentionally blocks the real clock to test checkpoint 4"
     )]
     async fn deadline_after_validate_returns_deadline_but_hook_ran() {
-        // A literal URL whose hook sleeps the deadline out then returns Ok:
-        // checkpoint 4 must return DeadlineExceeded, and the hook flag is true.
         let deadline = Instant::now() + Duration::from_millis(30);
         let fake = FakeResolver::ok(vec![]);
         let ran = StdArc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1125,7 +1119,6 @@ mod tests {
 
     #[tokio::test]
     async fn public_wrapper_prepares_a_literal_target() {
-        // Port 9 (discard) is never dialed — prepare_url_target does not connect.
         let target = prepare_url_target("http://127.0.0.1:9/health", far_deadline(), |_| Ok(()))
             .await
             .expect("literal prepares");
@@ -1180,7 +1173,6 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(5);
         let client = SubRequestClient::new(SubRequestConnector::new(1, None));
 
-        // Buffered.
         let target = prepare_url_target(&url, deadline, |_| Ok(())).await.unwrap();
         let prepared = target.bind(get_request());
         let peer = prepared.peer_at(0).expect("one address");
@@ -1190,7 +1182,6 @@ mod tests {
         assert_eq!(resp.status, 200);
         assert_eq!(resp.body, bytes::Bytes::from_static(b"hello-parity"));
 
-        // Streaming (fresh prepared target — bind consumes the target).
         let target = prepare_url_target(&url, deadline, |_| Ok(())).await.unwrap();
         let prepared = target.bind(get_request());
         let peer = prepared.peer_at(0).expect("one address");

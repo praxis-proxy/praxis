@@ -28,9 +28,8 @@ use crate::{FilterError, actions::FilterAction, any_filter::AnyFilter, tcp_filte
 impl FilterPipeline {
     /// Run all TCP connect filters in order.
     ///
-    /// TCP filters do not participate in branch chain
-    /// evaluation currently. TCP pipelines execute filters
-    /// sequentially without conditional branching or rejoin logic.
+    /// TCP pipelines execute sequentially, without conditional branching
+    /// or rejoin logic.
     ///
     /// # Errors
     ///

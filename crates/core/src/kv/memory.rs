@@ -3,10 +3,6 @@
 
 //! In-memory key-value store backend using [`DashMap`].
 //!
-//! Optimized for concurrent reads with lock-free lookups.
-//! Writes are sharded across map segments to minimize
-//! contention.
-//!
 //! [`DashMap`]: dashmap::DashMap
 
 use std::sync::Arc;
@@ -32,8 +28,7 @@ const MAX_ENTRIES: usize = 100_000;
 
 /// Thread-safe in-memory key-value store.
 ///
-/// Uses [`DashMap`] for concurrent access. Reads are
-/// lock-free; writes shard across map segments.
+/// Uses [`DashMap`] for concurrent access.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -409,10 +404,6 @@ mod tests {
 
     #[test]
     fn lookup_prefix_returns_smallest_matching_key() {
-        // With many matching keys, the result must be deterministic
-        // (lexicographically smallest), not an arbitrary hash-order entry.
-        // Dozens of keys (inserted largest-first) make an arbitrary-order
-        // implementation near-certain to return a non-smallest key.
         let store = InMemoryKvBackend::new();
         for c in ('a'..='z').rev() {
             let key = format!("route.{c}");
@@ -441,10 +432,6 @@ mod tests {
 
     #[test]
     fn lookup_suffix_returns_smallest_matching_key() {
-        // Determinism guard for the Suffix arm: with many suffix matches the
-        // lexicographically smallest key must win, not an arbitrary hash-order
-        // entry. Keys inserted largest-first make a nondeterministic
-        // implementation near-certain to return a non-smallest key.
         let store = InMemoryKvBackend::new();
         for c in ('a'..='z').rev() {
             let key = format!("{c}.svc");

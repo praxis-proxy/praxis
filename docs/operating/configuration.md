@@ -620,8 +620,8 @@ use it as a primary data store.
 
 The `KvBackend` trait allows alternative implementations
 (e.g. Redis). The default `InMemoryKvBackend` uses
-DashMap for lock-free reads. See the `praxis_core::kv`
-module docs for the trait definition.
+DashMap. See the `praxis_core::kv` module docs for the
+trait definition.
 
 ## Graceful Shutdown
 

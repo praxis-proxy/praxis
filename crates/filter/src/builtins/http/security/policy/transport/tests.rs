@@ -25,9 +25,9 @@ use super::*;
 
 const OK_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nhi";
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 #[expect(clippy::too_many_lines, reason = "the mapping table is the test")]
@@ -439,9 +439,9 @@ async fn resolution_leaves_the_rest_of_the_budget_for_the_exchange() {
     assert!(remaining <= budget, "and never more than was granted");
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Address selection and failover
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[test]
 fn a_public_answer_survives_a_private_one() {
@@ -556,9 +556,9 @@ fn only_an_address_specific_failure_justifies_another_address() {
     assert!(!worth_another_address(&SubRequestError::Io("reset".to_owned())));
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Limits and deadlines
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_successful_exchange_returns_the_status_body_and_headers() {
@@ -847,9 +847,9 @@ async fn a_pool_outlives_the_runtime_that_built_the_transport() {
     assert_eq!(backend.heads().len(), 2, "both requests reached the backend");
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Test Utilities
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Raw HTTP/1.1 test backend that records received request heads.
 struct Backend {

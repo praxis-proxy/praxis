@@ -37,10 +37,6 @@ fn via_value(version: Version) -> &'static str {
 }
 
 /// Pre-validated [`http::HeaderValue`] for [`via_value`]'s entry.
-///
-/// Inserting the `&str` directly would re-validate and heap-copy the
-/// value on every forwarded request and response; these statics wrap
-/// the same bytes once at compile time.
 fn via_header_value(entry: &'static str) -> http::HeaderValue {
     const V09: http::HeaderValue = http::HeaderValue::from_static("0.9 praxis");
     const V10: http::HeaderValue = http::HeaderValue::from_static("1.0 praxis");

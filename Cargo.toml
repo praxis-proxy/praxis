@@ -27,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.5"
+version = "0.5.6"
 edition = "2024"
 rust-version = "1.96"
 authors = ["Shane Utt <shaneutt@linux.com>"]
@@ -48,7 +48,7 @@ dashmap = "6.2.1"
 futures = "0.3.34"
 h2 = "0.4.19"
 http = "1.5.0"
-jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
@@ -69,10 +69,10 @@ parking_lot = "0.12.5"
 proptest = "1.11.0"
 quote = "1.0.47"
 praxis = { path = "crates/server", package = "praxis-proxy" }
-praxis-core = { version = "0.5.5", path = "crates/core", package = "praxis-proxy-core" }
-praxis-filter = { version = "0.5.5", path = "crates/filter", package = "praxis-proxy-filter" }
-praxis-protocol = { version = "0.5.5", path = "crates/protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.5.5", path = "crates/tls", package = "praxis-proxy-tls" }
+praxis-core = { version = "0.5.6", path = "crates/core", package = "praxis-proxy-core" }
+praxis-filter = { version = "0.5.6", path = "crates/filter", package = "praxis-proxy-filter" }
+praxis-protocol = { version = "0.5.6", path = "crates/protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.5.6", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }

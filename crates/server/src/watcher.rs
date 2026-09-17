@@ -767,10 +767,6 @@ mod tests {
     // Integration tests
     // -------------------------------------------------------------------------
 
-    /// The gate must notice a referenced document changing while the main config
-    /// stays byte-identical. This is the core of praxis-proxy/praxis#900: hashing
-    /// the main config alone left a filter serving whatever document it loaded at
-    /// startup, with no signal that the file on disk had moved on.
     #[test]
     fn referenced_document_change_is_detected_with_main_config_untouched() {
         let dir = tempfile::tempdir().unwrap();
@@ -780,7 +776,6 @@ mod tests {
         let refs = vec![doc.clone()];
         let before = composite_hash(VALID_YAML, &refs);
 
-        // Only the referenced document changes.
         std::fs::write(&doc, "plugins: [{name: added}]\n").unwrap();
         let after = composite_hash(VALID_YAML, &refs);
 
@@ -790,8 +785,6 @@ mod tests {
         );
     }
 
-    /// A document that disappears is a change, not a no-op. Hashing a missing file
-    /// as empty would make deletion invisible.
     #[test]
     fn referenced_document_removal_is_detected() {
         let dir = tempfile::tempdir().unwrap();
@@ -808,8 +801,6 @@ mod tests {
         );
     }
 
-    /// Two documents swapping contents must still register as a change, which is
-    /// why the path is folded into the hash alongside the content.
     #[test]
     fn swapping_two_referenced_documents_is_detected() {
         let dir = tempfile::tempdir().unwrap();
@@ -829,8 +820,6 @@ mod tests {
         );
     }
 
-    /// A filesystem event for a referenced document must pass the path filter, even
-    /// though that document is not the main config.
     #[test]
     fn path_filter_matches_a_referenced_document() {
         let dir = tempfile::tempdir().unwrap();
@@ -848,8 +837,6 @@ mod tests {
         assert!(filter.matches(&event), "a referenced document's event must be accepted");
     }
 
-    /// A referenced document configured as a relative path must match the
-    /// cwd-joined spelling inotify reports on Linux.
     #[test]
     fn path_filter_matches_a_relative_referenced_document_by_absolute_spelling() {
         let _lock = CWD_MUTEX.get_or_init(Mutex::default).lock().unwrap();
@@ -870,8 +857,6 @@ mod tests {
         );
     }
 
-    /// Adding referenced documents must not widen the filter: a sibling file
-    /// nothing references is still rejected.
     #[test]
     fn path_filter_rejects_a_document_that_is_not_referenced() {
         let dir = tempfile::tempdir().unwrap();
@@ -888,7 +873,6 @@ mod tests {
         );
     }
 
-    /// A document outside the main config's directory needs its own watch.
     #[test]
     fn watch_dirs_include_a_referenced_documents_own_directory() {
         let dirs = watch_dirs_for(
@@ -902,7 +886,6 @@ mod tests {
         );
     }
 
-    /// Documents alongside the main config need no second watch.
     #[test]
     fn watch_dirs_collapse_documents_in_the_config_directory() {
         let dirs = watch_dirs_for(
@@ -915,12 +898,6 @@ mod tests {
         assert_eq!(dirs, vec![PathBuf::from("/etc/praxis")], "one directory, watched once");
     }
 
-    /// A reload that fails must not advance the content hash.
-    ///
-    /// Advancing it would strand the operator's edit: the unchanged-content check
-    /// would then skip every retry, so a transient failure would become permanent
-    /// and the edit would never take effect no matter how long the provider took
-    /// to recover.
     #[test]
     fn failed_reload_leaves_hash_unchanged_so_the_edit_is_retried() {
         let dir = tempfile::tempdir().unwrap();
@@ -954,7 +931,6 @@ mod tests {
         let original_hash = composite_hash(VALID_YAML, &[]);
         let mut hash = original_hash;
 
-        // An edit that cannot be parsed stands in for any failing reload.
         std::fs::write(&config_path, "this: is: not: valid: praxis: config\n").unwrap();
         let ok = handle_reload(
             &config_path,
@@ -979,8 +955,6 @@ mod tests {
             "a failed reload must leave the hash untouched, or the retry is skipped forever",
         );
 
-        // Recovery: the same path now holds something valid, and because the hash
-        // was never advanced the attempt is not short-circuited.
         std::fs::write(&config_path, VALID_YAML).unwrap();
         let recovered = handle_reload(
             &config_path,
@@ -1622,8 +1596,6 @@ mod tests {
         assert!(last.is_none(), "a clean pre-check must not record a failure time");
     }
 
-    /// A fix that lands while the watcher is backing off must still be
-    /// applied, even though it produces no further filesystem events.
     #[test]
     fn deferred_reload_is_retried_after_backoff_without_a_new_event() {
         let dir = tempfile::tempdir().unwrap();
@@ -1677,13 +1649,9 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
 
-        // Fail once to arm the backoff window.
         std::fs::write(&config_path, "invalid: [[[yaml").unwrap();
         std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 200));
 
-        // Write the fix inside the backoff window. The watcher consumes
-        // this event while still backing off, so the retry has to come
-        // from the timer rather than from another notification.
         std::fs::write(&config_path, VALID_YAML_CHANGED).unwrap();
         std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 200));
 

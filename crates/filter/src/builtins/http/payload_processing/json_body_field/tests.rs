@@ -127,9 +127,6 @@ async fn extracts_field_from_complete_json() {
 
 #[tokio::test]
 async fn complete_json_in_non_final_chunk_defers_promotion() {
-    // A non-final chunk that is itself a complete JSON object must not
-    // promote: trailing bytes in a later chunk could override the field the
-    // backend parses. Extraction is deferred to the end-of-stream pass.
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -236,9 +233,6 @@ async fn returns_continue_on_incomplete_json() {
 
 #[tokio::test]
 async fn incomplete_json_does_not_promote() {
-    // A body that is not (yet) complete valid JSON must not promote: promoting
-    // from an unvalidated prefix desyncs the proxy from a backend that rejects
-    // or reparses the full body.
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -287,8 +281,6 @@ async fn promotes_with_large_trailing_unmapped_value() {
 
 #[tokio::test]
 async fn trailing_content_after_json_does_not_promote() {
-    // Content after a complete JSON value means the backend would reject the
-    // body (or parse differently); the proxy must not promote a header from it.
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -310,10 +302,6 @@ async fn trailing_content_after_json_does_not_promote() {
 
 #[tokio::test]
 async fn trailing_whitespace_after_json_still_promotes() {
-    // Newline- or whitespace-terminated JSON is routine from legitimate
-    // producers and parses identically on the backend; only non-whitespace
-    // trailing content must block promotion. Pins the serde_json `end()`
-    // semantics the extractor relies on.
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -333,10 +321,6 @@ async fn trailing_whitespace_after_json_still_promotes() {
 
 #[tokio::test]
 async fn last_wins_on_duplicate_keys() {
-    // Standard JSON parsers (serde_json, Python, JS) take the last value for a
-    // duplicated key. The promoted header must agree with what the backend
-    // parses, or an attacker could route/authorize on one value while the
-    // backend acts on another.
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -920,7 +904,6 @@ async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.current_filter_id = Some(0);
 
-    // First, a complete body at end-of-stream promotes and returns BodyDone.
     let full = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
     let mut body = Some(Bytes::from_static(full));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
@@ -930,7 +913,6 @@ async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "first promotion adds one header");
 
-    // A second hook (e.g. the EOS frozen body) must not re-Add a duplicate.
     let mut body = Some(Bytes::from_static(full));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(
