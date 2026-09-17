@@ -71,9 +71,6 @@ fn process_logging_writes_to_file() {
         .spawn()
         .expect("spawn praxis");
 
-    // Wait for a served HTTP response, not merely an accepted socket: the
-    // listener backlog accepts before the service is handling requests, so a
-    // TCP-only gate lets the request below race startup.
     wait_for_http(&format!("127.0.0.1:{port}"));
 
     let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
