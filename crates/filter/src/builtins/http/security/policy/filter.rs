@@ -468,7 +468,7 @@ impl PolicyFilter {
         }
     }
 
-    /// Warn when inference response rules cannot cover all responses.
+    /// Report inference response rules that cannot cover every response.
     fn warn_on_inference_response_gaps(cfg: &PolicyFilterConfig) {
         if !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
             tracing::warn!(
@@ -478,7 +478,7 @@ impl PolicyFilter {
                  will never run. Set `body_access: read_write` to enable them.",
             );
         }
-        tracing::warn!(
+        tracing::debug!(
             target: "policy.filter",
             "policy declares response-phase `llm:` rules: a response the upstream streams as \
              server-sent events carries no single completion, so those rules cannot run for it. \
