@@ -183,6 +183,25 @@ cluster, upstream, rewritten path, extensions,
 metadata, filter state. Body mode is clamped to the
 baseline ceiling via `clamp_body_mode_to_ceiling`.
 
+**Selected-upstream request-body phase:**
+
+After the request-filter pipeline completes and an
+upstream is selected, `run_pipeline` runs
+`execute_http_selected_upstream_request_body` on the
+same live filter context before the context fields
+are extracted. The phase runs only when
+`needs_selected_upstream_request_body` (a body-
+capability flag) and `filter_ctx.upstream.is_some()`.
+A reject or oversized adapted output (over the
+effective request-body limit resolved by
+`selected_upstream_body_limit`) becomes a local
+response with no upstream connection. Successful
+adaptation with a body writer is stored in the
+separate `adapted_request_body`,
+`retained_adapted_request_body`, and
+`adapted_request_body_len` fields; the canonical
+`pre_read_body` is left untouched.
+
 Source: `request_filter/mod.rs`,
 `request_filter/validation.rs`,
 `request_filter/stream_buffer.rs`, `normalize.rs`,
@@ -199,7 +218,10 @@ Async (Pingora allows `.await` here).
   body; returns immediately.
 - `pre_read_body` present - drains pre-read chunks
   from StreamBuffer mode instead of reading from the
-  session.
+  session. When adaptation ran
+  (`retained_adapted_request_body` is `Some`), the
+  drain forwards the adapted body exclusively and
+  never falls back to the canonical `pre_read_body`.
 - `!caps.needs_request_body` - no filter declared
   body access; returns immediately.
 
@@ -272,7 +294,9 @@ upstream. Runs after Pingora connects to the backend.
 4. **Content-Length repair** - when StreamBuffer body
    mutation changed the payload length,
    `ctx.mutated_request_body_len` updates the
-   `Content-Length` header.
+   `Content-Length` header. `apply_mutated_content_length`
+   stamps the adapted length when present (from the
+   selected-upstream body phase).
 5. **Via injection** - appends `Via: <version> praxis`
    per RFC 9110 Section 7.6.3.
 
@@ -453,6 +477,10 @@ Retry is driven by `fail_to_connect` setting the
 `retry` flag on the Pingora error. On retry, Pingora
 replays the request to `upstream_peer` (which reuses
 the saved upstream) and re-runs the downstream hooks.
+`reseed_retry_body` reseeds only the adapted
+representation on retry when selected-upstream body
+adaptation ran; the retry-body replay guard accounts
+for `max(original downstream body, final adapted body)`.
 
 Constraints:
 

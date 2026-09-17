@@ -140,8 +140,14 @@ pub(super) fn should_retry(
         return RetryDecision::DoNotRetry;
     }
 
-    let mutated_len = ctx.mutated_request_body_len.unwrap_or(0) as u64;
-    let effective_body_size = std::cmp::max(ctx.request_body_bytes, mutated_len);
+    // Adapted length (selected-upstream phase, #1139) supersedes the pre-read
+    // mutated length; retry accounting uses the larger of the original
+    // downstream body and the final transformed body.
+    let transformed_len = ctx
+        .adapted_request_body_len
+        .or(ctx.mutated_request_body_len)
+        .unwrap_or(0) as u64;
+    let effective_body_size = std::cmp::max(ctx.request_body_bytes, transformed_len);
     let body_limit = policy.body_limit_bytes();
     if effective_body_size > body_limit {
         debug!(
@@ -362,6 +368,20 @@ mod tests {
         assert!(
             !is_retriable(&permissive, RetryOutcome::Other),
             "even a fully permissive policy must not retry unclassified errors"
+        );
+    }
+
+    #[test]
+    fn should_retry_blocks_when_adapted_body_exceeds_limit() {
+        let mut ctx = ctx_idempotent();
+        ctx.request_body_bytes = 10; // small original downstream body
+        ctx.adapted_request_body_len = Some(100_000); // adaptation expanded it past the limit
+
+        let decision = should_retry(&ctx, &RetryPolicy::legacy_default(), RetryOutcome::ConnectFailure, None);
+
+        assert!(
+            matches!(decision, RetryDecision::DoNotRetry),
+            "an adapted body over the replay limit must block the retry"
         );
     }
 }

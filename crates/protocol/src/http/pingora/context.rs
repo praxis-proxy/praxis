@@ -196,6 +196,31 @@ pub struct PingoraRequestCtx {
     /// closing a request-smuggling mismatch. Set only when a body writer ran.
     pub retained_pre_read_body: Option<VecDeque<Bytes>>,
 
+    /// Adapted request body captured by the selected-upstream phase (#1139).
+    ///
+    /// When a selected-upstream body writer ran, the phase output is frozen
+    /// here as the exchange-local body Pingora forwards to the selected
+    /// upstream. Drained by `request_body_filter` in preference to
+    /// `pre_read_body`; kept separate from the canonical pre-read body so the
+    /// canonical bytes are never forwarded once adaptation ran (#1138).
+    ///
+    /// Uses `VecDeque` so draining from the front is O(1).
+    pub adapted_request_body: Option<VecDeque<Bytes>>,
+
+    /// Retained copy of the adapted body for retry replay (#1139).
+    ///
+    /// `Some(_)` is the durable marker that adaptation ran for this request; it
+    /// persists for the request's lifetime (unlike `adapted_request_body`,
+    /// which drains to `None`). `reseed_retry_body` restores
+    /// `adapted_request_body` from this copy on each retry so replays match the
+    /// stamped `Content-Length`.
+    pub retained_adapted_request_body: Option<VecDeque<Bytes>>,
+
+    /// Authoritative length of the adapted body sent to the selected upstream
+    /// (#1139). Takes precedence over `mutated_request_body_len` in
+    /// `apply_mutated_content_length` and the retry-body replay guard.
+    pub adapted_request_body_len: Option<usize>,
+
     /// Buffer for request body accumulation in [`StreamBuffer`] mode.
     ///
     /// [`StreamBuffer`]: praxis_filter::BodyMode::StreamBuffer
@@ -569,6 +594,9 @@ impl Default for PingoraRequestCtx {
             upstream_connect_start: None,
             pre_read_body: None,
             retained_pre_read_body: None,
+            adapted_request_body: None,
+            retained_adapted_request_body: None,
+            adapted_request_body_len: None,
             request_body_buffer: None,
             request_body_bytes: 0,
             request_body_mode: BodyMode::Stream,
@@ -1132,6 +1160,20 @@ mod tests {
             fctx_a2.filter_state.get(&0).and_then(|v| v.downcast_ref::<String>()),
             Some(&String::from("from_pipeline_a")),
             "request A should still see its own state in a later phase"
+        );
+    }
+
+    #[test]
+    fn default_ctx_has_no_adapted_body() {
+        let ctx = PingoraRequestCtx::default();
+        assert!(ctx.adapted_request_body.is_none(), "adapted body defaults to None");
+        assert!(
+            ctx.retained_adapted_request_body.is_none(),
+            "retained adapted body defaults to None"
+        );
+        assert!(
+            ctx.adapted_request_body_len.is_none(),
+            "adapted body length defaults to None"
         );
     }
 

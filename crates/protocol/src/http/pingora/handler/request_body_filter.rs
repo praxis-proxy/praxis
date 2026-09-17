@@ -13,6 +13,8 @@
 //! [`BodyMode`]: praxis_filter::BodyMode
 //! [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
 
+use std::collections::VecDeque;
+
 use bytes::Bytes;
 use pingora_core::Result;
 use pingora_proxy::Session;
@@ -29,6 +31,36 @@ use super::{
 // Request Body Filters
 // -----------------------------------------------------------------------------
 
+/// Forward the next pre-read request-body chunk, preferring the adapted
+/// selected-upstream body (#1139) when adaptation ran.
+///
+/// Returns `true` when a pre-read/adapted drain is active and `*body` was set
+/// (the caller must return immediately); `false` when no pre-read drain applies
+/// and normal body-mode processing should proceed.
+///
+/// Once adaptation ran (`retained_adapted_request_body` is `Some`, a marker that
+/// persists for the whole request), the adapted representation is drained
+/// exclusively. After it is exhausted this forwards nothing and NEVER falls back
+/// to the canonical `pre_read_body` — falling back would corrupt framing and
+/// violate the #1138 iteration-isolation invariant.
+fn drain_pre_read_body(ctx: &mut PingoraRequestCtx, body: &mut Option<Bytes>) -> bool {
+    if ctx.retained_adapted_request_body.is_some() {
+        *body = ctx.adapted_request_body.as_mut().and_then(VecDeque::pop_front);
+        if ctx.adapted_request_body.as_ref().is_none_or(VecDeque::is_empty) {
+            ctx.adapted_request_body = None;
+        }
+        return true;
+    }
+    if let Some(chunks) = &mut ctx.pre_read_body {
+        *body = chunks.pop_front();
+        if chunks.is_empty() {
+            ctx.pre_read_body = None;
+        }
+        return true;
+    }
+    false
+}
+
 /// Run body filters on a request body chunk, enforcing size limits.
 #[expect(clippy::large_stack_frames, clippy::too_many_lines, reason = "body filter dispatch")]
 pub(super) async fn execute(
@@ -42,13 +74,8 @@ pub(super) async fn execute(
         return Ok(());
     }
 
-    if let Some(chunks) = &mut ctx.pre_read_body {
-        tracing::trace!("forwarding pre-read body chunks from StreamBuffer mode");
-
-        *body = chunks.pop_front();
-        if chunks.is_empty() {
-            ctx.pre_read_body = None;
-        }
+    if drain_pre_read_body(ctx, body) {
+        tracing::trace!("forwarding pre-read (or adapted selected-upstream) body chunks");
         return Ok(());
     }
 
@@ -195,6 +222,7 @@ mod tests {
 
     use bytes::Bytes;
 
+    use super::drain_pre_read_body;
     use crate::http::pingora::context::PingoraRequestCtx;
 
     #[test]
@@ -255,6 +283,64 @@ mod tests {
             ctx.pre_read_body.is_none(),
             "pre_read_body should be None after draining all chunks"
         );
+    }
+
+    #[test]
+    fn drain_prefers_adapted_body_when_adaptation_ran() {
+        let mut ctx = make_ctx();
+        // Canonical pre-read is present but must be ignored once adaptation ran.
+        ctx.pre_read_body = Some(VecDeque::from([Bytes::from_static(b"canonical")]));
+        ctx.adapted_request_body = Some(VecDeque::from([Bytes::from_static(b"ADAPTED")]));
+        ctx.retained_adapted_request_body = Some(VecDeque::from([Bytes::from_static(b"ADAPTED")]));
+
+        let mut body = None;
+        assert!(drain_pre_read_body(&mut ctx, &mut body), "drain is active");
+        assert_eq!(body, Some(Bytes::from_static(b"ADAPTED")), "adapted body forwarded");
+
+        // Exhausted: forwards nothing, never falls back to the canonical body.
+        let mut next = None;
+        assert!(
+            drain_pre_read_body(&mut ctx, &mut next),
+            "drain stays active after exhaustion"
+        );
+        assert_eq!(next, None, "no fallback to canonical bytes once adapted is drained");
+        assert!(
+            ctx.pre_read_body.is_some(),
+            "canonical pre-read body is left intact but bypassed"
+        );
+    }
+
+    #[test]
+    fn drain_uses_canonical_body_when_no_adaptation() {
+        let mut ctx = make_ctx();
+        ctx.pre_read_body = Some(VecDeque::from([Bytes::from_static(b"canonical")]));
+
+        let mut body = None;
+        assert!(drain_pre_read_body(&mut ctx, &mut body), "drain is active");
+        assert_eq!(body, Some(Bytes::from_static(b"canonical")), "canonical body forwarded");
+        assert!(ctx.pre_read_body.is_none(), "canonical body cleared after draining");
+    }
+
+    #[test]
+    fn drain_inactive_when_no_pre_read() {
+        let mut ctx = make_ctx();
+        let mut body = Some(Bytes::from_static(b"streamed"));
+        assert!(!drain_pre_read_body(&mut ctx, &mut body), "no drain, normal processing");
+        assert_eq!(body, Some(Bytes::from_static(b"streamed")), "body untouched");
+    }
+
+    #[test]
+    fn drain_empty_adapted_body_forwards_nothing() {
+        let mut ctx = make_ctx();
+        ctx.adapted_request_body = Some(VecDeque::new());
+        ctx.retained_adapted_request_body = Some(VecDeque::new());
+
+        let mut body = Some(Bytes::from_static(b"stale"));
+        assert!(
+            drain_pre_read_body(&mut ctx, &mut body),
+            "drain is active for empty adapted body"
+        );
+        assert_eq!(body, None, "empty adapted body forwards nothing (Content-Length: 0)");
     }
 
     // -------------------------------------------------------------------------

@@ -202,9 +202,13 @@ fn normalize_uri_authority(req: &mut RequestHeader, authority: &http::header::He
 /// emitting both `Content-Length` and `Transfer-Encoding: chunked` violates
 /// [RFC 9112 Section 6.2] and is the canonical request-smuggling ambiguity.
 ///
+/// When the selected-upstream phase adapted the body (#1139),
+/// `adapted_request_body_len` is authoritative and takes precedence over the
+/// pre-read `mutated_request_body_len`.
+///
 /// [RFC 9112 Section 6.2]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.2
 pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &PingoraRequestCtx) {
-    let Some(new_len) = ctx.mutated_request_body_len else {
+    let Some(new_len) = ctx.adapted_request_body_len.or(ctx.mutated_request_body_len) else {
         return;
     };
     let _remove = req.remove_header(&http::header::TRANSFER_ENCODING);
@@ -217,16 +221,25 @@ pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &Pingor
 
 /// Re-seed the mutated request body before a retry attempt replays it.
 ///
-/// The first attempt forwards the post-filter body from `pre_read_body`, which
-/// drains as it is written. A retry replays the ORIGINAL body from Pingora's
-/// fixed retry buffer, but [`apply_mutated_content_length`] still stamps the
-/// mutated length; without re-seeding, the replayed body would not match its
-/// `Content-Length` (a request-smuggling gadget). Restore the retained mutated
-/// body so each replay matches the stamped length.
+/// The first attempt forwards the post-filter body from `pre_read_body`
+/// (or `adapted_request_body` when the selected-upstream phase ran), which
+/// drains as it is written. A retry replays from Pingora's fixed retry buffer
+/// (the ORIGINAL bytes) while [`apply_mutated_content_length`] re-stamps the
+/// authoritative length; without re-seeding, the replayed body would not match
+/// its `Content-Length` (a request-smuggling gadget). Restore the retained copy
+/// so each replay matches the stamped length.
 ///
-/// A no-op on the first attempt (`pre_read_body` is still populated) and when
-/// no body writer ran (`retained_pre_read_body` is `None`).
+/// When the selected-upstream phase adapted the body (#1139), only the adapted
+/// representation is replayed; the canonical body is never reseeded once
+/// adaptation ran (preserves the #1138 isolation invariant). A no-op on the
+/// first attempt and when no body writer ran.
 pub(crate) fn reseed_retry_body(ctx: &mut PingoraRequestCtx) {
+    if ctx.retained_adapted_request_body.is_some() {
+        if ctx.adapted_request_body.is_none() {
+            ctx.adapted_request_body = ctx.retained_adapted_request_body.clone();
+        }
+        return;
+    }
     if ctx.pre_read_body.is_none() && ctx.retained_pre_read_body.is_some() {
         ctx.pre_read_body = ctx.retained_pre_read_body.clone();
     }
@@ -1126,6 +1139,27 @@ mod tests {
     }
 
     #[test]
+    fn apply_mutated_content_length_prefers_adapted_length() {
+        let mut req = make_request(&[("transfer-encoding", "chunked")]);
+        let mut ctx = PingoraRequestCtx::default();
+        // Pre-read mutation reported 512, but the selected-upstream phase produced 7.
+        ctx.mutated_request_body_len = Some(512);
+        ctx.adapted_request_body_len = Some(7);
+
+        apply_mutated_content_length(&mut req, &ctx);
+
+        assert_eq!(
+            req.headers.get(http::header::CONTENT_LENGTH).unwrap(),
+            "7",
+            "adapted length wins over the pre-read mutated length"
+        );
+        assert!(
+            req.headers.get(http::header::TRANSFER_ENCODING).is_none(),
+            "stale Transfer-Encoding is stripped"
+        );
+    }
+
+    #[test]
     fn reseed_retry_body_restores_mutated_body_on_retry_only() {
         let mut ctx = PingoraRequestCtx::default();
         ctx.pre_read_body = Some(std::collections::VecDeque::from([bytes::Bytes::from_static(
@@ -1164,6 +1198,54 @@ mod tests {
         assert!(
             plain.pre_read_body.is_none(),
             "with no retained body, a retry must not fabricate one"
+        );
+    }
+
+    #[test]
+    fn reseed_retry_body_restores_adapted_only() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.retained_adapted_request_body = Some(std::collections::VecDeque::from([bytes::Bytes::from_static(
+            b"ADAPTED",
+        )]));
+        // A stale canonical retained copy must NOT be reseeded once adaptation ran.
+        ctx.retained_pre_read_body = Some(std::collections::VecDeque::from([bytes::Bytes::from_static(
+            b"canonical",
+        )]));
+        // Both drained on the previous attempt.
+        ctx.adapted_request_body = None;
+        ctx.pre_read_body = None;
+
+        reseed_retry_body(&mut ctx);
+
+        assert_eq!(
+            ctx.adapted_request_body,
+            Some(std::collections::VecDeque::from([bytes::Bytes::from_static(
+                b"ADAPTED"
+            )])),
+            "adapted body is reseeded from its retained copy"
+        );
+        assert!(
+            ctx.pre_read_body.is_none(),
+            "canonical body is never reseeded once adaptation ran"
+        );
+    }
+
+    #[test]
+    fn reseed_retry_body_restores_canonical_when_no_adaptation() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.retained_pre_read_body = Some(std::collections::VecDeque::from([bytes::Bytes::from_static(
+            b"canonical",
+        )]));
+        ctx.pre_read_body = None;
+
+        reseed_retry_body(&mut ctx);
+
+        assert_eq!(
+            ctx.pre_read_body,
+            Some(std::collections::VecDeque::from([bytes::Bytes::from_static(
+                b"canonical"
+            )])),
+            "canonical body is reseeded when adaptation did not run"
         );
     }
 
