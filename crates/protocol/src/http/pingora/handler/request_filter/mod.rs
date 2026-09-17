@@ -308,7 +308,19 @@ async fn run_pipeline(
         // Canonical pre-read body for the selected-upstream phase. Read before
         // building the filter context, which borrows nothing from `ctx`.
         let mut working_body = if selected_upstream_participates {
-            ctx.pre_read_body.as_ref().and_then(|chunks| chunks.front().cloned())
+            ctx.pre_read_body.as_ref().and_then(|chunks| {
+                // `StreamBuffer` accumulation freezes the whole pre-read body into
+                // a single chunk (mirrored by `store_adapted_request_body`), so the
+                // phase only ever consumes the front chunk. Assert the invariant so
+                // a future multi-chunk representation cannot silently truncate the
+                // body handed to the selected-upstream phase.
+                debug_assert!(
+                    chunks.len() <= 1,
+                    "pre_read_body should be a single frozen chunk, found {}",
+                    chunks.len()
+                );
+                chunks.front().cloned()
+            })
         } else {
             None
         };
@@ -2103,6 +2115,38 @@ mod tests {
         }
     }
 
+    struct SelectedUpstreamErrorFilter;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for SelectedUpstreamErrorFilter {
+        fn name(&self) -> &'static str {
+            "selected_upstream_error"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> std::result::Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
+            praxis_filter::BodyAccess::ReadOnly
+        }
+
+        fn request_body_mode(&self) -> BodyMode {
+            BodyMode::StreamBuffer { max_bytes: Some(4096) }
+        }
+
+        async fn on_selected_upstream_request_body(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+            _body: &mut Option<Bytes>,
+        ) -> std::result::Result<praxis_filter::SelectedUpstreamBodyOutcome, FilterError> {
+            Err(FilterError::from("selected-upstream body hook failed"))
+        }
+    }
+
     /// Build a single-filter pipeline from a named factory (participant filters).
     fn participant_pipeline(name: &'static str, make: fn() -> Box<dyn praxis_filter::HttpFilter>) -> FilterPipeline {
         use std::sync::Arc as StdArc;
@@ -2187,6 +2231,25 @@ mod tests {
         assert!(
             ctx.adapted_request_body.is_none(),
             "a rejected request stores no adapted body"
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_upstream_phase_error_propagates() {
+        let pipeline = participant_pipeline("selected_upstream_error", || Box::new(SelectedUpstreamErrorFilter));
+        let mut ctx = make_ctx();
+        ctx.pre_read_body = Some(VecDeque::from([Bytes::from_static(b"body")]));
+        ctx.upstream = Some(make_test_upstream());
+
+        let result = run_pipeline(&pipeline, make_request(), &mut ctx).await;
+
+        assert!(
+            result.is_err(),
+            "an Err from the selected-upstream body hook propagates out of run_pipeline"
+        );
+        assert!(
+            ctx.adapted_request_body.is_none(),
+            "a failed selected-upstream phase stores no adapted body"
         );
     }
 
