@@ -148,11 +148,12 @@ pub struct VerifierState {
 impl VerifierState {
     /// Build a state from a verifier and the mode it was built with.
     pub(crate) fn new(verifier: Arc<dyn ClientCertVerifier>, mode: ClientCertMode) -> Self {
-        Self {
-            // RequireNamed also mandates a cert, else a certless peer passes on reload.
-            mandatory: matches!(mode, ClientCertMode::Require | ClientCertMode::RequireNamed),
-            verifier,
-        }
+        // RequireNamed also mandates a cert, else a certless peer passes on reload.
+        #[cfg(feature = "spiffe")]
+        let mandatory = matches!(mode, ClientCertMode::Require | ClientCertMode::RequireNamed);
+        #[cfg(not(feature = "spiffe"))]
+        let mandatory = mode == ClientCertMode::Require;
+        Self { mandatory, verifier }
     }
 }
 

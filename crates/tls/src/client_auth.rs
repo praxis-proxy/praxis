@@ -12,17 +12,20 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "spiffe")]
 use rustls::{
-    DistinguishedName, RootCertStore, SignatureScheme,
-    client::danger::HandshakeSignatureValid,
-    pki_types::{CertificateDer, CertificateRevocationListDer, UnixTime, pem::PemObject as _},
-    server::{
-        WebPkiClientVerifier,
-        danger::{ClientCertVerified, ClientCertVerifier},
-    },
+    DistinguishedName, SignatureScheme, client::danger::HandshakeSignatureValid, pki_types::UnixTime,
+    server::danger::ClientCertVerified,
+};
+use rustls::{
+    RootCertStore,
+    pki_types::{CertificateDer, CertificateRevocationListDer, pem::PemObject as _},
+    server::{WebPkiClientVerifier, danger::ClientCertVerifier},
 };
 
-use crate::{ClientCertMode, TlsError, spiffe::svid_id_allowed};
+#[cfg(feature = "spiffe")]
+use crate::spiffe::svid_id_allowed;
+use crate::{ClientCertMode, TlsError};
 
 // -----------------------------------------------------------------------------
 // Verifier Builder
@@ -59,6 +62,13 @@ use crate::{ClientCertMode, TlsError, spiffe::svid_id_allowed};
 /// [`ClientCertVerifier`]: rustls::server::danger::ClientCertVerifier
 /// [`TlsError`]: crate::TlsError
 /// [`ClientCertMode::None`]: crate::ClientCertMode::None
+#[cfg_attr(
+    not(feature = "spiffe"),
+    expect(
+        unused_variables,
+        reason = "trusted_spiffe_ids is consumed only under the spiffe feature"
+    )
+)]
 pub(crate) fn build_client_verifier(
     ca_path: &str,
     mode: ClientCertMode,
@@ -86,6 +96,7 @@ pub(crate) fn build_client_verifier(
         ClientCertMode::Require => builder
             .build()
             .map_err(|e| verifier_err(format!("failed to build verifier: {e}"))),
+        #[cfg(feature = "spiffe")]
         ClientCertMode::RequireNamed => builder
             .build()
             .map(|inner| named_verifier(inner, trusted_spiffe_ids))
@@ -99,6 +110,7 @@ pub(crate) fn build_client_verifier(
 /// Warns when the allowlist is empty: `RequireNamed` then accepts any valid
 /// X.509-SVID the client CA signs, which is a safe default but easy to set
 /// unintentionally.
+#[cfg(feature = "spiffe")]
 fn named_verifier(inner: Arc<dyn ClientCertVerifier>, trusted_spiffe_ids: &[String]) -> Arc<dyn ClientCertVerifier> {
     if trusted_spiffe_ids.is_empty() {
         tracing::warn!(
@@ -119,6 +131,7 @@ fn named_verifier(inner: Arc<dyn ClientCertVerifier>, trusted_spiffe_ids: &[Stri
 /// Chain is verified first, so the name is read only from a certificate that
 /// already validated against the configured authority. Rejecting here ends the
 /// handshake, before any request.
+#[cfg(feature = "spiffe")]
 #[derive(Debug)]
 struct NamedPeerVerifier {
     /// Verifier that validates the chain before the name is read.
@@ -129,6 +142,7 @@ struct NamedPeerVerifier {
     allowed: Arc<[Arc<str>]>,
 }
 
+#[cfg(feature = "spiffe")]
 impl ClientCertVerifier for NamedPeerVerifier {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
         self.inner.root_hint_subjects()
@@ -460,6 +474,7 @@ mod tests {
 
     // ---- NamedPeerVerifier ----
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn require_named_mode_mandates_client_auth() {
         ensure_crypto_provider();
@@ -474,6 +489,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn require_named_mode_with_allowlist_mandates_client_auth() {
         ensure_crypto_provider();
@@ -498,6 +514,7 @@ mod tests {
     /// Mint a CA (written to a temp PEM) and a client leaf it signs carrying
     /// `leaf_uris` as URI SANs with a clientAuth EKU. Returns the temp dir (kept
     /// alive so the CA file outlives the call), the CA path, and the leaf DER.
+    #[cfg(feature = "spiffe")]
     fn mint_client(leaf_uris: &[&str]) -> (tempfile::TempDir, std::path::PathBuf, CertificateDer<'static>) {
         use rcgen::{
             BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, SanType,
@@ -533,6 +550,7 @@ mod tests {
 
     /// Build a `RequireNamed` verifier over `ca_path` + `allowlist` and run the
     /// leaf through `verify_client_cert` (chain, then X509-SVID §5.2, then allowlist).
+    #[cfg(feature = "spiffe")]
     fn named_verify(
         ca_path: &std::path::Path,
         allowlist: &[String],
@@ -551,6 +569,7 @@ mod tests {
             .map(|_verified| ())
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn a_named_peer_in_the_allowlist_is_accepted() {
         let id = "spiffe://grid.internal/site/pool-a";
@@ -558,6 +577,7 @@ mod tests {
         named_verify(&ca_path, &[id.to_owned()], &leaf).expect("an allowlisted SVID is accepted");
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn a_named_peer_outside_the_allowlist_is_refused() {
         let (_dir, ca_path, leaf) = mint_client(&["spiffe://grid.internal/site/pool-b"]);
@@ -572,6 +592,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn a_named_peer_in_a_foreign_trust_domain_is_refused() {
         // Same path, different trust domain: the allowlist match is over the
@@ -581,12 +602,14 @@ mod tests {
             .expect_err("a foreign trust domain is not an allowlist member");
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn an_empty_allowlist_accepts_any_ca_signed_svid() {
         let (_dir, ca_path, leaf) = mint_client(&["spiffe://grid.internal/site/anyone"]);
         named_verify(&ca_path, &[], &leaf).expect("an empty allowlist accepts any valid SVID the CA signs");
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn a_listed_non_spiffe_leaf_is_refused() {
         // A clientAuth leaf that chains, but whose only SAN is a non-SPIFFE URI:
@@ -597,6 +620,7 @@ mod tests {
             .expect_err("a non-SPIFFE leaf is refused even when its URI string is listed");
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn a_leaf_off_the_trusted_ca_is_refused() {
         // The rogue leaf carries the right name and is listed, but is signed by a

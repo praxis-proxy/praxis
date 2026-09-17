@@ -250,6 +250,7 @@ impl ListenerTls {
     /// The allowlist is only consulted under [`ClientCertMode::RequireNamed`],
     /// so a non-empty list under any other mode is rejected rather than left
     /// silently unenforced. Each entry must be a leaf SPIFFE ID.
+    #[cfg(feature = "spiffe")]
     fn validate_trusted_spiffe_ids(&self) -> Result<(), TlsError> {
         if self.trusted_spiffe_ids.is_empty() {
             return Ok(());
@@ -267,6 +268,18 @@ impl ListenerTls {
             }
         }
         Ok(())
+    }
+
+    /// Reject any SPIFFE allowlist: the `spiffe` feature is not built in, so
+    /// silently ignoring a security field is not acceptable.
+    #[cfg(not(feature = "spiffe"))]
+    fn validate_trusted_spiffe_ids(&self) -> Result<(), TlsError> {
+        if self.trusted_spiffe_ids.is_empty() {
+            return Ok(());
+        }
+        Err(TlsError::ServerConfigError {
+            detail: "trusted_spiffe_ids requires a build with the `spiffe` feature".to_owned(),
+        })
     }
 
     /// Whether hot-reload is enabled for this listener.
@@ -348,6 +361,7 @@ pub enum ClientCertMode {
     /// that validates proves membership; the name is what tells two
     /// members apart. Rejecting here ends the handshake, so an unnamed
     /// peer never sends a request.
+    #[cfg(feature = "spiffe")]
     RequireNamed,
 }
 
@@ -491,6 +505,7 @@ mod tests {
     }
 
     /// Build a validated listener with the given mode + allowlist over a real CA.
+    #[cfg(feature = "spiffe")]
     fn listener_with_allowlist(mode: ClientCertMode, ids: &[&str]) -> Result<(), TlsError> {
         let tmp = temp_cert_key_ca();
         let tls = ListenerTls {
@@ -505,6 +520,7 @@ mod tests {
         tls.validate()
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn require_named_with_a_valid_allowlist_is_accepted() {
         listener_with_allowlist(
@@ -517,12 +533,14 @@ mod tests {
         .expect("a valid allowlist under require_named validates");
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn require_named_with_an_empty_allowlist_is_accepted() {
         listener_with_allowlist(ClientCertMode::RequireNamed, &[])
             .expect("an empty allowlist under require_named is the accept-any default");
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn an_allowlist_without_require_named_is_rejected() {
         let err = listener_with_allowlist(ClientCertMode::Require, &["spiffe://grid.internal/site/pool-a"])
@@ -533,6 +551,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "spiffe")]
     #[test]
     fn an_invalid_id_in_the_allowlist_is_rejected() {
         // A bare trust domain is a valid SPIFFE ID but not a leaf (no path),
@@ -542,6 +561,28 @@ mod tests {
         assert!(
             err.to_string().contains("not a valid leaf SPIFFE ID"),
             "error should explain the invalid leaf id: {err}"
+        );
+    }
+
+    #[cfg(not(feature = "spiffe"))]
+    #[test]
+    fn a_spiffe_allowlist_without_the_feature_is_rejected() {
+        let tmp = temp_cert_key_ca();
+        let tls = ListenerTls {
+            client_ca: Some(CaConfig {
+                ca_path: tmp.ca.clone(),
+                crl_paths: Vec::new(),
+            }),
+            client_cert_mode: ClientCertMode::Require,
+            trusted_spiffe_ids: vec!["spiffe://grid.internal/site/pool-a".to_owned()],
+            ..ListenerTls::new_validated(&tmp.cert, &tmp.key).unwrap()
+        };
+        let err = tls
+            .validate()
+            .expect_err("a spiffe allowlist in a build without the feature must be rejected");
+        assert!(
+            err.to_string().contains("spiffe"),
+            "error should name the spiffe feature: {err}"
         );
     }
 

@@ -18,19 +18,21 @@ workspace = true
 
 [features]
 config-reload = ["dep:arc-swap", "dep:notify", "dep:tokio"]
+# SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
+spiffe = ["dep:spiffe", "dep:x509-parser"]
 
 [dependencies]
 arc-swap = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 rustls = { workspace = true }
 serde = { workspace = true }
-spiffe = { workspace = true }
+spiffe = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"], optional = true }
 tracing = { workspace = true }
 # Parsing only: the `verify`/`ring` features stay off so all crypto goes through
 # the injected rustls provider (FIPS). Do not enable them here.
-x509-parser = { workspace = true }
+x509-parser = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

@@ -40,6 +40,7 @@ pub mod reload;
 pub mod setup;
 pub mod sni;
 pub mod sni_name;
+#[cfg(feature = "spiffe")]
 pub(crate) mod spiffe;
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

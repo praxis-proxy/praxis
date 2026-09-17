@@ -39,6 +39,7 @@ pub enum TlsError {
 
     /// TLS client configuration construction failed (e.g. malformed CA bundle,
     /// client cert/key mismatch, or an unsupported protocol version).
+    #[cfg(feature = "spiffe")]
     #[error("TLS client config error: {detail}")]
     ClientConfigError {
         /// Underlying error description.

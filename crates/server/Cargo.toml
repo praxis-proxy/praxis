@@ -56,6 +56,8 @@ config-reload = ["dep:notify", "praxis-protocol/config-reload"]
 admin-api = ["praxis-protocol/admin-api"]
 dev = ["basic-auth-filter"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter", "experimental"]
+# SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
+spiffe = ["praxis-protocol/spiffe", "experimental"]
 # The `policy` filter (Praxis Policy Engine). On by default; the server
 # depends on praxis-filter without dependency defaults, so a
 # `--no-default-features` build excludes the filter and the `ppe` tree.
