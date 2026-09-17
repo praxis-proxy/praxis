@@ -99,6 +99,16 @@ fn reload_under_load_every_response_from_one_generation() {
 /// swap: intermediate configs are never served, the final one is, and
 /// the proxy keeps answering throughout.
 #[test]
+// Asserts a timing property: ten rewrites land inside one 500ms debounce
+// window so no intermediate config is ever applied. Under cargo-llvm-cov the
+// instrumented binary is slow enough that the writes can spread past the
+// window, at which point the watcher correctly applies an intermediate config
+// and this fails. The debounce logic is covered by unit tests, so skip the
+// timing assertion under coverage; it still runs in `make test-resilience`.
+#[cfg_attr(
+    coverage,
+    ignore = "debounce window is timing-sensitive under llvm-cov instrumentation"
+)]
 fn rapid_rewrites_debounce_to_final_config() {
     let backend = start_backend_with_shutdown("origin");
     let proxy_port = free_port();
