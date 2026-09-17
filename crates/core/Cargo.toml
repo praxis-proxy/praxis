@@ -17,6 +17,7 @@ name = "praxis_core"
 workspace = true
 
 [features]
+spiffe = ["praxis-tls/spiffe"]
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",

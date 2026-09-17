@@ -8,6 +8,7 @@ readme = "../../README.md"
 publish = false
 
 [features]
+spiffe = ["praxis-core/spiffe"]
 
 [lints]
 workspace = true

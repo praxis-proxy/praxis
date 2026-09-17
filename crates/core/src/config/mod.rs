@@ -570,6 +570,10 @@ filter_chains:
         let root = format!("{}/../../examples/configs", env!("CARGO_MANIFEST_DIR"));
         let mut count = 0;
         for entry in walkdir(&root) {
+            #[cfg(not(feature = "spiffe"))]
+            if entry.file_name().is_some_and(|n| n == "tls-mtls-spiffe.yaml") {
+                continue;
+            }
             Config::from_file(&entry).unwrap_or_else(|e| panic!("{}: {e}", entry.display()));
             count += 1;
         }

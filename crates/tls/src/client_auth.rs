@@ -22,7 +22,7 @@ use rustls::{
 };
 
 #[cfg(feature = "spiffe")]
-use crate::spiffe::svid_id_allowed;
+use crate::spiffe::{PeerAuth, authorize_peer};
 use crate::{ClientCertMode, TlsError};
 
 // -----------------------------------------------------------------------------
@@ -155,13 +155,23 @@ impl ClientCertVerifier for NamedPeerVerifier {
         // RFC 5280 §6: chain before name.
         let verified = self.inner.verify_client_cert(end_entity, intermediates, now)?;
 
-        // X509-SVID §5.2 leaf, then allowlist.
-        if svid_id_allowed(end_entity.as_ref(), &self.allowed) {
-            Ok(verified)
-        } else {
-            Err(rustls::Error::InvalidCertificate(
-                rustls::CertificateError::ApplicationVerificationFailure,
-            ))
+        // X509-SVID leaf, then allowlist. Log why a peer was rejected so an
+        // operator can tell an invalid SVID from an allowlist miss; the peer sees
+        // only a generic alert.
+        match authorize_peer(end_entity.as_ref(), &self.allowed) {
+            PeerAuth::Allowed => Ok(verified),
+            PeerAuth::InvalidLeaf => {
+                tracing::warn!("peer certificate is not a valid X.509-SVID leaf");
+                Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure,
+                ))
+            },
+            PeerAuth::NotAllowed(id) => {
+                tracing::warn!(peer_id = %id, "peer SPIFFE ID not in trusted_spiffe_ids");
+                Err(rustls::Error::InvalidCertificate(
+                    rustls::CertificateError::ApplicationVerificationFailure,
+                ))
+            },
         }
     }
 
@@ -230,11 +240,8 @@ fn load_crls(paths: &[String]) -> Result<Vec<CertificateRevocationListDer<'stati
     Ok(crls)
 }
 
-/// Build a [`RootCertStore`] from a PEM bundle.
-///
-/// Returns an error detail string the caller maps to its own [`TlsError`]
-/// variant, so the same bytes-to-store logic serves both a file-loading listener
-/// and an in-memory client config.
+/// Build a [`RootCertStore`] from a PEM bundle, returning an error detail string
+/// the caller maps to its own [`TlsError`] variant.
 ///
 /// # Errors
 ///
@@ -242,7 +249,7 @@ fn load_crls(paths: &[String]) -> Result<Vec<CertificateRevocationListDer<'stati
 /// or a certificate is rejected as a trust anchor.
 ///
 /// [`RootCertStore`]: rustls::RootCertStore
-pub(crate) fn roots_from_pem(pem: &[u8]) -> Result<RootCertStore, String> {
+fn roots_from_pem(pem: &[u8]) -> Result<RootCertStore, String> {
     let certs: Vec<_> = CertificateDer::pem_slice_iter(pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("failed to parse PEM: {e}"))?;
@@ -515,7 +522,8 @@ mod tests {
     #[cfg(feature = "spiffe")]
     fn mint_client(leaf_uris: &[&str]) -> (tempfile::TempDir, std::path::PathBuf, CertificateDer<'static>) {
         use rcgen::{
-            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, SanType,
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+            KeyUsagePurpose, SanType,
         };
 
         let ca_key = KeyPair::generate().expect("ca key");
@@ -533,7 +541,11 @@ mod tests {
                 .subject_alt_names
                 .push(SanType::URI((*uri).try_into().expect("uri san")));
         }
-        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        // A conforming X.509-SVID leaf: critical keyUsage with digitalSignature and
+        // an EKU with both serverAuth and clientAuth.
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages =
+            vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
         let leaf_der = leaf_params
             .signed_by(&leaf_key, &issuer)
             .expect("leaf cert")

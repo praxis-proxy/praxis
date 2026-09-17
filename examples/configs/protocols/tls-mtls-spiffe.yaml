@@ -1,0 +1,43 @@
+# Listener mTLS with SPIFFE X.509-SVID Peer Identity (require_named)
+#
+# The proxy authorizes a client at the TLS handshake by the SPIFFE ID in its
+# X.509-SVID client certificate. The certificate must chain to the trusted CA
+# and its SPIFFE ID must be in trusted_spiffe_ids. An empty allowlist accepts any
+# valid SVID the CA signs. Requires a build with the `spiffe` feature.
+#
+#   Client (SVID) -> mTLS + SPIFFE -> Praxis :8443 -> HTTP -> Backend :3000
+#
+# Usage:
+#   cargo run -p praxis-proxy --features spiffe -- -c examples/configs/protocols/tls-mtls-spiffe.yaml
+
+listeners:
+  - name: secure
+    address: "127.0.0.1:8443"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: /etc/ssl/certs/server.pem
+          key_path: /etc/ssl/private/server-key.pem
+      client_ca:
+        ca_path: /etc/ssl/certs/client-ca.pem
+      client_cert_mode: require_named
+      trusted_spiffe_ids:
+        - spiffe://grid.internal/signals
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

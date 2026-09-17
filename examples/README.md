@@ -106,6 +106,7 @@ page.
 | [tls-mtls-both.yaml](configs/protocols/tls-mtls-both.yaml) | Client mTLS to the proxy (client cert required), and proxy mTLS to the upstream backend (proxy presents its own client certificate) |
 | [tls-mtls-listener-request.yaml](configs/protocols/tls-mtls-listener-request.yaml) | The proxy requests a client certificate but does not require one |
 | [tls-mtls-listener.yaml](configs/protocols/tls-mtls-listener.yaml) | The proxy requires clients to present a valid TLS certificate signed by the trusted CA |
+| [tls-mtls-spiffe.yaml](configs/protocols/tls-mtls-spiffe.yaml) | The proxy authorizes a client at the TLS handshake by the SPIFFE ID in its X.509-SVID client certificate |
 | [tls-mtls-upstream.yaml](configs/protocols/tls-mtls-upstream.yaml) | Plain HTTP from clients; the proxy presents a client certificate to the upstream backend, which requires mutual TLS authentication |
 | [tls-multi-cert.yaml](configs/protocols/tls-multi-cert.yaml) | Multiple certificates on one listener; Praxis selects the certificate matching the client's SNI hostname |
 | [tls-sni-routing.yaml](configs/protocols/tls-sni-routing.yaml) | Routes TLS connections to different upstreams based on the Server Name Indication (SNI) hostname in the ClientHello |
