@@ -234,16 +234,32 @@ insecure_options:
     )
 }
 
-/// Two-endpoint pipeline that deterministically exercises retry replay of the
-/// adapted body.
+/// Two-endpoint pipeline that deterministically exercises the retry policy over
+/// the adapted body.
 ///
-/// `round_robin` makes `failing_port` (a 503 backend) the first attempt and
-/// `live_port` (an echo backend) the retry target. `status_5xx` +
-/// `allow_non_idempotent` let a single POST drain the adapted body to the 503
-/// backend, retry, reseed the adapted body, and replay it to the echo backend.
+/// `round_robin` makes `endpoint0_port` the first attempt and `endpoint1_port`
+/// the second; callers assign the 503/echo roles per scenario — a 503 backend
+/// first + echo second exercises retry replay, echo first exercises
+/// single-attempt delivery. `max_retries` parametrizes the policy so tests can
+/// cover both retrying (`> 0`) and non-retrying (`0`) configurations.
+/// `status_5xx` + `allow_non_idempotent` let a single POST drain the adapted
+/// body, retry (when permitted), reseed the adapted body, and replay it.
 /// `load_balancer_strategy` is a cluster-level field (sibling of `endpoints`
 /// and `retry_policy`), mirroring `retry.rs`.
-fn retry_yaml(proxy_port: u16, failing_port: u16, live_port: u16, filter_name: &str) -> String {
+///
+/// Routes only `/api/`, not `/`: the proxy readiness probe issues `GET /`,
+/// which would otherwise run through the load_balancer and advance the
+/// round_robin counter before the first real request — landing the first
+/// request on endpoint[1] instead of [0]. With `/api/`, `GET /` gets a 404
+/// without touching the load_balancer, so the counter stays at 0 and the first
+/// request deterministically selects endpoint[0]. Callers POST to `/api/...`.
+fn retry_yaml(
+    proxy_port: u16,
+    endpoint0_port: u16,
+    endpoint1_port: u16,
+    filter_name: &str,
+    max_retries: u32,
+) -> String {
     format!(
         r#"
 listeners:
@@ -255,17 +271,17 @@ filter_chains:
     filters:
       - filter: router
         routes:
-          - path_prefix: "/"
+          - path_prefix: "/api/"
             cluster: "backend"
       - filter: load_balancer
         clusters:
           - name: "backend"
             load_balancer_strategy: round_robin
             endpoints:
-              - "127.0.0.1:{failing_port}"
-              - "127.0.0.1:{live_port}"
+              - "127.0.0.1:{endpoint0_port}"
+              - "127.0.0.1:{endpoint1_port}"
             retry_policy:
-              max_retries: 3
+              max_retries: {max_retries}
               allow_non_idempotent: true
               retriable_conditions: [status_5xx]
               backoff:
@@ -539,6 +555,7 @@ fn retry_replays_adapted_body_after_status_5xx() {
         failing_port,
         live.port(),
         "selected_upstream_append_marker",
+        3,
     ))
     .unwrap();
     let registry = registry_with("selected_upstream_append_marker", || {
@@ -546,7 +563,7 @@ fn retry_replays_adapted_body_after_status_5xx() {
     });
     let proxy = start_proxy_with_registry(&config, &registry);
 
-    let (status, body) = http_post(proxy.addr(), "/echo", "retry me");
+    let (status, body) = http_post(proxy.addr(), "/api/echo", "retry me");
 
     assert_eq!(status, 200, "the retry reaches the live echo backend");
     // The reseeded adapted body is replayed byte-for-byte: exactly one marker
@@ -557,5 +574,110 @@ fn retry_replays_adapted_body_after_status_5xx() {
         body.matches("|adapted").count(),
         1,
         "the adapted body is replayed as-is; adaptation must not run again on retry"
+    );
+}
+
+#[test]
+fn empty_input_injection_forwards_injected_body() {
+    // Regression, the mirror of `empty_adapted_output_forwards_empty_body`: an
+    // EMPTY client request body must still run the selected-upstream phase, and
+    // bytes the phase INJECTS into that empty input must be captured, framed
+    // (Content-Length recomputed from the adapted body), and forwarded. The
+    // participant observes `None` for the empty body and appends its marker, so
+    // the echo backend must receive exactly the injected bytes. A path that
+    // short-circuited empty bodies would drop the injection and the backend
+    // would see nothing.
+    let backend = start_echo_backend();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&single_backend_yaml(
+        proxy_port,
+        backend.port(),
+        "selected_upstream_append_marker",
+    ))
+    .unwrap();
+    let registry = registry_with("selected_upstream_append_marker", || {
+        Box::new(AppendMarkerSelectedUpstreamFilter)
+    });
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let (status, body) = http_post(proxy.addr(), "/echo", "");
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        body, "|adapted",
+        "an empty input still runs the phase; the injected bytes are forwarded"
+    );
+    assert_eq!(
+        body.matches("|adapted").count(),
+        1,
+        "the phase runs exactly once even when the downstream body is empty"
+    );
+}
+
+#[test]
+fn max_retries_zero_does_not_retry_status_5xx() {
+    // Counterpart to `retry_replays_adapted_body_after_status_5xx`: with
+    // `max_retries: 0` the single attempt hits the 503 endpoint[0] and the
+    // policy performs NO retry, so the upstream 503 is returned to the client
+    // verbatim. endpoint[1] is a live echo backend that would answer 200 if a
+    // spurious retry occurred, so a 200 here would expose a regression.
+    let failing_port = Backend::status(503, "unavailable").start();
+    let live = start_echo_backend();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&retry_yaml(
+        proxy_port,
+        failing_port,
+        live.port(),
+        "selected_upstream_append_marker",
+        0,
+    ))
+    .unwrap();
+    let registry = registry_with("selected_upstream_append_marker", || {
+        Box::new(AppendMarkerSelectedUpstreamFilter)
+    });
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let (status, _body) = http_post(proxy.addr(), "/api/echo", "retry me");
+
+    assert_eq!(
+        status, 503,
+        "max_retries: 0 forwards the upstream 5xx without retrying onto endpoint[1]"
+    );
+}
+
+#[test]
+fn max_retries_zero_forwards_adapted_body_on_single_attempt() {
+    // With a retry_policy present but `max_retries: 0`, the selected-upstream
+    // phase still adapts the body and the single attempt (endpoint[0], the live
+    // echo backend) receives it. Exactly one marker proves the phase ran once
+    // with no replay. endpoint[1] is never attempted because [0] succeeds, so it
+    // is an unbound placeholder port.
+    let live = start_echo_backend();
+    let unused_endpoint = free_port();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&retry_yaml(
+        proxy_port,
+        live.port(),
+        unused_endpoint,
+        "selected_upstream_append_marker",
+        0,
+    ))
+    .unwrap();
+    let registry = registry_with("selected_upstream_append_marker", || {
+        Box::new(AppendMarkerSelectedUpstreamFilter)
+    });
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let (status, body) = http_post(proxy.addr(), "/api/echo", "retry me");
+
+    assert_eq!(status, 200, "the single attempt reaches the live echo backend");
+    assert_eq!(
+        body, "retry me|adapted",
+        "max_retries: 0 still forwards the adapted body on the single attempt"
+    );
+    assert_eq!(
+        body.matches("|adapted").count(),
+        1,
+        "the phase runs exactly once; max_retries: 0 performs no replay"
     );
 }
