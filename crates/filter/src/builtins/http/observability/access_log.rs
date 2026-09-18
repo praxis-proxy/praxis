@@ -174,9 +174,6 @@ const DEFAULT_FIELDS: &[&str] = &[
     "response_body_bytes",
 ];
 
-/// Header names rejected at config load time in v1.
-const SENSITIVE_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie", "set-cookie"];
-
 // -----------------------------------------------------------------------------
 // Field projection
 // -----------------------------------------------------------------------------
@@ -709,7 +706,7 @@ fn normalize_header_names(names: Option<&[String]>) -> Result<HashSet<String>, F
         if trimmed.is_empty() {
             return Err("access_log: header names must not be empty".into());
         }
-        if is_sensitive_header(trimmed) {
+        if super::is_sensitive_header(trimmed) {
             return Err(format!("access_log: header {trimmed:?} is not allowed in v1").into());
         }
         normalized.insert(trimmed.to_ascii_lowercase());
@@ -850,11 +847,6 @@ fn validate_emit_conditions(conditions: Option<&AccessLogEmitConditions>) -> Res
     }
 
     Ok(())
-}
-
-fn is_sensitive_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    SENSITIVE_HEADERS.contains(&lower.as_str())
 }
 
 fn header_json_key(name: &str) -> String {

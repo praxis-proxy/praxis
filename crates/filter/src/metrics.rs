@@ -18,6 +18,18 @@ const CIRCUIT_BREAKER_OPEN: &str = "praxis_circuit_breaker_open";
 /// Counter for load-balancer panic-mode selections.
 const LB_PANIC_MODE_TOTAL: &str = "praxis_lb_panic_mode_total";
 
+#[cfg(feature = "cloud-events-filter")]
+/// Counter for `CloudEvents` publication outcomes.
+const CLOUD_EVENTS_PUBLISH_TOTAL: &str = "praxis_cloud_events_publish_total";
+
+#[cfg(feature = "cloud-events-filter")]
+/// Histogram for `CloudEvents` publication latency in seconds.
+const CLOUD_EVENTS_PUBLISH_DURATION_SECONDS: &str = "praxis_cloud_events_publish_duration_seconds";
+
+#[cfg(feature = "cloud-events-filter")]
+/// Counter for `CloudEvents` events skipped before publication.
+const CLOUD_EVENTS_SKIPPED_TOTAL: &str = "praxis_cloud_events_skipped_total";
+
 /// Request direction label value.
 pub(crate) const PHASE_REQUEST: &str = "request";
 
@@ -68,6 +80,55 @@ pub(crate) fn set_circuit_breaker_state(cluster_name: SharedString, open: bool) 
 /// Increment the load-balancer panic-mode counter for a cluster.
 pub(crate) fn record_lb_panic_mode(cluster: SharedString) {
     counter!(LB_PANIC_MODE_TOTAL, "cluster" => cluster).increment(1);
+}
+
+#[cfg(feature = "cloud-events-filter")]
+/// Record one `CloudEvents` publication outcome and its latency.
+pub(crate) fn record_cloud_events_publish(
+    outcome: &'static str,
+    failure_class: &'static str,
+    status: Option<u16>,
+    latency_secs: f64,
+) {
+    let status_class = status.map_or("none", http_status_class);
+    counter!(
+        CLOUD_EVENTS_PUBLISH_TOTAL,
+        "outcome" => outcome,
+        "failure_class" => failure_class,
+        "status_class" => status_class,
+    )
+    .increment(1);
+    histogram!(CLOUD_EVENTS_PUBLISH_DURATION_SECONDS, "outcome" => outcome).record(latency_secs);
+}
+
+#[cfg(feature = "cloud-events-filter")]
+/// Classify an HTTP status into a bounded metric label.
+fn http_status_class(status: u16) -> &'static str {
+    match status / 100 {
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        5 => "5xx",
+        _ => "other",
+    }
+}
+
+#[cfg(feature = "cloud-events-filter")]
+/// Record one `CloudEvents` publication attempt.
+pub(crate) fn record_cloud_events_attempt() {
+    counter!(
+        CLOUD_EVENTS_PUBLISH_TOTAL,
+        "outcome" => "attempt",
+        "failure_class" => "none",
+        "status_class" => "none",
+    )
+    .increment(1);
+}
+
+#[cfg(feature = "cloud-events-filter")]
+/// Record an event skipped before an outbound publication attempt.
+pub(crate) fn record_cloud_events_skipped(reason: &'static str) {
+    counter!(CLOUD_EVENTS_SKIPPED_TOTAL, "reason" => reason).increment(1);
 }
 
 // -----------------------------------------------------------------------------
@@ -148,6 +209,24 @@ mod tests {
             FILTER_DURATION_SECONDS, "praxis_filter_duration_seconds",
             "histogram metric name"
         );
+    }
+
+    #[cfg(feature = "cloud-events-filter")]
+    #[test]
+    fn cloud_events_metrics_expose_operational_labels() {
+        crate::test_utils::install_metrics_recorder();
+
+        record_cloud_events_publish("success", "none", Some(204), 0.001);
+        record_cloud_events_publish("failure", "http_status", Some(500), 0.002);
+        record_cloud_events_skipped("size_limit");
+
+        let rendered = crate::test_utils::render_metrics();
+        assert!(rendered.contains("praxis_cloud_events_publish_total"));
+        assert!(rendered.contains("outcome=\"success\""));
+        assert!(rendered.contains("failure_class=\"http_status\""));
+        assert!(rendered.contains("status_class=\"5xx\""));
+        assert!(rendered.contains("praxis_cloud_events_skipped_total"));
+        assert!(rendered.contains("reason=\"size_limit\""));
     }
 
     // -------------------------------------------------------------------------

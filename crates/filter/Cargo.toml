@@ -27,10 +27,16 @@ otel = [
     "dep:tracing-opentelemetry",
 ]
 
+cloud-events-filter = [
+    "dep:chrono",
+    "dep:url",
+]
+
 [lints]
 workspace = true
 
 [dependencies]
+chrono = { workspace = true, optional = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
@@ -60,6 +66,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
@@ -69,5 +76,5 @@ opentelemetry_sdk = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "io-util"] }
 tracing-subscriber = { workspace = true }

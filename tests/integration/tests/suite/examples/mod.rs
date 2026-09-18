@@ -16,6 +16,8 @@ mod basic_reverse_proxy;
 mod branching;
 mod canary_routing;
 mod circuit_breaker;
+#[cfg(feature = "cloud-events-filter")]
+mod cloud_events;
 mod conditional_filters;
 mod credential_injection;
 mod csrf;

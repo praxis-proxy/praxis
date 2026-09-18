@@ -9,6 +9,7 @@ publish = false
 
 [features]
 spiffe = ["praxis-core/spiffe"]
+cloud-events-filter = ["praxis-filter/cloud-events-filter"]
 
 [lints]
 workspace = true

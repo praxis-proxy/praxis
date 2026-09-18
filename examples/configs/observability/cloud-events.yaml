@@ -1,0 +1,42 @@
+# CloudEvents Publisher
+#
+# Publishes a bounded, best-effort CloudEvents 1.0 response event after the
+# upstream response completes. The local receiver below is illustrative.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features cloud-events-filter -- -c examples/configs/observability/cloud-events.yaml
+#   curl -H 'User-Agent: example-client' http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: cloud_events
+        on: response_complete
+        destination: http://127.0.0.1:3001/events
+        source: urn:praxis:gateway
+        type: gateway.response.completed
+        include_provenance: true
+        request_headers: [user-agent]
+        data:
+          status: { value: response.status, type: integer, required: true }
+          user_agent: { value: request_header.user-agent, type: string }
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

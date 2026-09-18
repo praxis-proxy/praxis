@@ -215,6 +215,19 @@ pub(crate) fn parse_target(url: &str) -> Result<ParsedTarget, InvalidTarget> {
     })
 }
 
+/// Validate an absolute HTTP(S) target without resolving or connecting to it.
+///
+/// Use this while loading static configuration. Runtime callers should use
+/// [`prepare_url_target`] to validate resolved addresses and construct peers.
+///
+/// # Errors
+///
+/// Returns [`InvalidTarget`] when the URL is malformed or is not an absolute
+/// HTTP(S) target permitted by the shared target rules.
+pub fn validate_url_target(url: &str) -> Result<(), InvalidTarget> {
+    parse_target(url).map(|_target| ())
+}
+
 use std::net::SocketAddr;
 
 use pingora_core::upstreams::peer::HttpPeer;

@@ -461,6 +461,8 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http(filters, "access_log", AccessLogFilter::from_config);
     #[cfg(feature = "basic-auth-filter")]
     register_http_security(filters, "basic_auth", crate::BasicAuthFilter::from_config);
+    #[cfg(feature = "cloud-events-filter")]
+    register_http(filters, "cloud_events", crate::builtins::CloudEventsFilter::from_config);
     register_http(filters, "circuit_breaker", CircuitBreakerFilter::from_config);
     register_http(filters, "compression", CompressionFilter::from_config);
     register_http_security(filters, "cors", CorsFilter::from_config);

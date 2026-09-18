@@ -5,5 +5,7 @@
 
 mod access_log_fields;
 mod access_logging;
+#[cfg(feature = "cloud-events-filter")]
+mod cloud_events;
 mod logging;
 mod process_logging;

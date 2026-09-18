@@ -10,6 +10,7 @@ Built-in filters organized by protocol and category.
 | Filter | Feature | Description |
 |--------|---------|-------------|
 | [`access_log`](http/observability/access_log.md) | - | Logs structured access records for each request and response. |
+| [`cloud_events`](http/observability/cloud_events.md) | `cloud-events-filter` | Generate structured CloudEvents and ship them to a configured HTTP endpoint. |
 | [`request_id`](http/observability/request_id.md) | - | Ensures every request carries a correlation ID. |
 | [`trace_context`](http/observability/trace_context.md) | - | Propagates W3C Trace Context headers (`traceparent`, `tracestate`). |
 

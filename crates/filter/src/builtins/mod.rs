@@ -8,6 +8,8 @@ mod tcp;
 
 #[cfg(feature = "basic-auth-filter")]
 pub use http::BasicAuthFilter;
+#[cfg(feature = "cloud-events-filter")]
+pub use http::CloudEventsFilter;
 pub use http::{
     AccessLogFilter, CircuitBreakerFilter, CompressionFilter, ContainsValue, CorsFilter, CredentialInjectionFilter,
     CsrfFilter, DisallowedOriginMode, EndpointReselector, EndpointSelectorFilter, ForwardedHeadersFilter,
