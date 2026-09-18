@@ -8,8 +8,9 @@ name: Release
 #
 #   Phase 1 (version tag push): validate the tag against the workspace
 #   version, run the full test suite, verify the crates package cleanly with
-#   a publish dry run, build and push the container image to GHCR, then cut a
-#   DRAFT pre-release. The image ships at this stage so the release can
+#   a publish dry run, build and push the container image to GHCR (immutable
+#   tags only), then cut a DRAFT release (marked as a pre-release only for a
+#   pre-release tag). The image ships at this stage so the release can
 #   reference an image that already exists; the crates are only dry-run here.
 #
 #   Phase 2 (a maintainer publishes the draft): publishing the draft, whether
@@ -26,6 +27,7 @@ on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
   release:
     types: [published]
 
@@ -62,7 +64,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           TAG_VERSION="${TAG#v}"
-          CARGO_VERSION=$(perl -ne 'print $1 if /^version\s*=\s*"(.+)"/' Cargo.toml)
+          CARGO_VERSION=$(awk -F'"' '/^\[workspace\.package\]/{f=1} f && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
           if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
             echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml ($CARGO_VERSION)"
             exit 1
@@ -70,14 +72,17 @@ jobs:
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
 
   # ----------------------------------------------------------------------------
-  # Phase 1 (tag push): skip the redundant test run when this commit is already
+  # Phase 1 (tag push): skip the redundant checks when this commit is already
   # green
   #
-  # The test suite is split on main across the "Tests", "Tests (Integration)",
-  # and "Conformance" workflows. When all three already concluded successfully
-  # for this exact commit, re-running them for the tag is pure duplication, so
-  # the `test` job below is skipped. Otherwise it runs the unit, integration,
-  # and conformance suites directly.
+  # The release gate is split on main across the "Tests", "Tests (Integration)",
+  # "Conformance", "Supply Chain", and "Coverage" workflows. The "Tests"
+  # workflow already includes the lint job, so a green "Tests" also means lint
+  # passed for this commit. When all of these already concluded successfully for
+  # this exact commit, re-running them for the tag is pure duplication, so the
+  # fallback `test`, `lint`, `audit`, and `coverage` jobs below are skipped.
+  # Otherwise they run the unit, integration, conformance, lint, audit, and
+  # coverage checks directly.
   # ----------------------------------------------------------------------------
 
   preflight:
@@ -88,9 +93,9 @@ jobs:
       actions: read
       contents: read
     outputs:
-      tests_already_green: ${{ steps.check.outputs.tests_already_green }}
+      checks_already_green: ${{ steps.check.outputs.checks_already_green }}
     steps:
-      - name: Check whether the required test workflows already passed for this commit
+      - name: Check whether the required check workflows already passed for this commit
         id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -98,7 +103,9 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           all_green=true
-          for wf in "Tests" "Tests (Integration)" "Conformance"; do
+          # The "Tests" workflow already runs the lint job, so a green "Tests"
+          # here also means lint passed for this commit.
+          for wf in "Tests" "Tests (Integration)" "Conformance" "Supply Chain" "Coverage"; do
             conclusion=$(gh run list --repo "$REPO" --workflow "$wf" --limit 100 \
               --json headSha,status,conclusion \
               --jq "[.[] | select(.headSha==\"$SHA\" and .status==\"completed\")][0].conclusion // \"none\"" \
@@ -106,15 +113,22 @@ jobs:
             echo "workflow '$wf' @ $SHA -> ${conclusion:-none}"
             [ "$conclusion" = "success" ] || all_green=false
           done
-          echo "tests_already_green=$all_green" >> "$GITHUB_OUTPUT"
+          echo "checks_already_green=$all_green" >> "$GITHUB_OUTPUT"
           if [ "$all_green" = "true" ]; then
-            echo "::notice::Required test workflows already passed for $SHA; skipping the tag test job."
+            echo "::notice::Required check workflows already passed for $SHA; skipping the tag fallback jobs."
           else
-            echo "::notice::Test workflows not all green for $SHA; the tag test job will run."
+            echo "::notice::Check workflows not all green for $SHA; the tag fallback jobs will run."
           fi
 
   # ----------------------------------------------------------------------------
-  # Phase 1 (tag push): run the full test suite (skipped when already green)
+  # Phase 1 (tag push): fallback checks (skipped when already green)
+  #
+  # These four jobs (`test`, `lint`, `audit`, `coverage`) re-run the release
+  # gate directly whenever preflight could not confirm the commit is already
+  # green. The `test` job below runs the unit, integration, and conformance
+  # suites; the `lint`, `audit`, and `coverage` jobs cover the remaining gates.
+  # A green run of any of them (or a skip when preflight already confirmed
+  # green) lets the container build and draft release proceed.
   # ----------------------------------------------------------------------------
 
   test:
@@ -127,7 +141,7 @@ jobs:
       !cancelled()
       && github.event_name == 'push'
       && needs.validate.result == 'success'
-      && needs.preflight.outputs.tests_already_green != 'true'
+      && needs.preflight.outputs.checks_already_green != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -138,7 +152,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
 
       - name: Install h2spec
         run: make target/praxis-binutils/h2spec
@@ -148,6 +162,81 @@ jobs:
           make test
           make test-integration
           make test-conformance
+
+  # ----------------------------------------------------------------------------
+  # Phase 1 (tag push): fallback lint (skipped when already green)
+  # ----------------------------------------------------------------------------
+
+  lint:
+    needs: [validate, preflight]
+    if: >-
+      !cancelled()
+      && github.event_name == 'push'
+      && needs.validate.result == 'success'
+      && needs.preflight.outputs.checks_already_green != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust lint toolchain
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+
+      - name: Lint
+        run: make lint
+
+  # ----------------------------------------------------------------------------
+  # Phase 1 (tag push): fallback supply-chain audit (skipped when already green)
+  # ----------------------------------------------------------------------------
+
+  audit:
+    needs: [validate, preflight]
+    if: >-
+      !cancelled()
+      && github.event_name == 'push'
+      && needs.validate.result == 'success'
+      && needs.preflight.outputs.checks_already_green != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Supply chain audit
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+
+  # ----------------------------------------------------------------------------
+  # Phase 1 (tag push): fallback coverage (skipped when already green)
+  # ----------------------------------------------------------------------------
+
+  coverage:
+    needs: [validate, preflight]
+    if: >-
+      !cancelled()
+      && github.event_name == 'push'
+      && needs.validate.result == 'success'
+      && needs.preflight.outputs.checks_already_green != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Coverage check
+        uses: praxis-proxy/conventions/.github/actions/coverage-check@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
 
   # ----------------------------------------------------------------------------
   # Phase 1 (tag push): verify crates package cleanly (publish dry run)
@@ -166,7 +255,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
 
       - name: Publish dry run
         run: make publish-dry-run
@@ -174,17 +263,24 @@ jobs:
   # ----------------------------------------------------------------------------
   # Phase 1 (tag push): build and publish the container image to GHCR
   #
-  # The image ships before the release is published so the release references
-  # an image that already exists.
+  # The image ships before the release is published so the release references an
+  # image that already exists. Phase 1 pushes only immutable tags (the
+  # :<version> and :sha- tags); the moving :<major>.<minor> tag is advanced
+  # later in Phase 2, and only once a stable release is actually published (see
+  # the container-tags job).
   # ----------------------------------------------------------------------------
 
   container:
-    needs: [validate, test]
+    needs: [validate, test, lint, audit, coverage, publish-dry-run]
     if: >-
       github.event_name == 'push'
       && !cancelled()
       && needs.validate.result == 'success'
+      && needs.publish-dry-run.result == 'success'
       && (needs.test.result == 'success' || needs.test.result == 'skipped')
+      && (needs.lint.result == 'success' || needs.lint.result == 'skipped')
+      && (needs.audit.result == 'success' || needs.audit.result == 'skipped')
+      && (needs.coverage.result == 'success' || needs.coverage.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -196,20 +292,73 @@ jobs:
           persist-credentials: false
           ref: ${{ github.ref_name }}
 
-      - name: Build and publish container
-        uses: praxis-proxy/conventions/.github/actions/ghcr-publish@b702da784117b57488343273579932c3d432fa32 # v0.1.0
+      # Guard against overwriting the immutable :<version> image if Phase 1 is
+      # re-run after the release was already published (for example a
+      # force-repushed tag or a manual re-run of this job).
+      - name: Skip rebuild if the release is already published
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          skip=false
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null || echo missing)" = "false" ]; then
+            echo "::notice::$TAG already has a published release; not rebuilding or overwriting its image."
+            skip=true
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: steps.guard.outputs.skip != 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          image-name: ${{ github.repository }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Set up Buildx
+        if: steps.guard.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Derive image metadata (immutable tags only)
+        id: meta
+        if: steps.guard.outputs.skip != 'true'
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # Suppress the default moving :latest tag; Phase 1 pushes only
+          # immutable tags. :latest is advanced in Phase 2 (container-tags).
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha
+
+      - name: Build and push container
+        if: steps.guard.outputs.skip != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Containerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
   # ----------------------------------------------------------------------------
-  # Phase 1 (tag push): cut the draft pre-release
+  # Phase 1 (tag push): cut the draft release
   #
-  # A maintainer must review and publish this draft to trigger Phase 2 (the
-  # real crates.io publish).
+  # The draft is marked as a pre-release only when the tag carries a pre-release
+  # suffix (for example v1.0.0-rc.1); a stable tag cuts a normal draft so that
+  # publishing it advances the moving container tags. Re-running this job
+  # refreshes an existing draft rather than failing, but never clobbers a
+  # release a maintainer has already published. A maintainer must review and
+  # publish the draft to trigger Phase 2 (the real crates.io publish).
   # ----------------------------------------------------------------------------
 
   draft-release:
-    needs: [validate, test, publish-dry-run, container]
+    needs: [validate, test, lint, audit, coverage, publish-dry-run, container]
     if: >-
       github.event_name == 'push'
       && !cancelled()
@@ -217,6 +366,9 @@ jobs:
       && needs.publish-dry-run.result == 'success'
       && needs.container.result == 'success'
       && (needs.test.result == 'success' || needs.test.result == 'skipped')
+      && (needs.lint.result == 'success' || needs.lint.result == 'skipped')
+      && (needs.audit.result == 'success' || needs.audit.result == 'skipped')
+      && (needs.coverage.result == 'success' || needs.coverage.result == 'skipped')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -226,11 +378,36 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Create draft pre-release
+      - name: Create or refresh the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" --generate-notes --prerelease --draft
+        run: |
+          set -euo pipefail
+          # Mark the draft as a pre-release only for tags with a pre-release
+          # suffix (for example v1.0.0-rc.1) so that publishing a stable release
+          # later advances the moving container tags.
+          case "$TAG" in
+            *-*) PRERELEASE="--prerelease" ;;
+            *)   PRERELEASE="" ;;
+          esac
+          # Make re-runs idempotent: refresh an existing draft, but never clobber
+          # a release a maintainer has already published.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$TAG" --json isDraft --jq .isDraft)"
+            case "$is_draft" in
+              true) gh release delete "$TAG" --yes ;;
+              false)
+                echo "::notice::A published release already exists for $TAG; leaving it untouched."
+                exit 0
+                ;;
+              *)
+                echo "::error::Could not determine the release state for $TAG (got '$is_draft')."
+                exit 1
+                ;;
+            esac
+          fi
+          gh release create "$TAG" --generate-notes --draft $PRERELEASE
 
   # ----------------------------------------------------------------------------
   # Phase 2 (release published): publish the crates to crates.io for real
@@ -241,6 +418,11 @@ jobs:
 
   crates-publish:
     if: github.event_name == 'release'
+    # A protected GitHub Environment lets the maintainer require reviewers and
+    # scope the token to this job. crates.io OIDC trusted publishing is the
+    # recommended future replacement for the long-lived
+    # RUST_CRATES_PUBLISH_TOKEN.
+    environment: release
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
@@ -252,9 +434,33 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+
+      # The release event fires for any published release, and Phase 1's
+      # validate job only runs on the tag push. So skip non-version releases
+      # cleanly, and re-check that a version tag still matches the workspace
+      # version before publishing to crates.io.
+      - name: Check the release tag
+        id: check
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-.+)?$ ]]; then
+            echo "::notice::$TAG is not a version tag; skipping the crates publish."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          TAG_VERSION="${TAG#v}"
+          CARGO_VERSION=$(awk -F'"' '/^\[workspace\.package\]/{f=1} f && /^version[[:space:]]*=/{print $2; exit}' Cargo.toml)
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml ($CARGO_VERSION)"
+            exit 1
+          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
       - name: Publish crates
+        if: steps.check.outputs.publish == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.RUST_CRATES_PUBLISH_TOKEN }}
         run: |
@@ -263,3 +469,62 @@ jobs:
             exit 1
           fi
           make publish
+
+  # ----------------------------------------------------------------------------
+  # Phase 2 (release published): advance the moving :<major>.<minor> and :latest
+  # tags
+  #
+  # Phase 1 pushed only immutable tags. Here we retag the already-published
+  # :<version> image so :<major>.<minor> and :latest point at the same digest,
+  # without rebuilding, and only for stable releases. Pre-releases intentionally
+  # keep only the immutable :<version> and :sha- tags. For an out-of-order
+  # backport (publishing an older patch after a newer release is already out), a
+  # maintainer should not publish it as the newest release, since :latest here
+  # follows whatever release is published.
+  # ----------------------------------------------------------------------------
+
+  container-tags:
+    # Depends on crates-publish so the moving tags only advance once the
+    # environment-gated crates publish has actually succeeded; otherwise a
+    # rejected or failed publish could still repoint :latest.
+    needs: [crates-publish]
+    if: >-
+      github.event_name == 'release'
+      && github.event.release.prerelease == false
+      && needs.crates-publish.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Advance the major.minor and latest tags
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          # Only advance moving tags for a stable version tag (vX.Y.Z). Skip a
+          # pre-release tag, or any other published release, cleanly rather than
+          # failing or computing a garbage major.minor.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::notice::$TAG is not a stable version tag; leaving the moving tags unchanged."
+            exit 0
+          fi
+          VERSION="${TAG#v}"
+          MAJOR_MINOR="$(echo "$VERSION" | cut -d. -f1,2)"
+          # The immutable :<version> image must already exist from Phase 1.
+          if ! docker buildx imagetools inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            echo "::error::${IMAGE}:${VERSION} was not found; Phase 1 must publish it before the release is published."
+            exit 1
+          fi
+          docker buildx imagetools create \
+            --tag "${IMAGE}:${MAJOR_MINOR}" \
+            --tag "${IMAGE}:latest" \
+            "${IMAGE}:${VERSION}"

@@ -34,7 +34,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust (stable + nightly fmt)
-        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@9e74afe2bfce6db1d0e0df15b279d6e1e9dd6e2b # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
@@ -59,7 +59,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
         with:
           cache-suffix: doc
 
@@ -81,7 +81,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
 
       - name: Unit tests
         run: make test-unit
@@ -101,7 +101,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
 
       - name: Integration tests
         run: make test-integration
@@ -121,7 +121,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
 
       - name: Install Tools
         run: make target/praxis-binutils/h2spec
@@ -144,7 +144,7 @@ jobs:
           persist-credentials: false
 
       - name: Supply chain audit
-        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@9e74afe2bfce6db1d0e0df15b279d6e1e9dd6e2b # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
 
   # ----------------------------------------------------------------------------
   # Coverage gate
@@ -161,7 +161,7 @@ jobs:
           persist-credentials: false
 
       - name: Check coverage
-        uses: praxis-proxy/conventions/.github/actions/coverage-check@b702da784117b57488343273579932c3d432fa32 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/coverage-check@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
 
   # ----------------------------------------------------------------------------
   # Beta/Nightly canary

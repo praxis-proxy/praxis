@@ -360,27 +360,18 @@ audit:
 	cargo audit
 	cargo deny check
 
-PUBLISH_CRATES := praxis-proxy-tls praxis-proxy-core \
-	praxis-proxy-filter praxis-proxy-protocol praxis-proxy
-
 publish-dry-run:
-	@for crate in $(PUBLISH_CRATES); do \
-		printf "packaging %-25s " "$$crate" ; \
-		cargo package -p "$$crate" --list > /dev/null 2>&1 \
-			&& echo "ok" \
-			|| { echo "FAILED"; exit 1; }; \
-	done
-	cargo publish -p praxis-proxy-tls --dry-run
+	cargo publish --workspace --dry-run --locked
 
 # Real crates.io publish, in dependency order. Requires a crates.io token
 # in CARGO_REGISTRY_TOKEN (set from the RUST_CRATES_PUBLISH_TOKEN secret in
-# CI). `cargo publish` blocks until each crate is available in the index
-# before the next one publishes.
+# CI). `cargo publish --workspace` publishes every publishable crate in
+# dependency order, waiting for each to land in the index before the crates
+# that depend on it. This is not transactional: if a later crate fails, the
+# crates already published stay live, so a failed run cannot simply be re-run
+# at the same version.
 publish:
-	@for crate in $(PUBLISH_CRATES); do \
-		echo "publishing $$crate" ; \
-		cargo publish -p "$$crate" ; \
-	done
+	cargo publish --workspace --locked
 
 coverage:
 	cargo llvm-cov --workspace --html --output-dir target/coverage \
@@ -457,7 +448,7 @@ help:
 	@echo "  audit                cargo audit + cargo deny"
 	@echo "  semver               cargo semver-checks"
 	@echo "  mutants              mutation testing (cargo-mutants)"
-	@echo "  publish-dry-run      validate crate packaging for crates.io"
+	@echo "  publish-dry-run      build-verify all release crates for crates.io"
 	@echo "  publish              publish release crates to crates.io"
 	@echo "  coverage             HTML coverage report"
 	@echo "  coverage-check       fail if line coverage < 96%%"

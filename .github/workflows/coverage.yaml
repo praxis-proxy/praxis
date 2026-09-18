@@ -33,4 +33,4 @@ jobs:
           persist-credentials: false
 
       - name: Check coverage
-        uses: praxis-proxy/conventions/.github/actions/coverage-check@b702da784117b57488343273579932c3d432fa32 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/coverage-check@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0

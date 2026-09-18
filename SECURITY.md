@@ -2,16 +2,16 @@
 
 ## Supported Versions
 
-| Version   | Supported   |
-| --------- | ----------- |
-| 0.1.x     | No (Alpha)  |
-| 0.2.x     | No (Alpha)  |
-| 0.3.x     | No (Alpha)  |
-| 0.4.x     | No (Alpha)  |
-| 0.5.x     | No (Alpha)  |
-
-Only the latest patch release of each minor version
+Praxis is still pre-1.0, so no `0.x` release currently
 receives security updates.
+
+| Version | Supported |
+| ------- | --------- |
+| 0.x     | No        |
+
+A supported-version policy begins at `v1.0.0`. From that
+release onward, the latest patch of each supported minor
+version will receive security updates.
 
 ## Reporting a Vulnerability
 
