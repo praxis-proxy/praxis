@@ -23,6 +23,10 @@ const LB_PANIC_MODE_TOTAL: &str = "praxis_lb_panic_mode_total";
 const CLOUD_EVENTS_PUBLISH_TOTAL: &str = "praxis_cloud_events_publish_total";
 
 #[cfg(feature = "cloud-events-filter")]
+/// Counter for `CloudEvents` publication attempts.
+const CLOUD_EVENTS_ATTEMPTS_TOTAL: &str = "praxis_cloud_events_attempts_total";
+
+#[cfg(feature = "cloud-events-filter")]
 /// Histogram for `CloudEvents` publication latency in seconds.
 const CLOUD_EVENTS_PUBLISH_DURATION_SECONDS: &str = "praxis_cloud_events_publish_duration_seconds";
 
@@ -116,13 +120,7 @@ fn http_status_class(status: u16) -> &'static str {
 #[cfg(feature = "cloud-events-filter")]
 /// Record one `CloudEvents` publication attempt.
 pub(crate) fn record_cloud_events_attempt() {
-    counter!(
-        CLOUD_EVENTS_PUBLISH_TOTAL,
-        "outcome" => "attempt",
-        "failure_class" => "none",
-        "status_class" => "none",
-    )
-    .increment(1);
+    counter!(CLOUD_EVENTS_ATTEMPTS_TOTAL).increment(1);
 }
 
 #[cfg(feature = "cloud-events-filter")]
@@ -218,6 +216,7 @@ mod tests {
 
         record_cloud_events_publish("success", "none", Some(204), 0.001);
         record_cloud_events_publish("failure", "http_status", Some(500), 0.002);
+        record_cloud_events_attempt();
         record_cloud_events_skipped("size_limit");
 
         let rendered = crate::test_utils::render_metrics();
@@ -225,6 +224,7 @@ mod tests {
         assert!(rendered.contains("outcome=\"success\""));
         assert!(rendered.contains("failure_class=\"http_status\""));
         assert!(rendered.contains("status_class=\"5xx\""));
+        assert!(rendered.contains("praxis_cloud_events_attempts_total"));
         assert!(rendered.contains("praxis_cloud_events_skipped_total"));
         assert!(rendered.contains("reason=\"size_limit\""));
     }

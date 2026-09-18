@@ -19,7 +19,11 @@ mod cloud_events;
 #[cfg(feature = "cloud-events-filter")]
 pub use cloud_events::CloudEventsFilter;
 
-/// Header names rejected at config load time in v1.
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+/// Header names rejected at config load time.
 const SENSITIVE_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie", "set-cookie"];
 /// Return whether a header is prohibited from observability output.
 fn is_sensitive_header(name: &str) -> bool {

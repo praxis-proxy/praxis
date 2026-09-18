@@ -3,35 +3,39 @@
 
 # `cloud_events`
 
-Generate structured CloudEvents and ship them to a configured HTTP endpoint.
+Generate structured `CloudEvents` and ship them to a configured HTTP endpoint.
 
 Requires Cargo feature: `cloud-events-filter`.
+
+## Configuration Notes
+
+Experimental: requires the off-by-default `cloud-events-filter` feature. Review its best-effort delivery limitations before using it in production.
 
 ## Configuration
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `on` | `request` \| `response_headers` \| `response_complete` | yes | Lifecycle phase for this publisher. |
-| `destination` | string | yes | HTTP endpoint receiving the structured CloudEvent. |
+| `destination` | string | yes | HTTP endpoint receiving the structured `CloudEvent`. |
 | `delivery` | `best_effort` | no | Delivery guarantee supported by this version. |
-| `format` | `structured_json` | no | HTTP CloudEvents binding used by this publisher. |
-| `source` | string | yes | Static CloudEvents source attribute. |
-| `type` | string | yes | Static CloudEvents type attribute. |
-| `subject` | CloudEventsMapping | no | Optional CloudEvents subject attribute. |
+| `format` | `structured_json` | no | HTTP `CloudEvents` binding used by this publisher. |
+| `source` | string | yes | Static `CloudEvents` source attribute. |
+| `type` | string | yes | Static `CloudEvents` type attribute. |
+| `subject` | CloudEventsMapping | no | Optional `CloudEvents` subject attribute. |
 | `subject.value` | string | yes | Source reference: `context.*`, `metadata.*`, `request_header.*`, `response_header.*`, or `response.status`. |
 | `subject.type` | `string` \| `integer` \| `boolean` \| `json` | yes | Output conversion to apply. |
 | `subject.required` | bool | no | Whether failure to resolve this value suppresses the event. |
-| `schema` | string | no | Optional CloudEvents data-schema identifier. |
+| `schema` | string | no | Optional `CloudEvents` data-schema identifier. |
 | `include_provenance` | bool | no | Include source-derived provenance in reserved `data._praxis_provenance`. |
 | `context_fields` | string[] | no | Explicitly allowlisted context references. |
 | `request_headers` | string[] | no | Explicitly allowlisted request header names. |
 | `response_headers` | string[] | no | Explicitly allowlisted response header names. |
 | `metadata_fields` | string[] | no | Explicitly allowlisted filter metadata references. |
-| `data` | object<string, CloudEventsMapping> | no | Mapped CloudEvent data fields. |
+| `data` | object<string, CloudEventsMapping> | no | Mapped `CloudEvent` data fields. |
 | `data.value` | string | yes | Source reference: `context.*`, `metadata.*`, `request_header.*`, `response_header.*`, or `response.status`. |
 | `data.type` | `string` \| `integer` \| `boolean` \| `json` | yes | Output conversion to apply. |
 | `data.required` | bool | no | Whether failure to resolve this value suppresses the event. |
-| `extensions` | object<string, CloudEventsMapping> | no | Mapped CloudEvent extension attributes. |
+| `extensions` | object<string, CloudEventsMapping> | no | Mapped `CloudEvent` extension attributes. |
 | `extensions.value` | string | yes | Source reference: `context.*`, `metadata.*`, `request_header.*`, `response_header.*`, or `response.status`. |
 | `extensions.type` | `string` \| `integer` \| `boolean` \| `json` | yes | Output conversion to apply. |
 | `extensions.required` | bool | no | Whether failure to resolve this value suppresses the event. |

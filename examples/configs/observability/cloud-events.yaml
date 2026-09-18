@@ -3,6 +3,9 @@
 # Publishes a bounded, best-effort CloudEvents 1.0 response event after the
 # upstream response completes. The local receiver below is illustrative.
 #
+# Experimental: requires the off-by-default `cloud-events-filter` feature.
+# Review its best-effort delivery limitations before using it in production.
+#
 # Usage:
 #   cargo run -p praxis-proxy --features cloud-events-filter -- -c examples/configs/observability/cloud-events.yaml
 #   curl -H 'User-Agent: example-client' http://localhost:8080/

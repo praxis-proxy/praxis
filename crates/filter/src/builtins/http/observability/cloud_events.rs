@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (c) 2024 Praxis Contributors
+// Copyright (c) 2026 Praxis Contributors
 
 //! `CloudEvents` structured-JSON publisher.
 
@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, SecondsFormat, Utc};
 use http::{
-    HeaderMap, HeaderValue, Method, Uri,
+    HeaderMap, HeaderValue, Method, StatusCode, Uri,
     header::{CONTENT_TYPE, HeaderName},
 };
 use serde::Deserialize;
@@ -26,172 +26,14 @@ use crate::{
     filter::{HttpFilter, HttpFilterContext},
 };
 
-/// Maximum receiver response body retained by a best-effort publication.
-const MAX_DELIVERY_RESPONSE_BYTES: usize = 4_096;
-
-/// Maximum serialized `CloudEvent` size accepted.
-const MAX_EVENT_SIZE_BYTES: usize = 65_536; // 64 KiB
-
-/// Maximum `CloudEvents` delivery tasks across all publishers.
-const MAX_PENDING_DELIVERIES: usize = 64;
-
-/// Maximum explicitly configured mapped values in one event.
-const MAX_EVENT_MAPPINGS: usize = 64;
-
-/// Process-wide bound for active `CloudEvents` deliveries.
-static DELIVERY_PERMITS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(MAX_PENDING_DELIVERIES)));
-
 // -----------------------------------------------------------------------------
-// Configuration types
+// CloudEventsFilter
 // -----------------------------------------------------------------------------
-
-/// Lifecycle phase at which a `CloudEvent` is published.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum CloudEventsPhase {
-    /// Publish during request processing.
-    Request,
-    /// Publish after response headers are available.
-    ResponseHeaders,
-    /// Publish after the response has completed.
-    ResponseComplete,
-}
-
-/// Delivery behavior for a `CloudEvents` publisher.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum CloudEventsDelivery {
-    /// Attempt delivery without changing the proxied request outcome.
-    #[default]
-    BestEffort,
-}
-
-/// Wire format for a `CloudEvents` publisher.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum CloudEventsFormat {
-    /// `CloudEvents` structured-mode JSON over HTTP.
-    #[default]
-    StructuredJson,
-}
-
-/// Type conversion requested for a mapped value.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "snake_case")]
-enum CloudEventsValueType {
-    /// Serialize the value as a JSON string.
-    String,
-    /// Convert the value to a JSON integer.
-    Integer,
-    /// Convert the value to a JSON boolean.
-    Boolean,
-    /// Parse the value as JSON.
-    Json,
-}
-
-/// One explicitly configured value exported into a `CloudEvent`.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-struct CloudEventsMapping {
-    /// Source reference: `context.*`, `metadata.*`, `request_header.*`, `response_header.*`, or `response.status`.
-    value: String,
-    /// Output conversion to apply.
-    #[serde(rename = "type")]
-    value_type: CloudEventsValueType,
-    /// Whether failure to resolve this value suppresses the event.
-    #[serde(default)]
-    required: bool,
-}
-
-/// Deserialized configuration for one `CloudEvents` publisher.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CloudEventsFilterConfig {
-    /// Lifecycle phase for this publisher.
-    on: CloudEventsPhase,
-    /// HTTP endpoint receiving the structured `CloudEvent`.
-    destination: String,
-    /// Delivery guarantee supported by this version.
-    #[serde(default)]
-    delivery: CloudEventsDelivery,
-    /// HTTP `CloudEvents` binding used by this publisher.
-    #[serde(default)]
-    format: CloudEventsFormat,
-    /// Static `CloudEvents` source attribute.
-    source: String,
-    /// Static `CloudEvents` type attribute.
-    #[serde(rename = "type")]
-    event_type: String,
-    /// Optional `CloudEvents` subject attribute.
-    subject: Option<CloudEventsMapping>,
-    /// Optional `CloudEvents` data-schema identifier.
-    schema: Option<String>,
-    /// Include source-derived provenance in reserved `data._praxis_provenance`.
-    #[serde(default)]
-    include_provenance: bool,
-    /// Explicitly allowlisted context references.
-    #[serde(default)]
-    context_fields: Vec<String>,
-    /// Explicitly allowlisted request header names.
-    #[serde(default)]
-    request_headers: Vec<String>,
-    /// Explicitly allowlisted response header names.
-    #[serde(default)]
-    response_headers: Vec<String>,
-    /// Explicitly allowlisted filter metadata references.
-    #[serde(default)]
-    metadata_fields: Vec<String>,
-    /// Mapped `CloudEvent` data fields.
-    #[serde(default)]
-    data: BTreeMap<String, CloudEventsMapping>,
-    /// Mapped `CloudEvent` extension attributes.
-    #[serde(default)]
-    extensions: BTreeMap<String, CloudEventsMapping>,
-    /// Maximum serialized event size in bytes (1 through 65536).
-    #[serde(default = "default_size_limit_bytes")]
-    size_limit_bytes: usize,
-    /// Maximum outbound delivery time in milliseconds.
-    #[serde(default = "default_delivery_timeout_ms")]
-    delivery_timeout_ms: u64,
-}
-
-/// Cached response metadata for emission on the body phase.
-#[derive(Clone, Debug)]
-struct CloudEventsState {
-    /// Response status captured during the response-header phase.
-    status: Option<u16>,
-    /// Response headers captured during the response-header phase.
-    response_headers: Option<HeaderMap>,
-    /// Whether this configured publisher already emitted its event.
-    emitted: bool,
-}
-
-/// Supported mapping source families.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CloudEventsSource<'a> {
-    /// A trusted Praxis context field.
-    Context(&'a str),
-    /// A value published by an earlier filter.
-    Metadata(&'a str),
-    /// An explicitly allowlisted request header.
-    RequestHeader(&'a str),
-    /// An explicitly allowlisted response header.
-    ResponseHeader(&'a str),
-    /// The upstream response status code.
-    ResponseStatus,
-}
-
-/// Default maximum serialized event size: 64 KiB.
-fn default_size_limit_bytes() -> usize {
-    65_536 // 64 KiB
-}
-
-/// Default outbound delivery timeout: 3 seconds.
-fn default_delivery_timeout_ms() -> u64 {
-    3_000
-}
 
 /// Generate structured `CloudEvents` and ship them to a configured HTTP endpoint.
+///
+/// Experimental: requires the off-by-default `cloud-events-filter` feature.
+/// Review its best-effort delivery limitations before using it in production.
 ///
 /// # YAML configuration
 ///
@@ -286,6 +128,171 @@ pub struct CloudEventsFilter {
     delivery_timeout: Duration,
 }
 
+/// Deserialized configuration for one `CloudEvents` publisher.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloudEventsFilterConfig {
+    /// Lifecycle phase for this publisher.
+    on: CloudEventsPhase,
+    /// HTTP endpoint receiving the structured `CloudEvent`.
+    destination: String,
+    /// Delivery guarantee supported by this version.
+    #[serde(default)]
+    delivery: CloudEventsDelivery,
+    /// HTTP `CloudEvents` binding used by this publisher.
+    #[serde(default)]
+    format: CloudEventsFormat,
+    /// Static `CloudEvents` source attribute.
+    source: String,
+    /// Static `CloudEvents` type attribute.
+    #[serde(rename = "type")]
+    event_type: String,
+    /// Optional `CloudEvents` subject attribute.
+    subject: Option<CloudEventsMapping>,
+    /// Optional `CloudEvents` data-schema identifier.
+    schema: Option<String>,
+    /// Include source-derived provenance in reserved `data._praxis_provenance`.
+    #[serde(default)]
+    include_provenance: bool,
+    /// Explicitly allowlisted context references.
+    #[serde(default)]
+    context_fields: Vec<String>,
+    /// Explicitly allowlisted request header names.
+    #[serde(default)]
+    request_headers: Vec<String>,
+    /// Explicitly allowlisted response header names.
+    #[serde(default)]
+    response_headers: Vec<String>,
+    /// Explicitly allowlisted filter metadata references.
+    #[serde(default)]
+    metadata_fields: Vec<String>,
+    /// Mapped `CloudEvent` data fields.
+    #[serde(default)]
+    data: BTreeMap<String, CloudEventsMapping>,
+    /// Mapped `CloudEvent` extension attributes.
+    #[serde(default)]
+    extensions: BTreeMap<String, CloudEventsMapping>,
+    /// Maximum serialized event size in bytes (1 through 65536).
+    #[serde(default = "default_size_limit_bytes")]
+    size_limit_bytes: usize,
+    /// Maximum outbound delivery time in milliseconds.
+    #[serde(default = "default_delivery_timeout_ms")]
+    delivery_timeout_ms: u64,
+}
+
+/// Maximum receiver response body retained by a best-effort publication.
+const MAX_DELIVERY_RESPONSE_BYTES: usize = 4_096;
+
+/// Maximum serialized `CloudEvent` size accepted.
+const MAX_EVENT_SIZE_BYTES: usize = 65_536; // 64 KiB
+
+/// Maximum `CloudEvents` delivery tasks across all publishers.
+const MAX_PENDING_DELIVERIES: usize = 64;
+
+/// Maximum explicitly configured mapped values in one event.
+const MAX_EVENT_MAPPINGS: usize = 64;
+
+/// Process-wide bound for active `CloudEvents` deliveries.
+static DELIVERY_PERMITS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(MAX_PENDING_DELIVERIES)));
+
+// -----------------------------------------------------------------------------
+// Configuration types
+// -----------------------------------------------------------------------------
+
+/// Lifecycle phase at which a `CloudEvent` is published.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum CloudEventsPhase {
+    /// Publish during request processing.
+    Request,
+    /// Publish after response headers are available.
+    ResponseHeaders,
+    /// Publish after the response has completed.
+    ResponseComplete,
+}
+
+/// Delivery behavior for a `CloudEvents` publisher.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum CloudEventsDelivery {
+    /// Attempt delivery without changing the proxied request outcome.
+    #[default]
+    BestEffort,
+}
+
+/// Wire format for a `CloudEvents` publisher.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum CloudEventsFormat {
+    /// `CloudEvents` structured-mode JSON over HTTP.
+    #[default]
+    StructuredJson,
+}
+
+/// Type conversion requested for a mapped value.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum CloudEventsValueType {
+    /// Serialize the value as a JSON string.
+    String,
+    /// Convert the value to a JSON integer.
+    Integer,
+    /// Convert the value to a JSON boolean.
+    Boolean,
+    /// Parse the value as JSON.
+    Json,
+}
+
+/// One explicitly configured value exported into a `CloudEvent`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct CloudEventsMapping {
+    /// Source reference: `context.*`, `metadata.*`, `request_header.*`, `response_header.*`, or `response.status`.
+    value: String,
+    /// Output conversion to apply.
+    #[serde(rename = "type")]
+    value_type: CloudEventsValueType,
+    /// Whether failure to resolve this value suppresses the event.
+    #[serde(default)]
+    required: bool,
+}
+
+/// Cached response metadata for emission on the body phase.
+#[derive(Clone, Debug)]
+struct CloudEventsState {
+    /// Response status captured during the response-header phase.
+    status: Option<u16>,
+    /// Response headers captured during the response-header phase.
+    response_headers: Option<HeaderMap>,
+    /// Whether this configured publisher already emitted its event.
+    emitted: bool,
+}
+
+/// Supported mapping source families.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloudEventsSource<'a> {
+    /// A trusted Praxis context field.
+    Context(&'a str),
+    /// A value published by an earlier filter.
+    Metadata(&'a str),
+    /// An explicitly allowlisted request header.
+    RequestHeader(&'a str),
+    /// An explicitly allowlisted response header.
+    ResponseHeader(&'a str),
+    /// The upstream response status code.
+    ResponseStatus,
+}
+
+/// Default maximum serialized event size: 64 KiB.
+fn default_size_limit_bytes() -> usize {
+    65_536 // 64 KiB
+}
+
+/// Default outbound delivery timeout: 3 seconds.
+fn default_delivery_timeout_ms() -> u64 {
+    3_000
+}
+
 // -----------------------------------------------------------------------------
 // Construction
 // -----------------------------------------------------------------------------
@@ -354,12 +361,6 @@ impl CloudEventsFilter {
     }
 
     /// Build and enqueue one event without affecting the client response.
-    #[expect(
-        clippy::large_futures,
-        clippy::large_stack_frames,
-        clippy::too_many_lines,
-        reason = "bounded best-effort delivery keeps its lifecycle state together"
-    )]
     fn maybe_emit(&self, ctx: &mut HttpFilterContext<'_>) {
         if ctx
             .get_filter_state::<CloudEventsState>()
@@ -368,31 +369,38 @@ impl CloudEventsFilter {
             return;
         }
 
-        let Ok(permit) = Arc::clone(&DELIVERY_PERMITS).try_acquire_owned() else {
-            crate::metrics::record_cloud_events_skipped("backpressure");
-            Self::mark_emitted(ctx);
-            return;
-        };
-
         let Some(event) = self.build_event(ctx) else {
             crate::metrics::record_cloud_events_skipped("missing_required");
             Self::mark_emitted(ctx);
             return;
         };
+        self.enqueue_event(ctx, &event);
+        Self::mark_emitted(ctx);
+    }
+
+    /// Enqueue one bounded best-effort delivery without changing filter state.
+    #[expect(
+        clippy::large_futures,
+        clippy::large_stack_frames,
+        clippy::too_many_lines,
+        reason = "delivery preparation and bounded failure telemetry stay together"
+    )]
+    fn enqueue_event(&self, ctx: &HttpFilterContext<'_>, event: &Value) -> bool {
+        let Ok(permit) = Arc::clone(&DELIVERY_PERMITS).try_acquire_owned() else {
+            crate::metrics::record_cloud_events_skipped("backpressure");
+            return false;
+        };
         let Ok(body) = serde_json::to_vec(&event) else {
             crate::metrics::record_cloud_events_skipped("serialization");
-            Self::mark_emitted(ctx);
-            return;
+            return false;
         };
         if body.len() > self.size_limit_bytes {
             crate::metrics::record_cloud_events_skipped("size_limit");
-            Self::mark_emitted(ctx);
-            return;
+            return false;
         }
         let Some(client) = ctx.subrequest_client().cloned() else {
             crate::metrics::record_cloud_events_skipped("missing_client");
-            Self::mark_emitted(ctx);
-            return;
+            return false;
         };
 
         let destination = self.destination.clone();
@@ -406,7 +414,7 @@ impl CloudEventsFilter {
         };
 
         // share the runtime subrequest pool;
-        // TODO (followup): add a dedicated background/event pool if event bursts
+        // TODO(#1203): add a dedicated background/event pool if event bursts
         // contend with request-critical callouts.
         crate::metrics::record_cloud_events_attempt();
         tokio::spawn(async move {
@@ -475,8 +483,7 @@ impl CloudEventsFilter {
                 },
             }
         });
-
-        Self::mark_emitted(ctx);
+        true
     }
 
     /// Mark this filter invocation as having completed its publication decision.
@@ -487,12 +494,16 @@ impl CloudEventsFilter {
     }
 
     /// Build one structured `CloudEvent` without performing network delivery.
+    fn build_event(&self, ctx: &HttpFilterContext<'_>) -> Option<Value> {
+        self.build_event_with_state(ctx, ctx.get_filter_state::<CloudEventsState>())
+    }
+
+    /// Build an event using an explicitly supplied response state.
     #[expect(
         clippy::too_many_lines,
         reason = "envelope and payload assembly stay in one bounded operation"
     )]
-    fn build_event(&self, ctx: &HttpFilterContext<'_>) -> Option<Value> {
-        let state = ctx.get_filter_state::<CloudEventsState>();
+    fn build_event_with_state(&self, ctx: &HttpFilterContext<'_>, state: Option<&CloudEventsState>) -> Option<Value> {
         let mut event = Map::from_iter([
             ("specversion".to_owned(), Value::String("1.0".to_owned())),
             (
@@ -636,6 +647,13 @@ impl HttpFilter for CloudEventsFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // Interim responses can invoke this hook before the final response.
+        // `101 Switching Protocols` is an upgrade response and is final.
+        if ctx.response_header.as_ref().is_some_and(|response| {
+            response.status.is_informational() && response.status != StatusCode::SWITCHING_PROTOCOLS
+        }) {
+            return Ok(FilterAction::Continue);
+        }
         if self.on == CloudEventsPhase::ResponseHeaders {
             let Some(response) = ctx.response_header.as_ref() else {
                 return Ok(FilterAction::Continue);
@@ -670,6 +688,31 @@ impl HttpFilter for CloudEventsFilter {
             }
         }
         Ok(FilterAction::Continue)
+    }
+
+    // TODO(#1228): generalize deferred-record dispatch so incomplete lifecycle
+    // handling is not coupled to the access-log fallback path.
+    fn emit_deferred_record(&self, ctx: &HttpFilterContext<'_>, status: u16) -> bool {
+        if self.on != CloudEventsPhase::ResponseComplete
+            || ctx
+                .get_filter_state::<CloudEventsState>()
+                .is_some_and(|state| state.emitted)
+        {
+            return false;
+        }
+
+        let fallback_state = CloudEventsState {
+            status: (status != 0).then_some(status),
+            response_headers: ctx.response_header.as_ref().map(|response| response.headers.clone()),
+            emitted: false,
+        };
+        let state = ctx.get_filter_state::<CloudEventsState>().or(Some(&fallback_state));
+        let Some(event) = self.build_event_with_state(ctx, state) else {
+            crate::metrics::record_cloud_events_skipped("missing_required");
+            return true;
+        };
+        let _ = self.enqueue_event(ctx, &event);
+        true
     }
 
     fn response_body_access(&self) -> BodyAccess {
@@ -1413,6 +1456,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_complete_ignores_interim_informational_responses() {
+        let filter = phase_filter("response_complete");
+        let request = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        ctx.current_filter_id = Some(0);
+        let mut interim_response = crate::test_utils::make_response();
+        interim_response.status = http::StatusCode::EARLY_HINTS;
+        ctx.response_header = Some(&mut interim_response);
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        ctx.response_header = None;
+        assert!(ctx.get_filter_state::<super::CloudEventsState>().is_none());
+
+        let mut response = crate::test_utils::make_response();
+        response.status = http::StatusCode::OK;
+        ctx.response_header = Some(&mut response);
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        ctx.response_header = None;
+        assert!(!ctx.get_filter_state::<super::CloudEventsState>().unwrap().emitted);
+
+        let mut body = None;
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+        assert!(ctx.get_filter_state::<super::CloudEventsState>().unwrap().emitted);
+    }
+
+    #[tokio::test]
     async fn response_complete_emits_immediately_for_bodyless_response() {
         let filter = phase_filter("response_complete");
         let request = crate::test_utils::make_request(Method::GET, "/");
@@ -1453,7 +1522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publishes_structured_event_through_shared_subrequest_client() {
+    async fn publishes_deferred_event_after_incomplete_response() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = oneshot::channel();
@@ -1493,7 +1562,7 @@ mod tests {
         });
 
         let filter = CloudEventsFilter::build(CloudEventsFilterConfig {
-            on: CloudEventsPhase::Request,
+            on: CloudEventsPhase::ResponseComplete,
             destination: format!("http://{address}/events"),
             delivery: CloudEventsDelivery::BestEffort,
             format: CloudEventsFormat::StructuredJson,
@@ -1519,7 +1588,12 @@ mod tests {
         ctx.current_filter_id = Some(0);
         ctx.subrequest_client = Some(&client);
 
-        drop(filter.on_request(&mut ctx).await.unwrap());
+        let mut response = crate::test_utils::make_response();
+        ctx.response_header = Some(&mut response);
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        ctx.response_header = None;
+        assert!(!ctx.get_filter_state::<super::CloudEventsState>().unwrap().emitted);
+        assert!(filter.emit_deferred_record(&ctx, 502));
         let request = tokio::time::timeout(Duration::from_secs(2), receiver)
             .await
             .unwrap()
