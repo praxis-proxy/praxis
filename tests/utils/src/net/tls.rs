@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair, SanType};
+use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType};
 use rustls::ClientConfig;
 use tempfile::TempDir;
 
@@ -281,6 +281,37 @@ impl TestCertificates {
         let n = self.client_cert_counter.fetch_add(1, Ordering::Relaxed);
         let cert_path = self.temp_dir.path().join(format!("client-org-{n}.pem"));
         let key_path = self.temp_dir.path().join(format!("client-org-{n}-key.pem"));
+
+        std::fs::write(&cert_path, client_cert.pem()).expect("write client cert PEM");
+        std::fs::write(&key_path, client_key.serialize_pem()).expect("write client key PEM");
+
+        ClientCert { cert_path, key_path }
+    }
+
+    /// Generate a client certificate carrying `spiffe_id` as its sole URI SAN,
+    /// signed by this test CA. Useful for exercising `RequireNamed` listeners.
+    ///
+    /// # Panics
+    ///
+    /// Panics if certificate generation or file I/O fails.
+    pub fn generate_client_cert_with_spiffe_id(&self, spiffe_id: &str) -> ClientCert {
+        let issuer = Issuer::from_params(&self.ca_params, &self.ca_key);
+        let client_key = KeyPair::generate().expect("client key generation");
+        // A conforming X.509-SVID leaf: sole URI SAN, no DNS SAN, critical keyUsage
+        // with digitalSignature, and an EKU with both serverAuth and clientAuth.
+        let mut client_params = CertificateParams::new(Vec::<String>::new()).expect("client cert params");
+        client_params.distinguished_name.push(DnType::CommonName, "Test Client");
+        client_params
+            .subject_alt_names
+            .push(SanType::URI(spiffe_id.try_into().expect("spiffe uri san")));
+        client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        client_params.extended_key_usages =
+            vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
+        let client_cert = client_params.signed_by(&client_key, &issuer).expect("client cert sign");
+
+        let n = self.client_cert_counter.fetch_add(1, Ordering::Relaxed);
+        let cert_path = self.temp_dir.path().join(format!("client-svid-{n}.pem"));
+        let key_path = self.temp_dir.path().join(format!("client-svid-{n}-key.pem"));
 
         std::fs::write(&cert_path, client_cert.pem()).expect("write client cert PEM");
         std::fs::write(&key_path, client_key.serialize_pem()).expect("write client key PEM");

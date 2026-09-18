@@ -387,6 +387,138 @@ insecure_options:
     );
 }
 
+/// Build a `require_named` mTLS listener config, with an optional SPIFFE allowlist.
+#[cfg(feature = "spiffe")]
+fn require_named_yaml(
+    certs: &TestCertificates,
+    proxy_port: u16,
+    backend_port: u16,
+    trusted_spiffe_ids: &[&str],
+) -> String {
+    let listed: String = trusted_spiffe_ids
+        .iter()
+        .map(|id| format!("\n        - \"{id}\""))
+        .collect();
+    let allowlist = if listed.is_empty() {
+        String::new()
+    } else {
+        format!("\n      trusted_spiffe_ids:{listed}")
+    };
+    format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      client_ca:
+        ca_path: "{ca}"
+      client_cert_mode: require_named{allowlist}
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+        ca = certs.ca_cert_path.display(),
+    )
+}
+
+#[cfg(feature = "spiffe")]
+#[test]
+fn listener_mtls_require_named_allowlisted_peer_succeeds() {
+    let certs = TestCertificates::generate();
+    let id = "spiffe://grid.internal/site/pool-a";
+    let client_cert = certs.generate_client_cert_with_spiffe_id(id);
+    let client_config = certs.client_config_with_cert(&client_cert);
+
+    let backend_port_guard = start_backend_with_shutdown("mtls-named-ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = require_named_yaml(&certs, proxy_port, backend_port, &[id]);
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_tls_proxy_no_wait(&config);
+    wait_for_https(proxy.addr(), &client_config);
+
+    let (status, body) = https_get(proxy.addr(), "/", &client_config);
+    assert_eq!(status, 200, "an allowlisted SVID peer should be admitted");
+    assert_eq!(body, "mtls-named-ok", "require_named should forward the backend body");
+}
+
+#[cfg(feature = "spiffe")]
+#[test]
+fn listener_mtls_require_named_unlisted_peer_is_rejected() {
+    let certs = TestCertificates::generate();
+    // The client holds a valid, CA-signed SVID, but its identity is not allowlisted.
+    let client_cert = certs.generate_client_cert_with_spiffe_id("spiffe://grid.internal/site/pool-b");
+    let client_config = certs.client_config_with_cert(&client_cert);
+
+    let backend_port_guard = start_backend_with_shutdown("mtls-named-reject");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = require_named_yaml(
+        &certs,
+        proxy_port,
+        backend_port,
+        &["spiffe://grid.internal/site/pool-a"],
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_tls_proxy_no_wait(&config);
+
+    // Prove the listener is up using an allowlisted peer, so the only remaining
+    // reason the unlisted attempt can fail is the authorization decision, not a
+    // not-yet-bound listener.
+    let ready = certs.generate_client_cert_with_spiffe_id("spiffe://grid.internal/site/pool-a");
+    let ready_config = certs.client_config_with_cert(&ready);
+    wait_for_https(proxy.addr(), &ready_config);
+
+    let cfg_ref = &client_config;
+    let addr_ref = proxy.addr();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| https_get(addr_ref, "/", cfg_ref)));
+    assert!(
+        result.is_err(),
+        "an unlisted SVID peer should be rejected at the handshake"
+    );
+}
+
+#[cfg(feature = "spiffe")]
+#[test]
+fn listener_mtls_require_named_empty_allowlist_admits_any_svid() {
+    let certs = TestCertificates::generate();
+    let client_cert = certs.generate_client_cert_with_spiffe_id("spiffe://grid.internal/site/anyone");
+    let client_config = certs.client_config_with_cert(&client_cert);
+
+    let backend_port_guard = start_backend_with_shutdown("mtls-named-any");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    // Empty allowlist: any valid SVID the client CA vouches for is admitted.
+    let yaml = require_named_yaml(&certs, proxy_port, backend_port, &[]);
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_tls_proxy_no_wait(&config);
+    wait_for_https(proxy.addr(), &client_config);
+
+    let (status, _body) = https_get(proxy.addr(), "/", &client_config);
+    assert_eq!(status, 200, "an empty allowlist admits any valid SVID");
+}
+
 #[test]
 fn listener_mtls_require_no_client_cert_fails() {
     let certs = TestCertificates::generate();
