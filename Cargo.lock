@@ -4,17 +4,6 @@ version = 4
 
 [[package]]
 name = "ahash"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891477e0c6a8957309ee5c45a6368af3ae14bb510732d2684ffa19af310920f9"
-dependencies = [
- "getrandom 0.2.17",
- "once_cell",
- "version_check",
-]
-
-[[package]]
-name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
@@ -123,7 +112,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -134,7 +123,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1292,7 +1281,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1360,7 +1349,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf5efcf77a4da27927d3ab0509dec5b0954bb3bc59da5a1de9e52642ebd4cdf9"
 dependencies = [
- "ahash 0.8.12",
+ "ahash",
  "num_cpus",
  "parking_lot",
  "seize",
@@ -1634,15 +1623,16 @@ name = "hashbrown"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
-dependencies = [
- "ahash 0.7.8",
-]
 
 [[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash",
+ "allocator-api2",
+]
 
 [[package]]
 name = "hashbrown"
@@ -2565,7 +2555,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2997,9 +2987,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "843b4d6fc1ded47c045d25c5b79aff66fb8a8d7204210f090ba6671b136dd9e6"
+checksum = "286a764b06b52230f2dc13f8bb1cabf04a2a79a54129b8ed706d50bd9538cfe8"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
@@ -3016,9 +3006,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-cmf"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a34d8a61d7a4d3510beaede620503ee9f6c50e0b6a84d258c00354ab2051da48"
+checksum = "6be770424cfe4f023098356c88c6c27ebd49472a33f1cd3824567d3832f9305d"
 dependencies = [
  "praxis-policy-apl-core",
  "praxis-policy-core",
@@ -3027,9 +3017,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-core"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3e34c6a6b9a8a630d2deee0efb7a101de523528c20690b269e345c5ac17d881"
+checksum = "f654b0908eb17e9a3bdcaae82ad8a3e28622b0e84aafaacae076fdc698201281"
 dependencies = [
  "async-trait",
  "futures",
@@ -3039,13 +3029,14 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
 name = "praxis-policy-apl-runtime"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8421cb367d591771bdc4e1ce38aae910d788facb5d9189de24401a17288d1543"
+checksum = "005904c00ed9a6723f4c5bf333d52ebfcf18bd32d8bae600336f58b8236dcd02"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3062,9 +3053,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-core"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bddb294938b08f5381004aeceb07217bf513aa38a23c672974c71cbacec6eab"
+checksum = "700256f9e9a57d885be7d35029dce1a9bc472e3a6203bdfb2728e4372ecdf31c"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3087,9 +3078,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-orchestration"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64a774e00b8e685056001148fb3c094e21de1691d87acc56af89bbfcca30ad07"
+checksum = "6a4475b74afc9811454a976f0ee1b1588b259b786203f1f176493a6fded51a8c"
 dependencies = [
  "futures",
  "tokio",
@@ -3097,9 +3088,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-pdp-cedar-direct"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f560616300bc3ba4b8d1cb43937a4fc9b7e608bf86596b06ae252374b13b14e0"
+checksum = "741064cc4513a43aee6ea93407ef2b42153f8d2dc6c64cc27da82008a00f293f"
 dependencies = [
  "async-trait",
  "cedar-policy",
@@ -3112,9 +3103,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-pdp-cel"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4823562424fe061a801a5c758ecb3ec6f2923d52ee55d25ed8a7328822c8b86e"
+checksum = "bc8375a8b343433def3ae40c325a586a88c60ed7f0ccd1bde454d487dfd0ccc3"
 dependencies = [
  "async-trait",
  "cel",
@@ -3126,9 +3117,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-pdp-opa"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06ffd0a4e95f66ff2741e488d182c517cebc55425db1601064b82db25dd66e5a"
+checksum = "c44b83b536dbd64fd7039e96fd6f5f728884c49e1946d5a67906c75d889401bb"
 dependencies = [
  "async-trait",
  "praxis-policy-apl-core",
@@ -3142,12 +3133,12 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-delegator-oauth"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e26ca48ac8eefdf5ae847be7ff1edd21d481bf8ca22fb51de00b1a428635551"
+checksum = "ddd97e18fb69bd0b2ce2ac16edb7fccfb6f95c2a1a9cdd209be4cdea71b7f88e"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "getrandom 0.4.3",
  "hmac",
@@ -3163,12 +3154,12 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-elicitation-ciba"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "193279a70d24dc95246b94fcc808fdf25b1c2ffa81d1aa074030951b901602a3"
+checksum = "c730f75ae22bd2844000cd3da0b6d3eb886ff37b301faab7405b8655839dcae4"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "praxis-policy-core",
  "serde",
@@ -3179,12 +3170,12 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-plugin-identity-jwt"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "931ff18bd767f37df756efb017ac184a76ebe2e50578b1b84d12c2cb28dd320d"
+checksum = "02732b66491e6cde021253b45798077a01383248a7f8334c4ee816ccd3a7542f"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "futures",
  "jsonwebtoken",
@@ -3197,9 +3188,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-session-valkey"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28a3e18c9d0fad6e2b3dc549750d0ab8493e869a73029b3b545406775ee272cd"
+checksum = "425a4a72e0c2cf5db263dbba2ecd2b647ec7f469780d8fe2d85eb4ed5f759139"
 dependencies = [
  "async-trait",
  "deadpool-redis",
@@ -3560,7 +3551,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3612,7 +3603,7 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "350fc5dba8abe580c7e087282174e5a2ecc686b525e8ff57cdb60496c5127ed9"
 dependencies = [
- "ahash 0.8.12",
+ "ahash",
  "arrayvec 0.7.8",
  "async-trait",
  "blake2",
@@ -3648,7 +3639,7 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6715c22a92bc566fd9384790c2d1abfb9354de8f1a0dcf1f7256e0c3a2d6ad82"
 dependencies = [
- "ahash 0.8.12",
+ "ahash",
  "async-trait",
  "brotli",
  "bstr",
@@ -3734,11 +3725,11 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c73254f0b48aa956769c2f76f6464774fbf13f0b27cbbf3b64b5f3e2960d261c"
 dependencies = [
- "ahash 0.8.12",
+ "ahash",
  "arrayvec 0.7.8",
  "async-channel",
  "flurry",
- "hashbrown 0.12.3",
+ "hashbrown 0.14.5",
  "log",
  "parking_lot",
  "rand 0.10.2",
@@ -4189,7 +4180,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4623,7 +4614,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4666,7 +4657,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -4796,7 +4787,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4805,7 +4796,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5519,7 +5510,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
