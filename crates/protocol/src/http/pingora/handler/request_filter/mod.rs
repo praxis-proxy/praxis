@@ -17,7 +17,7 @@ use tracing::{Instrument as _, debug, error, warn};
 
 use super::super::{
     context::PingoraRequestCtx,
-    convert::{request_header_from_session, send_rejection},
+    convert::{request_header_from_session, send_rejection, send_rejection_for},
 };
 
 /// StreamBuffer pre-read logic and TRACE response construction.
@@ -77,19 +77,19 @@ pub(in crate::http) async fn execute(
     // path, so it cannot leak into this request's passive-health attribution.
     if let Some(rejection) = validation::validate_host_header(session) {
         snapshot_for_early_exit(session, ctx);
-        send_rejection(session, rejection).await;
+        send_rejection_for(session, rejection, ctx).await;
         return Ok(true);
     }
 
     if let Some(rejection) = super::normalize::normalize_request_headers(session) {
         snapshot_for_early_exit(session, ctx);
-        send_rejection(session, rejection).await;
+        send_rejection_for(session, rejection, ctx).await;
         return Ok(true);
     }
 
     if let Some(rejection) = reject_reserved_internal_headers(session) {
         snapshot_for_early_exit(session, ctx);
-        send_rejection(session, rejection).await;
+        send_rejection_for(session, rejection, ctx).await;
         return Ok(true);
     }
 
@@ -146,13 +146,13 @@ pub(in crate::http) async fn execute(
             },
             Err(PreReadError::Rejected(rejection)) => {
                 ctx.request_snapshot = Some(request);
-                send_rejection(session, rejection).await;
+                send_rejection_for(session, rejection, ctx).await;
                 return Ok(true);
             },
             Err(PreReadError::Filter(e)) => {
                 error!(error = %e, "body filter error during pre-read");
                 ctx.request_snapshot = Some(request);
-                send_rejection(session, Rejection::status(500)).await;
+                send_rejection_for(session, Rejection::status(500), ctx).await;
                 return Ok(true);
             },
             Err(PreReadError::Io(e)) => return Err(e),
@@ -196,7 +196,7 @@ pub(in crate::http) async fn execute(
             ..
         }) => {
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-            send_rejection(session, rejection).await;
+            send_rejection_for(session, rejection, ctx).await;
             Ok(true)
         },
         Ok(PipelineResult {
@@ -216,7 +216,7 @@ pub(in crate::http) async fn execute(
         Err(e) => {
             error!(error = %e, "filter pipeline error");
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_INTERNAL);
-            send_rejection(session, Rejection::status(500)).await;
+            send_rejection_for(session, Rejection::status(500), ctx).await;
             Ok(true)
         },
     }
@@ -513,7 +513,9 @@ async fn run_terminal_response(
     let mut resp = match prepared {
         Ok(resp) => resp,
         Err(rejection) => {
-            send_rejection(session, rejection).await;
+            // Boxed for the same reason as the call above: this frame is
+            // already near the stack-size threshold.
+            Box::pin(send_rejection_for(session, rejection, ctx)).await;
             return;
         },
     };
@@ -531,7 +533,7 @@ async fn run_terminal_response(
         // emit a duplicate record for a response access_log already logged.
         ctx.response_delivery_complete = true;
     } else if let Err(rejection) = run_parent_terminal_body_filters(pipeline, ctx, &resp, &mut body, true) {
-        send_rejection(session, rejection).await;
+        send_rejection_for(session, rejection, ctx).await;
         return;
     }
     super::hop_by_hop::strip_hop_by_hop_header_map(&mut resp.headers, super::hop_by_hop::RESPONSE_HOP_BY_HOP);
@@ -714,7 +716,7 @@ async fn run_streaming_terminal_response(
         Ok(resp) => resp,
         Err(rejection) => {
             streaming_body.cancel().await;
-            send_rejection(session, rejection).await;
+            send_rejection_for(session, rejection, ctx).await;
             return;
         },
     };
@@ -724,7 +726,7 @@ async fn run_streaming_terminal_response(
         error!("streaming terminal response is incompatible with StreamBuffer response mode");
         streaming_body.swap_extensions(&mut ctx.extensions);
         streaming_body.cancel().await;
-        send_rejection(session, Rejection::status(500)).await;
+        send_rejection_for(session, Rejection::status(500), ctx).await;
         return;
     }
 
@@ -743,7 +745,7 @@ async fn run_streaming_terminal_response(
     let Some(header) = build_streaming_terminal_header(&resp) else {
         streaming_body.swap_extensions(&mut ctx.extensions);
         streaming_body.cancel().await;
-        send_rejection(session, Rejection::status(500)).await;
+        send_rejection_for(session, Rejection::status(500), ctx).await;
         return;
     };
     if let Err(e) = session.write_response_header(Box::new(header), false).await {
@@ -839,7 +841,7 @@ async fn suppress_streaming_terminal_response(
     if let Err(e) = streaming_body.suppress().await {
         error!(error = %e, "failed to suppress streaming terminal response");
         streaming_body.cancel().await;
-        send_rejection(session, Rejection::status(500)).await;
+        send_rejection_for(session, Rejection::status(500), ctx).await;
         return;
     }
     ctx.response_delivery_complete = true;
@@ -848,7 +850,7 @@ async fn suppress_streaming_terminal_response(
     prepare_streaming_headers(resp, is_head, is_not_modified, http::Version::HTTP_10);
     let Some(header) = build_streaming_terminal_header(resp) else {
         streaming_body.cancel().await;
-        send_rejection(session, Rejection::status(500)).await;
+        send_rejection_for(session, Rejection::status(500), ctx).await;
         return;
     };
     if let Err(e) = session.write_response_header(Box::new(header), true).await {

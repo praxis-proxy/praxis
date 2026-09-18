@@ -66,6 +66,55 @@ pub(crate) fn response_header_from_pingora(upstream: &pingora_http::ResponseHead
 // Pingora - Rejection
 // -----------------------------------------------------------------------------
 
+/// Send a rejection, rendering it in gRPC's shape when the pipeline
+/// armed one for this request.
+///
+/// Only error statuses become gRPC statuses: a successful short-circuit
+/// — a CORS preflight `204`, a `static_response` `200` — is a real HTTP
+/// response the client asked for, not a proxy error.
+pub(crate) async fn send_rejection_for(
+    session: &mut Session,
+    rejection: Rejection,
+    ctx: &crate::http::pingora::context::PingoraRequestCtx,
+) {
+    // A rejection that already names a gRPC status was built by a gRPC
+    // filter; it only needs the framing, not the status mapping.
+    if rejection
+        .headers
+        .iter()
+        .any(|(name, _value)| name.eq_ignore_ascii_case("grpc-status"))
+    {
+        crate::http::pingora::grpc_trailers::send_grpc_rejection(session, &rejection).await;
+        return;
+    }
+
+    let mapping = ctx.extensions.get::<praxis_filter::GrpcErrorMapping>();
+    if let Some(mapping) = mapping.filter(|_mapping| rejection.status >= 400) {
+        let message = grpc_error_message(&rejection);
+        crate::http::pingora::grpc_trailers::send_trailers_only(session, mapping, rejection.status, message).await;
+        return;
+    }
+    send_rejection(session, rejection).await;
+}
+
+/// The text to carry as `grpc-message` for a rejection.
+///
+/// Prefers the rejection's own body, which names the rule that fired;
+/// falls back to the status's reason phrase.
+fn grpc_error_message(rejection: &Rejection) -> &str {
+    rejection
+        .body
+        .as_deref()
+        .and_then(|body| str::from_utf8(body).ok())
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            http::StatusCode::from_u16(rejection.status)
+                .ok()
+                .and_then(|status| status.canonical_reason())
+        })
+        .unwrap_or("proxy error")
+}
+
 /// Send a rejection response to the client, including any headers and body from the [`Rejection`].
 ///
 /// Disables downstream keep-alive by default so the connection closes after

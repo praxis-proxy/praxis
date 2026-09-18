@@ -86,6 +86,51 @@ TCP probes for non-HTTP services (databases, caches,
 message brokers) where a successful connection implies
 availability.
 
+### gRPC Probes
+
+gRPC probes call `grpc.health.v1.Health/Check` and
+count an endpoint healthy only when the call returns
+`SERVING`.
+
+```yaml
+clusters:
+  - name: grpc-backend
+    endpoints:
+      - "10.0.0.1:50051"
+    http:
+      version: h2
+    health_check:
+      type: grpc
+      grpc_service: "" # empty: the server's overall status
+      interval_ms: 2000
+      timeout_ms: 1000
+      healthy_threshold: 1
+      unhealthy_threshold: 2
+```
+
+Use a gRPC probe for a gRPC upstream. A gRPC server
+does not serve `/healthz`, and one that has stopped
+serving still completes an HTTP/2 handshake, so both
+the HTTP and TCP probes report it healthy. Only this
+probe can tell "reachable" from "serving".
+
+`grpc_service` names one registered service. Left
+empty (the default) it asks for the server's overall
+status, which is what the health protocol defines an
+empty name to mean.
+
+An endpoint is healthy only when all three hold: HTTP
+200, `grpc-status: 0`, and a decoded `SERVING`. A
+server that answers `NOT_SERVING`, or that does not
+implement the health service at all, is marked
+unhealthy.
+
+gRPC probes ignore `path` and `expected_status`. They
+speak plaintext h2c on their own connection, so they
+cannot be combined with cluster TLS — that
+combination is rejected at config load rather than
+silently failing every probe.
+
 ## Passive Health Checks
 
 Passive health checks observe real request outcomes
@@ -293,7 +338,9 @@ startup and rejects invalid settings:
 - `path` must start with `/` and must not contain
   query strings, fragments, CR/LF, or encoded
   control characters
-- `type: grpc` is defined but not yet supported
+- `grpc_service` must be at most 255 bytes of
+  printable ASCII without spaces
+- `type: grpc` cannot be combined with cluster TLS
 
 ### SSRF Prevention
 

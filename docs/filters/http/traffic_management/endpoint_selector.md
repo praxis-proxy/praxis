@@ -18,6 +18,7 @@ The resolved value must be a single `host:port` authority. If no trusted value i
 | `connection` | EndpointConnectionConfig | no | Optional connection tuning for selected upstreams. |
 | `connection.connection_timeout_ms` | integer | no | TCP connection timeout in milliseconds. |
 | `connection.idle_timeout_ms` | integer | no | Idle connection timeout in milliseconds. |
+| `connection.http_version` | `h1` \| `h2` \| `auto` | no | HTTP version to speak upstream (`h1`, `h2`, or `auto`). Mirrors a cluster's `http.version`; defaults to HTTP/1.1. |
 | `connection.read_timeout_ms` | integer | no | Per-read timeout in milliseconds. |
 | `connection.total_connection_timeout_ms` | integer | no | Total TCP and TLS connection timeout in milliseconds. |
 | `connection.write_timeout_ms` | integer | no | Per-write timeout in milliseconds. |

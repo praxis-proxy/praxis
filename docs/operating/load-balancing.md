@@ -323,6 +323,39 @@ clusters:
 All fields are optional. Omitted fields use
 Pingora's built-in defaults.
 
+### Upstream HTTP Version
+
+Praxis speaks HTTP/1.1 to upstreams by default. A cluster
+can opt into HTTP/2, which gRPC upstreams require — a gRPC
+call's outcome arrives in response trailers, and no
+HTTP/1.1 leg carries those:
+
+```yaml
+clusters:
+  - name: grpc-backend
+    endpoints:
+      - "10.0.0.1:50051"
+    http:
+      version: h2
+```
+
+| Value | Behaviour |
+| ----- | --------- |
+| `h1` | HTTP/1.1 only (default) |
+| `h2` | HTTP/2 only: ALPN `h2` over TLS, prior-knowledge h2c over plaintext |
+| `auto` | Prefer HTTP/2, fall back to HTTP/1.1 |
+
+`h2` over plaintext assumes the endpoint speaks h2c; there
+is no negotiation to fall back on, so a server that does
+not fails to connect. `auto` has nothing to negotiate with
+over plaintext either and stays on HTTP/1.1 there — it is
+only meaningful for TLS upstreams.
+
+Response trailers ride on the HTTP/2 leg only, so any
+feature that reads them — the `grpc_status` access log
+fields, the `grpc_web` filter — needs `h2` here to do
+anything at all.
+
 ## Complete Example
 
 A production-like configuration with multiple

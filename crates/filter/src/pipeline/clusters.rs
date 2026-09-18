@@ -258,6 +258,7 @@ mod tests {
     fn reachable_excludes_branch_lb_on_conditional_host() {
         let mut host = noop_filter("headers");
         host.conditions = vec![Condition::When(ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: Some("/x".to_owned()),
             methods: None,

@@ -3,8 +3,6 @@
 
 //! gRPC content-type detection filter.
 
-pub(crate) mod content_type;
-
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
@@ -17,9 +15,9 @@ pub(crate) mod content_type;
 mod tests;
 
 use async_trait::async_trait;
+use praxis_core::grpc::GrpcKind;
 use tracing::trace;
 
-use self::content_type::GrpcKind;
 use crate::{
     EmptyFilterConfig, FilterAction, FilterError,
     filter::{HttpFilter, HttpFilterContext},

@@ -5,6 +5,10 @@
 
 /// Cluster endpoint metadata for `/api/stats`. Kept ungated for reload.
 pub mod cluster_meta;
+/// gRPC health check probe (`grpc.health.v1.Health/Check`).
+pub mod grpc;
+/// `grpc.health.v1` message framing and protobuf codec.
+pub(crate) mod grpc_wire;
 /// Listener metadata for `GET /api/pipelines`. Kept ungated: the reload
 /// path maintains this store even when the admin API is not compiled in.
 pub mod listener_meta;

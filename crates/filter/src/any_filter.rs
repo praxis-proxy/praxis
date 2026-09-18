@@ -68,6 +68,17 @@ impl AnyFilter {
         }
     }
 
+    /// Emit this filter's end-of-request record from the logging phase.
+    ///
+    /// Returns whether a record was emitted. TCP filters have no HTTP
+    /// request to log.
+    pub fn emit_deferred_record(&self, ctx: &crate::HttpFilterContext<'_>, status: u16) -> bool {
+        match self {
+            Self::Http(f) => f.emit_deferred_record(ctx, status),
+            Self::Tcp(_) => false,
+        }
+    }
+
     /// Cluster names this filter can load balance.
     pub fn load_balancer_clusters(&self) -> Vec<String> {
         match self {

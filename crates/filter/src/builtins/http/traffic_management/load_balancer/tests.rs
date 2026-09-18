@@ -32,6 +32,7 @@ fn new_creates_clusters() {
 fn try_new_rejects_semantically_invalid_authority() {
     let cluster = Cluster {
         http: praxis_core::config::ClusterHttpOptions {
+            version: praxis_core::config::UpstreamHttpVersion::default(),
             authority: Some(Arc::from("https://api.example.com")),
             ..praxis_core::config::ClusterHttpOptions::default()
         },
@@ -74,6 +75,7 @@ clusters:
 fn new_panics_on_invalid_authority() {
     let cluster = Cluster {
         http: praxis_core::config::ClusterHttpOptions {
+            version: praxis_core::config::UpstreamHttpVersion::default(),
             authority: Some(Arc::from("user@api.example.com")),
             ..praxis_core::config::ClusterHttpOptions::default()
         },
@@ -541,6 +543,7 @@ fn build_strategy_consistent_hash() {
 async fn tls_and_sni_wired_from_cluster() {
     let cluster = Cluster {
         http: praxis_core::config::ClusterHttpOptions {
+            version: praxis_core::config::UpstreamHttpVersion::default(),
             authority: Some(Arc::from("public.example.com")),
             ..praxis_core::config::ClusterHttpOptions::default()
         },

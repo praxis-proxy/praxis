@@ -8,7 +8,7 @@ mod health_check;
 mod load_balancer_strategy;
 mod retry_policy;
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 pub use endpoint::Endpoint;
 pub use health_check::{HealthCheckConfig, HealthCheckType};
@@ -29,6 +29,52 @@ use crate::errors::ProxyError;
 // Cluster
 // -----------------------------------------------------------------------------
 
+/// The HTTP version Praxis speaks to a cluster's endpoints.
+///
+/// Praxis proxies to upstreams over HTTP/1.1 unless a cluster opts
+/// out. HTTP/2 is required for gRPC upstreams: response trailers —
+/// which carry `grpc-status` — exist only on an HTTP/2 leg.
+///
+/// ```
+/// use praxis_core::config::UpstreamHttpVersion;
+///
+/// let v: UpstreamHttpVersion = serde_yaml::from_str("h2").unwrap();
+/// assert_eq!(v, UpstreamHttpVersion::H2);
+/// assert_eq!(UpstreamHttpVersion::default(), UpstreamHttpVersion::H1);
+///
+/// let bad: Result<UpstreamHttpVersion, _> = serde_yaml::from_str("http3");
+/// assert!(bad.is_err());
+/// ```
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpstreamHttpVersion {
+    /// HTTP/1.1 only (the default, and Praxis's historical behaviour).
+    #[default]
+    H1,
+
+    /// HTTP/2 only: ALPN `h2` over TLS, prior-knowledge h2c over
+    /// plaintext. A plaintext endpoint that does not speak h2c fails
+    /// to connect — there is no negotiation to fall back on.
+    H2,
+
+    /// Prefer HTTP/2, fall back to HTTP/1.1.
+    ///
+    /// Over TLS this advertises `h2,http/1.1` and honours the server's
+    /// choice. Over plaintext there is no negotiation mechanism, so
+    /// Pingora connects over HTTP/1.1.
+    Auto,
+}
+
+impl fmt::Display for UpstreamHttpVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::H1 => f.write_str("h1"),
+            Self::H2 => f.write_str("h2"),
+            Self::Auto => f.write_str("auto"),
+        }
+    }
+}
+
 /// HTTP-specific options for a cluster.
 ///
 /// These apply only when the cluster serves HTTP listeners; TCP load
@@ -39,11 +85,11 @@ pub struct ClusterHttpOptions {
     /// Override the upstream HTTP `Host` header.
     ///
     /// When set, the proxy rewrites the `Host` header sent to the
-    /// upstream instead of forwarding the downstream value. Upstream
-    /// connections use HTTP/1.1; the `:authority` pseudo-header on
-    /// the downstream HTTP/2 side is not forwarded upstream. TLS SNI
-    /// remains independent — configure `tls.sni` separately when
-    /// needed.
+    /// upstream instead of forwarding the downstream value. The
+    /// downstream HTTP/2 `:authority` pseudo-header is never forwarded
+    /// upstream; on an HTTP/2 upstream leg Pingora rebuilds
+    /// `:authority` from this `Host` value. TLS SNI remains
+    /// independent — configure `tls.sni` separately when needed.
     ///
     /// Must be a valid HTTP authority: a hostname with an optional
     /// port, or a bracketed IPv6 address with an optional port. URI
@@ -76,6 +122,28 @@ pub struct ClusterHttpOptions {
     /// rationale — as `application_protocol`.
     #[serde(default)]
     pub application_provider: Option<Arc<str>>,
+
+    /// HTTP version used for upstream connections to this cluster.
+    ///
+    /// Defaults to [`H1`]. Set `h2` for gRPC upstreams: response
+    /// trailers, and therefore `grpc-status`, only exist on an
+    /// HTTP/2 leg.
+    ///
+    /// ```
+    /// # use praxis_core::config::{Cluster, UpstreamHttpVersion};
+    /// let yaml = r#"
+    /// name: "grpc"
+    /// endpoints: ["10.0.0.1:50051"]
+    /// http:
+    ///   version: h2
+    /// "#;
+    /// let cluster: Cluster = serde_yaml::from_str(yaml).unwrap();
+    /// assert_eq!(cluster.http.version, UpstreamHttpVersion::H2);
+    /// ```
+    ///
+    /// [`H1`]: UpstreamHttpVersion::H1
+    #[serde(default)]
+    pub version: UpstreamHttpVersion,
 }
 
 /// A named group of upstream endpoints.

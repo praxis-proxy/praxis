@@ -18,6 +18,7 @@ Built-in filters organized by protocol and category.
 | Filter | Feature | Description |
 |--------|---------|-------------|
 | [`compression`](http/payload_processing/compression.md) | - | Enables Pingora's built-in response compression when present in a filter chain. |
+| [`grpc_web`](http/payload_processing/grpc_web.md) | - | Translates gRPC-Web calls to native gRPC and back. |
 | [`json_body_field`](http/payload_processing/json_body_field.md) | - | Extracts top-level fields from a JSON request body and promotes their values to request headers using [`StreamBuffer`] mode. |
 | [`json_rpc`](http/payload_processing/json_rpc.md) | - | Extracts JSON-RPC 2.0 envelope metadata from request bodies and promotes method, id, and kind to request headers and filter results for routing. |
 
@@ -42,6 +43,7 @@ Built-in filters organized by protocol and category.
 | [`circuit_breaker`](http/traffic_management/circuit_breaker.md) | - | Rejects requests to clusters whose circuit is open. |
 | [`endpoint_selector`](http/traffic_management/endpoint_selector.md) | - | Selects an upstream endpoint from a trusted mutation source. |
 | [`grpc_detection`](http/traffic_management/grpc_detection.md) | - | Detects gRPC requests from the `content-type` header and promotes the variant to filter metadata and results for downstream routing. |
+| [`grpc_timeout`](http/traffic_management/grpc_timeout.md) | - | Honours the `grpc-timeout` request header as a real deadline. |
 | [`iterative_request_router`](http/traffic_management/iterative_request_router.md) | - | Framework-level filter for iterative sub-request execution. |
 | [`load_balancer`](http/traffic_management/load_balancer.md) | - | Selects an upstream endpoint using the cluster's configured strategy. |
 | [`rate_limit`](http/traffic_management/rate_limit.md) | - | Token bucket rate limiter that rejects excess traffic with 429. |
@@ -55,6 +57,7 @@ Built-in filters organized by protocol and category.
 
 | Filter | Feature | Description |
 |--------|---------|-------------|
+| [`grpc_status`](http/transformation/grpc_status.md) | - | Answers proxy-generated errors in the shape gRPC clients expect. |
 | [`headers`](http/transformation/headers.md) | - | Adds, sets, or removes headers on upstream requests and downstream responses. |
 | [`path_rewrite`](http/transformation/path_rewrite.md) | - | Rewrites the request path before forwarding to the upstream. |
 | [`url_rewrite`](http/transformation/url_rewrite.md) | - | Rewrites request URLs using regex substitution and query parameter manipulation before the request reaches upstream. |

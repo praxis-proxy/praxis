@@ -71,6 +71,7 @@ impl FilteredStreamingBody {
         let result = {
             let cont = &mut self.continuation;
             let mut ctx = crate::filter::HttpFilterContext {
+                grpc_completion: None,
                 buffered_request_body: None,
                 body_done_indices: std::mem::take(&mut cont.body_done_indices),
                 branch_iterations: HashMap::new(),

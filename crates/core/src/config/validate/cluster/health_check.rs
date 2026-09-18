@@ -14,6 +14,16 @@ use crate::{
 };
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Maximum accepted `grpc_service` length, in bytes.
+///
+/// The name goes into the probe's protobuf request; bounding it keeps
+/// that request frame small.
+const MAX_GRPC_SERVICE_LEN: usize = 255;
+
+// -----------------------------------------------------------------------------
 // Health Check Validation
 // -----------------------------------------------------------------------------
 
@@ -40,14 +50,50 @@ fn validate_expected_status(hc: &crate::config::HealthCheckConfig, cluster_name:
     Ok(())
 }
 
-/// Reject unsupported health check types.
+/// Validate the fields a probe type actually reads.
+///
+/// The match is exhaustive on purpose: a new probe type must be
+/// considered here rather than silently inheriting HTTP's rules.
 fn validate_health_check_type(hc: &crate::config::HealthCheckConfig, cluster_name: &str) -> Result<(), ProxyError> {
     match hc.check_type {
         HealthCheckType::Http | HealthCheckType::Tcp => Ok(()),
-        HealthCheckType::Grpc => Err(ProxyError::Config(format!(
-            "cluster '{cluster_name}': health check type 'grpc' is not yet supported"
-        ))),
+        HealthCheckType::Grpc => validate_grpc_service(&hc.grpc_service, cluster_name),
     }
+}
+
+/// Reject gRPC service names that are unbounded or not printable ASCII.
+fn validate_grpc_service(service: &str, cluster_name: &str) -> Result<(), ProxyError> {
+    if service.len() > MAX_GRPC_SERVICE_LEN {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': health_check.grpc_service must be at most {MAX_GRPC_SERVICE_LEN} bytes, got {}",
+            service.len()
+        )));
+    }
+    if service.bytes().any(|byte| !byte.is_ascii_graphic()) {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': health_check.grpc_service must be printable ASCII without spaces"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject gRPC probes on TLS clusters.
+///
+/// The probe speaks plaintext h2c on its own connection. Without this
+/// check a `tls:` cluster with `type: grpc` would drive every endpoint
+/// unhealthy and give the operator no clue why.
+pub(super) fn validate_grpc_probe_transport(cluster: &Cluster) -> Result<(), ProxyError> {
+    let is_grpc = cluster
+        .health_check
+        .as_ref()
+        .is_some_and(|hc| hc.check_type == HealthCheckType::Grpc);
+    if is_grpc && cluster.tls.is_some() {
+        return Err(ProxyError::Config(format!(
+            "cluster '{}': health check type 'grpc' probes over plaintext h2c and cannot be used with cluster TLS",
+            cluster.name
+        )));
+    }
+    Ok(())
 }
 
 /// Validate interval, timeout, and path constraints.
@@ -430,7 +476,7 @@ clusters:
     }
 
     #[test]
-    fn reject_grpc_health_check() {
+    fn accept_grpc_health_check() {
         let yaml = r#"
 listeners:
   - name: web
@@ -443,12 +489,90 @@ filter_chains:
         status: 200
 clusters:
   - name: "backend"
-    endpoints: ["10.0.0.1:80"]
+    endpoints: ["10.0.0.1:50051"]
+    health_check:
+      type: grpc
+      grpc_service: "pkg.Svc"
+"#;
+        let config = Config::from_yaml(yaml).expect("a gRPC health check should be accepted");
+        let hc = config.clusters[0].health_check.as_ref().expect("health check");
+        assert_eq!(hc.grpc_service, "pkg.Svc", "the service name should round-trip");
+    }
+
+    #[test]
+    fn reject_grpc_health_check_on_tls_cluster() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:50051"]
+    tls:
+      sni: "backend.internal"
     health_check:
       type: grpc
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(err.to_string().contains("not yet supported"), "got: {err}");
+        assert!(
+            err.to_string().contains("h2c"),
+            "the error should explain the transport conflict: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_grpc_service_with_a_space() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:50051"]
+    health_check:
+      type: grpc
+      grpc_service: "bad name"
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("printable ASCII"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_overlong_grpc_service() {
+        let long = "a".repeat(256);
+        let yaml = format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:50051"]
+    health_check:
+      type: grpc
+      grpc_service: "{long}"
+"#
+        );
+        let err = Config::from_yaml(&yaml).unwrap_err();
+        assert!(err.to_string().contains("at most"), "got: {err}");
     }
 
     #[test]
@@ -609,6 +733,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -629,6 +754,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -729,6 +855,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -752,6 +879,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -775,6 +903,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -794,6 +923,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -817,6 +947,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: Some(0),
@@ -860,6 +991,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -883,6 +1015,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -1017,6 +1150,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -1040,6 +1174,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -1063,6 +1198,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -1086,6 +1222,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -1181,6 +1318,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,
@@ -1204,6 +1342,7 @@ clusters:
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,

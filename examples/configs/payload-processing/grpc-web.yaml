@@ -1,0 +1,69 @@
+# gRPC-Web to gRPC Translation
+#
+# Lets a browser call a gRPC backend. Browsers cannot speak gRPC: they
+# have no access to HTTP/2 trailers, which is where a call's status
+# lives. gRPC-Web keeps the same length-prefixed framing but moves the
+# trailers into the body as one final frame, and optionally base64-
+# encodes the whole stream so it survives an XMLHttpRequest.
+#
+# This filter rewrites the request's content-type to native gRPC
+# (base64-decoding the body first for the -text variant), rewrites the
+# response's content-type back, and converts the upstream response
+# trailers into the trailer frame the browser expects. A Trailers-Only
+# response needs no frame: it carries the status in its header block,
+# which is where a gRPC-Web client looks for it.
+#
+# Requires an HTTP/2 upstream: trailers exist on no other leg, so there
+# would be nothing to translate. Non-gRPC-Web requests pass through
+# untouched.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/payload-processing/grpc-web.yaml
+#
+# Exercise (from a browser, or with grpcurl against the backend directly):
+#   curl -s localhost:8080/pkg.Svc/Method \
+#     -H 'content-type: application/grpc-web+proto' \
+#     --data-binary @request.bin | xxd
+
+listeners:
+  - name: grpc-web
+    address: "127.0.0.1:8080"
+    protocol: http
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: grpc_web
+        encodings:
+          # application/grpc-web[+codec] — raw frames.
+          binary: true
+          # application/grpc-web-text[+codec] — base64 frames. Request
+          # bodies are buffered to decode them, so scope this chain to
+          # gRPC-Web routes if that cost matters.
+          text: true
+        # Ceiling for buffering a base64 request body.
+        max_buffer_bytes: 10485760 # 10 MiB
+        # synthesize: append grpc-status 2 (UNKNOWN) when the upstream
+        #   ends the stream without a status, so the browser sees an
+        #   explicit failure rather than a parse error.
+        # passthrough: forward the body unchanged.
+        on_missing_trailers: synthesize
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: grpc-backend
+
+      - filter: load_balancer
+        clusters:
+          - name: grpc-backend
+            endpoints:
+              - "127.0.0.1:50051"
+            http:
+              # Required: the trailers this filter translates exist only
+              # on an HTTP/2 leg.
+              version: h2
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

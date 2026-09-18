@@ -1,0 +1,61 @@
+# gRPC Condition Predicate
+#
+# The `grpc` condition predicate gates a filter on whether the request
+# carries gRPC, classified from the `content-type` header alone
+# (`application/grpc`, `application/grpc+proto`, `application/grpc+json`,
+# or any other `application/grpc+<codec>`).
+#
+# The predicate reads the header directly, so it needs no `grpc_detection`
+# filter ahead of it and does not depend on filter ordering. Use
+# `when: {grpc: true}` to run a filter only for gRPC, `unless: {grpc: true}`
+# (or `when: {grpc: false}`) to run it only for everything else.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/grpc-condition.yaml
+#
+# Exercise:
+#   curl -s -D- -X POST -H "content-type: application/grpc" http://localhost:8080/pkg.Svc/Method
+#   # -> 200 "grpc-only", no X-Traffic header
+#   curl -s -D- http://localhost:8080/
+#   # -> proxied to the backend, with X-Traffic: http
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # Tag only non-gRPC responses: gRPC carries its outcome in
+      # trailers, so response headers added here would be pointless.
+      - filter: headers
+        conditions:
+          - unless:
+              grpc: true
+        response_set:
+          - name: "X-Traffic"
+            value: "http"
+
+      # gRPC traffic terminates here instead of reaching the backend.
+      - filter: static_response
+        conditions:
+          - when:
+              grpc: true
+        status: 200
+        body: "grpc-only"
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

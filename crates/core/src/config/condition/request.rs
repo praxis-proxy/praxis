@@ -54,15 +54,25 @@ impl_condition_serialize!(Condition, ConditionMatch);
 ///     r#"
 /// path_prefix: "/api"
 /// methods: ["GET", "POST"]
+/// grpc: true
 /// "#,
 /// )
 /// .unwrap();
 /// assert_eq!(m.path_prefix.as_deref(), Some("/api"));
 /// assert_eq!(m.methods.as_ref().unwrap().len(), 2);
+/// assert_eq!(m.grpc, Some(true));
 /// ```
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConditionMatch {
+    /// Request must (`true`) or must not (`false`) be gRPC.
+    ///
+    /// Classified from the `content-type` header alone, so the
+    /// predicate is independent of filter ordering and does not
+    /// require the `grpc_detection` filter in the chain.
+    #[serde(default)]
+    pub grpc: Option<bool>,
+
     /// Request URI must match this exact path.
     #[serde(default)]
     pub path: Option<String>,
@@ -199,6 +209,47 @@ path_prefix: "/health"
         let yaml = "- {}";
         let err = serde_yaml::from_str::<Vec<Condition>>(yaml).unwrap_err();
         assert!(err.to_string().contains("either"));
+    }
+
+    #[test]
+    fn parse_grpc_predicate_true() {
+        let m: ConditionMatch = serde_yaml::from_str("grpc: true\n").unwrap();
+        assert_eq!(m.grpc, Some(true), "grpc: true should parse");
+        assert!(m.path.is_none(), "path should stay unset");
+    }
+
+    #[test]
+    fn parse_grpc_predicate_false() {
+        let m: ConditionMatch = serde_yaml::from_str("grpc: false\n").unwrap();
+        assert_eq!(m.grpc, Some(false), "grpc: false should parse");
+    }
+
+    #[test]
+    fn grpc_predicate_defaults_to_unset() {
+        let m: ConditionMatch = serde_yaml::from_str("path: \"/\"\n").unwrap();
+        assert!(m.grpc.is_none(), "grpc should be None when omitted");
+    }
+
+    #[test]
+    fn reject_non_boolean_grpc_predicate() {
+        let err = serde_yaml::from_str::<ConditionMatch>("grpc: \"yes\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("bool"),
+            "a non-boolean grpc value should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn grpc_predicate_round_trips_through_serialization() {
+        let m: ConditionMatch = serde_yaml::from_str("grpc: true\npath_prefix: \"/pkg.Svc\"\n").unwrap();
+        let yaml = serde_yaml::to_string(&m).unwrap();
+        let back: ConditionMatch = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.grpc, Some(true), "grpc should survive a serialize round trip");
+        assert_eq!(
+            back.path_prefix.as_deref(),
+            Some("/pkg.Svc"),
+            "path_prefix should survive a serialize round trip"
+        );
     }
 
     #[test]

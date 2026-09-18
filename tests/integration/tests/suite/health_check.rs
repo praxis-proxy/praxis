@@ -137,17 +137,61 @@ filter_chains:
 }
 
 #[test]
-fn health_check_grpc_rejected() {
+fn health_check_grpc_config_parses() {
     let yaml = format!(
         r#"
 listeners:
   - name: default
     address: "127.0.0.1:{port}"
     filter_chains: [main]
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_health_checks: true
 clusters:
   - name: backend
     endpoints:
-      - "127.0.0.1:8080"
+      - "127.0.0.1:50051"
+    http:
+      version: h2
+    health_check:
+      type: grpc
+      grpc_service: "pkg.Svc"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        port = free_port(),
+    );
+
+    let config = Config::from_yaml(&yaml).expect("a gRPC health check should be accepted");
+    let hc = config.clusters[0]
+        .health_check
+        .as_ref()
+        .expect("the cluster should carry a health check");
+    assert_eq!(hc.grpc_service, "pkg.Svc", "the service name should round-trip");
+}
+
+#[test]
+fn health_check_grpc_rejects_tls_clusters() {
+    // The probe speaks plaintext h2c on its own connection, so this
+    // combination would drive every endpoint unhealthy with no clue why.
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{port}"
+    filter_chains: [main]
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_health_checks: true
+clusters:
+  - name: backend
+    endpoints:
+      - "127.0.0.1:50051"
+    tls:
+      sni: "backend.internal"
     health_check:
       type: grpc
 filter_chains:
@@ -159,12 +203,45 @@ filter_chains:
         port = free_port(),
     );
 
-    let config = Config::from_yaml(&yaml);
-    assert!(config.is_err(), "gRPC health check should be rejected");
-    let err = config.unwrap_err().to_string();
+    let err = Config::from_yaml(&yaml)
+        .expect_err("a gRPC probe on a TLS cluster should be rejected")
+        .to_string();
     assert!(
-        err.contains("grpc") || err.contains("gRPC"),
-        "error should mention grpc: {err}"
+        err.contains("h2c") || err.contains("TLS"),
+        "the error should explain the transport conflict: {err}"
+    );
+}
+
+#[test]
+fn health_check_grpc_rejects_unprintable_service_names() {
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{port}"
+    filter_chains: [main]
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_health_checks: true
+clusters:
+  - name: backend
+    endpoints:
+      - "127.0.0.1:50051"
+    health_check:
+      type: grpc
+      grpc_service: "bad name"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        port = free_port(),
+    );
+
+    assert!(
+        Config::from_yaml(&yaml).is_err(),
+        "a service name with a space should be rejected at config load"
     );
 }
 
@@ -373,6 +450,7 @@ fn health_check_builds_registry_for_checked_clusters() {
             health_check: Some(praxis_core::config::HealthCheckConfig {
                 check_type: praxis_core::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,

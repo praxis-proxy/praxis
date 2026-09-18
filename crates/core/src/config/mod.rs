@@ -43,7 +43,7 @@ pub use cluster::{
     DEFAULT_RETRY_BODY_LIMIT_BYTES, Endpoint, HashFunction, HealthCheckConfig, HealthCheckType, HttpStatusCode,
     LoadBalancerStrategy, MAX_EFFECTIVE_RETRIES, MAX_RETRY_BODY_LIMIT_BYTES, MaglevOpts, ParameterisedStrategy,
     PriorityOpts, RetriableCondition, RetryBodyLimit, RetryBudgetConfig, RetryPolicy, RingHashOpts, SimpleStrategy,
-    SubsetFallbackPolicy, SubsetOpts, ZoneAwareOpts,
+    SubsetFallbackPolicy, SubsetOpts, UpstreamHttpVersion, ZoneAwareOpts,
 };
 pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch};
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};

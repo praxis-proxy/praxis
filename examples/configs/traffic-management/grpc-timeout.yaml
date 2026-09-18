@@ -1,0 +1,61 @@
+# gRPC Deadline Propagation
+#
+# Honours the `grpc-timeout` request header as a real deadline. Without
+# this filter the header is forwarded untouched and only the static
+# cluster timeouts apply, so a client that asked for 100ms can wait on a
+# 30-second upstream read, and every retry restarts the clock.
+#
+# The filter clamps the client's ask to `max_timeout_ms`, holds it as an
+# absolute deadline for the whole request, shrinks each upstream
+# attempt's connect and read budget to what is left, and rewrites
+# `grpc-timeout` upstream with the remaining time. A call that is
+# already past its deadline is answered DEADLINE_EXCEEDED (gRPC status
+# 4) without contacting the upstream.
+#
+# Non-gRPC requests pass through untouched.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/grpc-timeout.yaml
+#
+# Exercise:
+#   grpcurl -plaintext -max-time 1 localhost:8080 pkg.Svc/Method
+
+listeners:
+  - name: grpc
+    address: "127.0.0.1:8080"
+    protocol: http
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: grpc_timeout
+        # Ceiling honoured whatever the client asks for.
+        max_timeout_ms: 30000
+        # Applied when a call carries no grpc-timeout header. Omit to
+        # leave such calls unbounded.
+        default_timeout_ms: 10000
+        # Kept back from the upstream so the proxy can still answer
+        # DEADLINE_EXCEEDED before the client's own timer fires.
+        headroom_ms: 50
+        # Rewrite grpc-timeout upstream with the remaining budget.
+        propagate: true
+        # A malformed grpc-timeout is answered INTERNAL (13), as gRPC
+        # implementations do. Use `ignore` to fall back to the default.
+        on_invalid: reject
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: grpc-backend
+
+      - filter: load_balancer
+        clusters:
+          - name: grpc-backend
+            endpoints:
+              - "127.0.0.1:50051"
+            http:
+              version: h2
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

@@ -196,6 +196,10 @@ enum FieldToken {
     ResponseBodyBytes,
     TraceId,
     SpanId,
+    GrpcStatus,
+    GrpcStatusName,
+    GrpcMessage,
+    GrpcStatusDetailsBin,
     RequestHeader(String),
     ResponseHeader(String),
     /// A filter-metadata key, such as `llm.model`.
@@ -351,8 +355,23 @@ impl AccessLogFilter {
             return false;
         }
 
+        // A gRPC call's outcome is its grpc-status, not the transport 200, so
+        // match status_classes against the status the gRPC code maps to. This
+        // lets an "errors only" listener (e.g. status_classes: [4xx, 5xx])
+        // capture gRPC failures, which would otherwise all read as 2xx. A
+        // non-canonical code (outside 0..=16) is still a failure, so it maps
+        // to 500 rather than falling back to the transport 200.
+        let class_status = if request_is_grpc(ctx) {
+            ctx.grpc_completion.as_ref().map_or(status, |completion| {
+                completion
+                    .code()
+                    .map_or(500, praxis_core::grpc::GrpcStatusCode::to_http_status)
+            })
+        } else {
+            status
+        };
         if let Some(classes) = &conditions.status_classes
-            && !classes.iter().any(|class| class.matches(status))
+            && !classes.iter().any(|class| class.matches(class_status))
         {
             return false;
         }
@@ -414,6 +433,12 @@ pub fn bodyless_response(status: http::StatusCode, req_method: &http::Method) ->
         || status == http::StatusCode::NO_CONTENT
         || status == http::StatusCode::NOT_MODIFIED
         || req_method == http::Method::HEAD
+}
+
+/// Whether the request itself is gRPC. A stray `grpc-status` on an ordinary
+/// response must not make it look like a completed gRPC call.
+fn request_is_grpc(ctx: &HttpFilterContext<'_>) -> bool {
+    praxis_core::grpc::GrpcKind::from_headers(&ctx.request.headers).is_grpc()
 }
 
 /// Marker inserted into request extensions once an access record has been
@@ -541,6 +566,33 @@ impl EmitPlan {
                 FieldToken::SpanId => {
                     record.insert("span_id".to_owned(), current_span_id());
                 },
+                FieldToken::GrpcStatus => {
+                    let value = ctx
+                        .grpc_completion()
+                        .map_or_else(|| "-".to_owned(), |completion| completion.raw_code().to_string());
+                    record.insert("grpc_status".to_owned(), value);
+                },
+                FieldToken::GrpcStatusName => {
+                    let value = ctx
+                        .grpc_completion()
+                        .map_or_else(|| "-".to_owned(), praxis_core::grpc::GrpcCompletion::code_name);
+                    record.insert("grpc_status_name".to_owned(), value);
+                },
+                FieldToken::GrpcMessage => {
+                    let value = ctx
+                        .grpc_completion()
+                        .and_then(|completion| completion.message())
+                        .map_or_else(|| "-".to_owned(), |message| sanitize_for_log(message).into_owned());
+                    record.insert("grpc_message".to_owned(), value);
+                },
+                FieldToken::GrpcStatusDetailsBin => {
+                    let value = ctx
+                        .grpc_completion()
+                        .and_then(|completion| completion.status_details_bin())
+                        .unwrap_or("-")
+                        .to_owned();
+                    record.insert("grpc_status_details_bin".to_owned(), value);
+                },
                 FieldToken::RequestHeader(name) => {
                     let value = first_header_value(&ctx.request.headers, name).unwrap_or_else(|| "-".to_owned());
                     let key = format!("request_header.{}", header_json_key(name));
@@ -571,6 +623,32 @@ impl HttpFilter for AccessLogFilter {
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
+    }
+
+    /// Emit the record for a request that never reached the completion
+    /// hooks, honouring the configured `fields`.
+    ///
+    /// A complete gRPC call carries its outcome in trailers, so it reaches
+    /// the log only through this path; it is sampled and gated like any
+    /// other response. A request with no completion is genuinely incomplete
+    /// (rejected before the upstream, or aborted mid-stream) and is always
+    /// recorded, so no failure goes unlogged. Returns `true` once the record
+    /// is claimed, including when sampling or conditions drop it, so the
+    /// caller does not re-emit it through the fixed-shape fallback.
+    fn emit_deferred_record(&self, ctx: &HttpFilterContext<'_>, status: u16) -> bool {
+        if !tracing::enabled!(tracing::Level::INFO) {
+            return false;
+        }
+        let duration_ms = truncate_u128(ctx.request_start.elapsed().as_millis());
+        if ctx.grpc_completion.is_some()
+            && request_is_grpc(ctx)
+            && (!self.passes_emit_conditions(ctx, status, duration_ms) || !self.should_log())
+        {
+            return true;
+        }
+        let response_headers = ctx.response_header.as_ref().map(|response| &response.headers);
+        self.emit_access_log(ctx, status, response_headers, duration_ms);
+        true
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -702,6 +780,9 @@ fn parse_scalar_field_token(token: &str) -> Result<FieldToken, FilterError> {
     if let Some(prefixed) = parse_prefixed_field_token(token) {
         return prefixed;
     }
+    if let Some(parsed) = parse_grpc_field_token(token) {
+        return Ok(parsed);
+    }
 
     match token {
         "method" => Ok(FieldToken::Method),
@@ -718,6 +799,20 @@ fn parse_scalar_field_token(token: &str) -> Result<FieldToken, FilterError> {
         "span_id" => Ok(FieldToken::SpanId),
         "filter_results" => Err("access_log: filter_results is not supported in v1".into()),
         other => Err(format!("access_log: unknown field token {other:?}").into()),
+    }
+}
+
+/// Parse the gRPC completion field tokens.
+///
+/// These read the `grpc-status` family of response trailers and render
+/// `-` for any response that carries none.
+fn parse_grpc_field_token(token: &str) -> Option<FieldToken> {
+    match token {
+        "grpc_status" => Some(FieldToken::GrpcStatus),
+        "grpc_status_name" => Some(FieldToken::GrpcStatusName),
+        "grpc_message" => Some(FieldToken::GrpcMessage),
+        "grpc_status_details_bin" => Some(FieldToken::GrpcStatusDetailsBin),
+        _ => None,
     }
 }
 
@@ -1170,6 +1265,50 @@ conditions:
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "one assertion per rendered gRPC field")]
+    fn build_record_renders_grpc_completion() {
+        let plan = EmitPlan {
+            fields: vec![
+                FieldToken::GrpcStatus,
+                FieldToken::GrpcStatusName,
+                FieldToken::GrpcMessage,
+                FieldToken::GrpcStatusDetailsBin,
+            ],
+            is_default: false,
+        };
+        let req = grpc_request();
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut trailers = http::HeaderMap::new();
+        let _prev = trailers.insert("grpc-status", http::HeaderValue::from_static("5"));
+        let _prev = trailers.insert("grpc-message", http::HeaderValue::from_static("no%20such%20user"));
+        let _prev = trailers.insert("grpc-status-details-bin", http::HeaderValue::from_static("CAUSBG9vcHM"));
+        ctx.grpc_completion = praxis_core::grpc::GrpcCompletion::from_headers(&trailers);
+
+        let record = plan.build_record(&ctx, 200, None, 0);
+
+        assert_eq!(
+            record.get("grpc_status"),
+            Some(&"5".to_owned()),
+            "the numeric status should be rendered"
+        );
+        assert_eq!(
+            record.get("grpc_status_name"),
+            Some(&"NOT_FOUND".to_owned()),
+            "the canonical name should be rendered"
+        );
+        assert_eq!(
+            record.get("grpc_message"),
+            Some(&"no%20such%20user".to_owned()),
+            "the message should be rendered as received"
+        );
+        assert_eq!(
+            record.get("grpc_status_details_bin"),
+            Some(&"CAUSBG9vcHM".to_owned()),
+            "status details should be rendered as received"
+        );
+    }
+
+    #[test]
     fn metadata_token_rejects_an_empty_key() {
         let err = parse_scalar_field_token("metadata.").expect_err("should fail");
         assert!(err.to_string().contains("metadata token"), "got: {err}");
@@ -1212,6 +1351,41 @@ conditions:
             Some(&"-".to_owned()),
             "an unset key reads as absent, matching the header tokens",
         );
+    }
+
+    #[test]
+    fn build_record_grpc_fields_are_dashes_for_non_grpc_responses() {
+        let plan = EmitPlan {
+            fields: vec![
+                FieldToken::GrpcStatus,
+                FieldToken::GrpcStatusName,
+                FieldToken::GrpcMessage,
+            ],
+            is_default: false,
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+
+        let record = plan.build_record(&ctx, 200, None, 0);
+
+        assert_eq!(record.get("grpc_status"), Some(&"-".to_owned()), "no gRPC status");
+        assert_eq!(record.get("grpc_status_name"), Some(&"-".to_owned()), "no gRPC name");
+        assert_eq!(record.get("grpc_message"), Some(&"-".to_owned()), "no gRPC message");
+    }
+
+    #[test]
+    fn grpc_field_tokens_parse() {
+        for token in [
+            "grpc_status",
+            "grpc_status_name",
+            "grpc_message",
+            "grpc_status_details_bin",
+        ] {
+            assert!(
+                parse_scalar_field_token(token).is_ok(),
+                "{token} should be a valid access_log field"
+            );
+        }
     }
 
     #[test]
@@ -1705,5 +1879,139 @@ conditions:
             out.contains("record="),
             "small field sets must use the same record shape as large ones: {out:?}"
         );
+    }
+
+    #[test]
+    fn deferred_record_samples_complete_grpc_calls() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("sample_rate: 0.5").unwrap();
+        let filter = test_filter(&yaml);
+        let req = grpc_request();
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.grpc_completion = grpc_completion("0");
+
+        let mut logged = 0;
+        for _ in 0..8 {
+            if capture_logs(|| {
+                let _claimed = filter.emit_deferred_record(&ctx, 200);
+            })
+            .contains("access")
+            {
+                logged += 1;
+            }
+        }
+        assert_eq!(logged, 4, "sample_rate 0.5 should log half of the complete gRPC calls");
+    }
+
+    #[test]
+    fn deferred_record_gates_complete_grpc_by_conditions() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("conditions:\n  paths: [\"/allowed\"]").unwrap();
+        let filter = test_filter(&yaml);
+        let req = grpc_request();
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.grpc_completion = grpc_completion("0");
+
+        let dropped = capture_logs(|| {
+            let _claimed = filter.emit_deferred_record(&ctx, 200);
+        });
+        assert!(
+            !dropped.contains("access"),
+            "a complete gRPC call outside the configured paths must not log: {dropped:?}"
+        );
+    }
+
+    #[test]
+    fn deferred_record_always_logs_incomplete_requests() {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str("sample_rate: 0.5\nconditions:\n  paths: [\"/allowed\"]").unwrap();
+        let filter = test_filter(&yaml);
+        let req = grpc_request();
+        let ctx = crate::test_utils::make_filter_context(&req);
+
+        for _ in 0..4 {
+            let logged = capture_logs(|| {
+                let _claimed = filter.emit_deferred_record(&ctx, 502);
+            });
+            assert!(
+                logged.contains("access"),
+                "an incomplete request must always log, bypassing sampling and conditions: {logged:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deferred_record_gates_grpc_by_mapped_status_class() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("conditions:\n  status_classes: [5xx]").unwrap();
+        let filter = test_filter(&yaml);
+        let req = grpc_request();
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        ctx.grpc_completion = grpc_completion("13");
+        let logged_error = capture_logs(|| {
+            let _claimed = filter.emit_deferred_record(&ctx, 200);
+        });
+        assert!(
+            logged_error.contains("access"),
+            "a gRPC INTERNAL error maps to 5xx and must log despite the HTTP 200: {logged_error:?}"
+        );
+
+        ctx.grpc_completion = grpc_completion("0");
+        let logged_ok = capture_logs(|| {
+            let _claimed = filter.emit_deferred_record(&ctx, 200);
+        });
+        assert!(
+            !logged_ok.contains("access"),
+            "a successful gRPC call maps to 2xx and must be excluded by an errors-only filter: {logged_ok:?}"
+        );
+    }
+
+    #[test]
+    fn deferred_record_logs_non_canonical_grpc_failures() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("conditions:\n  status_classes: [5xx]").unwrap();
+        let filter = test_filter(&yaml);
+        let req = grpc_request();
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        ctx.grpc_completion = grpc_completion("20");
+        let logged = capture_logs(|| {
+            let _claimed = filter.emit_deferred_record(&ctx, 200);
+        });
+        assert!(
+            logged.contains("access"),
+            "a non-canonical grpc-status is still a failure and must map to 5xx, not the HTTP 200: {logged:?}"
+        );
+    }
+
+    #[test]
+    fn deferred_record_ignores_stray_grpc_status_on_non_grpc_request() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("sample_rate: 0.5").unwrap();
+        let filter = test_filter(&yaml);
+        let req = crate::test_utils::make_request(http::Method::GET, "/rest/thing");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.grpc_completion = grpc_completion("0");
+
+        for _ in 0..4 {
+            let logged = capture_logs(|| {
+                let _claimed = filter.emit_deferred_record(&ctx, 200);
+            });
+            assert!(
+                logged.contains("access"),
+                "a non-gRPC request must always log; a stray grpc-status must not enable sampling: {logged:?}"
+            );
+        }
+    }
+
+    fn grpc_request() -> crate::context::Request {
+        let mut req = crate::test_utils::make_request(http::Method::POST, "/pkg.Svc/Method");
+        let _prev = req.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/grpc"),
+        );
+        req
+    }
+
+    fn grpc_completion(status: &'static str) -> Option<praxis_core::grpc::GrpcCompletion> {
+        let mut trailers = http::HeaderMap::new();
+        let _prev = trailers.insert("grpc-status", http::HeaderValue::from_static(status));
+        praxis_core::grpc::GrpcCompletion::from_headers(&trailers)
     }
 }

@@ -22,7 +22,7 @@ use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection};
 use tracing::error;
 
 use super::{
-    super::{context::PingoraRequestCtx, convert::send_rejection},
+    super::{context::PingoraRequestCtx, convert::send_rejection_for},
     BodyFilterOutput, accumulate_stream_buffer, check_body_size_limit, release_stream_buffer,
     suppress_stream_buffer_chunk,
 };
@@ -91,7 +91,7 @@ pub(super) async fn execute(
         BodyMode::SizeLimit { max_bytes } => {
             if check_body_size_limit(body.as_ref(), &mut ctx.request_body_bytes, max_bytes) {
                 ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-                send_rejection(session, Rejection::status(413)).await;
+                send_rejection_for(session, Rejection::status(413), ctx).await;
                 return Err(pingora_core::Error::explain(
                     pingora_core::ErrorType::HTTPStatus(413),
                     "request body exceeds maximum size",
@@ -103,7 +103,7 @@ pub(super) async fn execute(
         BodyMode::StreamBuffer { max_bytes } if !ctx.request_body_released => {
             if accumulate_stream_buffer(body, &mut ctx.request_body_buffer, end_of_stream, max_bytes) {
                 ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-                send_rejection(session, Rejection::status(413)).await;
+                send_rejection_for(session, Rejection::status(413), ctx).await;
                 return Err(pingora_core::Error::explain(
                     pingora_core::ErrorType::HTTPStatus(413),
                     "request body exceeds stream_buffer size limit",
@@ -128,7 +128,7 @@ pub(super) async fn execute(
                 && ctx.request_body_bytes.saturating_add(chunk_len) > max as u64
             {
                 ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-                send_rejection(session, Rejection::status(413)).await;
+                send_rejection_for(session, Rejection::status(413), ctx).await;
                 return Err(pingora_core::Error::explain(
                     pingora_core::ErrorType::HTTPStatus(413),
                     "streamed request body exceeds global body limit",
@@ -186,7 +186,7 @@ pub(super) async fn execute(
         Ok(FilterAction::Reject(rejection)) => {
             let status = rejection.status;
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-            send_rejection(session, rejection).await;
+            send_rejection_for(session, rejection, ctx).await;
             Err(pingora_core::Error::explain(
                 pingora_core::ErrorType::HTTPStatus(status),
                 "request body rejected by filter pipeline",
@@ -195,7 +195,7 @@ pub(super) async fn execute(
         Err(e) => {
             error!(error = %e, "filter pipeline error during request body");
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_INTERNAL);
-            send_rejection(session, Rejection::status(500)).await;
+            send_rejection_for(session, Rejection::status(500), ctx).await;
             Err(pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
                 format!("request body filter error: {e}"),

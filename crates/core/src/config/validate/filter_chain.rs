@@ -80,15 +80,16 @@ fn validate_request_conditions(chain_name: &str, entry: &FilterEntry) -> Result<
         let matcher = match condition {
             Condition::When(m) | Condition::Unless(m) => m,
         };
-        if matcher.path.is_none()
+        if matcher.grpc.is_none()
+            && matcher.path.is_none()
             && matcher.path_prefix.is_none()
             && matcher.methods.is_none()
             && matcher.headers.is_none()
         {
             return Err(ProxyError::Config(format!(
                 "filter '{filter}' in chain '{chain_name}': condition {idx} is \
-                 empty; set at least one of path, path_prefix, methods, or \
-                 headers (an empty condition matches every request, so \
+                 empty; set at least one of grpc, path, path_prefix, methods, \
+                 or headers (an empty condition matches every request, so \
                  'unless' would disable the filter entirely)",
                 filter = entry.filter_type,
             )));
@@ -339,6 +340,52 @@ filter_chains:
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn accept_grpc_only_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: ip_acl
+        deny: ["10.0.0.0/8"]
+        conditions:
+          - when:
+              grpc: true
+"#;
+        let config = Config::from_yaml(yaml);
+        assert!(
+            config.is_ok(),
+            "grpc alone is a complete predicate and must not be rejected as empty: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn empty_condition_error_lists_the_grpc_predicate() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: ip_acl
+        deny: ["10.0.0.0/8"]
+        conditions:
+          - when: {}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("at least one of grpc, path"),
+            "the remedy should name every settable predicate: {err}"
+        );
     }
 
     #[test]

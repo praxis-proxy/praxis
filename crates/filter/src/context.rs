@@ -324,6 +324,14 @@ pub struct HttpFilterContext<'a> {
     /// [`filter_results`]: Self::filter_results
     pub filter_metadata: HashMap<String, String>,
 
+    /// How the upstream gRPC call ended.
+    ///
+    /// Read from the response trailers, or from the response header
+    /// block of a Trailers-Only response. `None` for a non-gRPC
+    /// response, and during the request phase — the trailers have not
+    /// arrived yet.
+    pub grpc_completion: Option<praxis_core::grpc::GrpcCompletion>,
+
     /// Trusted header mutations recorded by *earlier* pre-read passes.
     ///
     /// Read-only for filters: the protocol layer seeds it before each
@@ -673,6 +681,14 @@ impl HttpFilterContext<'_> {
     /// Read a durable metadata value by key.
     pub fn get_metadata(&self, key: &str) -> Option<&str> {
         self.filter_metadata.get(key).map(String::as_str)
+    }
+
+    /// How the upstream gRPC call ended, if this was a gRPC call.
+    ///
+    /// Only populated once the upstream response trailers have been
+    /// seen, so it is always `None` during the request phase.
+    pub fn grpc_completion(&self) -> Option<&praxis_core::grpc::GrpcCompletion> {
+        self.grpc_completion.as_ref()
     }
 
     /// X-Request-ID header value, if present and valid UTF-8.

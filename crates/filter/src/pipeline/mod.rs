@@ -165,6 +165,8 @@ pub struct FilterPipeline {
     /// Mirrors `insecure_options.allow_private_upstreams`; consumed by the
     /// upstream peer builders when they resolve a hostname.
     allow_private_upstreams: bool,
+    /// Indices into `filters` of filters declaring response-trailer access.
+    response_trailer_filter_indices: Vec<usize>,
 }
 
 #[expect(
@@ -416,6 +418,29 @@ impl FilterPipeline {
             .iter()
             .filter(|pf| pf.filter.name() == type_name)
             .any(|pf| crate::condition::should_execute(&pf.conditions, request))
+    }
+
+    /// Ask each filter to emit its end-of-request record, returning
+    /// whether any did.
+    ///
+    /// Used by the protocol layer's logging phase for requests that never
+    /// reached a filter's own completion hooks. Filters that log nothing
+    /// are no-ops, so this is cheap for pipelines without an access log.
+    pub fn emit_deferred_records(&self, ctx: &crate::HttpFilterContext<'_>, status: u16) -> bool {
+        // Short-circuits on the first filter that claims the record: one
+        // access record per request, matching the completion hooks, which
+        // mark the request logged after the first emit.
+        self.filters
+            .iter()
+            .any(|pf| pf.filter.emit_deferred_record(ctx, status))
+    }
+
+    /// Whether any filter in this pipeline rewrites response trailers.
+    ///
+    /// Lets the protocol layer skip the trailer hook entirely for the
+    /// pipelines — nearly all of them — that do not need it.
+    pub fn needs_response_trailers(&self) -> bool {
+        self.body_capabilities.needs_response_trailers
     }
 
     /// Compression configuration, if a compression filter is present.

@@ -68,6 +68,9 @@ pub struct BodyCapabilities {
     /// selected-upstream phase.
     pub needs_selected_upstream_request_body: bool,
 
+    /// Whether any filter rewrites upstream response trailers.
+    pub needs_response_trailers: bool,
+
     /// Resolved request body mode (`StreamBuffer` if any filter requires it).
     pub request_body_mode: BodyMode,
 
@@ -113,6 +116,10 @@ mod tests {
         assert!(
             !caps.needs_request_context,
             "default caps should not need request context"
+        );
+        assert!(
+            !caps.needs_response_trailers,
+            "default caps should not need response trailers"
         );
         assert_eq!(
             caps.request_body_mode,

@@ -113,6 +113,7 @@ impl FilterPipeline {
         let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);
         let (request_body_filter_indices, response_body_filter_indices) = body_filter_indices(&filters);
         let selected_upstream_request_body_filter_indices = selected_upstream_request_body_indices(&filters);
+        let response_trailer_filter_indices = super::body::response_trailer_filter_indices(&filters);
         let id_generator = Arc::new(IdGenerator::new());
         let time_source: Arc<dyn praxis_core::time::TimeSource> = Arc::new(SystemTimeSource);
         let mut pipeline = Self {
@@ -123,6 +124,7 @@ impl FilterPipeline {
             response_body_filter_indices,
             selected_upstream_request_body_filter_indices,
             allow_private_upstreams: false,
+            response_trailer_filter_indices,
             health_registry: None,
             id_generator: Arc::clone(&id_generator),
             kv_stores: None,
@@ -253,6 +255,7 @@ impl FilterPipeline {
     ///     config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
     ///     conditions: vec![praxis_core::config::Condition::When(
     ///         praxis_core::config::ConditionMatch {
+    ///             grpc: None,
     ///             path: None,
     ///             path_prefix: Some("/api".to_owned()),
     ///             methods: None,

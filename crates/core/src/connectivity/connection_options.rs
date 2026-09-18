@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Per-upstream connection tuning (timeouts).
+//! Per-upstream connection tuning (timeouts, HTTP version).
 //!
-//! Derived from cluster-level timeout settings in the config.
+//! Derived from cluster-level settings in the config.
 
 use std::time::Duration;
 
-use crate::config::Cluster;
+use crate::config::{Cluster, UpstreamHttpVersion};
 
 // -----------------------------------------------------------------------------
 // ConnectionOptions
@@ -32,6 +32,9 @@ use crate::config::Cluster;
 pub struct ConnectionOptions {
     /// TCP connection timeout.
     pub connection_timeout: Option<Duration>,
+
+    /// HTTP version to speak on this upstream connection.
+    pub http_version: UpstreamHttpVersion,
 
     /// Idle connection timeout.
     pub idle_timeout: Option<Duration>,
@@ -68,6 +71,7 @@ impl From<&Cluster> for ConnectionOptions {
     fn from(cluster: &Cluster) -> Self {
         Self {
             connection_timeout: cluster.connection_timeout_ms.map(Duration::from_millis),
+            http_version: cluster.http.version,
             idle_timeout: cluster.idle_timeout_ms.map(Duration::from_millis),
             read_timeout: cluster.read_timeout_ms.map(Duration::from_millis),
             total_connection_timeout: cluster.total_connection_timeout_ms.map(Duration::from_millis),

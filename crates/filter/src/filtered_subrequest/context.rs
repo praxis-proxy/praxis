@@ -54,6 +54,7 @@ pub(super) fn build_sub_filter_context<'a>(
     runtime: SubrequestRuntimeResources<'a>,
 ) -> HttpFilterContext<'a> {
     HttpFilterContext {
+        grpc_completion: None,
         buffered_request_body: None,
         body_done_indices: Vec::new(),
         branch_iterations: HashMap::new(),

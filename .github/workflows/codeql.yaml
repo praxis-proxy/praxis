@@ -51,7 +51,9 @@ jobs:
 
       - name: Build
         if: matrix.language == 'rust'
-        run: cargo build --workspace
+        # Analysis only covers the runtime crates, so skip the test, bench,
+        # and xtask crates to avoid compiling code CodeQL will not scan.
+        run: cargo build -p praxis-proxy -p praxis-proxy-core -p praxis-proxy-filter -p praxis-proxy-protocol -p praxis-proxy-tls
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0

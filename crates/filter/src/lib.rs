@@ -54,6 +54,7 @@ mod extensions;
 mod factory;
 mod filter;
 mod filtered_subrequest;
+mod grpc_response;
 pub(crate) mod load_balancing;
 mod metrics;
 pub(crate) mod path_match;
@@ -77,7 +78,7 @@ pub use builtins::{
     CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointReselector,
     EndpointSelectorFilter, GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode,
     RedirectStatus, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry, StickySessionsFilter,
-    access_record_already_emitted, bodyless_response, emit_access_record, has_dot_dot_traversal,
+    access_record_already_emitted, bodyless_response, emit_access_record, encode_trailer_frame, has_dot_dot_traversal,
     http::payload_processing::compression_config::CompressionConfig, mark_access_record_emitted,
     normalize_rewritten_path,
 };
@@ -102,6 +103,7 @@ pub use filtered_subrequest::{
     CalloutOutcome, CalloutResponse, FilteredSubrequestExecutor, StagedUpstream, StagedUpstreamFallback,
     SubrequestRuntime,
 };
+pub use grpc_response::GrpcErrorMapping;
 pub use pipeline::{
     FilterPipeline, PipelineExtension,
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
@@ -472,6 +474,7 @@ pub(crate) mod test_utils {
             buffered_request_body: None,
             body_done_indices: Vec::new(),
             branch_iterations: std::collections::HashMap::new(),
+            grpc_completion: None,
             client_addr: None,
             cluster: None,
             current_filter_id: None,

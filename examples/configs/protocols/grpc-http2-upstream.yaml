@@ -1,0 +1,50 @@
+# gRPC Upstream over HTTP/2
+#
+# Praxis proxies to upstreams over HTTP/1.1 by default. gRPC backends
+# speak HTTP/2 only, and a call's outcome (`grpc-status`) arrives in
+# response trailers, which no HTTP/1.1 leg can carry. Set a cluster's
+# `http.version` to `h2` to give it an HTTP/2 upstream connection.
+#
+# Values:
+#   h1    HTTP/1.1 only (default; Praxis's historical behaviour)
+#   h2    HTTP/2 only — ALPN `h2` over TLS, prior-knowledge h2c over plaintext
+#   auto  prefer HTTP/2, fall back to HTTP/1.1 (TLS only; plaintext has
+#         no negotiation mechanism, so `auto` connects over HTTP/1.1)
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/grpc-http2-upstream.yaml
+#
+# Exercise (with any gRPC client, e.g. grpcurl):
+#   grpcurl -plaintext localhost:8080 pkg.Svc/Method
+
+listeners:
+  - name: grpc
+    address: "127.0.0.1:8080"
+    protocol: http
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      # Gate gRPC-specific handling on the traffic itself.
+      - filter: grpc_detection
+        conditions:
+          - when:
+              grpc: true
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: grpc-backend
+
+      - filter: load_balancer
+        clusters:
+          - name: grpc-backend
+            endpoints:
+              - "127.0.0.1:50051"
+            http:
+              # Required for gRPC: trailers only exist on an HTTP/2 leg.
+              version: h2
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

@@ -1,0 +1,66 @@
+# gRPC Trailers-Only Error Responses
+#
+# Answers proxy-generated errors in the shape gRPC clients expect. gRPC
+# carries a call's outcome in a `grpc-status` header on an HTTP 200, not
+# in the HTTP status, so a client that meets Praxis's own 403 or 502
+# sees a bare transport failure with no usable status.
+#
+# With this filter those errors become Trailers-Only responses: a single
+# header block, no body, with `grpc-status` mapped from the HTTP status
+# Praxis chose, per the gRPC HTTP mapping:
+#
+#   400 -> 13 INTERNAL            404 -> 12 UNIMPLEMENTED
+#   401 -> 16 UNAUTHENTICATED     429 -> 14 UNAVAILABLE
+#   403 ->  7 PERMISSION_DENIED   502/503/504 -> 14 UNAVAILABLE
+#   anything else -> 2 UNKNOWN
+#
+# Non-gRPC requests on the same chain keep ordinary HTTP errors.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/transformation/grpc-status-errors.yaml
+#
+# Exercise:
+#   grpcurl -plaintext localhost:8080 pkg.Svc/Method   # -> Unavailable (no backend)
+
+listeners:
+  - name: grpc
+    address: "127.0.0.1:8080"
+    protocol: http
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    # Arm the envelope first: everything that rejects after this point
+    # answers in gRPC's shape.
+    filters:
+      - filter: grpc_status
+        # content_type: classify from the request's content-type.
+        # always: treat every request on this chain as gRPC.
+        detect: content_type
+        # echo: answer with the request's codec (application/grpc+json...).
+        # grpc: always answer bare application/grpc.
+        content_type: echo
+        # Carry the proxy's error text as a percent-encoded grpc-message.
+        include_message: true
+
+      # Any rejection after grpc_status is answered in gRPC's shape:
+      # this one denies a range, and a route miss below yields
+      # UNIMPLEMENTED rather than a bare 404.
+      - filter: ip_acl
+        deny: ["10.99.0.0/16"]
+
+      - filter: router
+        routes:
+          - path_prefix: "/pkg.Svc"
+            cluster: grpc-backend
+
+      - filter: load_balancer
+        clusters:
+          - name: grpc-backend
+            endpoints:
+              - "127.0.0.1:50051"
+            http:
+              version: h2
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

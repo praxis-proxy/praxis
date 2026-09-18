@@ -2432,6 +2432,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
+        response_trailer_filter_indices: Vec::new(),
     });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2508,6 +2509,7 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
+        response_trailer_filter_indices: Vec::new(),
     });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2581,6 +2583,7 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
+        response_trailer_filter_indices: Vec::new(),
     });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2648,6 +2651,7 @@ async fn all_executed_filters_run_on_response() {
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
+        response_trailer_filter_indices: Vec::new(),
     });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2852,6 +2856,7 @@ async fn skipped_filter_skips_its_branches() {
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
+        response_trailer_filter_indices: Vec::new(),
     });
 
     let req = crate::test_utils::make_request(Method::GET, "/other");
@@ -4361,6 +4366,7 @@ fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilte
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
+        response_trailer_filter_indices: Vec::new(),
     })
 }
 
@@ -4460,6 +4466,7 @@ fn gate_condition(header: &str, value: &str) -> Vec<praxis_core::config::Conditi
     headers.insert(header.to_owned(), value.to_owned());
     vec![praxis_core::config::Condition::When(
         praxis_core::config::ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: None,
             methods: None,
@@ -4671,6 +4678,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
+        response_trailer_filter_indices: Vec::new(),
     })
 }
 
@@ -4705,6 +4713,7 @@ fn make_pipeline_with_conditions(
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
+        response_trailer_filter_indices: Vec::new(),
     })
 }
 
@@ -4739,12 +4748,14 @@ fn make_pipeline_with_response_conditions(
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
+        response_trailer_filter_indices: Vec::new(),
     })
 }
 
 /// Build a `When` condition that matches on a path prefix.
 fn when_path(prefix: &str) -> praxis_core::config::Condition {
     praxis_core::config::Condition::When(praxis_core::config::ConditionMatch {
+        grpc: None,
         path: None,
         path_prefix: Some(prefix.to_owned()),
         methods: None,
@@ -4776,6 +4787,7 @@ fn named_noop_entry(filter_type: &str, failure_mode: FailureMode) -> FilterEntry
 /// Build an `Unless` condition that matches on a path prefix.
 fn unless_path(prefix: &str) -> praxis_core::config::Condition {
     praxis_core::config::Condition::Unless(praxis_core::config::ConditionMatch {
+        grpc: None,
         path: None,
         path_prefix: Some(prefix.to_owned()),
         methods: None,
@@ -5381,6 +5393,7 @@ fn streaming_capability_detected_when_filter_declares_it() {
         response_body_filter_indices: Vec::new(),
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
+        response_trailer_filter_indices: Vec::new(),
     });
     assert!(
         pipeline.may_select_streaming_subrequest_response(),

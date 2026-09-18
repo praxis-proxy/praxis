@@ -115,6 +115,18 @@ pub(super) fn selected_upstream_request_body_indices(filters: &[PipelineFilter])
     indices
 }
 
+/// Indices of filters declaring response-trailer access.
+pub(super) fn response_trailer_filter_indices(filters: &[PipelineFilter]) -> Vec<usize> {
+    filters
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, pf)| match &pf.filter {
+            AnyFilter::Http(f) if f.response_trailer_access() => Some(idx),
+            AnyFilter::Http(_) | AnyFilter::Tcp(_) => None,
+        })
+        .collect()
+}
+
 /// Recursively accumulate body capabilities from a slice of pipeline filters.
 pub(super) fn accumulate_caps(caps: &mut BodyCapabilities, filters: &[PipelineFilter]) {
     accumulate_caps_inner(caps, filters, false);
@@ -227,6 +239,9 @@ fn accumulate_response_body(
             caps.any_response_body_writer = true;
         }
         merge_body_mode(&mut caps.response_body_mode, filter.response_body_mode());
+    }
+    if filter.response_trailer_access() {
+        caps.needs_response_trailers = true;
     }
 }
 

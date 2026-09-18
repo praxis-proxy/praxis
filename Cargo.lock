@@ -3309,6 +3309,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "h2",
  "http",
  "metrics",
  "metrics-exporter-prometheus",
@@ -3410,6 +3411,7 @@ version = "0.5.6"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64 0.23.1",
  "bytes",
  "futures",
  "h2",

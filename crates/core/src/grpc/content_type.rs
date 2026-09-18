@@ -1,15 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! gRPC content-type classification for HTTP filter context.
+//! gRPC classification of the HTTP `content-type` header.
 
 // -----------------------------------------------------------------------------
 // GrpcKind
 // -----------------------------------------------------------------------------
 
 /// Classifies the gRPC variant from the request `content-type` header.
+///
+/// ```
+/// use praxis_core::grpc::GrpcKind;
+///
+/// assert_eq!(
+///     GrpcKind::from_content_type("application/grpc"),
+///     GrpcKind::Grpc
+/// );
+/// assert_eq!(
+///     GrpcKind::from_content_type("application/json"),
+///     GrpcKind::None
+/// );
+/// assert!(GrpcKind::from_content_type("application/grpc+proto").is_grpc());
+/// assert!(!GrpcKind::None.is_grpc());
+/// ```
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) enum GrpcKind {
+pub enum GrpcKind {
     /// Not a gRPC request.
     #[default]
     None,
@@ -29,7 +44,7 @@ pub(crate) enum GrpcKind {
 
 impl GrpcKind {
     /// Detect the gRPC variant from a request header map.
-    pub(crate) fn from_headers(headers: &http::HeaderMap) -> Self {
+    pub fn from_headers(headers: &http::HeaderMap) -> Self {
         headers
             .get(http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
@@ -38,7 +53,7 @@ impl GrpcKind {
     }
 
     /// Classify a `content-type` header value as a gRPC variant.
-    pub(crate) fn from_content_type(value: &str) -> Self {
+    pub fn from_content_type(value: &str) -> Self {
         let mime = value.split_once(';').map_or(value, |(before, _)| before).trim();
         if !mime
             .get(..16)
@@ -60,8 +75,15 @@ impl GrpcKind {
         }
     }
 
+    /// Whether the classified request carries gRPC.
+    #[must_use]
+    pub fn is_grpc(self) -> bool {
+        self != Self::None
+    }
+
     /// Return the content-type sub-type as a static string.
-    pub(crate) fn as_str(self) -> &'static str {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Grpc => "grpc",

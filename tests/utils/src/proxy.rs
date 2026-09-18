@@ -31,9 +31,14 @@ use tokio_util::sync::CancellationToken;
 /// [`ProxyGuard`]: ProxyGuard
 const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Time to wait after writing a config file for the watcher
-/// to debounce (500ms) and apply the reload.
-const RELOAD_SETTLE: Duration = Duration::from_millis(1500);
+/// Time to wait after writing a config file for the watcher to debounce
+/// and apply the reload. The watcher debounces for 500ms; for the small
+/// configs these tests reload, rebuilding and swapping the pipeline then
+/// takes only milliseconds, so double the debounce window is a safe
+/// budget. A config whose filters do I/O at load (for example a `policy`
+/// filter fetching JWKS) can take much longer; such a test must wait on
+/// its own readiness signal instead of relying on this constant.
+const RELOAD_SETTLE: Duration = Duration::from_millis(1000);
 
 /// Worker threads per proxy spawned by the test harness.
 ///

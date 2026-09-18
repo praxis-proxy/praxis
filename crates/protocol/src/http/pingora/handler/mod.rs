@@ -49,6 +49,10 @@ mod reserved_headers;
 mod response_body_filter;
 /// Response filter hook.
 mod response_filter;
+/// Response trailer hook: filter-driven trailer rewriting.
+mod response_trailer_filter;
+/// Response trailer hook: gRPC completion capture.
+mod response_trailers;
 /// Policy-aware retry decision engine.
 mod retry;
 /// Upstream peer selection hook.
@@ -376,7 +380,13 @@ fn maybe_emit_fallback_access_log(pipeline: &FilterPipeline, status: u16, ctx: &
         if !pipeline.filter_request_conditions_match("access_log", filter_ctx.request) {
             return;
         }
-        praxis_filter::emit_access_record(&filter_ctx, status);
+        // Route through the pipeline so the record honours the filter's
+        // configured `fields`, and so late facts — the gRPC completion
+        // status captured from the response trailers — reach it. Only
+        // fall back to the fixed shape if no filter claimed the record.
+        if !pipeline.emit_deferred_records(&filter_ctx, status) {
+            praxis_filter::emit_access_record(&filter_ctx, status);
+        }
     }
 }
 

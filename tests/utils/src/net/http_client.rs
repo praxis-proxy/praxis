@@ -258,6 +258,111 @@ pub fn h2c_get(addr: &str, path: &str, host: Option<&str>) -> (u16, String) {
     })
 }
 
+/// The outcome of an h2c gRPC call: response headers, plus whether the
+/// header block itself ended the stream.
+#[derive(Clone, Debug)]
+pub struct GrpcCallResult {
+    /// Whether the response HEADERS frame carried `END_STREAM`.
+    ///
+    /// A gRPC Trailers-Only response must set it: without it a client
+    /// waits for trailers that never arrive and reports the call as
+    /// broken rather than reading the status.
+    pub end_stream: bool,
+
+    /// Response headers.
+    pub headers: http::HeaderMap,
+
+    /// HTTP status.
+    pub status: u16,
+
+    /// Trailers, when the response sent any.
+    pub trailers: Option<http::HeaderMap>,
+}
+
+impl GrpcCallResult {
+    /// A header or trailer value as text.
+    ///
+    /// Looks in the header block first, then the trailers, matching how
+    /// a gRPC client resolves `grpc-status`.
+    #[must_use]
+    pub fn grpc_header(&self, name: &str) -> Option<String> {
+        self.headers
+            .get(name)
+            .or_else(|| self.trailers.as_ref().and_then(|trailers| trailers.get(name)))
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    }
+}
+
+/// Make an h2c gRPC call through `addr` and return the response shape.
+///
+/// Speaks HTTP/2 with prior knowledge, as a gRPC client does over
+/// plaintext, so tests can assert on framing an HTTP/1.1 client cannot
+/// observe.
+///
+/// # Panics
+///
+/// Panics if the connection, handshake, or exchange fails.
+#[must_use]
+pub fn h2c_grpc_call(addr: &str, path: &str, extra_headers: &[(&str, &str)]) -> GrpcCallResult {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime for h2c");
+
+    rt.block_on(Box::pin(grpc_call(addr, path, extra_headers)))
+}
+
+/// Build the request for [`h2c_grpc_call`].
+fn grpc_request(path: &str, extra_headers: &[(&str, &str)]) -> http::Request<()> {
+    let mut builder = http::Request::post(path)
+        .header("host", "localhost")
+        .header("te", "trailers");
+    // Only default the codec when the caller did not pick one: two
+    // content-type headers is a malformed request, not a codec choice.
+    if !extra_headers
+        .iter()
+        .any(|(name, _value)| name.eq_ignore_ascii_case("content-type"))
+    {
+        builder = builder.header("content-type", "application/grpc");
+    }
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, *value);
+    }
+    builder.body(()).expect("build gRPC request")
+}
+
+/// Drive one h2c gRPC exchange.
+async fn grpc_call(addr: &str, path: &str, extra_headers: &[(&str, &str)]) -> GrpcCallResult {
+    let tcp = tokio::net::TcpStream::connect(addr).await.expect("TCP connect for h2c");
+    let (mut client, h2_conn) = h2::client::handshake(tcp).await.expect("h2c handshake");
+    tokio::spawn(async move {
+        let _result = h2_conn.await;
+    });
+
+    let (response_fut, _send) = client
+        .send_request(grpc_request(path, extra_headers), true)
+        .expect("send gRPC request");
+    let response = response_fut.await.expect("gRPC response");
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let mut body = response.into_body();
+    let end_stream = body.is_end_stream();
+
+    while let Some(chunk) = body.data().await {
+        let data = chunk.expect("gRPC body chunk");
+        let _release = body.flow_control().release_capacity(data.len());
+    }
+    let trailers = body.trailers().await.ok().flatten();
+
+    GrpcCallResult {
+        end_stream,
+        headers,
+        status,
+        trailers,
+    }
+}
+
 /// Send an h2c GET whose request URI is absolute (explicit `:scheme` and
 /// `:authority` pseudo-headers) and return `(status, body)`.
 ///

@@ -233,6 +233,7 @@ mod tests {
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
                 expected_status: 200,
+                grpc_service: String::new(),
                 healthy_threshold: 2,
                 interval_ms: 5000,
                 passive_healthy_threshold: None,

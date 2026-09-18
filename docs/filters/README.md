@@ -165,10 +165,10 @@ category:
 builtins/
   http/                       HTTP protocol filters
     observability/            Access logs, request IDs, trace context
-    payload_processing/       Compression, body field extraction, JSON-RPC
+    payload_processing/       Compression, body field extraction, JSON-RPC, gRPC-Web
     security/                 Basic auth, CORS, credential injection, CSRF, forwarded headers, guardrails, IP ACL, peer identity trust, policy
-    traffic_management/       Circuit breaker, endpoint selector, gRPC detection, iterative request router, load balancer, rate limit, redirect, router, sticky sessions, static response, timeout
-    transformation/           Header, path rewrite, URL rewrite
+    traffic_management/       Circuit breaker, endpoint selector, gRPC detection, gRPC deadlines, iterative request router, load balancer, rate limit, redirect, router, sticky sessions, static response, timeout
+    transformation/           gRPC error envelope, header, path rewrite, URL rewrite
   tcp/                        TCP protocol filters
     observability/            Connection logging
     traffic_management/       SNI router, TCP load balancer
@@ -456,10 +456,27 @@ condition are ANDed; all conditions must pass.
 
 | Field         | Matches when                 |
 | ------------- | ---------------------------- |
+| `grpc`        | Request is (`true`) or is not (`false`) gRPC |
 | `path`        | URI exactly equals value     |
 | `path_prefix` | URI starts with value        |
 | `methods`     | Method in list               |
 | `headers`     | All listed headers match     |
+
+`grpc` classifies the request from its `content-type` header
+(`application/grpc`, `application/grpc+proto`, `application/grpc+json`,
+or any other `application/grpc+<codec>`). It reads the header directly,
+so it works without the `grpc_detection` filter and does not depend on
+filter ordering. `application/grpc-web` is a distinct protocol and does
+not match.
+
+```yaml
+# Rate limit only gRPC calls.
+- filter: rate_limit
+  conditions:
+    - when:
+        grpc: true
+  requests_per_second: 100
+```
 
 ```yaml
 filter_chains:

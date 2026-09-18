@@ -10,7 +10,6 @@
     clippy::mod_module_files,
     clippy::shadow_unrelated,
     clippy::single_char_lifetime_names,
-    clippy::struct_field_names,
     reason = "TODO(conventions-sync): fix violations and remove"
 )]
 
@@ -42,6 +41,8 @@ pub mod config;
 pub mod connectivity;
 /// Error types shared across the workspace.
 pub mod errors;
+/// Shared gRPC protocol helpers.
+pub mod grpc;
 /// Shared health state types for active health checking.
 pub mod health;
 /// Per-instance request ID generation.

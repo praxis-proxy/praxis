@@ -35,7 +35,10 @@ pub enum HealthCheckType {
     Http,
     /// TCP connect probe.
     Tcp,
-    /// gRPC health check (not yet supported).
+    /// gRPC health probe via `grpc.health.v1.Health/Check`.
+    ///
+    /// Probes over plaintext h2c, so it cannot be combined with
+    /// cluster TLS.
     Grpc,
 }
 
@@ -93,6 +96,14 @@ pub struct HealthCheckConfig {
     /// Expected HTTP status code for a healthy response.
     #[serde(default = "default_expected_status")]
     pub expected_status: u16,
+
+    /// gRPC service name to check. Only used by the `grpc` probe.
+    ///
+    /// Empty (the default) asks for the server's overall serving
+    /// status, which is what the `grpc.health.v1.Health` contract
+    /// defines an empty name to mean.
+    #[serde(default)]
+    pub grpc_service: String,
 
     /// Consecutive successes required to mark an endpoint healthy.
     #[serde(default = "default_healthy_threshold")]
@@ -219,6 +230,7 @@ unhealthy_threshold: 3
         let hc = HealthCheckConfig {
             check_type: HealthCheckType::Http,
             expected_status: 204,
+            grpc_service: String::new(),
             healthy_threshold: 3,
             interval_ms: 10000,
             passive_healthy_threshold: Some(3),

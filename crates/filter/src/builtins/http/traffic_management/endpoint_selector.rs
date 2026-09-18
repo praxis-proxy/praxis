@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use praxis_core::{
-    config::{CachedClusterTls, ClusterTls},
+    config::{CachedClusterTls, ClusterTls, UpstreamHttpVersion},
     connectivity::{ConnectionOptions, Upstream},
 };
 use serde::Deserialize;
@@ -47,6 +47,12 @@ struct EndpointConnectionConfig {
     #[serde(default)]
     idle_timeout_ms: Option<u64>,
 
+    /// HTTP version to speak upstream (`h1`, `h2`, or `auto`).
+    ///
+    /// Mirrors a cluster's `http.version`; defaults to HTTP/1.1.
+    #[serde(default)]
+    http_version: UpstreamHttpVersion,
+
     /// Per-read timeout in milliseconds.
     #[serde(default)]
     read_timeout_ms: Option<u64>,
@@ -84,6 +90,7 @@ impl EndpointConnectionConfig {
 
         Ok(ConnectionOptions {
             connection_timeout: self.connection_timeout_ms.map(std::time::Duration::from_millis),
+            http_version: self.http_version,
             idle_timeout: self.idle_timeout_ms.map(std::time::Duration::from_millis),
             read_timeout: self.read_timeout_ms.map(std::time::Duration::from_millis),
             total_connection_timeout: self.total_connection_timeout_ms.map(std::time::Duration::from_millis),

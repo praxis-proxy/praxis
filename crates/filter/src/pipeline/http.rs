@@ -413,6 +413,46 @@ impl FilterPipeline {
         }
         Ok(released_or_continue(released))
     }
+
+    /// Run response-trailer filters over the upstream trailers.
+    ///
+    /// Returns the bytes the first filter produced, if any. Those bytes
+    /// replace the downstream trailers entirely, appended to the body as
+    /// its last chunk — which is how a gRPC status reaches a client that
+    /// cannot read HTTP trailers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if a filter fails to process the trailers.
+    pub fn execute_http_response_trailers(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        trailers: &mut http::HeaderMap,
+    ) -> Result<Option<Bytes>, FilterError> {
+        let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());
+        for &idx in self.response_trailer_filter_indices.iter().rev() {
+            let Some(pf) = self.filters.get(idx) else {
+                continue;
+            };
+            if skipped_in_request_phase(ctx, request_phase_tracked, idx) {
+                trace!(
+                    filter = pf.filter.name(),
+                    "skipped response trailers (not executed in request phase)"
+                );
+                continue;
+            }
+            let AnyFilter::Http(http_filter) = &pf.filter else {
+                continue;
+            };
+            ctx.current_filter_id = Some(pf.filter_id);
+            let produced = http_filter.on_response_trailers(ctx, trailers);
+            ctx.current_filter_id = None;
+            if let Some(bytes) = produced? {
+                return Ok(Some(bytes));
+            }
+        }
+        Ok(None)
+    }
 }
 
 // -----------------------------------------------------------------------------

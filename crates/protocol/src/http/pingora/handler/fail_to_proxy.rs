@@ -8,7 +8,7 @@ use http::HeaderValue;
 use pingora_core::ErrorType;
 use pingora_proxy::{FailToProxy, Session};
 use praxis_filter::{ErrorResponseContext, ErrorResponseFormatterHandle, FormattedErrorResponse, Rejection};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::http::pingora::context::PingoraRequestCtx;
 
@@ -47,20 +47,34 @@ pub(super) async fn execute(
     let pending_rejection = ctx.pending_rejection.take();
     if !matches!(etype, ErrorType::HTTPStatus(_)) {
         ctx.stamp_error_type(crate::http::pingora::metrics::error_type_for(&etype, e.esource()));
+    } else if pending_rejection.is_some() {
+        ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
     }
     let formatter = ctx.extensions.get::<ErrorResponseFormatterHandle>();
+    let grpc = ctx.extensions.get::<praxis_filter::GrpcErrorMapping>();
 
     if let ErrorType::HTTPStatus(code) = etype {
         if let Some(rejection) = pending_rejection {
-            ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-            return handle_pending_rejection(session, code, rejection).await;
+            return handle_pending_rejection(session, code, rejection, grpc).await;
         }
-        return handle_http_status(session, code, formatter).await;
+        return handle_http_status(session, code, formatter, grpc).await;
     }
 
     let source = e.esource();
     if matches!(source, pingora_core::ErrorSource::Downstream) {
-        return handle_downstream(session, &etype, formatter).await;
+        return handle_downstream(session, &etype, formatter, grpc).await;
+    }
+
+    // An upstream timeout on a call whose gRPC deadline has passed is that
+    // deadline firing, not a generic 504: the client asked for the call to
+    // be abandoned, and it expects DEADLINE_EXCEEDED rather than a
+    // transport error.
+    if let Some(rejection) = grpc_deadline_rejection(&etype, ctx)
+        && !final_response_written(session)
+    {
+        warn!("upstream attempt cancelled by the gRPC deadline");
+        crate::http::pingora::grpc_trailers::send_grpc_rejection(session, &rejection).await;
+        return done(200);
     }
 
     let err = classify_error(&etype, source);
@@ -85,7 +99,39 @@ pub(super) async fn execute(
         return done(err.status);
     }
 
-    write_error_response(session, err, formatter).await
+    write_error_response(session, err, formatter, grpc).await
+}
+
+/// Build a `DEADLINE_EXCEEDED` response when an upstream timeout is the
+/// gRPC deadline firing.
+///
+/// Only timeouts qualify: a connection refused mid-deadline is still a
+/// connection refused, and reporting it as `DEADLINE_EXCEEDED` would
+/// hide a real upstream failure.
+fn grpc_deadline_rejection(etype: &ErrorType, ctx: &PingoraRequestCtx) -> Option<Rejection> {
+    if !matches!(
+        *etype,
+        ErrorType::ReadTimedout | ErrorType::WriteTimedout | ErrorType::ConnectTimedout
+    ) {
+        return None;
+    }
+    let deadline = ctx.extensions.get::<praxis_core::grpc::GrpcDeadline>()?;
+    if !deadline.is_expired() {
+        return None;
+    }
+    Some(
+        Rejection::status(200)
+            .with_header("content-type", "application/grpc")
+            // An HTTP/1.1 client would otherwise read this body-less 200
+            // until an EOF that keepalive never delivers.
+            .with_header("content-length", "0")
+            .with_header(
+                "grpc-status",
+                praxis_core::grpc::GrpcStatusCode::DeadlineExceeded.as_u32().to_string(),
+            )
+            .with_header("grpc-message", "deadline exceeded")
+            .preserving_keepalive(),
+    )
 }
 
 /// Structured response for explicit HTTP status errors.
@@ -96,6 +142,7 @@ async fn handle_http_status(
     session: &mut Session,
     code: u16,
     formatter: Option<&ErrorResponseFormatterHandle>,
+    grpc: Option<&praxis_filter::GrpcErrorMapping>,
 ) -> FailToProxy {
     if final_response_written(session) {
         return done(code);
@@ -105,7 +152,7 @@ async fn handle_http_status(
         message: status_title(code),
         status: code,
     };
-    write_error_response(session, err, formatter).await
+    write_error_response(session, err, formatter, grpc).await
 }
 
 /// Deliver a rejection raised during the response phase with its full
@@ -114,12 +161,32 @@ async fn handle_http_status(
 /// A response-phase `Reject` cannot write to the session directly (the
 /// upstream response is mid-flight), so the rejection crosses the error
 /// boundary via the request context and is written here.
-async fn handle_pending_rejection(session: &mut Session, code: u16, rejection: Rejection) -> FailToProxy {
+async fn handle_pending_rejection(
+    session: &mut Session,
+    code: u16,
+    rejection: Rejection,
+    grpc: Option<&praxis_filter::GrpcErrorMapping>,
+) -> FailToProxy {
     if final_response_written(session) {
+        return done(code);
+    }
+    if let Some(grpc) = grpc.filter(|_mapping| rejection.status >= 400) {
+        let message = rejection_message(&rejection);
+        crate::http::pingora::grpc_trailers::send_trailers_only(session, grpc, rejection.status, message).await;
         return done(code);
     }
     crate::http::pingora::convert::send_rejection(session, rejection).await;
     done(code)
+}
+
+/// The text to carry as `grpc-message` for a rejection.
+fn rejection_message(rejection: &Rejection) -> &str {
+    rejection
+        .body
+        .as_deref()
+        .and_then(|body| str::from_utf8(body).ok())
+        .filter(|text| !text.is_empty())
+        .unwrap_or("proxy error")
 }
 
 /// Handle a downstream-origin error.
@@ -131,6 +198,7 @@ async fn handle_downstream(
     session: &mut Session,
     etype: &ErrorType,
     formatter: Option<&ErrorResponseFormatterHandle>,
+    grpc: Option<&praxis_filter::GrpcErrorMapping>,
 ) -> FailToProxy {
     if is_connection_dead(etype) {
         debug!("downstream connection dead, skipping error response");
@@ -144,7 +212,7 @@ async fn handle_downstream(
         message: "Request error",
         status: 400,
     };
-    write_error_response(session, err, formatter).await
+    write_error_response(session, err, formatter, grpc).await
 }
 
 /// Whether the downstream connection is too broken to write a response.
@@ -160,7 +228,15 @@ async fn write_error_response(
     session: &mut Session,
     err: ProxyError,
     formatter: Option<&ErrorResponseFormatterHandle>,
+    grpc: Option<&praxis_filter::GrpcErrorMapping>,
 ) -> FailToProxy {
+    // A gRPC client cannot read a problem+json body: its error envelope
+    // is a header block with a grpc-status.
+    if let Some(grpc) = grpc {
+        crate::http::pingora::grpc_trailers::send_trailers_only(session, grpc, err.status, err.message).await;
+        return done(err.status);
+    }
+
     let FormattedErrorResponse { body, content_type } = format_error_response(&err, formatter);
 
     let Some(header) = build_header(err.status, body.len(), content_type) else {

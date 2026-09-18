@@ -1,0 +1,55 @@
+# gRPC Access Logging
+#
+# Logs how each gRPC call ended. A gRPC call's outcome is not its HTTP
+# status — that is 200 even for a failed call — but the `grpc-status`
+# trailer sent after the response body, so an ordinary access log
+# records every call as a success.
+#
+# Adds four access log fields:
+#   grpc_status              numeric grpc-status (e.g. 5)
+#   grpc_status_name         canonical name (e.g. NOT_FOUND)
+#   grpc_message             grpc-message, percent-encoded as received
+#   grpc_status_details_bin  grpc-status-details-bin, base64 as received
+#
+# They render "-" for non-gRPC responses, so one listener can carry
+# mixed traffic. Trailers require an HTTP/2 upstream leg, hence
+# `http.version: h2` on the cluster.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/observability/grpc-access-log.yaml
+
+listeners:
+  - name: grpc
+    address: "127.0.0.1:8080"
+    protocol: http
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: access_log
+        fields:
+          - method
+          - path
+          - status
+          - duration_ms
+          - cluster
+          - grpc_status
+          - grpc_status_name
+          - grpc_message
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: grpc-backend
+
+      - filter: load_balancer
+        clusters:
+          - name: grpc-backend
+            endpoints:
+              - "127.0.0.1:50051"
+            http:
+              version: h2
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

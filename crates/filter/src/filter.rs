@@ -95,6 +95,22 @@ pub trait HttpFilter: Send + Sync {
         Vec::new()
     }
 
+    /// Emit this filter's end-of-request record from the logging phase.
+    ///
+    /// The access log normally emits from its own completion hooks, but
+    /// some responses never reach them: a request rejected before the
+    /// upstream, a stream aborted mid-body, or a gRPC response whose
+    /// body ends with trailers rather than an end-of-stream body chunk.
+    /// The protocol layer calls this from the logging phase for those,
+    /// where late-arriving facts — the `grpc-status` trailer among them
+    /// — are finally available.
+    ///
+    /// Returns whether a record was emitted. Filters that log nothing
+    /// leave the default.
+    fn emit_deferred_record(&self, _ctx: &HttpFilterContext<'_>, _status: u16) -> bool {
+        false
+    }
+
     /// The cluster names this filter can load balance.
     ///
     /// Load-balancing filters override this so validation can compare
@@ -368,6 +384,37 @@ pub trait HttpFilter: Send + Sync {
     ) -> Result<SelectedUpstreamBodyOutcome, FilterError> {
         let _ = (ctx, body);
         Ok(SelectedUpstreamBodyOutcome::Continue)
+    }
+
+    /// Whether this filter rewrites upstream response trailers.
+    ///
+    /// Declaring `false` (the default) lets the protocol layer skip the
+    /// trailer hook entirely for pipelines that do not need it.
+    fn response_trailer_access(&self) -> bool {
+        false
+    }
+
+    /// Called once with the upstream response trailers, before they are
+    /// forwarded downstream.
+    ///
+    /// Returning `Some(bytes)` replaces the downstream trailers with
+    /// those bytes, appended to the response body as its final chunk.
+    /// That is how a gRPC call's status reaches a client that cannot
+    /// read HTTP trailers at all.
+    ///
+    /// Trailers exist only on an HTTP/2 upstream leg, so this never
+    /// fires for a cluster left on the default HTTP/1.1.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the trailers cannot be processed.
+    fn on_response_trailers(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        trailers: &mut http::HeaderMap,
+    ) -> Result<Option<Bytes>, FilterError> {
+        let _ = (ctx, trailers);
+        Ok(None)
     }
 }
 

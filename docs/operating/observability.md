@@ -570,6 +570,31 @@ with these fields:
 | `request_body_bytes` | Request body size |
 | `response_body_bytes` | Response body size |
 
+### gRPC Fields
+
+A gRPC call's outcome is not its HTTP status — that is
+`200` even for a failed call. It arrives in the response
+trailers instead, so these fields are opt-in via `fields:`
+and render `-` for non-gRPC responses:
+
+| Field | Description |
+| ------------------------- | ------------------------------------------- |
+| `grpc_status` | Numeric `grpc-status` (e.g. `5`) |
+| `grpc_status_name` | Canonical name (e.g. `NOT_FOUND`) |
+| `grpc_message` | `grpc-message`, percent-encoded as received |
+| `grpc_status_details_bin` | `grpc-status-details-bin`, base64 as received |
+
+```yaml
+- filter: access_log
+  fields: [method, path, status, grpc_status, grpc_status_name]
+```
+
+Trailers exist only on an HTTP/2 upstream leg, so the
+cluster must set `http.version: h2` — see
+[Upstream HTTP Version](load-balancing.md#upstream-http-version).
+`grpc_message` is logged in its wire form: decoding it
+would put control characters into a log line.
+
 ### Sampling
 
 For high-traffic deployments, reduce log volume with

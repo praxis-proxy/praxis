@@ -16,9 +16,10 @@ use std::{
 };
 
 use dashmap::DashMap;
-use pingora_core::upstreams::peer::HttpPeer;
+use pingora_core::{protocols::ALPN, upstreams::peer::HttpPeer};
 
 use super::ConnectionOptions;
+use crate::config::UpstreamHttpVersion;
 
 /// TTL for cached DNS entries.
 const DNS_TTL_SECS: u64 = 60;
@@ -530,6 +531,21 @@ pub fn apply_connection_options(peer: &mut HttpPeer, opts: &ConnectionOptions) {
     peer.options.idle_timeout = opts.idle_timeout;
     peer.options.read_timeout = opts.read_timeout;
     peer.options.write_timeout = opts.write_timeout;
+    peer.options.alpn = alpn_for(opts.http_version);
+}
+
+/// Map the configured upstream HTTP version onto Pingora's ALPN setting.
+///
+/// Pingora's connector reads only the ALPN bounds: `get_max_http_version()
+/// == 1` forces the HTTP/1.1 pool, and over plaintext (where there is no
+/// negotiation) `get_min_http_version() == 2` is the signal to speak h2c
+/// with prior knowledge.
+fn alpn_for(version: UpstreamHttpVersion) -> ALPN {
+    match version {
+        UpstreamHttpVersion::H1 => ALPN::H1,
+        UpstreamHttpVersion::H2 => ALPN::H2,
+        UpstreamHttpVersion::Auto => ALPN::H2H1,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -763,6 +779,57 @@ mod tests {
     }
 
     #[test]
+    fn apply_connection_options_defaults_to_http1() {
+        let mut peer = HttpPeer::new("127.0.0.1:80", false, String::new());
+        apply_connection_options(&mut peer, &ConnectionOptions::default());
+        assert_eq!(
+            peer.options.alpn.get_max_http_version(),
+            1,
+            "the default upstream leg must stay HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn apply_connection_options_sets_h2_alpn() {
+        let mut peer = HttpPeer::new("127.0.0.1:80", false, String::new());
+        let opts = ConnectionOptions {
+            http_version: UpstreamHttpVersion::H2,
+            ..ConnectionOptions::default()
+        };
+        apply_connection_options(&mut peer, &opts);
+        assert_eq!(
+            peer.options.alpn.get_min_http_version(),
+            2,
+            "h2 must be the minimum so Pingora speaks h2c over plaintext"
+        );
+        assert_eq!(
+            peer.options.alpn.get_max_http_version(),
+            2,
+            "h2 must be the maximum so the h1 pool is not used"
+        );
+    }
+
+    #[test]
+    fn apply_connection_options_sets_h2h1_alpn_for_auto() {
+        let mut peer = HttpPeer::new("127.0.0.1:80", false, String::new());
+        let opts = ConnectionOptions {
+            http_version: UpstreamHttpVersion::Auto,
+            ..ConnectionOptions::default()
+        };
+        apply_connection_options(&mut peer, &opts);
+        assert_eq!(
+            peer.options.alpn.get_min_http_version(),
+            1,
+            "auto must allow falling back to HTTP/1.1"
+        );
+        assert_eq!(
+            peer.options.alpn.get_max_http_version(),
+            2,
+            "auto must allow negotiating HTTP/2"
+        );
+    }
+
+    #[test]
     fn apply_connection_options_sets_timeouts() {
         use std::time::Duration;
 
@@ -772,6 +839,7 @@ mod tests {
             write_timeout: Some(Duration::from_secs(3)),
             idle_timeout: Some(Duration::from_secs(4)),
             total_connection_timeout: Some(Duration::from_secs(5)),
+            ..ConnectionOptions::default()
         };
         let mut peer = HttpPeer::new("127.0.0.1:80", false, String::new());
         apply_connection_options(&mut peer, &opts);

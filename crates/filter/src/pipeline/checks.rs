@@ -760,6 +760,7 @@ mod tests {
         let mut headers = std::collections::HashMap::new();
         headers.insert("x gate".to_owned(), "on".to_owned());
         let condition = Condition::When(ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: None,
             methods: None,
@@ -781,6 +782,7 @@ mod tests {
         let mut headers = std::collections::HashMap::new();
         headers.insert("x-gate".to_owned(), "on".to_owned());
         let condition = Condition::When(ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: None,
             methods: None,
@@ -2207,6 +2209,7 @@ mod tests {
     /// Build a `When` condition for testing.
     fn make_condition() -> Condition {
         Condition::When(ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: Some("/test".to_owned()),
             methods: None,

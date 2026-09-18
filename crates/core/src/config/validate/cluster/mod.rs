@@ -72,6 +72,7 @@ pub(in crate::config::validate) fn validate_clusters(
         if let Some(hc) = &cluster.health_check {
             health_check::validate_health_check(hc, &cluster.name)?;
         }
+        health_check::validate_grpc_probe_transport(cluster)?;
         health_check::validate_health_check_ssrf(cluster, insecure_options)?;
         health_check::warn_tls_http_probe_mismatch(cluster);
     }

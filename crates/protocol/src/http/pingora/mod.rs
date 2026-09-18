@@ -24,6 +24,8 @@ use crate::{ListenerPipelines, Protocol};
 /// Per-request context for filter pipeline results.
 pub mod context;
 pub(crate) mod convert;
+/// Trailers-Only responses for proxy-generated gRPC errors.
+pub(crate) mod grpc_trailers;
 /// HTTP proxy handler and Pingora integration.
 pub mod handler;
 /// Health check infrastructure: admin endpoints, probes, and background runner.

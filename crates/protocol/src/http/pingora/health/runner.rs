@@ -26,17 +26,23 @@ struct HealthCheckParams {
     /// Endpoint addresses to probe.
     endpoints: Vec<String>,
 
-    /// Probe type: [`Http`] or [`Tcp`].
+    /// Probe type: [`Http`], [`Tcp`], or [`Grpc`].
     ///
     /// [`Http`]: HealthCheckType::Http
     /// [`Tcp`]: HealthCheckType::Tcp
+    /// [`Grpc`]: HealthCheckType::Grpc
     check_type: HealthCheckType,
 
     /// Pre-built HTTP probe request bytes (ignored for TCP).
     http_request: String,
 
-    /// Expected HTTP status code (ignored for TCP).
+    /// Expected HTTP status code (ignored for TCP and gRPC).
     expected_status: u16,
+
+    /// gRPC service name to check (ignored for HTTP and TCP).
+    ///
+    /// Empty asks for the server's overall serving status.
+    grpc_service: Arc<str>,
 
     /// Time between probe rounds.
     interval: Duration,
@@ -110,6 +116,7 @@ fn build_health_params(
         // is built once per task rather than per probe.
         http_request: crate::http::pingora::health::probe::build_http_probe_request(&hc.path),
         expected_status: hc.expected_status,
+        grpc_service: Arc::from(hc.grpc_service.as_str()),
         interval: Duration::from_millis(hc.interval_ms),
         timeout: Duration::from_millis(hc.timeout_ms),
         healthy_threshold: hc.healthy_threshold,
@@ -194,8 +201,14 @@ async fn spawn_probe<'ep>(idx: usize, addr: &'ep str, params: &HealthCheckParams
         },
         HealthCheckType::Tcp => tcp_probe(addr, params.timeout).await,
         HealthCheckType::Grpc => {
-            tracing::error!("gRPC health checks not yet implemented");
-            false
+            // Boxed: the h2 handshake future is large, and this arm sits
+            // inside the per-endpoint probe future set.
+            Box::pin(crate::http::pingora::health::grpc::grpc_probe(
+                addr,
+                &params.grpc_service,
+                params.timeout,
+            ))
+            .await
         },
     };
     (idx, addr, success)
@@ -425,6 +438,7 @@ mod tests {
             check_type: HealthCheckType::Tcp,
             http_request: super::super::probe::build_http_probe_request("/"),
             expected_status: 200,
+            grpc_service: Arc::from(""),
             interval: Duration::from_millis(100),
             timeout: Duration::from_millis(50),
             healthy_threshold: thresholds.0,

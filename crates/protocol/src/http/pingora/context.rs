@@ -290,6 +290,14 @@ pub struct PingoraRequestCtx {
     /// for passive health recording in the `logging` hook.
     pub upstream_response_status: Option<u16>,
 
+    /// How the upstream gRPC call ended.
+    ///
+    /// Captured from the response trailers, or from the response header
+    /// block of a Trailers-Only response. Held here rather than in the
+    /// filter context because trailers arrive after the response-header
+    /// phase, and the access log runs later still.
+    pub grpc_completion: Option<praxis_core::grpc::GrpcCompletion>,
+
     /// Whether the response phase has been executed. Used to ensure
     /// cleanup (e.g. least-connections counter release) in the
     /// `logging()` hook when errors bypass `response_filter`.
@@ -394,6 +402,7 @@ macro_rules! filter_context {
             filter_metadata: std::mem::take(&mut $ctx.filter_metadata),
             // Seeded per pre-read pass by `pre_read_body`; empty otherwise.
             prior_pre_read_mutations: Vec::new(),
+            grpc_completion: $ctx.grpc_completion.clone(),
             pre_read_mutations: std::mem::take(&mut $ctx.pre_read_mutations),
             structured_metadata: std::mem::take(&mut $ctx.structured_metadata),
             filter_results: std::mem::take(&mut $ctx.filter_results),
@@ -607,6 +616,7 @@ impl Default for PingoraRequestCtx {
             response_body_released: false,
             response_header_snapshot: None,
             upstream_response_status: None,
+            grpc_completion: None,
             response_phase_done: false,
             response_delivery_complete: false,
             pending_rejection: None,

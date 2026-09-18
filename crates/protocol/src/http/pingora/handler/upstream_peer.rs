@@ -152,6 +152,15 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
         // response-phase health accounting relies on.
         ctx.upstream_contacted = true;
     }
+    // Re-shrink the transport budget on every attempt: a retry reuses the
+    // first attempt's upstream, whose timeouts were sized to the deadline as
+    // it stood then, and would otherwise outlast it.
+    if let Some(deadline) = ctx.extensions.get::<praxis_core::grpc::GrpcDeadline>().copied()
+        && let Some(upstream) = ctx.upstream_for_retry.as_mut()
+    {
+        apply_grpc_deadline(deadline, upstream);
+    }
+
     let upstream = ctx.upstream_for_retry.as_ref().ok_or_else(|| {
         let cluster = &ctx.cluster;
         pingora_core::Error::explain(
@@ -181,6 +190,30 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
 /// crediting or faulting the wrong index.
 fn reselected_endpoint_index(health: Option<&praxis_core::health::ClusterHealthState>, addr: &str) -> usize {
     health.and_then(|h| h.endpoint_index(addr)).unwrap_or(usize::MAX)
+}
+
+/// Shrink this attempt's connection budget to what is left of the gRPC
+/// deadline.
+///
+/// Runs after [`apply_per_try_timeout`] so a configured per-try timeout
+/// can only tighten the deadline, never reach past it. Because
+/// `upstream_peer` runs once per attempt against the same absolute
+/// instant, each retry gets a smaller budget rather than restarting the
+/// client's clock.
+fn apply_grpc_deadline(deadline: praxis_core::grpc::GrpcDeadline, upstream: &mut Upstream) {
+    let Some(remaining) = deadline.remaining() else {
+        return;
+    };
+    let opts = Arc::make_mut(&mut upstream.connection);
+    opts.connection_timeout = Some(shorter(opts.connection_timeout, remaining));
+    opts.total_connection_timeout = Some(shorter(opts.total_connection_timeout, remaining));
+    opts.read_timeout = Some(shorter(opts.read_timeout, remaining));
+    opts.write_timeout = Some(shorter(opts.write_timeout, remaining));
+}
+
+/// The shorter of a configured timeout and the remaining deadline.
+fn shorter(configured: Option<std::time::Duration>, remaining: std::time::Duration) -> std::time::Duration {
+    configured.map_or(remaining, |configured| configured.min(remaining))
 }
 
 /// Override connection/read timeouts with the policy's per-try timeout when set.
@@ -576,6 +609,56 @@ mod tests {
         assert!(
             ctx.upstream_for_retry.is_some(),
             "retry upstream should remain for further retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_reapplies_grpc_deadline_on_retry() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(make_upstream("127.0.0.1:9090"));
+        ctx.extensions.insert(praxis_core::grpc::GrpcDeadline::new(
+            Instant::now() + std::time::Duration::from_millis(50),
+            false,
+            true,
+        ));
+
+        let _peer = execute(&mut ctx).await.expect("retry execute should succeed");
+
+        let read = ctx
+            .upstream_for_retry
+            .as_ref()
+            .unwrap()
+            .connection
+            .read_timeout
+            .expect("a retry's read timeout must be bounded by the remaining deadline");
+        assert!(
+            read <= std::time::Duration::from_millis(50),
+            "a retry must inherit the remaining deadline, not attempt one's budget: {read:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_enforces_the_deadline_even_when_propagation_is_off() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(make_upstream("127.0.0.1:9090"));
+        ctx.extensions.insert(praxis_core::grpc::GrpcDeadline::new(
+            Instant::now() + std::time::Duration::from_millis(50),
+            false,
+            false,
+        ));
+
+        let _peer = execute(&mut ctx).await.expect("execute should succeed");
+
+        let read = ctx
+            .upstream_for_retry
+            .as_ref()
+            .unwrap()
+            .connection
+            .read_timeout
+            .expect("propagate: false suppresses only the header, not transport enforcement");
+        assert!(
+            read <= std::time::Duration::from_millis(50),
+            "the transport budget must still shrink to the deadline: {read:?}"
         );
     }
 

@@ -1,0 +1,70 @@
+# gRPC Active Health Checks
+#
+# Probes upstream endpoints with `grpc.health.v1.Health/Check` instead
+# of an HTTP GET. A gRPC server does not serve /healthz, and one that
+# has stopped serving still completes an HTTP/2 handshake, so both the
+# `http` and `tcp` probes report it healthy. The health protocol asks
+# the question directly: only a call that returns SERVING counts.
+#
+# `grpc_service` names the service to check. Left empty (the default) it
+# asks for the server's overall status, which is what the protocol
+# defines an empty name to mean.
+#
+# The probe speaks plaintext h2c on its own connection, so it cannot be
+# combined with cluster TLS; that combination is rejected at config
+# load rather than silently failing every probe.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/observability/grpc-health-check.yaml
+#
+# Inspect endpoint health (verbose adds the per-cluster breakdown):
+#   curl -s localhost:9901/ready | jq
+
+listeners:
+  - name: grpc
+    address: "127.0.0.1:8080"
+    protocol: http
+    filter_chains: [main]
+
+# Active health checking runs from the top-level cluster definitions.
+clusters:
+  - name: grpc-backend
+    endpoints:
+      - "127.0.0.1:50051"
+      - "127.0.0.1:50052"
+    http:
+      version: h2
+    health_check:
+      type: grpc
+      # Empty: ask for the server's overall serving status.
+      # Set a name to check one registered service instead.
+      grpc_service: ""
+      interval_ms: 1000
+      timeout_ms: 500
+      healthy_threshold: 1
+      unhealthy_threshold: 1
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: grpc-backend
+
+      - filter: load_balancer
+        clusters:
+          - name: grpc-backend
+            endpoints:
+              - "127.0.0.1:50051"
+              - "127.0.0.1:50052"
+            http:
+              version: h2
+
+admin:
+  address: "127.0.0.1:9901"
+  verbose: true # per-cluster healthy/unhealthy counts on /ready
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
+  allow_private_health_checks: true # ... and probes them there too

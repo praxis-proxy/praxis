@@ -3,10 +3,13 @@
 
 //! Request condition evaluation for gating filter execution.
 
-use std::{borrow::Cow, convert::Infallible};
+use std::{borrow::Cow, collections::HashMap, convert::Infallible};
 
 use http::header::HeaderName;
-use praxis_core::config::{Condition, ConditionMatch};
+use praxis_core::{
+    config::{Condition, ConditionMatch},
+    grpc::GrpcKind,
+};
 
 use super::HeaderSource;
 use crate::context::Request;
@@ -43,6 +46,7 @@ impl HeaderSource for Request {
 ///
 /// // When condition matches.
 /// let when = Condition::When(ConditionMatch {
+///     grpc: None,
 ///     path: None,
 ///     path_prefix: Some("/api".into()),
 ///     methods: None,
@@ -52,6 +56,7 @@ impl HeaderSource for Request {
 ///
 /// // Unless condition matches — skipped.
 /// let unless = Condition::Unless(ConditionMatch {
+///     grpc: None,
 ///     path: None,
 ///     path_prefix: Some("/api".into()),
 ///     methods: None,
@@ -100,6 +105,12 @@ pub(crate) fn should_execute_from<S: HeaderSource>(
 /// reading header values from `source`. Unset fields impose no constraint
 /// (vacuously true).
 fn matches_request_from<S: HeaderSource>(m: &ConditionMatch, req: &Request, source: &S) -> Result<bool, S::Error> {
+    if let Some(want_grpc) = m.grpc
+        && GrpcKind::from_headers(&req.headers).is_grpc() != want_grpc
+    {
+        return Ok(false);
+    }
+
     if let Some(exact) = &m.path
         && req.uri.path() != exact
     {
@@ -120,21 +131,27 @@ fn matches_request_from<S: HeaderSource>(m: &ConditionMatch, req: &Request, sour
         return Ok(false);
     }
 
-    if let Some(headers) = &m.headers {
-        for (name, value) in headers {
-            // An unparseable condition header name can never equal a real
-            // request header, so it is a no-match (build validation rejects
-            // such names up front; this keeps evaluation total).
-            let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
-                return Ok(false);
-            };
-            match source.header(&header_name)? {
-                Some(v) if v.as_ref() == value.as_str() => {},
-                _ => return Ok(false),
-            }
+    match &m.headers {
+        Some(headers) => matches_headers_from(headers, source),
+        None => Ok(true),
+    }
+}
+
+/// Returns true if every required header is present with the expected
+/// value, reading values through `source`.
+fn matches_headers_from<S: HeaderSource>(headers: &HashMap<String, String>, source: &S) -> Result<bool, S::Error> {
+    for (name, value) in headers {
+        // An unparseable condition header name can never equal a real
+        // request header, so it is a no-match (build validation rejects
+        // such names up front; this keeps evaluation total).
+        let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
+            return Ok(false);
+        };
+        match source.header(&header_name)? {
+            Some(v) if v.as_ref() == value.as_str() => {},
+            _ => return Ok(false),
         }
     }
-
     Ok(true)
 }
 
@@ -152,7 +169,6 @@ fn matches_request_from<S: HeaderSource>(m: &ConditionMatch, req: &Request, sour
     reason = "tests"
 )]
 mod tests {
-    use std::collections::HashMap;
 
     use http::{HeaderMap, HeaderValue, Method, Uri};
 
@@ -291,6 +307,7 @@ mod tests {
     fn combined_path_and_method_both_match() {
         let req = make_request(Method::POST, "/api/users", HeaderMap::new());
         let m = ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
@@ -303,6 +320,7 @@ mod tests {
     fn combined_path_matches_method_does_not() {
         let req = make_request(Method::GET, "/api/users", HeaderMap::new());
         let m = ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
@@ -315,6 +333,7 @@ mod tests {
     fn combined_method_matches_path_does_not() {
         let req = make_request(Method::POST, "/health", HeaderMap::new());
         let m = ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
@@ -332,6 +351,7 @@ mod tests {
         let mut hdr_map = HashMap::new();
         hdr_map.insert("x-debug".to_owned(), "true".to_owned());
         let m = ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
@@ -349,6 +369,7 @@ mod tests {
         let mut hdr_map = HashMap::new();
         hdr_map.insert("x-debug".to_owned(), "true".to_owned());
         let m = ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
@@ -361,6 +382,7 @@ mod tests {
     fn unless_with_method_and_path() {
         let req = make_request(Method::GET, "/healthz", HeaderMap::new());
         let m = ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: Some("/healthz".to_owned()),
             methods: Some(vec!["GET".to_owned()]),
@@ -376,6 +398,7 @@ mod tests {
     fn unless_partial_match_allows_execution() {
         let req = make_request(Method::POST, "/healthz", HeaderMap::new());
         let m = ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: Some("/healthz".to_owned()),
             methods: Some(vec!["GET".to_owned()]),
@@ -391,6 +414,7 @@ mod tests {
     fn empty_condition_match_is_vacuously_true() {
         let req = make_request(Method::DELETE, "/any/path", HeaderMap::new());
         let m = ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: None,
             methods: None,
@@ -540,8 +564,162 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // gRPC Predicate
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn grpc_true_matches_bare_grpc_content_type() {
+        let req = content_type_request("application/grpc");
+        assert!(
+            should_execute(&[when(grpc_match(true))], &req),
+            "application/grpc should satisfy grpc: true"
+        );
+    }
+
+    #[test]
+    fn grpc_true_matches_codec_suffixed_content_type() {
+        for value in [
+            "application/grpc+proto",
+            "application/grpc+json",
+            "application/grpc+cbor",
+        ] {
+            let req = content_type_request(value);
+            assert!(
+                should_execute(&[when(grpc_match(true))], &req),
+                "{value} should satisfy grpc: true"
+            );
+        }
+    }
+
+    #[test]
+    fn grpc_true_skips_non_grpc_request() {
+        let req = content_type_request("application/json");
+        assert!(
+            !should_execute(&[when(grpc_match(true))], &req),
+            "application/json should not satisfy grpc: true"
+        );
+    }
+
+    #[test]
+    fn grpc_true_skips_request_without_content_type() {
+        let req = make_request(Method::GET, "/", HeaderMap::new());
+        assert!(
+            !should_execute(&[when(grpc_match(true))], &req),
+            "a request with no content-type should not satisfy grpc: true"
+        );
+    }
+
+    #[test]
+    fn grpc_true_skips_grpc_web_request() {
+        let req = content_type_request("application/grpc-web");
+        assert!(
+            !should_execute(&[when(grpc_match(true))], &req),
+            "gRPC-Web is a distinct protocol and should not satisfy grpc: true"
+        );
+    }
+
+    #[test]
+    fn grpc_false_matches_non_grpc_request() {
+        let req = content_type_request("application/json");
+        assert!(
+            should_execute(&[when(grpc_match(false))], &req),
+            "application/json should satisfy grpc: false"
+        );
+    }
+
+    #[test]
+    fn grpc_false_skips_grpc_request() {
+        let req = content_type_request("application/grpc");
+        assert!(
+            !should_execute(&[when(grpc_match(false))], &req),
+            "application/grpc should not satisfy grpc: false"
+        );
+    }
+
+    #[test]
+    fn unless_grpc_skips_grpc_request() {
+        let req = content_type_request("application/grpc+proto");
+        assert!(
+            !should_execute(&[unless(grpc_match(true))], &req),
+            "unless grpc: true should skip a gRPC request"
+        );
+    }
+
+    #[test]
+    fn unless_grpc_runs_for_non_grpc_request() {
+        let req = content_type_request("text/plain");
+        assert!(
+            should_execute(&[unless(grpc_match(true))], &req),
+            "unless grpc: true should run for a non-gRPC request"
+        );
+    }
+
+    #[test]
+    fn grpc_predicate_ands_with_other_fields() {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
+        let req = make_request(Method::POST, "/pkg.Svc/Method", headers);
+        let m = ConditionMatch {
+            grpc: Some(true),
+            path: None,
+            path_prefix: Some("/pkg.Svc".to_owned()),
+            methods: Some(vec!["POST".to_owned()]),
+            headers: None,
+        };
+        assert!(
+            should_execute(&[when(m)], &req),
+            "all three predicates match, so the filter should run"
+        );
+
+        let m = ConditionMatch {
+            grpc: Some(true),
+            path: None,
+            path_prefix: Some("/other".to_owned()),
+            methods: None,
+            headers: None,
+        };
+        assert!(
+            !should_execute(&[when(m)], &req),
+            "a non-matching prefix should still veto a matching grpc predicate"
+        );
+    }
+
+    #[test]
+    fn unset_grpc_predicate_imposes_no_constraint() {
+        let grpc = content_type_request("application/grpc");
+        let json = content_type_request("application/json");
+        assert!(
+            should_execute(&[when(path_match("/svc"))], &grpc),
+            "an unset grpc predicate should not exclude gRPC"
+        );
+        assert!(
+            should_execute(&[when(path_match("/svc"))], &json),
+            "an unset grpc predicate should not exclude non-gRPC"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Build a condition matching (or excluding) gRPC traffic.
+    fn grpc_match(want: bool) -> ConditionMatch {
+        ConditionMatch {
+            grpc: Some(want),
+            path: None,
+            path_prefix: None,
+            methods: None,
+            headers: None,
+        }
+    }
+
+    /// Build a request carrying the given `content-type`.
+    fn content_type_request(value: &str) -> Request {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::CONTENT_TYPE, HeaderValue::from_str(value).unwrap());
+        make_request(Method::POST, "/svc/Method", headers)
+    }
+
 
     /// Build a [`Request`] with the given method, path, and headers.
     fn make_request(method: Method, path: &str, headers: HeaderMap) -> Request {
@@ -565,6 +743,7 @@ mod tests {
     /// Build a condition matching a path prefix.
     fn path_match(prefix: &str) -> ConditionMatch {
         ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: Some(prefix.to_owned()),
             methods: None,
@@ -575,6 +754,7 @@ mod tests {
     /// Build a condition matching an exact path.
     fn exact_path_match(path: &str) -> ConditionMatch {
         ConditionMatch {
+            grpc: None,
             path: Some(path.to_owned()),
             path_prefix: None,
             methods: None,
@@ -585,6 +765,7 @@ mod tests {
     /// Build a condition matching HTTP methods.
     fn method_match(methods: &[&str]) -> ConditionMatch {
         ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: None,
             methods: Some(methods.iter().map(|s| (*s).to_owned()).collect()),
@@ -599,6 +780,7 @@ mod tests {
             headers.insert((*k).to_owned(), (*v).to_owned());
         }
         ConditionMatch {
+            grpc: None,
             path: None,
             path_prefix: None,
             methods: None,
@@ -620,18 +802,21 @@ mod tests {
         fn predicate() -> impl Strategy<Value = ConditionMatch> {
             prop_oneof![
                 path().prop_map(|p| ConditionMatch {
+                    grpc: None,
                     path: Some(p),
                     path_prefix: None,
                     methods: None,
                     headers: None,
                 }),
                 path().prop_map(|p| ConditionMatch {
+                    grpc: None,
                     path: None,
                     path_prefix: Some(p),
                     methods: None,
                     headers: None,
                 }),
                 proptest::collection::vec("(GET|POST|PUT|DELETE|PATCH)", 1..=3).prop_map(|ms| ConditionMatch {
+                    grpc: None,
                     path: None,
                     path_prefix: None,
                     methods: Some(ms),

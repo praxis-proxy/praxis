@@ -6,6 +6,7 @@
 mod circuit_breaker;
 mod endpoint_selector;
 mod grpc_detection;
+mod grpc_timeout;
 mod iterative_request_router;
 mod load_balancer;
 mod rate_limit;
@@ -19,6 +20,7 @@ pub(crate) mod token_bucket;
 pub use circuit_breaker::CircuitBreakerFilter;
 pub use endpoint_selector::EndpointSelectorFilter;
 pub use grpc_detection::GrpcDetectionFilter;
+pub use grpc_timeout::GrpcTimeoutFilter;
 pub use iterative_request_router::IterativeRequestRouterFilter;
 pub use load_balancer::{EndpointReselector, LoadBalancerFilter};
 pub use rate_limit::{RateLimitFilter, RateLimitMode};
