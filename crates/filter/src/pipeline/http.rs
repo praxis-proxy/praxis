@@ -33,6 +33,7 @@ use crate::{
     any_filter::AnyFilter,
     condition::should_execute,
     context::HttpFilterContext,
+    trace_context::ensure_trace_context,
 };
 
 // -----------------------------------------------------------------------------
@@ -60,6 +61,9 @@ impl FilterPipeline {
     #[expect(clippy::indexing_slicing, reason = "while loop bounds idx")]
     #[expect(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if self.enables_trace_propagation() {
+            ensure_trace_context(ctx);
+        }
         ctx.executed_filter_indices.clear();
         ctx.executed_filter_indices.resize(self.filters.len(), false);
         ctx.body_done_indices.clear();
@@ -206,6 +210,9 @@ impl FilterPipeline {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
+        if self.enables_trace_propagation() {
+            ensure_trace_context(ctx);
+        }
         ensure_body_done_indices(ctx, self.filters.len());
         accumulate_body_bytes(&mut ctx.request_body_bytes, body.as_ref());
         let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());

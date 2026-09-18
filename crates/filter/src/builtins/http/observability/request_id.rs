@@ -13,6 +13,7 @@ use crate::{
     FilterAction, FilterError,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
+    trace_context::{REQUEST_ID_HEADER, TraceContext},
 };
 
 // -----------------------------------------------------------------------------
@@ -152,12 +153,7 @@ impl HttpFilter for RequestIdFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let client_id = ctx
-            .request
-            .headers
-            .get(&*self.header_name)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned);
+        let client_id = inbound_header_value(ctx, &self.header_name);
 
         // Record provenance now, while the request headers are still
         // exactly what the client sent. By `on_response` the snapshot
@@ -167,13 +163,13 @@ impl HttpFilter for RequestIdFilter {
             ctx.insert_filter_state(ClientSuppliedId(client_id));
         }
 
-        let id = client_id.unwrap_or_else(|| ctx.id_generator.generate(ctx.time_source));
+        let id = client_id
+            .or_else(|| shared_request_id(ctx, &self.header_name))
+            .unwrap_or_else(|| ctx.id_generator.generate(ctx.time_source));
 
         debug!(request_id = %id, header = %self.header_name, "forwarding request ID");
         tracing::Span::current().record("request_id", &*id);
-
-        ctx.extra_request_headers
-            .push((Cow::Owned((*self.header_name).to_owned()), id));
+        adopt_request_id(ctx, &self.header_name, &id);
 
         Ok(FilterAction::Continue)
     }
@@ -192,6 +188,39 @@ impl HttpFilter for RequestIdFilter {
 
         Ok(FilterAction::Continue)
     }
+}
+
+/// Client-supplied value for `header_name`, if present and UTF-8.
+fn inbound_header_value(ctx: &HttpFilterContext<'_>, header_name: &str) -> Option<String> {
+    ctx.request
+        .headers
+        .get(header_name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+}
+
+/// Reuse a request-scoped [`TraceContext`] ID when this filter uses `x-request-id`.
+fn shared_request_id(ctx: &HttpFilterContext<'_>, header_name: &str) -> Option<String> {
+    if !header_name.eq_ignore_ascii_case(REQUEST_ID_HEADER) {
+        return None;
+    }
+    ctx.extensions
+        .get::<TraceContext>()
+        .map(|tc| tc.request_id().to_owned())
+}
+
+/// Make this filter's accepted ID the shared default `x-request-id`.
+fn adopt_request_id(ctx: &mut HttpFilterContext<'_>, header_name: &str, id: &str) {
+    if header_name.eq_ignore_ascii_case(REQUEST_ID_HEADER)
+        && let Some(tc) = ctx.extensions.get_mut::<TraceContext>()
+        && tc.request_id() != id
+    {
+        tc.set_request_id(id.to_owned());
+    }
+    ctx.extra_request_headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case(header_name));
+    ctx.extra_request_headers
+        .push((Cow::Owned(header_name.to_owned()), id.to_owned()));
 }
 
 // -----------------------------------------------------------------------------
@@ -302,6 +331,113 @@ mod tests {
 
         let (name, _) = &ctx.extra_request_headers[0];
         assert_eq!(name, "X-Correlation-ID", "should use custom header name from config");
+    }
+
+    #[tokio::test]
+    async fn reuses_trace_context_request_id_without_duplicating_header() {
+        let filter = make_filter("");
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.extensions.insert(TraceContext::new(
+            "from-trace-context".into(),
+            "4bf92f3577b34da6a3ce929d0e0e4736".into(),
+            "01".into(),
+        ));
+        ctx.extra_request_headers
+            .push((Cow::Borrowed("x-request-id"), "from-trace-context".into()));
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        let ids: Vec<_> = ctx
+            .extra_request_headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("x-request-id"))
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(ids, vec!["from-trace-context"]);
+    }
+
+    #[tokio::test]
+    async fn custom_header_name_is_independent_of_trace_context() {
+        let filter = make_filter("header_name: X-Correlation-ID");
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.extensions.insert(TraceContext::new(
+            "from-trace-context".into(),
+            "4bf92f3577b34da6a3ce929d0e0e4736".into(),
+            "01".into(),
+        ));
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        let (name, value) = &ctx.extra_request_headers[0];
+        assert_eq!(name, "X-Correlation-ID");
+        assert_ne!(value, "from-trace-context");
+        assert_eq!(
+            ctx.extensions.get::<TraceContext>().unwrap().request_id(),
+            "from-trace-context"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_supplied_id_overrides_preinitialized_trace_context() {
+        let filter = make_filter("");
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert("x-request-id", "from-client".parse().unwrap());
+        let mut ctx = seeded_trace_context(&req, "generated-before-request-id");
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+        assert_eq!(extra_ids(&ctx), vec!["from-client".to_owned()]);
+        assert_eq!(
+            ctx.extensions.get::<TraceContext>().unwrap().request_id(),
+            "from-client"
+        );
+
+        let mut resp = crate::test_utils::make_response();
+        ctx.response_header = Some(&mut resp);
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        assert_eq!(resp.headers["x-request-id"], "from-client");
+    }
+
+    #[tokio::test]
+    async fn generated_shared_id_is_not_echoed_after_preinitialized_trace_context() {
+        let filter = make_filter("");
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = seeded_trace_context(&req, "generated-before-request-id");
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+        assert_eq!(
+            ctx.extensions.get::<TraceContext>().unwrap().request_id(),
+            "generated-before-request-id"
+        );
+
+        let mut resp = crate::test_utils::make_response();
+        ctx.response_header = Some(&mut resp);
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        assert!(!resp.headers.contains_key("x-request-id"));
+    }
+
+    /// Context with a pre-initialized [`TraceContext`] and matching extra header.
+    fn seeded_trace_context<'a>(req: &'a crate::Request, request_id: &str) -> HttpFilterContext<'a> {
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.current_filter_id = Some(0);
+        ctx.extensions.insert(TraceContext::new(
+            request_id.into(),
+            "4bf92f3577b34da6a3ce929d0e0e4736".into(),
+            "01".into(),
+        ));
+        ctx.extra_request_headers
+            .push((Cow::Borrowed("x-request-id"), request_id.to_owned()));
+        ctx
+    }
+
+    /// Pending `x-request-id` extras in insertion order.
+    fn extra_ids(ctx: &HttpFilterContext<'_>) -> Vec<String> {
+        ctx.extra_request_headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("x-request-id"))
+            .map(|(_, v)| v.clone())
+            .collect()
     }
 
     #[test]

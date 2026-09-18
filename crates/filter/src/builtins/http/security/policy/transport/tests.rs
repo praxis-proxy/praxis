@@ -989,3 +989,36 @@ fn closed_port() -> SocketAddr {
     drop(listener);
     address
 }
+
+// -----------------------------------------------------------------------------
+// Task-local trace correlation
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn correlation_headers_returns_none_without_scope() {
+    assert!(correlation_headers().is_none());
+}
+
+#[tokio::test]
+async fn correlation_headers_returns_scoped_value() {
+    use http::header::HeaderName;
+
+    let mut fw = FrameworkHeaders::new();
+    fw.insert(
+        HeaderName::from_static("x-request-id"),
+        http::HeaderValue::from_static("req-1"),
+    )
+    .unwrap();
+
+    let inside = with_trace_correlation(fw, async { correlation_headers() }).await;
+    let headers = inside.expect("task-local must be visible inside scope");
+    let entries: Vec<_> = headers.iter().map(|(n, _)| n.as_str().to_owned()).collect();
+    assert!(entries.contains(&"x-request-id".to_owned()));
+}
+
+#[tokio::test]
+async fn correlation_headers_not_visible_after_scope_exits() {
+    let fw = FrameworkHeaders::new();
+    with_trace_correlation(fw, async {}).await;
+    assert!(correlation_headers().is_none());
+}

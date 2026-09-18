@@ -604,10 +604,16 @@ impl PolicyFilter {
     ) -> Result<IdentityPayload, Rejection> {
         let route_ext = Self::identity_extensions(ctx, headers.clone(), entity_type, entity_name);
 
-        let (id_result, _bg) = self
-            .mgr
-            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, Self::identity_payload(headers), route_ext, None)
-            .await;
+        let (id_result, _bg) = super::transport::with_trace_correlation(
+            trace_correlation(ctx),
+            self.mgr.invoke_named::<IdentityHook>(
+                HOOK_IDENTITY_RESOLVE,
+                Self::identity_payload(headers),
+                route_ext,
+                None,
+            ),
+        )
+        .await;
         if !id_result.continue_processing {
             return Err(auth_rejection(id_result.violation.as_ref()));
         }
@@ -755,10 +761,16 @@ impl PolicyFilter {
     ) -> Result<Option<AuthenticatedIdentity>, Rejection> {
         let headers = Self::snapshot_headers(ctx);
         let gate_ext = Self::identity_extensions(ctx, headers.clone(), ENTITY_HTTP, ENTITY_NAME_GLOBAL);
-        let (result, _bg) = self
-            .mgr
-            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, Self::identity_payload(headers), gate_ext, None)
-            .await;
+        let (result, _bg) = super::transport::with_trace_correlation(
+            trace_correlation(ctx),
+            self.mgr.invoke_named::<IdentityHook>(
+                HOOK_IDENTITY_RESOLVE,
+                Self::identity_payload(headers),
+                gate_ext,
+                None,
+            ),
+        )
+        .await;
 
         if !result.continue_processing {
             return Err(auth_rejection(result.violation.as_ref()));
@@ -868,11 +880,12 @@ impl PolicyFilter {
         };
         let mgr = Arc::clone(&self.mgr);
         let handle = tokio::runtime::Handle::current();
+        let fw = trace_correlation(ctx);
         let cmf_result = tokio::task::spawn_blocking(move || {
-            handle.block_on(async {
+            handle.block_on(super::transport::with_trace_correlation(fw, async {
                 let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
                 r
-            })
+            }))
         })
         .await
         .map_err(|e| -> FilterError { format!("policy: inference request-phase hook task failed: {e}").into() })?;
@@ -1042,11 +1055,12 @@ impl PolicyFilter {
         let mgr = Arc::clone(&self.mgr);
         let handle = tokio::runtime::Handle::current();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let fw = trace_correlation(ctx);
         tokio::task::spawn_blocking(move || {
-            let result = handle.block_on(async move {
+            let result = handle.block_on(super::transport::with_trace_correlation(fw, async move {
                 let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
                 r
-            });
+            }));
             drop(tx.send(result));
         });
         let cmf_result = rx.recv().map_err(|_recv| -> FilterError {
@@ -1168,13 +1182,14 @@ impl PolicyFilter {
         let payload = HttpPayload;
         let mgr = Arc::clone(&self.mgr);
         let handle = tokio::runtime::Handle::current();
+        let fw = trace_correlation(ctx);
         let result = tokio::task::spawn_blocking(move || {
-            handle.block_on(async {
+            handle.block_on(super::transport::with_trace_correlation(fw, async {
                 let (r, _bg) = mgr
                     .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, payload, extensions, None)
                     .await;
                 r
-            })
+            }))
         })
         .await
         .map_err(|e| -> FilterError { format!("policy: HTTP request-phase hook task failed: {e}").into() })?;
@@ -1260,14 +1275,15 @@ impl PolicyFilter {
         &self,
         hook: &'static str,
         extensions: Extensions,
+        fw: praxis_core::subrequest::FrameworkHeaders,
     ) -> Result<ppe::praxis_policy_core::executor::PipelineResult, FilterError> {
         let mgr = Arc::clone(&self.mgr);
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            handle.block_on(async {
+            handle.block_on(super::transport::with_trace_correlation(fw, async {
                 let (r, _bg) = mgr.invoke_named::<HttpHook>(hook, HttpPayload, extensions, None).await;
                 r
-            })
+            }))
         })
         .await
         .map_err(|e| -> FilterError { format!("policy: HTTP response-phase hook task failed: {e}").into() })
@@ -1712,11 +1728,12 @@ impl HttpFilter for PolicyFilter {
         };
         let mgr = Arc::clone(&self.mgr);
         let handle = tokio::runtime::Handle::current();
+        let fw = trace_correlation(ctx);
         let cmf_result = tokio::task::spawn_blocking(move || {
-            handle.block_on(async {
+            handle.block_on(super::transport::with_trace_correlation(fw, async {
                 let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
                 r
-            })
+            }))
         })
         .await
         .map_err(|e| -> FilterError { format!("policy: CMF request-phase hook task failed: {e}").into() })?;
@@ -1811,7 +1828,9 @@ impl HttpFilter for PolicyFilter {
             response.status.as_u16(),
         );
 
-        let result = self.dispatch_response_hook(hook, extensions).await?;
+        let result = self
+            .dispatch_response_hook(hook, extensions, trace_correlation(ctx))
+            .await?;
         if !result.continue_processing {
             tracing::warn!(
                 target: "policy.filter",
@@ -1922,11 +1941,12 @@ impl HttpFilter for PolicyFilter {
         let mgr = Arc::clone(&self.mgr);
         let handle = tokio::runtime::Handle::current();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let fw = trace_correlation(ctx);
         tokio::task::spawn_blocking(move || {
-            let result = handle.block_on(async move {
+            let result = handle.block_on(super::transport::with_trace_correlation(fw, async move {
                 let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
                 r
-            });
+            }));
             drop(tx.send(result));
         });
         let cmf_result = rx.recv().map_err(|_recv| -> FilterError {
@@ -2188,6 +2208,19 @@ pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extension
     }
 
     count
+}
+
+// -----------------------------------------------------------------------------
+// Trace correlation
+// -----------------------------------------------------------------------------
+
+/// Build framework headers carrying the request-scoped trace correlation
+/// (`x-request-id` + `traceparent`) so that policy engine HTTP calls
+/// (JWKS fetches, token exchanges) share the caller's trace.
+fn trace_correlation(ctx: &HttpFilterContext<'_>) -> praxis_core::subrequest::FrameworkHeaders {
+    let mut fw = praxis_core::subrequest::FrameworkHeaders::new();
+    ctx.apply_trace_propagation(&mut fw);
+    fw
 }
 
 // -----------------------------------------------------------------------------

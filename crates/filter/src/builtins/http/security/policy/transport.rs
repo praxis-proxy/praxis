@@ -30,8 +30,30 @@ use ppe::praxis_policy_core::{
 use praxis_core::{
     config::DEFAULT_SUBREQUEST_POOL_SIZE,
     connectivity::{ConnectionOptions, peer as peer_utils},
-    subrequest::{SubRequest, SubRequestClient, SubRequestConnector, SubRequestError, SubResponse},
+    subrequest::{FrameworkHeaders, SubRequest, SubRequestClient, SubRequestConnector, SubRequestError, SubResponse},
 };
+
+// -----------------------------------------------------------------------------
+// Per-request trace correlation
+// -----------------------------------------------------------------------------
+
+tokio::task_local! {
+    /// Framework headers injected by the policy filter before invoking the
+    /// PPE engine so that outbound transport calls carry the request-scoped
+    /// `x-request-id` and `traceparent`.
+    static TRACE_CORRELATION: FrameworkHeaders;
+}
+
+/// Run `future` with `fw` available to policy transport calls via the
+/// task-local.
+pub(super) fn with_trace_correlation<F: Future>(fw: FrameworkHeaders, future: F) -> impl Future<Output = F::Output> {
+    TRACE_CORRELATION.scope(fw, future)
+}
+
+/// Read the per-request framework headers, if the caller scoped them.
+fn correlation_headers() -> Option<FrameworkHeaders> {
+    TRACE_CORRELATION.try_with(Clone::clone).ok()
+}
 
 use crate::policy_connector::shared_policy_connector;
 
@@ -146,7 +168,13 @@ impl PolicyHttpTransport {
 
             match self
                 .client()
-                .execute(&peer, &sub_request, req.max_response_bytes, remaining, None)
+                .execute(
+                    &peer,
+                    &sub_request,
+                    req.max_response_bytes,
+                    remaining,
+                    correlation_headers().as_ref(),
+                )
                 .await
             {
                 Ok(response) => return Ok(into_http_response(response)),

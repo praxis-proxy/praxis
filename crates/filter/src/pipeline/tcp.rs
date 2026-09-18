@@ -471,6 +471,7 @@ mod tests {
             session_stores: None,
             subrequest_client: None,
             may_select_streaming_subrequest_response: false,
+            enables_trace_propagation: false,
             pipeline_extensions: Vec::new(),
             time_source: Arc::new(praxis_core::time::SystemTimeSource),
             request_body_ceiling: None,

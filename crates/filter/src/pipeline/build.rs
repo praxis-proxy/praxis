@@ -111,6 +111,9 @@ impl FilterPipeline {
         let body_capabilities = compute_body_capabilities(&filters);
         let compression = extract_compression_config(&filters);
         let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);
+        let enables_trace_propagation = filters
+            .iter()
+            .any(|pf| pf.filter.name() == "trace_context" && pf.conditions.is_empty());
         let (request_body_filter_indices, response_body_filter_indices) = body_filter_indices(&filters);
         let selected_upstream_request_body_filter_indices = selected_upstream_request_body_indices(&filters);
         let id_generator = Arc::new(IdGenerator::new());
@@ -132,6 +135,7 @@ impl FilterPipeline {
             route_templates: Arc::default(),
             subrequest_client: None,
             may_select_streaming_subrequest_response,
+            enables_trace_propagation,
             time_source: Arc::clone(&time_source),
             request_body_ceiling: None,
             response_body_ceiling: None,

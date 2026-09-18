@@ -163,6 +163,9 @@ impl SubRequestClient {
         }
         drop(nominated);
         if let Some(fw) = framework_headers {
+            for name in fw.removals() {
+                let _remove = req_header.remove_header(name);
+            }
             for (name, value) in fw.iter() {
                 let _insert = req_header.insert_header(name.clone(), value.clone());
             }

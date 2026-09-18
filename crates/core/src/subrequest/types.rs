@@ -62,6 +62,11 @@ pub const DEPTH_HEADER: &str = "x-praxis-iterative-depth";
 pub struct FrameworkHeaders {
     /// Validated (name, value) pairs to inject.
     entries: Vec<(http::header::HeaderName, http::HeaderValue)>,
+    /// Header names stripped from the outbound request after sanitisation.
+    ///
+    /// Applied before `entries` so a subsequent insert can replace an
+    /// untrusted inbound value with a validated one.
+    removals: Vec<http::header::HeaderName>,
 }
 
 impl FrameworkHeaders {
@@ -104,15 +109,28 @@ impl FrameworkHeaders {
             .push((http::header::HeaderName::from_static(DEPTH_HEADER), value));
     }
 
+    /// Remove `name` from the outbound request after sanitisation.
+    ///
+    /// Removals are applied before inserts so a later [`Self::insert`] of the
+    /// same name becomes the only outbound value.
+    pub fn remove(&mut self, name: http::header::HeaderName) {
+        self.removals.push(name);
+    }
+
     /// Iterate over the validated entries.
     pub fn iter(&self) -> impl Iterator<Item = &(http::header::HeaderName, http::HeaderValue)> {
         self.entries.iter()
     }
 
-    /// Whether no entries have been added.
+    /// Iterate over header names scheduled for removal.
+    pub fn removals(&self) -> impl Iterator<Item = &http::header::HeaderName> {
+        self.removals.iter()
+    }
+
+    /// Whether no entries or removals have been added.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.is_empty() && self.removals.is_empty()
     }
 }
 

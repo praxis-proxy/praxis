@@ -846,6 +846,16 @@ fn framework_headers_accepts_non_reserved_non_transport() {
 }
 
 #[test]
+fn framework_headers_remove_is_not_empty() {
+    let mut fw = FrameworkHeaders::new();
+    fw.remove(http::header::HeaderName::from_static("tracestate"));
+    assert!(!fw.is_empty());
+    let names: Vec<_> = fw.removals().map(|n| n.as_str().to_owned()).collect();
+    assert_eq!(names, vec!["tracestate"]);
+    assert_eq!(fw.iter().count(), 0);
+}
+
+#[test]
 fn framework_headers_set_depth_injects_reserved_header() {
     let mut fw = FrameworkHeaders::new();
     fw.set_depth(2);

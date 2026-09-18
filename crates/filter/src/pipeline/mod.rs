@@ -138,6 +138,9 @@ pub struct FilterPipeline {
     /// sub-request response.
     may_select_streaming_subrequest_response: bool,
 
+    /// Whether an unconditional top-level `trace_context` filter is present.
+    enables_trace_propagation: bool,
+
     /// External pipeline extensions injected after construction.
     pipeline_extensions: Vec<Box<dyn PipelineExtension>>,
 
@@ -337,6 +340,19 @@ impl FilterPipeline {
     /// ```
     pub fn contains_filter(&self, type_name: &str) -> bool {
         self.filters.iter().any(|pf| pf.filter.name() == type_name)
+    }
+
+    /// Whether an unconditional `trace_context` filter is present at the top level.
+    ///
+    /// Only unconditional top-level filters qualify: a `trace_context`
+    /// buried in a branch sub-chain or gated by request conditions may
+    /// never execute for a given request, so pre-initializing
+    /// [`TraceContext`] for it would activate tracing on subrequests
+    /// that the operator intended to exclude.
+    ///
+    /// [`TraceContext`]: crate::trace_context::TraceContext
+    pub(crate) fn enables_trace_propagation(&self) -> bool {
+        self.enables_trace_propagation
     }
 
     /// Names of filters in this pipeline whose protocol level is not
