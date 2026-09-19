@@ -1,0 +1,23 @@
+name: Enhancement
+description: Starting point to a new feature, which might need a formal proposal
+labels: ["enhancement", "triage/needs-triage"]
+body:
+  - type: textarea
+    id: what 
+    attributes:
+      label: What? 
+      description: What do you want to add?
+    validations:
+      required: true
+  - type: textarea
+    id: Why?
+    attributes:
+      label: Context
+      description: Why is this needed?
+    validations:
+      required: true
+  - type: textarea
+    id: assumptions
+    attributes:
+      label: Assumptions
+      description: What presuppositions is this based on?
