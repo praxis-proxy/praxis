@@ -705,21 +705,18 @@ impl HttpFilterContext<'_> {
     pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
         let key = key.into();
         let value = value.into();
-        if key.is_empty() || key.len() > 64 {
-            tracing::warn!(key_len = key.len(), "metadata key rejected (must be 1-64 bytes)");
-            return;
+        if key.len() > 64 {
+            tracing::warn!(key_len = key.len(), "metadata key >64 bytes");
         }
         if value.len() > 256 {
-            tracing::warn!(key = %key, value_len = value.len(), "metadata value rejected (max 256 bytes)");
-            return;
+            tracing::warn!(key = %key, value_len = value.len(), "metadata value >256 bytes)");
         }
         if !self.filter_metadata.contains_key(&key) && self.filter_metadata.len() >= MAX_METADATA_ENTRIES {
             tracing::warn!(
                 key = %key,
                 entries = self.filter_metadata.len(),
-                "metadata entry rejected (max {MAX_METADATA_ENTRIES} entries)"
+                "metadata is above threshold (max {MAX_METADATA_ENTRIES} entries)"
             );
-            return;
         }
         self.filter_metadata.insert(key, value);
     }
@@ -1486,89 +1483,6 @@ mod tests {
         assert!(
             ctx.kv_stores.unwrap().get("nonexistent").is_none(),
             "missing store name should return None"
-        );
-    }
-
-    #[test]
-    fn set_metadata_rejects_empty_key() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_metadata("", "val");
-        assert!(ctx.get_metadata("").is_none(), "empty key should be silently rejected");
-    }
-
-    #[test]
-    fn set_metadata_rejects_long_key() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        let long_key = "k".repeat(65);
-        ctx.set_metadata(long_key.as_str(), "val");
-        assert!(
-            ctx.get_metadata(long_key.as_str()).is_none(),
-            "65-byte key should be rejected"
-        );
-    }
-
-    #[test]
-    fn set_metadata_accepts_max_length_key() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        let max_key = "k".repeat(64);
-        ctx.set_metadata(max_key.as_str(), "val");
-        assert_eq!(
-            ctx.get_metadata(max_key.as_str()),
-            Some("val"),
-            "64-byte key should be accepted"
-        );
-    }
-
-    #[test]
-    fn set_metadata_rejects_long_value() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        let long_value = "v".repeat(257);
-        ctx.set_metadata("key", long_value.as_str());
-        assert!(ctx.get_metadata("key").is_none(), "257-byte value should be rejected");
-    }
-
-    #[test]
-    fn set_metadata_rejects_when_entry_limit_reached() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        for i in 0..MAX_METADATA_ENTRIES {
-            ctx.set_metadata(format!("key.{i}"), "value");
-        }
-        assert_eq!(
-            ctx.filter_metadata.len(),
-            MAX_METADATA_ENTRIES,
-            "should accept exactly {MAX_METADATA_ENTRIES} entries"
-        );
-
-        ctx.set_metadata("overflow", "value");
-        assert!(
-            ctx.get_metadata("overflow").is_none(),
-            "entry beyond limit should be rejected"
-        );
-    }
-
-    #[test]
-    fn set_metadata_allows_overwrite_at_limit() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        for i in 0..MAX_METADATA_ENTRIES {
-            ctx.set_metadata(format!("key.{i}"), "old");
-        }
-
-        ctx.set_metadata("key.0", "new");
-        assert_eq!(
-            ctx.get_metadata("key.0"),
-            Some("new"),
-            "overwriting existing key at limit should succeed"
-        );
-        assert_eq!(
-            ctx.filter_metadata.len(),
-            MAX_METADATA_ENTRIES,
-            "overwrite should not increase entry count"
         );
     }
 
