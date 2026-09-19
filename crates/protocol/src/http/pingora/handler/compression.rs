@@ -2,6 +2,11 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Per-request compression levels and upstream response eligibility.
+//!
+//! Praxis drives Pingora's `ResponseCompression` module per request: it applies
+//! the encoder levels from config (clamped to each algorithm's range) before
+//! Accept-Encoding is parsed, then disables compression for upstream responses
+//! that fall outside the configured policy.
 
 use pingora_core::{
     modules::http::{HttpModuleCtx, compression::ResponseCompression},
@@ -11,7 +16,14 @@ use pingora_proxy::Session;
 use praxis_filter::CompressionConfig;
 use tracing::debug;
 
-/// Configure before Pingora parses Accept-Encoding or writes a synthetic response.
+// -----------------------------------------------------------------------------
+// Request-phase Setup
+// -----------------------------------------------------------------------------
+
+/// Apply the configured encoder levels to Pingora's compression module.
+///
+/// Must run before Pingora parses Accept-Encoding or writes a synthetic
+/// response.
 pub(super) fn configure_compression(modules: &mut HttpModuleCtx, compression: Option<&CompressionConfig>) {
     let Some(module) = modules.get_mut::<ResponseCompression>() else {
         return;
@@ -26,6 +38,10 @@ pub(super) fn configure_compression(modules: &mut HttpModuleCtx, compression: Op
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// Response Eligibility
+// -----------------------------------------------------------------------------
 
 /// Disable compression for upstream responses outside the configured policy.
 pub(super) fn adjust_compression(
@@ -47,7 +63,15 @@ pub(super) fn adjust_compression(
     }
 }
 
-/// Clamp at the encoder boundary, including configs built through the Rust API.
+// -----------------------------------------------------------------------------
+// Encoder Level Clamping
+// -----------------------------------------------------------------------------
+
+/// Resolve each algorithm's effective encoder level, clamped to its own range.
+///
+/// This is the final clamp before the encoder, so it also bounds a
+/// `CompressionConfig` built directly through the Rust API, which skips the
+/// level validation that YAML config parsing enforces.
 fn effective_levels(cfg: &CompressionConfig) -> [(Algorithm, u32); 3] {
     [
         (Algorithm::Gzip, cfg.gzip_enabled, cfg.gzip_level, 9),

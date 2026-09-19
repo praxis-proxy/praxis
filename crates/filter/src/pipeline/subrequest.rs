@@ -20,6 +20,7 @@ use praxis_core::subrequest::{SubRequest, SubResponse};
 
 /// Maximum response body size (10 MiB) to prevent unbounded
 /// memory growth from sub-request responses.
+#[cfg(feature = "iterative-request-router")]
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 10_485_760; // 10 MiB
 
 /// Header for iterative-router loop prevention.
@@ -28,6 +29,7 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 10_485_760; // 10 MiB
 /// uses it for injection.
 ///
 /// [`FrameworkHeaders::set_depth`]: praxis_core::subrequest::FrameworkHeaders::set_depth
+#[cfg(feature = "iterative-request-router")]
 pub(crate) use praxis_core::subrequest::DEPTH_HEADER;
 
 // -----------------------------------------------------------------------------
@@ -157,6 +159,7 @@ fn header_bytes(headers: &HeaderMap) -> usize {
 }
 
 /// Returns the default maximum response body size for sub-requests.
+#[cfg(feature = "iterative-request-router")]
 pub(crate) fn default_max_response_bytes() -> usize {
     DEFAULT_MAX_RESPONSE_BYTES
 }
@@ -173,6 +176,7 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "iterative-request-router")]
     #[test]
     fn iteration_state_default_depth() {
         let state = IterationState {
@@ -194,6 +198,7 @@ mod tests {
         assert_eq!(state.iteration, 0, "initial iteration should be zero");
     }
 
+    #[cfg(feature = "iterative-request-router")]
     #[test]
     fn default_max_response_bytes_is_10_mib() {
         assert_eq!(default_max_response_bytes(), 10_485_760, "default max should be 10 MiB");

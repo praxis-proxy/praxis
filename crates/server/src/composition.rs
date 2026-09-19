@@ -3,24 +3,40 @@
 
 //! Data-only server composition for embedding Praxis.
 //!
-//! [`ServerComposition`] describes how a downstream binary customizes an
-//! embedded Praxis server without reaching into its lifecycle. It is passed
-//! to [`run_server_with_composition`] and carries three things:
+//! This module provides the [`ServerComposition`] API for binaries that embed
+//! Praxis as a library. It lets you customize the filter registry, inject
+//! pipeline-scoped resources, and validate built pipelines, all without reaching
+//! into the server's lifecycle or threading model.
 //!
-//! 1. **Registry construction** — how the filter [`FilterRegistry`] is built. The factory runs once at startup and
-//!    receives a [`RegistryContext`] exposing the server-owned [`SubRequestClient`], the one runtime handle a
-//!    downstream registry commonly needs while wiring its filters.
-//! 2. **Pipeline-extension factories** — each produces a fresh [`PipelineExtension`] per listener pipeline. Factories
-//!    receive an immutable [`ExtensionContext`] and must be synchronous and side-effect-free; they run again on every
-//!    hot reload.
-//! 3. **Read-only pipeline validators** — each inspects a built pipeline via a [`ValidatorContext`] and may reject it,
-//!    but cannot mutate it.
+//! ## When to use this
+//!
+//! - **Standard `praxis` binary**: use [`run_server`](crate::run_server) (built-in and auto-discovered filters, no
+//!   customization).
+//! - **Custom filter registry only**: use [`run_server_with_registry`](crate::run_server_with_registry).
+//! - **Full composition control** (custom registry, pipeline extensions, validators): use
+//!   [`run_server_with_composition`](crate::run_server_with_composition) with a [`ServerComposition`].
+//!
+//! ## What it carries
+//!
+//! [`ServerComposition`] holds three things, each called at a different point in the server's lifecycle:
+//!
+//! 1. **Registry construction** (startup only): A factory that builds the filter [`FilterRegistry`]. It runs once at
+//!    startup and receives a [`RegistryContext`] exposing the server-owned [`SubRequestClient`], the one runtime handle
+//!    a downstream registry commonly needs while wiring its filters.
+//!
+//! 2. **Pipeline-extension factories** (startup and every reload): Each produces a fresh [`PipelineExtension`] for one
+//!    listener pipeline. Factories receive an immutable [`ExtensionContext`] and must be synchronous and
+//!    side-effect-free. They run again on every config reload, letting you inject fresh pipeline-scoped resources
+//!    (model registries, connection pools, etc.) into per-request extensions.
+//!
+//! 3. **Read-only pipeline validators** (startup and every reload): Each inspects a built pipeline via a
+//!    [`ValidatorContext`] and may reject it, but cannot mutate it. Use this to enforce downstream policy (required
+//!    filters, forbidden configurations, etc.).
 //!
 //! The composition never exposes mutable pipelines, watchers, listeners, or
-//! publication handles: it is a description consumed by the server, not a hook
+//! publication handles. It is a description consumed by the server, not a hook
 //! into a running one.
 //!
-//! [`run_server_with_composition`]: crate::run_server_with_composition
 //! [`SubRequestClient`]: praxis_core::subrequest::SubRequestClient
 
 use std::{fmt, sync::Arc};
@@ -133,6 +149,17 @@ impl<'ctx> RegistryContext<'ctx> {
 }
 
 /// Immutable context handed to a pipeline-extension factory per listener.
+///
+/// An extension factory receives this each time a listener pipeline is built
+/// (at startup and on every config reload) and uses it to construct a fresh
+/// [`PipelineExtension`]. The context is deliberately immutable and narrow:
+/// factories must be side-effect-free so they can run again on reload without
+/// accumulating state or violating the server's threading model.
+///
+/// Extension factories typically use this to inspect the listener's configuration
+/// and construct pipeline-scoped resources (model registries, connection pools,
+/// lookup tables) that are later injected into per-request extensions via
+/// [`PipelineExtension::prepare`].
 pub struct ExtensionContext<'ctx> {
     /// The full effective configuration.
     config: &'ctx Config,
@@ -237,9 +264,17 @@ impl<'ctx> ValidatorContext<'ctx> {
 
 /// The reload-durable half of a [`ServerComposition`].
 ///
-/// Holds the pipeline-extension factories and validators applied on every
-/// rebuild. The default value applies no extensions and no validators, which is
-/// what the standard non-embedded server uses.
+/// A [`ServerComposition`] splits into two parts: a startup-only registry factory
+/// (consumed once) and this reload-durable `PipelineComposition` (cloned into the
+/// config-reload watcher). This struct holds the pipeline-extension factories and
+/// validators applied on every pipeline rebuild, both at startup and on every
+/// config reload.
+///
+/// The default value applies no extensions and no validators, which is what the
+/// standard non-embedded `praxis` binary uses when calling [`run_server`](crate::run_server).
+///
+/// This type is `Clone` because the server clones it into the hot-reload watcher
+/// thread, where it survives across reloads while the registry is built only once.
 #[derive(Clone, Default)]
 pub(crate) struct PipelineComposition {
     /// Factories producing a fresh extension per listener pipeline.

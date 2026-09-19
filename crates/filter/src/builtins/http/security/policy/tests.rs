@@ -3717,7 +3717,6 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-
 /// Write a policy with only an inference response hook.
 #[expect(
     clippy::too_many_lines,
@@ -4536,7 +4535,6 @@ async fn a_field_mutator_leaves_an_inference_response_untouched() {
         "the client must receive the upstream body, not a partial redaction",
     );
 }
-
 
 #[test]
 fn a_post_only_inference_policy_is_active() {

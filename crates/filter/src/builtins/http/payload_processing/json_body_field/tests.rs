@@ -906,7 +906,6 @@ async fn empty_string_field_value_promoted() {
     assert_eq!(value, "", "empty string value should be promoted as empty header");
 }
 
-
 #[tokio::test]
 async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
     let filter = make_filter("model", "X-Model");

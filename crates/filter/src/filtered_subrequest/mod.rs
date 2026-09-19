@@ -75,10 +75,11 @@ use self::{
     transport::{build_peer, classify_transport_failure, stream_termination_cause},
 };
 pub(crate) use self::{
-    continuation::{FilteredSubrequestContinuation, SubrequestCompletion},
-    sanitize::normalize_response_status,
+    continuation::FilteredSubrequestContinuation,
     streaming::{CalloutStreamingBody, FilteredStreamingBody},
 };
+#[cfg(feature = "iterative-request-router")]
+pub(crate) use self::{continuation::SubrequestCompletion, sanitize::normalize_response_status};
 use crate::{
     FilterAction, FilterError, FilterPipeline, StreamTermination, StreamTerminationCause, SubRequest,
     SubRequestResponseMode, SubResponse,

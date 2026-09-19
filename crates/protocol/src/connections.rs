@@ -38,6 +38,7 @@ pub fn try_acquire_global() -> (bool, Option<OwnedSemaphorePermit>) {
     let Some(sem) = GLOBAL_LIMIT.get() else {
         return (false, None);
     };
+
     if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
         (false, Some(permit))
     } else {
@@ -74,6 +75,12 @@ mod tests {
         let (exceeded, permit) = try_acquire_global();
         assert!(exceeded, "third acquire should exceed limit of 2");
         assert!(permit.is_none(), "exhausted limit should return no permit");
+
+        init_global_limit(100);
+
+        let (exceeded, still_none) = try_acquire_global();
+        assert!(exceeded, "limit should still be 2 after re-init");
+        assert!(still_none.is_none(), "re-init should be a no-op");
 
         drop(first);
 

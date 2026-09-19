@@ -57,6 +57,8 @@ admin-api = ["praxis-protocol/admin-api"]
 dev = ["basic-auth-filter"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter", "experimental"]
 cloud-events-filter = ["praxis-filter/cloud-events-filter", "experimental"]
+# The `iterative_request_router` filter. Off by default; experimental.
+iterative-request-router = ["praxis-filter/iterative-request-router", "experimental"]
 # SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
 spiffe = ["praxis-protocol/spiffe", "experimental"]
 # The `policy` filter (Praxis Policy Engine). On by default; the server

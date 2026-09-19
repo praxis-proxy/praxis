@@ -34,6 +34,10 @@ pub(crate) struct SubrequestCompletion {
     /// Request extensions after completion, still holding caller-owned types.
     pub(crate) extensions: RequestExtensions,
     /// Results retained across all sub-request phases.
+    #[cfg_attr(
+        not(feature = "iterative-request-router"),
+        expect(dead_code, reason = "read only by the iterative_request_router continuation path")
+    )]
     pub(crate) filter_results: HashMap<&'static str, FilterResultSet>,
     /// Bounded locally emitted chunks.
     pub(crate) pending_chunks: VecDeque<Bytes>,
@@ -161,6 +165,10 @@ impl FilteredSubrequestContinuation {
     ///
     /// The caller reads its own injected extension types (for example an
     /// iteration-state marker) without consuming the continuation.
+    #[cfg_attr(
+        not(feature = "iterative-request-router"),
+        expect(dead_code, reason = "used only by the iterative_request_router filter")
+    )]
     pub(crate) fn extensions(&self) -> &RequestExtensions {
         &self.extensions
     }

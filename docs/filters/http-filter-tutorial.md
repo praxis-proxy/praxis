@@ -57,7 +57,7 @@ version used by your Praxis server.
 
 ## 2. Implement the filter
 
-Replace `extensions/require-header-crates/filter/src/lib.rs` with:
+Replace `extensions/require-header-filter/src/lib.rs` with:
 
 ```rust
 use async_trait::async_trait;

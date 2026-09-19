@@ -45,6 +45,12 @@ pub mod metrics;
 // -----------------------------------------------------------------------------
 
 /// Pingora-backed HTTP protocol implementation.
+///
+/// Registers HTTP listeners from the configuration, binding them to Pingora
+/// HTTP proxy services with filter pipelines. Delegates to
+/// [`handler::load_http_handler`] for each listener. Implements [`Protocol`].
+///
+/// [`Protocol`]: crate::Protocol
 pub struct PingoraHttp;
 
 impl Protocol for PingoraHttp {

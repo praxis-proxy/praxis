@@ -596,6 +596,10 @@ impl HttpFilterContext<'_> {
     }
 
     /// Shared sub-request client, if set.
+    #[cfg_attr(
+        not(feature = "iterative-request-router"),
+        expect(dead_code, reason = "read only by the iterative_request_router filter")
+    )]
     pub(crate) fn subrequest_client(&self) -> Option<&praxis_core::subrequest::SubRequestClient> {
         self.subrequest_client
     }

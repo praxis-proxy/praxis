@@ -1,7 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! `runtime.logging` configuration.
+//! Log destination and buffering configuration.
+//!
+//! Praxis logs to `stdout`, `stderr`, or a file at a configured path, with
+//! optional non-blocking I/O to prevent slow log writes from delaying request
+//! processing. When `non_blocking` is enabled (the default), log records are
+//! enqueued to a background thread that owns the actual write handle, keeping
+//! the hot path fast even when the log destination is slow (rotated files,
+//! network-mounted volumes, containers with synchronous log drivers).
+//!
+//! # Non-blocking queue
+//!
+//! The background writer uses a bounded crossbeam channel with a capacity of
+//! `buffer_size` lines (default: [`DEFAULT_BUFFER_SIZE_LINES`], currently
+//! 128,000 from `tracing_appender`). When the queue fills, new log records
+//! are dropped to preserve the non-blocking guarantee. The queue pre-allocates
+//! its capacity at logging initialization, so unbounded sizes would abort the
+//! process; the maximum is capped at 10 million lines.
+//!
+//! # Rotation and retention
+//!
+//! Praxis does **not** rotate log files. With `output: file`, logs grow in
+//! place at `file_path`. Rotation and retention are delegated to the platform:
+//! `journald`, `logrotate`, container log drivers, or a logging sidecar. For
+//! containerized deployments, log to `stdout` or `stderr` and let the runtime
+//! capture it, rather than managing files inside the container.
 
 use std::path::Path;
 

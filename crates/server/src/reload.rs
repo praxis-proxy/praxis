@@ -213,15 +213,18 @@ fn carry_over_health_state(
         let unchanged_check = old_by_name.get(cluster.name.as_ref()).is_some_and(|old_c| {
             !crate::reload_diagnostics::config_value_changed(&old_c.health_check, &cluster.health_check)
         });
+
         if !unchanged_check {
             continue;
         }
+
         let (Some(old_entry), Some(new_entry)) = (
             old_registry.get(cluster.name.as_ref()),
             new_registry.get(cluster.name.as_ref()),
         ) else {
             continue;
         };
+
         carried = carried.saturating_add(carry_cluster_endpoints(cluster, old_entry, new_entry));
     }
 

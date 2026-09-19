@@ -720,7 +720,6 @@ mod tests {
         make_request(Method::POST, "/svc/Method", headers)
     }
 
-
     /// Build a [`Request`] with the given method, path, and headers.
     fn make_request(method: Method, path: &str, headers: HeaderMap) -> Request {
         Request {

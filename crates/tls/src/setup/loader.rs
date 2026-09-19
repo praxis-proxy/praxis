@@ -1,7 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Certificate and key loading utilities.
+//! Certificate and key loading utilities for TLS setup.
+//!
+//! This module provides validated loading of certificates and private keys
+//! from PEM-encoded files. All loading paths use [`Zeroizing`] wrappers to
+//! clear sensitive key material from memory when dropped. Loaded certificate
+//! and key pairs are validated to ensure they match before being accepted,
+//! with detailed error messages that distinguish key-mismatch failures from
+//! parse errors.
+//!
+//! The module is consumed by the parent [`setup`][crate::setup] module to
+//! construct `rustls::ServerConfig` instances for listeners and upstream
+//! cluster TLS.
+//!
+//! [`Zeroizing`]: zeroize::Zeroizing
 
 use std::sync::Arc;
 
@@ -37,10 +50,22 @@ pub(crate) fn default_crypto_provider() -> Arc<CryptoProvider> {
 // Certificate Loading
 // -----------------------------------------------------------------------------
 
-/// Load a [`CertifiedKey`] from a [`CertKeyPair`].
+/// Load and validate a certificate/key pair into a [`CertifiedKey`].
+///
+/// Loads the certificate chain and private key from the paths in [`CertKeyPair`],
+/// validates that the certificate and key are cryptographically consistent (the
+/// key's public component matches the certificate), and constructs a signing key
+/// using the process-wide [`CryptoProvider`].
+///
+/// Returns a [`TlsError::FileLoadError`] if the files cannot be read, parsed,
+/// or validated. The error detail distinguishes key-mismatch failures from
+/// certificate parse failures and signing-key exposure failures so operators
+/// are not sent chasing the wrong problem.
 ///
 /// [`CertifiedKey`]: rustls::sign::CertifiedKey
 /// [`CertKeyPair`]: crate::CertKeyPair
+/// [`CryptoProvider`]: rustls::crypto::CryptoProvider
+/// [`TlsError::FileLoadError`]: crate::TlsError::FileLoadError
 pub(crate) fn load_certified_key(pair: &CertKeyPair) -> Result<CertifiedKey, TlsError> {
     let (certs, key) = load_cert_and_key(pair)?;
     let provider = default_crypto_provider();
@@ -82,7 +107,19 @@ fn keys_match_error_detail(e: &rustls::Error) -> String {
     }
 }
 
-/// Load certificate chain and private key from PEM files.
+/// Load and parse certificate chain and private key from PEM files.
+///
+/// Reads the PEM-encoded certificate and key files, parses them into DER
+/// form, and validates that at least one certificate is present and exactly
+/// one private key is found. File contents are wrapped in [`Zeroizing`] to
+/// clear sensitive key material from memory.
+///
+/// Returns the parsed certificate chain and private key on success, or a
+/// [`TlsError::FileLoadError`] if files cannot be read or parsed, if no
+/// certificates or keys are found, or if the PEM structure is invalid.
+///
+/// [`Zeroizing`]: zeroize::Zeroizing
+/// [`TlsError::FileLoadError`]: crate::TlsError::FileLoadError
 pub(super) fn load_cert_and_key(
     pair: &CertKeyPair,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {

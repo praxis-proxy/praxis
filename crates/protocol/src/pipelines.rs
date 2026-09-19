@@ -54,6 +54,10 @@ pub struct ListenerPipelines {
 
 impl ListenerPipelines {
     /// Create from a map of listener name to pipeline.
+    ///
+    /// Called by the server during startup after building filter pipelines
+    /// from the loaded configuration. Each pipeline is wrapped in [`ArcSwap`]
+    /// for atomic replacement during hot reloads.
     pub fn new(pipelines: HashMap<String, Arc<FilterPipeline>>) -> Self {
         let swappable = pipelines
             .into_iter()
@@ -63,6 +67,10 @@ impl ListenerPipelines {
     }
 
     /// Get the swappable pipeline for a listener by name.
+    ///
+    /// Called by protocol adapters on every request to access the filter
+    /// pipeline. The returned [`ArcSwap`] reference allows protocol adapters
+    /// to load the current pipeline without blocking reload operations.
     pub fn get(&self, listener_name: &str) -> Option<&Arc<ArcSwap<FilterPipeline>>> {
         self.pipelines.get(listener_name)
     }
@@ -115,6 +123,9 @@ impl ListenerPipelines {
     }
 
     /// Returns an iterator over listener names.
+    ///
+    /// Used during config reload to iterate over all listeners when
+    /// swapping pipelines or collecting referenced files for watching.
     pub fn listener_names(&self) -> impl Iterator<Item = &str> {
         self.pipelines.keys().map(String::as_str)
     }

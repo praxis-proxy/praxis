@@ -29,10 +29,12 @@ pub use security::{
 };
 #[cfg(feature = "policy-engine")]
 pub use security::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+#[cfg(feature = "iterative-request-router")]
+pub use traffic_management::IterativeRequestRouterFilter;
 pub use traffic_management::{
     CircuitBreakerFilter, EndpointReselector, EndpointSelectorFilter, GrpcDetectionFilter, GrpcTimeoutFilter,
-    IterativeRequestRouterFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
-    RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
+    LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus, RouterFilter,
+    StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
     sticky_sessions::{SessionStore, SessionStoreRegistry},
 };
 pub use transformation::{

@@ -15,6 +15,7 @@ On request: looks up session store for pinned endpoint, sets `ctx.pinned_endpoin
 |-------|------|---------|-------------|
 | `clusters` | ClusterSessionConfig[] | yes | Per-cluster session persistence configurations. |
 | `clusters[].name` | string | yes | Cluster name this config applies to. |
+| `clusters[].type` | `cookie` \| `header` \| `learn` | yes | Session persistence mode: `cookie` injects cookies, `header` reads a request header, `learn` observes upstream response cookies or headers. |
 | `clusters[].cookie_name` | string | one of | Cookie name used to store the session ID. |
 | `clusters[].cookie_attributes` | CookieAttributes | one of | Cookie attributes for the `Set-Cookie` header. |
 | `clusters[].cookie_attributes.domain` | string | no | `Domain` attribute. |

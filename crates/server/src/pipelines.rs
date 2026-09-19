@@ -52,6 +52,7 @@ pub fn build_subrequest_client(config: &Config) -> SubRequestClient {
         .runtime
         .subrequest_pool_size
         .unwrap_or(DEFAULT_SUBREQUEST_POOL_SIZE);
+
     let connector = SubRequestConnector::with_options(SubRequestConnectorOptions {
         keepalive_pool_size: pool_size,
         max_connections: config.runtime.subrequest_max_connections,
@@ -65,6 +66,7 @@ pub fn build_subrequest_client(config: &Config) -> SubRequestClient {
                 half_open_timeout: Duration::from_secs(cb.half_open_timeout_secs),
             }),
     });
+
     let ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
     SubRequestClient::with_max_response_bytes(connector, ceiling)
 }
@@ -157,15 +159,12 @@ pub(crate) fn resolve_pipelines_with_composition(
     // builds where a dependency turned the filter on through feature
     // unification.
     praxis_filter::set_policy_subrequest_connector(subrequest_client.connector());
-
     let chains: HashMap<&str, &[_]> = config
         .filter_chains
         .iter()
         .map(|c| (c.name.as_str(), c.filters.as_slice()))
         .collect();
-
     let mut pipelines = HashMap::with_capacity(config.listeners.len());
-
     for listener in &config.listeners {
         let mut entries = Vec::new();
         for chain_name in &listener.filter_chains {
@@ -185,7 +184,6 @@ pub(crate) fn resolve_pipelines_with_composition(
         // the full configuration or conditional filters and branch chains would
         // appear absent.
         let entry_snapshot = entries.clone();
-
         let mut pipeline =
             FilterPipeline::build_with_chains(&mut entries, registry, &chains, &config.insecure_options)?;
         configure_pipeline(
@@ -249,9 +247,11 @@ fn configure_pipeline(
     pipeline.set_route_templates(Arc::new(praxis_core::config::RouteTemplates::compile(
         &config.metrics.route_templates,
     )));
+
     if !health_registry.is_empty() {
         pipeline.set_health_registry(Arc::clone(health_registry));
     }
+
     // Always inject the process-wide KV registry (even while empty): the
     // registry is a shared Arc handle, and filters create their stores in it
     // on demand at request time via `ctx.kv_stores`. Gating on `is_empty()`
@@ -260,11 +260,13 @@ fn configure_pipeline(
     // extension surface and the admin KV API, and making `basic_auth` in
     // `kv_store` mode deny every request.
     pipeline.set_kv_stores(kv_stores.clone());
+
     // Always inject the process-wide registry (even while empty): the sticky
     // sessions filter adopts per-cluster stores into it on demand, which is
     // what lets session bindings survive config reloads.
     pipeline.set_session_stores(Arc::clone(session_stores));
     pipeline.set_subrequest_client(subrequest_client.clone());
+
     // Runtime SSRF / DNS-rebinding control for the HTTP upstream path: the
     // peer builders read this off the pipeline when they resolve a hostname.
     pipeline.set_allow_private_upstreams(config.insecure_options.allow_private_upstreams);
@@ -1282,8 +1284,6 @@ filter_chains:
     }
 
     // -------------------------------------------------------------------------
-    // build_subrequest_client: issue #994 regression
-    //
     // build_subrequest_client is the single construction path used by BOTH the
     // server startup path (server.rs) and the CLI --validate/--dump path
     // (commands.rs::validate_config_for_startup). A configured

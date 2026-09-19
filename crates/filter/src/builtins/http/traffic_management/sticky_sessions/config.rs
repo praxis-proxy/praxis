@@ -12,7 +12,8 @@ const MAX_ENTRIES_UPPER_BOUND: u64 = 200_000;
 // PersistenceConfig (tagged enum)
 // -----------------------------------------------------------------------------
 
-/// How session identity is determined.
+/// Session persistence mode: `cookie` injects cookies, `header` reads a request
+/// header, `learn` observes upstream response cookies or headers.
 ///
 /// Uses `#[serde(tag = "type")]` so the YAML discriminator is `type: cookie`,
 /// `type: header`, or `type: learn`. Each variant carries only the fields

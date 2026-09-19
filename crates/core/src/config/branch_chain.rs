@@ -14,10 +14,12 @@
 //! Branch sub-chains run only during the request phase (`on_request`);
 //! their `on_request_body`, `on_response_body`, and
 //! `on_selected_upstream_request_body` hooks are not executed, so
-//! body-transforming filters belong on the main pipeline path. This
-//! module defines only the config surface; validation lives in
-//! `crate::config::validate::branch_chain` and execution in the
-//! `praxis-filter` pipeline.
+//! body-transforming filters belong on the main pipeline path.
+//!
+//! This module defines only the config surface. Validation lives in
+//! `crate::config::validate::branch_chain`, execution in
+//! `praxis-filter::pipeline`, and filter result feedback in
+//! `praxis-filter::FilterResultSet`.
 
 use serde::Deserialize;
 
@@ -57,6 +59,10 @@ use super::chain_ref::ChainRef;
 #[serde(deny_unknown_fields)]
 pub struct BranchChainConfig {
     /// Globally unique name for this branch.
+    ///
+    /// Must be unique across all branches in the entire configuration,
+    /// not just within a single listener or filter. Validated at startup
+    /// before pipeline construction.
     pub name: String,
 
     /// Chains to execute when triggered. Named refs
@@ -67,6 +73,10 @@ pub struct BranchChainConfig {
     /// `rejoin` targets the branch point or an earlier
     /// filter. Validation rejects backward rejoin
     /// without this field.
+    ///
+    /// Capped at 100 by validation. When the iteration
+    /// count is exhausted, the pipeline resumes at the
+    /// rejoin point without executing the branch again.
     #[serde(default)]
     pub max_iterations: Option<u32>,
 
@@ -78,16 +88,21 @@ pub struct BranchChainConfig {
 
     /// Where to resume in the parent pipeline after the branch.
     ///
-    /// - `"next"` (default): continue after the branch point
-    /// - `"terminal"` or `"client"`: stop the pipeline
-    /// - `"<name>"`: skip to a named filter in the pipeline
+    /// - `"next"` (default): continue at the filter immediately after the branch point, processing the rest of the
+    ///   pipeline normally.
+    /// - `"terminal"` or `"client"`: stop pipeline execution and return the response to the client without running
+    ///   further filters.
+    /// - `"<name>"`: skip to a named filter (the `name` field on a [`FilterEntry`], not the filter type). If the
+    ///   target appears later in the pipeline, this becomes a forward skip. If earlier, it becomes re-entrance and
+    ///   requires [`max_iterations`] to prevent infinite loops.
     ///
     /// Named targets work across chains because all listener
-    /// chains are concatenated into one flat pipeline. Forward
-    /// targets become `SkipTo`; backward targets become
-    /// `ReEnter` (which requires [`max_iterations`]).
+    /// chains are concatenated into one flat pipeline during
+    /// startup. Cross-chain rejoin targets use `"chain:filter"`
+    /// syntax.
     ///
     /// [`max_iterations`]: BranchChainConfig::max_iterations
+    /// [`FilterEntry`]: super::FilterEntry
     #[serde(default = "default_rejoin")]
     pub rejoin: String,
 }
@@ -128,18 +143,29 @@ pub struct BranchCondition {
     /// `"guardrails"`, `"json_rpc"`), NOT the user-assigned `name`
     /// on [`FilterEntry`].
     ///
+    /// Filters populate results using their type name as the key in
+    /// `ctx.filter_results`. See `praxis-filter::FilterResultSet` for
+    /// how filters write results and how branches read them.
+    ///
     /// [`HttpFilter::name()`]: https://docs.rs/praxis-filter/latest/praxis_filter/trait.HttpFilter.html#tymethod.name
     /// [`FilterEntry`]: super::FilterEntry
     pub filter: String,
 
     /// Result key to check (default: "status").
+    ///
+    /// The key identifies which result field to inspect.
+    /// Common keys include `"status"`, `"action"`, and `"tier"`,
+    /// but the available keys depend on what the target filter
+    /// writes to its `FilterResultSet`. Limited to 64 bytes.
     #[serde(default = "default_result_key")]
     pub key: String,
 
     /// Expected result value. Branch fires when the
-    /// filter's result for `key` equals this value.
+    /// filter's result for `key` equals this value
+    /// (exact string match).
     ///
     /// In YAML this field is written as `result:`, not `value:`.
+    /// Limited to 256 bytes.
     #[serde(rename = "result")]
     pub value: String,
 }

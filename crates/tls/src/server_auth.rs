@@ -39,8 +39,10 @@ use crate::{TlsError, spiffe::svid_id_matches};
 pub struct SpiffePinnedPeer {
     /// Authorities the chain is verified against.
     roots: Arc<RootCertStore>,
+
     /// Signature algorithms of the active crypto provider.
     algorithms: WebPkiSupportedAlgorithms,
+
     /// SPIFFE identity the verified certificate must carry.
     expected: Arc<str>,
 }
@@ -108,18 +110,9 @@ impl ServerCertVerifier for SpiffePinnedPeer {
     }
 }
 
-/// Split a combined certificate-and-key PEM into a chain and its private key.
-fn split_identity(pem: &[u8]) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {
-    let chain = CertificateDer::pem_slice_iter(pem)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| TlsError::ClientConfigError {
-            detail: format!("client certificate PEM: {e}"),
-        })?;
-    let key = PrivateKeyDer::from_pem_slice(pem).map_err(|e| TlsError::ClientConfigError {
-        detail: format!("client key PEM: {e}"),
-    })?;
-    Ok((chain, key))
-}
+// -----------------------------------------------------------------------------
+// Public Functions
+// -----------------------------------------------------------------------------
 
 /// Build a rustls client configuration that pins `expected_spiffe`.
 ///
@@ -150,9 +143,7 @@ pub fn pinned_client_config(
     }
 
     let roots = crate::client_auth::roots_from_pem(ca_pem).map_err(|detail| TlsError::ClientConfigError { detail })?;
-
     let verifier = SpiffePinnedPeer::new(&provider, Arc::new(roots), Arc::from(expected_spiffe));
-
     let builder = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| TlsError::ClientConfigError {
@@ -172,73 +163,36 @@ pub fn pinned_client_config(
         },
         None => builder.with_no_client_auth(),
     };
+
     Ok(config)
 }
+
+// -----------------------------------------------------------------------------
+// Private Utilities
+// -----------------------------------------------------------------------------
+
+/// Split a combined certificate-and-key PEM into a chain and its private key.
+fn split_identity(pem: &[u8]) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {
+    let chain = CertificateDer::pem_slice_iter(pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| TlsError::ClientConfigError {
+            detail: format!("client certificate PEM: {e}"),
+        })?;
+    let key = PrivateKeyDer::from_pem_slice(pem).map_err(|e| TlsError::ClientConfigError {
+        detail: format!("client key PEM: {e}"),
+    })?;
+    Ok((chain, key))
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::expect_used, clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
-
-    fn provider() -> Arc<CryptoProvider> {
-        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
-    }
-
-    /// Extended key usage a minted leaf should carry.
-    enum Eku {
-        ServerAndClient,
-        ClientOnly,
-        Absent,
-    }
-
-    /// Mint a CA and a leaf it signs carrying `leaf_uris` as URI SANs and `eku`.
-    fn mint(ca_cn: &str, leaf_uris: &[&str], eku: &Eku) -> (CertificateDer<'static>, CertificateDer<'static>) {
-        use rcgen::{
-            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-            KeyUsagePurpose, SanType,
-        };
-
-        let ca_key = KeyPair::generate().expect("ca key");
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.distinguished_name.push(DnType::CommonName, ca_cn);
-        let ca_der = ca_params.self_signed(&ca_key).expect("ca cert").der().clone();
-        let issuer = Issuer::new(ca_params, ca_key);
-
-        let leaf_key = KeyPair::generate().expect("leaf key");
-        let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("leaf params");
-        leaf_params.distinguished_name.push(DnType::CommonName, "peer");
-        for uri in leaf_uris {
-            leaf_params
-                .subject_alt_names
-                .push(SanType::URI((*uri).try_into().expect("uri san")));
-        }
-        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        leaf_params.extended_key_usages = match eku {
-            Eku::ServerAndClient => vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth],
-            Eku::ClientOnly => vec![ExtendedKeyUsagePurpose::ClientAuth],
-            Eku::Absent => vec![],
-        };
-        let leaf_der = leaf_params
-            .signed_by(&leaf_key, &issuer)
-            .expect("leaf cert")
-            .der()
-            .clone();
-        (ca_der, leaf_der)
-    }
-
-    fn verifier(ca: &CertificateDer<'_>, expected: &str) -> SpiffePinnedPeer {
-        let mut roots = RootCertStore::empty();
-        roots.add(ca.clone()).expect("add ca");
-        SpiffePinnedPeer::new(&provider(), Arc::new(roots), Arc::from(expected))
-    }
-
-    fn verify(v: &SpiffePinnedPeer, leaf: &CertificateDer<'_>) -> Result<(), rustls::Error> {
-        let name = ServerName::try_from("peer.grid").expect("server name");
-        v.verify_server_cert(leaf, &[], &name, &[], UnixTime::now())
-            .map(|_verified| ())
-    }
 
     #[test]
     fn the_pinned_identity_is_accepted() {
@@ -308,39 +262,6 @@ mod tests {
         );
     }
 
-    /// Mint a CA (as PEM), a leaf it signs, and the leaf's private key, so the
-    /// leaf can serve in a real handshake.
-    fn mint_serving(ca_cn: &str, leaf_uri: &str) -> (Vec<u8>, CertificateDer<'static>, PrivateKeyDer<'static>) {
-        use rcgen::{
-            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-            KeyUsagePurpose, SanType,
-        };
-
-        let ca_key = KeyPair::generate().expect("ca key");
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.distinguished_name.push(DnType::CommonName, ca_cn);
-        let ca_pem = ca_params.self_signed(&ca_key).expect("ca cert").pem().into_bytes();
-        let issuer = Issuer::new(ca_params, ca_key);
-
-        let leaf_key = KeyPair::generate().expect("leaf key");
-        let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("leaf params");
-        leaf_params.distinguished_name.push(DnType::CommonName, "peer");
-        leaf_params
-            .subject_alt_names
-            .push(SanType::URI(leaf_uri.try_into().expect("uri san")));
-        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        leaf_params.extended_key_usages =
-            vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
-        let leaf_der = leaf_params
-            .signed_by(&leaf_key, &issuer)
-            .expect("leaf cert")
-            .der()
-            .clone();
-        let key = PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
-        (ca_pem, leaf_der, key)
-    }
-
     #[test]
     fn a_noncanonical_pin_is_rejected_at_build_time() {
         // SPIFFE trust domains are canonically lowercase, so an uppercase pin would
@@ -351,40 +272,6 @@ mod tests {
             matches!(err, Err(TlsError::ClientConfigError { .. })),
             "a noncanonical trust-domain pin is a config error"
         );
-    }
-
-    /// Mint a CA (as PEM), the leaf certificate PEM, and the combined
-    /// certificate-and-key identity PEM a client can present as its own identity.
-    fn mint_identity_pem(ca_cn: &str, leaf_uri: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
-        use rcgen::{
-            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-            KeyUsagePurpose, SanType,
-        };
-
-        let ca_key = KeyPair::generate().expect("ca key");
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.distinguished_name.push(DnType::CommonName, ca_cn);
-        let ca_pem = ca_params.self_signed(&ca_key).expect("ca cert").pem().into_bytes();
-        let issuer = Issuer::new(ca_params, ca_key);
-
-        let leaf_key = KeyPair::generate().expect("leaf key");
-        let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("leaf params");
-        leaf_params.distinguished_name.push(DnType::CommonName, "peer");
-        leaf_params
-            .subject_alt_names
-            .push(SanType::URI(leaf_uri.try_into().expect("uri san")));
-        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        leaf_params.extended_key_usages =
-            vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
-        let cert_pem = leaf_params
-            .signed_by(&leaf_key, &issuer)
-            .expect("leaf cert")
-            .pem()
-            .into_bytes();
-        let mut identity_pem = cert_pem.clone();
-        identity_pem.extend_from_slice(leaf_key.serialize_pem().as_bytes());
-        (ca_pem, cert_pem, identity_pem)
     }
 
     #[test]
@@ -426,48 +313,6 @@ mod tests {
             matches!(err, Err(TlsError::ClientConfigError { .. })),
             "a client identity PEM with no private key is a config error"
         );
-    }
-
-    /// Run an in-memory TLS handshake with `client_config`, the server presenting
-    /// `server_leaf`/`server_key`. Returns the client's verification result.
-    fn handshake(
-        client_config: rustls::ClientConfig,
-        server_leaf: CertificateDer<'static>,
-        server_key: PrivateKeyDer<'static>,
-    ) -> Result<(), rustls::Error> {
-        let server_config = rustls::ServerConfig::builder_with_provider(provider())
-            .with_safe_default_protocol_versions()
-            .expect("server versions")
-            .with_no_client_auth()
-            .with_single_cert(vec![server_leaf], server_key)
-            .expect("server cert");
-        let mut server = rustls::ServerConnection::new(Arc::new(server_config)).expect("server conn");
-        let name = ServerName::try_from("peer.grid").expect("server name");
-        let mut client = rustls::ClientConnection::new(Arc::new(client_config), name).expect("client conn");
-
-        for _ in 0..16 {
-            let mut c2s = Vec::new();
-            client.write_tls(&mut c2s).expect("client write");
-            let mut c2s_reader = c2s.as_slice();
-            while !c2s_reader.is_empty() {
-                server.read_tls(&mut c2s_reader).expect("server read");
-            }
-            server.process_new_packets()?;
-
-            let mut s2c = Vec::new();
-            server.write_tls(&mut s2c).expect("server write");
-            let mut s2c_reader = s2c.as_slice();
-            while !s2c_reader.is_empty() {
-                client.read_tls(&mut s2c_reader).expect("client read");
-            }
-            // The certificate verifier runs here, so a rejection surfaces as Err.
-            client.process_new_packets()?;
-
-            if !client.is_handshaking() {
-                return Ok(());
-            }
-        }
-        Err(rustls::Error::General("handshake did not complete".to_owned()))
     }
 
     #[test]
@@ -517,5 +362,177 @@ mod tests {
 
         let v = verifier(&ca_der, "spiffe://grid.internal/signals");
         verify(&v, &leaf_der).expect_err("an expired certificate is rejected");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    fn provider() -> Arc<CryptoProvider> {
+        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+    }
+
+    /// Extended key usage a minted leaf should carry.
+    enum Eku {
+        ServerAndClient,
+        ClientOnly,
+        Absent,
+    }
+
+    /// Run an in-memory TLS handshake with `client_config`, the server presenting
+    /// `server_leaf`/`server_key`. Returns the client's verification result.
+    fn handshake(
+        client_config: rustls::ClientConfig,
+        server_leaf: CertificateDer<'static>,
+        server_key: PrivateKeyDer<'static>,
+    ) -> Result<(), rustls::Error> {
+        let server_config = rustls::ServerConfig::builder_with_provider(provider())
+            .with_safe_default_protocol_versions()
+            .expect("server versions")
+            .with_no_client_auth()
+            .with_single_cert(vec![server_leaf], server_key)
+            .expect("server cert");
+        let mut server = rustls::ServerConnection::new(Arc::new(server_config)).expect("server conn");
+        let name = ServerName::try_from("peer.grid").expect("server name");
+        let mut client = rustls::ClientConnection::new(Arc::new(client_config), name).expect("client conn");
+
+        for _ in 0..16 {
+            let mut c2s = Vec::new();
+            client.write_tls(&mut c2s).expect("client write");
+            let mut c2s_reader = c2s.as_slice();
+            while !c2s_reader.is_empty() {
+                server.read_tls(&mut c2s_reader).expect("server read");
+            }
+            server.process_new_packets()?;
+
+            let mut s2c = Vec::new();
+            server.write_tls(&mut s2c).expect("server write");
+            let mut s2c_reader = s2c.as_slice();
+            while !s2c_reader.is_empty() {
+                client.read_tls(&mut s2c_reader).expect("client read");
+            }
+            // The certificate verifier runs here, so a rejection surfaces as Err.
+            client.process_new_packets()?;
+
+            if !client.is_handshaking() {
+                return Ok(());
+            }
+        }
+        Err(rustls::Error::General("handshake did not complete".to_owned()))
+    }
+
+    /// Mint a CA and a leaf it signs carrying `leaf_uris` as URI SANs and `eku`.
+    fn mint(ca_cn: &str, leaf_uris: &[&str], eku: &Eku) -> (CertificateDer<'static>, CertificateDer<'static>) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+            KeyUsagePurpose, SanType,
+        };
+
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.distinguished_name.push(DnType::CommonName, ca_cn);
+        let ca_der = ca_params.self_signed(&ca_key).expect("ca cert").der().clone();
+        let issuer = Issuer::new(ca_params, ca_key);
+
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("leaf params");
+        leaf_params.distinguished_name.push(DnType::CommonName, "peer");
+        for uri in leaf_uris {
+            leaf_params
+                .subject_alt_names
+                .push(SanType::URI((*uri).try_into().expect("uri san")));
+        }
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages = match eku {
+            Eku::ServerAndClient => vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth],
+            Eku::ClientOnly => vec![ExtendedKeyUsagePurpose::ClientAuth],
+            Eku::Absent => vec![],
+        };
+        let leaf_der = leaf_params
+            .signed_by(&leaf_key, &issuer)
+            .expect("leaf cert")
+            .der()
+            .clone();
+        (ca_der, leaf_der)
+    }
+
+    /// Mint a CA (as PEM), the leaf certificate PEM, and the combined
+    /// certificate-and-key identity PEM a client can present as its own identity.
+    fn mint_identity_pem(ca_cn: &str, leaf_uri: &str) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+            KeyUsagePurpose, SanType,
+        };
+
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.distinguished_name.push(DnType::CommonName, ca_cn);
+        let ca_pem = ca_params.self_signed(&ca_key).expect("ca cert").pem().into_bytes();
+        let issuer = Issuer::new(ca_params, ca_key);
+
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("leaf params");
+        leaf_params.distinguished_name.push(DnType::CommonName, "peer");
+        leaf_params
+            .subject_alt_names
+            .push(SanType::URI(leaf_uri.try_into().expect("uri san")));
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages =
+            vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
+        let cert_pem = leaf_params
+            .signed_by(&leaf_key, &issuer)
+            .expect("leaf cert")
+            .pem()
+            .into_bytes();
+        let mut identity_pem = cert_pem.clone();
+        identity_pem.extend_from_slice(leaf_key.serialize_pem().as_bytes());
+        (ca_pem, cert_pem, identity_pem)
+    }
+
+    /// Mint a CA (as PEM), a leaf it signs, and the leaf's private key, so the
+    /// leaf can serve in a real handshake.
+    fn mint_serving(ca_cn: &str, leaf_uri: &str) -> (Vec<u8>, CertificateDer<'static>, PrivateKeyDer<'static>) {
+        use rcgen::{
+            BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
+            KeyUsagePurpose, SanType,
+        };
+
+        let ca_key = KeyPair::generate().expect("ca key");
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("ca params");
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.distinguished_name.push(DnType::CommonName, ca_cn);
+        let ca_pem = ca_params.self_signed(&ca_key).expect("ca cert").pem().into_bytes();
+        let issuer = Issuer::new(ca_params, ca_key);
+
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("leaf params");
+        leaf_params.distinguished_name.push(DnType::CommonName, "peer");
+        leaf_params
+            .subject_alt_names
+            .push(SanType::URI(leaf_uri.try_into().expect("uri san")));
+        leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        leaf_params.extended_key_usages =
+            vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
+        let leaf_der = leaf_params
+            .signed_by(&leaf_key, &issuer)
+            .expect("leaf cert")
+            .der()
+            .clone();
+        let key = PrivateKeyDer::from(rustls::pki_types::PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
+        (ca_pem, leaf_der, key)
+    }
+
+    fn verifier(ca: &CertificateDer<'_>, expected: &str) -> SpiffePinnedPeer {
+        let mut roots = RootCertStore::empty();
+        roots.add(ca.clone()).expect("add ca");
+        SpiffePinnedPeer::new(&provider(), Arc::new(roots), Arc::from(expected))
+    }
+
+    fn verify(v: &SpiffePinnedPeer, leaf: &CertificateDer<'_>) -> Result<(), rustls::Error> {
+        let name = ServerName::try_from("peer.grid").expect("server name");
+        v.verify_server_cert(leaf, &[], &name, &[], UnixTime::now())
+            .map(|_verified| ())
     }
 }

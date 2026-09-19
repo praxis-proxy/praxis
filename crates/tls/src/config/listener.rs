@@ -1,7 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Listener TLS configuration: `ListenerTls`, `ClientCertMode`, and `TlsVersion`.
+//! Listener TLS configuration for server-role TLS termination.
+//!
+//! This module provides [`ListenerTls`], which configures how Praxis listeners
+//! accept and validate TLS connections. It supports:
+//!
+//! - **SNI-based certificate selection**: Multiple certificates can be configured with `server_names` to serve
+//!   different domains from a single listener. One certificate may be marked as `default` to handle requests that don't
+//!   match any configured SNI names.
+//!
+//! - **Mutual TLS (mTLS)**: Client certificate verification with configurable modes via [`ClientCertMode`]. When
+//!   enabled, the listener can request or require client certificates signed by a trusted CA. With the `spiffe`
+//!   feature, workload identity can be enforced via SPIFFE IDs.
+//!
+//! - **Hot-reload**: Single-certificate listeners support automatic certificate reloading when cert or key files
+//!   change, enabling rotation without restarting the proxy. Multi-cert (SNI) configurations disable hot-reload because
+//!   the listener must pre-compute SNI routing tables at startup.
+//!
+//! - **Cipher suite and version control**: Restrict accepted cipher suites and set minimum TLS versions per listener
+//!   via [`TlsVersion`].
+//!
+//! Deserialization validates paths (rejecting traversal), file existence, and
+//! configuration consistency (e.g., mTLS modes must specify a CA).
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 

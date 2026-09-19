@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+#[cfg(feature = "iterative-request-router")]
 use praxis_core::config::InsecureOptions;
 
 use crate::{
@@ -59,6 +60,7 @@ enum RegisteredFilterFactory {
     Standard(FilterFactory),
 
     /// A built-in HTTP factory that resolves nested filters.
+    #[cfg(feature = "iterative-request-router")]
     HttpWithRegistry(RegistryHttpFilterFactory),
 
     /// An application HTTP factory that binds an outbound subrequest chain at
@@ -76,6 +78,7 @@ enum RegisteredFilterFactory {
 /// declared [`InsecureOptions`], so inline outbound clusters are gated
 /// (SSRF/TLS-verify) by the containing build's real posture rather than an
 /// unconditional strict default. Used by `iterative_request_router`.
+#[cfg(feature = "iterative-request-router")]
 type RegistryHttpFilterFactory =
     fn(&serde_yaml::Value, &ChainBindingContext<'_>) -> Result<Box<dyn crate::filter::HttpFilter>, FilterError>;
 
@@ -89,7 +92,15 @@ impl RegisteredFilterFactory {
     /// supplies one.
     ///
     /// [`FilterPipeline::build_with_chains`]: crate::FilterPipeline::build_with_chains
-    fn create(&self, config: &serde_yaml::Value, registry: &FilterRegistry) -> Result<AnyFilter, FilterError> {
+    fn create(
+        &self,
+        config: &serde_yaml::Value,
+        #[cfg_attr(
+            not(feature = "iterative-request-router"),
+            expect(unused_variables, reason = "registry is read only by the gated HttpWithRegistry arm")
+        )]
+        registry: &FilterRegistry,
+    ) -> Result<AnyFilter, FilterError> {
         match self {
             Self::Standard(factory) => factory.create(config),
             // No containing build here, so there is no named-chain table, no
@@ -97,6 +108,7 @@ impl RegisteredFilterFactory {
             // context (empty chains, strict default posture). The real server
             // path builds through `create_with_binding`, which threads the true
             // `ChainBindingContext` from `FilterPipeline::build_with_chains`.
+            #[cfg(feature = "iterative-request-router")]
             Self::HttpWithRegistry(factory) => {
                 ChainBindingContext::with_standalone(registry, &InsecureOptions::default(), |ctx| factory(config, ctx))
                     .map(AnyFilter::Http)
@@ -121,6 +133,7 @@ impl RegisteredFilterFactory {
     ) -> Result<AnyFilter, FilterError> {
         match self {
             Self::Standard(factory) => factory.create(config),
+            #[cfg(feature = "iterative-request-router")]
             Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, ctx)?)),
             Self::ChainBinding(factory) => Ok(AnyFilter::Http(factory(config, ctx)?)),
         }
@@ -484,6 +497,7 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http(filters, "grpc_web", GrpcWebFilter::from_config);
     register_http_security(filters, "guardrails", crate::GuardrailsFilter::from_config);
     register_http_security(filters, "ip_acl", IpAclFilter::from_config);
+    #[cfg(feature = "iterative-request-router")]
     register_http_with_registry(
         filters,
         "iterative_request_router",
@@ -513,6 +527,7 @@ fn register_http(filters: &mut HashMap<String, FilterRegistration>, name: &str, 
 
 /// Registers a built-in HTTP filter whose nested configuration must
 /// resolve against the same registry as its containing pipeline.
+#[cfg(feature = "iterative-request-router")]
 fn register_http_with_registry(
     filters: &mut HashMap<String, FilterRegistration>,
     name: &str,
@@ -656,6 +671,7 @@ mod tests {
             names.contains(&"json_body_field"),
             "json_body_field should be registered"
         );
+        #[cfg(feature = "iterative-request-router")]
         assert!(
             names.contains(&"iterative_request_router"),
             "iterative_request_router should be registered"

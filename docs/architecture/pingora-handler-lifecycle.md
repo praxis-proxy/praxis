@@ -60,18 +60,15 @@ a request sees.
 
 ## Handler Variants
 
-Two structs implement `ProxyHttp`:
+One struct implements `ProxyHttp`:
 
 | Struct | Body hooks | When used |
 |--------|-----------|-----------|
 | `PingoraHttpHandler` | Yes | Always (production) |
-| `PingoraHttpHandlerNoBody` | No | Reserved; unused |
 
 `PingoraHttpHandler` is always loaded because a hot
 reload may add body filters, and Pingora's compression
-module registration is one-shot at startup. Both
-variants share the same `PingoraRequestCtx` as their
-associated `CTX` type.
+module registration is one-shot at startup.
 
 ## Per-Request Context
 
@@ -111,7 +108,7 @@ Rejects with 503 and `Retry-After` when:
 
 Also applies the downstream read timeout if configured.
 
-Source: `with_body.rs`, `no_body.rs`
+Source: `with_body.rs`
 
 ### init_downstream_modules
 
@@ -122,7 +119,7 @@ present. Because module registration is one-shot,
 adding compression to a listener that lacked it at
 startup requires a full restart.
 
-Source: `with_body.rs`, `no_body.rs`
+Source: `with_body.rs`
 
 ### request_filter
 
@@ -529,8 +526,7 @@ Source: `context.rs` (`pin_pipeline`, `pipeline`)
 
 | Submodule | Pingora hook | Key concern |
 |-----------|-------------|-------------|
-| `no_body.rs` | all (no body) | zero-overhead variant |
-| `with_body.rs` | all (with body) | production handler |
+| `with_body.rs` | all | production handler |
 | `request_filter/mod.rs` | `request_filter` | validation, pipeline |
 | `request_filter/validation.rs` | (sub) | Host, Max-Forwards |
 | `request_filter/stream_buffer.rs` | (sub) | body pre-read, TRACE |

@@ -148,6 +148,8 @@ pub(super) fn clear_selected_application(extensions: &mut RequestExtensions) {
 
 /// Framework-level filter for iterative sub-request execution.
 ///
+/// Experimental: requires the off-by-default `iterative-request-router` feature.
+///
 /// Holds named steps, each backed by a pre-built sub-pipeline.
 /// During request processing, runs an iteration loop: execute each
 /// step's request filters, make the HTTP call via Pingora's

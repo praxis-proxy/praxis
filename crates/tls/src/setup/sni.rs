@@ -135,6 +135,10 @@ impl ResolvesServerCert for SniCertResolver {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Builder
+// -----------------------------------------------------------------------------
+
 /// Build an [`SniCertResolver`] from a list of certificate entries.
 ///
 /// The entry with `default: true` becomes the fallback certificate.

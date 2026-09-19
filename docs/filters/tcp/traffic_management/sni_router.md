@@ -33,3 +33,5 @@ routes:
     upstream: "10.0.0.2:443"
 default_upstream: "10.0.0.3:443"
 ```
+
+[RFC 4343]: https://datatracker.ietf.org/doc/html/rfc4343

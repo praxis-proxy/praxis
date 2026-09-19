@@ -34,6 +34,7 @@ mod index;
 mod ops;
 mod pointer;
 mod rewrite;
+mod simd_scan;
 mod skip;
 mod store;
 

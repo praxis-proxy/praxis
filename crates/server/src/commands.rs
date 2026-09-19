@@ -2,6 +2,18 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Check-mode command helpers shared by `--validate` and `--dump`.
+//!
+//! This module provides the entry points for Praxis's non-server CLI modes:
+//! configuration validation (`--validate`) and effective-config dumping
+//! (`--dump`). Both modes load and fully validate the configuration using
+//! the same validation pipeline that runs at server startup, ensuring that
+//! `--validate` catches errors before deployment and `--dump` only outputs
+//! configurations that would actually start.
+//!
+//! The validation pipeline instantiates filter factories, expands chains,
+//! applies ordering and body-limit checks, and validates logging configuration.
+//! This catches both parse errors and semantic issues like undefined chain
+//! references or invalid filter configurations.
 
 use praxis_core::config::Config;
 
@@ -13,14 +25,16 @@ use crate::dump;
 
 /// Load and fully validate configuration without starting the server.
 ///
-/// Shared by `--validate` and `--dump`. Runs the same validation
-/// checks used during server startup: log override validation,
-/// filter factory instantiation, chain expansion, ordering checks,
-/// and body-limit application.
+/// Shared by `--validate` and `--dump`. Runs the same validation pipeline
+/// used during server startup, ensuring that configuration accepted by these
+/// CLI modes will start successfully. This includes log override validation,
+/// filter factory instantiation, chain expansion, ordering checks, and
+/// body-limit application.
 ///
 /// # Errors
 ///
-/// Returns an error if loading or validation fails.
+/// Returns an error if loading or validation fails. Any error returned here
+/// would also prevent server startup.
 pub(crate) fn load_and_validate_for_cli(
     explicit: Option<&str>,
 ) -> Result<Config, Box<dyn std::error::Error + Send + Sync>> {
@@ -30,6 +44,24 @@ pub(crate) fn load_and_validate_for_cli(
 }
 
 /// Validate a parsed configuration by building filter pipelines.
+///
+/// Runs the full validation suite that server startup performs:
+/// - Validates log override module paths and levels
+/// - Validates logging configuration (targets, format, output paths)
+/// - Instantiates filter factories from the registry
+/// - Resolves and expands filter chains
+/// - Applies ordering and body-limit checks to pipelines
+///
+/// This catches semantic errors (undefined chains, invalid filter configs,
+/// incompatible filter ordering) that pure schema validation cannot detect.
+/// If this function succeeds, the configuration is safe to use for server
+/// startup.
+///
+/// # Errors
+///
+/// Returns an error if any validation step fails: invalid log configuration,
+/// unknown filter types, undefined chain references, or filter instantiation
+/// errors.
 pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     praxis_core::logging::validate_log_overrides(config)?;
     praxis_core::logging::validate_logging(config)?;
@@ -54,6 +86,11 @@ pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn
 // -----------------------------------------------------------------------------
 
 /// Load, validate, and dump effective configuration to stdout.
+///
+/// The "effective configuration" is the parsed, validated configuration
+/// exactly as the server would see it at startup, including any defaults
+/// applied during parsing. This is useful for inspecting what Praxis
+/// actually uses after processing the YAML source.
 ///
 /// # Errors
 ///

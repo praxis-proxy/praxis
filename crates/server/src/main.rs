@@ -84,6 +84,7 @@ fn main() {
     let tracing_guard = praxis::init_tracing(&config).unwrap_or_else(|e| praxis::fatal(&e));
     let log_level = Some(tracing_guard.log_level_state());
     info!(version = env!("PRAXIS_VERSION"), "starting server");
+
     let _tracing_guard = tracing_guard;
     praxis::run_server(config, config_path, log_level)
 }

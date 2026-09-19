@@ -5,7 +5,11 @@
 
 Framework-level filter for iterative sub-request execution.
 
+Requires Cargo feature: `iterative-request-router`.
+
 ## Configuration Notes
+
+Experimental: requires the off-by-default `iterative-request-router` feature.
 
 Holds named steps, each backed by a pre-built sub-pipeline. During request processing, runs an iteration loop: execute each step's request filters, make the HTTP call via Pingora's `Connector`, execute its response filters, evaluate transition rules, and continue or return the final response.
 
@@ -26,16 +30,16 @@ Streaming steps remain pull-based. Header-safe failover rules run before any byt
 | `steps[].filters` | FilterEntry[] | yes | Filters to execute for this step's sub-request. |
 | `steps[].filters[].filter` | string | yes | Filter type name (e.g. `"router"`, `"load_balancer"`, or a custom name). |
 | `steps[].filters[].branch_chains` | BranchChainConfig[] | no | Optional branch chains evaluated after this filter based on filter result conditions. |
-| `steps[].filters[].branch_chains[].name` | string | yes | Globally unique name for this branch. |
+| `steps[].filters[].branch_chains[].name` | string | yes | Globally unique name for this branch. Must be unique across all branches in the entire configuration, not just within a single listener or filter. Validated at startup before pipeline construction. |
 | `steps[].filters[].branch_chains[].chains` | (`Inline` \| `Named`)[] | yes | Chains to execute when triggered. Named refs or inline definitions, concatenated in order. |
 | `steps[].filters[].branch_chains[].chains[].name` | string | yes | Globally unique chain name. |
 | `steps[].filters[].branch_chains[].chains[].filters` | FilterEntry[] | yes | Ordered list of filters. |
-| `steps[].filters[].branch_chains[].max_iterations` | integer | no | Maximum re-entrance iterations. Required when `rejoin` targets the branch point or an earlier filter. Validation rejects backward rejoin without this field. |
+| `steps[].filters[].branch_chains[].max_iterations` | integer | no | Maximum re-entrance iterations. Required when `rejoin` targets the branch point or an earlier filter. Validation rejects backward rejoin without this field. Capped at 100 by validation. When the iteration count is exhausted, the pipeline resumes at the rejoin point without executing the branch again. |
 | `steps[].filters[].branch_chains[].on_result` | BranchCondition | no | Condition based on a filter's result output. When omitted, the branch always fires (unconditional branch). |
-| `steps[].filters[].branch_chains[].on_result.filter` | string | yes | Filter TYPE name whose results to inspect. Must match the return value of [`HttpFilter::name()`] (e.g., `"guardrails"`, `"json_rpc"`), NOT the user-assigned `name` on [`FilterEntry`]. |
-| `steps[].filters[].branch_chains[].on_result.key` | string | no | Result key to check (default: "status"). |
-| `steps[].filters[].branch_chains[].on_result.result` | string | yes | Expected result value. Branch fires when the filter's result for `key` equals this value. In YAML this field is written as `result:`, not `value:`. |
-| `steps[].filters[].branch_chains[].rejoin` | string | no | Where to resume in the parent pipeline after the branch. - `"next"` (default): continue after the branch point - `"terminal"` or `"client"`: stop the pipeline - `"<name>"`: skip to a named filter in the pipeline Named targets work across chains because all listener chains are concatenated into one flat pipeline. Forward targets become `SkipTo`; backward targets become `ReEnter` (which requires [`max_iterations`]). |
+| `steps[].filters[].branch_chains[].on_result.filter` | string | yes | Filter TYPE name whose results to inspect. Must match the return value of [`HttpFilter::name()`] (e.g., `"guardrails"`, `"json_rpc"`), NOT the user-assigned `name` on [`FilterEntry`]. Filters populate results using their type name as the key in `ctx.filter_results`. See `praxis-filter::FilterResultSet` for how filters write results and how branches read them. |
+| `steps[].filters[].branch_chains[].on_result.key` | string | no | Result key to check (default: "status"). The key identifies which result field to inspect. Common keys include `"status"`, `"action"`, and `"tier"`, but the available keys depend on what the target filter writes to its `FilterResultSet`. Limited to 64 bytes. |
+| `steps[].filters[].branch_chains[].on_result.result` | string | yes | Expected result value. Branch fires when the filter's result for `key` equals this value (exact string match). In YAML this field is written as `result:`, not `value:`. Limited to 256 bytes. |
+| `steps[].filters[].branch_chains[].rejoin` | string | no | Where to resume in the parent pipeline after the branch. - `"next"` (default): continue at the filter immediately after the branch point, processing the rest of the pipeline normally. - `"terminal"` or `"client"`: stop pipeline execution and return the response to the client without running further filters. - `"<name>"`: skip to a named filter (the `name` field on a [`FilterEntry`], not the filter type). If the target appears later in the pipeline, this becomes a forward skip. If earlier, it becomes re-entrance and requires [`max_iterations`] to prevent infinite loops. Named targets work across chains because all listener chains are concatenated into one flat pipeline during startup. Cross-chain rejoin targets use `"chain:filter"` syntax. |
 | `steps[].filters[].conditions` | Condition[] | no | Ordered conditions that gate whether this filter runs on requests. Empty means the filter always runs. |
 | `steps[].filters[].name` | string | no | Optional user-assigned name for this filter entry. Used as a rejoin target by branch chains. |
 | `steps[].filters[].response_conditions` | ResponseCondition[] | no | Ordered conditions that gate whether this filter runs on responses. Evaluated against the upstream response (status, headers). Empty means the filter always runs on responses. |
@@ -71,3 +75,5 @@ steps:
       - default: true
         done: true
 ```
+
+[`HttpFilter::name()`]: https://docs.rs/praxis-filter/latest/praxis_filter/trait.HttpFilter.html#tymethod.name

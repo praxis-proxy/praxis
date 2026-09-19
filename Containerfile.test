@@ -14,8 +14,6 @@
 
 FROM rust:1.96-alpine
 
-ENV OPENSSL_STATIC=1
-
 # The full project directory is bind-mounted at /src. This includes
 # the host's target/ directory, but CARGO_TARGET_DIR redirects all
 # compilation to /cache/target (a named volume), so cargo never
@@ -24,6 +22,7 @@ ENV OPENSSL_STATIC=1
 # Linux binaries there instead of into the host's target/.
 ENV CARGO_TARGET_DIR=/cache/target
 ENV BINUTILS_DIR=/cache/praxis-binutils
+ENV OPENSSL_STATIC=1
 
 # -------------------------------------------------------------------
 # Tool Layer

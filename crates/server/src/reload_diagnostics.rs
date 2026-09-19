@@ -231,7 +231,12 @@ fn detect_subrequest_circuit_breaker_change(old: &Config, new: &Config) {
     }
 }
 
-/// Warn for each changed startup-only runtime field.
+/// Emit a restart-required warning for each changed runtime field in the list.
+///
+/// Compares `old.runtime.$field` against `new.runtime.$field` for each field
+/// name given, logging a structured warning when any differs. The caller
+/// supplies a list of field identifiers; the macro generates a comparison and
+/// warning for each.
 macro_rules! detect_runtime_field_changes {
     ($old:expr, $new:expr, [$($field:ident),* $(,)?]) => {
         $(

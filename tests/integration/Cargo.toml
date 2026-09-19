@@ -14,6 +14,7 @@ default = ["policy-engine"]
 policy-engine = ["praxis-filter/policy-engine"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter"]
 cloud-events-filter = ["praxis/cloud-events-filter"]
+iterative-request-router = ["praxis/iterative-request-router"]
 # Off by default; runs the SPIFFE mTLS e2e tests against a proxy built with it.
 spiffe = ["praxis/spiffe"]
 no-mac-cert-rotation-tests = []

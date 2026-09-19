@@ -49,3 +49,53 @@ pub(crate) fn default_true() -> bool {
 pub(crate) fn is_default_cert_mode(mode: &ClientCertMode) -> bool {
     *mode == ClientCertMode::None
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn has_parent_dir_component_detects_dot_dot() {
+        assert!(has_parent_dir_component("../foo"));
+        assert!(has_parent_dir_component("foo/../bar"));
+        assert!(has_parent_dir_component("/etc/../tmp"));
+        assert!(has_parent_dir_component("a/b/../c"));
+    }
+
+    #[test]
+    fn has_parent_dir_component_accepts_normal_paths() {
+        assert!(!has_parent_dir_component("/etc/ssl/cert.pem"));
+        assert!(!has_parent_dir_component("relative/path/file.txt"));
+        assert!(!has_parent_dir_component("./file.pem"));
+        assert!(!has_parent_dir_component("file.pem"));
+        assert!(!has_parent_dir_component("/"));
+    }
+
+    #[test]
+    fn has_parent_dir_component_handles_edge_cases() {
+        assert!(!has_parent_dir_component(""));
+        assert!(!has_parent_dir_component("."));
+        assert!(!has_parent_dir_component("..file"));
+        assert!(!has_parent_dir_component("file..txt"));
+    }
+
+    #[test]
+    fn default_true_returns_true() {
+        assert!(default_true());
+    }
+
+    #[test]
+    fn is_default_cert_mode_detects_none() {
+        assert!(is_default_cert_mode(&ClientCertMode::None));
+    }
+
+    #[test]
+    fn is_default_cert_mode_rejects_non_defaults() {
+        assert!(!is_default_cert_mode(&ClientCertMode::Request));
+        assert!(!is_default_cert_mode(&ClientCertMode::Require));
+    }
+}

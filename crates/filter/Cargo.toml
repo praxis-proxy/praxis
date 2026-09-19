@@ -32,8 +32,311 @@ cloud-events-filter = [
     "dep:url",
 ]
 
-[lints]
-workspace = true
+# The `iterative_request_router` filter (framework-level multi-sub-request
+# loop). Off by default; experimental. Carries no extra dependencies.
+iterative-request-router = []
+
+# ---------------------------------------------------------------------------
+# Lint configuration
+#
+# This crate does NOT inherit `[lints] workspace = true` because the workspace
+# sets `unsafe_code = "forbid"`. The `json_ops::simd_scan` module needs SIMD
+# intrinsics, which require unsafe blocks, so the rules below mirror
+# `[workspace.lints]` verbatim EXCEPT `unsafe_code`, which is lowered to "deny"
+# so those specific functions can opt in with a reasoned `#[expect(unsafe_code)]`
+# while unsafe anywhere else in the crate still fails the build.
+#
+# Keep this block in sync with `[workspace.lints]` in the root `Cargo.toml`;
+# only `unsafe_code` intentionally differs.
+# ---------------------------------------------------------------------------
+
+[lints.rust]
+# `coverage` is set by cargo-llvm-cov; declare it so `#[cfg(coverage)]` gates
+# don't trip the unexpected_cfgs lint under `-D warnings`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
+dead_code = "deny"
+# Lowered from workspace "forbid" to "deny" so the SIMD intrinsic functions
+# in `json_ops::simd_scan` can opt in with `#[expect(unsafe_code)]`.
+unsafe_code = "deny"
+missing_docs = "deny"
+unreachable_pub = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+# Cast safety
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+# Import hygiene
+macro_use_extern_crate = "deny"
+unused_extern_crates = "deny"
+# Lifetime clarity
+elided_lifetimes_in_paths = "deny"
+single_use_lifetimes = "deny"
+# Qualification hygiene
+unused_qualifications = "deny"
+# Macro hygiene
+unused_macro_rules = "deny"
+meta_variable_misuse = "deny"
+# Drop safety
+let_underscore_drop = "deny"
+# Identifier safety
+keyword_idents_2024 = "deny"
+non_ascii_idents = "deny"
+# Method call correctness
+noop_method_call = "deny"
+# Lifetime clarity (extended)
+redundant_lifetimes = "deny"
+unused_lifetimes = "deny"
+# Visibility hygiene
+unnameable_types = "deny"
+# Import hygiene (extended)
+redundant_imports = "deny"
+# Binding hygiene
+unit_bindings = "deny"
+# Bound clarity
+explicit_outlives_requirements = "deny"
+# Debug trait coverage
+# missing_debug_implementations: many types contain Box<dyn Trait> without Debug bounds
+missing_debug_implementations = "allow"
+
+[lints.clippy]
+# Async and concurrency safety
+await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
+future_not_send = "deny"
+large_futures = "deny"
+let_underscore_future = "deny"
+let_underscore_must_use = "deny"
+# Memory and allocation efficiency
+assigning_clones = "deny"
+implicit_clone = "deny"
+inefficient_to_string = "deny"
+large_enum_variant = "deny"
+large_stack_frames = "deny"
+large_types_passed_by_value = "deny"
+needless_pass_by_value = "deny"
+rc_buffer = "deny"
+str_to_string = "deny"
+trivially_copy_pass_by_ref = "deny"
+vec_init_then_push = "deny"
+# API design
+return_self_not_must_use = "deny"
+# Documentation
+doc_markdown = "deny"
+missing_docs_in_private_items = "deny"
+# Allowed: blank line after attributes is intentional style
+empty_line_after_outer_attr = "allow"
+# Idiomatic Rust
+checked_conversions = "deny"
+cloned_instead_of_copied = "deny"
+explicit_into_iter_loop = "deny"
+explicit_iter_loop = "deny"
+flat_map_option = "deny"
+from_iter_instead_of_collect = "deny"
+manual_assert = "deny"
+manual_instant_elapsed = "deny"
+manual_let_else = "deny"
+manual_ok_or = "deny"
+manual_string_new = "deny"
+map_unwrap_or = "deny"
+redundant_closure_for_method_calls = "deny"
+ref_patterns = "deny"
+set_contains_or_insert = "deny"
+try_err = "deny"
+unnecessary_get_then_check = "deny"
+unnested_or_patterns = "deny"
+# Borrow hygiene
+needless_borrow = "deny"
+# Code clarity
+if_not_else = "deny"
+match_bool = "deny"
+match_same_arms = "deny"
+mut_mut = "deny"
+needless_for_each = "deny"
+range_plus_one = "deny"
+redundant_else = "deny"
+semicolon_if_nothing_returned = "deny"
+uninlined_format_args = "deny"
+unreadable_literal = "deny"
+unseparated_literal_suffix = "deny"
+unused_self = "deny"
+# Import hygiene
+enum_glob_use = "deny"
+wildcard_imports = "deny"
+# String handling
+string_add_assign = "deny"
+string_slice = "deny"
+# Function size
+too_many_lines = "deny"
+# Dev hygiene
+dbg_macro = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+# Cast safety
+cast_lossless = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+cast_precision_loss = "deny"
+ptr_as_ptr = "deny"
+# Documentation completeness
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+# Dead code detection
+unused_async = "deny"
+unnecessary_wraps = "deny"
+needless_pass_by_ref_mut = "deny"
+no_effect_underscore_binding = "deny"
+used_underscore_binding = "deny"
+# API hygiene
+option_option = "deny"
+ref_option_ref = "deny"
+default_trait_access = "deny"
+expl_impl_clone_on_copy = "deny"
+# Code clarity
+items_after_statements = "deny"
+macro_use_imports = "deny"
+multiple_inherent_impl = "deny"
+needless_continue = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+same_functions_in_if_condition = "deny"
+same_name_method = "deny"
+stable_sort_primitive = "deny"
+string_add = "deny"
+string_lit_as_bytes = "deny"
+trait_duplication_in_bounds = "deny"
+type_repetition_in_bounds = "deny"
+verbose_bit_mask = "deny"
+zero_sized_map_values = "deny"
+# Boolean hygiene
+fn_params_excessive_bools = "deny"
+struct_excessive_bools = "deny"
+# Complexity (thresholds in clippy.toml)
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+# Safety and correctness
+unwrap_used = "deny"
+missing_assert_message = "deny"
+infinite_loop = "deny"
+map_err_ignore = "deny"
+or_fun_call = "deny"
+clone_on_ref_ptr = "deny"
+debug_assert_with_mut_call = "deny"
+collection_is_never_read = "deny"
+rc_mutex = "deny"
+significant_drop_in_scrutinee = "deny"
+mutex_integer = "deny"
+mutex_atomic = "deny"
+zombie_processes = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+significant_drop_tightening = "warn"
+# Diagnostic hygiene
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
+# Redundancy
+redundant_type_annotations = "deny"
+needless_raw_strings = "deny"
+needless_raw_string_hashes = "deny"
+# Idiomatic Rust (extended)
+inconsistent_struct_constructor = "deny"
+match_wildcard_for_single_variants = "deny"
+single_match_else = "deny"
+empty_drop = "deny"
+manual_clamp = "deny"
+# Safety documentation
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+# Restriction: no placeholder macros in production
+todo = "deny"
+unimplemented = "deny"
+# Restriction: don't silently discard errors
+unused_result_ok = "deny"
+# Restriction: prevent process exit without cleanup
+exit = "deny"
+# Restriction: prevent resource leaks
+mem_forget = "deny"
+# Restriction: trait import hygiene
+unused_trait_names = "deny"
+# Restriction: enforce descriptive error type names
+error_impl_error = "deny"
+# Restriction: unit structs use semicolons
+empty_structs_with_brackets = "deny"
+# Restriction: tests must live in #[cfg(test)] modules
+tests_outside_test_module = "deny"
+# Restriction: no SAFETY comments on safe code
+unnecessary_safety_comment = "deny"
+# Restriction: catch renamed trait method parameters
+renamed_function_params = "deny"
+# Restriction: prefer .then_some() / .then()
+if_then_some_else_none = "deny"
+# Restriction: avoid intermediate allocations
+format_push_string = "deny"
+# Restriction: use .as_slice() not &v[..]
+deref_by_slicing = "deny"
+# Restriction: catch inexact float literals
+lossy_float_literal = "deny"
+# Restriction: no semicolons in single-expression blocks
+semicolon_inside_block = "deny"
+# Restriction: enforce clippy.toml method blocklist
+disallowed_methods = "deny"
+# Arithmetic safety: no unchecked arithmetic; use checked_/saturating_/wrapping_
+arithmetic_side_effects = "deny"
+# Cast safety (extended): no `as` casts; use From/TryFrom
+as_conversions = "deny"
+# Float correctness: no direct float equality comparisons
+float_cmp = "deny"
+# Endianness safety: no native-endian byte conversions on the wire
+host_endian_bytes = "deny"
+# Match exhaustiveness: name every variant; no `_` arms over enums
+wildcard_enum_match_arm = "deny"
+# Determinism: no iteration over unordered hash collections
+iter_over_hash_type = "deny"
+# Module organization: `foo.rs` style, never `foo/mod.rs`
+mod_module_files = "deny"
+# Naming clarity
+min_ident_chars = "deny"
+single_char_lifetime_names = "deny"
+struct_field_names = "deny"
+# Shadowing safety: no rebinding a name to an unrelated value
+shadow_unrelated = "deny"
+# API design (extended)
+impl_trait_in_params = "deny"
+partial_pub_fields = "deny"
+pub_underscore_fields = "deny"
+pub_without_shorthand = "deny"
+ref_option = "deny"
+# Restriction: unit enum variants use no brackets
+empty_enum_variants_with_brackets = "deny"
+# Restriction: build PathBuf with from/join, not push chains
+pathbuf_init_then_push = "deny"
+# Restriction: prefer iterator repetition over mapped ranges
+map_with_unused_argument_over_ranges = "deny"
+# Restriction: no read-and-write of one variable in a single expression
+mixed_read_write_in_expression = "deny"
+# Restriction: use `..` instead of `field: _` in patterns
+unneeded_field_pattern = "deny"
+# Restriction: no `self` imports of items
+unnecessary_self_imports = "deny"
+# Restriction: use fs::read / fs::read_to_string over manual reads
+verbose_file_reads = "deny"
+# Restriction: `^` is not exponentiation
+suspicious_xor_used_as_pow = "deny"
+# Test quality: unwrap results in tests so failures print the error
+assertions_on_result_states = "deny"
+# Test naming: no redundant test_ prefix inside #[cfg(test)] modules
+redundant_test_prefix = "deny"
+
+[lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+invalid_codeblock_attributes = "deny"
+redundant_explicit_links = "deny"
+unescaped_backticks = "deny"
+bare_urls = "deny"
+invalid_html_tags = "deny"
+missing_crate_level_docs = "deny"
+private_doc_tests = "allow"
 
 [dependencies]
 chrono = { workspace = true, optional = true }
@@ -50,7 +353,6 @@ opentelemetry = { workspace = true, optional = true }
 percent-encoding = { workspace = true }
 pingora-core = { workspace = true }
 praxis-core = { workspace = true }
-praxis-simd-scan = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }

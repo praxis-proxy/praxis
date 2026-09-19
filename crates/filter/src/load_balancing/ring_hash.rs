@@ -172,7 +172,6 @@ fn compute_hash(s: &str, hash_fn: &HashFunction) -> u64 {
     }
 }
 
-
 /// `xxHash64` with seed 0.
 #[expect(clippy::too_many_lines, reason = "hash algorithm is inherently sequential")]
 #[expect(clippy::indexing_slicing, reason = "slice index `i` is bounded by input.len()")]

@@ -1,7 +1,42 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Certificate/key pair and CA configuration types.
+//! Certificate, key, and CA trust configuration for TLS listeners and clusters.
+//!
+//! This module provides the config types for TLS certificate/key pairs and CA
+//! trust anchors, used by both listener (server) and cluster (client) TLS:
+//!
+//! - [`CertKeyPair`]: the server certificate and private key Praxis presents to clients (listener) or uses for mutual
+//!   TLS (cluster).
+//! - [`CaConfig`]: CA trust configuration for verifying peer certificates, with optional CRL support for listener
+//!   client authentication.
+//!
+//! # Path validation
+//!
+//! All certificate, key, CA, and CRL paths are validated at config load time
+//! to reject path traversal (`..` components). Absolute paths like
+//! `/etc/ssl/certs/server.pem` are allowed and common in production. Relative
+//! paths are resolved from the proxy's working directory and must not traverse
+//! upward. Symlinks are permitted but logged as warnings for operators to
+//! review (symlinks can hide traversal or point outside expected boundaries).
+//!
+//! # SNI and multi-certificate listeners
+//!
+//! Listeners can serve multiple certificates with different `server_names` to
+//! support virtual hosting. Each [`CertKeyPair`] lists the SNI hostnames it
+//! covers; one certificate may be marked `default: true` to handle unmatched
+//! SNI or clients that don't send SNI at all. Wildcard server names like
+//! `*.example.com` are supported and require at least three labels (bare `*`
+//! and `*.com` are rejected). Server names are validated as DNS hostnames per
+//! RFC 1123, with labels that start and end with alphanumerics.
+//!
+//! # Certificate revocation lists (CRL)
+//!
+//! CRL checking is supported **only for listener client authentication**, not
+//! for upstream cluster TLS. When `client_auth` is configured on a listener,
+//! `crl_paths` in the associated [`CaConfig`] are loaded and checked against
+//! presented client certificates. Setting `crl_paths` under a cluster's TLS
+//! configuration is rejected at validation to avoid silent no-op behavior.
 
 use serde::{Deserialize, Serialize};
 
@@ -73,9 +108,11 @@ impl CertKeyPair {
             }
             warn_if_symlink(field, path);
         }
+
         for name in &self.server_names {
             validate_server_name(name)?;
         }
+
         Ok(())
     }
 }
@@ -151,11 +188,13 @@ fn validate_server_name(name: &str) -> Result<(), TlsError> {
     crate::sni_name::validate(name).map_err(|e| TlsError::ServerConfigError {
         detail: format!("server_names '{name}': {e}"),
     })?;
+
     if name.starts_with("*.") && name.split('.').count() < 3 {
         return Err(TlsError::ServerConfigError {
             detail: format!("server_names '{name}': wildcard requires at least 3 labels (e.g. *.example.com)"),
         });
     }
+
     Ok(())
 }
 

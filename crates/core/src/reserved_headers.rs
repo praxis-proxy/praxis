@@ -38,6 +38,30 @@
 // scope and additive vs override semantics.
 pub const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-", "x-ext-protocol-", "x-ext-agent-"];
 
+/// [RFC 9110] hop-by-hop headers: connection-specific headers that apply to a
+/// single transport hop and must not be forwarded across a proxy boundary.
+///
+/// This is the canonical set shared by sub-request stripping in `praxis-core`
+/// and the protocol request handlers in `praxis-protocol`, so the two cannot
+/// drift. Response stripping uses this set minus `proxy-authorization`, which
+/// is a request-only credential header.
+///
+/// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
+pub const HOP_BY_HOP_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+// -----------------------------------------------------------------------------
+// Reserved Headers
+// -----------------------------------------------------------------------------
+
 /// Return whether a header name matches any reserved prefix.
 ///
 /// The comparison is ASCII case-insensitive. Every current caller passes an
@@ -62,26 +86,6 @@ pub fn is_reserved(name: &str) -> bool {
             .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
     })
 }
-
-/// [RFC 9110] hop-by-hop headers: connection-specific headers that apply to a
-/// single transport hop and must not be forwarded across a proxy boundary.
-///
-/// This is the canonical set shared by sub-request stripping in `praxis-core`
-/// and the protocol request handlers in `praxis-protocol`, so the two cannot
-/// drift. Response stripping uses this set minus `proxy-authorization`, which
-/// is a request-only credential header.
-///
-/// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
-pub const HOP_BY_HOP_HEADERS: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-];
 
 /// Whether a header must never be removed because a client named it in a
 /// `Connection` token.
@@ -124,6 +128,10 @@ mod tests {
     use super::is_connection_token_protected;
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "comprehensive test coverage requires checking all branches and edge cases"
+    )]
     fn connection_token_protection_covers_proxy_owned_and_essential() {
         for protected in [
             "host",
@@ -142,11 +150,26 @@ mod tests {
                 "{protected} must be protected from Connection-token stripping"
             );
         }
+
         for allowed in ["x-app-state", "x-request-id", "cache-control", "x-forward"] {
             assert!(
                 !is_connection_token_protected(allowed),
                 "{allowed} is an ordinary connection-scoped header and may be stripped"
             );
         }
+
+        assert!(!is_connection_token_protected(""), "empty string must not be protected");
+        assert!(
+            !is_connection_token_protected("x"),
+            "single character must not be protected"
+        );
+        assert!(
+            !is_connection_token_protected("ab"),
+            "two characters must not be protected"
+        );
+        assert!(
+            is_connection_token_protected("x-forwarded-"),
+            "exact x-forwarded- prefix (12 chars) must be protected"
+        );
     }
 }

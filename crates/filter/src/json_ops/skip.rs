@@ -4,9 +4,11 @@
 //! Fast JSON structural skipping (SIMD string scan, recursive container walk).
 
 use bytes::Bytes;
-use praxis_simd_scan::find_json_string_delim;
 
-use super::error::{JsonError, MAX_JSON_DEPTH};
+use super::{
+    error::{JsonError, MAX_JSON_DEPTH},
+    simd_scan::find_json_string_delim,
+};
 
 // -----------------------------------------------------------------------------
 // JSON string encoding

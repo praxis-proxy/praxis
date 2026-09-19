@@ -3353,7 +3353,6 @@ dependencies = [
  "praxis-policy",
  "praxis-proxy-core",
  "praxis-proxy-tls",
- "praxis-simd-scan",
  "proptest",
  "quixotic-plecostomus-core",
  "rand 0.10.2",
@@ -3424,10 +3423,6 @@ dependencies = [
  "yaml_serde",
  "zeroize",
 ]
-
-[[package]]
-name = "praxis-simd-scan"
-version = "0.5.6"
 
 [[package]]
 name = "praxis-test-utils"

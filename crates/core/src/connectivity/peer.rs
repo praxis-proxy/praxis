@@ -458,7 +458,6 @@ fn literal_socket_addr(address: &str) -> Option<SocketAddr> {
     address.parse::<SocketAddr>().ok()
 }
 
-
 /// Store a resolution outcome, evicting the oldest entry at capacity.
 fn insert_cached(host: &str, outcome: Result<Arc<[IpAddr]>, String>) {
     let cache = dns_cache();

@@ -17,6 +17,29 @@ use std::{collections::HashMap, fmt::Write as _};
 
 use cargo_metadata::{CargoOpt, DependencyKind, Metadata, NodeDep, Package, PackageId, Resolve};
 
+// -------------------------------------------------------------------
+// Entry Point
+// -------------------------------------------------------------------
+
+fn main() {
+    emit_version_env();
+
+    let Some(metadata) = load_metadata() else {
+        write_generated_file(&generate_registration_code(&[]));
+        return;
+    };
+
+    let crates = discover_external_filter_crates(&metadata);
+    let code = generate_registration_code(&crates);
+
+    write_generated_file(&code);
+    emit_rerun_directives(&metadata);
+}
+
+// -------------------------------------------------------------------
+// Types
+// -------------------------------------------------------------------
+
 /// Active Cargo feature selection for this build script invocation.
 struct ActiveFeatures {
     /// Whether Cargo enabled the package's default feature set.
@@ -26,18 +49,9 @@ struct ActiveFeatures {
     names: Vec<String>,
 }
 
-fn main() {
-    emit_version_env();
-
-    let Some(metadata) = load_metadata() else {
-        write_generated_file(&generate_registration_code(&[]));
-        return;
-    };
-    let crates = discover_external_filter_crates(&metadata);
-    let code = generate_registration_code(&crates);
-    write_generated_file(&code);
-    emit_rerun_directives(&metadata);
-}
+// -------------------------------------------------------------------
+// Discovery
+// -------------------------------------------------------------------
 
 /// Scan dependencies for `[package.metadata.praxis-filters]`.
 fn discover_external_filter_crates(metadata: &Metadata) -> Vec<String> {
@@ -55,8 +69,13 @@ fn discover_external_filter_crates(metadata: &Metadata) -> Vec<String> {
 
     crates.sort();
     crates.dedup();
+
     crates
 }
+
+// -------------------------------------------------------------------
+// Metadata
+// -------------------------------------------------------------------
 
 /// Load cargo metadata, narrowed to dependencies available for the current
 /// target when Cargo provides one.
@@ -67,6 +86,7 @@ fn load_metadata() -> Option<Metadata> {
     let active_features = active_features()?;
     let mut command = cargo_metadata::MetadataCommand::new();
     apply_active_features(&mut command, active_features);
+
     if let Ok(target) = std::env::var("TARGET") {
         command.other_options(vec!["--filter-platform".to_owned(), target]);
     }
@@ -145,6 +165,10 @@ fn has_praxis_filter_marker(pkg: &Package) -> bool {
         .is_some_and(|obj| obj.contains_key("praxis-filters"))
 }
 
+// -------------------------------------------------------------------
+// Code Generation
+// -------------------------------------------------------------------
+
 /// Generate the `register_external_filters` function body.
 fn generate_registration_code(crates: &[String]) -> String {
     let mut code = String::from(
@@ -185,6 +209,10 @@ fn write_generated_file(code: &str) {
     let dest = std::path::Path::new(&out_dir).join("external_filters.rs");
     std::fs::write(&dest, code).expect("failed to write external_filters.rs");
 }
+
+// -------------------------------------------------------------------
+// Version
+// -------------------------------------------------------------------
 
 /// Emit `PRAXIS_VERSION` with the package version, git SHA, and dirty marker.
 ///
@@ -235,6 +263,10 @@ fn git_version_suffix() -> Option<String> {
 
     Some(if dirty { format!("{sha}-dirty") } else { sha })
 }
+
+// -------------------------------------------------------------------
+// Rerun Directives
+// -------------------------------------------------------------------
 
 /// Tell Cargo when to re-run this build script.
 fn emit_rerun_directives(metadata: &Metadata) {

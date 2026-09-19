@@ -2,6 +2,14 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Conversions between Pingora types and Praxis transport-agnostic types.
+//!
+//! This module bridges Pingora's request/response lifecycle to Praxis's
+//! transport-agnostic filter pipeline. The conversion functions run on every
+//! request and are marked inline to minimize overhead at this boundary.
+//!
+//! The rejection path handles both plain HTTP responses and gRPC trailers-only
+//! error mapping, dispatching based on whether the pipeline armed gRPC mode for
+//! a given request.
 
 use pingora_proxy::Session;
 use praxis_filter::{Rejection, Request, Response};
@@ -69,16 +77,22 @@ pub(crate) fn response_header_from_pingora(upstream: &pingora_http::ResponseHead
 /// Send a rejection, rendering it in gRPC's shape when the pipeline
 /// armed one for this request.
 ///
+/// Follows a three-path dispatch:
+/// 1. If the rejection carries a `grpc-status` header (gRPC filter built it), send it as a gRPC rejection with framing
+///    but no status remapping.
+/// 2. If a `GrpcErrorMapping` is armed and the status is an error (>= 400), map the HTTP status to a gRPC code and send
+///    trailers-only.
+/// 3. Otherwise, send as a plain HTTP response.
+///
 /// Only error statuses become gRPC statuses: a successful short-circuit
-/// — a CORS preflight `204`, a `static_response` `200` — is a real HTTP
+/// (a CORS preflight `204`, a `static_response` `200`) is a real HTTP
 /// response the client asked for, not a proxy error.
 pub(crate) async fn send_rejection_for(
     session: &mut Session,
     rejection: Rejection,
     ctx: &crate::http::pingora::context::PingoraRequestCtx,
 ) {
-    // A rejection that already names a gRPC status was built by a gRPC
-    // filter; it only needs the framing, not the status mapping.
+    // Path 1: gRPC filter already set grpc-status, just frame it.
     if rejection
         .headers
         .iter()
@@ -88,19 +102,23 @@ pub(crate) async fn send_rejection_for(
         return;
     }
 
+    // Path 2: GrpcErrorMapping armed and status is an error, map to gRPC.
     let mapping = ctx.extensions.get::<praxis_filter::GrpcErrorMapping>();
     if let Some(mapping) = mapping.filter(|_mapping| rejection.status >= 400) {
         let message = grpc_error_message(&rejection);
         crate::http::pingora::grpc_trailers::send_trailers_only(session, mapping, rejection.status, message).await;
         return;
     }
+    // Path 3: plain HTTP rejection.
     send_rejection(session, rejection).await;
 }
 
 /// The text to carry as `grpc-message` for a rejection.
 ///
-/// Prefers the rejection's own body, which names the rule that fired;
-/// falls back to the status's reason phrase.
+/// Prefers the rejection's own body when present: filters set it to name the
+/// rule that fired (for example "rate limit exceeded"), giving clients a more
+/// specific diagnostic than the HTTP status's canonical reason phrase.
+/// Falls back through: body text → status reason phrase → "proxy error".
 fn grpc_error_message(rejection: &Rejection) -> &str {
     rejection
         .body
@@ -153,6 +171,11 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
 
 /// Build a Pingora [`ResponseHeader`] from a [`Rejection`], falling back
 /// to 500 if the status code is invalid.
+///
+/// The 500 fallback handles rejections with out-of-range status codes
+/// (for example, manually constructed `Rejection` with an invalid value).
+/// This ensures the proxy always sends a valid HTTP response even if a
+/// filter produced a malformed rejection.
 ///
 /// [`ResponseHeader`]: pingora_http::ResponseHeader
 /// [`Rejection`]: praxis_filter::Rejection

@@ -1,7 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Shared retry budget and per-cluster active-request tracking.
+//! Retry budget and active-request tracking to prevent cascading failures.
+//!
+//! When an upstream cluster starts failing, aggressive retries can amplify the
+//! problem: doubling traffic against an already-overloaded backend turns a
+//! partial outage into a total one. This module provides token-bucket retry
+//! admission control that prevents retry storms.
+//!
+//! # How it works
+//!
+//! Each cluster gets a [`RetryBudget`](crate::retry::RetryBudget) that acts as a token-bucket rate limiter.
+//! Tokens refill at a minimum floor rate (`min_retries_per_second`) and are
+//! capped at a percentage of the cluster's active request count. When a request
+//! needs to retry, it must acquire a token first; if the bucket is empty, the
+//! retry is rejected and the error is returned to the client immediately.
+//!
+//! The dynamic cap (`percent` of active requests) means retry capacity scales
+//! with legitimate traffic: a healthy cluster handling 1000 req/s with a 20%
+//! budget can retry up to 200 req/s, but when traffic drops to 100 req/s during
+//! an incident, retry capacity drops to 20 req/s. This prevents retries from
+//! dominating the request mix when a backend is already struggling.
+//!
+//! # Why per-cluster
+//!
+//! Retry state is cluster-scoped, not global or per-listener. A failure in one
+//! backend cluster should not exhaust retry budget for unrelated clusters. Each
+//! cluster's [`ClusterRetryState`](crate::retry::ClusterRetryState) tracks its own active requests and budget.
+//!
+//! # Token refill and admission
+//!
+//! Tokens refill continuously based on wall-clock time since the last refill,
+//! using atomic compare-exchange loops to handle concurrent callers. The refill
+//! rate is `min_retries_per_second` tokens per second, capped at
+//! `max_tokens(active_requests)`. Acquiring a token is a single atomic decrement
+//! that fails when the bucket is empty.
+//!
+//! When no budget is configured for a cluster, an unlimited budget is used that
+//! always admits retries (the legacy behavior, retained for compatibility).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

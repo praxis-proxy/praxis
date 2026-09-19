@@ -1,8 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Prometheus metrics: recorder installation, HTTP/upstream/config metric
-//! recording, and scrape rendering.
+//! Prometheus metrics: recorder installation, metric recording for the HTTP
+//! and upstream paths, config-reload counters, and scrape rendering.
+//!
+//! Every recorder guards on `is_recorder_installed`, so recording stays a
+//! cheap no-op until the exporter is installed. Label emission then takes one
+//! of two shapes: the default, all-enabled configuration keeps the
+//! static-label macro form so it emits exactly the series it did before label
+//! selection existed, while disabling a dimension drops it from the emitted
+//! labels (`selected_labels` builds the reduced set for the multi-label
+//! metrics; the single-label recorders check the flag inline).
 
 use std::sync::OnceLock;
 
@@ -11,7 +19,7 @@ use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use praxis_core::config::{MetricLabel, MetricLabelsConfig};
 
 // -----------------------------------------------------------------------------
-// Constants
+// Metric Names
 // -----------------------------------------------------------------------------
 
 /// Counter for completed HTTP requests.
@@ -70,6 +78,10 @@ const CONFIG_RELOAD_LAST_SUCCESS_TIMESTAMP: &str = "praxis_config_reload_last_su
 /// Counter for proxy errors not already counted by a dedicated metric.
 const ERRORS_TOTAL: &str = "praxis_errors_total";
 
+// -----------------------------------------------------------------------------
+// Label Values
+// -----------------------------------------------------------------------------
+
 /// Error type: a filter rejected the request.
 pub(crate) const ERROR_TYPE_FILTER_REJECT: &str = "filter_reject";
 
@@ -115,10 +127,16 @@ pub(crate) const RELOAD_RESULT_SUCCESS: &str = "success";
 /// Config reload result: failure.
 pub(crate) const RELOAD_RESULT_FAILURE: &str = "failure";
 
+// -----------------------------------------------------------------------------
+// Histogram Buckets
+// -----------------------------------------------------------------------------
+
 /// Histogram bucket upper bounds for HTTP body sizes in bytes.
 ///
-/// Defaults from `PrometheusBuilder` target request durations in seconds
-/// (`0.005`…`10`), which collapse almost every body into `+Inf`.
+/// `PrometheusBuilder`'s default buckets target request durations in seconds
+/// (`0.005` to `10`), so without an override almost every body would fall into
+/// the `+Inf` bucket. These byte-scaled bounds keep the body-size histograms
+/// meaningful.
 const BODY_SIZE_BUCKETS_BYTES: &[f64] = &[
     64.0,
     256.0,
@@ -296,6 +314,10 @@ pub fn collect_stats_metrics(prometheus_text: &str) -> StatsMetricsSnapshot {
     snapshot
 }
 
+// -----------------------------------------------------------------------------
+// Prometheus Text Parsing
+// -----------------------------------------------------------------------------
+
 /// Parsed Prometheus sample: metric name, label map, and integer value.
 type PrometheusSample<'a> = (&'a str, std::collections::HashMap<String, String>, u64);
 
@@ -363,7 +385,7 @@ fn parse_prometheus_label_pair(pair: &str) -> Option<(String, String)> {
 }
 
 // -----------------------------------------------------------------------------
-// Status Class
+// Status & Method Labels
 // -----------------------------------------------------------------------------
 
 /// Map an HTTP status code to its class label (`"1xx"`, `"2xx"`, etc.).
@@ -418,7 +440,7 @@ pub fn method_label(method: &str) -> &'static str {
 }
 
 // -----------------------------------------------------------------------------
-// Metric Recording
+// Request Metrics
 // -----------------------------------------------------------------------------
 
 /// Labels for a completed HTTP request.
@@ -504,6 +526,10 @@ fn record_request_metrics_all_labels(labels: RequestMetricLabels, duration_secs:
     .record(duration_secs);
 }
 
+// -----------------------------------------------------------------------------
+// Body-Size Metrics
+// -----------------------------------------------------------------------------
+
 /// Build the enabled subset of the body-size histogram labels.
 fn selected_body_labels(method: &'static str, status_class: &'static str, cluster: SharedString) -> Vec<Label> {
     let selected = metric_labels();
@@ -577,6 +603,10 @@ pub(crate) fn record_body_size_metrics(
     record_body_size_all_labels(method, status_class, cluster, request_bytes, response_bytes);
 }
 
+// -----------------------------------------------------------------------------
+// Active Request Tracking
+// -----------------------------------------------------------------------------
+
 /// RAII guard that decrements `praxis_http_active_requests` on drop.
 ///
 /// Acquired once per HTTP request. Pingora owns the request context by
@@ -613,6 +643,10 @@ impl Drop for ActiveRequestGuard {
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// Error Classification
+// -----------------------------------------------------------------------------
 
 /// Record a proxy error.
 ///
@@ -669,6 +703,10 @@ fn is_unreachable(etype: &::pingora_core::ErrorType) -> bool {
     )
 }
 
+// -----------------------------------------------------------------------------
+// Overload Rejections
+// -----------------------------------------------------------------------------
+
 /// Record an overload rejection.
 pub(crate) fn record_overload_reject(reason: &'static str) {
     if !is_recorder_installed() {
@@ -676,6 +714,10 @@ pub(crate) fn record_overload_reject(reason: &'static str) {
     }
     counter!(OVERLOAD_REJECTS_TOTAL, "reason" => reason).increment(1);
 }
+
+// -----------------------------------------------------------------------------
+// Upstream Metrics
+// -----------------------------------------------------------------------------
 
 /// Record upstream connect duration for a cluster.
 pub(crate) fn record_upstream_connect_duration(cluster: SharedString, duration_secs: f64) {
@@ -750,6 +792,10 @@ pub(crate) fn record_upstream_retry(cluster: SharedString, result: &'static str)
         counter!(UPSTREAM_RETRIES_TOTAL, "result" => result).increment(1);
     }
 }
+
+// -----------------------------------------------------------------------------
+// Upstream Health
+// -----------------------------------------------------------------------------
 
 /// Refresh cluster endpoint health gauges.
 ///
@@ -827,6 +873,10 @@ pub(crate) fn count_healthy_endpoints(health: &praxis_core::health::ClusterHealt
     health.endpoint_counts()
 }
 
+// -----------------------------------------------------------------------------
+// Config Reload
+// -----------------------------------------------------------------------------
+
 /// Record a successful config reload.
 pub fn record_config_reload_success() {
     if !is_recorder_installed() {
@@ -846,6 +896,10 @@ pub fn record_config_reload_failure() {
     }
     counter!(CONFIG_RELOAD_TOTAL, "result" => RELOAD_RESULT_FAILURE).increment(1);
 }
+
+// -----------------------------------------------------------------------------
+// Shared Label Values
+// -----------------------------------------------------------------------------
 
 /// [`SharedString`] for the `"none"` cluster label.
 ///

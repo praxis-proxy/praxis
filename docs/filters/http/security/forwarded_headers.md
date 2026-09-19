@@ -25,3 +25,5 @@ filter: forwarded_headers
 trusted_proxies: ["10.0.0.0/8"]
 use_standard_header: true
 ```
+
+[RFC 7239]: https://datatracker.ietf.org/doc/html/rfc7239

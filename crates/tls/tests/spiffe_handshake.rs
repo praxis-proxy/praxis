@@ -9,12 +9,15 @@
 //! allowlist admits or rejects a peer at the handshake, before any request.
 
 #![cfg(feature = "spiffe")]
+// Integration tests carry the same suppressions the crate's in-module tests do:
+// the workspace gate denies panicking helpers and test functions outside a
+// cfg(test) module, neither of which applies to a standalone test binary.
 #![allow(
-    clippy::unwrap_used,
+    clippy::allow_attributes_without_reason,
     clippy::expect_used,
     clippy::panic,
     clippy::tests_outside_test_module,
-    reason = "integration test"
+    clippy::unwrap_used
 )]
 
 use std::sync::Arc;
@@ -29,8 +32,65 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject as _},
 };
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// A SPIFFE ID present in the server's trust allowlist.
 const ALLOWED_ID: &str = "spiffe://grid.internal/signals";
+
+/// A SPIFFE ID the server does not allowlist.
 const OTHER_ID: &str = "spiffe://grid.internal/other";
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn an_allowlisted_svid_completes_the_handshake() {
+    let pki = TestPki::new();
+    let server = server_config(&pki, &[ALLOWED_ID]);
+    let client = client_config(&pki, Some(pki.mint_client(ALLOWED_ID, true)));
+    handshake(server, client).expect("an allowlisted SVID should complete the handshake");
+}
+
+#[test]
+fn an_empty_allowlist_admits_any_conforming_svid() {
+    let pki = TestPki::new();
+    let server = server_config(&pki, &[]);
+    let client = client_config(&pki, Some(pki.mint_client(OTHER_ID, true)));
+    handshake(server, client).expect("an empty allowlist admits any valid SVID the CA signs");
+}
+
+#[test]
+fn an_unlisted_svid_fails_the_handshake() {
+    let pki = TestPki::new();
+    let server = server_config(&pki, &[ALLOWED_ID]);
+    let client = client_config(&pki, Some(pki.mint_client(OTHER_ID, true)));
+    let err = handshake(server, client).expect_err("an unlisted SVID must be rejected");
+    assert!(matches!(err, rustls::Error::InvalidCertificate(_)), "got {err:?}");
+}
+
+#[test]
+fn a_non_conforming_leaf_fails_the_handshake() {
+    let pki = TestPki::new();
+    let server = server_config(&pki, &[ALLOWED_ID]);
+    let client = client_config(&pki, Some(pki.mint_client(ALLOWED_ID, false)));
+    let err = handshake(server, client).expect_err("a non-conforming leaf (no keyUsage/EKU) must be rejected");
+    assert!(matches!(err, rustls::Error::InvalidCertificate(_)), "got {err:?}");
+}
+
+#[test]
+fn a_missing_client_certificate_fails_the_handshake() {
+    let pki = TestPki::new();
+    let server = server_config(&pki, &[ALLOWED_ID]);
+    let client = client_config(&pki, None);
+    handshake(server, client).expect_err("require_named must reject a peer with no certificate");
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
 
 /// Install a process-default provider. When the workspace enables both aws-lc-rs
 /// and ring, rustls cannot auto-select one. Idempotent.
@@ -40,10 +100,10 @@ fn install_provider() {
 
 /// A test CA that signs the server certificate and mints client SVID leaves.
 struct TestPki {
-    issuer: Issuer<'static, KeyPair>,
     ca_pem: String,
-    server_pem: String,
+    issuer: Issuer<'static, KeyPair>,
     server_key_pem: String,
+    server_pem: String,
 }
 
 impl TestPki {
@@ -62,10 +122,10 @@ impl TestPki {
         let server_cert = server_params.signed_by(&server_key, &issuer).unwrap();
 
         Self {
-            issuer,
             ca_pem,
-            server_pem: server_cert.pem(),
+            issuer,
             server_key_pem: server_key.serialize_pem(),
+            server_pem: server_cert.pem(),
         }
     }
 
@@ -171,47 +231,4 @@ fn handshake(server_cfg: Arc<rustls::ServerConfig>, client_cfg: Arc<ClientConfig
         }
     }
     panic!("handshake did not settle within the round budget");
-}
-
-#[test]
-fn an_allowlisted_svid_completes_the_handshake() {
-    let pki = TestPki::new();
-    let server = server_config(&pki, &[ALLOWED_ID]);
-    let client = client_config(&pki, Some(pki.mint_client(ALLOWED_ID, true)));
-    handshake(server, client).expect("an allowlisted SVID should complete the handshake");
-}
-
-#[test]
-fn an_empty_allowlist_admits_any_conforming_svid() {
-    let pki = TestPki::new();
-    let server = server_config(&pki, &[]);
-    let client = client_config(&pki, Some(pki.mint_client(OTHER_ID, true)));
-    handshake(server, client).expect("an empty allowlist admits any valid SVID the CA signs");
-}
-
-#[test]
-fn an_unlisted_svid_fails_the_handshake() {
-    let pki = TestPki::new();
-    let server = server_config(&pki, &[ALLOWED_ID]);
-    let client = client_config(&pki, Some(pki.mint_client(OTHER_ID, true)));
-    let err = handshake(server, client).expect_err("an unlisted SVID must be rejected");
-    assert!(matches!(err, rustls::Error::InvalidCertificate(_)), "got {err:?}");
-}
-
-#[test]
-fn a_non_conforming_leaf_fails_the_handshake() {
-    // CA-signed and in the allowlist, but not a conforming SVID (no keyUsage / EKU).
-    let pki = TestPki::new();
-    let server = server_config(&pki, &[ALLOWED_ID]);
-    let client = client_config(&pki, Some(pki.mint_client(ALLOWED_ID, false)));
-    let err = handshake(server, client).expect_err("a non-conforming leaf must be rejected");
-    assert!(matches!(err, rustls::Error::InvalidCertificate(_)), "got {err:?}");
-}
-
-#[test]
-fn a_missing_client_certificate_fails_the_handshake() {
-    let pki = TestPki::new();
-    let server = server_config(&pki, &[ALLOWED_ID]);
-    let client = client_config(&pki, None);
-    handshake(server, client).expect_err("require_named must reject a peer with no certificate");
 }

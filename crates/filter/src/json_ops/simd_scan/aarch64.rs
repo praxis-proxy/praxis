@@ -24,7 +24,7 @@ const LANE: usize = 16;
 /// the scalar scanner handling any remainder.
 pub(crate) fn find(haystack: &[u8]) -> Option<usize> {
     if haystack.len() < LANE {
-        return crate::generic::find(haystack);
+        return super::generic::find(haystack);
     }
 
     #[expect(unsafe_code, reason = "call into a `#[target_feature(enable = \"neon\")]` function")]
@@ -133,7 +133,7 @@ fn find_inner(haystack: &[u8]) -> Option<usize> {
     }
 
     let tail = haystack.get(offset..)?;
-    crate::generic::find(tail).and_then(|pos| offset.checked_add(pos))
+    super::generic::find(tail).and_then(|pos| offset.checked_add(pos))
 }
 
 /// Classify 16 bytes, returning a mask vector (0xFF in matching lanes).

@@ -264,6 +264,7 @@ pub(crate) fn roots_from_pem(pem: &[u8]) -> Result<RootCertStore, String> {
             .add(cert)
             .map_err(|e| format!("failed to add CA cert: {e}"))?;
     }
+
     Ok(root_store)
 }
 
@@ -275,6 +276,7 @@ fn load_ca_root_store(ca_path: &str) -> Result<RootCertStore, TlsError> {
         path: ca_path.to_owned(),
         detail: e.to_string(),
     })?);
+
     roots_from_pem(&ca_pem).map_err(|detail| TlsError::FileLoadError {
         path: ca_path.to_owned(),
         detail,

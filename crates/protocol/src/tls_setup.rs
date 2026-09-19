@@ -2,6 +2,36 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Shared TLS settings builder for HTTP and TCP listeners.
+//!
+//! This module provides [`build_tls_settings`], the unified entry point for
+//! constructing Pingora [`TlsSettings`] from a Praxis [`ListenerTls`] config.
+//! It is used by both HTTP and TCP protocol adapters to set up listener TLS,
+//! handling the distinction between hot-reload and static certificate modes.
+//!
+//! # Hot-reload vs static certificates
+//!
+//! When the `config-reload` feature is compiled in AND the listener has
+//! `hot_reload: true`, this module builds a reloadable TLS configuration via
+//! [`praxis_tls::setup::build_reloadable_server_config`] and spawns a
+//! [`CertWatcher`] background task to monitor certificate files for changes.
+//! The watcher runs for the process lifetime and swaps certificates
+//! atomically when they change on disk, without dropping connections.
+//!
+//! Otherwise (no `config-reload` feature, or `hot_reload: false`), a static
+//! `rustls::ServerConfig` is built via [`praxis_tls::setup::build_server_config`]
+//! and certificate changes require a full config reload.
+//!
+//! # Certificate watcher lifecycle
+//!
+//! The returned shutdown sender allows the caller to stop the cert watcher
+//! early by sending `true`. Dropping the sender does NOT stop the watcher;
+//! it continues monitoring until explicitly stopped or the process exits.
+//! Callers typically keep the sender alive for the server lifetime.
+//!
+//! [`build_tls_settings`]: crate::tls_setup::build_tls_settings
+//! [`TlsSettings`]: pingora_core::listeners::tls::TlsSettings
+//! [`ListenerTls`]: praxis_tls::ListenerTls
+//! [`CertWatcher`]: praxis_tls::watcher::CertWatcher
 
 use pingora_core::listeners::tls::TlsSettings;
 use praxis_core::ProxyError;

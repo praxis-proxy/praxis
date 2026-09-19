@@ -29,8 +29,8 @@
 //! - HTTP protocol implementations and Pingora adapters ([`http`]).
 //! - Raw TCP/L4 forwarding ([`tcp`]).
 //! - Active health-check probes and admin/observability endpoints.
-//! - TLS listener setup (the `tls_setup` module) and keeping certificate hot-reload watchers alive for the process
-//!   lifetime ([`CertWatcherShutdowns`]).
+//! - TLS listener setup (the `tls_setup` module), plus holding the certificate hot-reload watcher shutdown handles so
+//!   those watchers can be stopped early ([`CertWatcherShutdowns`]).
 //!
 //! Boundary with Pingora: Pingora owns request-smuggling prevention,
 //! HTTP/2 backpressure, connection-pool safety, and HTTP/1.1 upgrade
@@ -40,11 +40,14 @@
 //! requests), Host validation, `X-Forwarded-*` injection, and retry
 //! logic.
 
-use praxis_core::{PingoraServerRuntime, ProxyError, config::Config};
-use tokio::sync::watch;
+mod cert_watcher_shutdowns;
+pub use cert_watcher_shutdowns::CertWatcherShutdowns;
 
 mod pipelines;
 pub use pipelines::ListenerPipelines;
+
+mod protocol;
+pub use protocol::Protocol;
 
 /// Process-wide connection limit.
 pub mod connections;
@@ -55,54 +58,3 @@ pub mod tcp;
 
 /// Shared TLS settings builder for HTTP and TCP listeners.
 pub(crate) mod tls_setup;
-
-// -----------------------------------------------------------------------------
-// CertWatcherShutdowns
-// -----------------------------------------------------------------------------
-
-/// Collected TLS certificate watcher shutdown senders.
-///
-/// Background [`CertWatcher`] tasks run for the process lifetime. These
-/// [`watch::Sender`]s are held so a watcher can be asked to stop early via
-/// `send(true)`; dropping them does not stop the watchers (they end at process
-/// exit).
-///
-/// [`watch::Sender`]: tokio::sync::watch::Sender
-/// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
-pub struct CertWatcherShutdowns {
-    /// Shutdown senders kept alive for the server lifetime.
-    _senders: Vec<watch::Sender<bool>>,
-}
-
-impl CertWatcherShutdowns {
-    /// Wrap collected shutdown senders.
-    pub fn new(senders: Vec<watch::Sender<bool>>) -> Self {
-        Self { _senders: senders }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Protocol
-// -----------------------------------------------------------------------------
-
-/// A protocol implementation that registers services onto a shared server runtime.
-pub trait Protocol: Send {
-    /// Register this protocol's services. Does not block.
-    ///
-    /// Returns any TLS certificate watcher shutdown senders. The caller keeps
-    /// these alive to retain the ability to stop a watcher early via
-    /// `send(true)`; the watcher tasks otherwise run for the process lifetime
-    /// (dropping the senders does not stop them).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ProxyError`] if listener binding or setup fails.
-    ///
-    /// [`ProxyError`]: praxis_core::ProxyError
-    fn register(
-        self: Box<Self>,
-        server: &mut PingoraServerRuntime,
-        config: &Config,
-        pipelines: &ListenerPipelines,
-    ) -> Result<Vec<watch::Sender<bool>>, ProxyError>;
-}

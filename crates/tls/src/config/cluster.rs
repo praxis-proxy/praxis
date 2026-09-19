@@ -2,6 +2,23 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Cluster (upstream) TLS configuration.
+//!
+//! Configures TLS for outbound connections from Praxis to upstream servers (client role).
+//! Presence of [`ClusterTls`] on a cluster enables TLS for all connections to that cluster.
+//!
+//! The main settings are:
+//!
+//! - **`sni`**: The hostname to send in the TLS SNI extension. Required for name-based virtual hosting and certificate
+//!   validation when the upstream endpoint is an IP address.
+//! - **`verify`**: Whether to verify the upstream certificate against the system or custom CA. Defaults to `true`.
+//!   Disabling verification is insecure and should only be used in isolated test environments.
+//! - **`ca`**: Custom CA certificate(s) for verifying upstream certs. Use when the upstream uses a private CA or
+//!   self-signed certificates.
+//! - **`client_cert`**: Client certificate and key for mutual TLS (mTLS). The upstream must be configured to request
+//!   and verify client certificates.
+//!
+//! See [`crate::config::CaConfig`] and [`crate::config::CertKeyPair`] for CA and certificate
+//! file configuration.
 
 use serde::{Deserialize, Deserializer, Serialize, de};
 

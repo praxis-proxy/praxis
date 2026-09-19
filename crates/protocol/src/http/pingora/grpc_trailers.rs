@@ -116,3 +116,7 @@ fn build_header(
     }
     Some(header)
 }
+
+// Tested via integration tests in tests/integration/tests/suite/examples/grpc_status_errors.rs
+// and related files, which verify the HTTP/2 END_STREAM behavior and protocol-level details
+// that require a full Session context.

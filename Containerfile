@@ -23,7 +23,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/core/Cargo.toml crates/core/Cargo.toml
 COPY crates/filter/Cargo.toml crates/filter/Cargo.toml
 COPY crates/protocol/Cargo.toml crates/protocol/Cargo.toml
-COPY crates/simd-scan/Cargo.toml crates/simd-scan/Cargo.toml
 COPY crates/tls/Cargo.toml crates/tls/Cargo.toml
 COPY crates/server/Cargo.toml crates/server/Cargo.toml
 
@@ -37,13 +36,11 @@ RUN sed -i '/xtask/d; /benchmarks/d; /tests\//d' Cargo.toml
 RUN mkdir -p crates/core/src \
     crates/filter/src \
     crates/protocol/src \
-    crates/simd-scan/src \
     crates/tls/src \
     crates/server/src \
     && echo '//! stub' > crates/core/src/lib.rs \
     && echo '//! stub' > crates/filter/src/lib.rs \
     && echo '//! stub' > crates/protocol/src/lib.rs \
-    && echo '//! stub' > crates/simd-scan/src/lib.rs \
     && echo '//! stub' > crates/tls/src/lib.rs \
     && echo '//! stub' > crates/server/src/lib.rs \
     && printf '//! stub\nfn main() {}\n' > crates/server/src/main.rs
@@ -61,7 +58,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY crates/core/src crates/core/src
 COPY crates/filter/src crates/filter/src
 COPY crates/protocol/src crates/protocol/src
-COPY crates/simd-scan/src crates/simd-scan/src
 COPY crates/tls/src crates/tls/src
 COPY crates/server/src crates/server/src
 COPY examples examples
@@ -69,7 +65,7 @@ COPY examples examples
 # Touch the lib/main files so cargo sees them as newer than
 # the cached stub artifacts.
 RUN find crates/core/src crates/filter/src \
-    crates/protocol/src crates/simd-scan/src crates/tls/src crates/server/src \
+    crates/protocol/src crates/tls/src crates/server/src \
     -name '*.rs' -exec touch {} +
 
 # ------------------------------------------------------------------------------

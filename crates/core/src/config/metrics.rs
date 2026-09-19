@@ -2,6 +2,33 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Metrics and observability configuration.
+//!
+//! Praxis exports Prometheus metrics through the admin interface when enabled.
+//! This module provides configuration types for controlling which metrics are
+//! collected and how they are labeled.
+//!
+//! # Metric families
+//!
+//! Metrics are opt-in by default. Operators enable specific metric families via
+//! [`MetricsConfig`], such as `filter_duration` for per-filter timing histograms.
+//!
+//! # Label dimensions
+//!
+//! All metrics emit a default set of label dimensions (`cluster`, `endpoint`,
+//! `listener`, `method`, `route`, `status_class`). In large deployments with many
+//! clusters or routes, the total cardinality can grow unbounded. The
+//! [`MetricLabelsConfig`] type allows operators to disable specific dimensions,
+//! collapsing the series that differ only by the disabled label. This bounds
+//! cardinality while keeping the metric itself available.
+//!
+//! # Route templates
+//!
+//! The `route` label grows with the number of configured routes. For APIs with
+//! dynamic path segments (e.g., `/users/42/orders`), each unique path produces
+//! a distinct series. [`RouteTemplates`] collapses these by matching request
+//! paths against templates like `/users/{id}/orders`, labeling all matched
+//! requests with the template instead of the raw path. This keeps the label
+//! bounded and meaningful without losing per-route observability.
 
 use std::collections::HashMap;
 

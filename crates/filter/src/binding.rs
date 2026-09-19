@@ -204,6 +204,7 @@ impl<'a> ChainBindingContext<'a> {
     ///
     /// [`FilterRegistry::create`]: crate::FilterRegistry
     /// [`FilterPipeline::build_with_chains`]: crate::FilterPipeline::build_with_chains
+    #[cfg(feature = "iterative-request-router")]
     pub(crate) fn with_standalone<R>(
         registry: &FilterRegistry,
         insecure: &InsecureOptions,
@@ -239,6 +240,7 @@ impl<'a> ChainBindingContext<'a> {
     ///
     /// [`bind_chain`]: Self::bind_chain
     /// [`ChainRef`]: praxis_core::config::ChainRef
+    #[cfg(feature = "iterative-request-router")]
     pub(crate) fn build_nested_step_pipeline(
         &self,
         entries: &mut [FilterEntry],
@@ -1346,6 +1348,7 @@ mod tests {
     // Reject terminal filters at build time instead.
     // -------------------------------------------------------------------------
 
+    #[cfg(feature = "iterative-request-router")]
     #[test]
     #[expect(clippy::too_many_lines, reason = "inline valid-IRR YAML fixture")]
     fn outbound_chain_with_terminal_filter_rejected() {
@@ -1390,6 +1393,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "iterative-request-router")]
     #[test]
     #[expect(clippy::too_many_lines, reason = "inline valid-IRR YAML fixture nested in a branch")]
     fn outbound_chain_with_branch_nested_terminal_filter_rejected() {

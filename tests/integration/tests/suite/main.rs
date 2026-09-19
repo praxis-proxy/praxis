@@ -68,6 +68,7 @@ mod health_check;
 mod hot_reload;
 mod http_active_requests;
 mod ip_acl;
+#[cfg(feature = "iterative-request-router")]
 mod iterative_request_router;
 mod json_body_field;
 mod json_rpc;
@@ -83,6 +84,7 @@ mod route_templates;
 mod routing;
 mod security;
 mod selected_upstream_body;
+#[cfg(feature = "iterative-request-router")]
 mod selected_upstream_body_subrequests;
 mod sni_router;
 mod stats_admin;
