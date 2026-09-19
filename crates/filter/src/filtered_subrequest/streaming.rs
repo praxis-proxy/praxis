@@ -68,6 +68,7 @@ impl FilteredStreamingBody {
     #[expect(clippy::too_many_lines, reason = "context reconstruction requires many fields")]
     fn run_step_body_filters(&mut self, body: &mut Option<Bytes>, end_of_stream: bool) -> Result<(), FilterError> {
         let remaining_read_timeout;
+        let stream_deadline;
         let result = {
             let cont = &mut self.continuation;
             let mut ctx = crate::filter::HttpFilterContext {
@@ -128,6 +129,7 @@ impl FilteredStreamingBody {
             );
 
             remaining_read_timeout = leftover_stream_read_timeout(&mut ctx);
+            stream_deadline = leftover_stream_deadline(&mut ctx);
 
             cont.body_done_indices = ctx.body_done_indices;
             cont.executed_filter_indices = ctx.executed_filter_indices;
@@ -147,6 +149,7 @@ impl FilteredStreamingBody {
                 .into());
         }
         apply_leftover_read_timeout(&mut self.upstream, remaining_read_timeout);
+        apply_leftover_stream_deadline(&mut self.upstream, stream_deadline);
         Ok(())
     }
 
@@ -321,6 +324,24 @@ fn apply_leftover_read_timeout(body: &mut Option<Box<SubResponseBody>>, leftover
         && let Some(upstream) = body.as_mut()
     {
         upstream.cap_read_timeout(timeout);
+    }
+}
+
+fn leftover_stream_deadline(ctx: &mut crate::filter::HttpFilterContext<'_>) -> Option<std::time::Instant> {
+    ctx.take_stream_deadline_cap()
+}
+
+fn std_instant_to_tokio(deadline: std::time::Instant) -> tokio::time::Instant {
+    let now_std = std::time::Instant::now();
+    let now_tokio = tokio::time::Instant::now();
+    now_tokio + deadline.saturating_duration_since(now_std)
+}
+
+fn apply_leftover_stream_deadline(body: &mut Option<Box<SubResponseBody>>, deadline: Option<std::time::Instant>) {
+    if let Some(deadline) = deadline
+        && let Some(upstream) = body.as_mut()
+    {
+        upstream.cap_stream_deadline(std_instant_to_tokio(deadline));
     }
 }
 

@@ -1171,6 +1171,64 @@ fn cap_read_timeout_keeps_a_tighter_existing_snapshot() {
     drop(body);
 }
 
+#[test]
+fn cap_stream_deadline_tightens_the_dispatch_snapshot() {
+    let mut body = SubResponseBody::new_done();
+    let later = tokio::time::Instant::now() + Duration::from_secs(30);
+    let sooner = tokio::time::Instant::now() + Duration::from_secs(1);
+    body.stream_deadline = Some(later);
+    body.cap_stream_deadline(sooner);
+    assert_eq!(
+        body.stream_deadline,
+        Some(sooner),
+        "leftover deadline must recap the live body, not a detached peer copy"
+    );
+    drop(body);
+}
+
+#[test]
+fn cap_stream_deadline_keeps_a_tighter_existing_snapshot() {
+    let mut body = SubResponseBody::new_done();
+    let sooner = tokio::time::Instant::now() + Duration::from_millis(100);
+    let later = tokio::time::Instant::now() + Duration::from_secs(1);
+    body.stream_deadline = Some(sooner);
+    body.cap_stream_deadline(later);
+    assert_eq!(
+        body.stream_deadline,
+        Some(sooner),
+        "a tighter existing stream deadline must not be relaxed"
+    );
+    drop(body);
+}
+
+#[tokio::test]
+async fn cap_stream_deadline_fails_immediately_after_expiry() {
+    use std::time::Instant;
+
+    let (mut body, backend) = open_stalled_stream(StreamLimits {
+        idle_timeout: Duration::from_secs(30),
+        max_stream_duration: None,
+        max_total_bytes: None,
+    })
+    .await;
+    assert!(body.next_chunk().await.unwrap().is_some(), "first chunk should arrive");
+    body.cap_stream_deadline(tokio::time::Instant::now() + Duration::from_millis(50));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let started = Instant::now();
+    let err = body.next_chunk().await.unwrap_err();
+    let elapsed = started.elapsed();
+    backend.abort();
+    assert!(
+        matches!(err, SubRequestError::DeadlineExceeded),
+        "an expired absolute deadline must fail before starting a fresh relative timer, got: {err}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "deadline enforcement must not wait for a new per-read timer, elapsed={elapsed:?}"
+    );
+    drop(body);
+}
+
 #[tokio::test]
 async fn cap_read_timeout_shortens_the_next_chunk_wait() {
     use std::time::Instant;

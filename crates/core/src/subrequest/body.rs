@@ -84,6 +84,20 @@ impl SubResponseBody {
         self.read_timeout = Some(self.read_timeout.map_or(timeout, |existing| existing.min(timeout)));
     }
 
+    /// Tighten the absolute stream deadline.
+    ///
+    /// Response-body filters can publish a wall-clock deadline through
+    /// [`HttpFilterContext::cap_stream_deadline`](praxis_filter::HttpFilterContext::cap_stream_deadline);
+    /// the streaming executor copies it here so every later
+    /// [`next_chunk`](Self::next_chunk) checks elapsed time before waiting,
+    /// even when downstream backpressure delays the next upstream poll.
+    pub fn cap_stream_deadline(&mut self, deadline: tokio::time::Instant) {
+        self.stream_deadline = Some(match self.stream_deadline {
+            Some(existing) => existing.min(deadline),
+            None => deadline,
+        });
+    }
+
     /// Pull the next body chunk from the upstream.
     ///
     /// Returns:
