@@ -10,7 +10,7 @@ body:
     validations:
       required: true
   - type: textarea
-    id: Why?
+    id: why
     attributes:
       label: Context
       description: Why is this needed?
