@@ -357,7 +357,7 @@ impl HttpFilter for StickySessionsFilter {
             return Ok(FilterAction::Continue);
         }
 
-        ctx.set_metadata(META_SESSION_KEY, &session_key);
+        ctx.set_metadata(META_SESSION_KEY, session_key);
 
         Ok(FilterAction::Continue)
     }

@@ -15,6 +15,7 @@ use std::{
 use http::{HeaderMap, Method, StatusCode, Uri, header::HeaderName};
 use praxis_core::{
     connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
+    value::Value,
 };
 use praxis_tls::TlsPeerIdentity;
 
@@ -319,10 +320,13 @@ pub struct HttpFilterContext<'a> {
     /// for the entire request lifetime.
     ///
     /// Keys use dot-prefix namespacing by convention
-    /// (e.g. `json_rpc.kind`, `classifier.label`).
+    /// (e.g. `json_rpc.kind`, `classifier.label`). Values are typed
+    /// [`Value`]s; most filters store [`Value::String`], but any scalar
+    /// variant may be stored and read back via [`get_metadata_value`].
     ///
     /// [`filter_results`]: Self::filter_results
-    pub filter_metadata: HashMap<String, String>,
+    /// [`get_metadata_value`]: Self::get_metadata_value
+    pub filter_metadata: HashMap<String, Value>,
 
     /// How the upstream gRPC call ended.
     ///
@@ -678,9 +682,22 @@ impl HttpFilterContext<'_> {
         self.extensions.insert(PendingStreamChunks::new(max_retained_bytes));
     }
 
-    /// Read a durable metadata value by key.
+    /// Read a durable metadata value by key as a string.
+    ///
+    /// Returns the text only when the stored [`Value`] is a
+    /// [`Value::String`]; any other variant yields `None`. Use
+    /// [`get_metadata_value`](Self::get_metadata_value) to read the typed
+    /// value regardless of variant.
     pub fn get_metadata(&self, key: &str) -> Option<&str> {
-        self.filter_metadata.get(key).map(String::as_str)
+        self.filter_metadata.get(key).and_then(|value| match value {
+            Value::String(text) => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Read a durable metadata value by key as its typed [`Value`].
+    pub fn get_metadata_value(&self, key: &str) -> Option<&Value> {
+        self.filter_metadata.get(key)
     }
 
     /// How the upstream gRPC call ended, if this was a gRPC call.
@@ -700,17 +717,24 @@ impl HttpFilterContext<'_> {
     ///
     /// Keys should use dot-prefix namespacing
     /// (e.g. `json_rpc.kind`, `classifier.label`). Keys are limited to
-    /// 64 bytes and values to 256 bytes to bound per-request
-    /// memory growth.
-    pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
+    /// 64 bytes. Variable-length values ([`Value::String`],
+    /// [`Value::Bytes`]) are limited to 256 bytes to bound per-request
+    /// memory growth; fixed-width scalar variants are always accepted.
+    /// A `&str` or `String` value converts to [`Value::String`].
+    pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<Value>) {
         let key = key.into();
         let value = value.into();
         if key.is_empty() || key.len() > 64 {
             tracing::warn!(key_len = key.len(), "metadata key rejected (must be 1-64 bytes)");
             return;
         }
-        if value.len() > 256 {
-            tracing::warn!(key = %key, value_len = value.len(), "metadata value rejected (max 256 bytes)");
+        let value_len = match &value {
+            Value::String(text) => text.len(),
+            Value::Bytes(bytes) => bytes.len(),
+            _ => 0,
+        };
+        if value_len > 256 {
+            tracing::warn!(key = %key, value_len, "metadata value rejected (max 256 bytes)");
             return;
         }
         if !self.filter_metadata.contains_key(&key) && self.filter_metadata.len() >= MAX_METADATA_ENTRIES {

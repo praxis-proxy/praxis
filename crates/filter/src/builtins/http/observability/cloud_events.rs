@@ -1286,7 +1286,7 @@ mod tests {
         request.headers.insert(USER_AGENT, "praxis-test".parse().unwrap());
         let mut ctx = crate::test_utils::make_filter_context(&request);
         ctx.cluster = Some("provider-a".into());
-        ctx.filter_metadata.insert("token.total".to_owned(), "42".to_owned());
+        ctx.filter_metadata.insert("token.total".to_owned(), "42".into());
 
         let event = filter.build_event(&ctx).unwrap();
         let object = event.as_object().unwrap();
@@ -1359,7 +1359,7 @@ mod tests {
         let mut optional_ctx = crate::test_utils::make_filter_context(&request);
         optional_ctx
             .filter_metadata
-            .insert("token.total".to_owned(), "not-an-integer".to_owned());
+            .insert("token.total".to_owned(), "not-an-integer".into());
         let event = optional_filter.build_event(&optional_ctx).unwrap();
         assert_eq!(event["data"], json!({}));
 
@@ -1367,7 +1367,7 @@ mod tests {
         let mut required_ctx = crate::test_utils::make_filter_context(&request);
         required_ctx
             .filter_metadata
-            .insert("token.total".to_owned(), "not-an-integer".to_owned());
+            .insert("token.total".to_owned(), "not-an-integer".into());
         assert!(required_filter.build_event(&required_ctx).is_none());
     }
 
