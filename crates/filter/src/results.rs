@@ -39,6 +39,12 @@ const MAX_KEY_LEN: usize = 64;
 /// Maximum length of a result value in bytes.
 const MAX_VALUE_LEN: usize = 256;
 
+/// Maximum number of distinct keys in one result set.
+///
+/// Key and value lengths are bounded, but without an entry cap a filter
+/// could grow its result set without limit within a single request.
+const MAX_ENTRIES: usize = 64;
+
 // -----------------------------------------------------------------------------
 // FilterResultSet
 // -----------------------------------------------------------------------------
@@ -125,6 +131,7 @@ impl FilterResultSet {
     /// Returns [`FilterError`] if:
     /// - `key` is empty, exceeds 64 bytes, or contains non-ASCII-alphanumeric characters (besides `_` and `-`)
     /// - `value` exceeds 256 bytes or contains control characters (0x00-0x1F except 0x09/tab)
+    /// - `key` is new and the set already holds 64 entries
     ///
     /// ```
     /// use praxis_filter::FilterResultSet;
@@ -142,6 +149,9 @@ impl FilterResultSet {
         let value = value.into();
         validate_result_key(&key)?;
         validate_result_value(&value)?;
+        if !self.entries.contains_key(&key) && self.entries.len() >= MAX_ENTRIES {
+            return Err(format!("result set is full (max {MAX_ENTRIES} entries)").into());
+        }
         self.entries.insert(key, value);
         Ok(())
     }
@@ -289,6 +299,22 @@ mod tests {
         rs.set("tier", "premium").unwrap();
         assert_eq!(rs.get("status"), Some("hit"), "first key should be retained");
         assert_eq!(rs.get("tier"), Some("premium"), "second key should be present");
+    }
+
+    #[test]
+    fn set_rejects_a_new_key_beyond_max_entries() {
+        let mut rs = FilterResultSet::new();
+        for i in 0..MAX_ENTRIES {
+            rs.set(format!("key-{i}"), "v").unwrap();
+        }
+        let err = rs.set("overflow", "v").unwrap_err();
+        assert!(
+            err.to_string().contains("full"),
+            "new key beyond the cap must be rejected: {err}"
+        );
+        rs.set("key-0", "updated")
+            .expect("overwriting an existing key must still succeed at the cap");
+        assert_eq!(rs.get("key-0"), Some("updated"), "overwrite should take effect");
     }
 
     #[test]

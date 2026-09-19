@@ -186,7 +186,7 @@ impl CircuitBreakerFilter {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any config field is
-    /// invalid (zero threshold, zero recovery window).
+    /// invalid (zero threshold, zero recovery window, zero half-open timeout).
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
@@ -194,19 +194,17 @@ impl CircuitBreakerFilter {
 
         let mut breakers = HashMap::new();
         for cluster in &cfg.clusters {
-            if cluster.consecutive_failures == 0 {
-                return Err(format!(
-                    "circuit_breaker: cluster '{}': consecutive_failures must be > 0",
-                    cluster.name
-                )
-                .into());
-            }
-            if cluster.recovery_window_secs == 0 {
-                return Err(format!(
-                    "circuit_breaker: cluster '{}': recovery_window_secs must be > 0",
-                    cluster.name
-                )
-                .into());
+            // A zero half-open timeout makes every probe immediately stale, so
+            // concurrent requests keep re-opening the circuit and invalidating
+            // the probe before its result can close the breaker.
+            for (field, value) in [
+                ("consecutive_failures", u64::from(cluster.consecutive_failures)),
+                ("recovery_window_secs", cluster.recovery_window_secs),
+                ("half_open_timeout_secs", cluster.half_open_timeout_secs),
+            ] {
+                if value == 0 {
+                    return Err(format!("circuit_breaker: cluster '{}': {field} must be > 0", cluster.name).into());
+                }
             }
             breakers.insert(
                 Arc::clone(&cluster.name),

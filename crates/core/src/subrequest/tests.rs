@@ -4,7 +4,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use http::HeaderMap;
+use http::{HeaderMap, HeaderValue};
 
 use super::{internals::*, types::*};
 use crate::circuit::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitCheck, PeerKey};
@@ -360,6 +360,18 @@ fn nominated_tokens_match_case_insensitively() {
     assert!(
         is_request_stripped(&"x-custom".parse().unwrap(), &nominated),
         "a nominated name must strip regardless of the token's case"
+    );
+}
+
+#[test]
+fn nominated_tokens_survive_an_obs_text_byte_in_the_same_value() {
+    let mut headers = HeaderMap::new();
+    headers.insert("connection", HeaderValue::from_bytes(b"x-custom, \xff").unwrap());
+    headers.insert("x-custom", "value".parse().unwrap());
+    let nominated = connection_nominated_tokens(&headers);
+    assert!(
+        is_request_stripped(&"x-custom".parse().unwrap(), &nominated),
+        "a non-UTF-8 sibling token must not disable the valid nomination"
     );
 }
 
@@ -819,7 +831,7 @@ fn is_transport_header_rejects_hop_by_hop_and_framing() {
 #[test]
 fn framework_headers_rejects_transport_headers() {
     let mut fw = FrameworkHeaders::new();
-    let val = http::HeaderValue::from_static("1");
+    let val = HeaderValue::from_static("1");
     let result = fw.insert(http::header::CONTENT_LENGTH, val);
     assert!(result.is_err(), "transport header should be rejected");
     assert!(fw.is_empty());
@@ -828,7 +840,7 @@ fn framework_headers_rejects_transport_headers() {
 #[test]
 fn framework_headers_rejects_reserved_headers() {
     let mut fw = FrameworkHeaders::new();
-    let val = http::HeaderValue::from_static("1");
+    let val = HeaderValue::from_static("1");
     let name: http::header::HeaderName = "x-praxis-depth".parse().unwrap();
     let result = fw.insert(name, val);
     assert!(result.is_err(), "reserved header should be rejected");
@@ -838,7 +850,7 @@ fn framework_headers_rejects_reserved_headers() {
 #[test]
 fn framework_headers_accepts_non_reserved_non_transport() {
     let mut fw = FrameworkHeaders::new();
-    let val = http::HeaderValue::from_static("3");
+    let val = HeaderValue::from_static("3");
     let name: http::header::HeaderName = "x-request-id".parse().unwrap();
     fw.insert(name, val).unwrap();
     assert!(!fw.is_empty());

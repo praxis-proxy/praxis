@@ -436,8 +436,15 @@ fn read_variable_u16(data: &[u8], pos: usize) -> Result<&[u8], SniParseError> {
 // SNI Extension Parsing Utilities
 // -----------------------------------------------------------------------------
 
-/// Walk extensions looking for the SNI extension (type 0).
+/// Walk every extension, validating framing, and parse the SNI extension (type 0).
+///
+/// The whole block is walked rather than returning at the first SNI
+/// extension: a duplicate SNI extension is rejected (RFC 8446 §4.2 forbids
+/// repeated extension types) because a downstream TLS stack may pick a
+/// different one and disagree with SNI-based routing.
 fn parse_extensions(mut ext: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
+    let mut sni_ext: Option<&[u8]> = None;
+
     while ext.len() >= 4 {
         let ext_type = read_u16(ext, 0)?;
         let ext_len = read_u16(ext, 2)? as usize;
@@ -449,19 +456,25 @@ fn parse_extensions(mut ext: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
         let ext_data = ext.get(4..4 + ext_len).ok_or(SniParseError::MalformedExtension)?;
 
         if ext_type == EXTENSION_TYPE_SNI {
-            return parse_sni_extension(ext_data);
+            if sni_ext.is_some() {
+                return Err(SniParseError::MalformedExtension);
+            }
+            sni_ext = Some(ext_data);
         }
 
         ext = ext.get(4 + ext_len..).ok_or(SniParseError::MalformedExtension)?;
     }
 
-    Ok(ClientHelloInfo { sni: None })
+    sni_ext.map_or(Ok(ClientHelloInfo { sni: None }), parse_sni_extension)
 }
 
 /// Parse the SNI extension payload and extract the hostname.
+///
+/// The payload must be exactly one `ServerNameList`: bytes after the declared
+/// list, or a partial entry at its tail, are framing errors.
 fn parse_sni_extension(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
     let list_len = read_u16(data, 0)? as usize;
-    if data.len() < 2 + list_len {
+    if data.len() != 2 + list_len {
         return Err(SniParseError::MalformedExtension);
     }
 
@@ -503,7 +516,9 @@ fn parse_sni_extension(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
         list = list.get(3 + name_len..).ok_or(SniParseError::MalformedExtension)?;
     }
 
-    Ok(ClientHelloInfo { sni: hostname })
+    list.is_empty()
+        .then_some(ClientHelloInfo { sni: hostname })
+        .ok_or(SniParseError::MalformedExtension)
 }
 
 // -----------------------------------------------------------------------------
@@ -1023,6 +1038,51 @@ mod tests {
             parse_sni(&record),
             Err(SniParseError::MalformedExtension),
             "two host_name entries violate RFC 6066 §3 and must be rejected, not silently first-wins"
+        );
+    }
+
+    #[test]
+    fn duplicate_sni_extension_is_rejected() {
+        let mut exts = build_sni_extension("a.example.com");
+        exts.extend_from_slice(&build_sni_extension("b.example.com"));
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &exts);
+        let record = wrap_in_record(&hello);
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::MalformedExtension),
+            "a second SNI extension must be rejected, not silently first-wins"
+        );
+    }
+
+    #[test]
+    fn sni_extension_with_trailing_bytes_is_rejected() {
+        let mut ext = build_sni_extension("exact.example.com");
+        ext.extend_from_slice(&[0xAA]);
+        let declared = u16::from_be_bytes([ext[2], ext[3]]) + 1;
+        ext[2..4].copy_from_slice(&declared.to_be_bytes());
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let record = wrap_in_record(&hello);
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::MalformedExtension),
+            "bytes after the declared ServerNameList are a framing error"
+        );
+    }
+
+    #[test]
+    fn sni_list_with_truncated_tail_is_rejected() {
+        let mut ext = build_sni_extension("exact.example.com");
+        ext.extend_from_slice(&[SNI_NAME_TYPE_HOST, 0x00]);
+        for offset in [2, 4] {
+            let declared = u16::from_be_bytes([ext[offset], ext[offset + 1]]) + 2;
+            ext[offset..offset + 2].copy_from_slice(&declared.to_be_bytes());
+        }
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let record = wrap_in_record(&hello);
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::MalformedExtension),
+            "a partial entry at the end of the ServerNameList must not be silently dropped"
         );
     }
 

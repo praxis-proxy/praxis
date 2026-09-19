@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use super::super::config_validation::validate_max_body_bytes;
+use super::super::config_validation::{validate_header_name, validate_max_body_bytes};
 use crate::{FilterError, body::DEFAULT_JSON_BODY_MAX_BYTES};
 
 // -----------------------------------------------------------------------------
@@ -67,7 +67,7 @@ fn validate_mapping(field: &str, header: &str) -> Result<(), FilterError> {
     if header.is_empty() {
         return Err("json_body_field: 'header' must not be empty".into());
     }
-    Ok(())
+    validate_header_name("json_body_field", "'header'", Some(header))
 }
 
 /// Build the mappings vec from either single-field or multi-field

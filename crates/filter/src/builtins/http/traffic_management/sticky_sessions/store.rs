@@ -100,7 +100,9 @@ impl SessionStore {
 
     /// Look up the endpoint for a session key.
     ///
-    /// Returns `None` if not found or expired. Expired entries are removed lazily.
+    /// Returns `None` if not found or expired. Expired entries are removed lazily,
+    /// re-checking expiry under the shard lock so a binding refreshed by a
+    /// concurrent `put` between the check and the removal survives.
     /// On hit, updates `last_accessed` for LRU tracking. On miss, triggers an
     /// opportunistic sweep if more than `ttl / 2` has elapsed since the last one.
     pub(super) fn get(&self, key: &str) -> Option<Arc<str>> {
@@ -108,7 +110,8 @@ impl SessionStore {
         let now = Instant::now();
         if now.duration_since(entry.last_accessed) >= self.ttl {
             drop(entry);
-            self.map.remove(key);
+            self.map
+                .remove_if(key, |_, entry| now.duration_since(entry.last_accessed) >= self.ttl);
             self.maybe_sweep(now);
             return None;
         }

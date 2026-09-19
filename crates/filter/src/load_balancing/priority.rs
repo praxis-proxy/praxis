@@ -19,14 +19,14 @@ use super::{
 
 /// Routes requests to the highest-priority (lowest number) tier that has
 /// sufficient healthy capacity. Spills to the next tier when the current
-/// tier's healthy weight falls below `100 / overprovisioning_factor` of
-/// its total weight.
+/// tier's healthy endpoint count falls below `100 / overprovisioning_factor`
+/// of its total endpoint count; endpoint weights do not affect capacity.
 pub(crate) struct PriorityLevels {
     /// Ordered tiers from highest priority (0) to lowest.
     tiers: Vec<PriorityTier>,
 
     /// Overprovisioning factor as a percentage (e.g. 140 → spill when
-    /// healthy capacity < 100/140 ≈ 71% of tier weight).
+    /// healthy endpoints < 100/140 ≈ 71% of the tier's endpoints).
     overprovisioning_factor: u32,
 }
 

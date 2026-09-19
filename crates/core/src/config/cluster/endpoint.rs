@@ -114,7 +114,8 @@ impl TryFrom<EndpointRaw> for Endpoint {
                     let mut keys: Vec<&str> = w.unknown.keys().map(String::as_str).collect();
                     keys.sort_unstable();
                     return Err(format!(
-                        "endpoint '{}': unknown field(s): {}; expected only 'address' and 'weight'",
+                        "endpoint '{}': unknown field(s): {}; expected only 'address', 'weight', 'metadata', \
+                         'priority', and 'zone'",
                         w.address,
                         keys.join(", ")
                     ));
@@ -259,6 +260,16 @@ priority: 1
         assert!(ep.metadata().is_empty());
         assert_eq!(ep.zone(), None);
         assert_eq!(ep.priority(), 0);
+    }
+
+    #[test]
+    fn weighted_endpoint_unknown_field_error_lists_every_valid_field() {
+        let yaml = "address: \"10.0.0.1:80\"\nzonee: a";
+        let err = serde_yaml::from_str::<Endpoint>(yaml).unwrap_err().to_string();
+        assert!(err.contains("zonee"), "should name the unknown key: {err}");
+        for field in ["'address'", "'weight'", "'metadata'", "'priority'", "'zone'"] {
+            assert!(err.contains(field), "should list {field} as a valid field: {err}");
+        }
     }
 
     #[test]

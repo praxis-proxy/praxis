@@ -107,7 +107,7 @@ fn header_value_matches(name: &str, actual: &http::HeaderValue, expected: &str) 
 
     if name.eq_ignore_ascii_case("content-type") {
         if has_parameters(expected) {
-            return media_type(actual).eq_ignore_ascii_case(media_type(expected)) && params(actual) == params(expected);
+            return media_type(actual).eq_ignore_ascii_case(media_type(expected)) && params_match(actual, expected);
         }
         return media_type(actual).eq_ignore_ascii_case(media_type(expected));
     }
@@ -127,9 +127,26 @@ fn has_parameters(value: &str) -> bool {
         .is_some_and(|(_, params)| !params.trim().is_empty())
 }
 
-/// Extract the parameter portion of a header value (everything after the first `;`).
-fn params(value: &str) -> &str {
-    value.split_once(';').map_or("", |(_, p)| p)
+/// Compare media-type parameters as a set, ignoring order, surrounding
+/// whitespace, quotes, and ASCII case (`charset=UTF-8` equals `charset=utf-8`).
+fn params_match(actual: &str, expected: &str) -> bool {
+    normalized_params(actual) == normalized_params(expected)
+}
+
+/// The parameters after the first `;`, lowercased, unquoted, and sorted.
+fn normalized_params(value: &str) -> Vec<(String, String)> {
+    let mut params: Vec<(String, String)> = value
+        .split_once(';')
+        .map_or("", |(_, params)| params)
+        .split(';')
+        .filter_map(|param| param.split_once('='))
+        .map(|(name, val)| {
+            let val = val.trim().trim_matches('"');
+            (name.trim().to_ascii_lowercase(), val.to_ascii_lowercase())
+        })
+        .collect();
+    params.sort();
+    params
 }
 
 // -----------------------------------------------------------------------------
@@ -348,6 +365,40 @@ mod tests {
             &[resp_when(resp_header_match(&[(
                 "content-type",
                 "application/json; profile=a"
+            )]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_parameters_ignore_whitespace_and_value_case() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("application/json;charset=UTF-8"),
+        );
+        let resp = make_response(200, headers);
+        assert!(should_execute_response(
+            &[resp_when(resp_header_match(&[(
+                "content-type",
+                "application/json; charset=utf-8"
+            )]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_parameters_ignore_order_and_quotes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("multipart/form-data; boundary=\"abc\"; charset=utf-8"),
+        );
+        let resp = make_response(200, headers);
+        assert!(should_execute_response(
+            &[resp_when(resp_header_match(&[(
+                "content-type",
+                "multipart/form-data; charset=utf-8; boundary=abc"
             )]))],
             &resp
         ));

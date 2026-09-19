@@ -36,6 +36,9 @@ const H2_FRAME_TYPE_SETTINGS: u8 = 0x04;
 /// Minimum H2 frame header size (9 bytes).
 const H2_FRAME_HEADER_LEN: usize = 9;
 
+/// How long a healthy HTTP/2 probe waits for the server to close after GOAWAY.
+const H2_CLOSE_GRACE: Duration = Duration::from_millis(100);
+
 // -----------------------------------------------------------------------------
 // HTTP Probe
 // -----------------------------------------------------------------------------
@@ -141,11 +144,14 @@ async fn read_status_line(stream: &mut TcpStream, addr: &str) -> Option<String> 
 ///     Some(503)
 /// );
 /// assert_eq!(parse_status_code("garbage"), None);
+/// assert_eq!(parse_status_code("SMTP 200 ready\r\n"), None);
 /// ```
 pub(crate) fn parse_status_code(response: &str) -> Option<u16> {
-    let first_line = response.lines().next()?;
-    let parts: Vec<&str> = first_line.splitn(3, ' ').collect();
-    parts.get(1)?.parse().ok()
+    let mut parts = response.lines().next()?.splitn(3, ' ');
+    // Only an HTTP status line counts; any other protocol whose greeting
+    // happens to carry the expected number as its second token must not.
+    parts.next().filter(|version| version.starts_with("HTTP/"))?;
+    parts.next()?.parse().ok()
 }
 
 // -----------------------------------------------------------------------------
@@ -199,7 +205,9 @@ async fn h2_probe_inner(addr: &str) -> bool {
         return false;
     }
 
-    h2_close_gracefully(&mut stream).await;
+    // The verdict is already healthy; a server that keeps the connection
+    // open after our GOAWAY must not turn it into a timeout.
+    drop(tokio::time::timeout(H2_CLOSE_GRACE, h2_close_gracefully(&mut stream)).await);
     true
 }
 
@@ -216,22 +224,18 @@ async fn h2_send_preface(stream: &mut TcpStream, addr: &str) -> bool {
     true
 }
 
-/// Read the server's response and verify it contains a SETTINGS frame.
+/// Read the server's response and verify it starts with a SETTINGS frame.
+///
+/// TCP preserves neither write nor frame boundaries, so the nine-byte frame
+/// header is read exactly rather than judged from a single short read.
 async fn h2_read_settings(stream: &mut TcpStream, addr: &str) -> bool {
-    let mut buf = [0_u8; 64];
-    let n = match stream.read(&mut buf).await {
-        Ok(n) if n >= H2_FRAME_HEADER_LEN => n,
-        Ok(n) => {
-            trace!(addr, bytes = n, "h2 health check response too short");
-            return false;
-        },
-        Err(e) => {
-            trace!(addr, error = %e, "h2 health check read failed");
-            return false;
-        },
-    };
+    let mut header = [0_u8; H2_FRAME_HEADER_LEN];
+    if let Err(e) = stream.read_exact(&mut header).await {
+        trace!(addr, error = %e, "h2 health check read failed");
+        return false;
+    }
 
-    if !is_settings_frame(buf.get(..n).unwrap_or_default()) {
+    if !is_settings_frame(&header) {
         trace!(addr, "h2 health check did not receive SETTINGS frame");
         return false;
     }
@@ -359,6 +363,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_status_rejects_non_http_status_lines() {
+        for line in ["SMTP 200 ready\r\n", "garbage 200 anything"] {
+            assert_eq!(
+                parse_status_code(line),
+                None,
+                "a non-HTTP greeting must not be read as status 200: {line:?}"
+            );
+        }
+    }
+
+    #[test]
     fn parse_status_http10() {
         assert_eq!(
             parse_status_code("HTTP/1.0 301 Moved Permanently\r\n"),
@@ -472,6 +487,51 @@ mod tests {
 
         let result = probe.await.unwrap();
         assert!(result, "should succeed when server responds with SETTINGS");
+    }
+
+    #[tokio::test]
+    async fn h2_probe_accepts_settings_header_split_across_reads() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let probe_addr = addr.clone();
+        let probe = tokio::spawn(async move { h2_probe(&probe_addr, Duration::from_secs(2)).await });
+
+        let (mut socket, _peer) = listener.accept().await.unwrap();
+        let mut buf = [0_u8; 512];
+        let _ = socket.read(&mut buf).await.unwrap();
+        socket.write_all(&H2_SETTINGS[..4]).await.unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        socket.write_all(&H2_SETTINGS[4..]).await.unwrap();
+        socket.shutdown().await.unwrap();
+
+        let result = probe.await.unwrap();
+        assert!(
+            result,
+            "a SETTINGS header delivered in two segments is still a valid handshake"
+        );
+    }
+
+    #[tokio::test]
+    async fn h2_probe_succeeds_when_server_keeps_connection_open() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let probe_addr = addr.clone();
+        let probe = tokio::spawn(async move { h2_probe(&probe_addr, Duration::from_secs(2)).await });
+
+        let (mut socket, _peer) = listener.accept().await.unwrap();
+        let mut buf = [0_u8; 512];
+        let _ = socket.read(&mut buf).await.unwrap();
+        socket.write_all(H2_SETTINGS).await.unwrap();
+
+        let result = probe.await.unwrap();
+        assert!(
+            result,
+            "a server that answers SETTINGS but never closes is still healthy"
+        );
+        drop(socket);
     }
 
     #[tokio::test]

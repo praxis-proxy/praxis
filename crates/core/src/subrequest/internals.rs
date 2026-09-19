@@ -328,13 +328,16 @@ pub(super) use crate::reserved_headers::HOP_BY_HOP_HEADERS;
 
 /// Collect the `Connection`-nominated header names, borrowed from the
 /// map's own `Connection` values.
+///
+/// Tokenizes the raw bytes rather than `to_str()` so one obs-text byte in a
+/// value cannot discard every other nomination in it; a token that is not
+/// UTF-8 cannot name a header and is skipped on its own.
 pub(super) fn connection_nominated_tokens(headers: &HeaderMap) -> Vec<&str> {
     headers
         .get_all(http::header::CONNECTION)
         .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
+        .flat_map(|value| value.as_bytes().split(|&byte| byte == b','))
+        .filter_map(|token| std::str::from_utf8(token.trim_ascii()).ok())
         .filter(|token| !token.is_empty())
         .collect()
 }

@@ -79,11 +79,20 @@ impl RequestIdFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if the YAML config is malformed.
+    /// Returns [`FilterError`] if the YAML config is malformed or
+    /// `header_name` is not a valid HTTP header name.
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: RequestIdFilterConfig = parse_filter_config("request_id", config)?;
+
+        if http::HeaderName::from_bytes(cfg.header_name.as_bytes()).is_err() {
+            return Err(format!(
+                "request_id: header_name '{}' is not a valid HTTP header name",
+                cfg.header_name
+            )
+            .into());
+        }
 
         Ok(Box::new(Self {
             header_name: Arc::from(cfg.header_name.as_str()),
@@ -302,6 +311,16 @@ mod tests {
 
         let (name, _) = &ctx.extra_request_headers[0];
         assert_eq!(name, "X-Correlation-ID", "should use custom header name from config");
+    }
+
+    #[test]
+    fn from_config_rejects_invalid_header_name() {
+        let config: serde_yaml::Value = serde_yaml::from_str("header_name: 'bad header'").unwrap();
+        let err = RequestIdFilter::from_config(&config).err().expect("should fail");
+        assert!(
+            err.to_string().contains("not a valid HTTP header name"),
+            "a header name that can never be emitted must be rejected at config time: {err}"
+        );
     }
 
     #[test]

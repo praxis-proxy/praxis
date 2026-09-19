@@ -75,6 +75,13 @@ fn validate_endpoint_address(addr: &str, cluster_name: &str) -> Result<(), Proxy
             "cluster '{cluster_name}': endpoint '{addr}' must be 'host:port' with a valid port"
         )));
     }
+    // An unbalanced bracket (`[::1:80`, `::1]:80`) is neither an IPv6
+    // literal nor a resolvable hostname, so it can only fail at connect.
+    if host.starts_with('[') != host.ends_with(']') {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': endpoint '{addr}' has an unbalanced IPv6 bracket (expected '[addr]:port')"
+        )));
+    }
     // A valid port with an empty host (`:80`) parses here but has no
     // resolvable host, so every request to the cluster fails at connect;
     // the empty host also slips past the SSRF hostname check.
@@ -322,6 +329,18 @@ mod tests {
         let clusters = vec![Cluster::with_defaults("web", vec!["[]:80".into()])];
         let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
         assert!(err.to_string().contains("empty host"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_unbalanced_ipv6_bracket_endpoint() {
+        for addr in ["[::1:80", "::1]:80"] {
+            let clusters = vec![Cluster::with_defaults("web", vec![addr.into()])];
+            let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+            assert!(
+                err.to_string().contains("unbalanced IPv6 bracket"),
+                "'{addr}' must be rejected: {err}"
+            );
+        }
     }
 
     #[test]

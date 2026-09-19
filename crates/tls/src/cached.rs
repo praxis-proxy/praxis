@@ -237,10 +237,20 @@ impl CachedClientCert {
     /// # Errors
     ///
     /// Returns [`TlsError`] if either file cannot be read, contains
-    /// no valid PEM data, or the key file has no private key.
+    /// no valid PEM data, the key file has no private key, the certificate
+    /// is not valid X.509, or the certificate and key do not match.
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn from_pem_files(cert_path: &str, key_path: &str) -> Result<Self, TlsError> {
+        // Same structural and key-match checks the listener path runs, so a
+        // pair that could never complete an upstream handshake fails at
+        // config time rather than on the first connection.
+        drop(crate::setup::loader::load_certified_key(&crate::CertKeyPair {
+            cert_path: cert_path.to_owned(),
+            default: false,
+            key_path: key_path.to_owned(),
+            server_names: Vec::new(),
+        })?);
         let cert_der = load_and_validate_certs(cert_path, "client cert")?;
         let key_der = parse_key_pem(key_path)?;
         tracing::info!(cert_path, "cached client certificate");
@@ -514,6 +524,19 @@ mod tests {
         assert!(
             msg.contains("no certificates found"),
             "error should mention missing certificates: {msg}"
+        );
+    }
+
+    #[test]
+    fn cached_client_cert_from_pem_mismatched_key_fails() {
+        let pair_a = gen_test_certs();
+        let pair_b = gen_test_certs();
+        let err =
+            CachedClientCert::from_pem_files(pair_a.cert_path.to_str().unwrap(), pair_b.key_path.to_str().unwrap())
+                .expect_err("a cert and a key from different pairs must be rejected at config time");
+        assert!(
+            err.to_string().contains("do not match"),
+            "error should mention the cert/key mismatch: {err}"
         );
     }
 
