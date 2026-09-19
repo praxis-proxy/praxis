@@ -367,6 +367,53 @@ fn body_size_limit_without_content_length_enforced() {
 }
 
 #[test]
+fn released_stream_buffer_body_still_honors_global_limit() {
+    let backend_port_guard = start_echo_backend();
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&body_limit_yaml_with_filter(
+        proxy_port,
+        backend_port,
+        16,
+        "release_first_chunk",
+    ))
+    .unwrap();
+    let registry = registry_with("release_first_chunk", || Box::new(ReleaseFirstChunkFilter));
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let mut stream = std::net::TcpStream::connect(proxy.addr()).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let first = "a".repeat(8);
+    let second = "b".repeat(64);
+    std::io::Write::write_all(
+        &mut stream,
+        format!(
+            "POST /echo HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+             {:x}\r\n{first}\r\n",
+            first.len()
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    std::io::Write::write_all(
+        &mut stream,
+        format!("{:x}\r\n{second}\r\n0\r\n\r\n", second.len()).as_bytes(),
+    )
+    .unwrap();
+    let mut raw = String::new();
+    drop(std::io::Read::read_to_string(&mut stream, &mut raw));
+
+    assert_eq!(
+        parse_status(&raw),
+        413,
+        "chunks streamed after a StreamBuffer release must still count against max_request_bytes"
+    );
+}
+
+#[test]
 fn response_body_over_limit_returns_error() {
     let large_body = "z".repeat(512);
     let backend_port_guard = start_backend_with_shutdown(&large_body);
@@ -532,6 +579,35 @@ impl HttpFilter for BodyUppercaseFilter {
         }
 
         Ok(FilterAction::Continue)
+    }
+}
+
+/// Upgrades to a generous StreamBuffer at request time and releases on the
+/// first chunk, so every later chunk streams through the released path.
+struct ReleaseFirstChunkFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for ReleaseFirstChunkFilter {
+    fn name(&self) -> &'static str {
+        "release_first_chunk"
+    }
+
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        ctx.set_request_body_mode(BodyMode::StreamBuffer { max_bytes: Some(1024) });
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Release)
     }
 }
 
@@ -817,6 +893,35 @@ listeners:
 filter_chains:
   - name: main
     filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
+
+/// YAML config with `body_limits.max_request_bytes` and a custom request filter.
+fn body_limit_yaml_with_filter(proxy_port: u16, backend_port: u16, limit: usize, filter_name: &str) -> String {
+    format!(
+        r#"
+body_limits:
+  max_request_bytes: {limit}
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: {filter_name}
       - filter: router
         routes:
           - path_prefix: "/"

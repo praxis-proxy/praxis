@@ -534,8 +534,10 @@ impl CircuitBreakerRegistry {
         }
     }
 
-    /// Evict idle breakers that have been `Closed` with zero failures
-    /// for at least `idle_threshold`.
+    /// Evict breakers that have been idle for at least `idle_threshold`
+    /// (see `CircuitBreaker::is_idle`): no request in flight and not
+    /// `Open` inside its recovery window. Residual failures do not exempt a
+    /// breaker.
     ///
     /// Returns the number of entries removed. The caller is
     /// responsible for scheduling periodic invocations.

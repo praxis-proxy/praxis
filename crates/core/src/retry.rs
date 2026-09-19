@@ -67,41 +67,40 @@ impl RetryBudget {
     ///
     /// Refill rate = `min_retries_per_second` tokens/second.
     /// `tokens_to_add = min_retries_per_second * elapsed_seconds`,
-    /// capped at `max_tokens(active_requests)`.
+    /// capped at `max_tokens(active_requests)`. The cap is applied on every
+    /// call, so a bucket filled under high load settles to the lower cap as
+    /// soon as traffic falls, not only when the next token accrues.
     pub fn refill(&self, active_requests: u64) {
         let now = now_ms();
         let last = self.last_refill_ms.load(Ordering::Relaxed);
-        if now <= last {
-            return;
-        }
-        let elapsed_ms = now - last;
-        if elapsed_ms == 0 {
-            return;
-        }
+        let elapsed_ms = now.saturating_sub(last);
+        let accrued = u64::from(self.min_retries_per_second).saturating_mul(elapsed_ms) / 1000;
 
-        let tokens_to_add = u64::from(self.min_retries_per_second).saturating_mul(elapsed_ms) / 1000;
-        if tokens_to_add == 0 {
-            return;
-        }
-
-        // Only one refiller should advance last_refill; losers skip.
-        if self
-            .last_refill_ms
-            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
+        // Only one refiller should advance last_refill; losers add nothing
+        // but still clamp to the current cap.
+        let tokens_to_add = if accrued > 0
+            && self
+                .last_refill_ms
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
         {
-            return;
-        }
+            accrued
+        } else {
+            0
+        };
 
         self.add_tokens(tokens_to_add, active_requests);
     }
 
-    /// CAS loop to add tokens up to the dynamic cap.
+    /// CAS loop to add tokens, clamping the result to the dynamic cap.
     fn add_tokens(&self, tokens_to_add: u64, active_requests: u64) {
         let cap = self.max_tokens(active_requests);
         let mut current = self.tokens.load(Ordering::Relaxed);
         loop {
             let next = current.saturating_add(tokens_to_add).min(cap);
+            if next == current {
+                break;
+            }
             match self
                 .tokens
                 .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
@@ -250,6 +249,26 @@ mod tests {
         assert!(b.try_acquire());
         assert!(!b.try_acquire());
         assert_eq!(b.available(), 0);
+    }
+
+    #[test]
+    fn refill_settles_tokens_to_the_lower_cap_when_traffic_falls() {
+        let b = budget(100.0, 1);
+        b.tokens.store(500, Ordering::Relaxed);
+        b.refill(0);
+        assert_eq!(
+            b.available(),
+            1,
+            "tokens banked under high load must be clamped to the cap for the current load"
+        );
+    }
+
+    #[test]
+    fn refill_keeps_tokens_under_a_higher_cap() {
+        let b = budget(100.0, 1);
+        b.tokens.store(50, Ordering::Relaxed);
+        b.refill(500);
+        assert_eq!(b.available(), 50, "tokens below the cap must not be reduced");
     }
 
     #[test]

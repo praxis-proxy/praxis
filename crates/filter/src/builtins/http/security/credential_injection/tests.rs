@@ -227,6 +227,29 @@ fn rejects_empty_clusters() {
 }
 
 #[test]
+fn rejects_duplicate_cluster_name() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+clusters:
+  - name: provider-a
+    header: Authorization
+    value: "sk-first"
+  - name: provider-a
+    header: x-api-key
+    value: "sk-second"
+"#,
+    )
+    .unwrap();
+    let err = CredentialInjectionFilter::from_config(&yaml)
+        .err()
+        .expect("two rules for one cluster must not be silently last-wins");
+    assert!(
+        err.to_string().contains("duplicate cluster 'provider-a'"),
+        "error should name the duplicated cluster: {err}"
+    );
+}
+
+#[test]
 fn rejects_both_value_and_env_var() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"

@@ -2986,6 +2986,35 @@ fn one_registration_serves_repeated_filter_construction() {
 }
 
 #[test]
+fn a_factory_may_register_another_kind_while_factories_are_built() {
+    register_policy_plugin_factory(
+        "test/registers-a-sibling",
+        Arc::new(|| {
+            register_stub("test/registered-from-inside-a-factory");
+            Box::new(StubFactory {
+                builds: Arc::new(AtomicUsize::new(0)),
+            })
+        }),
+    );
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let kinds: Vec<String> = super::host_plugins::host_plugin_factories()
+            .into_iter()
+            .map(|(kind, _)| kind)
+            .collect();
+        drop(tx.send(kinds));
+    });
+    let kinds = rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("building factories must not deadlock on the registry lock");
+    assert!(
+        kinds.iter().any(|kind| kind == "test/registers-a-sibling"),
+        "the registering factory itself must be built: {kinds:?}"
+    );
+}
+
+#[test]
 fn a_host_registration_replaces_a_bundled_kind() {
     let builds = register_stub("delegator/oauth");
     let (_dir, path) = write_config_naming_kind("delegator/oauth");

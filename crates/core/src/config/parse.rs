@@ -183,7 +183,8 @@ fn line_contains_alias(line: &str) -> bool {
     for &c in line.as_bytes() {
         // An alias node is `*` at a node boundary followed by an
         // anchor-name character; check the char after a boundary `*`.
-        if prev_star && (c.is_ascii_alphanumeric() || c == b'_') {
+        // libyaml accepts `-` anywhere in an anchor name, including first.
+        if prev_star && (c.is_ascii_alphanumeric() || c == b'_' || c == b'-') {
             return true;
         }
         prev_star = false;
@@ -281,6 +282,15 @@ mod tests {
     fn reject_single_alias() {
         let err = reject_yaml_aliases("a: &a x\nb: *a\nlisteners: []\n");
         assert!(err.is_err(), "any alias node should be rejected");
+    }
+
+    #[test]
+    fn reject_alias_with_leading_hyphen() {
+        let err = reject_yaml_aliases("a: &-x 1\nb: *-x\nlisteners: []\n");
+        assert!(
+            err.is_err(),
+            "an alias whose anchor name starts with '-' must be rejected"
+        );
     }
 
     #[test]

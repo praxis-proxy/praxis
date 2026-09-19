@@ -102,9 +102,16 @@ impl PowerOfTwoChoices {
             return Some(Arc::clone(&ep.address));
         }
 
-        let (a, b) = self.pick_two(total_w);
-        let pos_a = self.weight_index_pos(&candidates, a, total_w);
-        let pos_b = self.weight_index_pos(&candidates, b, total_w);
+        let (pos_a, start_a) = self.weight_index_pos(&candidates, self.pick_slot(total_w));
+        // Draw the second slot from the other endpoints' weight only, then
+        // skip over `pos_a`'s slot range so the two samples are always
+        // distinct endpoints, not merely distinct slots.
+        let weight_a = self.endpoints[pos_a].weight as usize;
+        let mut b = self.pick_slot(total_w - weight_a);
+        if b >= start_a {
+            b += weight_a;
+        }
+        let (pos_b, _) = self.weight_index_pos(&candidates, b);
         let chosen = self.less_loaded(pos_a, pos_b);
 
         self.counters[chosen].fetch_add(1, Ordering::AcqRel);
@@ -147,36 +154,30 @@ impl PowerOfTwoChoices {
         }
     }
 
-    /// Generate two distinct random slots in `[0, total_weight)`.
+    /// Generate a random slot in `[0, total_weight)`.
     #[expect(
         clippy::cast_possible_truncation,
         reason = "modulo total_weight bounds the result to usize range"
     )]
-    fn pick_two(&self, total_weight: usize) -> (usize, usize) {
-        let r1 = super::next_random(&self.rng);
-        let mut r2 = super::next_random(&self.rng);
-        let a = (r1 as usize) % total_weight;
-        let mut b = (r2 as usize) % total_weight;
-        while b == a {
-            r2 = r2.wrapping_mul(super::LCG_A).wrapping_add(super::LCG_C);
-            b = (r2 as usize) % total_weight;
-        }
-        (a, b)
+    fn pick_slot(&self, total_weight: usize) -> usize {
+        (super::next_random(&self.rng) as usize) % total_weight
     }
 
-    /// Map a cumulative-weight slot to a candidate position.
+    /// Map a cumulative-weight slot to a candidate position and the first
+    /// slot of that candidate's weight range.
     #[expect(clippy::indexing_slicing, reason = "positions come from the endpoints scan")]
     #[expect(clippy::expect_used, reason = "caller guarantees candidates is non-empty")]
-    fn weight_index_pos(&self, candidates: &[usize], slot: usize, total_weight: usize) -> usize {
-        let slot = slot % total_weight;
-        let mut cumulative = 0_usize;
+    fn weight_index_pos(&self, candidates: &[usize], slot: usize) -> (usize, usize) {
+        let mut start = 0_usize;
         for &pos in candidates {
-            cumulative += self.endpoints[pos].weight as usize;
-            if slot < cumulative {
-                return pos;
+            let end = start + self.endpoints[pos].weight as usize;
+            if slot < end {
+                return (pos, start);
             }
+            start = end;
         }
-        *candidates.last().expect("candidates must be non-empty")
+        let last = *candidates.last().expect("candidates must be non-empty");
+        (last, start - self.endpoints[last].weight as usize)
     }
 
     /// Candidate positions: healthy-and-not-excluded when any endpoint is
@@ -294,6 +295,21 @@ mod tests {
 
         let heavy = counts.get("10.0.0.2:80").copied().unwrap_or(0);
         assert!(heavy > 60, "weight-9 endpoint should get majority: heavy={heavy}");
+    }
+
+    #[test]
+    fn weighted_endpoints_are_still_compared_by_load() {
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 9), ep("10.0.0.2:80", 1)]);
+        p2c.counter_for("10.0.0.1:80").store(100, Ordering::Relaxed);
+
+        for _ in 0..50 {
+            let addr = p2c.select(None, &[]).unwrap();
+            assert_eq!(
+                &*addr, "10.0.0.2:80",
+                "a heavy endpoint must never be compared against itself and win by default"
+            );
+            p2c.release(&addr);
+        }
     }
 
     #[test]

@@ -607,15 +607,21 @@ fn extract_origin_normalizes_default_port_in_referer() {
 fn extract_origin_referer_fragment_no_path() {
     let mut headers = http::HeaderMap::new();
     headers.insert("referer", "https://example.com#section".parse().unwrap());
-    let origin = extract_origin(&headers);
-    assert!(
-        origin.is_some(),
-        "Referer with fragment but no path should still extract an origin"
-    );
     assert_eq!(
-        origin.as_deref(),
-        Some("https://example.com#section"),
-        "fragment leaks when no path separates it (split('/') misses '#')"
+        extract_origin(&headers).as_deref(),
+        Some("https://example.com"),
+        "a fragment with no path must not leak into the origin"
+    );
+}
+
+#[test]
+fn extract_origin_referer_query_no_path() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("referer", "https://example.com:8443?q=1".parse().unwrap());
+    assert_eq!(
+        extract_origin(&headers).as_deref(),
+        Some("https://example.com:8443"),
+        "a query with no path must not leak into the origin"
     );
 }
 

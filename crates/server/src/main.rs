@@ -73,8 +73,14 @@ fn main() {
         return;
     }
 
+    // Load from the resolved path rather than re-probing the filesystem, so
+    // the config that runs is the one the reload watcher will watch.
     let config_path = praxis::resolve_config_path(explicit.as_deref());
-    let config = praxis::load_config(explicit.as_deref()).unwrap_or_else(|e| praxis::fatal(&e));
+    let config = match &config_path {
+        Some(path) => praxis_core::config::Config::from_file(path),
+        None => praxis_core::config::Config::from_yaml(praxis_core::config::DEFAULT_CONFIG),
+    }
+    .unwrap_or_else(|e| praxis::fatal(&e));
     let tracing_guard = praxis::init_tracing(&config).unwrap_or_else(|e| praxis::fatal(&e));
     let log_level = Some(tracing_guard.log_level_state());
     info!(version = env!("PRAXIS_VERSION"), "starting server");
