@@ -227,7 +227,11 @@ fn empty_predicate_error(chain_name: &str, filter: &str, idx: usize, field: &str
 ///
 /// This name list drives the config-time "terminal filter must be last"
 /// ordering check, which runs on `FilterEntry` values before any filter is
-/// instantiated and so has no trait object to query. The runtime outbound-chain
+/// instantiated and so has no trait object to query. That check is per chain;
+/// the flattened listener pipeline is checked when the server resolves
+/// pipelines (`validate_terminal_position` in the server crate), so a
+/// terminal chain followed by another non-empty chain passes `Config::from_yaml`
+/// and is rejected at pipeline construction. The runtime outbound-chain
 /// rejection instead uses the `HttpFilter::produces_terminal_response`
 /// capability (filter crate). The two live at different layers and must stay in
 /// sync: any new builtin that produces a terminal response must be added here
