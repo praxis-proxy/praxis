@@ -77,6 +77,25 @@ mod tests {
     }
 
     #[test]
+    fn load_from_explicit_path_reads_that_file() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("praxis.yaml");
+        std::fs::write(&path, config_with_listener_named("from-file")).expect("write config");
+
+        let config = Config::load_from(Some(&path), DEFAULT_CONFIG).expect("file should load");
+        assert_eq!(
+            config.listeners[0].name, "from-file",
+            "the resolved file must win over the fallback"
+        );
+    }
+
+    #[test]
+    fn load_from_none_uses_fallback_yaml() {
+        let config = Config::load_from(None, &config_with_listener_named("fallback")).expect("fallback should load");
+        assert_eq!(config.listeners[0].name, "fallback", "no path means the fallback YAML");
+    }
+
+    #[test]
     fn load_config_nonexistent_explicit_path_returns_error() {
         let result = Config::load(Some("/nonexistent/path/praxis.yaml"), DEFAULT_CONFIG);
         assert!(
@@ -96,5 +115,14 @@ mod tests {
             config.listeners[0].name, "default",
             "fallback config listener name should be 'default'"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// The built-in default config with its single listener renamed.
+    fn config_with_listener_named(name: &str) -> String {
+        DEFAULT_CONFIG.replacen("name: default\n", &format!("name: {name}\n"), 1)
     }
 }
