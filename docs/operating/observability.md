@@ -609,9 +609,10 @@ filter_chains:
 ```
 
 `sample_rate` accepts values in `(0.0, 1.0]`. The
-value `0.1` logs approximately 10% of requests.
-Sampling uses a deterministic counter (every Nth
-request), not random selection.
+value `0.1` logs 10% of requests. Sampling uses a
+deterministic counter (of the first N requests,
+exactly `floor(N × sample_rate)` are logged), not
+random selection.
 
 ### Log Format
 
