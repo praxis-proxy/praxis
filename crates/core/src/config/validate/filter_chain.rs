@@ -6,7 +6,10 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    config::{ChainRef, Condition, ConditionMatch, FilterChainConfig, FilterEntry, Listener, ResponseCondition},
+    config::{
+        ChainRef, Condition, ConditionMatch, FilterChainConfig, FilterEntry, Listener, ResponseCondition,
+        ResponseConditionMatch,
+    },
     errors::ProxyError,
 };
 
@@ -167,6 +170,46 @@ fn validate_response_conditions(chain_name: &str, entry: &FilterEntry) -> Result
                 "response headers",
             ));
         }
+        validate_response_predicate_values(chain_name, &entry.filter_type, idx, matcher)?;
+    }
+    Ok(())
+}
+
+/// Reject response-condition values that no response can ever carry.
+///
+/// A status outside the 100..=599 range that [RFC 9110 Section 15] defines,
+/// or an unparseable header name, never matches, which silently disables
+/// (or never gates) the filter.
+///
+/// [RFC 9110 Section 15]: https://datatracker.ietf.org/doc/html/rfc9110#section-15
+fn validate_response_predicate_values(
+    chain_name: &str,
+    filter: &str,
+    idx: usize,
+    matcher: &ResponseConditionMatch,
+) -> Result<(), ProxyError> {
+    if let Some(status) = matcher
+        .status
+        .iter()
+        .flatten()
+        .find(|status| !(100..=599).contains(*status))
+    {
+        return Err(ProxyError::Config(format!(
+            "filter '{filter}' in chain '{chain_name}': response condition {idx} \
+             has invalid status code {status} (expected 100-599)",
+        )));
+    }
+    if let Some(name) = matcher
+        .headers
+        .iter()
+        .flatten()
+        .map(|(name, _)| name)
+        .find(|name| http::header::HeaderName::from_bytes(name.as_bytes()).is_err())
+    {
+        return Err(ProxyError::Config(format!(
+            "filter '{filter}' in chain '{chain_name}': response condition {idx} \
+             has invalid header name '{name}'",
+        )));
     }
     Ok(())
 }
@@ -618,6 +661,51 @@ filter_chains:
         assert!(
             err.to_string().contains("empty response status list"),
             "an empty status list can never match and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_response_condition_status_out_of_range() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        response_conditions:
+          - when:
+              status: [200, 999]
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid status code 999"),
+            "a status that no response can carry must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_response_condition_invalid_header_name() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        response_conditions:
+          - unless:
+              headers:
+                "bad header": x
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid header name 'bad header'"),
+            "a header name that no response can carry must be rejected: {err}"
         );
     }
 
