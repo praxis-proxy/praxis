@@ -127,11 +127,14 @@ pub(crate) async fn http_probe_with_request(
 ///     Some(503)
 /// );
 /// assert_eq!(parse_status_code("garbage"), None);
+/// assert_eq!(parse_status_code("SMTP 200 ready\r\n"), None);
 /// ```
 pub(crate) fn parse_status_code(response: &str) -> Option<u16> {
-    let first_line = response.lines().next()?;
-    let parts: Vec<&str> = first_line.splitn(3, ' ').collect();
-    parts.get(1)?.parse().ok()
+    let mut parts = response.lines().next()?.splitn(3, ' ');
+    // Only an HTTP status line counts; any other protocol whose greeting
+    // happens to carry the expected number as its second token must not.
+    parts.next().filter(|version| version.starts_with("HTTP/"))?;
+    parts.next()?.parse().ok()
 }
 
 // -----------------------------------------------------------------------------
@@ -364,6 +367,17 @@ mod tests {
             None,
             "should return None for incomplete status line"
         );
+    }
+
+    #[test]
+    fn parse_status_rejects_non_http_status_lines() {
+        for line in ["SMTP 200 ready\r\n", "garbage 200 anything"] {
+            assert_eq!(
+                parse_status_code(line),
+                None,
+                "a non-HTTP greeting must not be read as status 200: {line:?}"
+            );
+        }
     }
 
     #[test]
