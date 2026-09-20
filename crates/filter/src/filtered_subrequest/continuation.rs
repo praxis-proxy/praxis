@@ -65,7 +65,7 @@ pub(crate) struct FilteredSubrequestContinuation {
     /// Filter results that persist across body chunks.
     pub(super) filter_results: HashMap<&'static str, FilterResultSet>,
     /// Filter metadata that persists across body chunks.
-    pub(super) filter_metadata: HashMap<String, String>,
+    pub(super) filter_metadata: HashMap<String, praxis_core::value::Value>,
     /// Structured metadata that persists across body chunks.
     pub(super) structured_metadata: HashMap<String, serde_json::Value>,
     /// Tracks which filters executed during request phase.

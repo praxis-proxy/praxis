@@ -6,7 +6,7 @@
 use std::{collections::VecDeque, net::IpAddr, sync::Arc, time::Instant};
 
 use bytes::Bytes;
-use praxis_core::connectivity::Upstream;
+use praxis_core::{connectivity::Upstream, value::Value};
 use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, TrustedHeaderMutation};
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Span;
@@ -98,7 +98,7 @@ pub struct PingoraRequestCtx {
     /// after filter execution.
     ///
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
-    pub filter_metadata: std::collections::HashMap<String, String>,
+    pub filter_metadata: std::collections::HashMap<String, Value>,
 
     /// Ordered log of trusted header mutations from pre-read body
     /// processing. Swapped into each [`HttpFilterContext`] and written
@@ -929,8 +929,8 @@ mod tests {
         };
 
         let mut ctx = default_ctx();
-        ctx.filter_metadata.insert("rpc.method".to_owned(), "echo".to_owned());
-        ctx.filter_metadata.insert("rpc.status".to_owned(), "ok".to_owned());
+        ctx.filter_metadata.insert("rpc.method".to_owned(), "echo".into());
+        ctx.filter_metadata.insert("rpc.status".to_owned(), "ok".into());
 
         let fctx = ctx.build_filter_context(&pipeline, &request, None);
         assert_eq!(
@@ -962,13 +962,13 @@ mod tests {
 
         ctx.filter_metadata = fctx.filter_metadata;
         assert_eq!(
-            ctx.filter_metadata.get("trace.id").map(String::as_str),
-            Some("abc-123"),
+            ctx.filter_metadata.get("trace.id"),
+            Some(&Value::from("abc-123")),
             "metadata set in filter context should persist back to protocol context"
         );
         assert_eq!(
-            ctx.filter_metadata.get("trace.span").map(String::as_str),
-            Some("42"),
+            ctx.filter_metadata.get("trace.span"),
+            Some(&Value::from("42")),
             "multiple metadata keys should persist back"
         );
     }

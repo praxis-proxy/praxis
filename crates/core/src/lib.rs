@@ -53,6 +53,8 @@ pub mod server;
 pub mod subrequest;
 /// Wall-clock time abstraction for filters.
 pub mod time;
+/// Value types to be used when sharing data.
+pub mod value;
 
 pub use errors::ProxyError;
 pub use logging::TracingGuard;
