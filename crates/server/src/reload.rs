@@ -659,6 +659,183 @@ filter_chains:
         );
     }
 
+    /// One listener switching protocol rejects the whole reload: the other
+    /// listener's pipeline is not swapped either, so the live pipelines and
+    /// both metadata stores stay on a single generation.
+    #[test]
+    fn protocol_change_on_one_listener_rejects_reload_for_all() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines_from(
+            Config::from_yaml(
+                r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: api
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+            )
+            .unwrap(),
+        );
+        let old_web_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+        let old_api_ptr = Arc::as_ptr(&live.get("api").unwrap().load());
+        let old_meta = meta.load_full();
+        let old_cluster_meta = cluster_meta.load_full();
+
+        let new_config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    protocol: tcp
+    cluster: db_pool
+    filter_chains: [tcp_lb]
+  - name: api
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+clusters:
+  - name: db_pool
+    endpoints:
+      - "10.0.0.1:5432"
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true
+filter_chains:
+  - name: tcp_lb
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: db_pool
+            endpoints:
+              - "10.0.0.1:5432"
+  - name: main
+    filters:
+      - filter: static_response
+        status: 404
+"#,
+        )
+        .unwrap();
+        let result = reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+            &PipelineComposition::default(),
+        );
+
+        assert!(
+            result.is_err(),
+            "a protocol change on any bound listener rejects the reload"
+        );
+        assert_eq!(
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            old_web_ptr,
+            "the changed listener keeps its HTTP pipeline"
+        );
+        assert_eq!(
+            Arc::as_ptr(&live.get("api").unwrap().load()),
+            old_api_ptr,
+            "the unchanged listener is not swapped ahead of the rejected one"
+        );
+        assert!(
+            Arc::ptr_eq(&meta.load_full(), &old_meta),
+            "listener metadata must not advance on a rejected reload"
+        );
+        assert!(
+            Arc::ptr_eq(&cluster_meta.load_full(), &old_cluster_meta),
+            "cluster metadata must not advance on a rejected reload"
+        );
+    }
+
+    /// A listener added by reload has no bound handler and therefore no
+    /// recorded protocol, so its protocol is not compared against anything.
+    /// The reload applies to the bound listener and skips the new one.
+    #[test]
+    fn new_tcp_listener_alongside_bound_http_listener_is_accepted() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let old_web_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+
+        let new_config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: db
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    cluster: db_pool
+    filter_chains: [tcp_lb]
+clusters:
+  - name: db_pool
+    endpoints:
+      - "10.0.0.1:5432"
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 404
+  - name: tcp_lb
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: db_pool
+            endpoints:
+              - "10.0.0.1:5432"
+"#,
+        )
+        .unwrap();
+        let result = reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+            &PipelineComposition::default(),
+        );
+
+        assert!(
+            result.is_ok(),
+            "adding a TCP listener next to a bound HTTP one is accepted: {result:?}"
+        );
+        assert_ne!(
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            old_web_ptr,
+            "the bound HTTP listener receives its rebuilt pipeline"
+        );
+        assert!(
+            live.get("db").is_none(),
+            "the new TCP listener has no handler to serve it until restart"
+        );
+        assert_eq!(
+            meta.load().get("db").map(|entry| entry.protocol),
+            Some(ProtocolKind::Tcp),
+            "the accepted reload publishes the new listener's metadata"
+        );
+    }
+
     #[test]
     #[cfg(feature = "chain-binding")]
     fn reload_rebinds_outbound_chain_and_reinjects_runtime_resources() {
