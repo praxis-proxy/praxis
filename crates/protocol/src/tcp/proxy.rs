@@ -644,8 +644,8 @@ fn try_parse_sni(buf: &[u8], filled: usize, reassembler: &mut Option<sni::SniRea
             *reassembler = Some(active);
             result
         },
-        Err(_) => {
-            trace!(filled, "not a TLS ClientHello, skipping SNI extraction");
+        Err(error) => {
+            trace!(filled, ?error, "not a TLS ClientHello, skipping SNI extraction");
             SniPeekResult::NotTls
         },
     }
@@ -657,8 +657,8 @@ fn reassembler_step(active: &mut sni::SniReassembler, data: &[u8], filled: usize
     match active.advance(data) {
         Ok(Some(info)) => SniPeekResult::Parsed(info),
         Ok(None) => SniPeekResult::NeedMore,
-        Err(_) => {
-            trace!(filled, "not a TLS ClientHello, skipping SNI extraction");
+        Err(error) => {
+            trace!(filled, ?error, "not a TLS ClientHello, skipping SNI extraction");
             SniPeekResult::NotTls
         },
     }

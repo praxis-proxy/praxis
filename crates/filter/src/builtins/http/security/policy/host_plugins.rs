@@ -70,12 +70,15 @@ pub fn register_policy_plugin_factory(kind: impl Into<String>, make: PolicyPlugi
 /// Called by `PolicyFilter::new`. Factories are constructed here rather than
 /// handed out as closures so the lock is released before any of them runs.
 pub(super) fn host_plugin_factories() -> Vec<(String, Box<dyn ppe::PluginFactory>)> {
-    HOST_FACTORIES
+    // Snapshot the closures first: a `make` that registers another kind
+    // takes the write lock, which would deadlock under a live read guard.
+    let makers: Vec<(String, PolicyPluginFactoryFn)> = HOST_FACTORIES
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .iter()
-        .map(|(kind, make)| (kind.clone(), make()))
-        .collect()
+        .map(|(kind, make)| (kind.clone(), Arc::clone(make)))
+        .collect();
+    makers.into_iter().map(|(kind, make)| (kind, make())).collect()
 }
 
 /// How many kinds a host has registered. For diagnostics at startup.

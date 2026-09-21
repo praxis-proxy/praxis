@@ -68,6 +68,16 @@ pub(crate) fn default_crypto_provider() -> Arc<CryptoProvider> {
 /// [`TlsError::FileLoadError`]: crate::TlsError::FileLoadError
 pub(crate) fn load_certified_key(pair: &CertKeyPair) -> Result<CertifiedKey, TlsError> {
     let (certs, key) = load_cert_and_key(pair)?;
+    certify(certs, key, pair)
+}
+
+/// Bind a certificate chain to its private key through the default crypto
+/// provider, rejecting an unsupported key type or a chain that does not match.
+pub(crate) fn certify(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    pair: &CertKeyPair,
+) -> Result<CertifiedKey, TlsError> {
     let provider = default_crypto_provider();
     let signing_key = provider
         .key_provider
@@ -120,7 +130,7 @@ fn keys_match_error_detail(error: &rustls::Error) -> String {
 ///
 /// [`Zeroizing`]: zeroize::Zeroizing
 /// [`TlsError::FileLoadError`]: crate::TlsError::FileLoadError
-pub(super) fn load_cert_and_key(
+pub(crate) fn load_cert_and_key(
     pair: &CertKeyPair,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {
     let cert_pem = Zeroizing::new(std::fs::read(&pair.cert_path).map_err(|err| TlsError::FileLoadError {

@@ -72,9 +72,8 @@ pub struct AccessLogFilter {
     /// Monotonic counter for deterministic sampling.
     counter: AtomicU64,
 
-    /// Sampling denominator: log 1 out of every N requests.
-    /// 1 means log everything (default).
-    sample_every: u64,
+    /// Fraction of requests to log, in `(0.0, 1.0]`; `1.0` logs everything.
+    sample_rate: f64,
 
     /// Selected fields and header projections.
     emit_plan: EmitPlan,
@@ -236,7 +235,9 @@ impl AccessLogFilter {
 
     #[expect(clippy::too_many_lines, reason = "config validation and emit plan assembly")]
     fn build(cfg: AccessLogConfig) -> Result<Self, FilterError> {
-        if cfg.sample_rate <= 0.0 || cfg.sample_rate > 1.0 {
+        // NaN compares false against both bounds, so a plain range check
+        // lets it through and then every sampling comparison fails.
+        if !cfg.sample_rate.is_finite() || cfg.sample_rate <= 0.0 || cfg.sample_rate > 1.0 {
             return Err(format!("access_log: sample_rate must be in (0.0, 1.0], got {}", cfg.sample_rate).into());
         }
 
@@ -277,13 +278,6 @@ impl AccessLogFilter {
             .iter()
             .any(|token| matches!(token, FieldToken::ResponseHeader(_)));
 
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "sample rate truncation"
-        )]
-        let sample_every = (1.0 / cfg.sample_rate).round() as u64;
-
         let is_default = cfg.fields.is_none();
         let emit_plan = EmitPlan {
             fields: field_tokens,
@@ -291,7 +285,7 @@ impl AccessLogFilter {
         };
 
         Ok(Self {
-            sample_every,
+            sample_rate: cfg.sample_rate,
             counter: AtomicU64::default(),
             emit_plan,
             emit_conditions: cfg.conditions,
@@ -300,13 +294,18 @@ impl AccessLogFilter {
     }
 
     /// Returns `true` if this request should be logged (sampling check).
+    ///
+    /// Deterministic accumulator: of the first `n` requests exactly
+    /// `floor(n × sample_rate)` are logged, so rates that are not a
+    /// reciprocal integer (`0.7`, `0.4`) are honored rather than rounded to
+    /// one-in-N.
+    #[expect(clippy::cast_precision_loss, reason = "the counter stays far below 2^53")]
     fn should_log(&self) -> bool {
-        if self.sample_every <= 1 {
+        if self.sample_rate >= 1.0 {
             return true;
         }
-        self.counter
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(self.sample_every)
+        let seen = self.counter.fetch_add(1, Ordering::Relaxed) as f64;
+        ((seen + 1.0) * self.sample_rate).floor() > (seen * self.sample_rate).floor()
     }
 
     /// Returns `true` for responses that Pingora delivers without a body phase.
@@ -1030,6 +1029,16 @@ mod tests {
     }
 
     #[test]
+    fn from_config_rejects_nan_sample_rate() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("sample_rate: .nan").unwrap();
+        let err = AccessLogFilter::from_config(&yaml).err().expect("should fail");
+        assert!(
+            err.to_string().contains("sample_rate must be in (0.0, 1.0]"),
+            "NaN passes a range check and then never samples; got: {err}"
+        );
+    }
+
+    #[test]
     fn from_config_rejects_non_numeric_sample_rate() {
         let yaml: serde_yaml::Value = serde_yaml::from_str("sample_rate: abc").unwrap();
         let err = AccessLogFilter::from_config(&yaml).err().expect("should fail");
@@ -1162,7 +1171,7 @@ conditions:
     #[test]
     fn should_log_every_request_by_default() {
         let filter = AccessLogFilter {
-            sample_every: 1,
+            sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![],
@@ -1172,14 +1181,14 @@ conditions:
             needs_response_headers: false,
         };
         for _ in 0..5 {
-            assert!(filter.should_log(), "sample_every=1 should log every request");
+            assert!(filter.should_log(), "sample_rate=1.0 should log every request");
         }
     }
 
     #[test]
     fn should_log_samples_at_rate() {
         let filter = AccessLogFilter {
-            sample_every: 4,
+            sample_rate: 0.25,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![],
@@ -1198,6 +1207,27 @@ conditions:
     }
 
     #[test]
+    fn should_log_honors_non_reciprocal_rates() {
+        for (rate, calls, expected) in [(0.7, 10, 7), (0.4, 10, 4), (0.000_000_51, 2_000_000, 1)] {
+            let filter = AccessLogFilter {
+                sample_rate: rate,
+                counter: AtomicU64::default(),
+                emit_plan: EmitPlan {
+                    fields: vec![],
+                    is_default: true,
+                },
+                emit_conditions: None,
+                needs_response_headers: false,
+            };
+            let logged = (0..calls).filter(|_| filter.should_log()).count();
+            assert_eq!(
+                logged, expected,
+                "rate {rate} over {calls} calls must log exactly {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn status_class_or_matching() {
         assert!(StatusClass::ServerError.matches(500));
         assert!(StatusClass::ClientError.matches(404));
@@ -1207,7 +1237,7 @@ conditions:
     #[test]
     fn passes_emit_conditions_and_sampling_order() {
         let filter = AccessLogFilter {
-            sample_every: 1,
+            sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![FieldToken::Method],
@@ -1497,7 +1527,7 @@ conditions:
     #[tokio::test]
     async fn on_response_continues_with_no_header() {
         let filter = AccessLogFilter {
-            sample_every: 1,
+            sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![],
@@ -1521,7 +1551,7 @@ conditions:
         use praxis_core::connectivity::{ConnectionOptions, Upstream};
 
         let filter = AccessLogFilter {
-            sample_every: 1,
+            sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![],
@@ -1561,7 +1591,7 @@ conditions:
     #[tokio::test]
     async fn on_response_stores_state_in_filter_state() {
         let filter = AccessLogFilter {
-            sample_every: 1,
+            sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![],
@@ -1589,7 +1619,7 @@ conditions:
     #[tokio::test]
     async fn on_response_no_header_skips_filter_state() {
         let filter = AccessLogFilter {
-            sample_every: 1,
+            sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![],
@@ -1651,7 +1681,7 @@ conditions:
     #[tokio::test]
     async fn on_response_stores_status_for_bodyless() {
         let filter = AccessLogFilter {
-            sample_every: 1,
+            sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![],
@@ -1679,7 +1709,7 @@ conditions:
     #[test]
     fn on_response_body_continues_before_end_of_stream() {
         let filter = AccessLogFilter {
-            sample_every: 1,
+            sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![],
@@ -1703,7 +1733,7 @@ conditions:
     #[expect(clippy::too_many_lines, reason = "integration-style filter context setup")]
     async fn on_response_body_uses_status_from_on_response() {
         let filter = AccessLogFilter {
-            sample_every: 1,
+            sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![],
@@ -1741,7 +1771,7 @@ conditions:
     #[test]
     fn response_body_access_is_read_only() {
         let filter = AccessLogFilter {
-            sample_every: 1,
+            sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
                 fields: vec![],

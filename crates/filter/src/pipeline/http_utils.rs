@@ -153,7 +153,12 @@ pub(super) fn dispatch_body_result(
     failure_mode: FailureMode,
 ) -> Result<BodyFilterOutcome, FilterError> {
     match result {
-        Ok(FilterAction::Continue | FilterAction::TerminalResponse(_) | FilterAction::StreamingTerminalResponse(_)) => {
+        Ok(FilterAction::Continue) => Ok(BodyFilterOutcome::Continue),
+        Ok(FilterAction::TerminalResponse(_) | FilterAction::StreamingTerminalResponse(_)) => {
+            warn!(
+                filter = filter_name,
+                "{phase}: terminal response ignored; only request-phase filters may synthesize a response"
+            );
             Ok(BodyFilterOutcome::Continue)
         },
         Ok(FilterAction::Release) => {
@@ -603,6 +608,16 @@ mod tests {
         assert!(
             matches!(outcome, BodyFilterOutcome::Continue),
             "Ok(Continue) should produce BodyFilterOutcome::Continue"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_terminal_response_is_ignored_not_honored() {
+        let terminal = FilterAction::TerminalResponse(Box::new(crate::TerminalResponse::new(200)));
+        let outcome = dispatch_body_result(Ok(terminal), "test", "request_body", FailureMode::Closed).unwrap();
+        assert!(
+            matches!(outcome, BodyFilterOutcome::Continue),
+            "a terminal response from a body phase is dropped and the body continues"
         );
     }
 

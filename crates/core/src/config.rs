@@ -214,16 +214,38 @@ impl Config {
     ///
     /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
     pub fn load(explicit_path: Option<&str>, fallback_yaml: &str) -> Result<Self, crate::errors::ProxyError> {
-        if let Some(path) = explicit_path {
-            Self::from_file(Path::new(path))
+        let default_path = Path::new("praxis.yaml");
+        let resolved = explicit_path
+            .map(Path::new)
+            .or_else(|| default_path.exists().then_some(default_path));
+        Self::load_from(resolved, fallback_yaml)
+    }
+
+    /// Load from an already-resolved source: the file at `path`, or
+    /// `fallback_yaml` when there is none.
+    ///
+    /// Callers that also need the path (to watch it for reloads) resolve it
+    /// once and pass it here, so the loaded config and the watched file
+    /// cannot disagree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProxyError::Config`] if the source cannot be loaded or is invalid.
+    ///
+    /// ```
+    /// use praxis_core::config::{Config, DEFAULT_CONFIG};
+    ///
+    /// let cfg = Config::load_from(None, DEFAULT_CONFIG).unwrap();
+    /// assert!(!cfg.listeners.is_empty());
+    /// ```
+    ///
+    /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
+    pub fn load_from(path: Option<&Path>, fallback_yaml: &str) -> Result<Self, crate::errors::ProxyError> {
+        if let Some(path) = path {
+            Self::from_file(path)
         } else {
-            let default_path = Path::new("praxis.yaml");
-            if default_path.exists() {
-                Self::from_file(default_path)
-            } else {
-                tracing::info!("no config file found, using built-in default");
-                Self::from_yaml(fallback_yaml)
-            }
+            tracing::info!("no config file found, using built-in default");
+            Self::from_yaml(fallback_yaml)
         }
     }
 }

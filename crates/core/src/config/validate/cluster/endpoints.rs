@@ -75,19 +75,51 @@ fn validate_endpoint_address(addr: &str, cluster_name: &str) -> Result<(), Proxy
             "cluster '{cluster_name}': endpoint '{addr}' must be 'host:port' with a valid port"
         )));
     }
+    validate_endpoint_host(host, addr, cluster_name)
+}
+
+/// Reject a host part that can never resolve: unbalanced IPv6 brackets,
+/// an empty host, a bracketed non-IPv6 literal, or a hostname outside
+/// RFC 1035 syntax.
+fn validate_endpoint_host(host: &str, addr: &str, cluster_name: &str) -> Result<(), ProxyError> {
+    // An unbalanced bracket (`[::1:80`, `::1]:80`) is neither an IPv6
+    // literal nor a resolvable hostname, so it can only fail at connect.
+    if host.starts_with('[') != host.ends_with(']') {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': endpoint '{addr}' has an unbalanced IPv6 bracket (expected '[addr]:port')"
+        )));
+    }
     // A valid port with an empty host (`:80`) parses here but has no
     // resolvable host, so every request to the cluster fails at connect;
     // the empty host also slips past the SSRF hostname check.
-    let host = host
-        .strip_prefix('[')
-        .and_then(|stripped| stripped.strip_suffix(']'))
-        .unwrap_or(host);
+    let bracketed = host.strip_prefix('[').and_then(|stripped| stripped.strip_suffix(']'));
+    let host = bracketed.unwrap_or(host);
     if host.is_empty() {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': endpoint '{addr}' has an empty host (expected 'host:port')"
         )));
     }
-    Ok(())
+    // The runtime resolver strips brackets and accepts a bare IP literal,
+    // so only a non-literal host has to satisfy hostname syntax.
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    if bracketed.is_some() {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': endpoint '{addr}' is not an IPv6 address (expected '[addr]:port')"
+        )));
+    }
+    // Same rule `endpoint_selector` applies to its `host:port` values: a
+    // name outside RFC 1035 syntax (`bad host`, `my_backend`) cannot be
+    // resolved, so it can only fail at connect. A single trailing dot
+    // (`backend.example.com.`) is the fully-qualified form the resolver
+    // looks up without search domains, not an empty label.
+    let name = host.strip_suffix('.').unwrap_or(host);
+    praxis_tls::dns::validate_dns_hostname(name).map_err(|err| {
+        ProxyError::Config(format!(
+            "cluster '{cluster_name}': endpoint '{addr}' is not a valid hostname ({err})"
+        ))
+    })
 }
 
 /// Reject a zero or out-of-range endpoint weight.
@@ -328,6 +360,49 @@ mod tests {
     }
 
     #[test]
+    fn reject_unbalanced_ipv6_bracket_endpoint() {
+        for addr in ["[::1:80", "::1]:80"] {
+            let clusters = vec![Cluster::with_defaults("web", vec![addr.into()])];
+            let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+            assert!(
+                err.to_string().contains("unbalanced IPv6 bracket"),
+                "'{addr}' must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_endpoint_host_with_invalid_characters() {
+        for addr in ["bad host:80", "my_backend:80", "back$end:80", "-bad.example.com:80"] {
+            let clusters = vec![Cluster::with_defaults("web", vec![addr.into()])];
+            let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+            assert!(
+                err.to_string().contains("not a valid hostname"),
+                "'{addr}' can never resolve and must be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_bracketed_non_ipv6_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["[abc]:80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("not an IPv6 address"),
+            "brackets must hold an IPv6 literal: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_multi_label_hostname_endpoint() {
+        let clusters = vec![Cluster::with_defaults(
+            "web",
+            vec!["backend.svc.example.net:8080".into()],
+        )];
+        validate_clusters(&clusters, &InsecureOptions::default()).expect("dotted hostname:port should be accepted");
+    }
+
+    #[test]
     fn accept_ipv4_endpoint() {
         let clusters = vec![Cluster::with_defaults("web", vec!["10.0.0.1:8080".into()])];
         validate_clusters(&clusters, &InsecureOptions::default()).expect("valid IPv4:port should be accepted");
@@ -343,6 +418,23 @@ mod tests {
     fn accept_hostname_endpoint() {
         let clusters = vec![Cluster::with_defaults("web", vec!["api.example.com:443".into()])];
         validate_clusters(&clusters, &InsecureOptions::default()).expect("hostname:port should be accepted");
+    }
+
+    #[test]
+    fn accept_trailing_dot_fqdn_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["backend.example.com.:80".into()])];
+        validate_clusters(&clusters, &InsecureOptions::default())
+            .expect("a fully-qualified name with a trailing dot should be accepted");
+    }
+
+    #[test]
+    fn reject_dot_only_host_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec![".:80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("is not a valid hostname"),
+            "a lone dot is not a hostname: {err}"
+        );
     }
 
     #[test]

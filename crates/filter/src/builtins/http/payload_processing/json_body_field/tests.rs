@@ -99,6 +99,16 @@ fn reject_empty_header() {
 }
 
 #[test]
+fn reject_invalid_header_name() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("field: model\nheader: 'bad header'").unwrap();
+    let err = JsonBodyFieldFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("not a valid HTTP header name"),
+        "a header name that can never be emitted must be rejected at config time: {err}"
+    );
+}
+
+#[test]
 fn reject_missing_both() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
     let err = JsonBodyFieldFilter::from_config(&yaml).err().expect("should fail");
