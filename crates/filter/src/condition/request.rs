@@ -156,6 +156,39 @@ pub(crate) fn should_execute_from<S: HeaderSource>(
     Ok(true)
 }
 
+/// Returns true if the request's intrinsic attributes (gRPC kind, path, method)
+/// satisfy the predicate. These fields read only `req`, so they are independent
+/// of the header source and selected-upstream metadata. Unset fields impose no
+/// constraint (vacuously true).
+fn matches_request_intrinsics(m: &ConditionMatch, req: &Request) -> bool {
+    if let Some(want_grpc) = m.grpc
+        && GrpcKind::from_headers(&req.headers).is_grpc() != want_grpc
+    {
+        return false;
+    }
+
+    if let Some(exact) = &m.path
+        && req.uri.path() != exact
+    {
+        return false;
+    }
+
+    if let Some(prefix) = &m.path_prefix
+        && !crate::path_match::path_prefix_matches(req.uri.path(), prefix)
+    {
+        return false;
+    }
+
+    if let Some(methods) = &m.methods
+        && !methods
+            .iter()
+            .any(|method| method.eq_ignore_ascii_case(req.method.as_str()))
+    {
+        return false;
+    }
+    true
+}
+
 /// Returns true if all specified fields in the predicate match the request,
 /// reading header values from `source` and selected-upstream metadata from
 /// `selected`. Unset fields impose no constraint (vacuously true).
@@ -165,29 +198,7 @@ fn matches_request_from<S: HeaderSource>(
     source: &S,
     selected: SelectedUpstream<'_>,
 ) -> Result<bool, S::Error> {
-    if let Some(want_grpc) = m.grpc
-        && GrpcKind::from_headers(&req.headers).is_grpc() != want_grpc
-    {
-        return Ok(false);
-    }
-
-    if let Some(exact) = &m.path
-        && req.uri.path() != exact
-    {
-        return Ok(false);
-    }
-
-    if let Some(prefix) = &m.path_prefix
-        && !crate::path_match::path_prefix_matches(req.uri.path(), prefix)
-    {
-        return Ok(false);
-    }
-
-    if let Some(methods) = &m.methods
-        && !methods
-            .iter()
-            .any(|method| method.eq_ignore_ascii_case(req.method.as_str()))
-    {
+    if !matches_request_intrinsics(m, req) {
         return Ok(false);
     }
 

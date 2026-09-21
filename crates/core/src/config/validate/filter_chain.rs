@@ -266,16 +266,16 @@ pub(super) fn validate_selected_upstream_matchers(
 /// The declared cluster application identifiers a `selected_upstream` matcher
 /// may name (across top-level and inline clusters).
 #[derive(Default)]
-struct DeclaredUpstreams<'a> {
+struct DeclaredUpstreams<'cfg> {
     /// Every declared cluster's `application_protocol`.
-    protocols: HashSet<&'a str>,
+    protocols: HashSet<&'cfg str>,
     /// Every declared cluster's `application_provider`.
-    providers: HashSet<&'a str>,
+    providers: HashSet<&'cfg str>,
     /// Every `(application_protocol, application_provider)` pair declared
     /// together on a single cluster. A matcher naming both fields matches only a
     /// cluster that carries both, so it must name a pair from this set, not one
     /// value drawn from each of two different clusters.
-    pairs: HashSet<(&'a str, &'a str)>,
+    pairs: HashSet<(&'cfg str, &'cfg str)>,
 }
 
 /// Check one filter entry's `selected_upstream` matchers, recursing into inline
@@ -288,7 +288,7 @@ fn validate_entry_selected_upstream(
 ) -> Result<(), ProxyError> {
     for (idx, condition) in entry.conditions.iter().enumerate() {
         let matcher = match condition {
-            Condition::When(m) | Condition::Unless(m) => m,
+            Condition::When(inner) | Condition::Unless(inner) => inner,
         };
         if let Some(selected) = &matcher.selected_upstream {
             check_selected_upstream_values(chain_name, &entry.filter_type, idx, selected, declared)?;
