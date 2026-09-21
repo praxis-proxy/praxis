@@ -13,14 +13,15 @@ use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 
 /// Install a process-wide default [`CryptoProvider`] for tests.
 ///
-/// When `cargo test --workspace` enables both `aws-lc-rs` and `ring`
-/// features, rustls cannot auto-detect a provider, so it must be
-/// installed explicitly. Idempotent: a no-op if a provider is already
-/// installed.
+/// rustls has no implicit fallback here — the Pingora fork enables
+/// `custom-provider` — so a test that builds any config must install one
+/// first. Delegates to [`crate::provider::install`] so tests exercise
+/// whichever provider the build selected, rather than pinning one of their
+/// own. Idempotent.
 ///
 /// [`CryptoProvider`]: rustls::crypto::CryptoProvider
 pub(crate) fn ensure_crypto_provider() {
-    drop(rustls::crypto::aws_lc_rs::default_provider().install_default());
+    crate::provider::install();
 }
 
 // -----------------------------------------------------------------------------
@@ -81,6 +82,7 @@ pub(crate) fn gen_test_certs_in(dir: &std::path::Path) -> TestCerts {
 
 /// Generate a self-signed CA certificate file for testing.
 pub(crate) fn gen_ca_file() -> TestCa {
+    ensure_crypto_provider();
     let ca_key = KeyPair::generate().expect("CA key generation");
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
     ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
@@ -136,6 +138,10 @@ fn gen_certs_at(dir: &std::path::Path, ca_cn: &str) -> GeneratedCerts {
 
 /// Generate a CA and server cert with custom SANs in `dir`.
 fn gen_certs_with_sans_at(dir: &std::path::Path, ca_cn: &str, sans: Vec<String>) -> GeneratedCerts {
+    // Any test that needs certificates will load them, and loading verifies
+    // the cert against its key through the installed provider. Hooking the
+    // fixture means no test has to remember.
+    ensure_crypto_provider();
     let ca_key = KeyPair::generate().expect("CA key generation");
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
     ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);

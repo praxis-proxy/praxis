@@ -431,7 +431,6 @@ impl Default for ServerComposition {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use praxis_core::subrequest::SubRequestConnector;
     use praxis_filter::RequestExtensions;
 
     use super::*;
@@ -581,7 +580,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn empty_subrequest_client() -> SubRequestClient {
-        SubRequestClient::new(SubRequestConnector::new(8, None))
+        SubRequestClient::new(crate::test_support::connector(8))
     }
 
     fn empty_pipeline() -> FilterPipeline {

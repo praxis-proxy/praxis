@@ -54,6 +54,12 @@ struct Cli {
 /// Entry point.
 #[expect(clippy::print_stderr, reason = "fatal error output")]
 fn main() {
+    // Before anything that might build a TLS config. `--validate` and `--dump`
+    // return without reaching `run_server`, and both construct a sub-request
+    // connector, so installing only on the serving path would leave those two
+    // subcommands panicking inside rustls.
+    praxis::install_crypto_provider();
+
     let cli = Cli::parse();
     let explicit = cli.config.or_else(|| std::env::var("PRAXIS_CONFIG").ok());
 

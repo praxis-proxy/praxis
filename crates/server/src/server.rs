@@ -37,6 +37,37 @@ use crate::{
     },
 };
 
+/// Install the rustls crypto provider selected at build time.
+///
+/// Must run before anything constructs a listener or an upstream connector.
+/// Pingora builds its upstream connectors while the proxy *service* is
+/// created, which is earlier than it looks, so this is the first statement of
+/// server startup rather than something done just before serving.
+///
+/// Fails the process if no provider ends up installed. There is no fallback:
+/// rustls' implicit one is compiled out by the Pingora fork's
+/// `custom-provider` feature, and quietly substituting a provider nobody
+/// selected is precisely the failure this guards against. For a FIPS build
+/// the provider *is* the compliance boundary, so starting without the
+/// intended one is worse than not starting.
+#[expect(clippy::print_stderr, reason = "fatal error before tracing is usable")]
+pub fn install_crypto_provider() {
+    let installed_here = praxis_tls::provider::install();
+
+    if !praxis_tls::provider::installed() {
+        eprintln!(
+            "fatal: failed to install the {} crypto provider; refusing to start",
+            praxis_tls::provider::name()
+        );
+        std::process::exit(1);
+    }
+
+    info!(
+        provider = praxis_tls::provider::name(),
+        installed_here, "installed rustls crypto provider"
+    );
+}
+
 /// Root, insecure-option, and file-permission checks before the server starts.
 fn run_startup_security_checks(config: &Config) {
     #[cfg(feature = "experimental")]
@@ -150,6 +181,8 @@ pub fn run_server_with_composition(
     config_path: Option<PathBuf>,
     log_level: Option<Arc<LogLevelState>>,
 ) -> ! {
+    install_crypto_provider();
+
     run_startup_security_checks(&config);
 
     #[cfg(feature = "admin-api")]
@@ -788,7 +821,7 @@ filter_chains:
 
     #[test]
     fn circuit_eviction_task_spawns_without_panicking() {
-        let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
+        let connector = crate::test_support::connector(1);
         let client = praxis_core::subrequest::SubRequestClient::new(connector);
         spawn_circuit_eviction_task(client);
     }

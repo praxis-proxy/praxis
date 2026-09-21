@@ -41,6 +41,18 @@ pub enum TlsError {
     #[error("build_client_verifier must not be called with client_cert_mode=None")]
     ClientVerifierNotRequired,
 
+    /// No crypto provider has been installed for this process.
+    ///
+    /// Praxis installs one during server bootstrap. Reaching this means TLS
+    /// was built before that ran, or the install was skipped. There is no
+    /// fallback by design: substituting a provider nobody selected is what
+    /// this error exists to prevent.
+    #[error(
+        "no crypto provider installed; praxis_tls::provider::install() must run during startup, \
+         before any listener or upstream connector is built"
+    )]
+    NoCryptoProvider,
+
     /// A `server_name` appears more than once across certificates.
     #[error("duplicate server_name '{name}' in certificate {path}")]
     DuplicateServerName {

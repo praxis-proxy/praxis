@@ -1767,6 +1767,6 @@ filter_chains:
 
     /// Empty sub-request client for tests.
     fn empty_subrequest_client() -> praxis_core::subrequest::SubRequestClient {
-        praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None))
+        praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8))
     }
 }

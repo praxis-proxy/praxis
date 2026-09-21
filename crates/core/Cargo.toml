@@ -17,6 +17,9 @@ name = "praxis_core"
 workspace = true
 
 [features]
+# Crypto provider passthrough — see crates/tls/src/provider.rs.
+openssl = ["praxis-tls/openssl"]
+aws-lc-rs = ["praxis-tls/aws-lc-rs"]
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",

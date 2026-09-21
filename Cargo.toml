@@ -72,7 +72,10 @@ praxis = { path = "crates/server", package = "praxis-proxy" }
 praxis-core = { version = "0.5.6", path = "crates/core", package = "praxis-proxy-core" }
 praxis-filter = { version = "0.5.6", path = "crates/filter", package = "praxis-proxy-filter" }
 praxis-protocol = { version = "0.5.6", path = "crates/protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.5.6", path = "crates/tls", package = "praxis-proxy-tls" }
+# default-features = false: the crypto provider is chosen by the top-level
+# binary and forwarded down, so no intermediate crate may pin one through
+# feature unification. See crates/tls/src/provider.rs.
+praxis-tls = { version = "0.5.6", path = "crates/tls", package = "praxis-proxy-tls", default-features = false }
 praxis-test-utils = { path = "tests/utils" }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
@@ -82,7 +85,12 @@ sha2 = "0.11.0"
 subtle = "2.6.1"
 rcgen = "0.14.10"
 regex = "1.13.1"
-rustls = "0.23.45"
+# No provider feature: the provider is selected by praxis-proxy-tls's
+# `openssl` / `aws-lc-rs` features and installed once at startup. Leaving
+# rustls' defaults on would silently re-enable aws-lc-rs for every build.
+# `prefer-post-quantum` is omitted because it implies `aws_lc_rs`.
+rustls = { version = "0.23.45", default-features = false, features = ["logging", "std", "tls12"] }
+rustls-openssl = "0.4.1"
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 syn = { version = "3.0.5", features = ["full", "extra-traits", "visit"] }
@@ -403,3 +411,33 @@ bare_urls = "deny"
 invalid_html_tags = "deny"
 missing_crate_level_docs = "deny"
 private_doc_tests = "allow"
+
+# -----------------------------------------------------------------------------
+# LOCAL DEVELOPMENT OVERRIDES — must be removed before merge
+# -----------------------------------------------------------------------------
+# These point the Pingora fork and the OpenSSL rustls provider at local working
+# copies. They exist because the work they carry is not published yet:
+#
+#   * quixotic-plecostomus-*  -> ../pingora, branch `remove-ring`. The published
+#     0.9.0 still depends on ring and still installs it as the process-wide
+#     provider, which would defeat everything below.
+#   * rustls-openssl -> the `fix/fips-self-report` branch, which routes digests,
+#     EC keygen and public-key import through EVP so they reach OpenSSL's FIPS
+#     provider. Published 0.4.1 does not carry those patches.
+#
+# CI has neither path, so this block breaks any build outside this machine.
+# Delete it once the fork is published and the rustls-openssl patches land
+# upstream or are vendored.
+[patch.crates-io]
+quixotic-plecostomus-cache = { path = "../pingora/pingora-cache" }
+quixotic-plecostomus-core = { path = "../pingora/pingora-core" }
+quixotic-plecostomus-error = { path = "../pingora/pingora-error" }
+quixotic-plecostomus-header-serde = { path = "../pingora/pingora-header-serde" }
+quixotic-plecostomus-http = { path = "../pingora/pingora-http" }
+quixotic-plecostomus-lru = { path = "../pingora/pingora-lru" }
+quixotic-plecostomus-pool = { path = "../pingora/pingora-pool" }
+quixotic-plecostomus-proxy = { path = "../pingora/pingora-proxy" }
+quixotic-plecostomus-runtime = { path = "../pingora/pingora-runtime" }
+quixotic-plecostomus-rustls = { path = "../pingora/pingora-rustls" }
+quixotic-plecostomus-timeout = { path = "../pingora/pingora-timeout" }
+rustls-openssl = { path = "../../rustls-openssl-fips" }

@@ -1682,7 +1682,7 @@ async fn on_request_no_connector() {
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "nested pipeline setup and ownership assertions")]
 async fn step_error_restores_parent_request_extensions() {
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let mut registry = crate::FilterRegistry::with_builtins();
     registry
@@ -1706,7 +1706,7 @@ steps:
     .unwrap();
     let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry).unwrap();
     let request = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let mut ctx = crate::test_utils::make_filter_context(&request);
     ctx.buffered_request_body = Some(bytes::Bytes::from_static(b"request"));
     ctx.subrequest_client = Some(&client);
@@ -1729,7 +1729,7 @@ steps:
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "nested pipeline setup and ownership assertions")]
 async fn completion_error_restores_parent_request_extensions() {
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let backend_port = start_unit_stream_backend();
     let mut registry = crate::FilterRegistry::with_builtins();
@@ -1762,7 +1762,7 @@ steps:
     .unwrap();
     let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry).unwrap();
     let request = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let mut ctx = crate::test_utils::make_filter_context(&request);
     ctx.buffered_request_body = Some(bytes::Bytes::from_static(b"request"));
     ctx.subrequest_client = Some(&client);
@@ -1790,7 +1790,7 @@ steps:
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "streaming pipeline setup and ownership assertions")]
 async fn streaming_completion_error_restores_parent_request_extensions() {
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let backend_port = start_unit_stream_backend();
     let mut registry = crate::FilterRegistry::with_builtins();
@@ -1830,7 +1830,7 @@ steps:
     .unwrap();
     let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry).unwrap();
     let request = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let mut ctx = crate::test_utils::make_filter_context(&request);
     ctx.buffered_request_body = Some(bytes::Bytes::from_static(b"request"));
     ctx.subrequest_client = Some(&client);
@@ -1878,7 +1878,7 @@ steps:
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "runtime guard setup and ownership assertions")]
 async fn streaming_runtime_guard_restores_parent_request_extensions() {
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let backend_port = start_unit_stream_backend();
     let mut registry = crate::FilterRegistry::with_builtins();
@@ -1913,7 +1913,7 @@ steps:
     .unwrap();
     let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry).unwrap();
     let request = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let mut ctx = crate::test_utils::make_filter_context(&request);
     ctx.buffered_request_body = Some(bytes::Bytes::from_static(b"request"));
     ctx.subrequest_client = Some(&client);
@@ -2569,7 +2569,7 @@ async fn closed_port_addr() -> std::net::SocketAddr {
 
 /// Build a `SubRequestClient` over a fresh single-connection connector.
 fn make_client() -> praxis_core::subrequest::SubRequestClient {
-    praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(4, None))
+    praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(4, None))
 }
 
 /// Build a filter context wired with a sub-request client and a

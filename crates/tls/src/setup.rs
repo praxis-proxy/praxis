@@ -178,7 +178,7 @@ fn build_config_builder(
             vec![&version::TLS12, &version::TLS13]
         },
     };
-    let provider = maybe_filter_provider(default_crypto_provider(), tls.cipher_suites.as_deref())?;
+    let provider = maybe_filter_provider(default_crypto_provider()?, tls.cipher_suites.as_deref())?;
     ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&versions)
         .map_err(|e| TlsError::ServerConfigError {
@@ -195,7 +195,7 @@ fn build_server_config_base(
         Some(TlsVersion::Tls13) => vec![&version::TLS13],
         Some(TlsVersion::Tls12) | None => vec![&version::TLS12, &version::TLS13],
     };
-    let provider = maybe_filter_provider(default_crypto_provider(), tls.cipher_suites.as_deref())?;
+    let provider = maybe_filter_provider(default_crypto_provider()?, tls.cipher_suites.as_deref())?;
     let builder = ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&versions)
         .map_err(|e| TlsError::ServerConfigError {
@@ -239,7 +239,7 @@ fn maybe_filter_provider(
     let filtered: Vec<_> = ids
         .iter()
         .filter_map(|id| {
-            let target = id.to_rustls().suite();
+            let target = id.to_rustls();
             provider.cipher_suites.iter().find(|s| s.suite() == target).copied()
         })
         .collect();
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn maybe_filter_provider_none_returns_original() {
-        let provider = default_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed by test_utils");
         let original_count = provider.cipher_suites.len();
 
         let result = maybe_filter_provider(Arc::clone(&provider), None).expect("None filter should succeed");
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn maybe_filter_provider_restricts_suites() {
-        let provider = default_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed by test_utils");
         let ids = [CipherSuiteId::Tls13Aes256GcmSha384];
 
         let result = maybe_filter_provider(provider, Some(&ids)).expect("single-suite filter should succeed");
@@ -651,14 +651,14 @@ mod tests {
         );
         assert_eq!(
             result.cipher_suites[0].suite(),
-            CipherSuiteId::Tls13Aes256GcmSha384.to_rustls().suite(),
+            CipherSuiteId::Tls13Aes256GcmSha384.to_rustls(),
             "filtered suite should match the requested one"
         );
     }
 
     #[test]
     fn maybe_filter_provider_preserves_configured_order() {
-        let provider = default_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed by test_utils");
         let ids = [
             CipherSuiteId::Tls13Chacha20Poly1305Sha256,
             CipherSuiteId::Tls13Aes128GcmSha256,
@@ -672,19 +672,19 @@ mod tests {
         );
         assert_eq!(
             result.cipher_suites[0].suite(),
-            CipherSuiteId::Tls13Chacha20Poly1305Sha256.to_rustls().suite(),
+            CipherSuiteId::Tls13Chacha20Poly1305Sha256.to_rustls(),
             "first suite should match the first configured cipher"
         );
         assert_eq!(
             result.cipher_suites[1].suite(),
-            CipherSuiteId::Tls13Aes128GcmSha256.to_rustls().suite(),
+            CipherSuiteId::Tls13Aes128GcmSha256.to_rustls(),
             "second suite should match the second configured cipher"
         );
     }
 
     #[test]
     fn maybe_filter_provider_reverses_provider_order_when_configured() {
-        let provider = default_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed by test_utils");
         let ids = [
             CipherSuiteId::Tls13Aes128GcmSha256,
             CipherSuiteId::Tls13Aes256GcmSha384,

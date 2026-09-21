@@ -25,6 +25,7 @@ clap = { workspace = true }
 notify = { workspace = true, optional = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
+praxis-tls = { workspace = true }
 praxis-protocol = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -45,7 +46,16 @@ tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [features]
-default = ["config-reload", "admin-api", "policy-engine"]
+default = ["config-reload", "admin-api", "policy-engine", "openssl"]
+
+# Crypto provider. Exactly one; see crates/tls/src/provider.rs.
+#   cargo build                                             -> OpenSSL
+#   cargo build --no-default-features --features aws-lc-rs  -> AWS-LC
+# OpenSSL is the default because it is the FIPS 140-3 target: the crypto is
+# performed by the platform's libcrypto.so rather than a statically linked
+# Rust implementation.
+openssl = ["praxis-tls/openssl", "praxis-core/openssl", "praxis-filter/openssl", "praxis-protocol/openssl"]
+aws-lc-rs = ["praxis-tls/aws-lc-rs", "praxis-core/aws-lc-rs", "praxis-filter/aws-lc-rs", "praxis-protocol/aws-lc-rs"]
 # Config-file and TLS certificate hot-reload (filesystem watching via
 # `notify`). On by default; disable for a leaner build that drops the
 # watchers and the `notify`/`arc-swap`/`tokio` deps they pull into tls.

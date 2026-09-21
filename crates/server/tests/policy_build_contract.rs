@@ -56,6 +56,9 @@ filter_chains:
 fn resolving_pipelines_registers_the_proxy_pool_for_policy_calls() {
     use std::{collections::HashMap, sync::Arc};
 
+    // Calls resolve_pipelines directly, so it misses main()'s provider install.
+    praxis::install_crypto_provider();
+
     use praxis::{build_subrequest_client, resolve_pipelines};
     use praxis_core::config::Config;
     use praxis_filter::{FilterRegistry, SessionStoreRegistry, registered_policy_subrequest_connector};

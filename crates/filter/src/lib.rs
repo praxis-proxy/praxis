@@ -64,6 +64,24 @@ mod results;
 pub mod sse;
 mod tcp_filter;
 
+/// Test-only helpers.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use praxis_core::subrequest::SubRequestConnector;
+
+    /// Build a connector, installing the crypto provider first.
+    ///
+    /// Tests construct connectors directly and so never reach the server
+    /// bootstrap that installs the provider. Pingora builds a TLS client
+    /// config during construction, and rustls has no implicit fallback — the
+    /// Pingora fork enables `custom-provider` — so this would otherwise
+    /// panic. Idempotent.
+    pub(crate) fn connector(keepalive_pool_size: usize, max_connections: Option<usize>) -> SubRequestConnector {
+        praxis_tls::provider::install();
+        SubRequestConnector::new(keepalive_pool_size, max_connections)
+    }
+}
+
 pub use actions::{
     FilterAction, Rejection, SelectedUpstreamBodyOutcome, StreamingResponseBody, StreamingTerminalResponse,
     TerminalResponse,

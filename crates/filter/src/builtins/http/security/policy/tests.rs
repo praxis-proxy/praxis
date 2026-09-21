@@ -2926,7 +2926,7 @@ fn try_build_filter_allowing_private(
     let _guard = crate::policy_connector::REGISTRATION_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::set_policy_subrequest_connector(&praxis_core::subrequest::SubRequestConnector::new(
+    crate::set_policy_subrequest_connector(&crate::test_support::connector(
         praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE,
         None,
     ));

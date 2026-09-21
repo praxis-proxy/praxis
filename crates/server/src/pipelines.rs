@@ -1146,7 +1146,7 @@ filter_chains:
 
     /// Empty sub-request client for tests.
     fn empty_subrequest_client() -> SubRequestClient {
-        SubRequestClient::new(SubRequestConnector::new(8, None))
+        SubRequestClient::new(crate::test_support::connector(8))
     }
 
     /// KV store registry with one test store.

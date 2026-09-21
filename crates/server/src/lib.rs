@@ -39,6 +39,27 @@ pub(crate) mod startup_checks;
 mod version;
 #[cfg(feature = "config-reload")]
 pub(crate) mod watcher;
+/// Test-only helpers.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use praxis_core::subrequest::SubRequestConnector;
+
+    /// Build a `SubRequestConnector`, installing the crypto provider first.
+    ///
+    /// Unit tests construct connectors directly, bypassing the server
+    /// bootstrap that normally installs the provider. Pingora builds a TLS
+    /// client config while the connector is created, and rustls has no
+    /// implicit fallback — the Pingora fork enables `custom-provider` — so
+    /// without this the constructor panics.
+    ///
+    /// Production is unaffected: `run_server_*` installs during bootstrap,
+    /// well before any connector exists.
+    pub(crate) fn connector(peers: usize) -> SubRequestConnector {
+        praxis_tls::provider::install();
+        SubRequestConnector::new(peers, None)
+    }
+}
+
 pub use composition::{CompositionError, ExtensionContext, RegistryContext, ServerComposition, ValidatorContext};
 pub use pipelines::{build_subrequest_client, resolve_pipelines};
 pub use praxis_core::{
@@ -47,7 +68,8 @@ pub use praxis_core::{
 };
 pub use praxis_filter::{PipelineExtension, RequestExtensions};
 pub use server::{
-    check_root_privilege, fatal, resolve_config_path, run_server, run_server_with_composition, run_server_with_registry,
+    check_root_privilege, fatal, install_crypto_provider, resolve_config_path, run_server, run_server_with_composition,
+    run_server_with_registry,
 };
 #[cfg(feature = "admin-api")]
 pub use version::process_version_info;

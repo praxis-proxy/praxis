@@ -17,12 +17,26 @@ name = "praxis_tls"
 workspace = true
 
 [features]
+default = ["openssl"]
 config-reload = ["dep:arc-swap", "dep:notify", "dep:tokio"]
+
+# Crypto provider selection. Exactly one must be enabled; see
+# `src/provider.rs`. rustls itself performs no cryptography — it delegates
+# every primitive to the installed provider.
+#
+# `openssl` routes cryptography to the system libcrypto.so, which on a
+# FIPS-enabled host is the platform's validated module. This is the
+# configuration Praxis targets for FIPS 140-3.
+openssl = ["dep:rustls-openssl"]
+# Statically linked AWS-LC. Builds without system OpenSSL, but the validated
+# module would be AWS's rather than the platform's.
+aws-lc-rs = ["rustls/aws_lc_rs"]
 
 [dependencies]
 arc-swap = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 rustls = { workspace = true }
+rustls-openssl = { workspace = true, optional = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"], optional = true }

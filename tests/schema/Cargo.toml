@@ -8,6 +8,9 @@ readme = "../../README.md"
 publish = false
 
 [features]
+# Crypto provider passthrough — see crates/tls/src/provider.rs.
+openssl = ["praxis-tls/openssl"]
+aws-lc-rs = ["praxis-tls/aws-lc-rs"]
 
 [lints]
 workspace = true
