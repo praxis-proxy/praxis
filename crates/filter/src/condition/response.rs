@@ -148,20 +148,23 @@ fn params_match(actual: &str, expected: &str) -> bool {
 /// Compare one parameter value under the case rule its name implies.
 fn param_value_matches(name: &str, actual: &str, expected: &str) -> bool {
     if name.eq_ignore_ascii_case("charset") {
-        actual.eq_ignore_ascii_case(expected)
+        value_chars(actual)
+            .map(|ch| ch.to_ascii_lowercase())
+            .eq(value_chars(expected).map(|ch| ch.to_ascii_lowercase()))
     } else {
-        actual == expected
+        value_chars(actual).eq(value_chars(expected))
     }
 }
 
-/// The `name=value` parameters after the first `;`, trimmed and unquoted.
+/// The `name=value` parameters after the first `;`, trimmed.
 ///
 /// Splits only on semicolons outside a quoted-string, so
-/// `boundary="a;b"` stays one parameter (RFC 9110 §5.6.4).
+/// `boundary="a;b"` stays one parameter (RFC 9110 §5.6.4). Values keep
+/// their quotes; [`value_chars`] removes them at comparison time.
 fn params(value: &str) -> impl Iterator<Item = (&str, &str)> {
     split_outside_quotes(value.split_once(';').map_or("", |(_, params)| params))
         .filter_map(|param| param.split_once('='))
-        .map(|(name, val)| (name.trim(), unquote(val.trim())))
+        .map(|(name, val)| (name.trim(), val.trim()))
 }
 
 /// Split `params` on `;`, ignoring semicolons inside double quotes and
@@ -181,12 +184,24 @@ fn split_outside_quotes(params: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Strip one pair of surrounding double quotes.
-fn unquote(value: &str) -> &str {
-    value
-        .strip_prefix('"')
-        .and_then(|inner| inner.strip_suffix('"'))
-        .unwrap_or(value)
+/// The characters of a parameter value with one pair of surrounding double
+/// quotes removed and quoted-pairs decoded, so `"foo\;bar"` equals
+/// `"foo;bar"` (RFC 9110 §5.6.4). An unquoted token yields its characters
+/// as written.
+fn value_chars(value: &str) -> impl Iterator<Item = char> + '_ {
+    let quoted = value.strip_prefix('"').and_then(|inner| inner.strip_suffix('"'));
+    let mut chars = quoted.unwrap_or(value).chars();
+    let decode = quoted.is_some();
+    std::iter::from_fn(move || {
+        let ch = chars.next()?;
+        // A backslash with nothing after it is a malformed quoted-string;
+        // keep it literal rather than dropping it.
+        Some(if decode && ch == '\\' {
+            chars.next().unwrap_or(ch)
+        } else {
+            ch
+        })
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -491,6 +506,36 @@ mod tests {
                 &resp
             ),
             "the same quoted value must still match"
+        );
+    }
+
+    #[test]
+    fn content_type_quoted_pair_decodes_before_compare() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("multipart/form-data; boundary=\"foo\\;bar\""),
+        );
+        let resp = make_response(200, headers);
+        assert!(
+            should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "multipart/form-data; boundary=\"foo;bar\""
+                )]))],
+                &resp
+            ),
+            "`\\;` inside a quoted-string is the same octet as `;` (RFC 9110 §5.6.4)"
+        );
+        assert!(
+            !should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "multipart/form-data; boundary=\"foo;baz\""
+                )]))],
+                &resp
+            ),
+            "decoding must not make different values match"
         );
     }
 
