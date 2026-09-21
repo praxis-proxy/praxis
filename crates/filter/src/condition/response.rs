@@ -127,22 +127,33 @@ fn has_parameters(value: &str) -> bool {
         .is_some_and(|(_, params)| !params.trim().is_empty())
 }
 
-/// Compare media-type parameters as a set, ignoring order, surrounding
-/// whitespace, quotes, and the ASCII case of parameter names.
+/// Compare media-type parameters as a multiset, ignoring order,
+/// surrounding whitespace, quotes, and the ASCII case of parameter names.
 ///
 /// Values are compared exactly, except `charset`, which RFC 9110 §8.3.1
 /// defines as case-insensitive (`charset=UTF-8` equals `charset=utf-8`).
 /// A multipart `boundary` is case-sensitive and must not fold.
 ///
+/// Every parameter must occur the same number of times on both sides, so
+/// a duplicated name cannot stand in for a missing one
+/// (`charset=utf-8; charset=utf-8` does not match `charset=utf-8; foo=bar`).
+///
 /// Compares in place rather than normalizing into owned strings, since this
-/// runs on the response path for every evaluation of such a condition.
+/// runs on the response path for every evaluation of such a condition;
+/// parameter lists are short enough that the quadratic scan is cheaper
+/// than allocating.
 fn params_match(actual: &str, expected: &str) -> bool {
     params(actual).count() == params(expected).count()
-        && params(expected).all(|(name, value)| {
-            params(actual).any(|(other_name, other_value)| {
-                other_name.eq_ignore_ascii_case(name) && param_value_matches(name, other_value, value)
-            })
+        && params(expected).all(|param| count_matching(actual, param) == count_matching(expected, param))
+}
+
+/// How many parameters of `value` equal `param` under its name's case rule.
+fn count_matching(value: &str, (name, val): (&str, &str)) -> usize {
+    params(value)
+        .filter(|(other_name, other_val)| {
+            other_name.eq_ignore_ascii_case(name) && param_value_matches(name, other_val, val)
         })
+        .count()
 }
 
 /// Compare one parameter value under the case rule its name implies.
@@ -536,6 +547,53 @@ mod tests {
                 &resp
             ),
             "decoding must not make different values match"
+        );
+    }
+
+    #[test]
+    fn content_type_duplicate_parameter_is_not_a_subset_match() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("text/plain; charset=utf-8; foo=bar"),
+        );
+        let resp = make_response(200, headers);
+        assert!(
+            !should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "text/plain; charset=utf-8; charset=utf-8"
+                )]))],
+                &resp
+            ),
+            "a repeated parameter must not stand in for a missing one"
+        );
+    }
+
+    #[test]
+    fn content_type_parameters_compare_as_multiset() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("text/plain; a=1; a=1; b=2"));
+        let resp = make_response(200, headers);
+        assert!(
+            !should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "text/plain; a=1; b=2; b=2"
+                )]))],
+                &resp
+            ),
+            "equal counts and mutual containment are not enough; multiplicities must agree"
+        );
+        assert!(
+            should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "text/plain; b=2; a=1; a=1"
+                )]))],
+                &resp
+            ),
+            "the same multiset in another order must still match"
         );
     }
 
