@@ -61,6 +61,9 @@ fn resolving_pipelines_registers_the_proxy_pool_for_policy_calls() {
     use praxis_core::config::Config;
     use praxis_filter::{FilterRegistry, SessionStoreRegistry, registered_policy_subrequest_connector};
 
+    // Calls resolve_pipelines directly, so it misses main()'s provider install.
+    praxis::install_crypto_provider();
+
     let config = Config::from_yaml(CONFIG).expect("the test config must parse");
     let client = build_subrequest_client(&config);
 

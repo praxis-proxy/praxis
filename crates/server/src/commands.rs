@@ -125,6 +125,8 @@ mod tests {
 
     #[test]
     fn load_and_validate_for_cli_with_valid_config() {
+        // These call the CLI helpers directly, so they miss main()'s install.
+        praxis_tls::provider::install();
         let path = example_config_path("traffic-management/basic-reverse-proxy.yaml");
         let result = load_and_validate_for_cli(Some(&path));
         assert!(
@@ -142,6 +144,8 @@ mod tests {
 
     #[test]
     fn load_and_validate_for_cli_with_none_uses_default() {
+        // These call the CLI helpers directly, so they miss main()'s install.
+        praxis_tls::provider::install();
         let result = load_and_validate_for_cli(None);
         assert!(
             result.is_ok(),
@@ -158,6 +162,8 @@ mod tests {
 
     #[test]
     fn run_dump_with_valid_config() {
+        // These call the CLI helpers directly, so they miss main()'s install.
+        praxis_tls::provider::install();
         let path = example_config_path("traffic-management/basic-reverse-proxy.yaml");
         let result = run_dump(Some(&path));
         assert!(
@@ -200,6 +206,8 @@ filter_chains:
 
     #[test]
     fn validate_rejects_unknown_filter_type() {
+        // These call the CLI helpers directly, so they miss main()'s install.
+        praxis_tls::provider::install();
         let config = Config::from_yaml(
             r#"
 listeners:

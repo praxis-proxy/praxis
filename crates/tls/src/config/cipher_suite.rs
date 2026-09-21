@@ -3,7 +3,7 @@
 
 //! Cipher suite identifiers for restricting accepted TLS cipher suites.
 
-use rustls::{SupportedCipherSuite, crypto::aws_lc_rs::cipher_suite};
+use rustls::CipherSuite;
 use serde::{Deserialize, Serialize};
 
 // -----------------------------------------------------------------------------
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// Cipher suite identifier for restricting accepted TLS cipher suites.
 ///
-/// Maps to `aws_lc_rs` [`SupportedCipherSuite`] variants. TLS 1.3
+/// Maps to rustls [`CipherSuite`] wire identifiers. TLS 1.3
 /// suites begin with `tls13_`; TLS 1.2 suites begin with `tls12_`.
 ///
 /// ```
@@ -72,33 +72,39 @@ pub enum CipherSuiteId {
 }
 
 impl CipherSuiteId {
-    /// Convert to the corresponding rustls [`SupportedCipherSuite`].
+    /// Convert to the corresponding rustls [`CipherSuite`] wire identifier.
+    ///
+    /// Deliberately an identifier rather than a `SupportedCipherSuite`: the
+    /// latter carries a provider's *implementation* of the suite, so naming
+    /// one here would tie the config surface to a particular provider. The
+    /// identifier is provider-independent, and the implementation is resolved
+    /// against whichever provider is installed — see
+    /// [`crate::provider`] and `setup::maybe_filter_provider`.
     ///
     /// ```
     /// use praxis_tls::CipherSuiteId;
     ///
     /// let suite = CipherSuiteId::Tls13Aes256GcmSha384;
-    /// let rustls_suite = suite.to_rustls();
     /// assert_eq!(
-    ///     format!("{:?}", rustls_suite.suite()),
+    ///     format!("{:?}", suite.to_rustls()),
     ///     "TLS13_AES_256_GCM_SHA384"
     /// );
     /// ```
     ///
-    /// [`SupportedCipherSuite`]: rustls::SupportedCipherSuite
-    pub fn to_rustls(&self) -> SupportedCipherSuite {
+    /// [`CipherSuite`]: rustls::CipherSuite
+    pub fn to_rustls(&self) -> CipherSuite {
         match self {
-            Self::Tls13Aes128GcmSha256 => cipher_suite::TLS13_AES_128_GCM_SHA256,
-            Self::Tls13Aes256GcmSha384 => cipher_suite::TLS13_AES_256_GCM_SHA384,
-            Self::Tls13Chacha20Poly1305Sha256 => cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
-            Self::Tls12EcdheEcdsaWithAes128GcmSha256 => cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-            Self::Tls12EcdheEcdsaWithAes256GcmSha384 => cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            Self::Tls13Aes128GcmSha256 => CipherSuite::TLS13_AES_128_GCM_SHA256,
+            Self::Tls13Aes256GcmSha384 => CipherSuite::TLS13_AES_256_GCM_SHA384,
+            Self::Tls13Chacha20Poly1305Sha256 => CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
+            Self::Tls12EcdheEcdsaWithAes128GcmSha256 => CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            Self::Tls12EcdheEcdsaWithAes256GcmSha384 => CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
             Self::Tls12EcdheEcdsaWithChacha20Poly1305Sha256 => {
-                cipher_suite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+                CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
             },
-            Self::Tls12EcdheRsaWithAes128GcmSha256 => cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-            Self::Tls12EcdheRsaWithAes256GcmSha384 => cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-            Self::Tls12EcdheRsaWithChacha20Poly1305Sha256 => cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            Self::Tls12EcdheRsaWithAes128GcmSha256 => CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            Self::Tls12EcdheRsaWithAes256GcmSha384 => CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            Self::Tls12EcdheRsaWithChacha20Poly1305Sha256 => CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
         }
     }
 
@@ -135,18 +141,18 @@ mod tests {
     #[test]
     fn to_rustls_maps_all_tls13_variants() {
         assert_eq!(
-            CipherSuiteId::Tls13Aes128GcmSha256.to_rustls().suite(),
-            cipher_suite::TLS13_AES_128_GCM_SHA256.suite(),
+            CipherSuiteId::Tls13Aes128GcmSha256.to_rustls(),
+            CipherSuite::TLS13_AES_128_GCM_SHA256,
             "TLS13_AES_128_GCM_SHA256 mismatch"
         );
         assert_eq!(
-            CipherSuiteId::Tls13Aes256GcmSha384.to_rustls().suite(),
-            cipher_suite::TLS13_AES_256_GCM_SHA384.suite(),
+            CipherSuiteId::Tls13Aes256GcmSha384.to_rustls(),
+            CipherSuite::TLS13_AES_256_GCM_SHA384,
             "TLS13_AES_256_GCM_SHA384 mismatch"
         );
         assert_eq!(
-            CipherSuiteId::Tls13Chacha20Poly1305Sha256.to_rustls().suite(),
-            cipher_suite::TLS13_CHACHA20_POLY1305_SHA256.suite(),
+            CipherSuiteId::Tls13Chacha20Poly1305Sha256.to_rustls(),
+            CipherSuite::TLS13_CHACHA20_POLY1305_SHA256,
             "TLS13_CHACHA20_POLY1305_SHA256 mismatch"
         );
     }
@@ -154,20 +160,18 @@ mod tests {
     #[test]
     fn to_rustls_maps_all_tls12_ecdsa_variants() {
         assert_eq!(
-            CipherSuiteId::Tls12EcdheEcdsaWithAes128GcmSha256.to_rustls().suite(),
-            cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256.suite(),
+            CipherSuiteId::Tls12EcdheEcdsaWithAes128GcmSha256.to_rustls(),
+            CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
             "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 mismatch"
         );
         assert_eq!(
-            CipherSuiteId::Tls12EcdheEcdsaWithAes256GcmSha384.to_rustls().suite(),
-            cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384.suite(),
+            CipherSuiteId::Tls12EcdheEcdsaWithAes256GcmSha384.to_rustls(),
+            CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
             "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 mismatch"
         );
         assert_eq!(
-            CipherSuiteId::Tls12EcdheEcdsaWithChacha20Poly1305Sha256
-                .to_rustls()
-                .suite(),
-            cipher_suite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256.suite(),
+            CipherSuiteId::Tls12EcdheEcdsaWithChacha20Poly1305Sha256.to_rustls(),
+            CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
             "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 mismatch"
         );
     }
@@ -175,20 +179,18 @@ mod tests {
     #[test]
     fn to_rustls_maps_all_tls12_rsa_variants() {
         assert_eq!(
-            CipherSuiteId::Tls12EcdheRsaWithAes128GcmSha256.to_rustls().suite(),
-            cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256.suite(),
+            CipherSuiteId::Tls12EcdheRsaWithAes128GcmSha256.to_rustls(),
+            CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
             "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 mismatch"
         );
         assert_eq!(
-            CipherSuiteId::Tls12EcdheRsaWithAes256GcmSha384.to_rustls().suite(),
-            cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384.suite(),
+            CipherSuiteId::Tls12EcdheRsaWithAes256GcmSha384.to_rustls(),
+            CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
             "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 mismatch"
         );
         assert_eq!(
-            CipherSuiteId::Tls12EcdheRsaWithChacha20Poly1305Sha256
-                .to_rustls()
-                .suite(),
-            cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256.suite(),
+            CipherSuiteId::Tls12EcdheRsaWithChacha20Poly1305Sha256.to_rustls(),
+            CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
             "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 mismatch"
         );
     }

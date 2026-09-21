@@ -8,6 +8,17 @@ CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2
 NIGHTLY_VERSION  := $(shell grep -m1 'rust-toolchain@' .github/actions/install-nightly-rust/action.yml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')
 V                ?=
 
+# Crypto provider for every cargo invocation below. praxis-proxy-tls compiles
+# only with a provider selected (see crates/tls/src/provider.rs), and
+# `--no-default-features` passes would otherwise drop it. Change here, or
+# override per-invocation:
+#
+#   make test-unit CRYPTO_PROVIDER=aws-lc-rs
+#
+# `openssl` is the FIPS 140-3 target: the crypto is performed by the
+# platform's libcrypto.so rather than a statically linked Rust library.
+CRYPTO_PROVIDER  ?= openssl
+
 UNAME_S := $(shell uname -s | tr A-Z a-z)
 UNAME_M := $(shell uname -m)
 
@@ -23,7 +34,7 @@ all: build
 
 REQUIRED_CMDS := cargo
 RUST_TARGETS := all build release check \
-	test test-unit \
+	test test-unit test-provider \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
@@ -33,7 +44,7 @@ RUST_TARGETS := all build release check \
 	run-echo run-debug
 NIGHTLY_FMT_TARGETS  := lint lint-fips fmt
 CMAKE_TARGETS := all build release check \
-	test test-unit \
+	test test-unit test-provider \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
@@ -49,7 +60,7 @@ endif
 LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 
 .PHONY: all build build-dev release check check-features clean \
-	test test-unit \
+	test test-unit test-provider \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
@@ -130,9 +141,9 @@ release:
 
 check:
 	cargo check --workspace
-	cargo check -p praxis-proxy --no-default-features
-	cargo check -p praxis-proxy --no-default-features --features config-reload,admin-api
-	cargo check -p praxis-proxy-filter --no-default-features
+	cargo check -p praxis-proxy --no-default-features --features $(CRYPTO_PROVIDER)
+	cargo check -p praxis-proxy --no-default-features --features config-reload,admin-api,$(CRYPTO_PROVIDER)
+	cargo check -p praxis-proxy-filter --no-default-features --features $(CRYPTO_PROVIDER)
 
 # Verify every optional and experimental feature compiles in isolation.
 # `lint` and `test` build the extremes (--all-features and
@@ -389,7 +400,22 @@ test-unit:
 		--exclude praxis-test-utils \
 		--exclude praxis-tests-benches \
 		$(_NOCAPTURE)
-	cargo test -p praxis-proxy-filter --no-default-features $(_NOCAPTURE)
+	cargo test -p praxis-proxy-filter --no-default-features --features $(CRYPTO_PROVIDER) $(_NOCAPTURE)
+
+# Exercise one crypto provider end to end.
+#
+# `test-unit` cannot do this: its first pass uses --all-features, which links
+# *both* providers and resolves to openssl by precedence, so the aws-lc-rs
+# build is never actually run there. This target names features explicitly so
+# exactly one provider is compiled in.
+#
+#   make test-provider                             # openssl (default)
+#   make test-provider CRYPTO_PROVIDER=aws-lc-rs   # AWS-LC
+test-provider:
+	cargo test -p praxis-proxy-tls --no-default-features \
+		--features $(CRYPTO_PROVIDER),config-reload $(_NOCAPTURE)
+	cargo test -p praxis-proxy --no-default-features \
+		--features $(CRYPTO_PROVIDER),config-reload,admin-api,policy-engine $(_NOCAPTURE)
 
 test-schema:
 	cargo test -p praxis-tests-schema $(_NOCAPTURE)
@@ -449,9 +475,9 @@ bench: $(VEGETA) $(FORTIO_DEP)
 
 lint:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
-	cargo clippy -p praxis-proxy --no-default-features --all-targets -- -D warnings
-	cargo clippy -p praxis-proxy --no-default-features --features config-reload,admin-api --all-targets -- -D warnings
-	cargo clippy -p praxis-proxy-filter --no-default-features --all-targets -- -D warnings
+	cargo clippy -p praxis-proxy --no-default-features --features $(CRYPTO_PROVIDER) --all-targets -- -D warnings
+	cargo clippy -p praxis-proxy --no-default-features --features config-reload,admin-api,$(CRYPTO_PROVIDER) --all-targets -- -D warnings
+	cargo clippy -p praxis-proxy-filter --no-default-features --features $(CRYPTO_PROVIDER) --all-targets -- -D warnings
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
 	cargo machete
 	cargo xtask lint-deps
@@ -572,6 +598,7 @@ help:
 	@echo "Test:"
 	@echo "  test                 tests outside tests/ (single pass, all features)"
 	@echo "  test-unit            alias for test"
+	@echo "  test-provider        one crypto provider end to end (CRYPTO_PROVIDER=openssl|aws-lc-rs)"
 	@echo "  test-schema   config validation + example tests"
 	@echo "  test-integration     all tests/ suites: schema, security, resilience, integration"
 	@echo "  test-conformance     conformance tests only (needs h2spec)"

@@ -61,9 +61,9 @@ opentelemetry_sdk = { version = "0.32.1", default-features = false, features = [
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
 opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["gen-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
-pingora-core = { version = "0.9.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
-pingora-http = { version = "0.9.0", package = "quixotic-plecostomus-http" }
-pingora-proxy = { version = "0.9.0", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
+pingora-core = { version = "0.10.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
+pingora-http = { version = "0.10.0", package = "quixotic-plecostomus-http" }
+pingora-proxy = { version = "0.10.0", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
 percent-encoding = "2.3.2"
 rand = "0.10.3"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
@@ -81,9 +81,12 @@ praxis-core = { version = "0.6.0", path = "crates/core", package = "praxis-proxy
 # `policy-engine` explicitly, so the standard build is unchanged.
 praxis-filter = { version = "0.6.0", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
 praxis-protocol = { version = "0.6.0", path = "crates/protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.6.0", path = "crates/tls", package = "praxis-proxy-tls" }
+# default-features = false: the crypto provider is chosen by the top-level
+# binary and forwarded down, so no intermediate crate may pin one through
+# feature unification. See crates/tls/src/provider.rs.
+praxis-tls = { version = "0.6.0", path = "crates/tls", package = "praxis-proxy-tls", default-features = false }
 praxis-test-utils = { path = "tests/utils" }
-praxis-proxy-benchmarks = "0.2.1"
+praxis-proxy-benchmarks = "0.2.2"
 openssl = "0.10.81"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
@@ -93,7 +96,15 @@ sha2 = "0.11.0"
 subtle = "2.6.1"
 rcgen = "0.14.10"
 regex = "1.13.1"
-rustls = "0.23.45"
+# No provider feature: the provider is selected by praxis-proxy-tls's
+# `openssl` / `aws-lc-rs` features and installed once at startup. Leaving
+# rustls' defaults on would silently re-enable aws-lc-rs for every build.
+# `prefer-post-quantum` is omitted because it implies `aws_lc_rs`.
+rustls = { version = "0.23.45", default-features = false, features = ["logging", "std", "tls12"] }
+# The OpenSSL-backed rustls provider, vendored and published from the Pingora
+# fork (tofay/rustls-openssl 0.4.1 plus its FIPS provider-routing fixes); the
+# library name is still `rustls_openssl`.
+rustls-openssl = { version = "0.4.1", package = "quixotic-plecostomus-rustls-openssl", default-features = false, features = ["tls12"] }
 # parse-only: default-features off keeps the verify/ring crypto out of the graph.
 x509-parser = { version = "0.18.1", default-features = false }
 # SPIFFE-ID parsing only; default-features off keeps the workload-API client (tonic/grpc) and JWT support out of the graph.
@@ -423,3 +434,5 @@ bare_urls = "deny"
 invalid_html_tags = "deny"
 missing_crate_level_docs = "deny"
 private_doc_tests = "allow"
+
+

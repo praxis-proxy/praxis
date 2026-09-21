@@ -10,6 +10,9 @@ publish = false
 [features]
 spiffe = ["praxis-core/spiffe"]
 cloud-events-filter = ["praxis-filter/cloud-events-filter"]
+# Crypto provider passthrough — see crates/tls/src/provider.rs.
+openssl = ["praxis-tls/openssl"]
+aws-lc-rs = ["praxis-tls/aws-lc-rs"]
 
 [lints]
 workspace = true

@@ -456,10 +456,7 @@ fn sub_filter_context_inherits_parent_runtime_resources() {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use praxis_core::{
-        health::HealthRegistry,
-        id::IdGenerator,
-        kv::KvStoreRegistry,
-        subrequest::{SubRequestClient, SubRequestConnector},
+        health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, subrequest::SubRequestClient,
         time::FixedTimeSource,
     };
 
@@ -473,7 +470,7 @@ fn sub_filter_context_inherits_parent_runtime_resources() {
     let health_registry: HealthRegistry = Arc::new(HashMap::new());
     let id_generator = IdGenerator::with_seed(42);
     let kv_stores = KvStoreRegistry::new();
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let time_source = FixedTimeSource::new(Duration::from_secs(123));
 
     let ctx = super::context::build_sub_filter_context(
@@ -576,7 +573,7 @@ async fn run_returns_buffered_for_locally_produced_response() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let registry = crate::FilterRegistry::with_builtins();
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(
@@ -589,7 +586,7 @@ async fn run_returns_buffered_for_locally_produced_response() {
     .unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -632,7 +629,7 @@ async fn run_falls_back_to_next_staged_address_on_connection_refusal() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let dead = {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -644,7 +641,7 @@ async fn run_falls_back_to_next_staged_address_on_connection_refusal() {
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("[]").unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1206,7 +1203,7 @@ async fn run_re_pins_staged_upstream_over_chain_filter_rewrite() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let (staged_addr, staged_backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nstaged").await;
     let (attacker_addr, attacker_backend) =
@@ -1227,7 +1224,7 @@ async fn run_re_pins_staged_upstream_over_chain_filter_rewrite() {
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("- filter: test_upstream_hijack").unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1350,7 +1347,7 @@ async fn buffered_subrequest_context_inherits_parent_session_stores() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let saw_on_request = Arc::new(AtomicBool::new(false));
     let saw_on_response_body = Arc::new(AtomicBool::new(false));
@@ -1369,7 +1366,7 @@ async fn buffered_subrequest_context_inherits_parent_session_stores() {
     pipeline.set_session_stores(Arc::new(crate::SessionStoreRegistry::new()));
     let pipeline = Arc::new(pipeline);
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1402,7 +1399,7 @@ async fn subrequest_binds_credentials_to_logical_authority_not_transport() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (addr, backend) =
@@ -1447,7 +1444,7 @@ async fn subrequest_binds_credentials_to_logical_authority_not_transport() {
     let mut extensions = crate::RequestExtensions::default();
     extensions.insert(pending);
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1487,7 +1484,7 @@ async fn subrequest_sends_logical_authority_as_host_not_transport() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (addr, backend) =
@@ -1512,7 +1509,7 @@ async fn subrequest_sends_logical_authority_as_host_not_transport() {
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&chain).unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1559,7 +1556,7 @@ async fn subrequest_credential_injection_pins_host_to_credential_authority() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (addr, backend) =
@@ -1595,7 +1592,7 @@ async fn subrequest_credential_injection_pins_host_to_credential_authority() {
     let mut extensions = crate::RequestExtensions::default();
     extensions.insert(pending);
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1645,7 +1642,7 @@ async fn subrequest_unmatched_staged_credential_preserves_custom_host() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (addr, backend) =
@@ -1680,7 +1677,7 @@ async fn subrequest_unmatched_staged_credential_preserves_custom_host() {
     let mut extensions = crate::RequestExtensions::default();
     extensions.insert(pending);
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1987,9 +1984,9 @@ fn routed_chain_yaml(addr: std::net::SocketAddr, extra: &str) -> String {
 fn streaming_executor(max_response_bytes: usize) -> crate::FilteredSubrequestExecutor {
     use std::time::{Duration, Instant};
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
-    let client = SubRequestClient::new(SubRequestConnector::new(4, None));
+    let client = SubRequestClient::new(crate::test_support::connector(4, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, max_response_bytes, Duration::from_secs(5))
 }
@@ -2560,9 +2557,9 @@ impl crate::HttpFilter for BodyExpandingFilter {
 fn buffered_executor(max_response_bytes: usize) -> crate::FilteredSubrequestExecutor {
     use std::time::{Duration, Instant};
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
-    let client = SubRequestClient::new(SubRequestConnector::new(4, None));
+    let client = SubRequestClient::new(crate::test_support::connector(4, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, max_response_bytes, Duration::from_secs(5))
 }

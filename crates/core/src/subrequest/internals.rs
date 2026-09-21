@@ -68,6 +68,7 @@ pub struct SubRequestConnectorOptions {
 ///
 /// ```
 /// use praxis_core::subrequest::SubRequestConnector;
+/// # praxis_tls::provider::install(); // required before any connector is built
 ///
 /// let connector = SubRequestConnector::new(128, None);
 /// let _clone = connector.clone();
@@ -96,6 +97,7 @@ impl SubRequestConnector {
     ///
     /// ```
     /// use praxis_core::subrequest::SubRequestConnector;
+    /// # praxis_tls::provider::install(); // required before any connector is built
     ///
     /// let connector = SubRequestConnector::new(64, None);
     /// let bounded = SubRequestConnector::new(64, Some(256));
@@ -114,6 +116,7 @@ impl SubRequestConnector {
     ///
     /// ```
     /// use praxis_core::subrequest::{SubRequestConnector, SubRequestConnectorOptions};
+    /// # praxis_tls::provider::install(); // required before any connector is built
     ///
     /// let connector = SubRequestConnector::with_options(SubRequestConnectorOptions {
     ///     keepalive_pool_size: 64,
