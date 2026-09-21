@@ -17,6 +17,8 @@ Experimental: requires the off-by-default `cloud-events-filter` feature. Review 
 |-------|------|---------|-------------|
 | `on` | `request` \| `response_headers` \| `response_complete` | yes | Lifecycle phase for this publisher. |
 | `destination` | string | yes | HTTP endpoint receiving the structured `CloudEvent`. |
+| `authorization` | CloudEventsAuthorizationConfig | no | Optional environment-backed bearer authorization for the receiver. |
+| `authorization.env_var` | string | yes | Environment variable containing the bearer token. |
 | `delivery` | `best_effort` | no | Delivery guarantee supported by this version. |
 | `format` | `structured_json` | no | HTTP `CloudEvents` binding used by this publisher. |
 | `source` | string | yes | Static `CloudEvents` source attribute. |
@@ -48,6 +50,8 @@ Experimental: requires the off-by-default `cloud-events-filter` feature. Review 
 filter: cloud_events
 on: response_complete
 destination: https://events.example.net/v1/events
+authorization:
+  env_var: METERING_AUTH_TOKEN
 delivery: best_effort
 format: structured_json
 source: urn:praxis:gateway
