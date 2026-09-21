@@ -235,7 +235,9 @@ impl AccessLogFilter {
 
     #[expect(clippy::too_many_lines, reason = "config validation and emit plan assembly")]
     fn build(cfg: AccessLogConfig) -> Result<Self, FilterError> {
-        if cfg.sample_rate <= 0.0 || cfg.sample_rate > 1.0 {
+        // NaN compares false against both bounds, so a plain range check
+        // lets it through and then every sampling comparison fails.
+        if !cfg.sample_rate.is_finite() || cfg.sample_rate <= 0.0 || cfg.sample_rate > 1.0 {
             return Err(format!("access_log: sample_rate must be in (0.0, 1.0], got {}", cfg.sample_rate).into());
         }
 
@@ -1023,6 +1025,16 @@ mod tests {
         assert!(
             err.to_string().contains("sample_rate must be in (0.0, 1.0]"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_config_rejects_nan_sample_rate() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("sample_rate: .nan").unwrap();
+        let err = AccessLogFilter::from_config(&yaml).err().expect("should fail");
+        assert!(
+            err.to_string().contains("sample_rate must be in (0.0, 1.0]"),
+            "NaN passes a range check and then never samples; got: {err}"
         );
     }
 
