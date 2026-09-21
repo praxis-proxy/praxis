@@ -128,7 +128,11 @@ fn has_parameters(value: &str) -> bool {
 }
 
 /// Compare media-type parameters as a set, ignoring order, surrounding
-/// whitespace, quotes, and ASCII case (`charset=UTF-8` equals `charset=utf-8`).
+/// whitespace, quotes, and the ASCII case of parameter names.
+///
+/// Values are compared exactly, except `charset`, which RFC 9110 §8.3.1
+/// defines as case-insensitive (`charset=UTF-8` equals `charset=utf-8`).
+/// A multipart `boundary` is case-sensitive and must not fold.
 ///
 /// Compares in place rather than normalizing into owned strings, since this
 /// runs on the response path for every evaluation of such a condition.
@@ -136,9 +140,18 @@ fn params_match(actual: &str, expected: &str) -> bool {
     params(actual).count() == params(expected).count()
         && params(expected).all(|(name, value)| {
             params(actual).any(|(other_name, other_value)| {
-                other_name.eq_ignore_ascii_case(name) && other_value.eq_ignore_ascii_case(value)
+                other_name.eq_ignore_ascii_case(name) && param_value_matches(name, other_value, value)
             })
         })
+}
+
+/// Compare one parameter value under the case rule its name implies.
+fn param_value_matches(name: &str, actual: &str, expected: &str) -> bool {
+    if name.eq_ignore_ascii_case("charset") {
+        actual.eq_ignore_ascii_case(expected)
+    } else {
+        actual == expected
+    }
 }
 
 /// The `name=value` parameters after the first `;`, trimmed and unquoted.
@@ -404,6 +417,26 @@ mod tests {
             )]))],
             &resp
         ));
+    }
+
+    #[test]
+    fn content_type_boundary_value_is_case_sensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("multipart/form-data; boundary=ABC"),
+        );
+        let resp = make_response(200, headers);
+        assert!(
+            !should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "multipart/form-data; boundary=abc"
+                )]))],
+                &resp
+            ),
+            "only charset values are case-insensitive (RFC 9110 §8.3.1)"
+        );
     }
 
     #[test]
