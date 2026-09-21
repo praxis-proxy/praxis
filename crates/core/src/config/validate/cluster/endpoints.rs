@@ -111,8 +111,11 @@ fn validate_endpoint_host(host: &str, addr: &str, cluster_name: &str) -> Result<
     }
     // Same rule `endpoint_selector` applies to its `host:port` values: a
     // name outside RFC 1035 syntax (`bad host`, `my_backend`) cannot be
-    // resolved, so it can only fail at connect.
-    praxis_tls::dns::validate_dns_hostname(host).map_err(|err| {
+    // resolved, so it can only fail at connect. A single trailing dot
+    // (`backend.example.com.`) is the fully-qualified form the resolver
+    // looks up without search domains, not an empty label.
+    let name = host.strip_suffix('.').unwrap_or(host);
+    praxis_tls::dns::validate_dns_hostname(name).map_err(|err| {
         ProxyError::Config(format!(
             "cluster '{cluster_name}': endpoint '{addr}' is not a valid hostname ({err})"
         ))
@@ -415,6 +418,23 @@ mod tests {
     fn accept_hostname_endpoint() {
         let clusters = vec![Cluster::with_defaults("web", vec!["api.example.com:443".into()])];
         validate_clusters(&clusters, &InsecureOptions::default()).expect("hostname:port should be accepted");
+    }
+
+    #[test]
+    fn accept_trailing_dot_fqdn_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["backend.example.com.:80".into()])];
+        validate_clusters(&clusters, &InsecureOptions::default())
+            .expect("a fully-qualified name with a trailing dot should be accepted");
+    }
+
+    #[test]
+    fn reject_dot_only_host_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec![".:80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("is not a valid hostname"),
+            "a lone dot is not a hostname: {err}"
+        );
     }
 
     #[test]
