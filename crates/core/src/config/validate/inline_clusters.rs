@@ -97,6 +97,59 @@ fn validate_entry(chain_name: &str, entry: &FilterEntry, insecure_options: &Inse
     Ok(())
 }
 
+/// Collect every inline cluster declared across all chains.
+///
+/// Walks the same tree as [`validate_inline_clusters`] — `load_balancer` and
+/// `tcp_load_balancer` filters, including those nested in inline branch chains
+/// and `iterative_request_router` steps — but returns the parsed clusters
+/// instead of validating them. Callers use it to cross-reference config that
+/// depends on the full set of declared cluster identifiers (top-level *and*
+/// inline), such as `selected_upstream` condition matchers.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] if any inline `clusters:` list is malformed.
+/// In practice this never fires when called after [`validate_inline_clusters`],
+/// which has already parsed every list.
+pub(super) fn collect_inline_clusters(chains: &[FilterChainConfig]) -> Result<Vec<Cluster>, ProxyError> {
+    let mut out = Vec::new();
+    for chain in chains {
+        for entry in &chain.filters {
+            collect_entry_inline_clusters(&chain.name, entry, &mut out)?;
+        }
+    }
+    Ok(out)
+}
+
+/// Collect inline clusters from one filter entry, recursing into inline branch
+/// chains and `iterative_request_router` steps (mirrors [`validate_entry`]).
+fn collect_entry_inline_clusters(
+    chain_name: &str,
+    entry: &FilterEntry,
+    out: &mut Vec<Cluster>,
+) -> Result<(), ProxyError> {
+    if CLUSTER_BEARING_FILTERS.contains(&entry.filter_type.as_str()) {
+        out.extend(extract_clusters(chain_name, entry)?);
+    }
+
+    for branch in entry.branch_chains.as_deref().unwrap_or_default() {
+        for chain_ref in &branch.chains {
+            if let ChainRef::Inline { name, filters } = chain_ref {
+                for nested in filters {
+                    collect_entry_inline_clusters(name, nested, out)?;
+                }
+            }
+        }
+    }
+
+    if entry.filter_type == STEP_BEARING_FILTER {
+        for nested in extract_step_filters(chain_name, entry)? {
+            collect_entry_inline_clusters(chain_name, &nested, out)?;
+        }
+    }
+    Ok(())
+}
+
 /// Validate that every TCP listener's `cluster` reference resolves.
 ///
 /// A TCP listener's `cluster` is consumed only by the `tcp_load_balancer`

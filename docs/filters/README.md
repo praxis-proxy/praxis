@@ -454,13 +454,14 @@ headers in body hooks.
 Add `conditions` to any filter chain entry. Fields within a
 condition are ANDed; all conditions must pass.
 
-| Field         | Matches when                 |
-| ------------- | ---------------------------- |
-| `grpc`        | Request is (`true`) or is not (`false`) gRPC |
-| `path`        | URI exactly equals value     |
-| `path_prefix` | URI starts with value        |
-| `methods`     | Method in list               |
-| `headers`     | All listed headers match     |
+| Field               | Matches when                                    |
+| ------------------- | ----------------------------------------------- |
+| `grpc`              | Request is (`true`) or is not (`false`) gRPC    |
+| `path`              | URI exactly equals value                        |
+| `path_prefix`       | URI starts with value                           |
+| `methods`           | Method in list                                  |
+| `headers`           | All listed headers match                        |
+| `selected_upstream` | Load-balancer-selected upstream metadata match  |
 
 `grpc` classifies the request from its `content-type` header
 (`application/grpc`, `application/grpc+proto`, `application/grpc+json`,
@@ -506,6 +507,47 @@ Use `path` for exact matching (e.g., health checks on `/`):
 ```
 
 Skipped on request = skipped on response and on body hooks.
+
+### Selected-Upstream Conditions
+
+`selected_upstream` matches on the application metadata that
+the load balancer publishes when it selects an upstream. It
+has two optional sub-fields; when both are set they are ANDed:
+
+| Sub-field              | Matches when                              |
+| ---------------------- | ----------------------------------------- |
+| `application_protocol` | Selected upstream's protocol equals value |
+| `application_provider` | Selected upstream's provider equals value |
+
+```yaml
+- filter: path_rewrite
+  conditions:
+    - when:
+        selected_upstream:
+          application_protocol: openai_chat_completions
+          application_provider: vllm
+  # ...path_rewrite config...
+```
+
+This metadata is typed and framework-owned: it is read from
+the selection published by the load balancer, never from a
+request header or writable filter metadata. If no upstream
+has been selected yet, or the requested field is absent, the
+predicate **fails closed** — an unset value never satisfies a
+configured `when`, and never trips an `unless`.
+
+Because the metadata only exists after selection, a
+`selected_upstream` condition requires that an *unconditional*
+`load_balancer` is guaranteed to run earlier on every
+reachable path. Pipeline validation rejects the config
+otherwise (a conditional load balancer may not run, so it does
+not satisfy the guarantee). A load balancer nested in an
+unconditional branch, or one that hosts the branch containing
+the gated filter, does satisfy it.
+
+Selected-upstream predicates are evaluated once, during the
+normal request phase; they are not re-evaluated during body
+transformation.
 
 ### Response Conditions
 

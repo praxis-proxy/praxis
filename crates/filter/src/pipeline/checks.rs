@@ -19,7 +19,10 @@
 use praxis_core::config::{Condition, FailureMode, FilterEntry};
 use tracing::warn;
 
-use super::{branch::RejoinTarget, filter::PipelineFilter};
+use super::{
+    branch::{RejoinTarget, ResolvedBranch},
+    filter::PipelineFilter,
+};
 use crate::{
     any_filter::AnyFilter,
     body::{BodyAccess, BodyMode},
@@ -590,6 +593,296 @@ pub(super) fn check_selected_upstream_body_mode(filters: &[PipelineFilter], erro
     }
 }
 
+/// A `selected_upstream` request condition requires a load balancer to have run
+/// on **every** control-flow path that reaches the gated filter.
+///
+/// Selected-upstream metadata is published only by a load balancer after it
+/// selects an upstream ([`publish_selected_application`]). A predicate evaluated
+/// before any load balancer runs sees no metadata and fails closed, so the gated
+/// filter would be silently skipped (a `when`) or silently kept (an `unless`) on
+/// every request — the fail-open footgun this validation exists to prevent. If
+/// any reachable path reaches the gated filter with no prior load balancer, that
+/// is a build error.
+///
+/// The check is a forward reachability pass over the pipeline's control-flow
+/// graph tracking one fact per program point: can it be reached with no load
+/// balancer having run yet (`no_lb`)? A gated filter reachable with `no_lb` is
+/// flagged. Only an *unconditional* `load_balancer` clears `no_lb`; a conditional
+/// one may not run, and a conditional filter may itself be skipped, carrying
+/// `no_lb` past it.
+///
+/// Ordered branch exits are modelled faithfully (see [`evaluate_branches_inner`]):
+/// branches are evaluated in order, a `Next` rejoin falls through to the next
+/// branch, and `Terminal`/`SkipTo`/`ReEnter` stop sibling evaluation once they
+/// fire. Scope matters:
+/// - at the **top level** a firing `SkipTo`/`ReEnter` moves the pipeline index (see
+///   [`FilterPipeline::execute_http_request`]), so it is a jump edge to its target; `Terminal` ends the path; a
+///   `ReEnter` also eventually falls through (its condition stops matching or `max_iterations` is hit);
+/// - inside a **branch sub-chain** a nested `SkipTo`/`ReEnter` is discarded and execution continues at the next filter
+///   of the enclosing chain, while a nested `Terminal` fails the request closed (see [`map_nested_outcome`]). A nested
+///   `SkipTo`/`ReEnter` is thus an early sibling exit: a later sibling load-balancer branch never runs, so it cannot
+///   establish the guarantee.
+///
+/// [`publish_selected_application`]: crate::HttpFilterContext::publish_selected_application
+/// [`evaluate_branches_inner`]: super::evaluate
+/// [`FilterPipeline::execute_http_request`]: super::FilterPipeline::execute_http_request
+/// [`map_nested_outcome`]: super::evaluate
+pub(super) fn check_selected_upstream_condition_ordering(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    let no_lb = compute_top_level_no_lb(filters);
+    // Emit pass: revisit every top-level filter with the converged reachability
+    // state, flagging each gated filter — top-level or nested — reached without a
+    // guaranteed prior load balancer. Separate from the fixpoint so every gated
+    // filter is reported exactly once. The recomputed edges are discarded here.
+    let mut edges = Vec::new();
+    for ((index, pf), &no_lb_in) in filters.iter().enumerate().zip(&no_lb) {
+        edges.clear();
+        top_level_filter_edges(index, pf, no_lb_in, &mut edges, Some(&mut *errors));
+    }
+}
+
+/// Forward fixpoint: for each top-level filter index, can it be reached with no
+/// load balancer having run yet (`no_lb`)?
+///
+/// Index 0 is the pipeline entry (`no_lb = true`). Each filter's outgoing edges
+/// (fall-through plus top-level `SkipTo`/`ReEnter` jumps) propagate `no_lb`; an
+/// unconditional `load_balancer` clears it. Backward `ReEnter` edges make this a
+/// fixpoint. The per-index booleans only flip `false -> true`, so it converges in
+/// at most `filters.len()` rounds.
+fn compute_top_level_no_lb(filters: &[PipelineFilter]) -> Vec<bool> {
+    let count = filters.len();
+    let mut no_lb = vec![false; count];
+    let Some(entry) = no_lb.first_mut() else {
+        return no_lb;
+    };
+    *entry = true;
+    let mut edges = Vec::new();
+    loop {
+        let mut next = vec![false; count];
+        if let Some(entry) = next.first_mut() {
+            *entry = true;
+        }
+        for ((index, pf), &no_lb_in) in filters.iter().enumerate().zip(&no_lb) {
+            edges.clear();
+            top_level_filter_edges(index, pf, no_lb_in, &mut edges, None);
+            for &(target, reaches_no_lb) in &edges {
+                if reaches_no_lb && let Some(slot) = next.get_mut(target) {
+                    *slot = true;
+                }
+            }
+        }
+        if next == no_lb {
+            return no_lb;
+        }
+        no_lb = next;
+    }
+}
+
+/// Outgoing control-flow edges of a top-level filter as `(target, no_lb)` pairs,
+/// given whether it is entered with `no_lb`. When `errors` is `Some`, also flags
+/// any gated filter (this one and any nested in its branches) reached with
+/// `no_lb`; the fixpoint passes `None`, the emit pass `Some`.
+fn top_level_filter_edges(
+    index: usize,
+    pf: &PipelineFilter,
+    no_lb_in: bool,
+    edges: &mut Vec<(usize, bool)>,
+    mut errors: Option<&mut Vec<String>>,
+) {
+    if let Some(errors) = errors.as_deref_mut() {
+        flag_if_gated(pf, no_lb_in, errors);
+    }
+    let next_index = index + 1;
+    // A filter with its own conditions may be skipped, carrying `no_lb` to the
+    // next filter unchanged.
+    if no_lb_in && !pf.conditions.is_empty() {
+        edges.push((next_index, true));
+    }
+    // On the path where it runs, an unconditional load balancer clears `no_lb`;
+    // its branches then run after its `on_request`.
+    let entry = no_lb_in && !is_load_balancer(pf);
+    if let Some(carry) = top_level_branch_edges(&pf.branches, entry, edges, errors) {
+        edges.push((next_index, carry));
+    }
+}
+
+/// Fold a top-level host's ordered branches into jump edges, returning the
+/// fall-through `no_lb` state, or `None` when no path falls through to the next
+/// filter (an unconditional `Terminal` or `SkipTo`).
+fn top_level_branch_edges(
+    branches: &[ResolvedBranch],
+    entry: bool,
+    edges: &mut Vec<(usize, bool)>,
+    mut errors: Option<&mut Vec<String>>,
+) -> Option<bool> {
+    let mut carry = entry;
+    for branch in branches {
+        let branch_no_lb = nested_chain_no_lb(&branch.filters, carry, errors.as_deref_mut());
+        match branch.rejoin {
+            RejoinTarget::Next => {
+                carry = if branch.condition.is_none() {
+                    branch_no_lb
+                } else {
+                    branch_no_lb || carry
+                };
+            },
+            RejoinTarget::Terminal if branch.condition.is_none() => return None,
+            RejoinTarget::Terminal => {},
+            RejoinTarget::SkipTo(target) | RejoinTarget::ReEnter(target) => {
+                if branch_no_lb {
+                    edges.push((target, true));
+                }
+                // An unconditional forward SkipTo abandons the fall-through; a
+                // ReEnter always eventually falls through (re-running from
+                // `target`), so it does not.
+                if matches!(branch.rejoin, RejoinTarget::SkipTo(_)) && branch.condition.is_none() {
+                    return None;
+                }
+            },
+        }
+    }
+    Some(carry)
+}
+
+/// Whether this filter's request conditions include a `selected_upstream`
+/// predicate.
+fn filter_has_selected_upstream_condition(pf: &PipelineFilter) -> bool {
+    pf.conditions.iter().any(|condition| {
+        let (Condition::When(m) | Condition::Unless(m)) = condition;
+        m.selected_upstream.is_some()
+    })
+}
+
+/// Whether a branch sub-chain can fall through to its end with no load balancer
+/// having run, entered with `no_lb_in`. Flags nested gated filters when `errors`
+/// is `Some`.
+fn nested_chain_no_lb(filters: &[PipelineFilter], no_lb_in: bool, mut errors: Option<&mut Vec<String>>) -> bool {
+    let mut carry = no_lb_in;
+    for pf in filters {
+        carry = nested_filter_no_lb(pf, carry, errors.as_deref_mut());
+    }
+    carry
+}
+
+/// `no_lb` state after a single nested filter and its branches, entered with
+/// `no_lb_in`. Flags this filter when gated and reached with `no_lb`.
+fn nested_filter_no_lb(pf: &PipelineFilter, no_lb_in: bool, mut errors: Option<&mut Vec<String>>) -> bool {
+    if let Some(errors) = errors.as_deref_mut() {
+        flag_if_gated(pf, no_lb_in, errors);
+    }
+    // A conditional filter may be skipped, carrying `no_lb` past it; an
+    // unconditional load balancer clears it before its branches run.
+    let skipped = no_lb_in && !pf.conditions.is_empty();
+    let entry = no_lb_in && !is_load_balancer(pf);
+    skipped || nested_branches_exit(&pf.branches, entry, errors)
+}
+
+/// Fold a nested host's ordered branches into the `no_lb` state at the point
+/// execution leaves the host for the next filter in the enclosing chain.
+///
+/// A nested `SkipTo`/`ReEnter` is discarded at runtime ([`map_nested_outcome`]),
+/// so a firing one is an early sibling exit that continues at the next filter;
+/// a nested `Terminal` fails the request closed and ends the path.
+///
+/// [`map_nested_outcome`]: super::evaluate
+fn nested_branches_exit(branches: &[ResolvedBranch], entry: bool, mut errors: Option<&mut Vec<String>>) -> bool {
+    let mut carry = entry;
+    let mut exit = false;
+    let mut alive = true;
+    for branch in branches {
+        if !alive {
+            break;
+        }
+        let branch_no_lb = nested_chain_no_lb(&branch.filters, carry, errors.as_deref_mut());
+        match branch.rejoin {
+            RejoinTarget::Next => {
+                carry = if branch.condition.is_none() {
+                    branch_no_lb
+                } else {
+                    branch_no_lb || carry
+                };
+            },
+            RejoinTarget::Terminal => {
+                if branch.condition.is_none() {
+                    alive = false;
+                }
+            },
+            RejoinTarget::SkipTo(_) | RejoinTarget::ReEnter(_) => {
+                exit = exit || branch_no_lb;
+                if branch.condition.is_none() {
+                    alive = false;
+                }
+            },
+        }
+    }
+    exit || (alive && carry)
+}
+
+/// Whether `pf` is a `load_balancer` — the filter that publishes
+/// selected-upstream metadata.
+fn is_load_balancer(pf: &PipelineFilter) -> bool {
+    pf.filter.name() == "load_balancer"
+}
+
+/// Record the "no guaranteed load balancer" error for a gated filter reached
+/// with `no_lb`.
+fn flag_if_gated(pf: &PipelineFilter, no_lb: bool, errors: &mut Vec<String>) {
+    if no_lb && filter_has_selected_upstream_condition(pf) {
+        errors.push(format!(
+            "filter '{}' has a selected_upstream condition but no \
+             load_balancer is guaranteed to run before it; selected-upstream \
+             metadata is published only after a load balancer selects an \
+             upstream, so the condition would always fail closed. Add an \
+             unconditional load_balancer earlier in the chain.",
+            pf.filter.name(),
+        ));
+    }
+}
+
+/// A request-body hook with a `selected_upstream` condition is unusable when
+/// the pipeline pre-reads the request body.
+///
+/// A bounded [`BodyMode::StreamBuffer`] request body mode makes the protocol
+/// layer buffer the whole request body and run the request-body hooks *before*
+/// the request phase (see [`request_phase_tracked`]). Selected-upstream metadata
+/// is published only during the request phase, after a load balancer selects an
+/// upstream, so a `selected_upstream` condition re-evaluated on that pre-read
+/// path sees no metadata and fails closed — the body hook is silently skipped
+/// (a `when`) or silently kept (an `unless`) on every request, regardless of the
+/// upstream a later load balancer would select. Ordering cannot fix this: the
+/// pre-read runs before any load balancer. Reject it at build time instead.
+///
+/// Only top-level filters are checked: branch sub-chains run only their
+/// `on_request` hooks, never `on_request_body`, so a request-body hook nested in
+/// a branch never runs on the pre-read path.
+///
+/// [`BodyMode::StreamBuffer`]: crate::BodyMode::StreamBuffer
+/// [`request_phase_tracked`]: super::http
+pub(super) fn check_selected_upstream_condition_pre_read(
+    filters: &[PipelineFilter],
+    request_body_mode: BodyMode,
+    errors: &mut Vec<String>,
+) {
+    if !matches!(request_body_mode, BodyMode::StreamBuffer { .. }) {
+        return;
+    }
+    for pf in filters {
+        let AnyFilter::Http(filter) = &pf.filter else {
+            continue;
+        };
+        if filter.request_body_access() != BodyAccess::None && filter_has_selected_upstream_condition(pf) {
+            errors.push(format!(
+                "filter '{}' has a selected_upstream condition and a request-body \
+                 hook, but the pipeline's request_body_mode is StreamBuffer: the \
+                 request body is pre-read before the request phase, so the \
+                 condition is evaluated before any load balancer selects an \
+                 upstream and always fails closed. Remove the request-body access, \
+                 the selected_upstream condition, or the StreamBuffer body mode.",
+                filter.name(),
+            ));
+        }
+    }
+}
+
 /// `iterative_request_router` coexisting with `router` or `load_balancer`.
 ///
 /// The IRR owns the full sub-request lifecycle including routing.
@@ -747,13 +1040,10 @@ fn has_allow_rewrite_override(entries: &[FilterEntry], idx: usize) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use praxis_core::config::ConditionMatch;
+    use praxis_core::config::{ConditionMatch, SelectedUpstreamMatch};
 
     use super::*;
-    use crate::pipeline::{
-        branch::ResolvedBranch,
-        test_filters::{lb_filter, noop_filter_with_conditions, selector_filter},
-    };
+    use crate::pipeline::test_filters::{lb_filter, noop_filter_with_conditions, selector_filter};
 
     #[test]
     fn invalid_condition_header_name_rejected_at_build() {
@@ -765,6 +1055,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            selected_upstream: None,
         });
         let filters = vec![noop_filter_with_conditions("gated", vec![condition])];
         let mut errors = Vec::new();
@@ -787,6 +1078,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            selected_upstream: None,
         });
         let filters = vec![noop_filter_with_conditions("gated", vec![condition])];
         let mut errors = Vec::new();
@@ -2129,6 +2421,529 @@ mod tests {
         );
     }
 
+    /// A `When` condition matching selected-upstream metadata.
+    fn selected_upstream_cond(protocol: Option<&str>, provider: Option<&str>) -> Condition {
+        Condition::When(ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: None,
+            methods: None,
+            headers: None,
+            selected_upstream: Some(SelectedUpstreamMatch {
+                application_protocol: protocol.map(str::to_owned),
+                application_provider: provider.map(str::to_owned),
+            }),
+        })
+    }
+
+    /// A filter named `gated` carrying a single selected-upstream `When`.
+    fn gated_filter(protocol: Option<&str>, provider: Option<&str>) -> PipelineFilter {
+        noop_filter_with_conditions("gated", vec![selected_upstream_cond(protocol, provider)])
+    }
+
+    #[test]
+    fn selected_upstream_protocol_only_without_lb_errors() {
+        let filters = vec![gated_filter(Some("openai_chat_completions"), None)];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "protocol-only condition without an LB should error");
+        assert!(
+            errors[0].contains("gated") && errors[0].contains("load_balancer is guaranteed"),
+            "error should name the filter and the missing guarantee: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn selected_upstream_provider_only_without_lb_errors() {
+        let filters = vec![gated_filter(None, Some("vllm"))];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "provider-only condition without an LB should error");
+    }
+
+    #[test]
+    fn selected_upstream_both_without_lb_errors() {
+        let filters = vec![gated_filter(Some("openai_chat_completions"), Some("vllm"))];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "combined condition without an LB should error");
+    }
+
+    #[test]
+    fn selected_upstream_unless_without_lb_errors() {
+        let cond = Condition::Unless(ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: None,
+            methods: None,
+            headers: None,
+            selected_upstream: Some(SelectedUpstreamMatch {
+                application_protocol: Some("openai_chat_completions".to_owned()),
+                application_provider: None,
+            }),
+        });
+        let filters = vec![noop_filter_with_conditions("gated", vec![cond])];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "an `unless` selected-upstream condition must also be gated"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_after_unconditional_lb_ok() {
+        let filters = vec![
+            lb_filter(&[]),
+            gated_filter(Some("openai_chat_completions"), Some("vllm")),
+        ];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "an unconditional load balancer before the filter satisfies the guarantee: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_after_conditional_lb_errors() {
+        let mut lb = lb_filter(&[]);
+        lb.conditions = vec![Condition::When(ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: Some("/api".to_owned()),
+            methods: None,
+            headers: None,
+            selected_upstream: None,
+        })];
+        let filters = vec![lb, gated_filter(Some("openai_chat_completions"), None)];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a conditional load balancer may not run, so it does not satisfy the guarantee"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_no_condition_no_error() {
+        // A plain (non-selected-upstream) condition on a filter without an LB
+        // must not trip this check.
+        let cond = Condition::When(ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: Some("/api".to_owned()),
+            methods: None,
+            headers: None,
+            selected_upstream: None,
+        });
+        let filters = vec![noop_filter_with_conditions("gated", vec![cond])];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a non-selected-upstream condition is unaffected: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_in_lb_host_branch_ok() {
+        // A branch runs only after its host's `on_request`, so a load-balancer
+        // host guarantees selection for filters inside its branch.
+        let mut host = lb_filter(&[]);
+        host.branches = vec![make_branch_with_filters(
+            "br",
+            vec![gated_filter(Some("openai_chat_completions"), None)],
+        )];
+        let filters = vec![host];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a load-balancer host guarantees selection inside its branch: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_in_branch_without_lb_errors() {
+        let host = host_with_named_branch("br", vec![gated_filter(Some("openai_chat_completions"), None)]);
+        let filters = vec![host];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a selected-upstream condition inside a branch with no preceding LB should error"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_after_unconditional_branch_lb_ok() {
+        // An unconditional branch containing an unconditional LB guarantees
+        // selection for later top-level filters.
+        let host = host_with_named_branch("br", vec![lb_filter(&[])]);
+        let filters = vec![host, gated_filter(Some("openai_chat_completions"), None)];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "an LB in an unconditional branch guarantees selection downstream: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_after_conditional_branch_lb_errors() {
+        // A conditional branch may not fire, so its LB cannot be relied on.
+        let host = host_with_conditional_branch(vec![lb_filter(&[])]);
+        let filters = vec![host, gated_filter(Some("openai_chat_completions"), None)];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "an LB reachable only through a conditional branch does not satisfy the guarantee"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_reachable_via_skip_over_lb_errors() {
+        // A top-level SkipTo branch on the first filter jumps past the load
+        // balancer to the gated filter at the rejoin point. On the branch path
+        // the LB never runs, so the selected-upstream condition fails closed.
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![make_skip_branch("skip", 2)];
+        let filters = vec![
+            host,
+            lb_filter(&[]),
+            gated_filter(Some("openai_chat_completions"), None),
+        ];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a load balancer bypassed by a top-level SkipTo does not satisfy the guarantee: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("gated") && errors[0].contains("load_balancer is guaranteed"),
+            "error should name the gated filter and the missing guarantee: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn selected_upstream_skip_not_over_lb_ok() {
+        // The load balancer runs before the SkipTo host, so no branch path can
+        // bypass it and the downstream gated filter is always guarded.
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![make_skip_branch("skip", 3)];
+        let filters = vec![
+            lb_filter(&[]),
+            host,
+            named_noop_filter("noop", vec![]),
+            gated_filter(Some("openai_chat_completions"), None),
+        ];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a SkipTo that does not jump over the LB leaves the guarantee intact: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_skip_over_container_lb_errors() {
+        // An earlier top-level SkipTo jumps over a later sibling host whose
+        // unconditional branch CONTAINS the load balancer, landing on the gated
+        // filter. The container's load balancer sits inside the skip span, so on
+        // the branch path it is bypassed and cannot satisfy the guarantee.
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![make_skip_branch("skip", 2)];
+        let mut wrapper = named_noop_filter("wrapper", vec![]);
+        wrapper.branches = vec![make_branch_with_filters("inner", vec![lb_filter(&[])])];
+        let filters = vec![host, wrapper, gated_filter(Some("openai_chat_completions"), None)];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a container load balancer bypassed by a top-level SkipTo does not satisfy the guarantee: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_after_host_conditional_skip_before_lb_branch_errors() {
+        // A host with ORDERED branches: an earlier CONDITIONAL SkipTo branch,
+        // then a later UNCONDITIONAL branch containing the load balancer. When
+        // the conditional branch fires it skips forward past the host, so the
+        // later "unconditional" load-balancer branch is never evaluated and the
+        // downstream gated filter is reached without a selected upstream. The
+        // earlier miss credited the later branch and skipped this error.
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![
+            conditional_branch("skip", vec![], RejoinTarget::SkipTo(2)),
+            make_branch_with_filters("inner_lb", vec![lb_filter(&[])]),
+        ];
+        let filters = vec![
+            host,
+            named_noop_filter("noop", vec![]),
+            gated_filter(Some("openai_chat_completions"), None),
+        ];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "an earlier conditional SkipTo that bypasses a later LB branch voids the guarantee: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("gated") && errors[0].contains("load_balancer is guaranteed"),
+            "error should name the gated filter and the missing guarantee: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn selected_upstream_after_host_lb_branch_before_conditional_skip_ok() {
+        // Same branches as the erroring case, reordered so the UNCONDITIONAL
+        // load-balancer branch comes first. It always fires (and runs the load
+        // balancer) before the conditional SkipTo branch is evaluated, so every
+        // path past the host has selected an upstream.
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![
+            make_branch_with_filters("inner_lb", vec![lb_filter(&[])]),
+            conditional_branch("skip", vec![], RejoinTarget::SkipTo(2)),
+        ];
+        let filters = vec![
+            host,
+            named_noop_filter("noop", vec![]),
+            gated_filter(Some("openai_chat_completions"), None),
+        ];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "an unconditional LB branch reached before any forward skip guarantees selection: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_after_host_conditional_terminal_before_lb_branch_ok() {
+        // An earlier conditional Terminal branch does not void the guarantee:
+        // when it fires the request pipeline stops, so the downstream gated
+        // filter is never reached on that path; when it does not fire, the later
+        // unconditional load-balancer branch runs. Unlike SkipTo, Terminal
+        // cannot deliver a request to a downstream filter without the LB.
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![
+            conditional_branch("term", vec![], RejoinTarget::Terminal),
+            make_branch_with_filters("inner_lb", vec![lb_filter(&[])]),
+        ];
+        let filters = vec![
+            host,
+            named_noop_filter("noop", vec![]),
+            gated_filter(Some("openai_chat_completions"), None),
+        ];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a Terminal branch stops the pipeline, so it never bypasses the LB to a downstream filter: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_after_host_conditional_reenter_before_lb_branch_ok() {
+        // An earlier conditional ReEnter branch does not void the guarantee:
+        // ReEnter only targets an earlier index, so the host is re-evaluated on
+        // the way forward and its unconditional load-balancer branch still runs
+        // before the pipeline advances past the host.
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![
+            conditional_branch("loop", vec![], RejoinTarget::ReEnter(0)),
+            make_branch_with_filters("inner_lb", vec![lb_filter(&[])]),
+        ];
+        let filters = vec![
+            host,
+            named_noop_filter("noop", vec![]),
+            gated_filter(Some("openai_chat_completions"), None),
+        ];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a backward ReEnter re-runs the host, so its LB branch still runs before advancing: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_conditional_skip_past_gated_before_lb_branch_ok() {
+        // A host with ORDERED branches: an earlier CONDITIONAL SkipTo that jumps
+        // *past* the gated filter, then an UNCONDITIONAL load-balancer branch. On
+        // the firing path the skip lands beyond the gated filter, which is never
+        // reached; on the fall-through path the load-balancer branch runs before
+        // the gated filter. No path reaches the gated filter without a selected
+        // upstream, so the SkipTo must not be flagged.
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![
+            conditional_branch("skip", vec![], RejoinTarget::SkipTo(3)),
+            make_branch_with_filters("inner_lb", vec![lb_filter(&[])]),
+        ];
+        let filters = vec![
+            host,
+            gated_filter(Some("openai_chat_completions"), None),
+            named_noop_filter("noop", vec![]),
+            named_noop_filter("sink", vec![]),
+        ];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a conditional SkipTo that jumps past the gated filter never reaches it without an LB: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_conditional_skip_branch_with_own_lb_ok() {
+        // A host with a CONDITIONAL SkipTo branch whose OWN filters run a load
+        // balancer, followed by a top-level load balancer. On the firing path the
+        // branch runs its load balancer before skipping forward; on the
+        // fall-through path the top-level load balancer runs. Every path to the
+        // gated filter has selected an upstream, so the SkipTo must not be flagged
+        // even though its target lands on the gated filter.
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![conditional_branch(
+            "skip_lb",
+            vec![lb_filter(&[])],
+            RejoinTarget::SkipTo(2),
+        )];
+        let filters = vec![
+            host,
+            lb_filter(&[]),
+            gated_filter(Some("openai_chat_completions"), None),
+        ];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a conditional SkipTo whose branch runs its own LB, plus a fall-through LB, guarantees selection: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_nested_reenter_before_lb_branch_errors() {
+        // A load-balancer branch nested one level deep, guarded by an earlier
+        // conditional ReEnter sibling. Unlike a top-level ReEnter, a nested rejoin
+        // outcome is discarded after sibling evaluation stops, so when the ReEnter
+        // fires the later unconditional load-balancer branch never runs and
+        // execution continues to the gated filter with no selected upstream.
+        let mut nested_host = named_noop_filter("nested", vec![]);
+        nested_host.branches = vec![
+            conditional_branch("loop", vec![], RejoinTarget::ReEnter(0)),
+            make_branch_with_filters("inner_lb", vec![lb_filter(&[])]),
+        ];
+        let mut outer_host = named_noop_filter("outer", vec![]);
+        outer_host.branches = vec![make_branch_with_filters("wrap", vec![nested_host])];
+        let filters = vec![outer_host, gated_filter(Some("openai_chat_completions"), None)];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a nested ReEnter is an early sibling exit, so the later nested LB branch is not guaranteed: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("gated") && errors[0].contains("load_balancer is guaranteed"),
+            "error should name the gated filter and the missing guarantee: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn selected_upstream_nested_skip_before_lb_branch_errors() {
+        // The nested analogue of a top-level SkipTo: a load-balancer branch nested
+        // one level deep, guarded by an earlier conditional SkipTo sibling. A
+        // nested SkipTo outcome is discarded, so when it fires the later
+        // unconditional load-balancer branch never runs and execution continues to
+        // the gated filter with no selected upstream.
+        let mut nested_host = named_noop_filter("nested", vec![]);
+        nested_host.branches = vec![
+            conditional_branch("skip", vec![], RejoinTarget::SkipTo(1)),
+            make_branch_with_filters("inner_lb", vec![lb_filter(&[])]),
+        ];
+        let mut outer_host = named_noop_filter("outer", vec![]);
+        outer_host.branches = vec![make_branch_with_filters("wrap", vec![nested_host])];
+        let filters = vec![outer_host, gated_filter(Some("openai_chat_completions"), None)];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_ordering(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a nested SkipTo is an early sibling exit, so the later nested LB branch is not guaranteed: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_body_hook_with_stream_buffer_pre_read_errors() {
+        // A request-body hook carrying a selected_upstream condition is
+        // evaluated during the StreamBuffer pre-read, before any load balancer
+        // selects an upstream, so it always fails closed.
+        let mut bf = body_filter();
+        bf.conditions = vec![selected_upstream_cond(Some("openai_chat_completions"), None)];
+        let filters = vec![bf];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_pre_read(
+            &filters,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            &mut errors,
+        );
+        assert_eq!(
+            errors.len(),
+            1,
+            "a selected_upstream body hook under StreamBuffer pre-read must be flagged: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("branch_body") && errors[0].contains("pre-read"),
+            "error should name the filter and the pre-read cause: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn selected_upstream_body_hook_without_stream_buffer_ok() {
+        // Without a StreamBuffer pre-read the body hook runs after the request
+        // phase, so its selected_upstream condition sees published selection.
+        let mut bf = body_filter();
+        bf.conditions = vec![selected_upstream_cond(Some("openai_chat_completions"), None)];
+        let filters = vec![bf];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_pre_read(&filters, BodyMode::Stream, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "no pre-read means the body hook runs after selection: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_condition_without_body_hook_not_flagged_by_pre_read() {
+        // A selected_upstream condition on a filter with no request-body hook is
+        // not evaluated on the pre-read path, so StreamBuffer is irrelevant.
+        let filters = vec![gated_filter(Some("openai_chat_completions"), None)];
+        let mut errors = Vec::new();
+        check_selected_upstream_condition_pre_read(
+            &filters,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            &mut errors,
+        );
+        assert!(
+            errors.is_empty(),
+            "a header-only selected_upstream condition is not a pre-read hazard: {errors:?}"
+        );
+    }
+
     #[test]
     fn irr_with_router_errors() {
         let names = vec!["iterative_request_router", "router"];
@@ -2214,6 +3029,7 @@ mod tests {
             path_prefix: Some("/test".to_owned()),
             methods: None,
             headers: None,
+            selected_upstream: None,
         })
     }
 
@@ -2240,6 +3056,23 @@ mod tests {
             max_iterations: None,
             name: Arc::from(name),
             rejoin: RejoinTarget::SkipTo(target),
+        }
+    }
+
+    /// Build a *conditional* [`ResolvedBranch`] with the given filters and
+    /// rejoin target. A conditional branch may or may not fire at runtime, so it
+    /// cannot be relied on to run its filters on every path.
+    fn conditional_branch(name: &str, filters: Vec<PipelineFilter>, rejoin: RejoinTarget) -> ResolvedBranch {
+        ResolvedBranch {
+            condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
+                filter_name: Arc::from("classifier"),
+                key: Arc::from("kind"),
+                value: Arc::from("premium"),
+            }),
+            filters,
+            max_iterations: None,
+            name: Arc::from(name),
+            rejoin,
         }
     }
 

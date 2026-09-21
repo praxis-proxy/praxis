@@ -35,9 +35,12 @@ pub(super) fn maybe_emit_fallback_access_log(pipeline: &FilterPipeline, status: 
             return;
         }
         // Honor the entry's request conditions: a scoped access_log (e.g.
-        // only /api paths) must not gain fallback records for requests the
-        // operator excluded. Sampling is still deliberately bypassed.
-        if !pipeline.filter_request_conditions_match("access_log", filter_ctx.request) {
+        // only /api paths, or a `selected_upstream` predicate) must not gain
+        // fallback records for requests the operator excluded. The selection
+        // restored by `logging_cleanup` is on the context, so a
+        // `selected_upstream`-scoped filter is matched against it rather than
+        // silently dropped. Sampling is still deliberately bypassed.
+        if !pipeline.filter_request_conditions_match_selected("access_log", &filter_ctx) {
             return;
         }
         // Route through the pipeline so the record honours the filter's

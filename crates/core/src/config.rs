@@ -45,7 +45,7 @@ pub use cluster::{
     PriorityOpts, RetriableCondition, RetryBodyLimit, RetryBudgetConfig, RetryPolicy, RingHashOpts, SimpleStrategy,
     SubsetFallbackPolicy, SubsetOpts, UpstreamHttpVersion, ZoneAwareOpts,
 };
-pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch};
+pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch, SelectedUpstreamMatch};
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use insecure_options::{InsecureOptions, SkipPipelineChecks};
 pub use listener::{Listener, ListenerTls, ProtocolKind};

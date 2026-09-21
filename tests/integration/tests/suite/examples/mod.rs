@@ -83,6 +83,7 @@ mod ring_hash;
 mod round_robin;
 mod route_templates;
 mod security_examples;
+mod selected_upstream_conditions;
 mod session_affinity;
 mod static_response;
 mod sticky_sessions;

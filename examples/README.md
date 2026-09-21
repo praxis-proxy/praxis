@@ -111,6 +111,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [grpc-condition.yaml](configs/pipeline/grpc-condition.yaml) | The `grpc` condition predicate gates a filter on whether the request carries gRPC, classified from the `content-type` header alone (`application/grpc`, `application/grpc+proto`, `application/grpc+json`, or any other `application/grpc+<codec>`) |
 | [iterative-request-router-circuit-breaker.yaml](configs/pipeline/iterative-request-router-circuit-breaker.yaml) | Demonstrates circuit breaker integration with the iterative request router |
 | [iterative-request-router-sequence.yaml](configs/pipeline/iterative-request-router-sequence.yaml) | Demonstrates sequential sub-request execution where each step completes before the next begins |
+| [selected-upstream-conditions.yaml](configs/pipeline/selected-upstream-conditions.yaml) | Gate a filter on the application metadata the load balancer publishes when it selects an upstream |
 
 ### Protocols
 

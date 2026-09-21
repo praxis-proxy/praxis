@@ -20,7 +20,7 @@ use crate::{
     FilterError,
     actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
-    condition::{should_execute_from, should_execute_response_ref},
+    condition::{SelectedUpstream, should_execute_from, should_execute_response_ref},
     context::{EffectiveHeaders, HttpFilterContext, Response},
     metrics::{
         PHASE_REQUEST, PHASE_RESPONSE, PHASE_SELECTED_UPSTREAM, STREAM_BODY, STREAM_HEADERS, record_filter_duration,
@@ -44,6 +44,17 @@ pub(super) fn released_or_continue(released: bool) -> FilterAction {
         FilterAction::Release
     } else {
         FilterAction::Continue
+    }
+}
+
+/// Borrow the load balancer's published selection as a condition-eval view.
+///
+/// Both fields are `None` until a load balancer publishes a selection, so a
+/// `selected_upstream` predicate evaluated before then fails closed.
+pub(super) fn ctx_selected_upstream<'a>(ctx: &'a HttpFilterContext<'_>) -> SelectedUpstream<'a> {
+    SelectedUpstream {
+        application_protocol: ctx.selected_application_protocol(),
+        application_provider: ctx.selected_application_provider(),
     }
 }
 
@@ -75,8 +86,13 @@ pub(super) fn as_request_body_filter<'a>(
         return Ok(None);
     };
     if !conditions_resolved {
-        let run = should_execute_from(&pf.conditions, ctx.request, &EffectiveHeaders(ctx))
-            .map_err(|e| FilterError::from(format!("{}: {e}", http_filter.name())))?;
+        let run = should_execute_from(
+            &pf.conditions,
+            ctx.request,
+            &EffectiveHeaders(ctx),
+            ctx_selected_upstream(ctx),
+        )
+        .map_err(|e| FilterError::from(format!("{}: {e}", http_filter.name())))?;
         if !run {
             debug!(
                 filter = http_filter.name(),

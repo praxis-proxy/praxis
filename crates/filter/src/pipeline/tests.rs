@@ -4477,6 +4477,7 @@ fn gate_condition(header: &str, value: &str) -> Vec<praxis_core::config::Conditi
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            selected_upstream: None,
         },
     )]
 }
@@ -4769,6 +4770,7 @@ fn when_path(prefix: &str) -> praxis_core::config::Condition {
         path_prefix: Some(prefix.to_owned()),
         methods: None,
         headers: None,
+        selected_upstream: None,
     })
 }
 
@@ -4801,6 +4803,7 @@ fn unless_path(prefix: &str) -> praxis_core::config::Condition {
         path_prefix: Some(prefix.to_owned()),
         methods: None,
         headers: None,
+        selected_upstream: None,
     })
 }
 
@@ -5834,5 +5837,99 @@ fn set_session_stores_propagates_into_branch_nested_pipelines() {
     assert!(
         nested_has_stores,
         "set_session_stores must reach pipelines embedded by filters inside branch sub-chains"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// filter_request_conditions_match_selected
+// -----------------------------------------------------------------------------
+
+/// Build a single-`access_log`-filter pipeline scoped to `provider` via a
+/// `selected_upstream` `when` condition. `build` does not enforce ordering, so
+/// no load balancer is needed to construct it for these condition-match tests.
+fn access_log_scoped_to_provider(provider: &str) -> FilterPipeline {
+    let registry = FilterRegistry::with_builtins();
+    let condition = serde_yaml::from_str(&format!(
+        "when:\n  selected_upstream:\n    application_provider: {provider}\n"
+    ))
+    .expect("valid selected_upstream condition");
+    let mut entries = vec![FilterEntry {
+        branch_chains: None,
+        conditions: vec![condition],
+        filter_type: "access_log".into(),
+        config: serde_yaml::Value::Null,
+        name: None,
+        response_conditions: vec![],
+        failure_mode: FailureMode::default(),
+    }];
+    FilterPipeline::build(&mut entries, &registry).expect("access_log pipeline builds")
+}
+
+#[test]
+fn conditions_match_selected_honors_published_selection() {
+    // The fallback path restores the selection onto the context, so a
+    // selected_upstream-scoped filter must match when the published provider
+    // satisfies its predicate.
+    let pipeline = access_log_scoped_to_provider("vllm");
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.publish_selected_application(None, Some(Arc::from("vllm")));
+    assert!(
+        pipeline.filter_request_conditions_match_selected("access_log", &ctx),
+        "a selected_upstream-scoped filter must match its published provider"
+    );
+}
+
+#[test]
+fn conditions_match_selected_fails_closed_without_selection() {
+    // No selection published: the predicate has nothing to match and must fail
+    // closed, exactly as the selection-unaware helper does.
+    let pipeline = access_log_scoped_to_provider("vllm");
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let ctx = crate::test_utils::make_filter_context(&req);
+    assert!(
+        !pipeline.filter_request_conditions_match_selected("access_log", &ctx),
+        "absent selection must fail closed"
+    );
+    assert!(
+        !pipeline.filter_request_conditions_match("access_log", ctx.request),
+        "the selection-unaware helper also fails closed on a selected_upstream predicate"
+    );
+}
+
+#[test]
+fn conditions_match_selected_rejects_mismatched_selection() {
+    // A published provider that does not satisfy the predicate must not match,
+    // so the fallback record is correctly withheld.
+    let pipeline = access_log_scoped_to_provider("vllm");
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.publish_selected_application(None, Some(Arc::from("openai")));
+    assert!(
+        !pipeline.filter_request_conditions_match_selected("access_log", &ctx),
+        "a mismatched published provider must not match the predicate"
+    );
+}
+
+#[test]
+fn conditions_match_selected_unconditional_filter_always_matches() {
+    // An unconditional access_log matches regardless of selection, matching the
+    // selection-unaware helper's behavior.
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![FilterEntry {
+        branch_chains: None,
+        conditions: vec![],
+        filter_type: "access_log".into(),
+        config: serde_yaml::Value::Null,
+        name: None,
+        response_conditions: vec![],
+        failure_mode: FailureMode::default(),
+    }];
+    let pipeline = FilterPipeline::build(&mut entries, &registry).expect("access_log pipeline builds");
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let ctx = crate::test_utils::make_filter_context(&req);
+    assert!(
+        pipeline.filter_request_conditions_match_selected("access_log", &ctx),
+        "an unconditional filter matches even with no selection"
     );
 }

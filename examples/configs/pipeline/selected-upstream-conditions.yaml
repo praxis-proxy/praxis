@@ -1,0 +1,75 @@
+# Selected-Upstream Conditions
+#
+# Gate a filter on the application metadata the load balancer
+# publishes when it selects an upstream. The `selected_upstream`
+# condition matches the chosen cluster's `application_protocol` and/or
+# `application_provider` (typed, framework-owned values, never headers),
+# so downstream filters can adapt to *which* upstream was picked.
+#
+# Because the metadata only exists after selection, a filter carrying a
+# `selected_upstream` condition must sit after an unconditional
+# load_balancer; validation rejects the config otherwise. Missing
+# metadata fails closed: an unset value never satisfies a `when`.
+#
+# Flow:
+#
+#   /vllm/...   --router--> vllm_backend   (provider: vllm)
+#   /openai/... --router--> openai_backend (provider: openai)
+#        |
+#        v
+#   load_balancer publishes selected application metadata
+#        |
+#        v
+#   path_rewrite adds "/selected" ONLY when provider == vllm
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/selected-upstream-conditions.yaml
+#
+# Exercise:
+#   curl http://localhost:8080/vllm/chat    # upstream sees /selected/vllm/chat
+#   curl http://localhost:8080/openai/chat  # upstream sees /openai/chat (unchanged)
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/vllm"
+            cluster: vllm_backend
+          - path_prefix: "/openai"
+            cluster: openai_backend
+
+      - filter: load_balancer
+        clusters:
+          - name: vllm_backend
+            http:
+              application_protocol: openai_chat_completions
+              application_provider: vllm
+            endpoints:
+              - "127.0.0.1:3001"
+          - name: openai_backend
+            http:
+              application_protocol: openai_chat_completions
+              application_provider: openai
+            endpoints:
+              - "127.0.0.1:3002"
+
+      # Fires only for the vllm upstream. The load_balancer above is
+      # unconditional, so the selected-upstream metadata is guaranteed
+      # to exist by the time this condition is evaluated.
+      - filter: path_rewrite
+        add_prefix: "/selected"
+        conditions:
+          - when:
+              selected_upstream:
+                application_protocol: openai_chat_completions
+                application_provider: vllm
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

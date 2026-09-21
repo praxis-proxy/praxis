@@ -27,6 +27,7 @@
 
 use std::{pin::Pin, sync::Arc};
 
+use praxis_core::config::FailureMode;
 use tracing::{debug, trace, warn};
 
 use super::{
@@ -35,8 +36,8 @@ use super::{
     filter::PipelineFilter,
 };
 use crate::{
-    FilterError, actions::FilterAction, any_filter::AnyFilter, condition::should_execute, context::HttpFilterContext,
-    trace_context::ensure_trace_context,
+    FilterError, actions::FilterAction, any_filter::AnyFilter, condition::should_execute_selected,
+    context::HttpFilterContext, trace_context::ensure_trace_context,
 };
 
 // -----------------------------------------------------------------------------
@@ -193,22 +194,15 @@ async fn execute_branch_filters(
             AnyFilter::Http(f) => f.as_ref(),
             AnyFilter::Tcp(_) => continue,
         };
-        if !should_execute(&pf.conditions, ctx.request) {
+        let selected = super::http_utils::ctx_selected_upstream(ctx);
+        if !should_execute_selected(&pf.conditions, ctx.request, selected) {
             continue;
         }
         ctx.current_filter_id = Some(pf.filter_id);
         let result = http_filter.on_request(ctx).await;
         ctx.current_filter_id = None;
-        match result {
-            Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {},
-            Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
-            Ok(FilterAction::TerminalResponse(t)) => return Ok(FilterAction::TerminalResponse(t)),
-            Ok(FilterAction::StreamingTerminalResponse(t)) => {
-                return Ok(FilterAction::StreamingTerminalResponse(t));
-            },
-            Err(e) => {
-                check_failure_mode(http_filter.name(), e, "branch request", pf.failure_mode)?;
-            },
+        if let Some(action) = branch_request_outcome(result, http_filter.name(), pf.failure_mode)? {
+            return Ok(action);
         }
         if let Some(action) = dispatch_nested_outcome(&pf.branches, ctx).await? {
             return Ok(action);
@@ -219,11 +213,36 @@ async fn execute_branch_filters(
 
 /// Initialize correlation only after a branch is selected and its trace filter matches.
 fn ensure_branch_trace_context(filters: &[PipelineFilter], ctx: &mut HttpFilterContext<'_>) {
+    let selected = super::http_utils::ctx_selected_upstream(ctx);
     if filters
         .iter()
-        .any(|pf| pf.filter.name() == "trace_context" && should_execute(&pf.conditions, ctx.request))
+        .any(|pf| {
+            pf.filter.name() == "trace_context" && should_execute_selected(&pf.conditions, ctx.request, selected)
+        })
     {
         ensure_trace_context(ctx);
+    }
+}
+
+/// Map a branch filter's request-phase result to a parent-loop action.
+///
+/// `None` continues the branch loop; `Some` stops it (a terminal response or
+/// rejection). An error is routed through [`check_failure_mode`], which either
+/// swallows it (fail-open) or propagates it (fail-closed).
+fn branch_request_outcome(
+    result: Result<FilterAction, FilterError>,
+    filter_name: &str,
+    failure_mode: FailureMode,
+) -> Result<Option<FilterAction>, FilterError> {
+    match result {
+        Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => Ok(None),
+        Ok(FilterAction::Reject(r)) => Ok(Some(FilterAction::Reject(r))),
+        Ok(FilterAction::TerminalResponse(t)) => Ok(Some(FilterAction::TerminalResponse(t))),
+        Ok(FilterAction::StreamingTerminalResponse(t)) => Ok(Some(FilterAction::StreamingTerminalResponse(t))),
+        Err(e) => {
+            check_failure_mode(filter_name, e, "branch request", failure_mode)?;
+            Ok(None)
+        },
     }
 }
 
@@ -304,7 +323,6 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use http::Method;
-    use praxis_core::config::FailureMode;
 
     use super::*;
     use crate::{

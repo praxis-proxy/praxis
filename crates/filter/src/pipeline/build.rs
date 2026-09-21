@@ -228,6 +228,12 @@ impl FilterPipeline {
         super::checks::check_branch_body_filters(&self.filters, &mut errors);
         super::checks::check_branch_selected_upstream_body_filters(&self.filters, &mut errors);
         super::checks::check_selected_upstream_body_mode(&self.filters, &mut errors);
+        super::checks::check_selected_upstream_condition_ordering(&self.filters, &mut errors);
+        super::checks::check_selected_upstream_condition_pre_read(
+            &self.filters,
+            self.body_capabilities.request_body_mode,
+            &mut errors,
+        );
         super::checks::check_irr_with_router_or_lb(&names, &mut errors);
         if self.may_select_streaming_subrequest_response
             && matches!(
@@ -266,6 +272,7 @@ impl FilterPipeline {
     ///             path_prefix: Some("/api".to_owned()),
     ///             methods: None,
     ///             headers: None,
+    ///             selected_upstream: None,
     ///         },
     ///     )],
     ///     name: None,

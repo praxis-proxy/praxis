@@ -441,12 +441,41 @@ impl FilterPipeline {
     ///
     /// Used by protocol-level fallbacks that emit on a filter's behalf, so
     /// an operator's `when`/`unless` scoping is honored outside the normal
-    /// request phase.
+    /// request phase. No load balancer selection is supplied, so a
+    /// `selected_upstream` predicate fails closed (never matches). Callers with
+    /// a request context that may carry a published selection should use
+    /// [`filter_request_conditions_match_selected`] instead, so a
+    /// `selected_upstream`-scoped filter is honored when selection is available.
+    ///
+    /// [`filter_request_conditions_match_selected`]: Self::filter_request_conditions_match_selected
     pub fn filter_request_conditions_match(&self, type_name: &str, request: &crate::Request) -> bool {
         self.filters
             .iter()
             .filter(|pf| pf.filter.name() == type_name)
             .any(|pf| crate::condition::should_execute(&pf.conditions, request))
+    }
+
+    /// Like [`filter_request_conditions_match`], but matches `selected_upstream`
+    /// predicates against the load balancer's published selection read from
+    /// `ctx`.
+    ///
+    /// Protocol-level fallbacks that run after the request phase (e.g. the
+    /// fallback access record emitted from the logging phase) have the selection
+    /// restored on their context, so a filter scoped to a `selected_upstream`
+    /// predicate is honored rather than silently dropped. Absent selection still
+    /// fails closed, matching [`filter_request_conditions_match`].
+    ///
+    /// [`filter_request_conditions_match`]: Self::filter_request_conditions_match
+    pub fn filter_request_conditions_match_selected(
+        &self,
+        type_name: &str,
+        ctx: &crate::HttpFilterContext<'_>,
+    ) -> bool {
+        let selected = http_utils::ctx_selected_upstream(ctx);
+        self.filters
+            .iter()
+            .filter(|pf| pf.filter.name() == type_name)
+            .any(|pf| crate::condition::should_execute_selected(&pf.conditions, ctx.request, selected))
     }
 
     /// Ask each filter to emit its end-of-request record, returning

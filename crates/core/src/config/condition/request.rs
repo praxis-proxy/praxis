@@ -89,6 +89,70 @@ pub struct ConditionMatch {
     /// Headers that must be present and match.
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
+
+    /// Selected-upstream application metadata published by the load balancer.
+    ///
+    /// Matches the typed protocol/provider of the cluster the load balancer
+    /// selected for this exchange, not request headers or writable metadata.
+    /// Because the value is published only after upstream selection, a filter
+    /// carrying this predicate requires a load balancer guaranteed to run
+    /// before it (enforced at build time). Missing metadata never satisfies
+    /// the predicate (fail-closed).
+    #[serde(default)]
+    pub selected_upstream: Option<SelectedUpstreamMatch>,
+}
+
+// -----------------------------------------------------------------------------
+// SelectedUpstreamMatch
+// -----------------------------------------------------------------------------
+
+/// Match predicate over the load balancer's selected-upstream metadata
+/// (AND semantics).
+///
+/// Both fields are optional; an unset field imposes no constraint. Matching
+/// reads the typed selection the load balancer published for the exchange,
+/// which is stable for the life of the exchange and opaque to Praxis core.
+/// Missing metadata (no load balancer ran, or the selected cluster declared
+/// neither field) never satisfies a configured field.
+///
+/// ```
+/// use praxis_core::config::SelectedUpstreamMatch;
+///
+/// let m: SelectedUpstreamMatch = serde_yaml::from_str(
+///     r#"
+/// application_protocol: openai_chat_completions
+/// application_provider: vllm
+/// "#,
+/// )
+/// .unwrap();
+/// assert_eq!(
+///     m.application_protocol.as_deref(),
+///     Some("openai_chat_completions")
+/// );
+/// assert_eq!(m.application_provider.as_deref(), Some("vllm"));
+/// ```
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectedUpstreamMatch {
+    /// The selected cluster's opaque application protocol must equal this.
+    #[serde(default)]
+    pub application_protocol: Option<String>,
+
+    /// The selected cluster's opaque application provider must equal this.
+    #[serde(default)]
+    pub application_provider: Option<String>,
+}
+
+impl SelectedUpstreamMatch {
+    /// Whether this predicate constrains nothing (both fields unset).
+    ///
+    /// A configured-but-empty `selected_upstream: {}` gates on no metadata at
+    /// all, so validation rejects it the same way an empty top-level predicate
+    /// is rejected.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.application_protocol.is_none() && self.application_provider.is_none()
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -265,6 +329,90 @@ path: "/"
         assert!(
             m.path_prefix.is_none(),
             "path_prefix should be None for exact path match"
+        );
+    }
+
+    #[test]
+    fn parse_selected_upstream_both_fields() {
+        let m: ConditionMatch = serde_yaml::from_str(
+            r#"
+selected_upstream:
+  application_protocol: openai_chat_completions
+  application_provider: vllm
+"#,
+        )
+        .unwrap();
+        let su = m.selected_upstream.expect("selected_upstream should parse");
+        assert_eq!(
+            su.application_protocol.as_deref(),
+            Some("openai_chat_completions"),
+            "application_protocol mismatch"
+        );
+        assert_eq!(
+            su.application_provider.as_deref(),
+            Some("vllm"),
+            "application_provider mismatch"
+        );
+        assert!(!su.is_empty(), "a populated selected_upstream is not empty");
+    }
+
+    #[test]
+    fn parse_selected_upstream_protocol_only() {
+        let m: ConditionMatch = serde_yaml::from_str(
+            r#"
+selected_upstream:
+  application_protocol: openai_responses
+"#,
+        )
+        .unwrap();
+        let su = m.selected_upstream.expect("selected_upstream should parse");
+        assert_eq!(su.application_protocol.as_deref(), Some("openai_responses"));
+        assert!(
+            su.application_provider.is_none(),
+            "provider should be None when omitted"
+        );
+    }
+
+    #[test]
+    fn parse_selected_upstream_empty_is_empty() {
+        let m: ConditionMatch = serde_yaml::from_str("selected_upstream: {}").unwrap();
+        let su = m.selected_upstream.expect("empty map still parses");
+        assert!(su.is_empty(), "an all-absent selected_upstream reports empty");
+    }
+
+    #[test]
+    fn reject_unknown_selected_upstream_field() {
+        let err = serde_yaml::from_str::<ConditionMatch>(
+            r#"
+selected_upstream:
+  application_flavor: spicy
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("application_flavor"),
+            "unknown selected_upstream field should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_when_selected_upstream_condition() {
+        let conditions: Vec<Condition> = serde_yaml::from_str(
+            r#"
+- when:
+    selected_upstream:
+      application_provider: vllm
+"#,
+        )
+        .unwrap();
+        assert_eq!(conditions.len(), 1, "should parse 1 condition");
+        assert!(
+            matches!(
+                &conditions[0],
+                Condition::When(m)
+                    if m.selected_upstream.as_ref().and_then(|su| su.application_provider.as_deref()) == Some("vllm")
+            ),
+            "should be When gating on selected_upstream provider"
         );
     }
 }
