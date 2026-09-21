@@ -155,13 +155,38 @@ fn param_value_matches(name: &str, actual: &str, expected: &str) -> bool {
 }
 
 /// The `name=value` parameters after the first `;`, trimmed and unquoted.
+///
+/// Splits only on semicolons outside a quoted-string, so
+/// `boundary="a;b"` stays one parameter (RFC 9110 §5.6.4).
 fn params(value: &str) -> impl Iterator<Item = (&str, &str)> {
-    value
-        .split_once(';')
-        .map_or("", |(_, params)| params)
-        .split(';')
+    split_outside_quotes(value.split_once(';').map_or("", |(_, params)| params))
         .filter_map(|param| param.split_once('='))
-        .map(|(name, val)| (name.trim(), val.trim().trim_matches('"')))
+        .map(|(name, val)| (name.trim(), unquote(val.trim())))
+}
+
+/// Split `params` on `;`, ignoring semicolons inside double quotes and
+/// honoring `\"` quoted-pairs.
+fn split_outside_quotes(params: &str) -> impl Iterator<Item = &str> {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    params.split(move |ch: char| {
+        let is_separator = ch == ';' && !in_quotes;
+        match ch {
+            _ if escaped => escaped = false,
+            '\\' if in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            _ => {},
+        }
+        is_separator
+    })
+}
+
+/// Strip one pair of surrounding double quotes.
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(value)
 }
 
 // -----------------------------------------------------------------------------
@@ -436,6 +461,36 @@ mod tests {
                 &resp
             ),
             "only charset values are case-insensitive (RFC 9110 §8.3.1)"
+        );
+    }
+
+    #[test]
+    fn content_type_quoted_parameter_value_keeps_semicolons() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("multipart/form-data; boundary=\"foo;one\""),
+        );
+        let resp = make_response(200, headers);
+        assert!(
+            !should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "multipart/form-data; boundary=\"foo;two\""
+                )]))],
+                &resp
+            ),
+            "a semicolon inside a quoted-string must not split the parameter"
+        );
+        assert!(
+            should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "multipart/form-data; boundary=\"foo;one\""
+                )]))],
+                &resp
+            ),
+            "the same quoted value must still match"
         );
     }
 
