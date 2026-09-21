@@ -14,10 +14,9 @@ use tracing::{info, warn};
 /// Compare old and new configs, logging warnings for changes that
 /// require a process restart to take effect.
 pub(crate) fn log_restart_required_changes(old: &Config, new: &Config) {
-    // One shared name index serves all four listener detectors.
+    // One shared name index serves all three listener detectors.
     let old_by_name = listeners_by_name(old);
     detect_listener_topology_changes_with(old, new, &old_by_name);
-    detect_protocol_changes_with(new, &old_by_name);
     detect_compression_additions_with(old, new, &old_by_name);
     detect_tls_toggles_with(new, &old_by_name);
     detect_subrequest_max_connections_change(old, new);
@@ -73,22 +72,6 @@ fn detect_listener_topology_changes_with(old: &Config, new: &Config, old_by_name
                 old_address = %old_l.address,
                 new_address = %new_l.address,
                 "listener address changed; requires restart to rebind"
-            );
-        }
-    }
-}
-
-/// Detect protocol changes (e.g. HTTP to TCP).
-fn detect_protocol_changes_with(new: &Config, old_by_name: &ListenersByName<'_>) {
-    for new_l in &new.listeners {
-        if let Some(old_l) = old_by_name.get(new_l.name.as_str())
-            && old_l.protocol != new_l.protocol
-        {
-            warn!(
-                listener = %new_l.name,
-                old_protocol = ?old_l.protocol,
-                new_protocol = ?new_l.protocol,
-                "protocol changed; requires restart"
             );
         }
     }

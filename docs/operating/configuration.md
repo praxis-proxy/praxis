@@ -83,7 +83,6 @@ continues serving with the old config.
 
 - `runtime.logging` destination or buffering
 - Listener add, remove, or address rebind
-- Protocol changes (HTTP to TCP)
 - Compression module addition
 - TLS enable/disable, and any change inside a
   listener's `tls` block (certificate *file contents*
@@ -98,6 +97,13 @@ continues serving with the old config.
   `upstream_keepalive_pool_size`)
 - The `admin` section (the admin endpoint binds at
   startup)
+
+**Rejected (reload fails, nothing changes):**
+
+- Protocol change (HTTP to TCP or back) on an existing
+  listener. Its handler executes only filters of the
+  protocol it was started with, so the reload is refused
+  until the change is reverted or the process restarts.
 
 Stateful filters (rate limiter, circuit breaker) reset
 their state on reload. Operators should expect a brief

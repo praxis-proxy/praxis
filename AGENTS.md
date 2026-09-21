@@ -301,8 +301,9 @@ restarting. Each handler holds
 `Arc<ArcSwap<FilterPipeline>>`; a file watcher
 (500ms debounce, hardcoded) monitors the config file, validates,
 rebuilds pipelines, and swaps atomically. Listener
-topology, protocol type, and TLS toggle changes
-cannot be applied dynamically (logged as warnings).
+topology and TLS toggle changes cannot be applied
+dynamically (logged as warnings); a protocol change
+on a bound listener rejects the whole reload.
 
 **What reloads**: Filter pipelines, filter configurations, routing rules.
 **What does not reload**: Listener addresses/ports, protocol types (HTTP/TCP),

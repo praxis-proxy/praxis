@@ -370,8 +370,8 @@ fn register_protocols(
 /// The watcher monitors the config file and all referenced documents (external filter configs,
 /// policy files, etc.), debounces writes, validates the new config, rebuilds pipelines, and
 /// swaps them atomically via `ArcSwap` so in-flight requests see one consistent generation.
-/// Listener topology changes and protocol switches cannot be applied dynamically and are logged
-/// as warnings.
+/// Listener topology changes cannot be applied dynamically and are logged as warnings; a
+/// protocol switch on a bound listener rejects the whole reload.
 #[cfg(feature = "config-reload")]
 fn spawn_watcher(
     config_path: Option<PathBuf>,

@@ -18,6 +18,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
+use praxis_core::config::ProtocolKind;
 use praxis_filter::FilterPipeline;
 
 // -----------------------------------------------------------------------------
@@ -50,6 +51,13 @@ use praxis_filter::FilterPipeline;
 pub struct ListenerPipelines {
     /// Maps listener names to their swappable filter pipelines.
     pipelines: HashMap<String, Arc<ArcSwap<FilterPipeline>>>,
+    /// The protocol each listener's pipelines are resolved for.
+    ///
+    /// A protocol handler is bound once, for the process lifetime, and
+    /// executes only filters of its own protocol. Swaps replace the
+    /// pipeline in a slot but never this record, so a reload can tell
+    /// whether a rebuilt pipeline still matches the handler it targets.
+    protocols: HashMap<String, ProtocolKind>,
 }
 
 impl ListenerPipelines {
@@ -59,11 +67,49 @@ impl ListenerPipelines {
     /// from the loaded configuration. Each pipeline is wrapped in [`ArcSwap`]
     /// for atomic replacement during hot reloads.
     pub fn new(pipelines: HashMap<String, Arc<FilterPipeline>>) -> Self {
+        Self::with_protocols(pipelines, HashMap::new())
+    }
+
+    /// Create from a map of listener name to pipeline, recording the
+    /// protocol each listener's pipeline was resolved for.
+    ///
+    /// ```
+    /// use std::{collections::HashMap, sync::Arc};
+    ///
+    /// use praxis_core::config::ProtocolKind;
+    /// use praxis_filter::{FilterPipeline, FilterRegistry};
+    /// use praxis_protocol::ListenerPipelines;
+    ///
+    /// let registry = FilterRegistry::with_builtins();
+    /// let pipeline = Arc::new(FilterPipeline::build(&mut [], &registry).unwrap());
+    ///
+    /// let mut map = HashMap::new();
+    /// map.insert("db".to_owned(), pipeline);
+    /// let mut protocols = HashMap::new();
+    /// protocols.insert("db".to_owned(), ProtocolKind::Tcp);
+    /// let pipelines = ListenerPipelines::with_protocols(map, protocols);
+    ///
+    /// assert_eq!(pipelines.protocol("db"), Some(ProtocolKind::Tcp));
+    /// ```
+    pub fn with_protocols(
+        pipelines: HashMap<String, Arc<FilterPipeline>>,
+        protocols: HashMap<String, ProtocolKind>,
+    ) -> Self {
         let swappable = pipelines
             .into_iter()
             .map(|(name, p)| (name, Arc::new(ArcSwap::from(p))))
             .collect();
-        Self { pipelines: swappable }
+        Self {
+            pipelines: swappable,
+            protocols,
+        }
+    }
+
+    /// The protocol a listener's pipelines are resolved for, if recorded.
+    ///
+    /// Fixed at construction: a swap never changes it.
+    pub fn protocol(&self, listener_name: &str) -> Option<ProtocolKind> {
+        self.protocols.get(listener_name).copied()
     }
 
     /// Get the swappable pipeline for a listener by name.
@@ -205,6 +251,54 @@ mod tests {
         let pipelines = make_pipelines(&["web"]);
         let slot: &Arc<ArcSwap<FilterPipeline>> = pipelines.get("web").unwrap();
         let _loaded: arc_swap::Guard<Arc<FilterPipeline>> = slot.load();
+    }
+
+    #[test]
+    fn protocol_is_recorded_at_construction() {
+        let registry = FilterRegistry::with_builtins();
+        let mut map = HashMap::new();
+        map.insert(
+            "web".to_owned(),
+            Arc::new(FilterPipeline::build(&mut [], &registry).unwrap()),
+        );
+        let mut protocols = HashMap::new();
+        protocols.insert("web".to_owned(), ProtocolKind::Tcp);
+
+        let pipelines = ListenerPipelines::with_protocols(map, protocols);
+
+        assert_eq!(pipelines.protocol("web"), Some(ProtocolKind::Tcp));
+        assert_eq!(
+            pipelines.protocol("missing"),
+            None,
+            "unknown listeners have no protocol"
+        );
+    }
+
+    #[test]
+    fn protocol_survives_swap() {
+        let registry = FilterRegistry::with_builtins();
+        let mut map = HashMap::new();
+        map.insert(
+            "web".to_owned(),
+            Arc::new(FilterPipeline::build(&mut [], &registry).unwrap()),
+        );
+        let mut protocols = HashMap::new();
+        protocols.insert("web".to_owned(), ProtocolKind::Http);
+        let pipelines = ListenerPipelines::with_protocols(map, protocols);
+
+        pipelines.swap("web", Arc::new(FilterPipeline::build(&mut [], &registry).unwrap()));
+
+        assert_eq!(
+            pipelines.protocol("web"),
+            Some(ProtocolKind::Http),
+            "a swap replaces the pipeline, never the protocol the handler was bound for"
+        );
+    }
+
+    #[test]
+    fn new_records_no_protocol() {
+        let pipelines = make_pipelines(&["web"]);
+        assert_eq!(pipelines.protocol("web"), None);
     }
 
     #[test]

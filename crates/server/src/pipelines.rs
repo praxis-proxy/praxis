@@ -249,7 +249,12 @@ pub(crate) fn resolve_pipelines_with_composition(
         pipelines.insert(listener.name.clone(), Arc::new(pipeline));
     }
 
-    Ok(ListenerPipelines::new(pipelines))
+    let protocols = config
+        .listeners
+        .iter()
+        .map(|listener| (listener.name.clone(), listener.protocol))
+        .collect();
+    Ok(ListenerPipelines::with_protocols(pipelines, protocols))
 }
 
 /// Apply body limits, health registry, KV stores, pipeline extensions,

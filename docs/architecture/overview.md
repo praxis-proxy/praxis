@@ -190,9 +190,11 @@ are cancelled and respawned with a fresh registry on
 each successful reload.
 
 Changes that cannot be applied dynamically (listener
-topology, protocol type, compression module, TLS toggle)
-are detected by diffing old and new configs and logged
-as warnings.
+topology, compression module, TLS toggle) are detected
+by diffing old and new configs and logged as warnings.
+A protocol change on a bound listener is rejected as a
+reload failure, since its handler executes only filters
+of the protocol it was started with.
 
 ## Related
 
