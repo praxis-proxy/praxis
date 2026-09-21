@@ -5460,6 +5460,7 @@ fn trace_propagation_honors_trace_context_conditions() {
         path_prefix: Some("/api".to_owned()),
         methods: None,
         headers: None,
+        selected_upstream: None,
     });
     let pipeline = FilterPipeline::from_filters(vec![super::test_filters::noop_filter_with_conditions(
         "trace_context",

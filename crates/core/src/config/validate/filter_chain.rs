@@ -1107,6 +1107,33 @@ clusters:
     }
 
     #[test]
+    fn reject_selected_upstream_in_iterative_router_step() {
+        // IRR step filters are built into real pipelines, so selected_upstream
+        // matcher validation must recurse into them just like branch chains.
+        let yaml = r#"
+listeners: [{name: web, address: "127.0.0.1:8080", filter_chains: [main]}]
+filter_chains:
+  - name: main
+    filters:
+      - filter: iterative_request_router
+        steps:
+          - name: call
+            url: "http://backend"
+            filters:
+              - filter: request_id
+                conditions: [{when: {selected_upstream: {application_provider: ollama}}}]
+clusters:
+  - {name: c, http: {application_provider: vllm}, endpoints: ["10.0.0.1:80"]}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("application_provider 'ollama' matches no cluster"),
+            "a selected_upstream typo inside an IRR step must be rejected: {err}"
+        );
+    }
+
+    #[test]
     fn accept_populated_conditions() {
         let yaml = r#"
 listeners:

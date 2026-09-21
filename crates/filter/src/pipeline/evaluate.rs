@@ -216,9 +216,7 @@ fn ensure_branch_trace_context(filters: &[PipelineFilter], ctx: &mut HttpFilterC
     let selected = super::http_utils::ctx_selected_upstream(ctx);
     if filters
         .iter()
-        .any(|pf| {
-            pf.filter.name() == "trace_context" && should_execute_selected(&pf.conditions, ctx.request, selected)
-        })
+        .any(|pf| pf.filter.name() == "trace_context" && should_execute_selected(&pf.conditions, ctx.request, selected))
     {
         ensure_trace_context(ctx);
     }
@@ -483,6 +481,7 @@ mod tests {
                 path_prefix: Some("/api".to_owned()),
                 methods: None,
                 headers: None,
+                selected_upstream: None,
             },
         )];
         let branches = vec![make_branch(

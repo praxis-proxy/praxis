@@ -363,7 +363,12 @@ impl FilterPipeline {
             let Some(pf) = self.filters.get(idx) else {
                 continue;
             };
-            if crate::condition::should_execute_from(&pf.conditions, request, headers)? {
+            if crate::condition::should_execute_from(
+                &pf.conditions,
+                request,
+                headers,
+                crate::condition::SelectedUpstream::none(),
+            )? {
                 return Ok(true);
             }
         }

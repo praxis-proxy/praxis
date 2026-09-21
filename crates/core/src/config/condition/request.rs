@@ -374,6 +374,25 @@ selected_upstream:
     }
 
     #[test]
+    fn selected_upstream_provider_only_round_trips_through_serialization() {
+        let m: ConditionMatch = serde_yaml::from_str(
+            r#"
+selected_upstream:
+  application_provider: vllm
+"#,
+        )
+        .unwrap();
+        let yaml = serde_yaml::to_string(&m).unwrap();
+        let back: ConditionMatch = serde_yaml::from_str(&yaml).unwrap();
+        let su = back.selected_upstream.expect("selected_upstream should round-trip");
+        assert_eq!(su.application_provider.as_deref(), Some("vllm"));
+        assert!(
+            su.application_protocol.is_none(),
+            "protocol should remain None after round-trip"
+        );
+    }
+
+    #[test]
     fn parse_selected_upstream_empty_is_empty() {
         let m: ConditionMatch = serde_yaml::from_str("selected_upstream: {}").unwrap();
         let su = m.selected_upstream.expect("empty map still parses");
