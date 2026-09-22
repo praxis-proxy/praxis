@@ -5950,12 +5950,21 @@ impl HttpFilter for BindingRouterFilter {
         "binding_router"
     }
 
+    fn binds_upstream(&self) -> bool {
+        true
+    }
+
     async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        ctx.publish_bound_upstream(
-            Arc::from(self.cluster),
-            self.protocol.map(Arc::from),
-            self.provider.map(Arc::from),
-        );
+        if ctx
+            .publish_bound_upstream(
+                Arc::from(self.cluster),
+                self.protocol.map(Arc::from),
+                self.provider.map(Arc::from),
+            )
+            .is_err()
+        {
+            return Ok(FilterAction::Reject(crate::Rejection::status(500)));
+        }
         Ok(FilterAction::Continue)
     }
 }
@@ -6075,7 +6084,9 @@ fn filter_request_conditions_match_honors_bound_upstream_view() {
     // Bound request whose protocol matches: the predicate matches. Evaluating
     // against an empty view (the pre-fix behavior) would wrongly return false.
     let mut ctx_bound = crate::test_utils::make_filter_context(&req);
-    ctx_bound.publish_bound_upstream(Arc::from("inference"), Some(Arc::from("p1")), None);
+    ctx_bound
+        .publish_bound_upstream(Arc::from("inference"), Some(Arc::from("p1")), None)
+        .expect("publish before freeze succeeds");
     assert!(
         pipeline.filter_request_conditions_match("access_log", &ctx_bound),
         "a request bound to the matching protocol must match the access_log filter's condition"

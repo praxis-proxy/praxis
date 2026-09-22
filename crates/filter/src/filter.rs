@@ -151,6 +151,23 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Whether this filter selects its cluster from the frozen logical
+    /// binding ([`BoundUpstream`]) rather than a preceding `router`'s
+    /// exchange-local [`HttpFilterContext::cluster`].
+    ///
+    /// A load balancer configured with `cluster_source: bound_upstream`
+    /// overrides this. Pipeline validation uses it to reason about direct
+    /// branches and IRR-owned pipelines: a bound-consuming load balancer
+    /// needs a binding guaranteed on every reachable path and must declare
+    /// the bound cluster among its own [`load_balancer_clusters`].
+    ///
+    /// [`BoundUpstream`]: crate::extensions::BoundUpstream
+    /// [`HttpFilterContext::cluster`]: crate::HttpFilterContext::cluster
+    /// [`load_balancer_clusters`]: HttpFilter::load_balancer_clusters
+    fn consumes_bound_upstream(&self) -> bool {
+        false
+    }
+
     /// Whether this filter may select a streaming sub-request response.
     ///
     /// Pipeline validation uses this declaration to reject response

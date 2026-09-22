@@ -850,6 +850,204 @@ async fn irr_style_reuse_untagged_step_clears_prior_application() {
 }
 
 // -----------------------------------------------------------------------------
+// Bound Upstream Source Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn consumes_bound_upstream_reflects_cluster_source() {
+    let router_lb = LoadBalancerFilter::new(&[test_cluster("backend", &["127.0.0.1:8080"])]);
+    assert!(
+        !router_lb.consumes_bound_upstream(),
+        "the default router source must not consume a binding"
+    );
+
+    let bound_lb = LoadBalancerFilter::try_new_with_source(
+        &[test_cluster("backend", &["127.0.0.1:8080"])],
+        super::ClusterSource::BoundUpstream,
+    )
+    .unwrap();
+    assert!(
+        bound_lb.consumes_bound_upstream(),
+        "the bound_upstream source must report that it consumes a binding"
+    );
+}
+
+#[test]
+fn from_config_rejects_unknown_cluster_source() {
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+cluster_source: sideways
+clusters:
+  - name: backend
+    endpoints: ["127.0.0.1:8080"]
+"#,
+    )
+    .unwrap();
+
+    let error = LoadBalancerFilter::from_config(&config)
+        .err()
+        .expect("an unknown cluster_source value must be rejected");
+    assert!(
+        error.to_string().contains("sideways") || error.to_string().contains("variant"),
+        "the error should identify the invalid cluster_source: {error}"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_source_selects_bound_cluster_from_config() {
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+cluster_source: bound_upstream
+clusters:
+  - name: backend
+    endpoints: ["127.0.0.1:8080"]
+    http:
+      application_protocol: openai_responses
+      application_provider: openai
+"#,
+    )
+    .unwrap();
+    let lb = LoadBalancerFilter::from_config(&config).unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.publish_bound_upstream(
+        Arc::from("backend"),
+        Some(Arc::from("openai_responses")),
+        Some(Arc::from("openai")),
+    )
+    .unwrap();
+
+    let action = lb.on_request(&mut ctx).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a resolved bound selection should continue"
+    );
+    let upstream = ctx.upstream.as_ref().expect("upstream should be selected from the bound cluster");
+    assert_eq!(
+        &*upstream.address, "127.0.0.1:8080",
+        "the endpoint must come from the bound cluster"
+    );
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("backend"),
+        "the bound path must seed ctx.cluster so retry, health, and release paths key off the same cluster"
+    );
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        Some("openai_responses"),
+        "the bound path must publish the selected cluster's application protocol"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        Some("openai"),
+        "the bound path must publish the selected cluster's application provider"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_source_does_not_mutate_binding() {
+    let lb = LoadBalancerFilter::try_new_with_source(
+        &[cluster_with_application(
+            "backend",
+            &["127.0.0.1:8080"],
+            Some("openai_responses"),
+            Some("openai"),
+        )],
+        super::ClusterSource::BoundUpstream,
+    )
+    .unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.publish_bound_upstream(
+        Arc::from("backend"),
+        Some(Arc::from("bound_proto")),
+        Some(Arc::from("bound_prov")),
+    )
+    .unwrap();
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.bound_cluster(),
+        Some("backend"),
+        "the frozen binding cluster must be untouched by endpoint selection"
+    );
+    assert_eq!(
+        ctx.bound_application_protocol(),
+        Some("bound_proto"),
+        "the frozen binding protocol must be untouched by endpoint selection"
+    );
+    assert_eq!(
+        ctx.bound_application_provider(),
+        Some("bound_prov"),
+        "the frozen binding provider must be untouched by endpoint selection"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_source_ignores_context_cluster() {
+    let lb = LoadBalancerFilter::try_new_with_source(
+        &[test_cluster("backend", &["127.0.0.1:8080"])],
+        super::ClusterSource::BoundUpstream,
+    )
+    .unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    // A stale exchange-local cluster the bound source must not read.
+    ctx.cluster = Some(Arc::from("stale"));
+    ctx.publish_bound_upstream(Arc::from("backend"), None, None).unwrap();
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+
+    assert!(ctx.upstream.is_some(), "the bound cluster's endpoint must be selected");
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("backend"),
+        "the bound source must overwrite the stale ctx.cluster with the bound cluster"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_source_errors_when_unbound() {
+    let lb = LoadBalancerFilter::try_new_with_source(
+        &[test_cluster("backend", &["127.0.0.1:8080"])],
+        super::ClusterSource::BoundUpstream,
+    )
+    .unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let error = lb.on_request(&mut ctx).await.unwrap_err();
+
+    assert!(
+        error.to_string().contains("no upstream is bound"),
+        "a bound-source LB with no binding must fail closed: {error}"
+    );
+    assert!(ctx.upstream.is_none(), "no upstream may be selected without a binding");
+}
+
+#[tokio::test]
+async fn bound_upstream_source_errors_when_bound_cluster_not_declared() {
+    let lb = LoadBalancerFilter::try_new_with_source(
+        &[test_cluster("backend", &["127.0.0.1:8080"])],
+        super::ClusterSource::BoundUpstream,
+    )
+    .unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.publish_bound_upstream(Arc::from("other"), None, None).unwrap();
+
+    let error = lb.on_request(&mut ctx).await.unwrap_err();
+
+    assert!(
+        error.to_string().contains("not declared in this load_balancer"),
+        "a binding to a cluster this load balancer does not declare must fail closed: {error}"
+    );
+    assert!(ctx.upstream.is_none(), "no upstream may be selected for an undeclared cluster");
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 

@@ -36,7 +36,7 @@ use http::HeaderMap;
 #[cfg(feature = "router-json-aliases")]
 use http::header::HeaderName;
 use praxis_core::config::{PathMatch, Route};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 #[cfg(feature = "router-json-aliases")]
 use self::config::{
@@ -264,6 +264,34 @@ impl RouterFilter {
         }
 
         best.map(|(_, r)| r)
+    }
+
+    /// Apply a matched route to the request context: record metrics, select the
+    /// cluster, own the route-level retry override, and publish the logical
+    /// binding.
+    ///
+    /// The retry override is always reset for the matched route so a re-route
+    /// cannot inherit a policy the newly matched route did not declare.
+    ///
+    /// Publishing resolves the cluster's application metadata through the
+    /// pipeline catalog. Before the bound-upstream barrier freezes the binding a
+    /// later router replaces it; afterwards the binding is frozen and retargeting
+    /// to a different cluster fails closed. Valid configurations never hit that
+    /// case (validation forbids a second binding after the barrier), so treat it
+    /// as an internal error.
+    fn apply_matched_route(ctx: &mut HttpFilterContext<'_>, resolved: &ResolvedRoute) -> FilterAction {
+        ctx.metrics_route = Some(resolved.metrics_label.clone());
+        ctx.cluster = Some(Arc::clone(&resolved.route.cluster));
+        ctx.route_retry_policy = resolved.retry_policy.as_ref().map(Arc::clone);
+        if let Err(frozen) = ctx.bind_upstream(Arc::clone(&resolved.route.cluster)) {
+            warn!(
+                frozen = %frozen.frozen,
+                attempted = %frozen.attempted,
+                "router attempted to rebind a frozen logical upstream; failing closed",
+            );
+            return FilterAction::Reject(Rejection::status(500));
+        }
+        FilterAction::Continue
     }
 }
 
@@ -500,27 +528,11 @@ impl HttpFilter for RouterFilter {
             .or_else(|| ctx.request.uri.authority().map(http::uri::Authority::as_str));
 
         trace!(path = %path, host = host.unwrap_or(""), "matching route");
-        if let Some(resolved) = self.match_route(path, host, &ctx.request.headers) {
-            debug!(
-                path = %path,
-                cluster = %resolved.route.cluster,
-                "route matched"
-            );
-            ctx.metrics_route = Some(resolved.metrics_label.clone());
-            ctx.cluster = Some(Arc::clone(&resolved.route.cluster));
-            // Own the field for the matched route: clear any stale override
-            // from a previous route so a re-route cannot inherit a retry
-            // policy the newly matched route did not declare.
-            ctx.route_retry_policy = resolved.retry_policy.as_ref().map(Arc::clone);
-            // Publish the stable logical binding, resolving the cluster's
-            // application metadata through the pipeline catalog. A later router
-            // on the request path replaces this binding, so the last router
-            // reached wins.
-            ctx.bind_upstream(Arc::clone(&resolved.route.cluster));
-            Ok(FilterAction::Continue)
-        } else {
+        let Some(resolved) = self.match_route(path, host, &ctx.request.headers) else {
             debug!(path = %path, "no route matched");
-            Ok(FilterAction::Reject(Rejection::status(404)))
-        }
+            return Ok(FilterAction::Reject(Rejection::status(404)));
+        };
+        debug!(path = %path, cluster = %resolved.route.cluster, "route matched");
+        Ok(Self::apply_matched_route(ctx, resolved))
     }
 }

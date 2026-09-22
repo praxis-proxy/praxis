@@ -33,6 +33,7 @@ use crate::{
     actions::StreamingResponseBody,
     extensions::RequestExtensions,
     filtered_subrequest::{FilteredStreamingBody, FilteredSubrequestContinuation, SubrequestCompletion},
+    pipeline::catalog::ClusterApplicationCatalog,
     results::FilterResultSet,
 };
 
@@ -127,6 +128,10 @@ pub(super) struct IrrStreamingSession {
     max_stream_response_bytes: Option<usize>,
     /// Step selected after the current completion.
     next_step: Option<Arc<str>>,
+    /// The parent pipeline's cluster catalog, restored into the extensions
+    /// handed back to the parent context so the terminal step's catalog never
+    /// rides back in its place.
+    parent_catalog: Option<Arc<ClusterApplicationCatalog>>,
     /// Locally emitted or terminal buffered chunks awaiting delivery.
     pending_chunks: VecDeque<Bytes>,
     /// Reusable one-step executor.
@@ -154,6 +159,7 @@ impl IrrStreamingSession {
         step_transitions: HashMap<Arc<str>, Vec<super::config::StepTransition>>,
         max_state_bytes: usize,
         max_stream_response_bytes: Option<usize>,
+        parent_catalog: Option<Arc<ClusterApplicationCatalog>>,
     ) -> Self {
         Self {
             current: Some(FilteredStreamingBody::new(body, continuation)),
@@ -168,6 +174,7 @@ impl IrrStreamingSession {
             max_state_bytes,
             max_stream_response_bytes,
             next_step: None,
+            parent_catalog,
             pending_chunks,
             runner,
             state: None,
@@ -534,6 +541,10 @@ impl StreamingResponseBody for IrrStreamingSession {
         } else if let Some(owned) = self.extensions.as_mut() {
             std::mem::swap(owned, extensions);
         }
+        // Whichever step's extensions just crossed back carry that step's
+        // catalog; restore the parent pipeline's so it never rides back in its
+        // place. The frozen BoundUpstream is left untouched.
+        super::restore_parent_catalog(extensions, self.parent_catalog.as_ref());
     }
 }
 
