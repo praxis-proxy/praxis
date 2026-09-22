@@ -55,6 +55,10 @@ pub struct BodyCapabilities {
     /// selected-upstream phase.
     pub any_selected_upstream_request_body_writer: bool,
 
+    /// Whether any filter writes to the request body during the
+    /// bound-upstream phase.
+    pub any_bound_upstream_request_body_writer: bool,
+
     /// Whether any filter needs request body access.
     pub needs_request_body: bool,
 
@@ -67,6 +71,10 @@ pub struct BodyCapabilities {
     /// Whether any filter needs the request body during the
     /// selected-upstream phase.
     pub needs_selected_upstream_request_body: bool,
+
+    /// Whether any filter needs the request body during the
+    /// bound-upstream phase.
+    pub needs_bound_upstream_request_body: bool,
 
     /// Whether any filter rewrites upstream response trailers.
     pub needs_response_trailers: bool,
@@ -112,6 +120,14 @@ mod tests {
         assert!(
             !caps.any_selected_upstream_request_body_writer,
             "default caps should have no selected-upstream request body writer"
+        );
+        assert!(
+            !caps.needs_bound_upstream_request_body,
+            "default caps should not need bound-upstream request body"
+        );
+        assert!(
+            !caps.any_bound_upstream_request_body_writer,
+            "default caps should have no bound-upstream request body writer"
         );
         assert!(
             !caps.needs_request_context,

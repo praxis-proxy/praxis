@@ -25,7 +25,10 @@ use tracing::{debug, warn};
 
 use super::{
     FilterPipeline,
-    body::{body_filter_indices, compute_body_capabilities, selected_upstream_request_body_indices},
+    body::{
+        body_filter_indices, bound_upstream_request_body_indices, compute_body_capabilities,
+        selected_upstream_request_body_indices,
+    },
     filter::PipelineFilter,
 };
 use crate::{FilterError, any_filter::AnyFilter, registry::FilterRegistry};
@@ -118,6 +121,7 @@ impl FilterPipeline {
             .collect();
         let (request_body_filter_indices, response_body_filter_indices) = body_filter_indices(&filters);
         let selected_upstream_request_body_filter_indices = selected_upstream_request_body_indices(&filters);
+        let bound_upstream_request_body_filter_indices = bound_upstream_request_body_indices(&filters);
         let response_trailer_filter_indices = super::body::response_trailer_filter_indices(&filters);
         let cluster_application_catalog = build_cluster_application_catalog(&filters);
         let id_generator = Arc::new(IdGenerator::new());
@@ -129,6 +133,7 @@ impl FilterPipeline {
             request_body_filter_indices,
             response_body_filter_indices,
             selected_upstream_request_body_filter_indices,
+            bound_upstream_request_body_filter_indices,
             allow_private_upstreams: false,
             response_trailer_filter_indices,
             cluster_application_catalog,

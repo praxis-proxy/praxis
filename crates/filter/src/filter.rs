@@ -11,7 +11,7 @@ use praxis_core::config::InsecureOptions;
 
 pub(crate) use crate::context::HttpFilterContext;
 use crate::{
-    actions::{FilterAction, SelectedUpstreamBodyOutcome},
+    actions::{BoundUpstreamBodyOutcome, FilterAction, SelectedUpstreamBodyOutcome},
     body::{BodyAccess, BodyMode},
     builtins::http::payload_processing::compression_config::CompressionConfig,
     pipeline::{FilterPipeline, catalog::ClusterMetadataDeclaration},
@@ -254,6 +254,36 @@ pub trait HttpFilter: Send + Sync {
         BodyAccess::None
     }
 
+    /// Declares what access this filter needs to the request body during
+    /// the bound-upstream phase.
+    ///
+    /// The bound-upstream request-body phase runs exactly once per
+    /// downstream request, at the barrier immediately after the `router`
+    /// binds a logical upstream ([`BoundUpstream`]) and before any
+    /// gateway-owned request filters or IRR run. It gives a filter a
+    /// chance to inspect or rewrite the request body against the frozen
+    /// logical binding — before an endpoint is selected. Return
+    /// [`BodyAccess::None`] (the default) to opt out,
+    /// [`BodyAccess::ReadOnly`] to observe the body in
+    /// [`on_bound_upstream_request_body`], or [`BodyAccess::ReadWrite`] to
+    /// mutate it.
+    ///
+    /// A participating filter must declare a bounded
+    /// [`BodyMode::StreamBuffer`] via [`request_body_mode`] so the complete
+    /// body is buffered before this phase runs; the phase reuses the same
+    /// request-body delivery mode rather than defining its own. Pipeline
+    /// validation rejects a participant whose [`request_body_mode`] is not a
+    /// bounded `StreamBuffer`, and rejects a participant that no binding
+    /// filter can precede.
+    ///
+    /// [`on_bound_upstream_request_body`]: HttpFilter::on_bound_upstream_request_body
+    /// [`request_body_mode`]: HttpFilter::request_body_mode
+    /// [`BodyMode::StreamBuffer`]: crate::BodyMode::StreamBuffer
+    /// [`BoundUpstream`]: crate::extensions::BoundUpstream
+    fn bound_upstream_request_body_access(&self) -> BodyAccess {
+        BodyAccess::None
+    }
+
     /// Declares the delivery mode for request body chunks.
     ///
     /// [`BodyMode::Stream`] (the default) delivers chunks as they
@@ -416,6 +446,42 @@ pub trait HttpFilter: Send + Sync {
     ) -> Result<SelectedUpstreamBodyOutcome, FilterError> {
         let _ = (ctx, body);
         Ok(SelectedUpstreamBodyOutcome::Continue)
+    }
+
+    /// Called once with the fully buffered request body at the bound-upstream
+    /// barrier, immediately after the `router` binds a logical upstream and
+    /// before any gateway-owned request filters or IRR run.
+    ///
+    /// Runs only for filters that declare
+    /// [`bound_upstream_request_body_access`] other than
+    /// [`BodyAccess::None`], in pipeline order, and only when the filter's
+    /// request conditions (including any `bound_upstream` predicate) match
+    /// the frozen binding. `body` holds the complete request body (`None`
+    /// when the request had no body). Filters that declared
+    /// [`BodyAccess::ReadWrite`] may mutate `body` in place; the rewritten
+    /// buffer becomes the canonical body observed by the remaining pipeline,
+    /// direct dispatch, IRR, and retries. Return
+    /// [`BoundUpstreamBodyOutcome::Reject`] to abort with an error response;
+    /// the pipeline stops and does not call later bound-upstream body
+    /// filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if body processing fails. The pipeline honors
+    /// the filter's `failure_mode`: a closed filter's error aborts the
+    /// request, an open filter's error is logged and treated as
+    /// [`BoundUpstreamBodyOutcome::Continue`].
+    ///
+    /// [`bound_upstream_request_body_access`]: HttpFilter::bound_upstream_request_body_access
+    /// [`BoundUpstreamBodyOutcome::Reject`]: crate::BoundUpstreamBodyOutcome::Reject
+    /// [`BoundUpstreamBodyOutcome::Continue`]: crate::BoundUpstreamBodyOutcome::Continue
+    async fn on_bound_upstream_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<BoundUpstreamBodyOutcome, FilterError> {
+        let _ = (ctx, body);
+        Ok(BoundUpstreamBodyOutcome::Continue)
     }
 
     /// Whether this filter rewrites upstream response trailers.

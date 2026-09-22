@@ -220,6 +220,45 @@ pub enum SelectedUpstreamBodyOutcome {
 }
 
 // -----------------------------------------------------------------------------
+// BoundUpstreamBodyOutcome
+// -----------------------------------------------------------------------------
+
+/// Result of a filter's bound-upstream request-body processing.
+///
+/// The bound-upstream request-body phase runs exactly once per downstream
+/// request, at the barrier immediately after the `router` binds a logical
+/// upstream and before any gateway-owned request filters or IRR run, over
+/// the fully buffered request body. Like [`SelectedUpstreamBodyOutcome`] it
+/// has no streaming controls ([`Release`], [`BodyDone`]) and no
+/// terminal-response variants: the body is already complete and the phase
+/// either forwards it (unchanged or modified in place) with [`Continue`],
+/// or aborts with a [`Rejection`] via [`Reject`].
+///
+/// ```
+/// use praxis_filter::{BoundUpstreamBodyOutcome, Rejection};
+///
+/// let outcome = BoundUpstreamBodyOutcome::Continue;
+/// assert!(matches!(outcome, BoundUpstreamBodyOutcome::Continue));
+///
+/// let reject = BoundUpstreamBodyOutcome::Reject(Rejection::status(413));
+/// assert!(matches!(reject, BoundUpstreamBodyOutcome::Reject(r) if r.status == 413));
+/// ```
+///
+/// [`Release`]: FilterAction::Release
+/// [`BodyDone`]: FilterAction::BodyDone
+/// [`Continue`]: BoundUpstreamBodyOutcome::Continue
+/// [`Reject`]: BoundUpstreamBodyOutcome::Reject
+#[derive(Debug)]
+#[must_use]
+pub enum BoundUpstreamBodyOutcome {
+    /// Continue to the next bound-upstream request-body filter.
+    Continue,
+
+    /// Stop processing and respond with the given rejection.
+    Reject(Rejection),
+}
+
+// -----------------------------------------------------------------------------
 // Rejection
 // -----------------------------------------------------------------------------
 

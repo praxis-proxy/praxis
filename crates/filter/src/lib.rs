@@ -88,8 +88,8 @@ pub(crate) mod test_support {
 }
 
 pub use actions::{
-    FilterAction, Rejection, SelectedUpstreamBodyOutcome, StreamingResponseBody, StreamingTerminalResponse,
-    TerminalResponse,
+    BoundUpstreamBodyOutcome, FilterAction, Rejection, SelectedUpstreamBodyOutcome, StreamingResponseBody,
+    StreamingTerminalResponse, TerminalResponse,
 };
 pub use any_filter::AnyFilter;
 pub use binding::ChainBindingContext;

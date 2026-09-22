@@ -164,6 +164,13 @@ pub struct FilterPipeline {
     /// request-body access.
     selected_upstream_request_body_filter_indices: Vec<usize>,
 
+    /// Indices into `filters` of top-level filters declaring bound-upstream
+    /// request-body access, drained once per request by the barrier in
+    /// [`execute_http_request`].
+    ///
+    /// [`execute_http_request`]: FilterPipeline::execute_http_request
+    bound_upstream_request_body_filter_indices: Vec<usize>,
+
     /// Whether upstream hostnames may resolve to private or reserved IPs.
     ///
     /// Mirrors `insecure_options.allow_private_upstreams`; consumed by the

@@ -86,6 +86,14 @@ impl PendingStreamChunks {
     }
 }
 
+/// Once-per-request marker that the bound-upstream body barrier has run.
+///
+/// Stored in [`RequestExtensions`] rather than a context field because the
+/// extensions map is threaded across IRR iterations and survives `ReEnter`
+/// loops on the same context, so the barrier fires at most once for the whole
+/// downstream request regardless of how many times the pipeline re-executes.
+struct BoundUpstreamBarrierRan;
+
 /// Trusted header mutation recorded during pre-read body processing.
 ///
 /// Pre-read filters run *before* the request-phase pipeline. Mutations
@@ -672,6 +680,25 @@ impl HttpFilterContext<'_> {
             .and_then(|catalog| catalog.lookup(&cluster))
             .map_or((None, None), |meta| (meta.protocol_arc(), meta.provider_arc()));
         self.publish_bound_upstream(cluster, protocol, provider);
+    }
+
+    /// Whether the bound-upstream request-body barrier has already run.
+    ///
+    /// The barrier is a once-per-request pass: it consults this marker so a
+    /// `ReEnter` loop or an IRR iteration that re-executes the pipeline does
+    /// not replay the bound-upstream body hooks against an already-mutated
+    /// body.
+    pub(crate) fn bound_upstream_barrier_ran(&self) -> bool {
+        self.extensions.get::<BoundUpstreamBarrierRan>().is_some()
+    }
+
+    /// Record that the bound-upstream request-body barrier has run.
+    ///
+    /// Idempotent; called by the executor immediately after the binding
+    /// router publishes its [`BoundUpstream`] and the barrier drains its
+    /// participants, before any branch chains evaluate.
+    pub(crate) fn mark_bound_upstream_barrier_ran(&mut self) {
+        self.extensions.insert(BoundUpstreamBarrierRan);
     }
 
     /// Shared sub-request client, if set.

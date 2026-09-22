@@ -23,13 +23,14 @@ use super::{
     branch::BranchOutcome,
     http_utils::{
         BodyFilterOutcome, HeaderFilterOutcome, accumulate_body_bytes, as_request_body_filter, as_response_body_filter,
-        released_or_continue, run_request_body_filter, run_request_filter, run_response_body_filter,
-        run_response_filter, run_selected_upstream_request_body_filter, skip_by_response_conditions,
+        released_or_continue, run_bound_upstream_request_body_filter, run_request_body_filter, run_request_filter,
+        run_response_body_filter, run_response_filter, run_selected_upstream_request_body_filter,
+        skip_by_response_conditions,
     },
 };
 use crate::{
     FilterError,
-    actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
+    actions::{BoundUpstreamBodyOutcome, FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
     condition::should_execute_bound_selected,
     context::{EffectiveHeaders, HttpFilterContext},
@@ -108,6 +109,14 @@ impl FilterPipeline {
                 HeaderFilterOutcome::Continue => {},
             }
             ctx.executed_filter_indices[idx] = true;
+            // Bound-upstream request-body barrier: if this filter just bound a
+            // logical upstream, drain the bound-upstream body participants once
+            // against the frozen binding before its branch chains evaluate.
+            if let FilterAction::Reject(r) =
+                self.run_bound_upstream_request_body_barrier(http_filter, ctx).await?
+            {
+                return Ok(FilterAction::Reject(r));
+            }
             match super::evaluate::evaluate_branches(&pf.branches, ctx).await? {
                 BranchOutcome::Continue => idx += 1,
                 BranchOutcome::Terminal => {
@@ -343,6 +352,103 @@ impl FilterPipeline {
             }
         }
         Ok(FilterAction::Continue)
+    }
+
+    /// Fire the once-per-request bound-upstream request-body barrier.
+    ///
+    /// Called from [`execute_http_request`] immediately after a filter's
+    /// `on_request` sets its executed index and before its branch chains
+    /// evaluate. The barrier drains the bound-upstream body participants
+    /// exactly once per downstream request, and only once `binding_filter`
+    /// has actually bound a logical upstream. Pipelines with no bound-upstream
+    /// participants pay nothing beyond an empty-slice check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if a participant fails with a closed
+    /// `failure_mode`.
+    ///
+    /// [`execute_http_request`]: FilterPipeline::execute_http_request
+    async fn run_bound_upstream_request_body_barrier(
+        &self,
+        binding_filter: &dyn crate::filter::HttpFilter,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<FilterAction, FilterError> {
+        if self.bound_upstream_request_body_filter_indices.is_empty() {
+            return Ok(FilterAction::Continue);
+        }
+        if !binding_filter.binds_upstream() || ctx.bound_upstream_barrier_ran() || ctx.bound_cluster().is_none() {
+            return Ok(FilterAction::Continue);
+        }
+        ctx.mark_bound_upstream_barrier_ran();
+        self.execute_http_bound_upstream_request_body(ctx).await
+    }
+
+    /// Drain the bound-upstream request-body participants over the buffered
+    /// request body.
+    ///
+    /// Unlike [`execute_http_selected_upstream_request_body`], which the
+    /// protocol layer drives over a caller-owned working body after upstream
+    /// selection, this barrier runs inside the request phase and mutates
+    /// [`buffered_request_body`] in place with a take/commit pattern: the body
+    /// is moved out, threaded through each participant as a borrow distinct
+    /// from `&mut ctx`, and committed back even when a participant rejects.
+    ///
+    /// Each participant is gated by its own request conditions against the
+    /// frozen binding view rather than [`executed_filter_indices`], which is
+    /// not yet set for participants ordered after the binding filter when the
+    /// barrier fires.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if a participant fails with a closed
+    /// `failure_mode`.
+    ///
+    /// [`buffered_request_body`]: HttpFilterContext::buffered_request_body
+    /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
+    /// [`execute_http_selected_upstream_request_body`]: FilterPipeline::execute_http_selected_upstream_request_body
+    #[expect(clippy::too_many_lines, reason = "body hook loop with take/commit and per-filter skip checks")]
+    async fn execute_http_bound_upstream_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<FilterAction, FilterError> {
+        let mut body = ctx.buffered_request_body.take();
+        let mut result = Ok(FilterAction::Continue);
+        for &idx in &self.bound_upstream_request_body_filter_indices {
+            let Some(pf) = self.filters.get(idx) else {
+                continue;
+            };
+            if !should_execute_bound(&pf.conditions, ctx.request, ctx.bound_upstream_view()) {
+                trace!(filter = pf.filter.name(), "skipped bound-upstream request body (conditions)");
+                continue;
+            }
+            let AnyFilter::Http(http_filter) = &pf.filter else {
+                continue;
+            };
+            ctx.current_filter_id = Some(pf.filter_id);
+            let outcome = run_bound_upstream_request_body_filter(
+                http_filter.as_ref(),
+                ctx,
+                &mut body,
+                pf.failure_mode,
+                self.record_filter_duration_metrics,
+            )
+            .await;
+            ctx.current_filter_id = None;
+            match outcome {
+                Ok(BoundUpstreamBodyOutcome::Continue) => {},
+                Ok(BoundUpstreamBodyOutcome::Reject(rejection)) => {
+                    result = Ok(FilterAction::Reject(rejection));
+                    break;
+                },
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                },
+            }
+        }
+        ctx.buffered_request_body = body;
+        result
     }
 
     /// Run all HTTP response body filters in reverse order.

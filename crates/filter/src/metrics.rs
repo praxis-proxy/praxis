@@ -48,6 +48,15 @@ pub(crate) const PHASE_RESPONSE: &str = "response";
 /// produce indistinguishable histogram entries.
 pub(crate) const PHASE_SELECTED_UPSTREAM: &str = "selected_upstream";
 
+/// Bound-upstream direction label value (`on_bound_upstream_request_body`).
+///
+/// A distinct phase from [`PHASE_REQUEST`] and [`PHASE_SELECTED_UPSTREAM`]
+/// so the once-per-request bound-body pass is separable in dashboards: a
+/// filter active in both the normal request-body phase and the
+/// bound-upstream phase would otherwise produce indistinguishable histogram
+/// entries.
+pub(crate) const PHASE_BOUND_UPSTREAM: &str = "bound_upstream";
+
 /// Header hook label value (`on_request`, `on_response`).
 pub(crate) const STREAM_HEADERS: &str = "headers";
 
@@ -186,12 +195,28 @@ mod tests {
     }
 
     #[test]
+    fn record_distinguishes_request_and_bound_upstream_phases() {
+        crate::test_utils::install_metrics_recorder();
+
+        record_filter_duration("bound_phase_test", PHASE_REQUEST, STREAM_BODY, 0.001);
+        record_filter_duration("bound_phase_test", PHASE_BOUND_UPSTREAM, STREAM_BODY, 0.002);
+
+        let rendered = crate::test_utils::render_metrics();
+        assert_metric_labels(&rendered, "bound_phase_test", "request", "body");
+        assert_metric_labels(&rendered, "bound_phase_test", "bound_upstream", "body");
+    }
+
+    #[test]
     fn phase_constants_have_expected_values() {
         assert_eq!(PHASE_REQUEST, "request", "PHASE_REQUEST label value");
         assert_eq!(PHASE_RESPONSE, "response", "PHASE_RESPONSE label value");
         assert_eq!(
             PHASE_SELECTED_UPSTREAM, "selected_upstream",
             "PHASE_SELECTED_UPSTREAM label value"
+        );
+        assert_eq!(
+            PHASE_BOUND_UPSTREAM, "bound_upstream",
+            "PHASE_BOUND_UPSTREAM label value"
         );
     }
 
