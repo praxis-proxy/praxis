@@ -723,6 +723,7 @@ impl FilterPipeline {
     /// descend into step pipelines directly.
     ///
     /// [`consumes_bound_upstream`]: crate::HttpFilter::consumes_bound_upstream
+    #[cfg(feature = "iterative-request-router")]
     pub(crate) fn consumes_bound_upstream(&self) -> bool {
         let mut found = false;
         for_each_pipeline_filter(&self.filters, &mut |pf| {
@@ -735,6 +736,7 @@ impl FilterPipeline {
 
     /// Cluster names every bound-consuming filter in this pipeline declares,
     /// descending into branch sub-chains and nested framework pipelines.
+    #[cfg(feature = "iterative-request-router")]
     pub(crate) fn bound_upstream_clusters(&self) -> Vec<String> {
         let mut out = Vec::new();
         for_each_pipeline_filter(&self.filters, &mut |pf| {
@@ -753,6 +755,7 @@ impl FilterPipeline {
     /// cluster metadata reaches the parent catalog and its conflict check.
     ///
     /// [`declared_cluster_metadata`]: crate::HttpFilter::declared_cluster_metadata
+    #[cfg(feature = "iterative-request-router")]
     pub(crate) fn cluster_metadata_declarations(&self) -> Vec<catalog::ClusterMetadataDeclaration> {
         collect_cluster_declarations(&self.filters)
     }

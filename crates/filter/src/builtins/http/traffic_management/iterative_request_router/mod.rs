@@ -381,8 +381,13 @@ impl IterativeRequestRouterFilter {
             // operator's declared posture — runtime `apply_insecure_options` runs
             // too late to undo a build rejection.
             let pipeline = ctx.build_nested_step_pipeline(&mut entries)?;
+            // A step runs as a continuation of this IRR's parent, which already
+            // guarantees a logical binding on entry (the parent's own
+            // bound-upstream reachability check enforces that a binding precedes
+            // the IRR). Validate the step with that binding assumed present so a
+            // bound-consuming load balancer needs no second binding router.
             let ordering_errors =
-                pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
+                pipeline.step_ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
             if !ordering_errors.is_empty() {
                 return Err(format!(
                     "iterative_request_router: invalid step '{}': {}",

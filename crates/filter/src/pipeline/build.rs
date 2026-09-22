@@ -190,15 +190,46 @@ impl FilterPipeline {
     ///
     /// [`build`]: FilterPipeline::build
     /// [`SkipPipelineChecks`]: praxis_core::config::SkipPipelineChecks
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one sequential invocation per ordering check, including the bound-upstream passes"
-    )]
     pub fn ordering_errors(
         &self,
         entries: &[FilterEntry],
         allow_open_security: bool,
         skip: &SkipPipelineChecks,
+    ) -> Vec<String> {
+        // A top-level pipeline starts with nothing bound.
+        self.ordering_errors_inner(entries, allow_open_security, skip, false)
+    }
+
+    /// Validate an `iterative_request_router` step pipeline, which runs as a
+    /// continuation of a parent that already guarantees a logical binding before
+    /// the IRR (the parent's own bound-upstream reachability check enforces
+    /// this). The step's bound consumers are therefore validated with a binding
+    /// assumed present on entry.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn step_ordering_errors(
+        &self,
+        entries: &[FilterEntry],
+        allow_open_security: bool,
+        skip: &SkipPipelineChecks,
+    ) -> Vec<String> {
+        self.ordering_errors_inner(entries, allow_open_security, skip, true)
+    }
+
+    /// Shared body of [`Self::ordering_errors`] and the feature-gated
+    /// `step_ordering_errors` (the IRR-step variant).
+    ///
+    /// `entry_binding_guaranteed` seeds the bound-upstream reachability passes:
+    /// `false` for a top-level pipeline, `true` for an IRR step continuation.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential invocation per ordering check, including the bound-upstream passes"
+    )]
+    fn ordering_errors_inner(
+        &self,
+        entries: &[FilterEntry],
+        allow_open_security: bool,
+        skip: &SkipPipelineChecks,
+        entry_binding_guaranteed: bool,
     ) -> Vec<String> {
         let names: Vec<&str> = self.filters.iter().map(|pf| pf.filter.name()).collect();
 
@@ -242,11 +273,11 @@ impl FilterPipeline {
             &mut errors,
         );
         super::checks::check_cluster_metadata_conflicts(&self.filters, &mut errors);
-        super::checks::check_bound_upstream_requires_binding(&self.filters, &mut errors);
+        super::checks::check_bound_upstream_requires_binding(&self.filters, entry_binding_guaranteed, &mut errors);
         super::checks::check_bound_condition_with_pre_read_body(&self.filters, &mut errors);
         super::checks::check_bound_upstream_body_mode(&self.filters, &mut errors);
         super::checks::check_branch_bound_upstream_body_filters(&self.filters, &mut errors);
-        super::checks::check_no_rebind_after_binding(&self.filters, &mut errors);
+        super::checks::check_no_rebind_after_binding(&self.filters, entry_binding_guaranteed, &mut errors);
         super::checks::check_bound_cluster_coverage(&self.filters, &mut errors);
         super::checks::check_untagged_bound_cluster_fields(&self.filters, &mut errors);
         super::checks::check_irr_coexistence(&self.filters, &names, &mut errors);

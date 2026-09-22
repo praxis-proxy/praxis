@@ -134,7 +134,7 @@ pub trait HttpFilter: Send + Sync {
     }
 
     /// Whether this filter publishes a logical upstream binding
-    /// ([`BoundUpstream`]) when it selects a cluster.
+    /// (`BoundUpstream`) when it selects a cluster.
     ///
     /// Only a binding filter populates the view a `bound_upstream` condition
     /// reads and triggers the bound-upstream request-body phase. Pipeline
@@ -145,14 +145,13 @@ pub trait HttpFilter: Send + Sync {
     /// [`HttpFilterContext::cluster`] without publishing a binding leave the
     /// default.
     ///
-    /// [`BoundUpstream`]: crate::extensions::BoundUpstream
     /// [`HttpFilterContext::cluster`]: crate::HttpFilterContext::cluster
     fn binds_upstream(&self) -> bool {
         false
     }
 
     /// Whether this filter selects its cluster from the frozen logical
-    /// binding ([`BoundUpstream`]) rather than a preceding `router`'s
+    /// binding (`BoundUpstream`) rather than a preceding `router`'s
     /// exchange-local [`HttpFilterContext::cluster`].
     ///
     /// A load balancer configured with `cluster_source: bound_upstream`
@@ -161,7 +160,6 @@ pub trait HttpFilter: Send + Sync {
     /// needs a binding guaranteed on every reachable path and must declare
     /// the bound cluster among its own [`load_balancer_clusters`].
     ///
-    /// [`BoundUpstream`]: crate::extensions::BoundUpstream
     /// [`HttpFilterContext::cluster`]: crate::HttpFilterContext::cluster
     /// [`load_balancer_clusters`]: HttpFilter::load_balancer_clusters
     fn consumes_bound_upstream(&self) -> bool {
@@ -171,14 +169,12 @@ pub trait HttpFilter: Send + Sync {
     /// Cluster names this filter can select from the frozen logical binding.
     ///
     /// A load balancer with `cluster_source: bound_upstream` reports the
-    /// cluster names it can resolve from [`BoundUpstream`]; framework filters
+    /// cluster names it can resolve from `BoundUpstream`; framework filters
     /// that own nested pipelines (the IRR) fold their steps' bound-consuming
     /// declarations up through this hook. Pipeline validation unions these
     /// across every reachable path so a cluster the binding router may bind
     /// must be served by some bound-consuming load balancer. Filters that do
     /// not consume the binding leave the default empty list.
-    ///
-    /// [`BoundUpstream`]: crate::extensions::BoundUpstream
     fn bound_upstream_clusters(&self) -> Vec<String> {
         Vec::new()
     }
@@ -291,7 +287,7 @@ pub trait HttpFilter: Send + Sync {
     ///
     /// The bound-upstream request-body phase runs exactly once per
     /// downstream request, at the barrier immediately after the `router`
-    /// binds a logical upstream ([`BoundUpstream`]) and before any
+    /// binds a logical upstream (`BoundUpstream`) and before any
     /// gateway-owned request filters or IRR run. It gives a filter a
     /// chance to inspect or rewrite the request body against the frozen
     /// logical binding — before an endpoint is selected. Return
@@ -311,7 +307,6 @@ pub trait HttpFilter: Send + Sync {
     /// [`on_bound_upstream_request_body`]: HttpFilter::on_bound_upstream_request_body
     /// [`request_body_mode`]: HttpFilter::request_body_mode
     /// [`BodyMode::StreamBuffer`]: crate::BodyMode::StreamBuffer
-    /// [`BoundUpstream`]: crate::extensions::BoundUpstream
     fn bound_upstream_request_body_access(&self) -> BodyAccess {
         BodyAccess::None
     }

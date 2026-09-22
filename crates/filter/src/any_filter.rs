@@ -86,6 +86,16 @@ impl AnyFilter {
             Self::Tcp(_) => Vec::new(),
         }
     }
+
+    /// Whether the filter selects its target cluster from the frozen logical
+    /// binding rather than a preceding router (a `cluster_source:
+    /// bound_upstream` load balancer). TCP filters never do.
+    pub fn consumes_bound_upstream(&self) -> bool {
+        match self {
+            Self::Http(f) => f.consumes_bound_upstream(),
+            Self::Tcp(_) => false,
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -152,6 +162,10 @@ mod tests {
             vec!["web".to_owned(), "api".to_owned()],
             "Http variant should delegate load_balancer_clusters"
         );
+        assert!(
+            f.consumes_bound_upstream(),
+            "Http variant should delegate consumes_bound_upstream"
+        );
     }
 
     #[test]
@@ -169,6 +183,10 @@ mod tests {
             f.load_balancer_clusters().is_empty(),
             "Http variant should default to no load-balancer clusters"
         );
+        assert!(
+            !f.consumes_bound_upstream(),
+            "Http variant should default to not consuming the bound upstream"
+        );
     }
 
     #[test]
@@ -185,6 +203,10 @@ mod tests {
         assert!(
             f.load_balancer_clusters().is_empty(),
             "Tcp variant should not report HTTP load-balancer clusters"
+        );
+        assert!(
+            !f.consumes_bound_upstream(),
+            "Tcp variant should not report consuming the bound upstream"
         );
     }
 
@@ -253,6 +275,10 @@ mod tests {
 
         fn load_balancer_clusters(&self) -> Vec<String> {
             vec!["web".to_owned(), "api".to_owned()]
+        }
+
+        fn consumes_bound_upstream(&self) -> bool {
+            true
         }
 
         async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
