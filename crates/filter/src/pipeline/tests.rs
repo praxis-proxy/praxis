@@ -4355,6 +4355,8 @@ fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
     pipeline.response_body_filter_indices = response;
     pipeline.selected_upstream_request_body_filter_indices =
         super::body::selected_upstream_request_body_indices(&pipeline.filters);
+    pipeline.bound_upstream_request_body_filter_indices =
+        super::body::bound_upstream_request_body_indices(&pipeline.filters);
     pipeline
 }
 
@@ -4489,8 +4491,8 @@ fn gate_condition(header: &str, value: &str) -> Vec<praxis_core::config::Conditi
             path_prefix: None,
             methods: None,
             headers: Some(headers),
-            selected_upstream: None,
             bound_upstream: None,
+            selected_upstream: None,
         },
     )]
 }
@@ -4789,8 +4791,8 @@ fn when_path(prefix: &str) -> praxis_core::config::Condition {
         path_prefix: Some(prefix.to_owned()),
         methods: None,
         headers: None,
-        selected_upstream: None,
         bound_upstream: None,
+        selected_upstream: None,
     })
 }
 
@@ -4823,8 +4825,8 @@ fn unless_path(prefix: &str) -> praxis_core::config::Condition {
         path_prefix: Some(prefix.to_owned()),
         methods: None,
         headers: None,
-        selected_upstream: None,
         bound_upstream: None,
+        selected_upstream: None,
     })
 }
 
@@ -5483,8 +5485,8 @@ fn trace_propagation_honors_trace_context_conditions() {
         path_prefix: Some("/api".to_owned()),
         methods: None,
         headers: None,
-        selected_upstream: None,
         bound_upstream: None,
+        selected_upstream: None,
     });
     let pipeline = FilterPipeline::from_filters(vec![super::test_filters::noop_filter_with_conditions(
         "trace_context",
@@ -5866,73 +5868,6 @@ fn set_session_stores_propagates_into_branch_nested_pipelines() {
 }
 
 // -----------------------------------------------------------------------------
-// filter_request_conditions_match_selected
-// -----------------------------------------------------------------------------
-
-/// Build a single-`access_log`-filter pipeline scoped to `provider` via a
-/// `selected_upstream` `when` condition. `build` does not enforce ordering, so
-/// no load balancer is needed to construct it for these condition-match tests.
-fn access_log_scoped_to_provider(provider: &str) -> FilterPipeline {
-    let registry = FilterRegistry::with_builtins();
-    let condition = serde_yaml::from_str(&format!(
-        "when:\n  selected_upstream:\n    application_provider: {provider}\n"
-    ))
-    .expect("valid selected_upstream condition");
-    let mut entries = vec![FilterEntry {
-        branch_chains: None,
-        conditions: vec![condition],
-        filter_type: "access_log".into(),
-        config: serde_yaml::Value::Null,
-        name: None,
-        response_conditions: vec![],
-        failure_mode: FailureMode::default(),
-    }];
-    FilterPipeline::build(&mut entries, &registry).expect("access_log pipeline builds")
-}
-
-#[test]
-fn conditions_match_selected_honors_published_selection() {
-    // The fallback path restores the selection onto the context, so a
-    // selected_upstream-scoped filter must match when the published provider
-    // satisfies its predicate.
-    let pipeline = access_log_scoped_to_provider("vllm");
-    let req = crate::test_utils::make_request(Method::GET, "/");
-    let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.publish_selected_application(None, Some(Arc::from("vllm")));
-    assert!(
-        pipeline.filter_request_conditions_match_selected("access_log", &ctx),
-        "a selected_upstream-scoped filter must match its published provider"
-    );
-}
-
-#[test]
-fn conditions_match_selected_fails_closed_without_selection() {
-    // No selection published: the predicate has nothing to match and must fail
-    // closed, exactly as the selection-unaware helper does.
-    let pipeline = access_log_scoped_to_provider("vllm");
-    let req = crate::test_utils::make_request(Method::GET, "/");
-    let ctx = crate::test_utils::make_filter_context(&req);
-    assert!(
-        !pipeline.filter_request_conditions_match_selected("access_log", &ctx),
-        "absent selection must fail closed"
-    );
-    assert!(
-        !pipeline.filter_request_conditions_match("access_log", ctx.request),
-        "the selection-unaware helper also fails closed on a selected_upstream predicate"
-    );
-}
-
-#[test]
-fn conditions_match_selected_rejects_mismatched_selection() {
-    // A published provider that does not satisfy the predicate must not match,
-    // so the fallback record is correctly withheld.
-    let pipeline = access_log_scoped_to_provider("vllm");
-    let req = crate::test_utils::make_request(Method::GET, "/");
-    let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.publish_selected_application(None, Some(Arc::from("openai")));
-    assert!(
-        !pipeline.filter_request_conditions_match_selected("access_log", &ctx),
-        "a mismatched published provider must not match the predicate"
 // Bound-Upstream Condition
 // -----------------------------------------------------------------------------
 
@@ -6037,26 +5972,393 @@ async fn bound_upstream_condition_skips_filter_on_mismatch() {
     );
 }
 
-#[test]
-fn conditions_match_selected_unconditional_filter_always_matches() {
-    // An unconditional access_log matches regardless of selection, matching the
-    // selection-unaware helper's behavior.
+// -----------------------------------------------------------------------------
+// Bound-Upstream Request-Body Barrier
+// -----------------------------------------------------------------------------
+
+/// Configurable outcome for [`BoundBodyRecordingFilter`]'s barrier hook.
+enum BoundBodyBehavior {
+    Continue,
+    Reject(u16),
+    Error,
+}
+
+/// A bound-upstream request-body participant. Declaring
+/// `bound_upstream_request_body_access` is what arms the barrier: `build` (and
+/// the `with_body_indices` test helper) collect such filters into
+/// `bound_upstream_request_body_filter_indices`. The hook records how many
+/// times it ran and the body it observed, then returns a configurable outcome.
+struct BoundBodyRecordingFilter {
+    name: &'static str,
+    ran: Arc<AtomicUsize>,
+    seen_body: Arc<std::sync::Mutex<Option<Bytes>>>,
+    behavior: BoundBodyBehavior,
+}
+
+impl BoundBodyRecordingFilter {
+    fn new(
+        name: &'static str,
+        behavior: BoundBodyBehavior,
+    ) -> (Self, Arc<AtomicUsize>, Arc<std::sync::Mutex<Option<Bytes>>>) {
+        let ran = Arc::new(AtomicUsize::new(0));
+        let seen_body = Arc::new(std::sync::Mutex::new(None));
+        let filter = Self {
+            name,
+            ran: Arc::clone(&ran),
+            seen_body: Arc::clone(&seen_body),
+            behavior,
+        };
+        (filter, ran, seen_body)
+    }
+}
+
+#[async_trait]
+impl HttpFilter for BoundBodyRecordingFilter {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn bound_upstream_request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer {
+            max_bytes: Some(65_536),
+        }
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_bound_upstream_request_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<crate::BoundUpstreamBodyOutcome, FilterError> {
+        self.ran.fetch_add(1, Ordering::SeqCst);
+        *self.seen_body.lock().unwrap() = body.clone();
+        match self.behavior {
+            BoundBodyBehavior::Continue => Ok(crate::BoundUpstreamBodyOutcome::Continue),
+            BoundBodyBehavior::Reject(status) => Ok(crate::BoundUpstreamBodyOutcome::Reject(crate::Rejection::status(
+                status,
+            ))),
+            BoundBodyBehavior::Error => Err(FilterError::from("bound body boom")),
+        }
+    }
+}
+
+/// A filter that claims to bind an upstream but publishes nothing, modelling a
+/// router that ran without resolving a route.
+struct NonPublishingBindingFilter;
+
+#[async_trait]
+impl HttpFilter for NonPublishingBindingFilter {
+    fn name(&self) -> &'static str {
+        "non_publishing_binding"
+    }
+
+    fn binds_upstream(&self) -> bool {
+        true
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
+
+fn binding_router(cluster: &'static str) -> Box<dyn HttpFilter> {
+    Box::new(BindingRouterFilter {
+        cluster,
+        protocol: Some("p1"),
+        provider: None,
+    })
+}
+
+#[tokio::test]
+async fn bound_upstream_barrier_runs_participant_and_commits_body() {
+    let (participant, ran, seen) = BoundBodyRecordingFilter::new("bound_body", BoundBodyBehavior::Continue);
+    let pipeline = make_pipeline(vec![binding_router("inference"), Box::new(participant)]);
+    assert_eq!(
+        pipeline.bound_upstream_request_body_filter_indices,
+        vec![1],
+        "the body participant must be collected into the barrier index"
+    );
+
+    let req = crate::test_utils::make_request(Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.buffered_request_body = Some(Bytes::from_static(b"payload"));
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "pipeline should continue");
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        1,
+        "barrier must run the participant exactly once"
+    );
+    assert_eq!(
+        seen.lock().unwrap().as_deref(),
+        Some(&b"payload"[..]),
+        "the participant must observe the buffered body"
+    );
+    assert_eq!(
+        ctx.buffered_request_body.as_deref(),
+        Some(&b"payload"[..]),
+        "the barrier must commit the body back into the context"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_barrier_reject_short_circuits_remaining_participants() {
+    let (rejecting, first_ran, _) = BoundBodyRecordingFilter::new("reject_body", BoundBodyBehavior::Reject(403));
+    let (trailing, second_ran, _) = BoundBodyRecordingFilter::new("trailing_body", BoundBodyBehavior::Continue);
+    let pipeline = make_pipeline(vec![
+        binding_router("inference"),
+        Box::new(rejecting),
+        Box::new(trailing),
+    ]);
+
+    let req = crate::test_utils::make_request(Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.buffered_request_body = Some(Bytes::from_static(b"payload"));
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    match action {
+        FilterAction::Reject(rejection) => assert_eq!(rejection.status, 403, "reject status must propagate"),
+        other => panic!("expected reject, got {other:?}"),
+    }
+    assert_eq!(
+        first_ran.load(Ordering::SeqCst),
+        1,
+        "the rejecting participant must run"
+    );
+    assert_eq!(
+        second_ran.load(Ordering::SeqCst),
+        0,
+        "a participant after a reject must not run"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_barrier_closed_failure_aborts_request() {
+    let (failing, ran, _) = BoundBodyRecordingFilter::new("failing_body", BoundBodyBehavior::Error);
+    // Default failure_mode is Closed, so the participant's error aborts.
+    let pipeline = make_pipeline(vec![binding_router("inference"), Box::new(failing)]);
+
+    let req = crate::test_utils::make_request(Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.buffered_request_body = Some(Bytes::from_static(b"payload"));
+
+    let result = pipeline.execute_http_request(&mut ctx).await;
+    assert!(result.is_err(), "a closed participant's error must abort the request");
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "the failing participant must have run");
+}
+
+#[tokio::test]
+async fn bound_upstream_barrier_open_failure_continues_to_next_participant() {
+    let (failing, first_ran, _) = BoundBodyRecordingFilter::new("failing_body", BoundBodyBehavior::Error);
+    let (trailing, second_ran, _) = BoundBodyRecordingFilter::new("trailing_body", BoundBodyBehavior::Continue);
+    let mut pipeline = make_pipeline(vec![binding_router("inference"), Box::new(failing), Box::new(trailing)]);
+    // Open failure mode on the failing participant swallows its error.
+    pipeline.filters[1].failure_mode = FailureMode::Open;
+
+    let req = crate::test_utils::make_request(Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.buffered_request_body = Some(Bytes::from_static(b"payload"));
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "open failure must not abort");
+    assert_eq!(
+        first_ran.load(Ordering::SeqCst),
+        1,
+        "the failing participant must have run"
+    );
+    assert_eq!(
+        second_ran.load(Ordering::SeqCst),
+        1,
+        "a participant after an open failure must still run"
+    );
+    assert_eq!(
+        ctx.buffered_request_body.as_deref(),
+        Some(&b"payload"[..]),
+        "the barrier must commit the body back after an open failure"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_barrier_gates_participant_on_condition() {
+    let mismatch: Vec<praxis_core::config::Condition> =
+        serde_yaml::from_str("- when:\n    bound_upstream:\n      application_protocol: other\n").unwrap();
+    let (skipped, skipped_ran, _) = BoundBodyRecordingFilter::new("skipped_body", BoundBodyBehavior::Continue);
+    let pipeline = make_pipeline_with_conditions(vec![
+        (binding_router("inference"), vec![]),
+        (Box::new(skipped), mismatch),
+    ]);
+
+    let req = crate::test_utils::make_request(Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.buffered_request_body = Some(Bytes::from_static(b"payload"));
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "pipeline should continue");
+    assert_eq!(
+        skipped_ran.load(Ordering::SeqCst),
+        0,
+        "a participant whose bound_upstream condition does not match must be skipped"
+    );
+
+    // The matching-condition counterpart runs.
+    let matches: Vec<praxis_core::config::Condition> =
+        serde_yaml::from_str("- when:\n    bound_upstream:\n      application_protocol: p1\n").unwrap();
+    let (matched, matched_ran, _) = BoundBodyRecordingFilter::new("matched_body", BoundBodyBehavior::Continue);
+    let pipeline = make_pipeline_with_conditions(vec![
+        (binding_router("inference"), vec![]),
+        (Box::new(matched), matches),
+    ]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.buffered_request_body = Some(Bytes::from_static(b"payload"));
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "pipeline should continue");
+    assert_eq!(
+        matched_ran.load(Ordering::SeqCst),
+        1,
+        "a participant whose bound_upstream condition matches must run"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_barrier_runs_once_per_request() {
+    let (participant, ran, _) = BoundBodyRecordingFilter::new("bound_body", BoundBodyBehavior::Continue);
+    // Two binding filters bind the same cluster; the barrier must drain
+    // participants only on the first binding and be a no-op on the second.
+    let pipeline = make_pipeline(vec![
+        binding_router("inference"),
+        binding_router("inference"),
+        Box::new(participant),
+    ]);
+
+    let req = crate::test_utils::make_request(Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.buffered_request_body = Some(Bytes::from_static(b"payload"));
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "pipeline should continue");
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        1,
+        "the barrier must run participants exactly once even with two binding filters"
+    );
+}
+
+#[tokio::test]
+async fn binding_freezes_without_bound_body_participants() {
+    let pipeline = make_pipeline(vec![binding_router("first"), binding_router("second")]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+
+    assert!(matches!(
+        action,
+        FilterAction::Reject(rejection) if rejection.status == 500
+    ));
+    assert_eq!(ctx.bound_cluster(), Some("first"));
+}
+
+#[tokio::test]
+async fn bound_upstream_barrier_noop_without_bound_cluster() {
+    let (participant, ran, _) = BoundBodyRecordingFilter::new("bound_body", BoundBodyBehavior::Continue);
+    // The binding filter declares `binds_upstream()` but never publishes, so no
+    // cluster is bound and the barrier must not drain participants.
+    let pipeline = make_pipeline(vec![Box::new(NonPublishingBindingFilter), Box::new(participant)]);
+    assert_eq!(
+        pipeline.bound_upstream_request_body_filter_indices,
+        vec![1],
+        "the participant is still collected; only the runtime guard skips it"
+    );
+
+    let req = crate::test_utils::make_request(Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.buffered_request_body = Some(Bytes::from_static(b"payload"));
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "pipeline should continue");
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        0,
+        "the barrier must be a no-op when no cluster is bound"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// filter_request_conditions_match (selection axis)
+// -----------------------------------------------------------------------------
+
+/// Build a single-`access_log`-filter pipeline scoped to `provider` via a
+/// `selected_upstream` `when` condition. `build` does not enforce ordering, so
+/// no load balancer is needed to construct it for these condition-match tests.
+fn access_log_scoped_to_provider(provider: &str) -> FilterPipeline {
     let registry = FilterRegistry::with_builtins();
+    let condition = serde_yaml::from_str(&format!(
+        "when:\n  selected_upstream:\n    application_provider: {provider}\n"
+    ))
+    .expect("valid selected_upstream condition");
     let mut entries = vec![FilterEntry {
         branch_chains: None,
-        conditions: vec![],
+        conditions: vec![condition],
         filter_type: "access_log".into(),
         config: serde_yaml::Value::Null,
         name: None,
         response_conditions: vec![],
         failure_mode: FailureMode::default(),
     }];
-    let pipeline = FilterPipeline::build(&mut entries, &registry).expect("access_log pipeline builds");
+    FilterPipeline::build(&mut entries, &registry).expect("access_log pipeline builds")
+}
+
+#[test]
+fn conditions_match_selected_honors_published_selection() {
+    // The fallback path restores the selection onto the context, so a
+    // selected_upstream-scoped filter must match when the published provider
+    // satisfies its predicate.
+    let pipeline = access_log_scoped_to_provider("vllm");
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.publish_selected_application(None, Some(Arc::from("vllm")));
+    assert!(
+        pipeline.filter_request_conditions_match("access_log", &ctx),
+        "a selected_upstream-scoped filter must match its published provider"
+    );
+}
+
+#[test]
+fn conditions_match_selected_fails_closed_without_selection() {
+    // No selection published: the predicate has nothing to match and must fail
+    // closed, exactly as the selection-unaware helper does.
+    let pipeline = access_log_scoped_to_provider("vllm");
     let req = crate::test_utils::make_request(Method::GET, "/");
     let ctx = crate::test_utils::make_filter_context(&req);
     assert!(
-        pipeline.filter_request_conditions_match_selected("access_log", &ctx),
-        "an unconditional filter matches even with no selection"
+        !pipeline.filter_request_conditions_match("access_log", &ctx),
+        "absent selection must fail closed"
+    );
+}
+
+#[test]
+fn conditions_match_selected_rejects_mismatched_selection() {
+    // A published provider that does not satisfy the predicate must not match,
+    // so the fallback record is correctly withheld.
+    let pipeline = access_log_scoped_to_provider("vllm");
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.publish_selected_application(None, Some(Arc::from("openai")));
+    assert!(
+        !pipeline.filter_request_conditions_match("access_log", &ctx),
+        "a mismatched published provider must not match the predicate"
+    );
+}
+
+#[test]
 fn filter_request_conditions_match_honors_bound_upstream_view() {
     // The protocol-level fallback (fallback access-log emission) gates on the
     // request's real bound view, not an empty one: a `bound_upstream`-gated
@@ -6160,5 +6462,28 @@ fn inject_cluster_catalog_drops_stale_parent_when_child_has_none() {
     assert!(
         ext.get::<Arc<super::catalog::ClusterApplicationCatalog>>().is_none(),
         "a nested pipeline with no catalog must drop the stale parent catalog",
+    );
+}
+
+#[test]
+fn conditions_match_selected_unconditional_filter_always_matches() {
+    // An unconditional access_log matches regardless of selection, matching the
+    // selection-unaware helper's behavior.
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![FilterEntry {
+        branch_chains: None,
+        conditions: vec![],
+        filter_type: "access_log".into(),
+        config: serde_yaml::Value::Null,
+        name: None,
+        response_conditions: vec![],
+        failure_mode: FailureMode::default(),
+    }];
+    let pipeline = FilterPipeline::build(&mut entries, &registry).expect("access_log pipeline builds");
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let ctx = crate::test_utils::make_filter_context(&req);
+    assert!(
+        pipeline.filter_request_conditions_match("access_log", &ctx),
+        "an unconditional filter matches even with no selection"
     );
 }
