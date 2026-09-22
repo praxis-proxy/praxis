@@ -160,6 +160,138 @@ pub fn start_stateful_backend(responses: Vec<(u16, String)>) -> BackendGuard {
     })
 }
 
+/// Start a backend that injects raw bytes as a response header line.
+///
+/// `malformed_header` may contain CRLF, control characters, or other
+/// illegal sequences inside what looks like a single header field.
+/// Used for response-side injection / response-splitting tests.
+///
+/// # Panics
+///
+/// Panics if the server fails to bind or accept connections.
+pub fn start_malicious_response_header_backend(malformed_header: Vec<u8>) -> BackendGuard {
+    spawn_tcp_server_with_shutdown(move |mut stream| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _headers = read_until_headers_complete(&mut stream);
+
+        let body = b"ok";
+        let mut response = Vec::new();
+        response.extend_from_slice(b"HTTP/1.1 200 OK\r\n");
+        response.extend_from_slice(&malformed_header);
+        if !malformed_header.ends_with(b"\r\n") {
+            response.extend_from_slice(b"\r\n");
+        }
+        response.extend_from_slice(
+            format!(
+                "Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        response.extend_from_slice(body);
+        let _sent = stream.write_all(&response);
+    })
+}
+
+/// Start a backend that sends the given raw HTTP response bytes
+/// after reading request headers.
+///
+/// # Panics
+///
+/// Panics if the server fails to bind or accept connections.
+pub fn start_raw_response_backend(response: Vec<u8>) -> BackendGuard {
+    spawn_tcp_server_with_shutdown(move |mut stream| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _headers = read_until_headers_complete(&mut stream);
+        let _sent = stream.write_all(&response);
+    })
+}
+
+/// Start a backend that writes a partial response (status +
+/// `Content-Length`) then drops the connection before finishing
+/// headers or body. Used for mid-response failure tests.
+///
+/// # Panics
+///
+/// Panics if the server fails to bind or accept connections.
+pub fn start_mid_response_drop_backend() -> u16 {
+    spawn_tcp_server(|mut stream| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut buf = [0_u8; 4096];
+        let _bytes = stream.read(&mut buf);
+        let _sent = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n");
+        let _flushed = stream.flush();
+        drop(stream);
+    })
+}
+
+/// Start a backend that answers with `Connection: keep-alive` and then
+/// appends a second forged response on the same socket. Used to verify
+/// the proxy does not forward keep-alive poisoning to the client.
+///
+/// # Panics
+///
+/// Panics if the server fails to bind or accept connections.
+pub fn start_keepalive_poison_backend() -> BackendGuard {
+    spawn_tcp_server_with_shutdown(|mut stream| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _headers = read_until_headers_complete(&mut stream);
+
+        let body = b"safe";
+        let mut response = Vec::new();
+        response.extend_from_slice(
+            format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: keep-alive\r\n\
+                 Keep-Alive: timeout=300\r\n\
+                 \r\n",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        response.extend_from_slice(body);
+        // Extra bytes that would become a second response if the proxy
+        // blindly reused or forwarded the upstream connection framing.
+        response.extend_from_slice(
+            b"HTTP/1.1 200 OK\r\n\
+              Content-Length: 6\r\n\
+              X-Poisoned: true\r\n\
+              \r\n\
+              poison",
+        );
+        let _sent = stream.write_all(&response);
+    })
+}
+
+/// Start a backend that returns a `Content-Encoding: gzip` body.
+///
+/// # Panics
+///
+/// Panics if the server fails to bind or accept connections.
+pub fn start_gzip_encoded_backend(gzip_body: Vec<u8>) -> BackendGuard {
+    spawn_tcp_server_with_shutdown(move |mut stream| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _headers = read_until_headers_complete(&mut stream);
+
+        let mut response = Vec::new();
+        response.extend_from_slice(
+            format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: application/octet-stream\r\n\
+                 Content-Encoding: gzip\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n",
+                gzip_body.len()
+            )
+            .as_bytes(),
+        );
+        response.extend_from_slice(&gzip_body);
+        let _sent = stream.write_all(&response);
+    })
+}
+
 /// Shared request log for [`start_reused_connection_kill_backend`]:
 /// `(connection_number, request_number_within_connection, method, path)`.
 pub type ReusedConnectionLog = Arc<Mutex<Vec<(usize, usize, String, String)>>>;
