@@ -70,6 +70,7 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 | `clusters[].retry_policy.retry_budget.min_retries_per_second` | integer | no | Floor on tokens per second even at low traffic. |
 | `clusters[].retry_policy.retry_body_limit_bytes` | RetryBodyLimit | no | Max request body size eligible for replay (bytes). Defaults to 64 `KiB`. |
 | `clusters[].retry_policy.allow_non_idempotent` | bool | no | Allow retries for non-idempotent methods (POST/PATCH) when true. |
+| `cluster_source` | `router` \| `bound_upstream` | no | Where the target cluster name is read from: `router` (the default) uses the cluster a preceding `router` selected into the request context; `bound_upstream` resolves the frozen logical binding a binding router published, letting a direct branch or an `iterative_request_router` step select an endpoint with no second router. Omit for `router`. |
 
 ## Example
 

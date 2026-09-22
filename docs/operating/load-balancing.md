@@ -436,6 +436,22 @@ filter_chains:
               - "10.0.1.3:8080"
 ```
 
+## Cluster Source
+
+By default a `load_balancer` reads the target
+cluster from `ctx.cluster`, which a preceding
+`router` set (`cluster_source: router`). It can
+instead read `cluster_source: bound_upstream`,
+resolving the frozen logical binding a binding
+router published and selecting an endpoint with no
+second router. This is how a direct dispatch branch
+picks an endpoint from a cluster that was bound once
+earlier in the pipeline; an
+`iterative_request_router` step — which needs the
+off-by-default `iterative-request-router` build
+feature — can do the same on every exchange. See
+[Upstream Binding](../architecture/upstream-binding.md).
+
 ## Dynamic Reload
 
 Load-balancing configuration is dynamically

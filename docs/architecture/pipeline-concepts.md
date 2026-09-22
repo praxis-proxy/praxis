@@ -211,6 +211,8 @@ For full details, see the
   step-by-step request walkthrough
 - [Branch Chains](../filters/branch-chains.md):
   conditional branching in pipelines
+- [Upstream Binding](upstream-binding.md):
+  pinning a logical cluster across a request
 - [Connection Lifecycle](connection-lifecycle.md):
   Pingora-level HTTP and TCP flow
 - [Filter System](../filters/README.md):

@@ -111,7 +111,11 @@ struct LoadBalancerConfig {
     #[serde(default)]
     clusters: Vec<Cluster>,
 
-    /// Where the target cluster name is read from. Omit for `router`.
+    /// Where the target cluster name is read from: `router` (the default) uses
+    /// the cluster a preceding `router` selected into the request context;
+    /// `bound_upstream` resolves the frozen logical binding a binding router
+    /// published, letting a direct branch or an `iterative_request_router` step
+    /// select an endpoint with no second router. Omit for `router`.
     #[serde(default)]
     cluster_source: ClusterSource,
 }

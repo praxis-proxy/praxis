@@ -168,6 +168,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [authority-override.yaml](configs/traffic-management/authority-override.yaml) | Demonstrates overriding the HTTP Host header sent to a specific upstream cluster, including requests received over HTTP/2 |
 | [basic-reverse-proxy.yaml](configs/traffic-management/basic-reverse-proxy.yaml) | Minimal config: one listener, one upstream, default filter chain |
 | [bound-upstream-condition.yaml](configs/traffic-management/bound-upstream-condition.yaml) | Gates a filter on the logical upstream the router bound for the request |
+| [bound-upstream-dispatch.yaml](configs/traffic-management/bound-upstream-dispatch.yaml) | Selects an upstream endpoint straight from the logical binding, with no second router |
 | [canary-routing.yaml](configs/traffic-management/canary-routing.yaml) | Sends ~10% of traffic to a canary backend while the stable backend handles the remaining ~90% |
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
 | [cluster-application-metadata.yaml](configs/traffic-management/cluster-application-metadata.yaml) | Tags an upstream cluster with opaque application metadata that consuming filters interpret |

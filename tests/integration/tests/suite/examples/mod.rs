@@ -13,6 +13,8 @@ mod admin_interface;
 mod api_key_filter;
 mod authority_override;
 mod basic_reverse_proxy;
+#[cfg(feature = "iterative-request-router")]
+mod bound_upstream_dispatch;
 mod branching;
 mod canary_routing;
 mod circuit_breaker;

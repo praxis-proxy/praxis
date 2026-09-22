@@ -1,0 +1,99 @@
+# Bound Upstream Dispatch
+#
+# Selects an upstream endpoint straight from the logical binding, with no
+# second router. A binding router publishes one logical cluster; a
+# load_balancer with `cluster_source: bound_upstream` then resolves that
+# frozen binding and picks an endpoint. This drives one pipeline with two
+# ownership modes: an OpenAI-tagged request is dispatched directly by a
+# branch, while every other request runs gateway-owned processing and an
+# iterative_request_router that also dispatches from the same binding.
+#
+# Requests under /openai/ bind the openai cluster and take the direct
+# branch, so gateway filters and the IRR are skipped. Every other request
+# binds the chat cluster, gains an X-Gateway-Processed marker, and is
+# dispatched by the IRR step's bound-consuming load balancer.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/bound-upstream-dispatch.yaml
+#   curl -i http://localhost:8080/openai/v1/responses   # direct dispatch
+#   curl -i http://localhost:8080/v1/chat/completions   # gateway + IRR dispatch
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # 1. The router binds one logical cluster from a trusted routing fact
+      #    (here the request path). It selects no endpoint; the binding
+      #    carries only the logical cluster name and its catalog metadata.
+      - filter: router
+        routes:
+          - path_prefix: "/openai/"
+            cluster: openai_backend
+
+          - path_prefix: "/"
+            cluster: chat_backend
+
+      # 2. Direct provider path: gated on the bound provider, this branch
+      #    dispatches straight from the binding via a bound-consuming load
+      #    balancer and rejoins `terminal`, so the gateway processing and
+      #    IRR below never run for a provider-owned request.
+      - filter: headers
+        conditions:
+          - when:
+              bound_upstream:
+                application_provider: openai
+        branch_chains:
+          - name: direct-openai
+            rejoin: terminal
+            chains:
+              - name: direct-openai-dispatch
+                filters:
+                  - filter: load_balancer
+                    cluster_source: bound_upstream
+                    clusters:
+                      - name: openai_backend
+                        http:
+                          application_protocol: openai_responses
+                          application_provider: openai
+                        endpoints:
+                          - "127.0.0.1:3001"
+
+      # 3. Gateway-owned processing. The direct branch above rejoins
+      #    `terminal`, so a provider-owned request never reaches here;
+      #    only the non-provider path is marked.
+      - filter: headers
+        response_set:
+          - name: "X-Gateway-Processed"
+            value: "true"
+
+      # 4. The iterative_request_router owns the non-provider exchange
+      #    lifecycle. Its step selects an endpoint from the same frozen
+      #    binding through a bound-consuming load balancer -- no second
+      #    router, no top-level load balancer. Provider-owned requests
+      #    already terminated at the direct branch, so no condition is
+      #    needed here.
+      - filter: iterative_request_router
+        initial_step: inference
+        steps:
+          - name: inference
+            filters:
+              - filter: load_balancer
+                cluster_source: bound_upstream
+                clusters:
+                  - name: chat_backend
+                    http:
+                      application_protocol: openai_chat_completions
+                      application_provider: vllm
+                    endpoints:
+                      - "127.0.0.1:3002"
+            on_result:
+              - default: true
+                done: true
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

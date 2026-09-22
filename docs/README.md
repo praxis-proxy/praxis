@@ -61,6 +61,9 @@ and security. AI Gateway docs live in
   design principles, protocol adapters, filter-first design
 - [Pipeline Concepts](architecture/pipeline-concepts.md):
   chains, pipelines, filter results, naming
+- [Upstream Binding](architecture/upstream-binding.md):
+  logical cluster binding, freeze barrier, bound
+  conditions
 - [Life of a Request](architecture/life-of-a-request.md):
   step-by-step request walkthrough
 - [Connection Lifecycle](architecture/connection-lifecycle.md):
