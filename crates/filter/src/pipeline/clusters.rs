@@ -13,6 +13,7 @@
 use std::collections::HashSet;
 
 use super::filter::PipelineFilter;
+use crate::any_filter::AnyFilter;
 
 // -----------------------------------------------------------------------------
 // Cluster Extraction
@@ -85,6 +86,50 @@ pub(super) fn reachable_lb_clusters(filters: &[PipelineFilter]) -> HashSet<Strin
                     out.extend(reachable_lb_clusters(&branch.filters));
                 }
             }
+        }
+    }
+    out
+}
+
+/// Cluster names that a binding filter (`binds_upstream`) may publish as the
+/// logical upstream, recursing into branch sub-chains.
+///
+/// The binding router records only a cluster name in the logical binding; these
+/// are exactly the names a bound-consuming load balancer must be able to
+/// resolve. Pipeline validation compares this set against
+/// [`extract_bound_upstream_clusters`] so every bindable cluster is served by
+/// some bound-consuming load balancer.
+pub(super) fn bindable_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for pf in filters {
+        if let AnyFilter::Http(f) = &pf.filter
+            && f.binds_upstream()
+        {
+            out.extend(f.selected_clusters());
+        }
+        for branch in &pf.branches {
+            out.extend(bindable_clusters(&branch.filters));
+        }
+    }
+    out
+}
+
+/// Cluster names that bound-consuming load balancers can resolve from the
+/// frozen logical binding, recursing into branch sub-chains.
+///
+/// A framework filter that owns nested pipelines (the IRR) folds its steps'
+/// bound-consuming declarations up through
+/// [`bound_upstream_clusters`](crate::HttpFilter::bound_upstream_clusters), so
+/// an IRR-step bound load balancer contributes here even though branch
+/// recursion alone does not descend into step pipelines.
+pub(super) fn extract_bound_upstream_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for pf in filters {
+        if let AnyFilter::Http(f) = &pf.filter {
+            out.extend(f.bound_upstream_clusters());
+        }
+        for branch in &pf.branches {
+            out.extend(extract_bound_upstream_clusters(&branch.filters));
         }
     }
     out

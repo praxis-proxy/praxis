@@ -243,7 +243,13 @@ impl FilterPipeline {
         );
         super::checks::check_cluster_metadata_conflicts(&self.filters, &mut errors);
         super::checks::check_bound_upstream_requires_binding(&self.filters, &mut errors);
-        super::checks::check_irr_with_router_or_lb(&names, &mut errors);
+        super::checks::check_bound_condition_with_pre_read_body(&self.filters, &mut errors);
+        super::checks::check_bound_upstream_body_mode(&self.filters, &mut errors);
+        super::checks::check_branch_bound_upstream_body_filters(&self.filters, &mut errors);
+        super::checks::check_no_rebind_after_binding(&self.filters, &mut errors);
+        super::checks::check_bound_cluster_coverage(&self.filters, &mut errors);
+        super::checks::check_untagged_bound_cluster_fields(&self.filters, &mut errors);
+        super::checks::check_irr_coexistence(&self.filters, &names, &mut errors);
         if self.may_select_streaming_subrequest_response
             && matches!(
                 self.body_capabilities.response_body_mode,
@@ -302,7 +308,7 @@ impl FilterPipeline {
 
         let mut warnings = Vec::new();
 
-        super::checks::check_router_without_lb(&names, &mut warnings);
+        super::checks::check_router_without_lb(&self.filters, &names, &mut warnings);
         super::checks::check_all_routers_conditional(&names, &self.filters, &mut warnings);
         super::checks::check_security_filter_in_conditional_branch(&self.filters, &mut warnings);
 

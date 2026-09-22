@@ -168,6 +168,21 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Cluster names this filter can select from the frozen logical binding.
+    ///
+    /// A load balancer with `cluster_source: bound_upstream` reports the
+    /// cluster names it can resolve from [`BoundUpstream`]; framework filters
+    /// that own nested pipelines (the IRR) fold their steps' bound-consuming
+    /// declarations up through this hook. Pipeline validation unions these
+    /// across every reachable path so a cluster the binding router may bind
+    /// must be served by some bound-consuming load balancer. Filters that do
+    /// not consume the binding leave the default empty list.
+    ///
+    /// [`BoundUpstream`]: crate::extensions::BoundUpstream
+    fn bound_upstream_clusters(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether this filter may select a streaming sub-request response.
     ///
     /// Pipeline validation uses this declaration to reject response

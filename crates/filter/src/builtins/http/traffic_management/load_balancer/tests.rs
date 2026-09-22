@@ -923,7 +923,10 @@ clusters:
         matches!(action, FilterAction::Continue),
         "a resolved bound selection should continue"
     );
-    let upstream = ctx.upstream.as_ref().expect("upstream should be selected from the bound cluster");
+    let upstream = ctx
+        .upstream
+        .as_ref()
+        .expect("upstream should be selected from the bound cluster");
     assert_eq!(
         &*upstream.address, "127.0.0.1:8080",
         "the endpoint must come from the bound cluster"
@@ -1044,7 +1047,10 @@ async fn bound_upstream_source_errors_when_bound_cluster_not_declared() {
         error.to_string().contains("not declared in this load_balancer"),
         "a binding to a cluster this load balancer does not declare must fail closed: {error}"
     );
-    assert!(ctx.upstream.is_none(), "no upstream may be selected for an undeclared cluster");
+    assert!(
+        ctx.upstream.is_none(),
+        "no upstream may be selected for an undeclared cluster"
+    );
 }
 
 // -----------------------------------------------------------------------------

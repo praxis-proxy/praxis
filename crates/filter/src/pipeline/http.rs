@@ -112,9 +112,7 @@ impl FilterPipeline {
             // Bound-upstream request-body barrier: if this filter just bound a
             // logical upstream, drain the bound-upstream body participants once
             // against the frozen binding before its branch chains evaluate.
-            if let FilterAction::Reject(r) =
-                self.run_bound_upstream_request_body_barrier(http_filter, ctx).await?
-            {
+            if let FilterAction::Reject(r) = self.run_bound_upstream_request_body_barrier(http_filter, ctx).await? {
                 return Ok(FilterAction::Reject(r));
             }
             match super::evaluate::evaluate_branches(&pf.branches, ctx).await? {
@@ -407,7 +405,10 @@ impl FilterPipeline {
     /// [`buffered_request_body`]: HttpFilterContext::buffered_request_body
     /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
     /// [`execute_http_selected_upstream_request_body`]: FilterPipeline::execute_http_selected_upstream_request_body
-    #[expect(clippy::too_many_lines, reason = "body hook loop with take/commit and per-filter skip checks")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "body hook loop with take/commit and per-filter skip checks"
+    )]
     async fn execute_http_bound_upstream_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -419,7 +420,10 @@ impl FilterPipeline {
                 continue;
             };
             if !should_execute_bound(&pf.conditions, ctx.request, ctx.bound_upstream_view()) {
-                trace!(filter = pf.filter.name(), "skipped bound-upstream request body (conditions)");
+                trace!(
+                    filter = pf.filter.name(),
+                    "skipped bound-upstream request body (conditions)"
+                );
                 continue;
             }
             let AnyFilter::Http(http_filter) = &pf.filter else {

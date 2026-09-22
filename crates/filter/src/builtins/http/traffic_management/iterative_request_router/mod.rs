@@ -75,7 +75,10 @@ use crate::{
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
     filtered_subrequest::{FilteredStreamingBody, SubrequestRuntime, normalize_response_status},
-    pipeline::{catalog::ClusterApplicationCatalog, subrequest::DEPTH_HEADER},
+    pipeline::{
+        catalog::{ClusterApplicationCatalog, ClusterMetadataDeclaration},
+        subrequest::DEPTH_HEADER,
+    },
 };
 
 // -----------------------------------------------------------------------------
@@ -462,6 +465,34 @@ impl HttpFilter for IterativeRequestRouterFilter {
         true
     }
 
+    fn consumes_bound_upstream(&self) -> bool {
+        // The IRR owns no cluster selection itself; it consumes the binding
+        // when any of its step pipelines carries a bound-consuming load
+        // balancer. Surfacing this lets pipeline validation reason about
+        // router/IRR coexistence and binding requirements without parsing the
+        // step configuration again.
+        self.step_pipelines
+            .values()
+            .any(|pipeline| pipeline.consumes_bound_upstream())
+    }
+
+    fn bound_upstream_clusters(&self) -> Vec<String> {
+        self.step_pipelines
+            .values()
+            .flat_map(|pipeline| pipeline.bound_upstream_clusters())
+            .collect()
+    }
+
+    fn declared_cluster_metadata(&self) -> Vec<ClusterMetadataDeclaration> {
+        // Fold every step pipeline's cluster declarations into the parent
+        // catalog so a step cluster's application metadata resolves at runtime
+        // and participates in the parent's conflict and untagged-field checks.
+        self.step_pipelines
+            .values()
+            .flat_map(|pipeline| pipeline.cluster_metadata_declarations())
+            .collect()
+    }
+
     fn request_body_access(&self) -> crate::body::BodyAccess {
         crate::body::BodyAccess::ReadOnly
     }
@@ -644,7 +675,8 @@ impl IterativeRequestRouterFilter {
                     let transitions = self.step_transitions.get(&current_step).map_or(&[][..], Vec::as_slice);
                     if !streaming_transition_order_is_valid(transitions) {
                         (*body).cancel().await;
-                        ctx.extensions = restore_parent_extensions(continuation.into_parent_extensions(), parent_catalog.as_ref());
+                        ctx.extensions =
+                            restore_parent_extensions(continuation.into_parent_extensions(), parent_catalog.as_ref());
                         return Err(format!(
                             "iterative_request_router: step '{current_step}' selected streaming with interleaved transition phases"
                         )
@@ -670,14 +702,16 @@ impl IterativeRequestRouterFilter {
                                     Ok(completion) => completion,
                                     Err(error) => {
                                         let (error, restored_extensions) = error.into_parts();
-                                        ctx.extensions = restore_parent_extensions(restored_extensions, parent_catalog.as_ref());
+                                        ctx.extensions =
+                                            restore_parent_extensions(restored_extensions, parent_catalog.as_ref());
                                         return Err(error);
                                     },
                                 };
                             completion.state.previous_response = None;
                             completion.state.iteration += 1;
                             if completion.state.retained_bytes() > self.max_state_bytes {
-                                ctx.extensions = restore_parent_extensions(completion.extensions, parent_catalog.as_ref());
+                                ctx.extensions =
+                                    restore_parent_extensions(completion.extensions, parent_catalog.as_ref());
                                 return Ok(FilterAction::Reject(Rejection::status(413)));
                             }
                             let next_body = completion
@@ -696,7 +730,10 @@ impl IterativeRequestRouterFilter {
                         TransitionResult::Done | TransitionResult::NoMatch => {
                             let Some(active_state) = continuation.extensions().get::<IterationState>() else {
                                 (*body).cancel().await;
-                                ctx.extensions = restore_parent_extensions(continuation.into_parent_extensions(), parent_catalog.as_ref());
+                                ctx.extensions = restore_parent_extensions(
+                                    continuation.into_parent_extensions(),
+                                    parent_catalog.as_ref(),
+                                );
                                 return Err(
                                     "iterative_request_router: iteration state missing before stream handoff"
                                         .to_owned()
@@ -715,11 +752,13 @@ impl IterativeRequestRouterFilter {
                                     Ok(completion) => completion,
                                     Err(error) => {
                                         let (error, restored_extensions) = error.into_parts();
-                                        ctx.extensions = restore_parent_extensions(restored_extensions, parent_catalog.as_ref());
+                                        ctx.extensions =
+                                            restore_parent_extensions(restored_extensions, parent_catalog.as_ref());
                                         return Err(error);
                                     },
                                 };
-                                ctx.extensions = restore_parent_extensions(completion.extensions, parent_catalog.as_ref());
+                                ctx.extensions =
+                                    restore_parent_extensions(completion.extensions, parent_catalog.as_ref());
                                 return Ok(FilterAction::Reject(Rejection::status(413)));
                             }
                             let status = normalize_response_status(outcome.response.status);

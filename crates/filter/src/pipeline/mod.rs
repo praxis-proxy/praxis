@@ -712,6 +712,50 @@ impl FilterPipeline {
     fn visit_nested_pipelines(&mut self, visitor: &mut dyn FnMut(&mut FilterPipeline)) {
         visit_branch_nested_pipelines(&mut self.filters, visitor);
     }
+
+    /// Whether any filter in this pipeline (including branch sub-chains and
+    /// nested framework pipelines) selects its cluster from the frozen logical
+    /// binding.
+    ///
+    /// A framework filter that owns nested pipelines (the IRR) folds its steps'
+    /// consumption up through [`consumes_bound_upstream`], so this walk sees an
+    /// IRR-step bound consumer even though [`for_each_pipeline_filter`] does not
+    /// descend into step pipelines directly.
+    ///
+    /// [`consumes_bound_upstream`]: crate::HttpFilter::consumes_bound_upstream
+    pub(crate) fn consumes_bound_upstream(&self) -> bool {
+        let mut found = false;
+        for_each_pipeline_filter(&self.filters, &mut |pf| {
+            if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+                found = found || f.consumes_bound_upstream();
+            }
+        });
+        found
+    }
+
+    /// Cluster names every bound-consuming filter in this pipeline declares,
+    /// descending into branch sub-chains and nested framework pipelines.
+    pub(crate) fn bound_upstream_clusters(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for_each_pipeline_filter(&self.filters, &mut |pf| {
+            if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+                out.extend(f.bound_upstream_clusters());
+            }
+        });
+        out
+    }
+
+    /// Cluster application-metadata declarations from every filter in this
+    /// pipeline, descending into branch sub-chains.
+    ///
+    /// A framework filter that owns nested pipelines folds its steps'
+    /// declarations up through [`declared_cluster_metadata`], so an IRR step's
+    /// cluster metadata reaches the parent catalog and its conflict check.
+    ///
+    /// [`declared_cluster_metadata`]: crate::HttpFilter::declared_cluster_metadata
+    pub(crate) fn cluster_metadata_declarations(&self) -> Vec<catalog::ClusterMetadataDeclaration> {
+        collect_cluster_declarations(&self.filters)
+    }
 }
 
 /// Visit every filter in `filters` and, recursively, every filter nested inside

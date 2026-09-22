@@ -879,7 +879,10 @@ mod tests {
             caps.needs_bound_upstream_request_body,
             "read-only bound participant should still need the phase"
         );
-        assert!(caps.needs_request_body, "read-only bound participant needs request body");
+        assert!(
+            caps.needs_request_body,
+            "read-only bound participant needs request body"
+        );
         assert!(
             !caps.any_bound_upstream_request_body_writer,
             "read-only bound participant must not set the bound writer flag"

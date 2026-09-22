@@ -189,35 +189,49 @@ impl LoadBalancerFilter {
         ctx: &mut HttpFilterContext<'_>,
     ) -> Result<(Arc<str>, &'a ClusterEntry), FilterError> {
         match self.cluster_source {
-            ClusterSource::Router => {
-                let Some(cluster) = ctx.cluster.as_ref() else {
-                    return Err(
-                        "load_balancer filter: no cluster set in context (is a router filter configured before this?)"
-                            .into(),
-                    );
-                };
-                let (key, entry) = self
-                    .clusters
-                    .get_key_value(cluster.as_ref())
-                    .ok_or_else(|| -> FilterError {
-                        format!("load_balancer filter: unknown cluster '{}'", cluster.as_ref()).into()
-                    })?;
-                Ok((Arc::clone(key), entry))
-            },
-            ClusterSource::BoundUpstream => {
-                let Some(bound) = ctx.bound_cluster() else {
-                    return Err("load_balancer filter: cluster_source is bound_upstream but no upstream is bound \
-                                (is a binding router configured before this?)"
-                        .into());
-                };
-                let (key, entry) = self.clusters.get_key_value(bound).ok_or_else(|| -> FilterError {
-                    format!("load_balancer filter: bound cluster '{bound}' not declared in this load_balancer").into()
-                })?;
-                let cluster = Arc::clone(key);
-                ctx.cluster = Some(Arc::clone(&cluster));
-                Ok((cluster, entry))
-            },
+            ClusterSource::Router => self.resolve_from_router(ctx),
+            ClusterSource::BoundUpstream => self.resolve_from_bound_upstream(ctx),
         }
+    }
+
+    /// Resolve the cluster a preceding `router` set in [`HttpFilterContext`].
+    fn resolve_from_router<'a>(
+        &'a self,
+        ctx: &HttpFilterContext<'_>,
+    ) -> Result<(Arc<str>, &'a ClusterEntry), FilterError> {
+        let Some(cluster) = ctx.cluster.as_ref() else {
+            return Err(
+                "load_balancer filter: no cluster set in context (is a router filter configured before this?)".into(),
+            );
+        };
+        let (key, entry) = self
+            .clusters
+            .get_key_value(cluster.as_ref())
+            .ok_or_else(|| -> FilterError {
+                format!("load_balancer filter: unknown cluster '{}'", cluster.as_ref()).into()
+            })?;
+        Ok((Arc::clone(key), entry))
+    }
+
+    /// Resolve the frozen logical binding, seeding [`HttpFilterContext::cluster`]
+    /// so retry, health, and `on_response` release paths key off it.
+    fn resolve_from_bound_upstream<'a>(
+        &'a self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<(Arc<str>, &'a ClusterEntry), FilterError> {
+        let Some(bound) = ctx.bound_cluster() else {
+            return Err(
+                "load_balancer filter: cluster_source is bound_upstream but no upstream is bound \
+                        (is a binding router configured before this?)"
+                    .into(),
+            );
+        };
+        let (key, entry) = self.clusters.get_key_value(bound).ok_or_else(|| -> FilterError {
+            format!("load_balancer filter: bound cluster '{bound}' not declared in this load_balancer").into()
+        })?;
+        let cluster = Arc::clone(key);
+        ctx.cluster = Some(Arc::clone(&cluster));
+        Ok((cluster, entry))
     }
 
     /// Look up health state for `cluster_name` from the context's
@@ -243,6 +257,14 @@ impl HttpFilter for LoadBalancerFilter {
 
     fn consumes_bound_upstream(&self) -> bool {
         self.cluster_source == ClusterSource::BoundUpstream
+    }
+
+    fn bound_upstream_clusters(&self) -> Vec<String> {
+        if self.cluster_source == ClusterSource::BoundUpstream {
+            self.clusters.keys().map(ToString::to_string).collect()
+        } else {
+            Vec::new()
+        }
     }
 
     fn declared_cluster_metadata(&self) -> Vec<ClusterMetadataDeclaration> {
