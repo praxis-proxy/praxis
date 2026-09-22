@@ -424,17 +424,14 @@ impl CloudEventsFilter {
 
         let destination = self.destination.clone();
         let timeout = self.delivery_timeout;
-        let authorization_token = self.authorization_token.as_ref().map(|token| token.to_string());
         let mut headers =
             HeaderMap::from_iter([(CONTENT_TYPE, HeaderValue::from_static("application/cloudevents+json"))]);
-        if let Some(token) = authorization_token {
-            let value = format!("Bearer {token}");
-            if let Ok(value) = HeaderValue::from_str(&value) {
-                headers.insert(http::header::AUTHORIZATION, value);
-            } else {
-                crate::metrics::record_cloud_events_skipped("invalid_authorization");
+        if let Some(token) = self.authorization_token.as_ref() {
+            let Ok(value) = authorization_header(token) else {
+                tracing::error!("cloud_events: authorization token invalid after construction");
                 return false;
-            }
+            };
+            headers.insert(http::header::AUTHORIZATION, value);
         }
         let request = praxis_core::subrequest::SubRequest {
             method: Method::POST,
@@ -798,6 +795,14 @@ fn resolve_authorization(config: &CloudEventsAuthorizationConfig) -> Result<Zero
             config.env_var
         )
     })?;
+    resolve_authorization_token(config, token)
+}
+
+/// Validate and retain the resolved receiver bearer token.
+fn resolve_authorization_token(
+    config: &CloudEventsAuthorizationConfig,
+    token: String,
+) -> Result<Zeroizing<String>, FilterError> {
     if token.is_empty() {
         return Err(format!(
             "cloud_events: authorization environment variable {:?} must not be empty",
@@ -811,7 +816,8 @@ fn resolve_authorization(config: &CloudEventsAuthorizationConfig) -> Result<Zero
 
 /// Build the receiver's bearer authorization header.
 fn authorization_header(token: &str) -> Result<HeaderValue, FilterError> {
-    HeaderValue::from_str(&format!("Bearer {token}"))
+    let value = Zeroizing::new(format!("Bearer {token}"));
+    HeaderValue::from_str(&value)
         .map_err(|_error| "cloud_events: authorization token contains invalid header characters".into())
 }
 
@@ -823,6 +829,11 @@ fn authorization_header(token: &str) -> Result<HeaderValue, FilterError> {
 fn validate_config(cfg: &CloudEventsFilterConfig) -> Result<(), FilterError> {
     praxis_core::connectivity::validate_url_target(&cfg.destination)
         .map_err(|error| format!("cloud_events: invalid destination: {error}"))?;
+    if cfg.authorization.is_some()
+        && !url::Url::parse(&cfg.destination).is_ok_and(|destination| destination.scheme() == "https")
+    {
+        return Err("cloud_events: authorization requires an HTTPS destination".into());
+    }
     if !(1..=MAX_EVENT_SIZE_BYTES).contains(&cfg.size_limit_bytes) {
         return Err(format!("cloud_events: size_limit_bytes must be between 1 and {MAX_EVENT_SIZE_BYTES}").into());
     }
@@ -1283,6 +1294,19 @@ mod tests {
     }
 
     #[test]
+    fn resolves_authorization_token_and_requires_https_destination() {
+        let authorization = super::CloudEventsAuthorizationConfig {
+            env_var: "METERING_AUTH_TOKEN".to_owned(),
+        };
+        let token = super::resolve_authorization_token(&authorization, "metering-secret".to_owned()).unwrap();
+        assert_eq!(token.as_str(), "metering-secret");
+
+        let yaml =
+            config("destination: http://events.example.test/events\nauthorization: { env_var: METERING_AUTH_TOKEN }");
+        assert!(CloudEventsFilter::from_config(&yaml).is_err());
+    }
+
+    #[test]
     fn rejects_blank_authorization_environment_variable() {
         let yaml = config("authorization: { env_var: '  ' }");
 
@@ -1609,8 +1633,7 @@ mod tests {
         assert!(ctx.get_filter_state::<super::CloudEventsState>().is_none());
     }
 
-    /// Publish one authenticated event to a local receiver and return its request.
-    async fn publish_authenticated_event(response: &'static [u8]) -> String {
+    async fn publish_deferred_event(response: &'static [u8], authenticated: bool) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (sender, receiver) = oneshot::channel();
@@ -1667,7 +1690,9 @@ mod tests {
             delivery_timeout_ms: 3_000,
         })
         .unwrap();
-        filter.authorization_token = Some(Zeroizing::new("metering-secret".to_owned()));
+        if authenticated {
+            filter.authorization_token = Some(Zeroizing::new("metering-secret".to_owned()));
+        }
         let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
         let client = praxis_core::subrequest::SubRequestClient::new(connector);
         let request = crate::test_utils::make_request(Method::GET, "/");
@@ -1692,29 +1717,36 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("content-type: application/cloudevents+json")
         );
-        assert!(request_text.contains("authorization: Bearer metering-secret"));
+        if authenticated {
+            assert!(request_text.contains("authorization: Bearer metering-secret"));
+        } else {
+            assert!(!request_text.to_ascii_lowercase().contains("authorization:"));
+        }
         assert!(request_text.contains("\"specversion\":\"1.0\""));
         server.await.unwrap();
         request_text.into_owned()
     }
 
     #[tokio::test]
-    async fn publishes_deferred_event_with_authorization() {
-        let request_text = publish_authenticated_event(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").await;
-
-        assert!(request_text.starts_with("POST /events HTTP/1.1\r\n"));
+    async fn publishes_deferred_event_with_and_without_authorization() {
+        for authenticated in [true, false] {
+            let request_text =
+                publish_deferred_event(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n", authenticated).await;
+            assert!(request_text.starts_with("POST /events HTTP/1.1\r\n"));
+        }
     }
 
     #[tokio::test]
     async fn records_authorization_rejection() {
         crate::test_utils::install_metrics_recorder();
-        let request_text = publish_authenticated_event(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").await;
+        let request_text =
+            publish_deferred_event(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n", true).await;
 
         assert!(request_text.contains("authorization: Bearer metering-secret"));
         let metrics = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let metrics = crate::test_utils::render_metrics();
-                if metrics.contains("failure_class=\"http_status\"") {
+                if metrics.contains("failure_class=\"http_status\"") && metrics.contains("status_class=\"4xx\"") {
                     break metrics;
                 }
                 tokio::task::yield_now().await;
