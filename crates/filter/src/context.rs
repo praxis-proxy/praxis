@@ -22,8 +22,8 @@ use crate::{
     FilterError, IterationState,
     body::BodyMode,
     condition::{ConditionError, HeaderSource},
-    extensions::{RequestExtensions, SelectedClusterApplication},
-    pipeline::body::merge_body_mode,
+    extensions::{BoundUpstream, RequestExtensions, SelectedClusterApplication},
+    pipeline::{body::merge_body_mode, catalog::ClusterApplicationCatalog},
     results::FilterResultSet,
 };
 
@@ -593,6 +593,85 @@ impl HttpFilterContext<'_> {
                 self.extensions.remove::<SelectedClusterApplication>();
             },
         }
+    }
+
+    /// Logical cluster bound for the whole downstream request, if any.
+    ///
+    /// Published by the router when it matches a route and stable across every
+    /// IRR iteration (unlike the exchange-local selected-upstream metadata).
+    /// `None` before any router has bound a cluster.
+    pub fn bound_cluster(&self) -> Option<&str> {
+        self.extensions.get::<BoundUpstream>().map(BoundUpstream::cluster)
+    }
+
+    /// Opaque application protocol of the bound cluster, if bound and tagged.
+    ///
+    /// Companion to [`bound_cluster`]; reflects the bound cluster's
+    /// `application_protocol` as resolved from the pipeline cluster catalog.
+    /// The value is opaque to Praxis core; consuming filters interpret it.
+    ///
+    /// [`bound_cluster`]: Self::bound_cluster
+    pub fn bound_application_protocol(&self) -> Option<&str> {
+        self.extensions
+            .get::<BoundUpstream>()
+            .and_then(BoundUpstream::application_protocol)
+    }
+
+    /// Opaque application provider of the bound cluster, if bound and tagged.
+    ///
+    /// Companion to [`bound_application_protocol`]; identical lifecycle and
+    /// opacity, reflecting the bound cluster's `application_provider`.
+    ///
+    /// [`bound_application_protocol`]: Self::bound_application_protocol
+    pub fn bound_application_provider(&self) -> Option<&str> {
+        self.extensions
+            .get::<BoundUpstream>()
+            .and_then(BoundUpstream::application_provider)
+    }
+
+    /// Borrow the bound upstream's application metadata as a condition view.
+    ///
+    /// Feeds request-phase condition evaluation so a `bound_upstream` predicate
+    /// can match on the router-published `application_protocol` /
+    /// `application_provider`. Returns an empty view (matching nothing) when no
+    /// upstream has been bound.
+    pub(crate) fn bound_upstream_view(&self) -> crate::condition::BoundUpstreamView<'_> {
+        crate::condition::BoundUpstreamView {
+            protocol: self.bound_application_protocol(),
+            provider: self.bound_application_provider(),
+        }
+    }
+
+    /// Publish (or replace) the logical upstream binding for this request.
+    ///
+    /// Called by the trusted built-in router after it selects a route's
+    /// cluster. `protocol`/`provider` come from the pipeline cluster catalog,
+    /// keyed by `cluster`. A later router replaces the previous binding, so the
+    /// last router reached on the request path wins.
+    pub(crate) fn publish_bound_upstream(
+        &mut self,
+        cluster: Arc<str>,
+        protocol: Option<Arc<str>>,
+        provider: Option<Arc<str>>,
+    ) {
+        self.extensions.insert(BoundUpstream::new(cluster, protocol, provider));
+    }
+
+    /// Resolve `cluster` through the injected pipeline catalog and publish the
+    /// binding.
+    ///
+    /// The trusted built-in router calls this right after it sets
+    /// [`cluster`](Self::cluster). Application metadata (protocol/provider) is
+    /// looked up in the pipeline cluster catalog; a cluster absent from the
+    /// catalog — or one declared without tags — binds with no metadata rather
+    /// than failing, so plain routing pipelines keep working.
+    pub(crate) fn bind_upstream(&mut self, cluster: Arc<str>) {
+        let (protocol, provider) = self
+            .extensions
+            .get::<Arc<ClusterApplicationCatalog>>()
+            .and_then(|catalog| catalog.lookup(&cluster))
+            .map_or((None, None), |meta| (meta.protocol_arc(), meta.provider_arc()));
+        self.publish_bound_upstream(cluster, protocol, provider);
     }
 
     /// Shared sub-request client, if set.
@@ -2775,5 +2854,79 @@ content-length: 0
             Some("bedrock"),
             "a later tagged selection must overwrite the prior provider"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Bound Upstream Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn bound_upstream_absent_by_default() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert!(ctx.bound_cluster().is_none(), "no cluster is bound before routing");
+        assert!(
+            ctx.bound_application_protocol().is_none(),
+            "protocol should be absent before binding"
+        );
+        assert!(
+            ctx.bound_application_provider().is_none(),
+            "provider should be absent before binding"
+        );
+    }
+
+    #[test]
+    fn publish_bound_upstream_exposes_cluster_and_metadata() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_bound_upstream(
+            Arc::from("inference-backend"),
+            Some(Arc::from("openai_responses")),
+            Some(Arc::from("openai")),
+        );
+        assert_eq!(
+            ctx.bound_cluster(),
+            Some("inference-backend"),
+            "bound cluster name should be readable"
+        );
+        assert_eq!(
+            ctx.bound_application_protocol(),
+            Some("openai_responses"),
+            "bound protocol should be readable"
+        );
+        assert_eq!(
+            ctx.bound_application_provider(),
+            Some("openai"),
+            "bound provider should be readable"
+        );
+    }
+
+    #[test]
+    fn publish_bound_upstream_untagged_cluster_still_binds() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_bound_upstream(Arc::from("backend"), None, None);
+        assert_eq!(
+            ctx.bound_cluster(),
+            Some("backend"),
+            "an untagged cluster still binds (the cluster name is always present)"
+        );
+        assert!(ctx.bound_application_protocol().is_none());
+        assert!(ctx.bound_application_provider().is_none());
+    }
+
+    #[test]
+    fn publish_bound_upstream_replaces_previous_binding() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_bound_upstream(Arc::from("first"), Some(Arc::from("p1")), None);
+        ctx.publish_bound_upstream(Arc::from("second"), Some(Arc::from("p2")), Some(Arc::from("prov")));
+        assert_eq!(
+            ctx.bound_cluster(),
+            Some("second"),
+            "the later binding replaces the previous one"
+        );
+        assert_eq!(ctx.bound_application_protocol(), Some("p2"));
+        assert_eq!(ctx.bound_application_provider(), Some("prov"));
     }
 }

@@ -34,6 +34,7 @@ pub(crate) mod body;
 pub(crate) mod branch;
 mod build;
 pub(crate) mod build_branch;
+pub(crate) mod catalog;
 mod checks;
 mod clusters;
 pub(crate) mod evaluate;
@@ -170,6 +171,12 @@ pub struct FilterPipeline {
     allow_private_upstreams: bool,
     /// Indices into `filters` of filters declaring response-trailer access.
     response_trailer_filter_indices: Vec<usize>,
+
+    /// Metadata-only catalog of every reachable cluster declaration,
+    /// injected into each request so a binding `router` can resolve a
+    /// matched cluster's application protocol and provider. `None` when no
+    /// filter declares any cluster.
+    cluster_application_catalog: Option<Arc<catalog::ClusterApplicationCatalog>>,
 }
 
 #[expect(
@@ -367,6 +374,7 @@ impl FilterPipeline {
                 &pf.conditions,
                 request,
                 headers,
+                crate::condition::BoundUpstreamView::default(),
                 crate::condition::SelectedUpstream::none(),
             )? {
                 return Ok(true);
@@ -441,46 +449,27 @@ impl FilterPipeline {
         names
     }
 
-    /// Whether any filter of `type_name` has request conditions matching
-    /// `request` (an unconditional entry always matches).
+    /// Whether any filter of `type_name` has request conditions matching the
+    /// request carried by `ctx` (an unconditional entry always matches).
     ///
     /// Used by protocol-level fallbacks that emit on a filter's behalf, so
     /// an operator's `when`/`unless` scoping is honored outside the normal
-    /// request phase. No load balancer selection is supplied, so a
-    /// `selected_upstream` predicate fails closed (never matches). Callers with
-    /// a request context that may carry a published selection should use
-    /// [`filter_request_conditions_match_selected`] instead, so a
-    /// `selected_upstream`-scoped filter is honored when selection is available.
-    ///
-    /// [`filter_request_conditions_match_selected`]: Self::filter_request_conditions_match_selected
-    pub fn filter_request_conditions_match(&self, type_name: &str, request: &crate::Request) -> bool {
-        self.filters
-            .iter()
-            .filter(|pf| pf.filter.name() == type_name)
-            .any(|pf| crate::condition::should_execute(&pf.conditions, request))
-    }
-
-    /// Like [`filter_request_conditions_match`], but matches `selected_upstream`
-    /// predicates against the load balancer's published selection read from
-    /// `ctx`.
-    ///
-    /// Protocol-level fallbacks that run after the request phase (e.g. the
-    /// fallback access record emitted from the logging phase) have the selection
-    /// restored on their context, so a filter scoped to a `selected_upstream`
-    /// predicate is honored rather than silently dropped. Absent selection still
-    /// fails closed, matching [`filter_request_conditions_match`].
-    ///
-    /// [`filter_request_conditions_match`]: Self::filter_request_conditions_match
-    pub fn filter_request_conditions_match_selected(
-        &self,
-        type_name: &str,
-        ctx: &crate::HttpFilterContext<'_>,
-    ) -> bool {
+    /// request phase. Evaluates against both the request's bound-upstream view
+    /// and the load balancer's published selection carried by `ctx`, so
+    /// `bound_upstream` and `selected_upstream` predicates are honored on the
+    /// fallback path exactly as during the normal request phase. The selection
+    /// restored by `logging_cleanup` is on the context, so a
+    /// `selected_upstream`-scoped filter is matched against it rather than
+    /// silently dropped; passing the request alone would evaluate every such
+    /// predicate against an empty view and mis-gate the fallback record. Absent
+    /// metadata still fails closed.
+    pub fn filter_request_conditions_match(&self, type_name: &str, ctx: &crate::HttpFilterContext<'_>) -> bool {
+        let bound = ctx.bound_upstream_view();
         let selected = http_utils::ctx_selected_upstream(ctx);
         self.filters
             .iter()
             .filter(|pf| pf.filter.name() == type_name)
-            .any(|pf| crate::condition::should_execute_selected(&pf.conditions, ctx.request, selected))
+            .any(|pf| crate::condition::should_execute_bound_selected(&pf.conditions, ctx.request, bound, selected))
     }
 
     /// Ask each filter to emit its end-of-request record, returning
@@ -614,8 +603,34 @@ impl FilterPipeline {
     /// filter context. Delegates to each registered
     /// [`PipelineExtension`].
     pub fn prepare_extensions(&self, extensions: &mut RequestExtensions) {
+        self.inject_cluster_catalog(extensions);
         for ext in &self.pipeline_extensions {
             ext.prepare(extensions);
+        }
+    }
+
+    /// Install this pipeline's cluster application catalog into per-request
+    /// extensions, replacing any catalog already present.
+    ///
+    /// A nested pipeline entered by a filtered sub-request installs the
+    /// caller's extensions, which carry the *parent* pipeline's catalog. This
+    /// swaps in this pipeline's own catalog so a router binding inside the
+    /// nested pipeline resolves application metadata against the right
+    /// declarations; when this pipeline declares no catalog it removes the
+    /// stale parent one rather than letting it leak through. Only the catalog
+    /// extension is touched — unlike [`prepare_extensions`], this does not
+    /// rerun the registered [`PipelineExtension`]s, which are owned by the
+    /// caller's pipeline.
+    ///
+    /// [`prepare_extensions`]: FilterPipeline::prepare_extensions
+    pub(crate) fn inject_cluster_catalog(&self, extensions: &mut RequestExtensions) {
+        match &self.cluster_application_catalog {
+            Some(catalog) => {
+                extensions.insert(Arc::clone(catalog));
+            },
+            None => {
+                extensions.remove::<Arc<catalog::ClusterApplicationCatalog>>();
+            },
         }
     }
 
@@ -706,6 +721,23 @@ fn for_each_pipeline_filter(filters: &[PipelineFilter], visit: &mut dyn FnMut(&P
             for_each_pipeline_filter(&branch.filters, visit);
         }
     }
+}
+
+/// Collect every filter's cluster application-metadata declarations,
+/// descending into branch sub-chains.
+///
+/// Shared by pipeline construction (which folds these into the runtime
+/// catalog) and validation (which detects conflicting declarations). Walks
+/// the same reachable filter set as the other pipeline-wide scans so a
+/// cluster declared only inside a branch still contributes.
+pub(super) fn collect_cluster_declarations(filters: &[PipelineFilter]) -> Vec<catalog::ClusterMetadataDeclaration> {
+    let mut declarations = Vec::new();
+    for_each_pipeline_filter(filters, &mut |pf| {
+        if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+            declarations.extend(f.declared_cluster_metadata());
+        }
+    });
+    declarations
 }
 
 /// Invoke each filter's [`visit_nested_pipelines`], descending recursively into

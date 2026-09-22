@@ -90,6 +90,15 @@ pub struct ConditionMatch {
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
 
+    /// Request must be bound to a logical upstream matching this
+    /// predicate.
+    ///
+    /// Only meaningful once the `router` filter has bound an upstream;
+    /// validation rejects a `bound_upstream` condition on a filter that
+    /// could run before routing. An unbound request never matches.
+    #[serde(default)]
+    pub bound_upstream: Option<ApplicationMatch>,
+
     /// Selected-upstream application metadata published by the load balancer.
     ///
     /// Matches the typed protocol/provider of the cluster the load balancer
@@ -100,6 +109,47 @@ pub struct ConditionMatch {
     /// the predicate (fail-closed).
     #[serde(default)]
     pub selected_upstream: Option<SelectedUpstreamMatch>,
+}
+
+// -----------------------------------------------------------------------------
+// ApplicationMatch
+// -----------------------------------------------------------------------------
+
+/// Predicate over the request's bound logical upstream (AND semantics
+/// across the fields that are set).
+///
+/// The fields are matched against the `application_protocol` /
+/// `application_provider` metadata that the bound cluster declares. Both
+/// are opaque, canonical identifiers; a value that could never name a
+/// valid cluster tag (e.g. containing uppercase) is rejected at
+/// validation time. A field left unset imposes no constraint, but at
+/// least one field must be set. If no upstream has been bound, or the
+/// bound cluster declares no value for a set field, the predicate does
+/// not match.
+///
+/// ```
+/// use praxis_core::config::ApplicationMatch;
+///
+/// let m: ApplicationMatch = serde_yaml::from_str(
+///     r#"
+/// application_protocol: "openai_responses"
+/// application_provider: "openai"
+/// "#,
+/// )
+/// .unwrap();
+/// assert_eq!(m.application_protocol.as_deref(), Some("openai_responses"));
+/// assert_eq!(m.application_provider.as_deref(), Some("openai"));
+/// ```
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApplicationMatch {
+    /// Bound cluster's `application_protocol` must equal this value.
+    #[serde(default)]
+    pub application_protocol: Option<String>,
+
+    /// Bound cluster's `application_provider` must equal this value.
+    #[serde(default)]
+    pub application_provider: Option<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -329,6 +379,96 @@ path: "/"
         assert!(
             m.path_prefix.is_none(),
             "path_prefix should be None for exact path match"
+        );
+    }
+
+    #[test]
+    fn parse_bound_upstream_condition() {
+        let m: ConditionMatch = serde_yaml::from_str(
+            r#"
+bound_upstream:
+  application_protocol: "openai_responses"
+  application_provider: "openai"
+"#,
+        )
+        .unwrap();
+        let bound = m.bound_upstream.expect("bound_upstream should parse");
+        assert_eq!(
+            bound.application_protocol.as_deref(),
+            Some("openai_responses"),
+            "application_protocol mismatch"
+        );
+        assert_eq!(
+            bound.application_provider.as_deref(),
+            Some("openai"),
+            "application_provider mismatch"
+        );
+    }
+
+    #[test]
+    fn parse_bound_upstream_partial() {
+        let m: ConditionMatch = serde_yaml::from_str(
+            r#"
+bound_upstream:
+  application_protocol: "openai_responses"
+"#,
+        )
+        .unwrap();
+        let bound = m.bound_upstream.expect("bound_upstream should parse");
+        assert_eq!(
+            bound.application_protocol.as_deref(),
+            Some("openai_responses"),
+            "application_protocol mismatch"
+        );
+        assert!(
+            bound.application_provider.is_none(),
+            "application_provider should be None when omitted"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_defaults_to_unset() {
+        let m: ConditionMatch = serde_yaml::from_str("path: \"/\"\n").unwrap();
+        assert!(m.bound_upstream.is_none(), "bound_upstream should be None when omitted");
+    }
+
+    #[test]
+    fn reject_unknown_bound_upstream_field() {
+        let err = serde_yaml::from_str::<ConditionMatch>(
+            r#"
+bound_upstream:
+  application_flavour: "openai"
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "an unknown bound_upstream field should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_round_trips_through_serialization() {
+        let m: ConditionMatch = serde_yaml::from_str(
+            r#"
+bound_upstream:
+  application_protocol: "openai_responses"
+  application_provider: "openai"
+"#,
+        )
+        .unwrap();
+        let yaml = serde_yaml::to_string(&m).unwrap();
+        let back: ConditionMatch = serde_yaml::from_str(&yaml).unwrap();
+        let bound = back.bound_upstream.expect("bound_upstream should survive a round trip");
+        assert_eq!(
+            bound.application_protocol.as_deref(),
+            Some("openai_responses"),
+            "application_protocol should survive a round trip"
+        );
+        assert_eq!(
+            bound.application_provider.as_deref(),
+            Some("openai"),
+            "application_provider should survive a round trip"
         );
     }
 

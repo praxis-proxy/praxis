@@ -131,6 +131,7 @@ fn make_request(method: Method, path: &str, headers: HeaderMap) -> Request {
 fn when_path(prefix: &str) -> Condition {
     Condition::When(ConditionMatch {
         grpc: None,
+        bound_upstream: None,
         path: None,
         path_prefix: Some(prefix.to_owned()),
         methods: None,
@@ -143,6 +144,7 @@ fn when_path(prefix: &str) -> Condition {
 fn when_methods(methods: &[&str]) -> Condition {
     Condition::When(ConditionMatch {
         grpc: None,
+        bound_upstream: None,
         path: None,
         path_prefix: None,
         methods: Some(methods.iter().map(|s| (*s).to_owned()).collect()),
@@ -156,6 +158,7 @@ fn when_headers(pairs: &[(&str, &str)]) -> Condition {
     let map: HashMap<String, String> = pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
     Condition::When(ConditionMatch {
         grpc: None,
+        bound_upstream: None,
         path: None,
         path_prefix: None,
         methods: None,
@@ -168,6 +171,7 @@ fn when_headers(pairs: &[(&str, &str)]) -> Condition {
 fn unless_path(prefix: &str) -> Condition {
     Condition::Unless(ConditionMatch {
         grpc: None,
+        bound_upstream: None,
         path: None,
         path_prefix: Some(prefix.to_owned()),
         methods: None,

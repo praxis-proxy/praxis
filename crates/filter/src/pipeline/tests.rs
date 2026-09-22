@@ -2434,6 +2434,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
         response_trailer_filter_indices: Vec::new(),
+        cluster_application_catalog: None,
     });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2512,6 +2513,7 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
         response_trailer_filter_indices: Vec::new(),
+        cluster_application_catalog: None,
     });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2587,6 +2589,7 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
         response_trailer_filter_indices: Vec::new(),
+        cluster_application_catalog: None,
     });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2656,6 +2659,7 @@ async fn all_executed_filters_run_on_response() {
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
         response_trailer_filter_indices: Vec::new(),
+        cluster_application_catalog: None,
     });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2862,6 +2866,7 @@ async fn skipped_filter_skips_its_branches() {
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
         response_trailer_filter_indices: Vec::new(),
+        cluster_application_catalog: None,
     });
 
     let req = crate::test_utils::make_request(Method::GET, "/other");
@@ -4373,6 +4378,7 @@ fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilte
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
         response_trailer_filter_indices: Vec::new(),
+        cluster_application_catalog: None,
     })
 }
 
@@ -4478,6 +4484,7 @@ fn gate_condition(header: &str, value: &str) -> Vec<praxis_core::config::Conditi
             methods: None,
             headers: Some(headers),
             selected_upstream: None,
+            bound_upstream: None,
         },
     )]
 }
@@ -4687,6 +4694,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
         response_trailer_filter_indices: Vec::new(),
+        cluster_application_catalog: None,
     })
 }
 
@@ -4723,6 +4731,7 @@ fn make_pipeline_with_conditions(
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
         response_trailer_filter_indices: Vec::new(),
+        cluster_application_catalog: None,
     })
 }
 
@@ -4759,6 +4768,7 @@ fn make_pipeline_with_response_conditions(
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
         response_trailer_filter_indices: Vec::new(),
+        cluster_application_catalog: None,
     })
 }
 
@@ -4771,6 +4781,7 @@ fn when_path(prefix: &str) -> praxis_core::config::Condition {
         methods: None,
         headers: None,
         selected_upstream: None,
+        bound_upstream: None,
     })
 }
 
@@ -4804,6 +4815,7 @@ fn unless_path(prefix: &str) -> praxis_core::config::Condition {
         methods: None,
         headers: None,
         selected_upstream: None,
+        bound_upstream: None,
     })
 }
 
@@ -5407,6 +5419,7 @@ fn streaming_capability_detected_when_filter_declares_it() {
         selected_upstream_request_body_filter_indices: Vec::new(),
         allow_private_upstreams: false,
         response_trailer_filter_indices: Vec::new(),
+        cluster_application_catalog: None,
     });
     assert!(
         pipeline.may_select_streaming_subrequest_response(),
@@ -5461,6 +5474,7 @@ fn trace_propagation_honors_trace_context_conditions() {
         methods: None,
         headers: None,
         selected_upstream: None,
+        bound_upstream: None,
     });
     let pipeline = FilterPipeline::from_filters(vec![super::test_filters::noop_filter_with_conditions(
         "trace_context",
@@ -5909,6 +5923,98 @@ fn conditions_match_selected_rejects_mismatched_selection() {
     assert!(
         !pipeline.filter_request_conditions_match_selected("access_log", &ctx),
         "a mismatched published provider must not match the predicate"
+// Bound-Upstream Condition
+// -----------------------------------------------------------------------------
+
+/// A filter that publishes a logical upstream binding during `on_request`,
+/// mirroring what the trusted `router` does after it resolves a route.
+struct BindingRouterFilter {
+    cluster: &'static str,
+    protocol: Option<&'static str>,
+    provider: Option<&'static str>,
+}
+
+#[async_trait]
+impl HttpFilter for BindingRouterFilter {
+    fn name(&self) -> &'static str {
+        "binding_router"
+    }
+
+    async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        ctx.publish_bound_upstream(
+            Arc::from(self.cluster),
+            self.protocol.map(Arc::from),
+            self.provider.map(Arc::from),
+        );
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[tokio::test]
+async fn bound_upstream_condition_runs_filter_on_match() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let match_cond: Vec<praxis_core::config::Condition> =
+        serde_yaml::from_str("- when:\n    bound_upstream:\n      application_protocol: p1\n").unwrap();
+    let pipeline = make_pipeline_with_conditions(vec![
+        (
+            Box::new(BindingRouterFilter {
+                cluster: "inference",
+                protocol: Some("p1"),
+                provider: None,
+            }),
+            vec![],
+        ),
+        (
+            Box::new(CountingFilter {
+                counter: Arc::clone(&counter),
+            }),
+            match_cond,
+        ),
+    ]);
+
+    let req = crate::test_utils::make_request(Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "pipeline should continue");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "a filter gated on a matching bound_upstream condition must run after the binding router"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_condition_skips_filter_on_mismatch() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let mismatch_cond: Vec<praxis_core::config::Condition> =
+        serde_yaml::from_str("- when:\n    bound_upstream:\n      application_protocol: other\n").unwrap();
+    let pipeline = make_pipeline_with_conditions(vec![
+        (
+            Box::new(BindingRouterFilter {
+                cluster: "inference",
+                protocol: Some("p1"),
+                provider: None,
+            }),
+            vec![],
+        ),
+        (
+            Box::new(CountingFilter {
+                counter: Arc::clone(&counter),
+            }),
+            mismatch_cond,
+        ),
+    ]);
+
+    let req = crate::test_utils::make_request(Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "pipeline should continue");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "a filter gated on a non-matching bound_upstream condition must be skipped"
     );
 }
 
@@ -5932,5 +6038,106 @@ fn conditions_match_selected_unconditional_filter_always_matches() {
     assert!(
         pipeline.filter_request_conditions_match_selected("access_log", &ctx),
         "an unconditional filter matches even with no selection"
+fn filter_request_conditions_match_honors_bound_upstream_view() {
+    // The protocol-level fallback (fallback access-log emission) gates on the
+    // request's real bound view, not an empty one: a `bound_upstream`-gated
+    // access_log filter must be evaluated against the binding published before
+    // the request failed, exactly as it would be on the normal request path.
+    let cond: Vec<praxis_core::config::Condition> =
+        serde_yaml::from_str("- when:\n    bound_upstream:\n      application_protocol: p1\n").unwrap();
+    let pipeline = make_pipeline_with_conditions(vec![(
+        Box::new(LoggingFilter {
+            label: "access_log",
+            log: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+        cond,
+    )]);
+
+    let req = crate::test_utils::make_request(Method::POST, "/v1/responses");
+
+    // Unbound request: the predicate does not match, so no fallback record.
+    let ctx_unbound = crate::test_utils::make_filter_context(&req);
+    assert!(
+        !pipeline.filter_request_conditions_match("access_log", &ctx_unbound),
+        "an unbound request must not match a bound_upstream-gated access_log filter"
+    );
+
+    // Bound request whose protocol matches: the predicate matches. Evaluating
+    // against an empty view (the pre-fix behavior) would wrongly return false.
+    let mut ctx_bound = crate::test_utils::make_filter_context(&req);
+    ctx_bound.publish_bound_upstream(Arc::from("inference"), Some(Arc::from("p1")), None);
+    assert!(
+        pipeline.filter_request_conditions_match("access_log", &ctx_bound),
+        "a request bound to the matching protocol must match the access_log filter's condition"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Cluster Application Catalog Injection
+// -----------------------------------------------------------------------------
+
+/// Build a single-cluster catalog tagging `cluster` with `protocol`.
+fn single_cluster_catalog(cluster: &str, protocol: &str) -> Arc<super::catalog::ClusterApplicationCatalog> {
+    let (catalog, conflicts) = super::catalog::build_catalog([super::catalog::ClusterMetadataDeclaration {
+        name: Arc::from(cluster),
+        metadata: super::catalog::ClusterApplicationMetadata::new(Some(Arc::from(protocol)), None),
+    }]);
+    assert!(conflicts.is_empty(), "single declaration cannot conflict");
+    Arc::new(catalog)
+}
+
+#[test]
+fn inject_cluster_catalog_replaces_stale_parent_catalog() {
+    use crate::RequestExtensions;
+
+    // A nested pipeline inherits the caller's (parent) extensions, which carry
+    // the parent pipeline's catalog. Entering the child must swap in the
+    // child's own catalog so a binding router resolves the right metadata.
+    let parent = single_cluster_catalog("inference", "parent_proto");
+    let child = single_cluster_catalog("inference", "child_proto");
+
+    let mut pipeline = make_pipeline(vec![]);
+    pipeline.cluster_application_catalog = Some(Arc::clone(&child));
+
+    let mut ext = RequestExtensions::new();
+    ext.insert(parent);
+
+    pipeline.inject_cluster_catalog(&mut ext);
+
+    let installed = ext
+        .get::<Arc<super::catalog::ClusterApplicationCatalog>>()
+        .expect("child catalog must be present after injection");
+    assert_eq!(
+        installed
+            .lookup("inference")
+            .and_then(super::catalog::ClusterApplicationMetadata::protocol),
+        Some("child_proto"),
+        "the nested pipeline's catalog must replace the parent's",
+    );
+}
+
+#[test]
+fn inject_cluster_catalog_drops_stale_parent_when_child_has_none() {
+    use crate::RequestExtensions;
+
+    // A nested pipeline that declares no catalog must not leak the parent's:
+    // leaving it installed would let a binding inside the sub-request resolve
+    // metadata against declarations the child never knew about.
+    let parent = single_cluster_catalog("inference", "parent_proto");
+
+    let pipeline = make_pipeline(vec![]);
+    assert!(
+        pipeline.cluster_application_catalog.is_none(),
+        "make_pipeline builds a catalog-less pipeline",
+    );
+
+    let mut ext = RequestExtensions::new();
+    ext.insert(parent);
+
+    pipeline.inject_cluster_catalog(&mut ext);
+
+    assert!(
+        ext.get::<Arc<super::catalog::ClusterApplicationCatalog>>().is_none(),
+        "a nested pipeline with no catalog must drop the stale parent catalog",
     );
 }

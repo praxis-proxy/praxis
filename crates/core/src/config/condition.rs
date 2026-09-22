@@ -6,7 +6,7 @@
 mod request;
 mod response;
 
-pub use request::{Condition, ConditionMatch, SelectedUpstreamMatch};
+pub use request::{ApplicationMatch, Condition, ConditionMatch, SelectedUpstreamMatch};
 pub use response::{ResponseCondition, ResponseConditionMatch};
 
 // -----------------------------------------------------------------------------

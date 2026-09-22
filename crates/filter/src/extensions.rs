@@ -154,6 +154,79 @@ impl SelectedClusterApplication {
 }
 
 // -----------------------------------------------------------------------------
+// BoundUpstream
+// -----------------------------------------------------------------------------
+
+/// Logical upstream cluster bound once for the whole downstream request.
+///
+/// Published by the trusted built-in `router` after it matches a route and
+/// selects that route's cluster, then read-only thereafter. Unlike
+/// [`SelectedClusterApplication`] — which is exchange-local and cleared
+/// between IRR rounds — `BoundUpstream` is stable for the entire downstream
+/// request and survives every IRR iteration, so request, bound-body,
+/// response, and logging filters all observe the same logical binding.
+///
+/// The identifiers are opaque to Praxis core — consuming filters interpret
+/// them; Praxis defines no enum of known protocols or providers. The type is
+/// deliberately crate-private with read-only getters: only the router
+/// constructs it (via [`HttpFilterContext::publish_bound_upstream`]), and
+/// external filters read it through [`HttpFilterContext::bound_cluster`],
+/// [`HttpFilterContext::bound_application_protocol`], and
+/// [`HttpFilterContext::bound_application_provider`] rather than naming the
+/// type. The metadata comes from the pipeline's cluster catalog, keyed by the
+/// selected cluster name.
+///
+/// A later router may replace the binding, so the last router reached on the
+/// request path wins.
+///
+/// [`HttpFilterContext::publish_bound_upstream`]: crate::HttpFilterContext::publish_bound_upstream
+/// [`HttpFilterContext::bound_cluster`]: crate::HttpFilterContext::bound_cluster
+/// [`HttpFilterContext::bound_application_protocol`]: crate::HttpFilterContext::bound_application_protocol
+/// [`HttpFilterContext::bound_application_provider`]: crate::HttpFilterContext::bound_application_provider
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BoundUpstream {
+    /// Logical cluster name selected by the router.
+    cluster: Arc<str>,
+    /// Opaque application protocol of the bound cluster, if tagged.
+    application_protocol: Option<Arc<str>>,
+    /// Opaque application provider of the bound cluster, if tagged.
+    application_provider: Option<Arc<str>>,
+}
+
+impl BoundUpstream {
+    /// Build a binding for `cluster` with its catalog-resolved application
+    /// metadata. The cluster name is mandatory (a route always names a
+    /// cluster); protocol and provider are present only when the cluster
+    /// declaration tagged them.
+    pub(crate) fn new(
+        cluster: Arc<str>,
+        application_protocol: Option<Arc<str>>,
+        application_provider: Option<Arc<str>>,
+    ) -> Self {
+        Self {
+            cluster,
+            application_protocol,
+            application_provider,
+        }
+    }
+
+    /// Logical cluster name selected by the router.
+    pub(crate) fn cluster(&self) -> &str {
+        &self.cluster
+    }
+
+    /// Opaque application protocol of the bound cluster, if tagged.
+    pub(crate) fn application_protocol(&self) -> Option<&str> {
+        self.application_protocol.as_deref()
+    }
+
+    /// Opaque application provider of the bound cluster, if tagged.
+    pub(crate) fn application_provider(&self) -> Option<&str> {
+        self.application_provider.as_deref()
+    }
+}
+
+// -----------------------------------------------------------------------------
 // RequestExtensions
 // -----------------------------------------------------------------------------
 
@@ -306,6 +379,48 @@ mod tests {
             .expect("a fully tagged cluster should produce a value");
         assert_eq!(app.protocol(), Some("openai_responses"), "protocol should read back");
         assert_eq!(app.provider(), Some("openai"), "provider should read back");
+    }
+
+    // -------------------------------------------------------------------------
+    // BoundUpstream Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn bound_upstream_exposes_cluster_and_metadata() {
+        let bound = BoundUpstream::new(
+            Arc::from("inference-backend"),
+            Some(Arc::from("openai_responses")),
+            Some(Arc::from("openai")),
+        );
+        assert_eq!(bound.cluster(), "inference-backend", "cluster name should read back");
+        assert_eq!(
+            bound.application_protocol(),
+            Some("openai_responses"),
+            "protocol should read back"
+        );
+        assert_eq!(
+            bound.application_provider(),
+            Some("openai"),
+            "provider should read back"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_allows_untagged_cluster() {
+        let bound = BoundUpstream::new(Arc::from("backend"), None, None);
+        assert_eq!(
+            bound.cluster(),
+            "backend",
+            "an untagged cluster still produces a binding (the cluster name is mandatory)"
+        );
+        assert!(
+            bound.application_protocol().is_none(),
+            "absent protocol reads back as None"
+        );
+        assert!(
+            bound.application_provider().is_none(),
+            "absent provider reads back as None"
+        );
     }
 
     #[test]

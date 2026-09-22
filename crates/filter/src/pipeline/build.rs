@@ -119,6 +119,7 @@ impl FilterPipeline {
         let (request_body_filter_indices, response_body_filter_indices) = body_filter_indices(&filters);
         let selected_upstream_request_body_filter_indices = selected_upstream_request_body_indices(&filters);
         let response_trailer_filter_indices = super::body::response_trailer_filter_indices(&filters);
+        let cluster_application_catalog = build_cluster_application_catalog(&filters);
         let id_generator = Arc::new(IdGenerator::new());
         let time_source: Arc<dyn praxis_core::time::TimeSource> = Arc::new(SystemTimeSource);
         let mut pipeline = Self {
@@ -130,6 +131,7 @@ impl FilterPipeline {
             selected_upstream_request_body_filter_indices,
             allow_private_upstreams: false,
             response_trailer_filter_indices,
+            cluster_application_catalog,
             health_registry: None,
             id_generator: Arc::clone(&id_generator),
             kv_stores: None,
@@ -185,7 +187,7 @@ impl FilterPipeline {
     /// [`SkipPipelineChecks`]: praxis_core::config::SkipPipelineChecks
     #[expect(
         clippy::too_many_lines,
-        reason = "streaming capability check adds one validation pass"
+        reason = "one sequential invocation per ordering check, including the bound-upstream passes"
     )]
     pub fn ordering_errors(
         &self,
@@ -234,6 +236,8 @@ impl FilterPipeline {
             self.body_capabilities.request_body_mode,
             &mut errors,
         );
+        super::checks::check_cluster_metadata_conflicts(&self.filters, &mut errors);
+        super::checks::check_bound_upstream_requires_binding(&self.filters, &mut errors);
         super::checks::check_irr_with_router_or_lb(&names, &mut errors);
         if self.may_select_streaming_subrequest_response
             && matches!(
@@ -273,6 +277,7 @@ impl FilterPipeline {
     ///             methods: None,
     ///             headers: None,
     ///             selected_upstream: None,
+    ///             bound_upstream: None,
     ///         },
     ///     )],
     ///     name: None,
@@ -327,6 +332,24 @@ fn warn_tcp_unsupported_fields(filter: &AnyFilter, entry: &FilterEntry) {
              branching is only supported for HTTP filters"
         );
     }
+}
+
+/// Build the metadata-only cluster catalog from every reachable cluster
+/// declaration (top-level filters and branch sub-chains).
+///
+/// Returns `None` when no filter declares a cluster, so pipelines that do
+/// not route pay nothing at request time. Conflicting declarations are
+/// ignored here and surfaced separately by
+/// [`check_cluster_metadata_conflicts`], which blocks a conflicting
+/// pipeline from serving traffic; the runtime map is only consulted once
+/// validation has passed.
+///
+/// [`check_cluster_metadata_conflicts`]: super::checks::check_cluster_metadata_conflicts
+fn build_cluster_application_catalog(
+    filters: &[PipelineFilter],
+) -> Option<Arc<super::catalog::ClusterApplicationCatalog>> {
+    let (catalog, _conflicts) = super::catalog::build_catalog(super::collect_cluster_declarations(filters));
+    (!catalog.is_empty()).then(|| Arc::new(catalog))
 }
 
 /// Scan the filter list for a compression filter and extract its config.

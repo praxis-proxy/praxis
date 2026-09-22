@@ -259,6 +259,92 @@ async fn on_request_sets_cluster_on_match() {
 }
 
 #[tokio::test]
+async fn on_request_publishes_name_only_binding_without_catalog() {
+    let router = make_router(vec![prefix_route("/", "default")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.bound_cluster(),
+        Some("default"),
+        "matching a route must publish the logical binding"
+    );
+    assert_eq!(
+        ctx.bound_application_protocol(),
+        None,
+        "a plain routing pipeline (no catalog) binds without a protocol"
+    );
+    assert_eq!(
+        ctx.bound_application_provider(),
+        None,
+        "a plain routing pipeline (no catalog) binds without a provider"
+    );
+}
+
+#[tokio::test]
+async fn on_request_resolves_binding_metadata_from_catalog() {
+    use std::sync::Arc;
+
+    use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration, build_catalog};
+
+    let router = make_router(vec![prefix_route("/", "inference")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let (catalog, conflicts) = build_catalog([ClusterMetadataDeclaration {
+        name: Arc::from("inference"),
+        metadata: ClusterApplicationMetadata::new(Some(Arc::from("openai_responses")), Some(Arc::from("openai"))),
+    }]);
+    assert!(conflicts.is_empty(), "a single declaration cannot conflict");
+    ctx.extensions.insert(Arc::new(catalog));
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.bound_cluster(),
+        Some("inference"),
+        "the binding names the matched cluster"
+    );
+    assert_eq!(
+        ctx.bound_application_protocol(),
+        Some("openai_responses"),
+        "the binding resolves the cluster's protocol from the catalog"
+    );
+    assert_eq!(
+        ctx.bound_application_provider(),
+        Some("openai"),
+        "the binding resolves the cluster's provider from the catalog"
+    );
+}
+
+#[tokio::test]
+async fn on_request_rebind_replaces_previous_binding() {
+    let router = make_router(vec![prefix_route("/", "default")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        ctx.bound_cluster(),
+        Some("default"),
+        "the first match binds the cluster"
+    );
+
+    // A later router on the request path replaces the binding: the last router
+    // reached wins.
+    let rerouter = make_router(vec![prefix_route("/", "other")]);
+    let action = rerouter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "a rebind continues normally");
+    assert_eq!(
+        ctx.bound_cluster(),
+        Some("other"),
+        "the later binding replaces the previous cluster"
+    );
+}
+
+#[tokio::test]
 async fn on_request_clears_stale_route_retry_policy_on_reroute() {
     let with_policy = RouterFilter::from_config(
         &serde_yaml::from_str::<serde_yaml::Value>(

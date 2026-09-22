@@ -119,8 +119,18 @@ pub(super) fn streaming_transition_order_is_valid(transitions: &[config::StepTra
 /// The generic executor already removes its own transient mechanisms; the
 /// router additionally injects [`IterationState`] and [`NextIterationBody`],
 /// which must not leak into the parent pipeline. Applying this to the executor's
-/// parent-facing extensions restores the exact end state of the pre-extraction
-/// router.
+/// parent-facing extensions restores the router-owned end state of the
+/// pre-extraction context.
+///
+/// One executor-injected fact is deliberately *not* reconciled here: each step's
+/// [`execute`] installs that step pipeline's cluster catalog into the threaded
+/// extensions, so the terminal step's catalog rides back into the parent rather
+/// than the parent's own. This is safe today because the sole catalog reader is
+/// [`bind_upstream`](crate::HttpFilterContext) via the `router`, which can never
+/// run after the IRR — the IRR is a terminal filter (`produces_terminal_response`,
+/// validated last-in-chain), and the response and logging paths never read the
+/// catalog. A future filter that resolves the catalog *after* an IRR must first
+/// restore the parent's catalog across the parent-facing write-back sites.
 pub(super) fn strip_iteration_extensions(mut extensions: RequestExtensions) -> RequestExtensions {
     extensions.remove::<IterationState>();
     extensions.remove::<NextIterationBody>();

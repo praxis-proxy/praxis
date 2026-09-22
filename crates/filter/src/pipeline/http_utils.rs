@@ -90,6 +90,7 @@ pub(super) fn as_request_body_filter<'a>(
             &pf.conditions,
             ctx.request,
             &EffectiveHeaders(ctx),
+            ctx.bound_upstream_view(),
             ctx_selected_upstream(ctx),
         )
         .map_err(|e| FilterError::from(format!("{}: {e}", http_filter.name())))?;

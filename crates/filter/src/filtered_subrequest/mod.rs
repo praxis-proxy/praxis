@@ -609,6 +609,11 @@ impl FilteredSubrequestExecutor {
         // application metadata. `run`/`run_classified` thread the caller's
         // extensions straight in (unlike the IRR, which clears at step entry).
         filter_ctx.extensions.remove::<SelectedClusterApplication>();
+        // The caller's extensions carry the *parent* pipeline's cluster catalog.
+        // Swap in this nested pipeline's own catalog (or drop the stale parent one
+        // when the nested pipeline declares none) so a router binding inside the
+        // sub-request resolves application metadata against the right declarations.
+        pipeline.inject_cluster_catalog(&mut filter_ctx.extensions);
         filter_ctx.extensions.insert(RetainedFilterResults::default());
         filter_ctx.enable_stream_chunk_emission(self.max_state_bytes);
         // A callout may stage a pre-resolved upstream (for example a URL prepared

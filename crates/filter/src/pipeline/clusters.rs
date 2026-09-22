@@ -263,6 +263,7 @@ mod tests {
             path_prefix: Some("/x".to_owned()),
             methods: None,
             headers: None,
+            bound_upstream: None,
             selected_upstream: None,
         })];
         host.branches = vec![ResolvedBranch {

@@ -64,11 +64,38 @@ pub(super) fn check_condition_header_names(filters: &[PipelineFilter], errors: &
     }
 }
 
+/// `trace_context` decides propagation before request routing, so it cannot be
+/// gated on metadata that the router or load balancer publishes later.
+pub(super) fn check_trace_context_upstream_conditions(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        if pf.filter.name() == "trace_context"
+            && pf.conditions.iter().any(|condition| {
+                let (Condition::When(matcher) | Condition::Unless(matcher)) = condition;
+                matcher.bound_upstream.is_some() || matcher.selected_upstream.is_some()
+            })
+        {
+            errors.push(
+                "trace_context cannot use bound_upstream or selected_upstream conditions because trace propagation is decided before routing"
+                    .to_owned(),
+            );
+        }
+        for branch in &pf.branches {
+            check_trace_context_upstream_conditions(&branch.filters, errors);
+        }
+    }
+}
+
 /// `load_balancer` without a filter that sets `ctx.cluster` will fail
 /// every request with "no cluster selected".
+///
+/// A `cluster_source: bound_upstream` load balancer is exempt: it resolves
+/// the target from the frozen logical binding and seeds `ctx.cluster`
+/// itself, so it never needs a preceding router. That a binding actually
+/// exists is enforced separately by [`check_bound_upstream_requires_binding`].
 pub(super) fn check_lb_without_cluster_selector(filters: &[PipelineFilter], errors: &mut Vec<String>) {
     for (i, filter) in filters.iter().enumerate() {
         if filter.filter.name() == "load_balancer"
+            && !filter.filter.consumes_bound_upstream()
             && !filters
                 .get(..i)
                 .unwrap_or_default()
@@ -280,13 +307,24 @@ pub(super) fn check_misaligned_clusters(filters: &[PipelineFilter], errors: &mut
     // excluded: it may not fire, so relying on it would hide a guaranteed 502
     // for requests that skip the branch.
     let top_selected = super::clusters::level_selected_clusters(filters);
-    let top_lb = super::clusters::reachable_lb_clusters(filters);
+
+    // A bound-consuming load balancer resolves its cluster from the frozen
+    // logical binding, so it serves a binding router's selection from any
+    // reachable path — including a conditional branch or an IRR step that
+    // `reachable_lb_clusters` deliberately excludes. Fold that coverage in so a
+    // top-level binding router selecting a bound cluster is not misreported as
+    // referencing an undefined load balancer.
+    let bound_coverage = guaranteed_bound_cluster_coverage(filters, true);
+    let mut top_lb = super::clusters::reachable_lb_clusters(filters);
+    top_lb.extend(bound_coverage.iter().cloned());
 
     // The empty-LB escape is judged on the WHOLE pipeline: a pipeline with no
     // load balancer anywhere may route by other means (static upstream), but
     // one whose only LBs live inside branches cannot serve a top-level
-    // selection, so the top-level check must still run against top_lb.
-    let any_lb = !super::clusters::extract_lb_clusters(filters).is_empty();
+    // selection, so the top-level check must still run against top_lb. A
+    // bound-consuming load balancer counts too, even when it lives in an IRR
+    // step that `extract_lb_clusters` does not descend into.
+    let any_lb = !super::clusters::extract_lb_clusters(filters).is_empty() || !bound_coverage.is_empty();
     if !top_selected.is_empty() && any_lb {
         for cluster in &top_selected {
             if !top_lb.contains(cluster.as_str()) {
@@ -883,31 +921,703 @@ pub(super) fn check_selected_upstream_condition_pre_read(
     }
 }
 
-/// `iterative_request_router` coexisting with `router` or `load_balancer`.
+// -----------------------------------------------------------------------------
+// Bound-Upstream Checks
+// -----------------------------------------------------------------------------
+
+/// Cluster declarations that disagree on application metadata.
 ///
-/// The IRR owns the full sub-request lifecycle including routing.
-/// A `router` or `load_balancer` in the same chain would conflict.
-pub(super) fn check_irr_with_router_or_lb(names: &[&str], errors: &mut Vec<String>) {
+/// The binding router resolves a matched cluster's opaque protocol and
+/// provider through the pipeline catalog. When two filters declare the same
+/// cluster name with differing tags, the catalog cannot resolve a single
+/// value: [`build_catalog`] keeps the first-seen declaration for determinism,
+/// and this check turns every disagreement into a configuration error before
+/// the pipeline serves traffic, so the runtime map is only consulted once no
+/// conflicts remain. Agreeing re-declarations (the normal multi-load-balancer
+/// case) are silent.
+///
+/// [`build_catalog`]: super::catalog::build_catalog
+pub(super) fn check_cluster_metadata_conflicts(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    let (_, conflicts) = super::catalog::build_catalog(super::collect_cluster_declarations(filters));
+    for conflict in conflicts {
+        errors.push(format!(
+            "cluster '{cluster}' is declared with conflicting application metadata \
+             (protocol {first_protocol:?} / provider {first_provider:?} vs \
+             protocol {second_protocol:?} / provider {second_provider:?}); every \
+             declaration of a cluster must agree on its protocol and provider",
+            cluster = conflict.cluster,
+            first_protocol = conflict.first.protocol(),
+            first_provider = conflict.first.provider(),
+            second_protocol = conflict.second.protocol(),
+            second_provider = conflict.second.provider(),
+        ));
+    }
+}
+
+/// A `bound_upstream` condition requires a guaranteed preceding binding.
+///
+/// A `bound_upstream` condition reads the logical binding published by a
+/// binding filter ([`binds_upstream`]). When no binding is *guaranteed* to run
+/// before such a condition on every path that reaches it, the condition can
+/// silently never match — a fail-open footgun. Reject it at build time.
+///
+/// Path sensitivity: only an *unconditional* binding filter guarantees a
+/// binding (a conditional router may be skipped), and a `SkipTo` branch that
+/// jumps over the binding, or an unreachable path, leaves the binding
+/// un-guaranteed. [`compute_binding_guaranteed`] resolves this over the
+/// pipeline control-flow graph; branch sub-chains inherit the guarantee
+/// established up to and including their host filter (a branch runs after its
+/// host's `on_request`). A binding publisher inside a branch is never credited:
+/// the request-scoped binding router must be top-level, which keeps the freeze
+/// point unique and visible.
+///
+/// `entry_binding_guaranteed` is `true` when this pipeline runs as an
+/// `iterative_request_router` step: the parent already guarantees a binding
+/// before the IRR (its own reachability check enforces this), so a step's bound
+/// consumer inherits that guarantee on entry.
+///
+/// [`binds_upstream`]: crate::HttpFilter::binds_upstream
+pub(super) fn check_bound_upstream_requires_binding(
+    filters: &[PipelineFilter],
+    entry_binding_guaranteed: bool,
+    errors: &mut Vec<String>,
+) {
+    let guaranteed = compute_binding_guaranteed(filters, entry_binding_guaranteed);
+    for (&binding_here, pf) in guaranteed.iter().zip(filters) {
+        if !binding_here && let Some(reason) = binding_requirement_reason(pf) {
+            errors.push(format!(
+                "filter '{name}' requires a bound logical upstream ({reason}) but no \
+                 preceding filter is guaranteed to bind one; place an unconditional \
+                 binding router earlier in the pipeline",
+                name = pf.filter.name(),
+            ));
+        }
+
+        // The host filter's on_request runs before its branches are evaluated,
+        // so a binding guaranteed on entry — or an unconditional binding by the
+        // host itself — is visible inside its branches.
+        let branch_binding_before = binding_here || unconditional_binds(pf);
+        for branch in &pf.branches {
+            walk_branch_bound_upstream_binding(&branch.filters, branch_binding_before, errors);
+        }
+    }
+}
+
+/// Whether a pipeline has a bound dependency that is not dominated by a local
+/// unconditional binding filter.
+///
+/// Nested-pipeline owners use this to propagate their true entry requirement to
+/// the enclosing pipeline rather than assuming the parent supplied a binding.
+#[cfg(feature = "iterative-request-router")]
+pub(super) fn requires_bound_upstream_on_entry(filters: &[PipelineFilter]) -> bool {
+    let guaranteed = compute_binding_guaranteed(filters, false);
+    guaranteed.iter().zip(filters).any(|(&binding_here, pf)| {
+        (!binding_here && binding_requirement_reason(pf).is_some())
+            || pf.branches.iter().any(|branch| {
+                branch_requires_binding_on_entry(&branch.filters, binding_here || unconditional_binds(pf))
+            })
+    })
+}
+
+/// Recurse through branch-local dependencies while tracking local publishers.
+#[cfg(feature = "iterative-request-router")]
+fn branch_requires_binding_on_entry(filters: &[PipelineFilter], mut binding_before: bool) -> bool {
+    for pf in filters {
+        if !binding_before && binding_requirement_reason(pf).is_some() {
+            return true;
+        }
+        let nested_binding = binding_before || unconditional_binds(pf);
+        if pf
+            .branches
+            .iter()
+            .any(|branch| branch_requires_binding_on_entry(&branch.filters, nested_binding))
+        {
+            return true;
+        }
+        binding_before = nested_binding;
+    }
+    false
+}
+
+/// Walk a branch sub-chain in order, tracking whether a binding is guaranteed,
+/// and report every `bound_upstream` condition reached without one.
+///
+/// Branch sub-chains run `on_request` linearly, so a plain left-to-right walk
+/// suffices; nested branches inherit the guarantee up to and including their
+/// host filter.
+fn walk_branch_bound_upstream_binding(filters: &[PipelineFilter], mut binding_before: bool, errors: &mut Vec<String>) {
+    for pf in filters {
+        if !binding_before && let Some(reason) = binding_requirement_reason(pf) {
+            errors.push(format!(
+                "filter '{name}' requires a bound logical upstream ({reason}) but no \
+                 preceding filter is guaranteed to bind one; place an unconditional \
+                 binding router earlier in the pipeline",
+                name = pf.filter.name(),
+            ));
+        }
+        let branch_binding_before = binding_before || unconditional_binds(pf);
+        for branch in &pf.branches {
+            walk_branch_bound_upstream_binding(&branch.filters, branch_binding_before, errors);
+        }
+        binding_before = branch_binding_before;
+    }
+}
+
+/// Forward dataflow over the top-level pipeline control-flow graph: for each
+/// filter index, whether a logical binding is guaranteed on entry (every path
+/// from the pipeline start to that filter passes through an unconditional
+/// binding filter).
+///
+/// Edges: the normal fall-through `i -> i+1`, plus each branch rejoin that
+/// transfers control elsewhere — `SkipTo(t)` and `ReEnter(t)` add `i -> t`.
+/// `Next` is the fall-through already modeled; `Terminal` stops the pipeline
+/// and so reaches no later filter. A binding is guaranteed at a node only when
+/// it is guaranteed on *every* incoming edge, so a node's value is the
+/// intersection (logical AND) of its incoming edge values. Values start
+/// optimistic and iterate to a fixpoint because `ReEnter` introduces back
+/// edges. An unreachable node (no incoming edge) resolves to `false`, which is
+/// the safe (reject) direction.
+///
+/// `entry_binding_guaranteed` seeds the pipeline-entry node: `false` for a
+/// top-level pipeline (nothing is bound before it starts), `true` for an
+/// `iterative_request_router` step, which runs as a continuation of a parent
+/// that already guarantees a binding before the IRR.
+fn compute_binding_guaranteed(filters: &[PipelineFilter], entry_binding_guaranteed: bool) -> Vec<bool> {
+    let len = filters.len();
+    let mut guaranteed = vec![true; len];
+    if len == 0 {
+        return guaranteed;
+    }
+
+    let edges = binding_control_flow_edges(filters);
+    // Values start optimistic (`true`) and only ever weaken; iterate the
+    // relaxation pass until it reaches a fixpoint (needed for `ReEnter` back
+    // edges).
+    while relax_binding_guarantees(filters, &edges, &mut guaranteed, entry_binding_guaranteed) {}
+    guaranteed
+}
+
+/// Control-flow edges `(from, to, fall_through)` over the top-level pipeline: the
+/// fall-through `i -> i+1` (`fall_through = true`), plus each `SkipTo`/`ReEnter`
+/// branch rejoin that transfers control to another in-range filter
+/// (`fall_through = false`). `Next` is the fall-through already modeled and
+/// `Terminal` reaches no later filter, so neither adds an edge.
+///
+/// The fall-through flag is retained to mirror the rest of the control-flow
+/// analysis. Both edge kinds currently use only top-level unconditional
+/// publishers because branch-local binding is rejected.
+fn binding_control_flow_edges(filters: &[PipelineFilter]) -> Vec<(usize, usize, bool)> {
+    let len = filters.len();
+    let mut edges: Vec<(usize, usize, bool)> = Vec::new();
+    for (idx, pf) in filters.iter().enumerate() {
+        if idx + 1 < len {
+            edges.push((idx, idx + 1, true));
+        }
+        for branch in &pf.branches {
+            match branch.rejoin {
+                RejoinTarget::SkipTo(target) | RejoinTarget::ReEnter(target) if target < len => {
+                    edges.push((idx, target, false));
+                },
+                RejoinTarget::SkipTo(_) | RejoinTarget::ReEnter(_) | RejoinTarget::Terminal | RejoinTarget::Next => {},
+            }
+        }
+    }
+    edges
+}
+
+/// One relaxation pass: recompute each node's guaranteed-on-entry value as the
+/// intersection (AND) of its incoming edges' exit values, and return whether any
+/// value changed.
+fn relax_binding_guarantees(
+    filters: &[PipelineFilter],
+    edges: &[(usize, usize, bool)],
+    guaranteed: &mut [bool],
+    entry_binding_guaranteed: bool,
+) -> bool {
+    // Per-node "binding guaranteed on exit". Keep separate vectors for the
+    // edge model even though branch-local publishers are rejected and both are
+    // therefore based on the host filter itself.
+    let out_fall_through: Vec<bool> = guaranteed
+        .iter()
+        .zip(filters)
+        .map(|(&g, pf)| g || filter_exit_binds(pf))
+        .collect();
+    let out_jump: Vec<bool> = guaranteed
+        .iter()
+        .zip(filters)
+        .map(|(&g, pf)| g || unconditional_binds(pf))
+        .collect();
+
+    let mut incoming: Vec<Option<bool>> = vec![None; guaranteed.len()];
+    // The entry node's inbound binding state: nothing bound for a top-level
+    // pipeline, or the parent's guaranteed binding for an IRR step.
+    if let Some(entry) = incoming.first_mut() {
+        *entry = Some(entry_binding_guaranteed);
+    }
+    for &(from, to, fall_through) in edges {
+        let out = if fall_through { &out_fall_through } else { &out_jump };
+        let Some(&edge_out) = out.get(from) else { continue };
+        if let Some(slot) = incoming.get_mut(to) {
+            *slot = Some(slot.map_or(edge_out, |acc| acc && edge_out));
+        }
+    }
+
+    let mut changed = false;
+    for (slot, incoming_val) in guaranteed.iter_mut().zip(&incoming) {
+        // An unreachable node (no incoming edge) resolves to `false`, the safe
+        // (reject) direction.
+        let next = incoming_val.unwrap_or(false);
+        if next != *slot {
+            *slot = next;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// `iterative_request_router` coexisting with a top-level `router` or
+/// `load_balancer`.
+///
+/// The blanket router/IRR incompatibility is replaced by a control-flow-aware
+/// rule:
+///
+/// - A top-level `load_balancer` still conflicts: it selects a physical endpoint before the IRR owns the exchange
+///   lifecycle.
+/// - A top-level `router` may coexist with the IRR *only* when some reachable consumer uses the binding — a
+///   bound-consuming load balancer in a direct branch or inside an IRR step. A binding router with no bound consumer
+///   anywhere is the old conflict: the router publishes a logical cluster nothing resolves.
+///
+/// The companion requirement — a binding must be *guaranteed* before the IRR
+/// and every other bound consumer — is enforced by
+/// [`check_bound_upstream_requires_binding`], because the IRR reports
+/// [`consumes_bound_upstream`] once any step consumes the binding.
+///
+/// [`consumes_bound_upstream`]: crate::HttpFilter::consumes_bound_upstream
+pub(super) fn check_irr_coexistence(filters: &[PipelineFilter], names: &[&str], errors: &mut Vec<String>) {
     if !names.contains(&"iterative_request_router") {
         return;
     }
-    if names.contains(&"router") {
-        errors.push(
-            "iterative_request_router and router in the same \
-             chain: the IRR owns routing within its step chains; \
-             a top-level router will conflict"
-                .to_owned(),
-        );
-    }
     if names.contains(&"load_balancer") {
         errors.push(
-            "iterative_request_router and load_balancer in the \
-             same chain: the IRR owns endpoint selection within \
-             its step chains; a top-level load_balancer will \
-             conflict"
+            "iterative_request_router and a top-level load_balancer in the \
+             same chain: the IRR owns endpoint selection within its step \
+             chains, and a top-level load_balancer selects a physical endpoint \
+             before the IRR owns the exchange lifecycle"
                 .to_owned(),
         );
     }
+    if names.contains(&"router") && !any_consumes_bound_upstream(filters) {
+        errors.push(
+            "iterative_request_router and a top-level router in the same chain, \
+             but no reachable consumer uses the logical binding: add a \
+             load_balancer with cluster_source: bound_upstream on the direct \
+             path or inside an IRR step, or remove the router"
+                .to_owned(),
+        );
+    }
+}
+
+/// A bound-upstream load balancer must be able to resolve every bindable
+/// cluster.
+///
+/// For each cluster a router may bind, the check follows the pipeline in order
+/// and requires a load balancer that is guaranteed to execute for that
+/// binding. An unconditional load balancer, or one guarded solely by a matching
+/// `bound_upstream` predicate, supplies coverage. Request-dependent conditions
+/// and result-dependent branch chains do not: they may bypass endpoint
+/// selection at runtime. Both bound-source load balancers and ordinary
+/// fallthrough load balancers count, because either can complete transport for
+/// the bound cluster. Pipelines with no declared bound consumer are unaffected.
+pub(super) fn check_bound_cluster_coverage(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    let coverage = guaranteed_bound_cluster_coverage(filters, true);
+    if !declares_bound_cluster_consumer(filters) {
+        return;
+    }
+    let mut bindable: Vec<String> = super::clusters::bindable_clusters(filters).into_iter().collect();
+    bindable.sort();
+    for cluster in bindable {
+        if !coverage.contains(cluster.as_str()) {
+            errors.push(format!(
+                "cluster '{cluster}' can be bound as the logical upstream but no \
+                 guaranteed load_balancer can serve it on its reachable path; \
+                 requests bound to it could fail endpoint selection"
+            ));
+        }
+    }
+}
+
+/// Whether this pipeline or one of its branches declares a bound-source
+/// cluster consumer.
+fn declares_bound_cluster_consumer(filters: &[PipelineFilter]) -> bool {
+    filters.iter().any(|pf| {
+        !pf.filter.bound_upstream_clusters().is_empty()
+            || pf
+                .branches
+                .iter()
+                .any(|branch| declares_bound_cluster_consumer(&branch.filters))
+    })
+}
+
+/// Bound clusters for which a consumer is structurally guaranteed by
+/// unconditional control flow or a condition composed solely of a decidable
+/// `bound_upstream` predicate.
+fn guaranteed_bound_cluster_coverage(
+    filters: &[PipelineFilter],
+    include_router_source_load_balancers: bool,
+) -> std::collections::HashSet<String> {
+    let bindable = super::clusters::bindable_clusters(filters);
+    let (catalog, _) = super::catalog::build_catalog(super::collect_cluster_declarations(filters));
+    bindable
+        .into_iter()
+        .filter(|cluster| {
+            cluster_has_guaranteed_bound_consumer(
+                filters,
+                cluster,
+                catalog.lookup(cluster),
+                include_router_source_load_balancers,
+            )
+        })
+        .collect()
+}
+
+/// Whether the given cluster is guaranteed to reach a compatible consumer
+/// before an unconditional terminal filter stops the path.
+fn cluster_has_guaranteed_bound_consumer(
+    filters: &[PipelineFilter],
+    cluster: &str,
+    metadata: Option<&super::catalog::ClusterApplicationMetadata>,
+    include_router_source_load_balancers: bool,
+) -> bool {
+    for pf in filters {
+        if !conditions_definitely_execute_for_binding(&pf.conditions, metadata) {
+            continue;
+        }
+        if filter_guarantees_bound_consumer(pf, cluster, metadata, include_router_source_load_balancers) {
+            return true;
+        }
+        if pf.conditions.is_empty()
+            && matches!(&pf.filter, AnyFilter::Http(filter) if filter.produces_terminal_response())
+        {
+            return false;
+        }
+    }
+    false
+}
+
+/// Whether one executing filter or an unconditional branch serves `cluster`.
+fn filter_guarantees_bound_consumer(
+    pf: &PipelineFilter,
+    cluster: &str,
+    metadata: Option<&super::catalog::ClusterApplicationMetadata>,
+    include_router_source_load_balancers: bool,
+) -> bool {
+    pf.filter
+        .bound_upstream_clusters()
+        .iter()
+        .any(|declared| declared == cluster)
+        || include_router_source_load_balancers
+            && pf
+                .filter
+                .load_balancer_clusters()
+                .iter()
+                .any(|declared| declared == cluster)
+        || pf.branches.iter().any(|branch| {
+            branch.condition.is_none()
+                && cluster_has_guaranteed_bound_consumer(
+                    &branch.filters,
+                    cluster,
+                    metadata,
+                    include_router_source_load_balancers,
+                )
+        })
+}
+
+/// Whether every filter condition is decidable from, and true for, the bound
+/// cluster's application metadata alone.
+fn conditions_definitely_execute_for_binding(
+    conditions: &[Condition],
+    metadata: Option<&super::catalog::ClusterApplicationMetadata>,
+) -> bool {
+    conditions.iter().all(|condition| {
+        let (kind_when, matcher) = match condition {
+            Condition::When(matcher) => (true, matcher),
+            Condition::Unless(matcher) => (false, matcher),
+        };
+        if matcher.grpc.is_some()
+            || matcher.path.is_some()
+            || matcher.path_prefix.is_some()
+            || matcher.methods.is_some()
+            || matcher.headers.is_some()
+            || matcher.selected_upstream.is_some()
+        {
+            return false;
+        }
+        let Some(bound) = &matcher.bound_upstream else {
+            return false;
+        };
+        let matches = bound.application_protocol.as_deref().is_none_or(|expected| {
+            metadata.and_then(super::catalog::ClusterApplicationMetadata::protocol) == Some(expected)
+        }) && bound.application_provider.as_deref().is_none_or(|expected| {
+            metadata.and_then(super::catalog::ClusterApplicationMetadata::provider) == Some(expected)
+        });
+        matches == kind_when
+    })
+}
+
+/// A different logical binding must not be publishable after the bound-body
+/// barrier freezes the first one.
+///
+/// The barrier freezes the logical binding at the first *guaranteed* binding.
+/// A later binding filter reachable after that point could publish a different
+/// logical cluster, which fails closed at runtime; reject it at build. The
+/// establishing binding itself is not flagged: it runs with no binding
+/// guaranteed on entry. Republishing is judged over the control-flow graph, so
+/// a binding filter in a branch reached only after the barrier is caught too.
+///
+/// Every successful binding is frozen, even when no bound-body participant is
+/// registered, so this invariant applies to every pipeline.
+pub(super) fn check_no_rebind_after_binding(
+    filters: &[PipelineFilter],
+    entry_binding_guaranteed: bool,
+    errors: &mut Vec<String>,
+) {
+    let mut binding_seen = entry_binding_guaranteed;
+    collect_rebind_errors(filters, &mut binding_seen, false, errors);
+}
+
+/// Enforce one logical binding publisher for the whole downstream request.
+///
+/// Mutually exclusive or conditional publishers are intentionally not treated
+/// as composable: the binding is request-scoped and immutable, so nested and
+/// IRR pipelines inherit it rather than publishing a second candidate.
+fn collect_rebind_errors(
+    filters: &[PipelineFilter],
+    binding_seen: &mut bool,
+    inside_branch: bool,
+    errors: &mut Vec<String>,
+) {
+    for pf in filters {
+        if *binding_seen
+            && matches!(&pf.filter, AnyFilter::Http(filter) if filter.conflicts_with_inherited_bound_upstream())
+        {
+            errors.push(format!(
+                "filter '{}' owns a nested pipeline that publishes a logical upstream binding, but the parent binding is already frozen; remove the nested router or the parent binding router",
+                pf.filter.name(),
+            ));
+        }
+        if filter_binds_upstream(pf) {
+            if inside_branch {
+                errors.push(format!(
+                    "filter '{}' publishes a logical upstream binding inside a branch; the request-scoped binding router must be top-level",
+                    pf.filter.name(),
+                ));
+            } else if *binding_seen {
+                errors.push(rebind_error(pf.filter.name()));
+            } else {
+                *binding_seen = true;
+            }
+        }
+        for branch in &pf.branches {
+            collect_rebind_errors(&branch.filters, binding_seen, true, errors);
+        }
+    }
+}
+
+/// The diagnostic for a binding filter that would rebind after the barrier.
+fn rebind_error(name: &str) -> String {
+    format!(
+        "filter '{name}' publishes a logical upstream binding, but a binding is already \
+         guaranteed before it; the binding freezes at the first guaranteed binding and a \
+         later binding would try to publish a different logical cluster (fail-closed). \
+         Keep exactly one binding router before the bound-body barrier"
+    )
+}
+
+/// A `bound_upstream` condition on a filter that also runs an ordinary pre-read
+/// request-body hook.
+///
+/// An ordinary pre-read body hook ([`request_body_access`]) runs before any
+/// binding exists, so pairing it with a `bound_upstream` condition on the same
+/// filter is contradictory: the condition cannot be evaluated when the hook
+/// runs. Body processing that needs the binding must move to the bound-upstream
+/// request-body phase.
+///
+/// [`request_body_access`]: crate::HttpFilter::request_body_access
+pub(super) fn check_bound_condition_with_pre_read_body(
+    filters: &[PipelineFilter],
+    request_body_mode: BodyMode,
+    errors: &mut Vec<String>,
+) {
+    if !matches!(request_body_mode, BodyMode::StreamBuffer { .. }) {
+        return;
+    }
+    for pf in filters {
+        if has_bound_upstream_condition(pf)
+            && let AnyFilter::Http(f) = &pf.filter
+            && f.request_body_access() != BodyAccess::None
+        {
+            errors.push(format!(
+                "filter '{name}' combines an ordinary pre-read request-body hook with a \
+                 bound_upstream condition, but a pre-read body hook runs before any binding \
+                 exists; move body processing to the bound-upstream request-body phase \
+                 (bound_upstream_request_body_access)",
+                name = pf.filter.name(),
+            ));
+        }
+    }
+}
+
+/// Bound-upstream body participants must buffer the full body.
+///
+/// A filter that participates in the bound-upstream request-body phase runs
+/// against the complete, frozen request body, which requires a bounded
+/// [`BodyMode::StreamBuffer`]. Reject a participant whose [`request_body_mode`]
+/// is `Stream`, `SizeLimit`, or an unbounded `StreamBuffer`, mirroring
+/// [`check_selected_upstream_body_mode`]. Branch nesting is a separate concern
+/// handled by [`check_branch_bound_upstream_body_filters`], so this walks only
+/// top-level filters.
+///
+/// [`BodyMode::StreamBuffer`]: crate::BodyMode::StreamBuffer
+/// [`request_body_mode`]: crate::HttpFilter::request_body_mode
+pub(super) fn check_bound_upstream_body_mode(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        let AnyFilter::Http(filter) = &pf.filter else {
+            continue;
+        };
+        if filter.bound_upstream_request_body_access() == BodyAccess::None {
+            continue;
+        }
+        if filter_has_selected_upstream_condition(pf) {
+            errors.push(format!(
+                "filter '{}' participates in the bound-upstream request-body phase but has a selected_upstream condition; endpoint metadata does not exist at the binding barrier",
+                filter.name(),
+            ));
+        }
+        if !matches!(
+            filter.request_body_mode(),
+            BodyMode::StreamBuffer { max_bytes: Some(_) }
+        ) {
+            errors.push(format!(
+                "filter '{name}' participates in the bound-upstream request body phase but \
+                 its request_body_mode is not a bounded StreamBuffer; declare \
+                 request_body_mode = StreamBuffer with a max_bytes limit",
+                name = filter.name(),
+            ));
+        }
+    }
+}
+
+/// Bound-upstream body-access filters inside branch chains.
+///
+/// The bound-upstream request-body phase, like the request-, response-, and
+/// selected-upstream body phases, runs only top-level filters: branch
+/// sub-chains run `on_request` only, so a filter declaring
+/// [`bound_upstream_request_body_access`] inside a branch would silently enable
+/// buffering for a hook that never runs. Move such a filter to the main
+/// pipeline path or gate it with filter conditions.
+///
+/// [`bound_upstream_request_body_access`]: crate::HttpFilter::bound_upstream_request_body_access
+pub(super) fn check_branch_bound_upstream_body_filters(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        for branch in &pf.branches {
+            collect_branch_bound_upstream_body_errors(&branch.name, &branch.filters, errors);
+        }
+    }
+}
+
+/// IRR step pipelines inherit an already-frozen downstream binding and must not
+/// declare the once-per-downstream-request bound-body phase again.
+pub(super) fn check_step_bound_upstream_body_filters(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        if let AnyFilter::Http(filter) = &pf.filter
+            && filter.bound_upstream_request_body_access() != BodyAccess::None
+        {
+            errors.push(format!(
+                "filter '{}' declares bound-upstream request-body access inside an iterative_request_router step; move it to the parent pipeline before the IRR",
+                filter.name(),
+            ));
+        }
+        for branch in &pf.branches {
+            check_step_bound_upstream_body_filters(&branch.filters, errors);
+        }
+    }
+}
+
+/// Recursively collect bound-upstream body-access violations inside one branch
+/// sub-chain.
+fn collect_branch_bound_upstream_body_errors(branch_name: &str, filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        if let AnyFilter::Http(filter) = &pf.filter
+            && filter.bound_upstream_request_body_access() != BodyAccess::None
+        {
+            errors.push(format!(
+                "filter '{name}' in branch '{branch_name}' declares bound-upstream request \
+                 body access, but branch filters only run on_request and body hooks never \
+                 execute; move it to the main pipeline or gate it with filter conditions",
+                name = filter.name(),
+            ));
+        }
+        for branch in &pf.branches {
+            collect_branch_bound_upstream_body_errors(&branch.name, &branch.filters, errors);
+        }
+    }
+}
+
+/// Reject a `bound_upstream` matcher that no bindable cluster can satisfy.
+///
+/// Untagged or differently tagged clusters are valid fallthrough destinations;
+/// they simply do not match. The configuration is erroneous only when the
+/// matcher as a whole (including a protocol/provider pair) matches no cluster
+/// the binding router can publish.
+pub(super) fn check_untagged_bound_cluster_fields(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    let bindable = super::clusters::bindable_clusters(filters);
+    if bindable.is_empty() {
+        return;
+    }
+    let (catalog, _) = super::catalog::build_catalog(super::collect_cluster_declarations(filters));
+    check_bound_matchers(filters, &bindable, &catalog, errors);
+}
+
+/// Recurse through pipeline conditions and flag unsatisfiable bound matchers.
+fn check_bound_matchers(
+    filters: &[PipelineFilter],
+    bindable: &std::collections::HashSet<String>,
+    catalog: &super::catalog::ClusterApplicationCatalog,
+    errors: &mut Vec<String>,
+) {
+    for pf in filters {
+        for condition in &pf.conditions {
+            let Condition::When(matcher) = condition else {
+                continue;
+            };
+            let Some(bound) = &matcher.bound_upstream else {
+                continue;
+            };
+            let satisfiable = bindable.iter().any(|cluster| {
+                let metadata = catalog.lookup(cluster);
+                bound.application_protocol.as_deref().is_none_or(|expected| {
+                    metadata.and_then(super::catalog::ClusterApplicationMetadata::protocol) == Some(expected)
+                }) && bound.application_provider.as_deref().is_none_or(|expected| {
+                    metadata.and_then(super::catalog::ClusterApplicationMetadata::provider) == Some(expected)
+                })
+            });
+            if !satisfiable {
+                errors.push(format!(
+                    "filter '{}' has a bound_upstream condition that matches no bindable cluster's application metadata",
+                    pf.filter.name(),
+                ));
+            }
+        }
+        for branch in &pf.branches {
+            check_bound_matchers(&branch.filters, bindable, catalog, errors);
+        }
+    }
+}
+
+/// Whether any filter in `filters` (including branch sub-chains and IRR steps)
+/// selects its cluster from the frozen logical binding.
+fn any_consumes_bound_upstream(filters: &[PipelineFilter]) -> bool {
+    !guaranteed_bound_cluster_coverage(filters, false).is_empty()
 }
 
 // -----------------------------------------------------------------------------
@@ -915,10 +1625,16 @@ pub(super) fn check_irr_with_router_or_lb(names: &[&str], errors: &mut Vec<Strin
 // -----------------------------------------------------------------------------
 
 /// Router without any following LB (requests will 502).
-pub(super) fn check_router_without_lb(names: &[&str], warnings: &mut Vec<String>) {
+///
+/// Suppressed when some reachable consumer selects an endpoint from the logical
+/// binding — a bound-consuming load balancer in a direct branch or inside an
+/// IRR step. Such a router binds a logical cluster that a
+/// bound-consuming load balancer resolves later, so the missing top-level
+/// `load_balancer` is expected, not a 502 hazard.
+pub(super) fn check_router_without_lb(filters: &[PipelineFilter], names: &[&str], warnings: &mut Vec<String>) {
     let has_router = names.contains(&"router");
     let has_lb = names.contains(&"load_balancer");
-    if has_router && !has_lb {
+    if has_router && !has_lb && !any_consumes_bound_upstream(filters) {
         warnings.push(
             "router filter without a load_balancer; \
              routed requests will fail with 502"
@@ -1012,6 +1728,69 @@ fn collect_conditional_branch_security_warnings(
 // Utilities
 // -----------------------------------------------------------------------------
 
+/// Whether any request condition on the filter gates on `bound_upstream`.
+///
+/// Only request-phase conditions are consulted: a response-phase condition
+/// always runs after routing, so the binding it reads is guaranteed to exist.
+fn has_bound_upstream_condition(pf: &PipelineFilter) -> bool {
+    pf.conditions.iter().any(|condition| {
+        let (Condition::When(m) | Condition::Unless(m)) = condition;
+        m.bound_upstream.is_some()
+    })
+}
+
+/// Whether the filter publishes a logical upstream binding.
+fn filter_binds_upstream(pf: &PipelineFilter) -> bool {
+    matches!(&pf.filter, AnyFilter::Http(f) if f.binds_upstream())
+}
+
+/// Whether the filter *unconditionally* publishes a logical upstream binding.
+///
+/// Only an unconditional binding filter guarantees a binding: a conditional
+/// router runs only when its request conditions match, so it cannot be relied
+/// on to have bound an upstream by the time a later `bound_upstream` condition
+/// is evaluated.
+fn unconditional_binds(pf: &PipelineFilter) -> bool {
+    pf.conditions.is_empty() && filter_binds_upstream(pf)
+}
+
+/// Whether control leaving `pf` toward the next filter in its enclosing chain is
+/// guaranteed to have published a logical binding.
+///
+/// Branch-local binding publishers are rejected by
+/// [`check_no_rebind_after_binding`], so only the host filter itself can
+/// establish the request-scoped guarantee.
+fn filter_exit_binds(pf: &PipelineFilter) -> bool {
+    unconditional_binds(pf)
+}
+
+/// Describe why a filter depends on a preceding binding, or `None` if it does
+/// not. Used to name the offending feature in the reachability diagnostic.
+///
+/// Three features consume the logical binding and therefore require one to be
+/// guaranteed before the filter runs: a `bound_upstream` request condition
+/// (reads the binding), a bound-upstream request-body hook (runs only after the
+/// binding freezes), and a bound-consuming load balancer (selects its cluster
+/// from the binding). Any of them without a guaranteed preceding binding is a
+/// fail-closed misconfiguration.
+fn binding_requirement_reason(pf: &PipelineFilter) -> Option<&'static str> {
+    if has_bound_upstream_condition(pf) {
+        return Some("a bound_upstream condition");
+    }
+    let AnyFilter::Http(f) = &pf.filter else {
+        return None;
+    };
+    if f.bound_upstream_request_body_access() != BodyAccess::None {
+        Some("a bound-upstream request-body hook")
+    } else if f.consumes_bound_upstream() {
+        Some("a bound_upstream load balancer")
+    } else if f.requires_bound_upstream_on_entry() {
+        Some("a nested pipeline that reads the logical binding on entry")
+    } else {
+        None
+    }
+}
+
 /// Check whether the filter entry at `idx` has
 /// `allow_rewrite_override: true` in its YAML config.
 ///
@@ -1043,7 +1822,10 @@ mod tests {
     use praxis_core::config::{ConditionMatch, SelectedUpstreamMatch};
 
     use super::*;
-    use crate::pipeline::test_filters::{lb_filter, noop_filter_with_conditions, selector_filter};
+    use crate::pipeline::test_filters::{
+        binding_router, bound_body_filter, bound_lb, lb_filter, metadata_filter, noop_filter_with_conditions,
+        selector_filter,
+    };
 
     #[test]
     fn invalid_condition_header_name_rejected_at_build() {
@@ -1055,6 +1837,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            bound_upstream: None,
             selected_upstream: None,
         });
         let filters = vec![noop_filter_with_conditions("gated", vec![condition])];
@@ -1078,12 +1861,29 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            bound_upstream: None,
             selected_upstream: None,
         });
         let filters = vec![noop_filter_with_conditions("gated", vec![condition])];
         let mut errors = Vec::new();
         check_condition_header_names(&filters, &mut errors);
         assert!(errors.is_empty(), "valid header name should not error: {errors:?}");
+    }
+
+    #[test]
+    fn trace_context_rejects_routing_dependent_conditions() {
+        for condition in [
+            bound_condition(None, Some("openai")),
+            selected_upstream_cond(None, Some("openai")),
+        ] {
+            let filters = vec![noop_filter_with_conditions("trace_context", vec![condition])];
+            let mut errors = Vec::new();
+
+            check_trace_context_upstream_conditions(&filters, &mut errors);
+
+            assert_eq!(errors.len(), 1);
+            assert!(errors[0].contains("before routing"));
+        }
     }
 
     #[test]
@@ -1105,6 +1905,20 @@ mod tests {
         let mut errors = Vec::new();
         check_lb_without_cluster_selector(&filters, &mut errors);
         assert!(errors.is_empty(), "router before LB should produce no errors");
+    }
+
+    #[test]
+    fn bound_lb_without_router_no_error() {
+        // A cluster_source: bound_upstream load balancer self-selects from the
+        // frozen binding, so it needs no preceding router. A missing binding is
+        // reported separately by check_bound_upstream_requires_binding.
+        let filters = vec![bound_lb(&["chat"])];
+        let mut errors = Vec::new();
+        check_lb_without_cluster_selector(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a bound-consuming load balancer needs no preceding router: {errors:?}"
+        );
     }
 
     #[test]
@@ -1720,9 +2534,10 @@ mod tests {
 
     #[test]
     fn router_without_lb_warns() {
+        let filters = vec![selector_filter("router", &["web"])];
         let names = vec!["router"];
         let mut warnings = Vec::new();
-        check_router_without_lb(&names, &mut warnings);
+        check_router_without_lb(&filters, &names, &mut warnings);
         assert_eq!(warnings.len(), 1, "should produce exactly one warning");
         assert!(
             warnings[0].contains("router filter without a load_balancer"),
@@ -1733,10 +2548,27 @@ mod tests {
 
     #[test]
     fn router_with_lb_no_warning() {
+        let filters = vec![selector_filter("router", &["web"]), lb_filter(&["web"])];
         let names = vec!["router", "load_balancer"];
         let mut warnings = Vec::new();
-        check_router_without_lb(&names, &mut warnings);
+        check_router_without_lb(&filters, &names, &mut warnings);
         assert!(warnings.is_empty(), "router with LB should produce no warnings");
+    }
+
+    #[test]
+    fn router_without_lb_suppressed_by_bound_consumer() {
+        // A binding router with no *top-level* load balancer is fine when a
+        // bound-consuming load balancer inside a branch resolves the binding.
+        let mut host = named_noop_filter("headers", vec![]);
+        host.branches = vec![make_branch_with_filters("direct", vec![bound_lb(&["inference"])])];
+        let filters = vec![binding_router(&["inference"]), host];
+        let names = vec!["router", "headers"];
+        let mut warnings = Vec::new();
+        check_router_without_lb(&filters, &names, &mut warnings);
+        assert!(
+            warnings.is_empty(),
+            "a bound consumer should suppress the router-without-LB warning: {warnings:?}"
+        );
     }
 
     #[test]
@@ -2429,6 +3261,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            bound_upstream: None,
             selected_upstream: Some(SelectedUpstreamMatch {
                 application_protocol: protocol.map(str::to_owned),
                 application_provider: provider.map(str::to_owned),
@@ -2478,6 +3311,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            bound_upstream: None,
             selected_upstream: Some(SelectedUpstreamMatch {
                 application_protocol: Some("openai_chat_completions".to_owned()),
                 application_provider: None,
@@ -2516,6 +3350,7 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: None,
             headers: None,
+            bound_upstream: None,
             selected_upstream: None,
         })];
         let filters = vec![lb, gated_filter(Some("openai_chat_completions"), None)];
@@ -2538,6 +3373,7 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: None,
             headers: None,
+            bound_upstream: None,
             selected_upstream: None,
         });
         let filters = vec![noop_filter_with_conditions("gated", vec![cond])];
@@ -2944,25 +3780,365 @@ mod tests {
         );
     }
 
+    // -------------------------------------------------------------------------
+    // Bound-Upstream Checks
+    // -------------------------------------------------------------------------
+
     #[test]
-    fn irr_with_router_errors() {
-        let names = vec!["iterative_request_router", "router"];
+    fn conflicting_cluster_metadata_errors() {
+        let filters = vec![
+            cluster_metadata_filter("inference", Some("openai_responses"), Some("openai")),
+            cluster_metadata_filter("inference", Some("openai_responses"), Some("azure")),
+        ];
         let mut errors = Vec::new();
-        check_irr_with_router_or_lb(&names, &mut errors);
-        assert_eq!(errors.len(), 1, "IRR + router should produce one error");
+        check_cluster_metadata_conflicts(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "disagreeing declarations must error: {errors:?}");
         assert!(
-            errors[0].contains("router"),
-            "error should mention router: {}",
+            errors[0].contains("inference") && errors[0].contains("conflicting application metadata"),
+            "error should name the cluster and the conflict: {}",
             errors[0]
         );
     }
 
     #[test]
+    fn agreeing_cluster_metadata_no_error() {
+        let filters = vec![
+            cluster_metadata_filter("inference", Some("openai_responses"), Some("openai")),
+            cluster_metadata_filter("inference", Some("openai_responses"), Some("openai")),
+        ];
+        let mut errors = Vec::new();
+        check_cluster_metadata_conflicts(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "agreeing re-declarations are the normal multi-LB case: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn conflicting_cluster_metadata_in_branch_errors() {
+        let top = cluster_metadata_filter("inference", Some("openai_responses"), Some("openai"));
+        let branch = host_with_branch(vec![cluster_metadata_filter(
+            "inference",
+            Some("openai_responses"),
+            Some("azure"),
+        )]);
+        let filters = vec![top, branch];
+        let mut errors = Vec::new();
+        check_cluster_metadata_conflicts(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a branch declaration disagreeing with a top-level one must error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_condition_without_binding_errors() {
+        let filters = vec![noop_filter_with_conditions(
+            "guardrails",
+            vec![bound_condition(Some("openai_responses"), None)],
+        )];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a bound_upstream condition with no preceding binding must error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("guardrails") && errors[0].contains("bound_upstream condition"),
+            "error should name the filter and the missing binding: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn bound_condition_after_router_no_error() {
+        let filters = vec![
+            binding_filter(),
+            noop_filter_with_conditions("guardrails", vec![bound_condition(Some("openai_responses"), None)]),
+        ];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a binding filter before the bound condition satisfies the requirement: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_condition_in_branch_after_router_no_error() {
+        let branch_host = host_with_branch(vec![noop_filter_with_conditions(
+            "guardrails",
+            vec![bound_condition(Some("openai_responses"), None)],
+        )]);
+        let filters = vec![binding_filter(), branch_host];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a branch inherits the binding established before its host: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_condition_in_branch_of_binding_host_no_error() {
+        let mut host = binding_filter();
+        host.branches = vec![make_branch_with_filters(
+            "br",
+            vec![noop_filter_with_conditions(
+                "guardrails",
+                vec![bound_condition(Some("openai_responses"), None)],
+            )],
+        )];
+        let filters = vec![host];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "the host's own binding is visible to its branches: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_condition_in_branch_without_binding_errors() {
+        let branch_host = host_with_branch(vec![noop_filter_with_conditions(
+            "guardrails",
+            vec![bound_condition(Some("openai_responses"), None)],
+        )]);
+        let filters = vec![branch_host];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a bound condition in a branch with no binding anywhere must error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn no_bound_dependency_no_binding_no_error() {
+        let filters = vec![named_noop_filter("headers", vec![])];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a pipeline with no bound-upstream dependency needs no binding: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_condition_after_conditional_router_errors() {
+        // A conditional router may be skipped when its request conditions do not
+        // match, so it does not *guarantee* a binding for a later bound
+        // condition on a path where it did not run.
+        let mut conditional_router = binding_filter();
+        conditional_router.conditions = vec![make_condition()];
+        let filters = vec![
+            conditional_router,
+            noop_filter_with_conditions("guardrails", vec![bound_condition(Some("openai_responses"), None)]),
+        ];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a conditional router does not guarantee a binding for a later bound condition: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("guardrails") && errors[0].contains("guaranteed"),
+            "error should name the filter and call out the missing guaranteed binding: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn bound_condition_after_skip_to_bypassing_router_errors() {
+        // A SkipTo branch on the first filter jumps directly to the guardrails at
+        // index 2, bypassing the binding router at index 1 on that path.
+        let mut gate = named_noop_filter("gate", vec![]);
+        gate.branches = vec![make_skip_branch("skip", 2)];
+        let filters = vec![
+            gate,
+            binding_filter(),
+            noop_filter_with_conditions("guardrails", vec![bound_condition(Some("openai_responses"), None)]),
+        ];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a SkipTo that jumps over the binding router must error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("guardrails"),
+            "error should name the reachable-without-binding filter: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn bound_condition_with_skip_to_after_binding_no_error() {
+        // The binding router runs before the SkipTo host, so every path into the
+        // guardrails — including the skip — has already bound an upstream.
+        let mut gate = named_noop_filter("gate", vec![]);
+        gate.branches = vec![make_skip_branch("skip", 3)];
+        let filters = vec![
+            binding_filter(),
+            gate,
+            named_noop_filter("headers", vec![]),
+            noop_filter_with_conditions("guardrails", vec![bound_condition(Some("openai_responses"), None)]),
+        ];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a binding before the SkipTo host covers every path into the bound condition: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_condition_after_unconditional_branch_router_errors() {
+        let branch_host = host_with_branch(vec![binding_filter()]);
+        let filters = vec![
+            branch_host,
+            noop_filter_with_conditions("guardrails", vec![bound_condition(Some("openai_responses"), None)]),
+        ];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a request binding must be published by a top-level router"
+        );
+    }
+
+    #[test]
+    fn bound_condition_after_nested_unconditional_branch_router_errors() {
+        let inner = host_with_named_branch("inner", vec![binding_filter()]);
+        let outer = host_with_named_branch("outer", vec![inner]);
+        let filters = vec![
+            outer,
+            noop_filter_with_conditions("guardrails", vec![bound_condition(Some("openai_responses"), None)]),
+        ];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "nested branch publishers cannot establish the root binding"
+        );
+    }
+
+    #[test]
+    fn bound_condition_after_conditional_branch_router_errors() {
+        // The binding router sits in a *conditional* branch that may not fire, so
+        // it does not guarantee a binding for a later top-level bound consumer.
+        let mut branch_host = named_noop_filter("headers", vec![]);
+        branch_host.branches = vec![conditional_branch("br", vec![binding_filter()], RejoinTarget::Next)];
+        let filters = vec![
+            branch_host,
+            noop_filter_with_conditions("guardrails", vec![bound_condition(Some("openai_responses"), None)]),
+        ];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a binding in a conditional branch does not guarantee one for a later consumer: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_condition_after_conditional_host_branch_router_errors() {
+        // The branch is unconditional, but its host carries request conditions
+        // and may be skipped, so the binding inside is not guaranteed.
+        let host = conditional_host_with_branch(vec![make_condition()], vec![binding_filter()]);
+        let filters = vec![
+            host,
+            noop_filter_with_conditions("guardrails", vec![bound_condition(Some("openai_responses"), None)]),
+        ];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a binding under a conditional host is not guaranteed for a later consumer: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_condition_via_skip_past_unconditional_branch_router_errors() {
+        // The gate's unconditional SkipTo(2) jumps straight to the guardrails,
+        // bypassing the binding router in the branch host's unconditional branch.
+        // The branch binding is credited only to the fall-through, never to the
+        // jump target, so the skip path reaches the bound condition unbound.
+        let mut gate = named_noop_filter("gate", vec![]);
+        gate.branches = vec![make_skip_branch("skip", 2)];
+        let branch_host = host_with_branch(vec![binding_filter()]);
+        let filters = vec![
+            gate,
+            branch_host,
+            noop_filter_with_conditions("guardrails", vec![bound_condition(Some("openai_responses"), None)]),
+        ];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a SkipTo bypassing a branch binding must still error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn irr_with_router_and_no_bound_consumer_errors() {
+        // A binding router with no reachable consumer is the old conflict.
+        let filters = vec![
+            named_noop_filter("iterative_request_router", vec![]),
+            selector_filter("router", &["web"]),
+        ];
+        let names = vec!["iterative_request_router", "router"];
+        let mut errors = Vec::new();
+        check_irr_coexistence(&filters, &names, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "IRR + router without a bound consumer should error once"
+        );
+        assert!(
+            errors[0].contains("router") && errors[0].contains("logical binding"),
+            "error should name the missing bound consumer: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn irr_with_router_and_bound_consumer_ok() {
+        // A binding router whose IRR step consumes the binding is accepted
+        // (rule 11). The bound consumer lives in a branch here, standing in for
+        // an IRR step pipeline that folds its consumption up.
+        let mut irr = named_noop_filter("iterative_request_router", vec![]);
+        irr.branches = vec![make_branch_with_filters("inference", vec![bound_lb(&["inference"])])];
+        let filters = vec![binding_router(&["inference"]), irr];
+        let names = vec!["router", "iterative_request_router"];
+        let mut errors = Vec::new();
+        check_irr_coexistence(&filters, &names, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "router + IRR with a reachable bound consumer is allowed: {errors:?}"
+        );
+    }
+
+    #[test]
     fn irr_with_load_balancer_errors() {
+        let filters = vec![
+            named_noop_filter("iterative_request_router", vec![]),
+            lb_filter(&["web"]),
+        ];
         let names = vec!["iterative_request_router", "load_balancer"];
         let mut errors = Vec::new();
-        check_irr_with_router_or_lb(&names, &mut errors);
-        assert_eq!(errors.len(), 1, "IRR + LB should produce one error");
+        check_irr_coexistence(&filters, &names, &mut errors);
+        assert_eq!(errors.len(), 1, "IRR + top-level LB should produce one error");
         assert!(
             errors[0].contains("load_balancer"),
             "error should mention load_balancer: {}",
@@ -2972,26 +4148,542 @@ mod tests {
 
     #[test]
     fn irr_with_both_router_and_lb_errors_twice() {
+        // A top-level LB (rule 10) plus a binding router with no bound consumer
+        // (rule 11) each fire.
+        let filters = vec![
+            named_noop_filter("iterative_request_router", vec![]),
+            selector_filter("router", &["web"]),
+            lb_filter(&["web"]),
+        ];
         let names = vec!["iterative_request_router", "router", "load_balancer"];
         let mut errors = Vec::new();
-        check_irr_with_router_or_lb(&names, &mut errors);
-        assert_eq!(errors.len(), 2, "IRR + router + LB should produce two errors");
+        check_irr_coexistence(&filters, &names, &mut errors);
+        assert_eq!(
+            errors.len(),
+            2,
+            "IRR + top-level LB + unconsumed router should error twice"
+        );
     }
 
     #[test]
     fn irr_alone_no_error() {
+        let filters = vec![named_noop_filter("iterative_request_router", vec![])];
         let names = vec!["iterative_request_router"];
         let mut errors = Vec::new();
-        check_irr_with_router_or_lb(&names, &mut errors);
+        check_irr_coexistence(&filters, &names, &mut errors);
         assert!(errors.is_empty(), "IRR alone should not error");
     }
 
     #[test]
     fn no_irr_router_and_lb_no_error() {
+        let filters = vec![selector_filter("router", &["web"]), lb_filter(&["web"])];
         let names = vec!["router", "load_balancer"];
         let mut errors = Vec::new();
-        check_irr_with_router_or_lb(&names, &mut errors);
+        check_irr_coexistence(&filters, &names, &mut errors);
         assert!(errors.is_empty(), "no IRR means no conflict");
+    }
+
+    // Rule 2: a bound_upstream condition on a filter that also runs an ordinary
+    // pre-read request-body hook.
+
+    #[test]
+    fn bound_condition_with_pre_read_body_errors() {
+        let mut pf = body_filter(); // declares request_body_access = ReadOnly
+        pf.conditions = vec![bound_condition(Some("openai_responses"), None)];
+        let filters = vec![pf];
+        let mut errors = Vec::new();
+        check_bound_condition_with_pre_read_body(
+            &filters,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            &mut errors,
+        );
+        assert_eq!(
+            errors.len(),
+            1,
+            "a pre-read body hook paired with a bound_upstream condition must error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("branch_body") && errors[0].contains("pre-read request-body hook"),
+            "error should name the filter and the contradiction: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn bound_condition_without_pre_read_body_no_error() {
+        let filters = vec![noop_filter_with_conditions(
+            "guardrails",
+            vec![bound_condition(Some("openai_responses"), None)],
+        )];
+        let mut errors = Vec::new();
+        check_bound_condition_with_pre_read_body(
+            &filters,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            &mut errors,
+        );
+        assert!(
+            errors.is_empty(),
+            "a bound condition with no pre-read body hook is fine: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn pre_read_body_without_bound_condition_no_error() {
+        let filters = vec![body_filter()];
+        let mut errors = Vec::new();
+        check_bound_condition_with_pre_read_body(
+            &filters,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            &mut errors,
+        );
+        assert!(
+            errors.is_empty(),
+            "an ordinary pre-read body hook without a bound condition is fine: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_condition_with_pre_read_body_in_branch_is_left_to_branch_body_check() {
+        let mut inner = body_filter();
+        inner.conditions = vec![bound_condition(Some("openai_responses"), None)];
+        let mut host = named_noop_filter("headers", vec![]);
+        host.branches = vec![make_branch_with_filters("br", vec![inner])];
+        let filters = vec![host];
+        let mut errors = Vec::new();
+        check_bound_condition_with_pre_read_body(
+            &filters,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            &mut errors,
+        );
+        assert!(errors.is_empty(), "branch body hooks are diagnosed by the branch check");
+    }
+
+    #[test]
+    fn bound_condition_with_body_hook_is_allowed_without_pre_read() {
+        let mut pf = body_filter();
+        pf.conditions = vec![bound_condition(Some("openai_responses"), None)];
+        for mode in [BodyMode::Stream, BodyMode::SizeLimit { max_bytes: 1024 }] {
+            let mut errors = Vec::new();
+            check_bound_condition_with_pre_read_body(std::slice::from_ref(&pf), mode, &mut errors);
+            assert!(
+                errors.is_empty(),
+                "post-request body mode can observe the binding: {errors:?}"
+            );
+        }
+    }
+
+    // Rule 3: bound-upstream body participants must buffer the full body.
+
+    #[test]
+    fn bound_upstream_body_mode_rejects_stream() {
+        let filters = vec![bound_body_filter("bound_body", BodyAccess::ReadOnly, BodyMode::Stream)];
+        let mut errors = Vec::new();
+        check_bound_upstream_body_mode(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "Stream mode must be rejected for a bound participant");
+        assert!(
+            errors[0].contains("bound_body") && errors[0].contains("bounded StreamBuffer"),
+            "error should name the filter and require a bounded buffer: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn bound_upstream_body_mode_rejects_unbounded_stream_buffer() {
+        let filters = vec![bound_body_filter(
+            "bound_body",
+            BodyAccess::ReadOnly,
+            BodyMode::StreamBuffer { max_bytes: None },
+        )];
+        let mut errors = Vec::new();
+        check_bound_upstream_body_mode(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "an unbounded StreamBuffer must be rejected");
+    }
+
+    #[test]
+    fn bound_upstream_body_mode_accepts_bounded_stream_buffer() {
+        let filters = vec![bound_body_filter(
+            "bound_body",
+            BodyAccess::ReadWrite,
+            BodyMode::StreamBuffer { max_bytes: Some(4096) },
+        )];
+        let mut errors = Vec::new();
+        check_bound_upstream_body_mode(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "bounded StreamBuffer is the required mode: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_body_mode_rejects_selected_upstream_condition() {
+        let mut filter = bound_body_filter(
+            "bound_body",
+            BodyAccess::ReadOnly,
+            BodyMode::StreamBuffer { max_bytes: Some(4096) },
+        );
+        filter.conditions = vec![selected_upstream_cond(None, Some("openai"))];
+        let mut errors = Vec::new();
+
+        check_bound_upstream_body_mode(&[filter], &mut errors);
+
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("endpoint metadata does not exist"));
+    }
+
+    #[test]
+    fn bound_upstream_body_mode_ignores_non_participants() {
+        let filters = vec![body_filter()];
+        let mut errors = Vec::new();
+        check_bound_upstream_body_mode(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a filter with no bound-upstream body access must not be checked: {errors:?}"
+        );
+    }
+
+    // Rule 4: bound-upstream body-access filters inside branch chains.
+
+    #[test]
+    fn branch_bound_upstream_body_filter_errors() {
+        let mut host = named_noop_filter("headers", vec![]);
+        host.branches = vec![make_branch_with_filters(
+            "bound_branch",
+            vec![bound_body_filter(
+                "bound_body",
+                BodyAccess::ReadWrite,
+                BodyMode::StreamBuffer { max_bytes: Some(4096) },
+            )],
+        )];
+        let filters = vec![host];
+        let mut errors = Vec::new();
+        check_branch_bound_upstream_body_filters(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "bound-upstream body filter in a branch must error");
+        assert!(
+            errors[0].contains("bound_branch") && errors[0].contains("bound_body"),
+            "error should name the branch and the filter: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn nested_branch_bound_upstream_body_filter_errors() {
+        let mut inner = named_noop_filter("classifier", vec![]);
+        inner.branches = vec![make_branch_with_filters(
+            "inner",
+            vec![bound_body_filter(
+                "bound_body",
+                BodyAccess::ReadOnly,
+                BodyMode::StreamBuffer { max_bytes: Some(4096) },
+            )],
+        )];
+        let mut host = named_noop_filter("headers", vec![]);
+        host.branches = vec![make_branch_with_filters("outer", vec![inner])];
+        let filters = vec![host];
+        let mut errors = Vec::new();
+        check_branch_bound_upstream_body_filters(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "the check must recurse into nested branches");
+        assert!(
+            errors[0].contains("inner"),
+            "error should name the innermost branch: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn top_level_bound_upstream_body_filter_no_branch_error() {
+        let filters = vec![bound_body_filter(
+            "bound_body",
+            BodyAccess::ReadWrite,
+            BodyMode::StreamBuffer { max_bytes: Some(4096) },
+        )];
+        let mut errors = Vec::new();
+        check_branch_bound_upstream_body_filters(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a top-level bound-upstream body filter is legitimate: {errors:?}"
+        );
+    }
+
+    // Rule 7: a bound-consuming load balancer or bound-upstream body hook
+    // requires a guaranteed preceding binding.
+
+    #[test]
+    fn bound_lb_without_binding_errors() {
+        let filters = vec![bound_lb(&["inference"])];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(errors.len(), 1, "a bound LB with no preceding binding must error");
+        assert!(
+            errors[0].contains("load_balancer") && errors[0].contains("bound_upstream load balancer"),
+            "error should name the bound LB dependency: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn bound_lb_after_binding_no_error() {
+        let filters = vec![binding_router(&["inference"]), bound_lb(&["inference"])];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "an unconditional binding router before the bound LB satisfies the requirement: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_lb_in_step_with_entry_binding_no_error() {
+        // An IRR step runs as a continuation of a parent that already guarantees
+        // a binding before the IRR (the parent's own reachability check enforces
+        // this). With that entry binding assumed present, a step's bound LB needs
+        // no step-local binding router.
+        let filters = vec![bound_lb(&["inference"])];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, true, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a step's bound LB inherits the parent's guaranteed binding: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_body_hook_without_binding_errors() {
+        let filters = vec![bound_body_filter(
+            "bound_body",
+            BodyAccess::ReadWrite,
+            BodyMode::StreamBuffer { max_bytes: Some(4096) },
+        )];
+        let mut errors = Vec::new();
+        check_bound_upstream_requires_binding(&filters, false, &mut errors);
+        assert_eq!(errors.len(), 1, "a bound-upstream body hook with no binding must error");
+        assert!(
+            errors[0].contains("bound-upstream request-body hook"),
+            "error should name the bound-body dependency: {}",
+            errors[0]
+        );
+    }
+
+    // Rule 8: a bound-upstream load balancer must resolve every bindable cluster.
+
+    #[test]
+    fn bound_coverage_without_consumer_no_error() {
+        let filters = vec![binding_router(&["inference"])];
+        let mut errors = Vec::new();
+        check_bound_cluster_coverage(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "no bound consumer means the coverage check does not run: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_coverage_union_across_paths_no_error() {
+        // §6 dual-path shape: a binding router publishes two clusters; each is
+        // resolved by a bound LB on a different reachable path.
+        let mut host_a = named_noop_filter("headers", vec![]);
+        host_a.branches = vec![make_branch_with_filters("a", vec![bound_lb(&["openai-responses"])])];
+        let mut host_b = named_noop_filter("headers", vec![]);
+        host_b.branches = vec![make_branch_with_filters("b", vec![bound_lb(&["chat-backend"])])];
+        let filters = vec![binding_router(&["openai-responses", "chat-backend"]), host_a, host_b];
+        let mut errors = Vec::new();
+        check_bound_cluster_coverage(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "the union of bound coverage across paths must accept both bindable clusters: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_direct_branch_and_ordinary_fallthrough_cover_distinct_clusters() {
+        let mut direct = named_noop_filter("headers", vec![bound_condition(None, Some("openai"))]);
+        let mut direct_branch = make_branch_with_filters("direct", vec![bound_lb(&["openai-backend"])]);
+        direct_branch.rejoin = RejoinTarget::Terminal;
+        direct.branches = vec![direct_branch];
+        let filters = vec![
+            binding_router(&["openai-backend", "chat-backend"]),
+            metadata_filter("catalog", "openai-backend", None, Some("openai")),
+            metadata_filter("catalog", "chat-backend", None, Some("vllm")),
+            direct,
+            lb_filter(&["chat-backend"]),
+        ];
+        let mut errors = Vec::new();
+
+        check_bound_cluster_coverage(&filters, &mut errors);
+
+        assert!(
+            errors.is_empty(),
+            "ordinary fallthrough transport completes coverage: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bound_coverage_missing_cluster_errors() {
+        let filters = vec![
+            binding_router(&["openai-responses", "chat-backend"]),
+            bound_lb(&["openai-responses"]),
+        ];
+        let mut errors = Vec::new();
+        check_bound_cluster_coverage(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a bindable cluster no bound LB resolves must error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("chat-backend"),
+            "error should name the uncovered cluster: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn conditional_branch_consumer_does_not_guarantee_coverage() {
+        let mut branch = make_branch_with_filters("optional", vec![bound_lb(&["inference"])]);
+        branch.condition = Some(crate::pipeline::branch::ResolvedBranchCondition {
+            filter_name: Arc::from("classifier"),
+            key: Arc::from("route"),
+            value: Arc::from("direct"),
+        });
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![branch];
+        let filters = vec![binding_router(&["inference"]), host];
+        let mut errors = Vec::new();
+
+        check_bound_cluster_coverage(&filters, &mut errors);
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "a skipped branch would leave the binding without transport"
+        );
+    }
+
+    // Rule 9: a different logical binding must not be publishable after the
+    // bound-body barrier freezes the first one.
+
+    #[test]
+    fn single_binding_no_rebind_error() {
+        // A binding followed by a consumer is the valid shape: exactly one
+        // binding before the barrier.
+        let filters = vec![binding_router(&["inference"]), bound_lb(&["inference"])];
+        let mut errors = Vec::new();
+        check_no_rebind_after_binding(&filters, false, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "the establishing binding runs with nothing bound on entry: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn rebind_without_body_participant_errors() {
+        let filters = vec![binding_router(&["a"]), binding_router(&["b"])];
+        let mut errors = Vec::new();
+        check_no_rebind_after_binding(&filters, false, &mut errors);
+        assert_eq!(errors.len(), 1, "the first binding freezes even without a body hook");
+    }
+
+    #[test]
+    fn second_top_level_binding_rebind_errors() {
+        let filters = vec![binding_router(&["a"]), binding_router(&["b"]), bound_lb(&["a"])];
+        let mut errors = Vec::new();
+        check_no_rebind_after_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a second binding after the barrier must error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("already") && errors[0].contains("binding"),
+            "error should explain the frozen binding: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn rebind_in_branch_after_binding_errors() {
+        let mut host = named_noop_filter("headers", vec![]);
+        host.branches = vec![make_branch_with_filters("br", vec![binding_router(&["b"])])];
+        let filters = vec![binding_router(&["a"]), host, bound_lb(&["a"])];
+        let mut errors = Vec::new();
+        check_no_rebind_after_binding(&filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a binding filter in a branch reached after the barrier must error: {errors:?}"
+        );
+    }
+
+    // Rule 12: an untagged bindable cluster reaching a `when bound_upstream`
+    // condition that requires the field it lacks.
+
+    #[test]
+    fn untagged_bound_cluster_when_condition_errors() {
+        let filters = vec![
+            binding_router(&["openai"]),
+            noop_filter_with_conditions("guardrails", vec![bound_condition(None, Some("openai"))]),
+        ];
+        let mut errors = Vec::new();
+        check_untagged_bound_cluster_fields(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "an untagged bindable cluster under a when-provider gate must error: {errors:?}"
+        );
+        assert!(errors[0].contains("matches no bindable cluster"));
+    }
+
+    #[test]
+    fn tagged_bound_cluster_when_condition_no_error() {
+        let filters = vec![
+            binding_router(&["openai"]),
+            metadata_filter("load_balancer", "openai", None, Some("openai")),
+            noop_filter_with_conditions("guardrails", vec![bound_condition(None, Some("openai"))]),
+        ];
+        let mut errors = Vec::new();
+        check_untagged_bound_cluster_fields(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a cluster tagged with the demanded field must not error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn untagged_bound_cluster_unless_condition_no_error() {
+        // `unless bound_upstream` on a missing field runs rather than silently
+        // skips, so it is not a dead gate and rule 12 excludes it.
+        let unless = Condition::Unless(ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: None,
+            methods: None,
+            headers: None,
+            bound_upstream: Some(praxis_core::config::ApplicationMatch {
+                application_protocol: None,
+                application_provider: Some("openai".to_owned()),
+            }),
+            selected_upstream: None,
+        });
+        let filters = vec![
+            binding_router(&["openai"]),
+            noop_filter_with_conditions("guardrails", vec![unless]),
+        ];
+        let mut errors = Vec::new();
+        check_untagged_bound_cluster_fields(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "an unless condition on a missing field is not a dead gate: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn no_bound_condition_no_untagged_error() {
+        let filters = vec![binding_router(&["openai"])];
+        let mut errors = Vec::new();
+        check_untagged_bound_cluster_fields(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "with no bound_upstream condition, no field is demanded: {errors:?}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3029,6 +4721,7 @@ mod tests {
             path_prefix: Some("/test".to_owned()),
             methods: None,
             headers: None,
+            bound_upstream: None,
             selected_upstream: None,
         })
     }
@@ -3150,6 +4843,89 @@ mod tests {
             vec![],
             vec![],
         )
+    }
+
+    /// Build a [`PipelineFilter`] that publishes a logical upstream binding,
+    /// standing in for a `router` in reachability tests.
+    fn binding_filter() -> PipelineFilter {
+        /// Minimal filter that reports it binds the logical upstream.
+        struct BindingFilter;
+
+        #[async_trait::async_trait]
+        impl crate::filter::HttpFilter for BindingFilter {
+            fn name(&self) -> &'static str {
+                "router"
+            }
+
+            async fn on_request(
+                &self,
+                _ctx: &mut crate::HttpFilterContext<'_>,
+            ) -> Result<crate::FilterAction, crate::FilterError> {
+                Ok(crate::FilterAction::Continue)
+            }
+
+            fn selects_cluster(&self) -> bool {
+                true
+            }
+
+            fn binds_upstream(&self) -> bool {
+                true
+            }
+        }
+
+        PipelineFilter::new(0, AnyFilter::Http(Box::new(BindingFilter)), vec![], vec![])
+    }
+
+    /// Build a [`PipelineFilter`] that declares application metadata for one
+    /// cluster, standing in for a `load_balancer` in catalog tests.
+    fn cluster_metadata_filter(cluster: &str, protocol: Option<&str>, provider: Option<&str>) -> PipelineFilter {
+        use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration};
+
+        /// Minimal filter declaring one cluster's application metadata.
+        struct MetadataFilter {
+            decl: ClusterMetadataDeclaration,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::filter::HttpFilter for MetadataFilter {
+            fn name(&self) -> &'static str {
+                "load_balancer"
+            }
+
+            async fn on_request(
+                &self,
+                _ctx: &mut crate::HttpFilterContext<'_>,
+            ) -> Result<crate::FilterAction, crate::FilterError> {
+                Ok(crate::FilterAction::Continue)
+            }
+
+            fn declared_cluster_metadata(&self) -> Vec<ClusterMetadataDeclaration> {
+                vec![self.decl.clone()]
+            }
+        }
+
+        let decl = ClusterMetadataDeclaration {
+            name: Arc::from(cluster),
+            metadata: ClusterApplicationMetadata::new(protocol.map(Arc::from), provider.map(Arc::from)),
+        };
+        PipelineFilter::new(0, AnyFilter::Http(Box::new(MetadataFilter { decl })), vec![], vec![])
+    }
+
+    /// Build a `When` condition that gates on the bound upstream's application
+    /// protocol and/or provider.
+    fn bound_condition(protocol: Option<&str>, provider: Option<&str>) -> Condition {
+        Condition::When(ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: None,
+            methods: None,
+            headers: None,
+            bound_upstream: Some(praxis_core::config::ApplicationMatch {
+                application_protocol: protocol.map(str::to_owned),
+                application_provider: provider.map(str::to_owned),
+            }),
+            selected_upstream: None,
+        })
     }
 
     /// Build a [`PipelineFilter`] whose filter selects a cluster.

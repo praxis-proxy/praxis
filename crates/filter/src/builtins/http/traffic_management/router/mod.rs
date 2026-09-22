@@ -478,6 +478,10 @@ impl HttpFilter for RouterFilter {
             .collect()
     }
 
+    fn binds_upstream(&self) -> bool {
+        true
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         // Match on the path only, excluding any query string. A preceding
         // path_rewrite/url_rewrite stores "<path>?<query>" in rewritten_path,
@@ -508,6 +512,11 @@ impl HttpFilter for RouterFilter {
             // from a previous route so a re-route cannot inherit a retry
             // policy the newly matched route did not declare.
             ctx.route_retry_policy = resolved.retry_policy.as_ref().map(Arc::clone);
+            // Publish the stable logical binding, resolving the cluster's
+            // application metadata through the pipeline catalog. A later router
+            // on the request path replaces this binding, so the last router
+            // reached wins.
+            ctx.bind_upstream(Arc::clone(&resolved.route.cluster));
             Ok(FilterAction::Continue)
         } else {
             debug!(path = %path, "no route matched");

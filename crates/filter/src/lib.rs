@@ -131,6 +131,7 @@ pub use filtered_subrequest::{
 pub use grpc_response::GrpcErrorMapping;
 pub use pipeline::{
     FilterPipeline, PipelineExtension,
+    catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration},
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
     subrequest::{IterationState, NextIterationBody},
 };

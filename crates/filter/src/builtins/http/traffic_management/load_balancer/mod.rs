@@ -35,6 +35,7 @@ use crate::{
     FilterError,
     actions::FilterAction,
     filter::{HttpFilter, HttpFilterContext},
+    pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration},
 };
 
 // -----------------------------------------------------------------------------
@@ -157,6 +158,19 @@ impl HttpFilter for LoadBalancerFilter {
 
     fn load_balancer_clusters(&self) -> Vec<String> {
         self.clusters.keys().map(ToString::to_string).collect()
+    }
+
+    fn declared_cluster_metadata(&self) -> Vec<ClusterMetadataDeclaration> {
+        self.clusters
+            .iter()
+            .map(|(name, entry)| ClusterMetadataDeclaration {
+                name: Arc::clone(name),
+                metadata: ClusterApplicationMetadata::new(
+                    entry.application_protocol.clone(),
+                    entry.application_provider.clone(),
+                ),
+            })
+            .collect()
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {

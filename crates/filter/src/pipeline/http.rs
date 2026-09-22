@@ -31,7 +31,7 @@ use crate::{
     FilterError,
     actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
-    condition::should_execute_selected,
+    condition::should_execute_bound_selected,
     context::{EffectiveHeaders, HttpFilterContext},
     trace_context::{TraceContext, ensure_trace_context},
 };
@@ -78,9 +78,10 @@ impl FilterPipeline {
                     continue;
                 },
             };
-            if !should_execute_selected(
+            if !should_execute_bound_selected(
                 &pf.conditions,
                 ctx.request,
+                ctx.bound_upstream_view(),
                 super::http_utils::ctx_selected_upstream(ctx),
             ) {
                 trace!(filter = http_filter.name(), "skipped by conditions");

@@ -36,7 +36,7 @@ use super::{
     filter::PipelineFilter,
 };
 use crate::{
-    FilterError, actions::FilterAction, any_filter::AnyFilter, condition::should_execute_selected,
+    FilterError, actions::FilterAction, any_filter::AnyFilter, condition::should_execute_bound_selected,
     context::HttpFilterContext, trace_context::ensure_trace_context,
 };
 
@@ -195,7 +195,7 @@ async fn execute_branch_filters(
             AnyFilter::Tcp(_) => continue,
         };
         let selected = super::http_utils::ctx_selected_upstream(ctx);
-        if !should_execute_selected(&pf.conditions, ctx.request, selected) {
+        if !should_execute_bound_selected(&pf.conditions, ctx.request, ctx.bound_upstream_view(), selected) {
             continue;
         }
         ctx.current_filter_id = Some(pf.filter_id);
@@ -213,11 +213,12 @@ async fn execute_branch_filters(
 
 /// Initialize correlation only after a branch is selected and its trace filter matches.
 fn ensure_branch_trace_context(filters: &[PipelineFilter], ctx: &mut HttpFilterContext<'_>) {
+    let bound = ctx.bound_upstream_view();
     let selected = super::http_utils::ctx_selected_upstream(ctx);
-    if filters
-        .iter()
-        .any(|pf| pf.filter.name() == "trace_context" && should_execute_selected(&pf.conditions, ctx.request, selected))
-    {
+    if filters.iter().any(|pf| {
+        pf.filter.name() == "trace_context"
+            && should_execute_bound_selected(&pf.conditions, ctx.request, bound, selected)
+    }) {
         ensure_trace_context(ctx);
     }
 }
@@ -481,6 +482,7 @@ mod tests {
                 path_prefix: Some("/api".to_owned()),
                 methods: None,
                 headers: None,
+                bound_upstream: None,
                 selected_upstream: None,
             },
         )];

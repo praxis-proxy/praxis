@@ -88,18 +88,21 @@ fn validate_request_conditions(chain_name: &str, entry: &FilterEntry) -> Result<
             && matcher.path_prefix.is_none()
             && matcher.methods.is_none()
             && matcher.headers.is_none()
+            && matcher.bound_upstream.is_none()
             && matcher.selected_upstream.is_none()
         {
             return Err(ProxyError::Config(format!(
                 "filter '{filter}' in chain '{chain_name}': condition {idx} is \
                  empty; set at least one of grpc, path, path_prefix, methods, \
-                 headers, or selected_upstream (an empty condition matches \
-                 every request, so 'unless' would disable the filter entirely)",
+                 headers, bound_upstream, or selected_upstream (an empty \
+                 condition matches every request, so 'unless' would disable \
+                 the filter entirely)",
                 filter = entry.filter_type,
             )));
         }
         validate_condition_containers(chain_name, &entry.filter_type, idx, matcher)?;
         validate_condition_paths(chain_name, &entry.filter_type, idx, matcher)?;
+        validate_condition_bound_upstream(chain_name, &entry.filter_type, idx, matcher)?;
     }
     Ok(())
 }
@@ -163,6 +166,41 @@ fn validate_condition_paths(
                  {field} must start with '/' (got '{value}'); {consequence}",
             )));
         }
+    }
+    Ok(())
+}
+
+/// Reject a `bound_upstream` predicate that sets no field or carries a
+/// non-canonical identifier.
+///
+/// A `bound_upstream: {}` with neither `application_protocol` nor
+/// `application_provider` imposes no constraint (vacuously true), which
+/// silently disables its filter under `unless` — the same accident class
+/// the empty-predicate check guards elsewhere. Each present value must be
+/// a canonical application identifier so it can name a valid cluster tag;
+/// an uppercase or otherwise malformed value could never match.
+fn validate_condition_bound_upstream(
+    chain_name: &str,
+    filter: &str,
+    idx: usize,
+    matcher: &ConditionMatch,
+) -> Result<(), ProxyError> {
+    let Some(bound) = &matcher.bound_upstream else {
+        return Ok(());
+    };
+    if bound.application_protocol.is_none() && bound.application_provider.is_none() {
+        return Err(ProxyError::Config(format!(
+            "filter '{filter}' in chain '{chain_name}': condition {idx} \
+             bound_upstream is empty; set at least one of \
+             application_protocol or application_provider"
+        )));
+    }
+    let context = format!("filter '{filter}' in chain '{chain_name}': condition {idx} bound_upstream");
+    if let Some(protocol) = bound.application_protocol.as_deref() {
+        super::validate_application_identifier(protocol, "application_protocol", &context)?;
+    }
+    if let Some(provider) = bound.application_provider.as_deref() {
+        super::validate_application_identifier(provider, "application_provider", &context)?;
     }
     Ok(())
 }
@@ -566,6 +604,7 @@ fn validate_listener_references(chains: &[FilterChainConfig], listeners: &[Liste
     clippy::indexing_slicing,
     clippy::needless_raw_strings,
     clippy::needless_raw_string_hashes,
+    clippy::too_many_lines,
     reason = "tests use unwrap/expect/indexing/raw strings for brevity"
 )]
 mod tests {
@@ -682,6 +721,118 @@ filter_chains:
         assert!(
             err.to_string().contains("condition 0 is empty"),
             "an empty predicate inside an IRR step must be rejected too: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_bound_upstream_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: headers
+        request_add:
+          - name: "x-tag"
+            value: "on"
+        conditions:
+          - when:
+              bound_upstream:
+                application_protocol: "openai_responses"
+                application_provider: "openai"
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+insecure_options:
+  allow_private_endpoints: true
+"#;
+        let config = Config::from_yaml(yaml);
+        assert!(
+            config.is_ok(),
+            "a canonical bound_upstream predicate after routing must be accepted: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn reject_empty_bound_upstream_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: headers
+        request_add:
+          - name: "x-tag"
+            value: "on"
+        conditions:
+          - when:
+              bound_upstream: {}
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+insecure_options:
+  allow_private_endpoints: true
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("bound_upstream is empty"),
+            "a bound_upstream with no fields silently disables its filter under unless: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_non_canonical_bound_upstream_identifier() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: headers
+        request_add:
+          - name: "x-tag"
+            value: "on"
+        conditions:
+          - when:
+              bound_upstream:
+                application_protocol: "OpenAI"
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+insecure_options:
+  allow_private_endpoints: true
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("lowercase ASCII"),
+            "an uppercase identifier could never name a cluster tag and must be rejected: {err}"
         );
     }
 

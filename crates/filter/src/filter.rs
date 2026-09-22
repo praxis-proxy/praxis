@@ -14,7 +14,7 @@ use crate::{
     actions::{FilterAction, SelectedUpstreamBodyOutcome},
     body::{BodyAccess, BodyMode},
     builtins::http::payload_processing::compression_config::CompressionConfig,
-    pipeline::FilterPipeline,
+    pipeline::{FilterPipeline, catalog::ClusterMetadataDeclaration},
 };
 
 // -----------------------------------------------------------------------------
@@ -117,6 +117,38 @@ pub trait HttpFilter: Send + Sync {
     /// selector outputs against the configured upstream cluster set.
     fn load_balancer_clusters(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Application metadata for the clusters this filter declares.
+    ///
+    /// The pipeline folds every filter's declarations into a single
+    /// metadata catalog so a binding `router` can resolve a matched
+    /// cluster's opaque application protocol and provider without owning
+    /// endpoint state. Load-balancing filters override this; the declared
+    /// names must match [`load_balancer_clusters`]. Filters that declare no
+    /// clusters leave the default empty list.
+    ///
+    /// [`load_balancer_clusters`]: HttpFilter::load_balancer_clusters
+    fn declared_cluster_metadata(&self) -> Vec<ClusterMetadataDeclaration> {
+        Vec::new()
+    }
+
+    /// Whether this filter publishes a logical upstream binding
+    /// ([`BoundUpstream`]) when it selects a cluster.
+    ///
+    /// Only a binding filter populates the view a `bound_upstream` condition
+    /// reads and triggers the bound-upstream request-body phase. Pipeline
+    /// validation uses this to reject a `bound_upstream` condition or a
+    /// bound-body hook that no binding filter can precede — the condition
+    /// would silently never match and the hook would silently never run.
+    /// The `router` overrides this; ordinary cluster selectors that only set
+    /// [`HttpFilterContext::cluster`] without publishing a binding leave the
+    /// default.
+    ///
+    /// [`BoundUpstream`]: crate::extensions::BoundUpstream
+    /// [`HttpFilterContext::cluster`]: crate::HttpFilterContext::cluster
+    fn binds_upstream(&self) -> bool {
+        false
     }
 
     /// Whether this filter may select a streaming sub-request response.
