@@ -55,7 +55,7 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
 notify = "8.2.0"
-object = { version = "0.37.3", default-features = false, features = ["read_core", "elf", "std"] }
+object = { version = "0.39.1", default-features = false, features = ["read_core", "elf", "std"] }
 opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
