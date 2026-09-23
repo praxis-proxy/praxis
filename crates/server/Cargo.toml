@@ -65,10 +65,12 @@ router-json-aliases = ["praxis-filter/router-json-aliases", "experimental"]
 chain-binding = ["praxis-filter/chain-binding", "experimental"]
 # SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
 spiffe = ["praxis-protocol/spiffe", "praxis-filter/spiffe", "experimental"]
-# The `policy` filter (Praxis Policy Engine). On by default; the server
-# depends on praxis-filter without dependency defaults, so a
-# `--no-default-features` build excludes the filter and the `ppe` tree.
-policy-engine = ["praxis-filter/policy-engine"]
+# The `policy` filter (Praxis Policy Engine). On by default. The workspace
+# declares praxis-filter with `default-features = false`, so this feature is
+# the only thing that turns the filter's `policy-engine` on; a
+# `--no-default-features` build (`make build-fips`) excludes the filter and
+# the whole `ppe` tree.
+policy-engine = ["praxis-filter/policy-engine", "praxis-protocol/policy-engine"]
 # Marker feature activated transitively by any experimental feature.
 # Used to gate the startup warning in startup_checks::warn_experimental_features.
 experimental = []
