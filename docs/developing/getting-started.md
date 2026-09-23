@@ -8,6 +8,7 @@
 - Docker 29.3.0+ or Podman (for container builds; the FIPS image, its
   signature verification and Red Hat's scanner need Podman on Linux)
 - Go 1.26+ (`make fips-scanner`, optional)
+- OpenShift CLI `oc` (`make fips-scan`, optional)
 - `cargo-machete` (unused dependency detection, `make lint`)
 - `cargo-audit`, `cargo-deny` (supply chain safety, `make audit`)
 - `cargo-llvm-cov` (coverage, `make coverage-check`)

@@ -134,7 +134,9 @@ runs it against the FIPS image from podman's image store (under
 `podman unshare` when podman is rootless) with `--fail-on-warnings`, so an
 inconclusive verdict such as a missing manifest fails, as it does in Red
 Hat's gated scans. Both need a Linux podman, rootless or root, not a podman
-machine. Point `CHECK_PAYLOAD` at another build to use it instead. Move
+machine. The scan also needs the OpenShift CLI (`oc`) on `PATH`: the scanner
+refuses to start without it, even though an image scan never runs it.
+Point `CHECK_PAYLOAD` at another build to use it instead. Move
 `CHECK_PAYLOAD_REV` forward once the PR merges or a release carries Rust
 support.
 

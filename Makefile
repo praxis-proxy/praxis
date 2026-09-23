@@ -58,7 +58,7 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	mutants \
 	coverage coverage-check \
 	fuzz fuzz-build \
-	require-container-engine require-podman \
+	require-container-engine require-podman require-oc \
 	container container-run \
 	test-container test-container-run \
 	build-fips release-fips check-fips lint-fips test-fips \
@@ -360,6 +360,9 @@ require-podman:
 require-go:
 	@command -v go >/dev/null || { echo "go is required to build check-payload"; exit 1; }
 
+require-oc:
+	@command -v oc >/dev/null || { echo "oc (the OpenShift CLI) is required: check-payload refuses to scan without it on PATH"; exit 1; }
+
 # The debug build is the edit-compile loop; only the release build carries
 # the manifest.
 build-fips:
@@ -443,7 +446,7 @@ fips-deps:
 # --fail-on-warnings makes an inconclusive verdict (for example a binary
 # without a crate manifest) fail, as Red Hat's gated scans do. Needs a Linux
 # podman (rootless or root), not a podman machine.
-fips-scan: | require-podman
+fips-scan: | require-podman require-oc
 	@[ -x "$(CHECK_PAYLOAD)" ] || { echo "check-payload not found at $(CHECK_PAYLOAD): run 'make fips-scanner' (needs go) or set CHECK_PAYLOAD"; exit 1; }
 	$(PODMAN_UNSHARE) $(CHECK_PAYLOAD) scan image \
 		--spec containers-storage:$(FIPS_IMAGE_REF) --fail-on-warnings
