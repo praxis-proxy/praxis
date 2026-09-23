@@ -33,20 +33,34 @@ cargo build -p praxis-proxy --release --no-default-features \
     --features config-reload,admin-api
 ```
 
-For that exact invocation in this workspace, the guarantee holds: the server
-depends on `praxis-proxy-filter` without dependency defaults, so dropping the
-server's `policy-engine` feature leaves the filter and the policy engine's
-dependency tree out of the build.
+For that exact invocation the guarantee holds: every Praxis crate depends on
+`praxis-proxy-filter` without dependency defaults, so dropping the server's
+`policy-engine` feature leaves the filter's `policy-engine` off and the policy
+engine's dependency tree out of the build. `make release-fips` is this build
+with the feature list kept in one place; see [FIPS 140-3](fips.md) for what
+that build is for and how to deploy it.
 
-Library embedders need more than one `default-features = false`. Cargo unions
-features across the whole dependency graph, so a single crate anywhere in that
-graph that depends on `praxis-proxy-filter` with its defaults turns
-`policy-engine` back on for everyone, and the `policy` filter registers itself
-on the filter crate's own feature rather than the server's, so it becomes
-nameable in config in a build believed to be policy-free. Every edge reaching
-`praxis-proxy-filter` must therefore set `default-features = false`. Verify with
-`cargo tree -i praxis-policy`: no output means the policy engine really is out
-of the build.
+### Disabling the policy engine as a library consumer
+
+The same holds when Praxis crates are embedded. Each crate that reaches the
+filter (`praxis-proxy`, `praxis-proxy-protocol`) depends on it without
+defaults and exposes its own `policy-engine` feature, forwarding to the
+filter's. So:
+
+- Depending on `praxis-proxy` (the server as a library) with
+  `default-features = false` and naming the features you want gives a
+  policy-free build; leaving defaults on gives the policy engine.
+- Depending on `praxis-proxy-protocol` or `praxis-proxy-filter` directly gives
+  no policy engine unless you enable `policy-engine` on them (the filter's own
+  default is on, so set `default-features = false` on that edge to keep it
+  off). `praxis-proxy-core` and `praxis-proxy-tls` never pull it.
+
+Cargo unions features across the whole dependency graph, so one crate anywhere
+in your graph that depends on `praxis-proxy-filter` with its defaults turns
+`policy-engine` back on for everyone, and the `policy` filter then becomes
+nameable in config in a build believed to be policy-free. Verify with
+`cargo tree -e normal -i praxis-policy`: no output means the policy engine
+really is out of the build.
 
 ## Feature summary
 

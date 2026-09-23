@@ -30,6 +30,7 @@ mod config;
 pub mod dns;
 mod error;
 mod identity;
+pub mod provider;
 #[cfg(feature = "config-reload")]
 pub mod reload;
 #[cfg(feature = "spiffe")]

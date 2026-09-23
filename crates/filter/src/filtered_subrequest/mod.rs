@@ -335,6 +335,7 @@ impl FilteredSubrequestExecutor {
     ///
     ///     // At request time the callout builds an executor from the shared client
     ///     // and the downstream attributes it reads off its `HttpFilterContext`.
+    ///     praxis_tls::provider::install(); // required before any connector is built
     ///     let client = SubRequestClient::new(SubRequestConnector::new(1, None));
     ///     let downstream = SubrequestRuntime::new(None, false, None, Instant::now());
     ///     let executor = FilteredSubrequestExecutor::for_callout(
@@ -445,6 +446,7 @@ impl FilteredSubrequestExecutor {
     ///     .unwrap();
     ///     let outbound = Arc::new(FilterPipeline::build(&mut chain, &registry).unwrap());
     ///
+    ///     praxis_tls::provider::install(); // required before any connector is built
     ///     let client = SubRequestClient::new(SubRequestConnector::new(1, None));
     ///     let downstream = SubrequestRuntime::new(None, false, None, Instant::now());
     ///     let executor = FilteredSubrequestExecutor::for_callout(

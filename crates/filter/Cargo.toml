@@ -19,7 +19,7 @@ policy-engine = [
     "dep:ppe",
 ]
 basic-auth-filter = [
-    "dep:sha2",
+    "dep:openssl",
     "dep:subtle",
 ]
 otel = [
@@ -80,7 +80,8 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 smallvec = { workspace = true }
 serde_yaml = { workspace = true }
-sha2 = { workspace = true, optional = true }
+# System OpenSSL for the password digest; see hash_password in basic_auth.
+openssl = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
 thiserror = { workspace = true }
 # Used by `policy-engine` for plugin `initialize()` at filter

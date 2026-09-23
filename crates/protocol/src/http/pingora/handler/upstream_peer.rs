@@ -726,6 +726,9 @@ mod tests {
 
     #[test]
     fn client_cert_from_cached_produces_cert_key() {
+        // Loading a certificate binds it to a key through the installed
+        // provider, and nothing else in this test path installs one.
+        praxis_tls::provider::install();
         let pair = gen_cert_key_files();
         let cert_path = pair.cert_path.to_str().expect("cert path should be valid UTF-8");
         let key_path = pair.key_path.to_str().expect("key path should be valid UTF-8");

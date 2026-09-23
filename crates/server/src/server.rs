@@ -54,8 +54,65 @@ const CIRCUIT_EVICTION_INTERVAL: Duration = Duration::from_secs(300); // 5 min
 const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
 
 // -----------------------------------------------------------------------------
+// Crypto Provider
+// -----------------------------------------------------------------------------
+
+/// Install the rustls crypto provider and, when the deployment requires FIPS
+/// mode (`PRAXIS_REQUIRE_FIPS`), refuse to start unless it is in effect.
+///
+/// Must run before anything constructs a listener or an upstream connector.
+/// Pingora builds its upstream connectors while the proxy *service* is
+/// created, which is earlier than it looks, so this is the first statement of
+/// server startup rather than something done just before serving.
+///
+/// Fails the process if no provider ends up installed. There is no fallback:
+/// rustls' implicit one is compiled out by the Pingora fork's
+/// `custom-provider` feature, and quietly substituting a provider nobody
+/// selected is precisely the failure this guards against. For a FIPS build
+/// the provider *is* the compliance boundary, so starting without the
+/// intended one is worse than not starting.
+pub fn install_crypto_provider() {
+    praxis_tls::provider::install();
+
+    if !praxis_tls::provider::installed() {
+        fatal(&format!(
+            "failed to install the {} crypto provider; refusing to start",
+            praxis_tls::provider::name()
+        ));
+    }
+
+    let status = praxis_tls::provider::status();
+    info!(
+        provider = status.name,
+        provider_fips = status.provider_fips,
+        kernel_fips = ?status.kernel_fips,
+        fips_required = praxis_tls::provider::required(),
+        "installed rustls crypto provider"
+    );
+
+    if praxis_tls::provider::required() {
+        let unmet = status.unmet();
+        if !unmet.is_empty() {
+            fatal(&format!(
+                "{} is set but FIPS mode is not in effect: {}",
+                praxis_tls::provider::REQUIRE_FIPS_ENV,
+                unmet.join("; ")
+            ));
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Startup Security Checks
 // -----------------------------------------------------------------------------
+
+/// Everything that must happen before any listener or connector exists: the
+/// crypto provider install first, then the root, insecure-option and
+/// file-permission checks.
+fn run_startup_checks(config: &Config) {
+    install_crypto_provider();
+    run_startup_security_checks(config);
+}
 
 /// Root, insecure-option, and file-permission checks before the server starts.
 fn run_startup_security_checks(config: &Config) {
@@ -164,7 +221,7 @@ pub fn run_server_with_composition(
     config_path: Option<PathBuf>,
     log_level: Option<Arc<LogLevelState>>,
 ) -> ! {
-    run_startup_security_checks(&config);
+    run_startup_checks(&config);
 
     #[cfg(feature = "admin-api")]
     let stats_started_at = std::time::Instant::now();
@@ -812,7 +869,7 @@ filter_chains:
 
     #[test]
     fn circuit_eviction_task_spawns_without_panicking() {
-        let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
+        let connector = crate::test_support::connector(1);
         let client = praxis_core::subrequest::SubRequestClient::new(connector);
         spawn_circuit_eviction_task(client);
     }

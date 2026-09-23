@@ -28,6 +28,8 @@ arc-swap = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
 rcgen = { workspace = true, optional = true }
 rustls = { workspace = true }
+# The one crypto provider: system OpenSSL through rustls. See src/provider.rs.
+rustls-openssl = { workspace = true }
 serde = { workspace = true }
 spiffe = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }

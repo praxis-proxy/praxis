@@ -645,10 +645,9 @@ mod tests {
             handshake(server, client).expect_err("require_named must reject a peer with no certificate");
         }
 
-        /// Install a process-default provider. When the workspace enables both aws-lc-rs
-        /// and ring, rustls cannot auto-select one. Idempotent.
+        /// Install the process-default provider. Idempotent.
         fn install_provider() {
-            drop(rustls::crypto::aws_lc_rs::default_provider().install_default());
+            crate::provider::install();
         }
 
         /// A test CA that signs the server certificate and mints client SVID leaves.
@@ -755,7 +754,7 @@ mod tests {
             roots
                 .add(CertificateDer::from_pem_slice(pki.ca_pem.as_bytes()).expect("test CA PEM must parse"))
                 .expect("test CA must be added to root store");
-            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let provider = Arc::new(rustls_openssl::default_provider());
             let builder = ClientConfig::builder_with_provider(provider)
                 .with_safe_default_protocol_versions()
                 .expect("test protocol versions must be valid")

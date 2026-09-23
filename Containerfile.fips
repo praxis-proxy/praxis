@@ -1,0 +1,168 @@
+# syntax=docker/dockerfile:1
+
+# ------------------------------------------------------------------------------
+# FIPS build of praxis on Red Hat Universal Base Image 9
+# ------------------------------------------------------------------------------
+#
+# Three stages, all driven by the Makefile:
+#
+#   builder   builds the FIPS feature set of praxis with Red Hat's own Rust
+#             toolchain and OpenSSL (make container-fips, make fips-check)
+#   report    runs `cargo xtask fips report` on that binary and keeps the
+#             result (make fips-check)
+#   runtime   the shippable image on ubi9/ubi-minimal (make container-fips)
+#
+# The FIPS build differs from the standard build only in its cargo features:
+# it turns off what is known not to be FIPS compliant yet (the policy engine,
+# whose dependencies carry their own cryptography). CARGO_FEATURES defaults to
+# the Makefile's FIPS_FEATURES; keep the two in sync.
+#
+# Both base images are pinned by digest and their Red Hat signatures are
+# verified by `make fips-verify-image` before any build. Update the digests
+# here and in the Makefile together, after `cargo xtask fips verify-image`
+# has accepted the new ones.
+
+ARG UBI9_DIGEST=sha256:a4b9ec09b1e790a53ef25b7777c539976abe519248264298e5194dcbceac8c31
+ARG UBI9_MINIMAL_DIGEST=sha256:8ebe2ad8fdf3cab3e5a53c1edc69194c98209cfadab24b884f4ad9ebcf7bbbfc
+
+# Red Hat's rust-toolset may trail the workspace's rust-version; the build
+# passes --ignore-rust-version so the toolchain Red Hat ships is what gets
+# exercised. If the tree needs a newer compiler, this step is where it shows.
+ARG CARGO_FEATURES="config-reload,admin-api"
+ARG CARGO_ARGS="--ignore-rust-version"
+
+# ------------------------------------------------------------------------------
+# Stage 1: build with Red Hat's toolchain
+# ------------------------------------------------------------------------------
+
+FROM registry.access.redhat.com/ubi9/ubi@${UBI9_DIGEST} AS builder
+
+# Everything comes from Red Hat's UBI repositories (GPG-checked by dnf):
+#   rust-toolset   Red Hat's rustc and cargo
+#   openssl-devel  headers so openssl-sys links the system libcrypto
+RUN dnf install -y --setopt=install_weak_deps=False \
+        rust-toolset openssl-devel gcc gcc-c++ cmake make \
+    && dnf clean all
+
+# Never vendor OpenSSL; the system library is the validated module.
+ENV OPENSSL_NO_VENDOR=1 \
+    CARGO_HOME=/cargo
+
+# The build caches below carry explicit ids. Without them podman and BuildKit
+# key a cache mount by its target path, so this file and Containerfile (which
+# also builds under /src/target, with a different toolchain) would share one
+# target directory, and a `cargo clean` here could delete the binary the other
+# build is about to copy.
+
+# cargo-auditable embeds the list of crates compiled into the binary, which is
+# the manifest Red Hat's scanner reads to find pure-Rust cryptography that
+# leaves no symbol. Not a Red Hat package: installed from crates.io at a pinned
+# version (Rust Secure Code Working Group; see docs/developing/fips.md).
+ARG CARGO_AUDITABLE_VERSION=0.7.6
+RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
+    cargo install cargo-auditable --version "${CARGO_AUDITABLE_VERSION}" --locked
+
+WORKDIR /src
+
+# The whole workspace, so the build resolves the committed lockfile as is
+# (--locked) and the report stage can run `cargo xtask fips`.
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY tests tests
+COPY xtask xtask
+COPY examples examples
+
+ARG CARGO_FEATURES
+ARG CARGO_ARGS
+
+# The embedded manifest must list exactly the crates compiled in. On a stable
+# toolchain cargo-auditable derives it from `cargo metadata`, which activates
+# weak features the build never enables (rustls-webpki's `ring?/alloc` puts
+# ring in the manifest of a binary that never compiled it) and unifies
+# features across workspace members; the scanner fails on the name alone.
+# Cargo's SBOM precursor is the exact list but unstable (-Zsbom):
+# RUSTC_BOOTSTRAP=1 lets Red Hat's stable cargo accept the flag, and the env
+# overrides hand rustc and every build script RUSTC_BOOTSTRAP=-1, which forbids
+# unstable features, so the code compiled is the stable code. Drop this once
+# cargo's `build.sbom` is stable (rust-lang/cargo#13709).
+#
+# cargo before 1.99 does not relink a binary when only the SBOM setting
+# changed (rust-lang/cargo#15695, fixed by #17216), so the old binary in the
+# cached target goes first. Drop the clean once rust-toolset is 1.99 or newer.
+RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
+    --mount=type=cache,id=praxis-fips-target,target=/src/target \
+    cargo clean --release -p praxis-proxy \
+    && RUSTC_BOOTSTRAP=1 CARGO_BUILD_SBOM=true \
+       cargo auditable -Zsbom \
+        --config 'env.RUSTC_BOOTSTRAP.value="-1"' \
+        --config 'env.RUSTC_BOOTSTRAP.force=true' \
+        build --release --locked -p praxis-proxy \
+        --no-default-features --features "${CARGO_FEATURES}" ${CARGO_ARGS} \
+    && mkdir -p /fips \
+    && cp target/release/praxis /fips/praxis
+
+# ------------------------------------------------------------------------------
+# Stage 2: compliance report
+# ------------------------------------------------------------------------------
+
+# Only built when this stage is the target (make fips-check), so publishing
+# the runtime image never compiles xtask. The report runs at build time,
+# while the cargo cache is mounted, so `cargo tree` can resolve the graph
+# offline. xtask is built without its default features, which keeps the
+# standard proxy build (and its non-FIPS dependencies) out of this image.
+# The exit status is kept so the image can be run to print the report and
+# fail accordingly.
+FROM builder AS report
+
+ARG CARGO_FEATURES
+ARG CARGO_ARGS
+
+RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
+    --mount=type=cache,id=praxis-fips-target,target=/src/target \
+    { cargo run --quiet --locked -p xtask --no-default-features ${CARGO_ARGS} -- \
+        fips report /fips/praxis --features "${CARGO_FEATURES}" --offline --out /fips/report.txt; \
+      echo $? > /fips/status; } \
+    ; true
+
+CMD ["sh", "-c", "cat /fips/report.txt; exit $(cat /fips/status)"]
+
+# ------------------------------------------------------------------------------
+# Stage 3: runtime
+# ------------------------------------------------------------------------------
+
+FROM registry.access.redhat.com/ubi9/ubi-minimal@${UBI9_MINIMAL_DIGEST} AS runtime
+
+LABEL org.opencontainers.image.source="https://github.com/praxis-proxy/praxis" \
+    org.opencontainers.image.description="Praxis proxy server (FIPS build on UBI 9)" \
+    org.opencontainers.image.licenses="Apache-2.0"
+
+# ubi9/ubi-minimal already ships what the binary needs at runtime, all from
+# Red Hat: openssl-libs (libcrypto.so.3, libssl.so.3), the FIPS provider
+# module (openssl-fips-provider-so), ca-certificates, and curl-minimal for the
+# health check. Nothing is installed here, so the image stays exactly what
+# Red Hat signed plus the praxis binary and its config.
+#
+# ubi-minimal has no useradd; add the unprivileged user directly.
+RUN echo 'praxis:x:1001:1001:praxis:/nonexistent:/sbin/nologin' >> /etc/passwd \
+    && echo 'praxis:x:1001:' >> /etc/group \
+    && mkdir -p /etc/praxis
+
+COPY --from=builder --chown=root:root --chmod=0555 \
+    /fips/praxis /usr/local/bin/praxis
+
+COPY --chown=1001:1001 --chmod=0444 \
+    examples/configs/operations/container-default.yaml \
+    /etc/praxis/config.yaml
+
+USER 1001:1001
+
+WORKDIR /etc/praxis
+
+# Port 8080: proxy listener (see container-default.yaml)
+# Port 9901: admin API for healthcheck and metrics
+EXPOSE 8080 9901
+
+HEALTHCHECK --interval=5s --timeout=3s --start-period=2s \
+    CMD curl -fsS http://127.0.0.1:9901/healthy || exit 1
+
+ENTRYPOINT ["praxis", "-c", "/etc/praxis/config.yaml"]

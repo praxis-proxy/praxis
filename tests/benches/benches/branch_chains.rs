@@ -203,7 +203,7 @@ fn build_pipeline_with_branches(branch_count: usize) -> FilterPipeline {
             failure_mode: praxis_core::config::FailureMode::default(),
             branch_chains: Some(branch_chains),
         },
-        filter_entry("headers", "response_add:\n  - name: X-Done\n    value: true"),
+        filter_entry("headers", "response_add:\n  - name: X-Done\n    value: \"true\""),
     ];
 
     FilterPipeline::build(&mut entries, &registry).unwrap()

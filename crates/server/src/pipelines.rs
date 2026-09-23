@@ -979,6 +979,8 @@ filter_chains:
 
     #[test]
     fn build_subrequest_client_wires_circuit_breaker_from_config() {
+        // Tests skip the server bootstrap that installs the provider.
+        praxis_tls::provider::install();
         let client = build_subrequest_client(&config_with_circuit_breaker());
         assert!(
             client.connector().has_circuit_breaker(),
@@ -990,6 +992,8 @@ filter_chains:
 
     #[test]
     fn build_subrequest_client_omits_circuit_breaker_when_unset() {
+        // Tests skip the server bootstrap that installs the provider.
+        praxis_tls::provider::install();
         let client = build_subrequest_client(&valid_config());
         assert!(
             !client.connector().has_circuit_breaker(),
@@ -999,6 +1003,8 @@ filter_chains:
 
     #[test]
     fn build_subrequest_client_threads_max_connections_from_config() {
+        // Tests skip the server bootstrap that installs the provider.
+        praxis_tls::provider::install();
         let client = build_subrequest_client(&config_with_circuit_breaker());
         assert_eq!(
             client.connector().configured_max_connections(),
@@ -1209,7 +1215,7 @@ filter_chains:
 
     /// Empty sub-request client for tests.
     fn empty_subrequest_client() -> SubRequestClient {
-        SubRequestClient::new(SubRequestConnector::new(8, None))
+        SubRequestClient::new(crate::test_support::connector(8))
     }
 
     /// KV store registry with one test store.

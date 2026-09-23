@@ -11,6 +11,7 @@
 //!
 //! ```
 //! use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+//! praxis_tls::provider::install(); // required before any connector is built
 //!
 //! let connector = SubRequestConnector::new(128, None);
 //! let client = SubRequestClient::new(connector);

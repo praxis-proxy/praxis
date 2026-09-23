@@ -787,10 +787,10 @@ fn a_transport_keeps_the_connector_it_was_built_with() {
     let _guard = crate::policy_connector::REGISTRATION_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let own = SubRequestConnector::new(8, None);
+    let own = crate::test_support::connector(8, None);
     let transport = PolicyHttpTransport::with_connector(Some(own.clone()), true);
 
-    crate::set_policy_subrequest_connector(&SubRequestConnector::new(1, None));
+    crate::set_policy_subrequest_connector(&crate::test_support::connector(1, None));
 
     assert!(
         std::ptr::eq(transport.client().connector().connector(), own.connector()),
@@ -803,7 +803,7 @@ fn a_transport_built_after_registration_uses_the_registered_pool() {
     let _guard = crate::policy_connector::REGISTRATION_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let shared = SubRequestConnector::new(16, None);
+    let shared = crate::test_support::connector(16, None);
     crate::set_policy_subrequest_connector(&shared);
 
     let transport = PolicyHttpTransport::new(true);
@@ -825,7 +825,7 @@ fn a_transport_built_without_a_registration_falls_back() {
 
 #[test]
 fn the_registered_connector_is_the_one_policy_calls_use() {
-    let shared = SubRequestConnector::new(16, None);
+    let shared = crate::test_support::connector(16, None);
     let client = build_client(Some(shared.clone()));
     assert!(
         std::ptr::eq(client.connector().connector(), shared.connector()),
@@ -835,7 +835,7 @@ fn the_registered_connector_is_the_one_policy_calls_use() {
 
 #[test]
 fn two_transports_from_one_registration_share_a_pool() {
-    let shared = SubRequestConnector::new(16, None);
+    let shared = crate::test_support::connector(16, None);
     let first = build_client(Some(shared.clone()));
     let second = build_client(Some(shared.clone()));
     assert!(std::ptr::eq(

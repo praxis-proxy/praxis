@@ -68,6 +68,7 @@ const EAGER_BODY_CAPACITY: usize = 131_072; // 128 KiB
 ///
 /// ```
 /// use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+/// praxis_tls::provider::install(); // required before any connector is built
 ///
 /// let connector = SubRequestConnector::new(128, None);
 /// let client = SubRequestClient::new(connector);

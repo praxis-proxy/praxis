@@ -22,6 +22,33 @@ use rustls::{ServerConfig, server::WantsServerCert, version};
 
 use crate::{CipherSuiteId, ClientCertMode, ListenerTls, TlsError, TlsVersion, client_auth};
 
+/// Apply the settings every listener config shares once its certificates are
+/// wired: the ALPN list and the Extended Master Secret requirement. When the
+/// deployment requires FIPS mode, a config that would not operate in it is an
+/// error rather than a listener.
+fn finish_server_config(mut config: ServerConfig, advertise_http_alpn: bool) -> Result<ServerConfig, TlsError> {
+    config.alpn_protocols = if advertise_http_alpn {
+        alpn_protocols()
+    } else {
+        Vec::new()
+    };
+    require_extended_master_secret(&mut config);
+    crate::provider::check_config_fips(config.fips(), "listener")?;
+    Ok(config)
+}
+
+/// Require the Extended Master Secret extension (RFC 7627) on every TLS 1.2
+/// session this listener negotiates.
+///
+/// TLS 1.3 binds its keys to the handshake transcript by design; TLS 1.2 only
+/// does so with this extension, which is why NIST SP 800-52r2 requires it and
+/// why rustls' own `ServerConfig::fips()` reports `false` without it. Every
+/// modern client supports it, so the cost is refusing TLS 1.2 handshakes from
+/// clients that do not, which is the intended outcome in a FIPS deployment.
+fn require_extended_master_secret(config: &mut ServerConfig) {
+    config.require_ems = true;
+}
+
 /// ALPN protocols advertised on HTTP TLS listeners.
 ///
 /// Only advertised when the caller asks for HTTP ALPN. TCP-over-TLS
@@ -66,7 +93,7 @@ pub fn build_server_config(tls: &ListenerTls, advertise_http_alpn: bool) -> Resu
     let builder = build_server_config_base(tls)?;
 
     let primary = tls.certificates.first().ok_or(TlsError::NoCertificates)?;
-    let mut config = if tls.certificates.len() == 1 {
+    let config = if tls.certificates.len() == 1 {
         let (certs, key) = loader::load_cert_and_key(primary)?;
         builder
             .with_single_cert(certs, key)
@@ -78,11 +105,7 @@ pub fn build_server_config(tls: &ListenerTls, advertise_http_alpn: bool) -> Resu
         builder.with_cert_resolver(Arc::new(resolver))
     };
 
-    config.alpn_protocols = if advertise_http_alpn {
-        alpn_protocols()
-    } else {
-        Vec::new()
-    };
+    let config = finish_server_config(config, advertise_http_alpn)?;
     Ok(Arc::new(config))
 }
 
@@ -149,12 +172,8 @@ pub fn build_reloadable_server_config(
     let resolver = crate::reload::ReloadableCertResolver::new(primary)?;
     let cert_handle = resolver.arc();
 
-    let mut config = builder.with_cert_resolver(Arc::new(resolver));
-    config.alpn_protocols = if advertise_http_alpn {
-        alpn_protocols()
-    } else {
-        Vec::new()
-    };
+    let config = builder.with_cert_resolver(Arc::new(resolver));
+    let config = finish_server_config(config, advertise_http_alpn)?;
 
     Ok(ReloadableServerConfig {
         config: Arc::new(config),
@@ -181,7 +200,7 @@ fn build_config_builder(
             vec![&version::TLS12, &version::TLS13]
         },
     };
-    let provider = maybe_filter_provider(default_crypto_provider(), tls.cipher_suites.as_deref())?;
+    let provider = maybe_filter_provider(default_crypto_provider()?, tls.cipher_suites.as_deref())?;
     ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&versions)
         .map_err(|err| TlsError::ServerConfigError {
@@ -238,7 +257,7 @@ fn maybe_filter_provider(
     let filtered: Vec<_> = ids
         .iter()
         .filter_map(|id| {
-            let target = id.to_rustls().suite();
+            let target = id.to_rustls();
             provider
                 .cipher_suites
                 .iter()
@@ -362,6 +381,10 @@ mod tests {
         };
 
         let config = build_server_config(&tls, true).expect("single-cert build should succeed");
+        assert!(
+            config.require_ems,
+            "TLS 1.2 sessions must require the Extended Master Secret"
+        );
         assert_eq!(
             config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()],
@@ -646,7 +669,8 @@ mod tests {
 
     #[test]
     fn maybe_filter_provider_none_returns_original() {
-        let provider = default_crypto_provider();
+        ensure_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed above");
         let original_count = provider.cipher_suites.len();
 
         let result = maybe_filter_provider(Arc::clone(&provider), None).expect("None filter should succeed");
@@ -659,7 +683,8 @@ mod tests {
 
     #[test]
     fn maybe_filter_provider_restricts_suites() {
-        let provider = default_crypto_provider();
+        ensure_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed above");
         let ids = [CipherSuiteId::Tls13Aes256GcmSha384];
 
         let result = maybe_filter_provider(provider, Some(&ids)).expect("single-suite filter should succeed");
@@ -670,14 +695,15 @@ mod tests {
         );
         assert_eq!(
             result.cipher_suites[0].suite(),
-            CipherSuiteId::Tls13Aes256GcmSha384.to_rustls().suite(),
+            CipherSuiteId::Tls13Aes256GcmSha384.to_rustls(),
             "filtered suite should match the requested one"
         );
     }
 
     #[test]
     fn maybe_filter_provider_preserves_configured_order() {
-        let provider = default_crypto_provider();
+        ensure_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed above");
         let ids = [
             CipherSuiteId::Tls13Chacha20Poly1305Sha256,
             CipherSuiteId::Tls13Aes128GcmSha256,
@@ -691,19 +717,20 @@ mod tests {
         );
         assert_eq!(
             result.cipher_suites[0].suite(),
-            CipherSuiteId::Tls13Chacha20Poly1305Sha256.to_rustls().suite(),
+            CipherSuiteId::Tls13Chacha20Poly1305Sha256.to_rustls(),
             "first suite should match the first configured cipher"
         );
         assert_eq!(
             result.cipher_suites[1].suite(),
-            CipherSuiteId::Tls13Aes128GcmSha256.to_rustls().suite(),
+            CipherSuiteId::Tls13Aes128GcmSha256.to_rustls(),
             "second suite should match the second configured cipher"
         );
     }
 
     #[test]
     fn maybe_filter_provider_reverses_provider_order_when_configured() {
-        let provider = default_crypto_provider();
+        ensure_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed above");
         let ids = [
             CipherSuiteId::Tls13Aes128GcmSha256,
             CipherSuiteId::Tls13Aes256GcmSha384,
@@ -770,6 +797,10 @@ mod tests {
         };
 
         let result = build_reloadable_server_config(&tls, true).expect("reloadable build should succeed");
+        assert!(
+            result.config.require_ems,
+            "TLS 1.2 sessions must require the Extended Master Secret"
+        );
         assert_eq!(
             result.config.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()],

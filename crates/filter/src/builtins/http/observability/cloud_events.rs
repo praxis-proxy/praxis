@@ -1412,7 +1412,7 @@ mod tests {
         let request = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&request);
         ctx.current_filter_id = Some(0);
-        let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
+        let connector = crate::test_support::connector(1, None);
         let client = praxis_core::subrequest::SubRequestClient::new(connector);
         ctx.subrequest_client = Some(&client);
 
@@ -1581,7 +1581,7 @@ mod tests {
             delivery_timeout_ms: 3_000,
         })
         .unwrap();
-        let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
+        let connector = crate::test_support::connector(1, None);
         let client = praxis_core::subrequest::SubRequestClient::new(connector);
         let request = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&request);
