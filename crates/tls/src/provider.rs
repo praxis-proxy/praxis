@@ -85,6 +85,68 @@ pub fn installed() -> bool {
     CryptoProvider::get_default().is_some()
 }
 
+/// What the process knows about FIPS at startup.
+///
+/// Two independent signals, reported separately so a log line says which one
+/// is missing: the kernel's FIPS mode, which on Red Hat Enterprise Linux is
+/// what activates the validated OpenSSL provider and the system crypto
+/// policy, and the installed rustls provider's own view of whether every
+/// primitive it offers is FIPS approved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Status {
+    /// Name of the compiled-in provider.
+    pub name: &'static str,
+    /// Whether a process-wide provider is installed.
+    pub installed: bool,
+    /// Whether the installed provider reports every cipher suite, key exchange
+    /// and signature algorithm as FIPS approved (rustls' `CryptoProvider::fips`).
+    /// `false` when no provider is installed.
+    pub provider_fips: bool,
+    /// Whether the kernel is in FIPS mode, from `/proc/sys/crypto/fips_enabled`.
+    /// `None` where that file does not exist (a non-Linux host, or a container
+    /// without `/proc` mounted).
+    pub kernel_fips: Option<bool>,
+}
+
+/// Path of the kernel's FIPS mode flag.
+const KERNEL_FIPS_FLAG: &str = "/proc/sys/crypto/fips_enabled";
+
+/// Read the process's FIPS status.
+///
+/// Reads the kernel flag on every call; it is cheap and cannot change once the
+/// system has booted, so callers may cache it or not as they like.
+///
+/// ```
+/// praxis_tls::provider::install();
+/// let status = praxis_tls::provider::status();
+/// assert!(status.installed);
+/// ```
+#[must_use]
+pub fn status() -> Status {
+    let provider = CryptoProvider::get_default();
+    Status {
+        name: name(),
+        installed: provider.is_some(),
+        provider_fips: provider.is_some_and(|provider| provider.fips()),
+        kernel_fips: std::fs::read_to_string(KERNEL_FIPS_FLAG)
+            .ok()
+            .and_then(|contents| kernel_fips_from(&contents)),
+    }
+}
+
+/// Interpret the contents of the kernel's FIPS flag.
+///
+/// The kernel writes a single digit and a newline; anything else is treated as
+/// unknown rather than as "off", so a corrupt or unexpected file never reads as
+/// a positive or negative claim.
+fn kernel_fips_from(contents: &str) -> Option<bool> {
+    match contents.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
+}
+
 /// The installed process-wide provider.
 ///
 /// Returns [`TlsError::NoCryptoProvider`] when none has been installed. There
@@ -123,5 +185,32 @@ mod tests {
     #[test]
     fn name_is_the_openssl_provider() {
         assert_eq!(name(), "openssl");
+    }
+
+    #[test]
+    fn kernel_flag_is_read_strictly() {
+        assert_eq!(kernel_fips_from("1\n"), Some(true));
+        assert_eq!(kernel_fips_from("0\n"), Some(false));
+        assert_eq!(kernel_fips_from("1"), Some(true));
+        assert_eq!(kernel_fips_from(""), None, "an empty file is unknown, not off");
+        assert_eq!(kernel_fips_from("2\n"), None, "an unexpected value is unknown");
+        assert_eq!(kernel_fips_from("garbage"), None);
+    }
+
+    #[test]
+    fn status_reflects_the_installed_provider() {
+        install();
+        let status = status();
+        assert_eq!(status.name, "openssl");
+        assert!(status.installed);
+        // Whether the provider is FIPS depends on the host's OpenSSL state, so
+        // only pin it to what rustls itself says.
+        let expected = CryptoProvider::get_default().expect("installed above").fips();
+        assert_eq!(status.provider_fips, expected);
+        // The kernel flag is host-dependent too; on Linux it is readable and
+        // one of the two known values.
+        if cfg!(target_os = "linux") && std::path::Path::new(KERNEL_FIPS_FLAG).exists() {
+            assert!(status.kernel_fips.is_some(), "the kernel flag must parse on Linux");
+        }
     }
 }

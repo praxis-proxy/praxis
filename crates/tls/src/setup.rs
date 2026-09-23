@@ -666,7 +666,8 @@ mod tests {
 
     #[test]
     fn maybe_filter_provider_none_returns_original() {
-        let provider = default_crypto_provider().expect("provider installed by test_utils");
+        ensure_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed above");
         let original_count = provider.cipher_suites.len();
 
         let result = maybe_filter_provider(Arc::clone(&provider), None).expect("None filter should succeed");
@@ -679,7 +680,8 @@ mod tests {
 
     #[test]
     fn maybe_filter_provider_restricts_suites() {
-        let provider = default_crypto_provider().expect("provider installed by test_utils");
+        ensure_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed above");
         let ids = [CipherSuiteId::Tls13Aes256GcmSha384];
 
         let result = maybe_filter_provider(provider, Some(&ids)).expect("single-suite filter should succeed");
@@ -697,7 +699,8 @@ mod tests {
 
     #[test]
     fn maybe_filter_provider_preserves_configured_order() {
-        let provider = default_crypto_provider().expect("provider installed by test_utils");
+        ensure_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed above");
         let ids = [
             CipherSuiteId::Tls13Chacha20Poly1305Sha256,
             CipherSuiteId::Tls13Aes128GcmSha256,
@@ -723,7 +726,8 @@ mod tests {
 
     #[test]
     fn maybe_filter_provider_reverses_provider_order_when_configured() {
-        let provider = default_crypto_provider().expect("provider installed by test_utils");
+        ensure_crypto_provider();
+        let provider = default_crypto_provider().expect("provider installed above");
         let ids = [
             CipherSuiteId::Tls13Aes128GcmSha256,
             CipherSuiteId::Tls13Aes256GcmSha384,

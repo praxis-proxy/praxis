@@ -71,7 +71,7 @@ const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
 /// the provider *is* the compliance boundary, so starting without the
 /// intended one is worse than not starting.
 pub fn install_crypto_provider() {
-    let installed_here = praxis_tls::provider::install();
+    praxis_tls::provider::install();
 
     if !praxis_tls::provider::installed() {
         fatal(&format!(
@@ -80,9 +80,12 @@ pub fn install_crypto_provider() {
         ));
     }
 
+    let status = praxis_tls::provider::status();
     info!(
-        provider = praxis_tls::provider::name(),
-        installed_here, "installed rustls crypto provider"
+        provider = status.name,
+        provider_fips = status.provider_fips,
+        kernel_fips = ?status.kernel_fips,
+        "installed rustls crypto provider"
     );
 }
 
