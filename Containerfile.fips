@@ -1,26 +1,34 @@
 # syntax=docker/dockerfile:1
 
 # ------------------------------------------------------------------------------
-# FIPS compliance check on UBI 9
+# FIPS build of praxis on Red Hat Universal Base Image 9
 # ------------------------------------------------------------------------------
 #
-# Builds praxis on Red Hat Universal Base Image 9 with Red Hat's own Rust
-# toolchain and OpenSSL, then runs `cargo xtask fips report` against the
-# result. `make fips-check` verifies the base image's Red Hat signature,
-# builds this file, and prints the report; the exit status is the report's.
+# Three stages, all driven by the Makefile:
 #
-# This is a check image, not a runtime image.
+#   builder   builds the FIPS feature set of praxis with Red Hat's own Rust
+#             toolchain and OpenSSL (make container-fips, make fips-check)
+#   report    runs `cargo xtask fips report` on that binary and keeps the
+#             result (make fips-check)
+#   runtime   the shippable image on ubi9/ubi-minimal (make container-fips)
 #
-# The base image is pinned by digest. Update the digest here and in the
-# Makefile (FIPS_UBI9_DIGEST) together, after `cargo xtask fips verify-image`
-# has accepted the new one.
+# The FIPS build differs from the standard build only in its cargo features:
+# it turns off what is known not to be FIPS compliant yet (the policy engine,
+# whose dependencies carry their own cryptography). CARGO_FEATURES defaults to
+# the Makefile's FIPS_FEATURES; keep the two in sync.
+#
+# Both base images are pinned by digest and their Red Hat signatures are
+# verified by `make fips-verify-image` before any build. Update the digests
+# here and in the Makefile together, after `cargo xtask fips verify-image`
+# has accepted the new ones.
 
 ARG UBI9_DIGEST=sha256:a4b9ec09b1e790a53ef25b7777c539976abe519248264298e5194dcbceac8c31
+ARG UBI9_MINIMAL_DIGEST=sha256:8ebe2ad8fdf3cab3e5a53c1edc69194c98209cfadab24b884f4ad9ebcf7bbbfc
 
-# Red Hat's rust-toolset may trail the workspace's rust-version; the check
-# passes --ignore-rust-version so the toolchain that Red Hat ships is what
-# gets exercised. If the tree needs a newer compiler, this step is where it
-# shows, and that is a finding in its own right.
+# Red Hat's rust-toolset may trail the workspace's rust-version; the build
+# passes --ignore-rust-version so the toolchain Red Hat ships is what gets
+# exercised. If the tree needs a newer compiler, this step is where it shows.
+ARG CARGO_FEATURES="config-reload,admin-api"
 ARG CARGO_ARGS="--ignore-rust-version"
 
 # ------------------------------------------------------------------------------
@@ -56,11 +64,13 @@ COPY tests tests
 COPY xtask xtask
 COPY examples examples
 
+ARG CARGO_FEATURES
 ARG CARGO_ARGS
 
 RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
     --mount=type=cache,id=praxis-fips-target,target=/src/target \
-    cargo build --release --locked -p praxis-proxy ${CARGO_ARGS} \
+    cargo build --release --locked -p praxis-proxy \
+        --no-default-features --features "${CARGO_FEATURES}" ${CARGO_ARGS} \
     && mkdir -p /fips \
     && cp target/release/praxis /fips/praxis
 
@@ -68,21 +78,64 @@ RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
 # Stage 2: compliance report
 # ------------------------------------------------------------------------------
 
-# Only built when this stage is the target (make fips-check). The report runs
-# at build time, while the cargo cache is mounted, so `cargo tree` can
-# resolve the graph offline. xtask is built without its default features,
-# which keeps the standard proxy build (and its non-FIPS dependencies) out of
-# this image. The exit status is kept so the image can be run to print the
-# report and fail accordingly.
+# Only built when this stage is the target (make fips-check), so publishing
+# the runtime image never compiles xtask. The report runs at build time,
+# while the cargo cache is mounted, so `cargo tree` can resolve the graph
+# offline. xtask is built without its default features, which keeps the
+# standard proxy build (and its non-FIPS dependencies) out of this image.
+# The exit status is kept so the image can be run to print the report and
+# fail accordingly.
 FROM builder AS report
 
+ARG CARGO_FEATURES
 ARG CARGO_ARGS
 
 RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
     --mount=type=cache,id=praxis-fips-target,target=/src/target \
     { cargo run --quiet --locked -p xtask --no-default-features ${CARGO_ARGS} -- \
-        fips report /fips/praxis --offline --out /fips/report.txt; \
+        fips report /fips/praxis --features "${CARGO_FEATURES}" --offline --out /fips/report.txt; \
       echo $? > /fips/status; } \
     ; true
 
 CMD ["sh", "-c", "cat /fips/report.txt; exit $(cat /fips/status)"]
+
+# ------------------------------------------------------------------------------
+# Stage 3: runtime
+# ------------------------------------------------------------------------------
+
+FROM registry.access.redhat.com/ubi9/ubi-minimal@${UBI9_MINIMAL_DIGEST} AS runtime
+
+LABEL org.opencontainers.image.source="https://github.com/praxis-proxy/praxis" \
+    org.opencontainers.image.description="Praxis proxy server (FIPS build on UBI 9)" \
+    org.opencontainers.image.licenses="Apache-2.0"
+
+# ubi9/ubi-minimal already ships what the binary needs at runtime, all from
+# Red Hat: openssl-libs (libcrypto.so.3, libssl.so.3), the FIPS provider
+# module (openssl-fips-provider-so), ca-certificates, and curl-minimal for the
+# health check. Nothing is installed here, so the image stays exactly what
+# Red Hat signed plus the praxis binary and its config.
+#
+# ubi-minimal has no useradd; add the unprivileged user directly.
+RUN echo 'praxis:x:1001:1001:praxis:/nonexistent:/sbin/nologin' >> /etc/passwd \
+    && echo 'praxis:x:1001:' >> /etc/group \
+    && mkdir -p /etc/praxis
+
+COPY --from=builder --chown=root:root --chmod=0555 \
+    /fips/praxis /usr/local/bin/praxis
+
+COPY --chown=1001:1001 --chmod=0444 \
+    examples/configs/operations/container-default.yaml \
+    /etc/praxis/config.yaml
+
+USER 1001:1001
+
+WORKDIR /etc/praxis
+
+# Port 8080: proxy listener (see container-default.yaml)
+# Port 9901: admin API for healthcheck and metrics
+EXPOSE 8080 9901
+
+HEALTHCHECK --interval=5s --timeout=3s --start-period=2s \
+    CMD curl -fsS http://127.0.0.1:9901/healthy || exit 1
+
+ENTRYPOINT ["praxis", "-c", "/etc/praxis/config.yaml"]

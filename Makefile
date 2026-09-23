@@ -29,9 +29,9 @@ RUST_TARGETS := all build release check \
 	test-config-validation test-config \
 	bench build-benches \
 	lint fmt doc audit coverage coverage-check \
-	fips-deps fips-report \
+	build-fips release-fips check-fips lint-fips test-fips fips-deps fips-report \
 	run-echo run-debug
-NIGHTLY_FMT_TARGETS  := lint fmt
+NIGHTLY_FMT_TARGETS  := lint lint-fips fmt
 CMAKE_TARGETS := all build release check \
 	test test-unit \
 	test-schema test-integration test-conformance \
@@ -61,6 +61,8 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	require-container-engine require-podman \
 	container container-run \
 	test-container test-container-run \
+	build-fips release-fips check-fips lint-fips test-fips \
+	container-fips container-fips-run \
 	fips-check fips-check-ubi fips-deps fips-report fips-verify-image \
 	run-echo run-debug \
 	tools clean-tools \
@@ -259,53 +261,107 @@ container-run: | require-container-engine
 # FIPS
 # -------------------------------------------------------------------
 #
-# Local, reproducible checks that a build is on the path to FIPS 140-3
-# compliance on RHEL. They mirror Red Hat's release scanner
-# (openshift/check-payload); see docs/developing/fips.md and
-# docs/developing/getting-started.md.
+# The standard build enables everything by default. The FIPS build turns
+# off what is known not to be FIPS 140-3 compliant yet, so nobody has to
+# know which features to pick:
 #
-#   make fips-check        build on UBI 9 with Red Hat's toolchain and print
-#                          the compliance report (alias for fips-check-ubi)
-#   make fips-report       the same report against an existing local binary
+#   policy-engine   praxis-policy carries its own cryptography (sha2, hmac,
+#                   jsonwebtoken on aws-lc-rs); off until it is ported
+#
+# Everything else in the default set stays on (config-reload, admin-api).
+# FIPS_FEATURES is the single place this is defined; Containerfile.fips
+# (CARGO_FEATURES) mirrors it and must be kept in sync.
+#
+# The FIPS build goes to its own target directory so it never overwrites,
+# or is mistaken for, the standard build.
+#
+#   make build-fips        FIPS build, debug profile
+#   make release-fips      FIPS build, release profile
+#   make lint-fips         clippy + rustfmt for the FIPS feature set
+#   make test-fips         unit tests for the FIPS feature set
+#   make container-fips    FIPS runtime image on UBI 9 (Red Hat toolchain,
+#                          signature-verified base images)
+#   make fips-check        build on UBI 9 and print the compliance report
+#   make fips-report       the same report against the local FIPS build
 #   make fips-deps         dependency graph only (seconds, no build)
 #
 # The report and the image verification are `cargo xtask fips` commands
 # (xtask/src/fips/). XTASK_FIPS builds xtask without its default features,
 # so these targets never compile the standard proxy build to run.
 #
-# The UBI base image is pinned by digest and its Red Hat signature is
-# verified before every build. Update FIPS_UBI9_DIGEST together with the
-# default in Containerfile.fips.
+# See docs/developing/fips.md and docs/developing/getting-started.md.
 
-FIPS_BIN         ?= target/release/praxis
-FIPS_UBI9_DIGEST := sha256:a4b9ec09b1e790a53ef25b7777c539976abe519248264298e5194dcbceac8c31
-FIPS_UBI9_IMAGE  := registry.access.redhat.com/ubi9/ubi@$(FIPS_UBI9_DIGEST)
-FIPS_CHECK_IMAGE ?= praxis-fips-check
-XTASK_FIPS       := cargo run -q -p xtask --no-default-features --
-
+FIPS_FEATURES           := config-reload,admin-api
+# The same list qualified for a multi-package cargo invocation.
+_COMMA                  := ,
+FIPS_FEATURES_QUALIFIED := $(subst $(_COMMA),$(_COMMA)praxis-proxy/,praxis-proxy/$(FIPS_FEATURES))
+FIPS_TARGET_DIR         := target/fips
+FIPS_BIN                ?= $(FIPS_TARGET_DIR)/release/praxis
+FIPS_CARGO_ARGS         := -p praxis-proxy --no-default-features --features $(FIPS_FEATURES) --target-dir $(FIPS_TARGET_DIR)
+FIPS_UBI9_DIGEST        := sha256:a4b9ec09b1e790a53ef25b7777c539976abe519248264298e5194dcbceac8c31
+FIPS_UBI9_MINIMAL_DIGEST := sha256:8ebe2ad8fdf3cab3e5a53c1edc69194c98209cfadab24b884f4ad9ebcf7bbbfc
+FIPS_UBI9_IMAGE         := registry.access.redhat.com/ubi9/ubi@$(FIPS_UBI9_DIGEST)
+FIPS_UBI9_MINIMAL_IMAGE := registry.access.redhat.com/ubi9/ubi-minimal@$(FIPS_UBI9_MINIMAL_DIGEST)
+FIPS_CHECK_IMAGE        ?= praxis-fips-check
+FIPS_BUILD_ARGS         := --build-arg UBI9_DIGEST=$(FIPS_UBI9_DIGEST) \
+	--build-arg UBI9_MINIMAL_DIGEST=$(FIPS_UBI9_MINIMAL_DIGEST) \
+	--build-arg CARGO_FEATURES=$(FIPS_FEATURES)
+XTASK_FIPS              := cargo run -q -p xtask --no-default-features --
 require-podman:
 	@command -v podman >/dev/null || { echo "podman is required: Red Hat image signatures can only be verified with podman"; exit 1; }
 
-fips-check: fips-check-ubi
+build-fips:
+	cargo build $(FIPS_CARGO_ARGS)
+
+release-fips:
+	cargo build --release $(FIPS_CARGO_ARGS)
+
+check-fips:
+	cargo check $(FIPS_CARGO_ARGS)
+
+# Clippy over every target of the FIPS build, plus the rustfmt check (which
+# is feature-independent but belongs in "is the FIPS version clean").
+lint-fips:
+	cargo clippy $(FIPS_CARGO_ARGS) --all-targets -- -D warnings
+	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
+
+# Unit tests of the crates that make up the FIPS binary, resolved exactly as
+# the FIPS build resolves them: no default features anywhere, only
+# FIPS_FEATURES on the binary. The integration suites run the standard build
+# through the test harness and are covered by `make test-integration`.
+test-fips:
+	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
+		-p praxis-proxy -p praxis-proxy-protocol -p praxis-proxy-filter \
+		-p praxis-proxy-core -p praxis-proxy-tls \
+		--features $(FIPS_FEATURES_QUALIFIED) $(_NOCAPTURE)
 
 fips-verify-image: | require-podman
 	$(XTASK_FIPS) fips verify-image --pinned-in Containerfile.fips $(FIPS_UBI9_IMAGE)
+	$(XTASK_FIPS) fips verify-image --pinned-in Containerfile.fips $(FIPS_UBI9_MINIMAL_IMAGE)
+
+container-fips: fips-verify-image
+	podman build -f Containerfile.fips --target runtime $(FIPS_BUILD_ARGS) \
+		-t $(IMAGE):$(VERSION)-fips .
+
+container-fips-run: | require-podman
+	podman run --rm --network=host $(IMAGE):$(VERSION)-fips 2>&1
+
+fips-check: fips-check-ubi
 
 fips-check-ubi: fips-verify-image
-	podman build -f Containerfile.fips --target report \
-		--build-arg UBI9_DIGEST=$(FIPS_UBI9_DIGEST) \
+	podman build -f Containerfile.fips --target report $(FIPS_BUILD_ARGS) \
 		-t $(FIPS_CHECK_IMAGE) .
 	podman run --rm $(FIPS_CHECK_IMAGE)
 
 fips-report:
-	$(XTASK_FIPS) fips report $(FIPS_BIN)
+	$(XTASK_FIPS) fips report --features $(FIPS_FEATURES) $(FIPS_BIN)
 
 # The graph check is `cargo xtask fips report` (cargo tree scoped to the
 # binary and its feature set) rather than cargo-deny: cargo-deny resolves features
 # workspace-wide, and the test crates always enable the policy engine on
-# the binary, so it cannot see a feature-reduced build's real graph.
+# the binary, so it cannot see the FIPS build's real graph.
 fips-deps:
-	$(XTASK_FIPS) fips report --deps-only
+	$(XTASK_FIPS) fips report --deps-only --features $(FIPS_FEATURES)
 
 # -------------------------------------------------------------------
 # Test
@@ -547,11 +603,18 @@ help:
 	@echo "  test-container       build test container image"
 	@echo "  test-container-run   build and run test suite in container"
 	@echo ""
-	@echo "FIPS:"
-	@echo "  fips-check           build on UBI 9 (Red Hat toolchain, signature-verified base) and print the compliance report"
-	@echo "  fips-report          compliance report against an existing binary (FIPS_BIN=target/release/praxis)"
+	@echo "FIPS (feature set: $(FIPS_FEATURES); policy engine off):"
+	@echo "  build-fips           FIPS build, debug profile, into target/fips"
+	@echo "  release-fips         FIPS build, release profile, into target/fips"
+	@echo "  check-fips           cargo check of the FIPS build"
+	@echo "  lint-fips            clippy (all targets) + rustfmt check for the FIPS feature set"
+	@echo "  test-fips            unit tests resolved as the FIPS build (no defaults, FIPS_FEATURES on the binary)"
+	@echo "  container-fips       FIPS runtime image on UBI 9 (Red Hat toolchain, signature-verified bases)"
+	@echo "  container-fips-run   run the FIPS image in foreground (host network)"
+	@echo "  fips-check           build on UBI 9 and print the compliance report (fails while findings remain)"
+	@echo "  fips-report          compliance report against the local FIPS build (FIPS_BIN=target/fips/release/praxis)"
 	@echo "  fips-deps            dependency graph vs Red Hat's crypto denylist (seconds, no build)"
-	@echo "  fips-verify-image    verify the pinned UBI 9 base image is Red Hat's (digest + signature)"
+	@echo "  fips-verify-image    verify the pinned UBI 9 base images are Red Hat's (digest + signature)"
 	@echo ""
 	@echo "Binutils (target/praxis-binutils/):"
 	@echo "  tools                download all external CLI tools"

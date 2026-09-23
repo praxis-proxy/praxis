@@ -282,7 +282,8 @@ jobs:
       && (needs.audit.result == 'success' || needs.audit.result == 'skipped')
       && (needs.coverage.result == 'success' || needs.coverage.result == 'skipped')
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Two images; the FIPS one is a from-scratch LTO release build on UBI 9.
+    timeout-minutes: 75
     permissions:
       contents: read
       packages: write
@@ -308,6 +309,21 @@ jobs:
             skip=true
           fi
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
+
+      # The FIPS image (Containerfile.fips, UBI 9, Red Hat's toolchain and
+      # OpenSSL) ships next to the standard one under the same immutable tags
+      # with a -fips suffix. Its pinned Red Hat base images are verified to be
+      # signed by Red Hat before anything is pushed; see docs/developing/fips.md.
+      - name: Set up Rust (for the Red Hat image verification)
+        if: steps.guard.outputs.skip != 'true'
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+        with:
+          # The restored target/ would otherwise be swept into the build context.
+          cache-target: "false"
+
+      - name: Verify the Red Hat base images are signed by Red Hat
+        if: steps.guard.outputs.skip != 'true'
+        run: make fips-verify-image
 
       - name: Log in to GHCR
         if: steps.guard.outputs.skip != 'true'
@@ -345,6 +361,32 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Derive FIPS image metadata (immutable tags only)
+        id: meta-fips
+        if: steps.guard.outputs.skip != 'true'
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}
+          flavor: |
+            latest=false
+            suffix=-fips
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha
+
+      - name: Build and push the FIPS container
+        if: steps.guard.outputs.skip != 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: Containerfile.fips
+          target: runtime
+          push: true
+          tags: ${{ steps.meta-fips.outputs.tags }}
+          labels: ${{ steps.meta-fips.outputs.labels }}
+          cache-from: type=gha,scope=fips
+          cache-to: type=gha,mode=min,scope=fips
 
   # ----------------------------------------------------------------------------
   # Phase 1 (tag push): cut the draft release
@@ -476,7 +518,9 @@ jobs:
   #
   # Phase 1 pushed only immutable tags. Here we retag the already-published
   # :<version> image so :<major>.<minor> and :latest point at the same digest,
-  # without rebuilding, and only for stable releases. Pre-releases intentionally
+  # without rebuilding, and only for stable releases; the FIPS image gets the
+  # same treatment under its -fips suffix (:<major>.<minor>-fips, :latest-fips).
+  # Pre-releases intentionally
   # keep only the immutable :<version> and :sha- tags. For an out-of-order
   # backport (publishing an older patch after a newer release is already out), a
   # maintainer should not publish it as the newest release, since :latest here
@@ -505,7 +549,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Advance the major.minor and latest tags
+      - name: Advance the major.minor and latest tags (standard and -fips)
         env:
           TAG: ${{ github.event.release.tag_name }}
           IMAGE: ghcr.io/${{ github.repository }}
@@ -519,12 +563,17 @@ jobs:
           fi
           VERSION="${TAG#v}"
           MAJOR_MINOR="$(echo "$VERSION" | cut -d. -f1,2)"
-          # The immutable :<version> image must already exist from Phase 1.
-          if ! docker buildx imagetools inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
-            echo "::error::${IMAGE}:${VERSION} was not found; Phase 1 must publish it before the release is published."
-            exit 1
-          fi
-          docker buildx imagetools create \
-            --tag "${IMAGE}:${MAJOR_MINOR}" \
-            --tag "${IMAGE}:latest" \
-            "${IMAGE}:${VERSION}"
+          # The immutable :<version> and :<version>-fips images must already
+          # exist from Phase 1.
+          for suffix in "" "-fips"; do
+            if ! docker buildx imagetools inspect "${IMAGE}:${VERSION}${suffix}" >/dev/null 2>&1; then
+              echo "::error::${IMAGE}:${VERSION}${suffix} was not found; Phase 1 must publish it before the release is published."
+              exit 1
+            fi
+          done
+          for suffix in "" "-fips"; do
+            docker buildx imagetools create \
+              --tag "${IMAGE}:${MAJOR_MINOR}${suffix}" \
+              --tag "${IMAGE}:latest${suffix}" \
+              "${IMAGE}:${VERSION}${suffix}"
+          done

@@ -67,8 +67,9 @@ the published file, not the in-image file, is used.
 
 ## Updating the pinned base image
 
-The digest lives in the `Makefile` (`FIPS_UBI9_DIGEST`) and, as a default, in
-`Containerfile.fips`. To move to a newer UBI 9:
+The digests live in the `Makefile` (`FIPS_UBI9_DIGEST`,
+`FIPS_UBI9_MINIMAL_DIGEST`) and, as defaults, in `Containerfile.fips`. To move
+to a newer UBI 9:
 
 ```console
 curl -sI -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \

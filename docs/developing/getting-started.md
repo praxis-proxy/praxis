@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Rust stable 1.96+
+- Rust stable 1.92+
 - Rust nightly (for `rustfmt`)
 - CMake 3.31+
 - Docker 29.3.0+ or Podman (for container builds)
@@ -96,27 +96,41 @@ structure and crate dependencies.
 See [security-hardening.md](../operating/security-hardening.md) for
 deployment guidance.
 
-### FIPS Compliance Check
+### FIPS Build and Compliance Check
 
 Praxis targets FIPS 140-3 on Red Hat Enterprise Linux by performing all
-cryptography in the RHEL OpenSSL FIPS provider. Three targets check a
-build against the rules Red Hat's release scanner
+cryptography in the RHEL OpenSSL FIPS provider. The standard build
+(`make build`, `make release`, `make container`) enables everything by
+default. The FIPS build turns off what is known not to be compliant yet,
+currently the policy engine, so nobody has to know which features to
+pick. The feature set is defined once, as `FIPS_FEATURES` in the
+`Makefile`:
+
+```console
+make release-fips    # FIPS build, release profile, into target/fips
+make build-fips      # same, debug profile
+make container-fips  # FIPS runtime image on UBI 9, tagged praxis:<version>-fips
+```
+
+Three targets check a build against the rules Red Hat's release scanner
 (`openshift/check-payload`) applies to Rust binaries, and explain every
 finding with a reason and a pointer:
 
 ```console
 make fips-deps     # dependency graph vs the crypto denylist (seconds, no build)
-make fips-report   # full report against target/release/praxis
+make fips-report   # full report against target/fips/release/praxis
 make fips-check    # build on UBI 9 with Red Hat's toolchain, then report
 ```
 
-The report and the image verification are `cargo xtask fips` commands;
-the Makefile targets wrap them. `make fips-check` needs a Linux podman
-(rootless or root): the UBI 9 base image is pinned by digest and its Red
-Hat signature is verified before the build (`cargo xtask fips
-verify-image`). The report's exit status is non-zero while findings
+The report and the image verification are `cargo xtask fips` commands; the
+Makefile targets wrap them. `make container-fips` and `make fips-check`
+need a Linux podman (rootless or root): the UBI 9 base images are pinned
+by digest and their Red Hat signatures are verified before every build
+(`cargo xtask fips verify-image`). The FIPS image is built with Red Hat's
+`rust-toolset` and links the system OpenSSL; nothing is installed into
+the runtime image beyond the binary and its config. The report's exit status is non-zero while findings
 remain. See [FIPS Tooling](fips.md) for what is checked and the
-provenance of the pinned image and signing key.
+provenance of the pinned images and signing key.
 
 ## Security: Binding Low Ports
 
