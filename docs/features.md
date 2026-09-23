@@ -209,6 +209,13 @@ deployment guidance.
   TCP closes immediately
 - **Runtime tuning** - thread pool sizing and
   work-stealing toggle
+- **FIPS 140-3 build** - all cryptography in the system
+  OpenSSL, which on a FIPS-enabled RHEL 9 host is the
+  validated module; a `-fips` image on UBI 9 built with
+  Red Hat's toolchain, `PRAXIS_REQUIRE_FIPS` to refuse
+  to start outside FIPS mode, and a compliance report
+  plus Red Hat's scanner in CI. See
+  [FIPS 140-3](operating/fips.md).
 - **Runtime key-value stores** - in-memory runtime caches
   created dynamically by filters. Admin API
   (GET/PUT/DELETE) and exact/prefix/suffix/regex match

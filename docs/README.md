@@ -30,6 +30,9 @@ and security. AI Gateway docs live in
   production deployment guidance
 - [Build Features](operating/build-features.md):
   compile-time feature flags and when to toggle them
+- [FIPS 140-3](operating/fips.md):
+  the FIPS build, host prerequisites,
+  `PRAXIS_REQUIRE_FIPS`, verifying a deployment
 
 ## Contributing
 

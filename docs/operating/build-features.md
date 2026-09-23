@@ -37,7 +37,8 @@ For that exact invocation the guarantee holds: every Praxis crate depends on
 `praxis-proxy-filter` without dependency defaults, so dropping the server's
 `policy-engine` feature leaves the filter's `policy-engine` off and the policy
 engine's dependency tree out of the build. `make release-fips` is this build
-with the feature list kept in one place.
+with the feature list kept in one place; see [FIPS 140-3](fips.md) for what
+that build is for and how to deploy it.
 
 ### Disabling the policy engine as a library consumer
 
