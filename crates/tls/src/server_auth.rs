@@ -369,7 +369,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn provider() -> Arc<CryptoProvider> {
-        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+        Arc::new(rustls_openssl::default_provider())
     }
 
     /// Extended key usage a minted leaf should carry.

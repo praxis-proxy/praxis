@@ -37,6 +37,3 @@ tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true }
 
 [features]
-# Crypto provider passthrough — see crates/tls/src/provider.rs.
-openssl = ["praxis-tls/openssl"]
-aws-lc-rs = ["praxis-tls/aws-lc-rs"]

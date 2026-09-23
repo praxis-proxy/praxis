@@ -196,9 +196,7 @@ mod tests {
 
     /// Install crypto provider for rustls (required for tests).
     fn ensure_crypto_provider() {
-        use rustls::crypto::aws_lc_rs;
-
-        drop(aws_lc_rs::default_provider().install_default());
+        praxis_tls::provider::install();
     }
 
     #[test]

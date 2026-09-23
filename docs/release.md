@@ -184,7 +184,8 @@ runs as usual (the tag push drives `release.yaml`).
 
 The production image is a minimal Alpine container:
 
-- Static musl build with LTO, single codegen unit, and stripped symbols
+- Dynamically linked musl build against Alpine's OpenSSL (`libcrypto3`,
+  `libssl3`), with LTO, single codegen unit, and stripped symbols
 - Runs as non-root user (`praxis`)
 - Exposes ports `8080` (proxy) and `9901` (admin)
 - Built-in health check at `http://127.0.0.1:9901/healthy`

@@ -1493,13 +1493,14 @@ mod tests {
         subrequest: praxis_core::subrequest::SubRequest,
         tc: crate::trace_context::TraceContext,
     ) -> String {
-        use praxis_core::subrequest::{FrameworkHeaders, SubRequestClient, SubRequestConnector};
+        use praxis_core::subrequest::{FrameworkHeaders, SubRequestClient};
 
         let (addr, server) = start_header_capture_server().await;
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.extensions.insert(tc);
-        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        // The helper installs the crypto provider the connector's TLS config needs.
+        let client = SubRequestClient::new(crate::test_support::connector(1, None));
         ctx.subrequest_client = Some(&client);
 
         let peer = pingora_core::upstreams::peer::HttpPeer::new(addr, false, "localhost".into());

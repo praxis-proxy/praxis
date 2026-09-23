@@ -81,10 +81,7 @@ praxis-core = { version = "0.6.0", path = "crates/core", package = "praxis-proxy
 # `policy-engine` explicitly, so the standard build is unchanged.
 praxis-filter = { version = "0.6.0", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
 praxis-protocol = { version = "0.6.0", path = "crates/protocol", package = "praxis-proxy-protocol" }
-# default-features = false: the crypto provider is chosen by the top-level
-# binary and forwarded down, so no intermediate crate may pin one through
-# feature unification. See crates/tls/src/provider.rs.
-praxis-tls = { version = "0.6.0", path = "crates/tls", package = "praxis-proxy-tls", default-features = false }
+praxis-tls = { version = "0.6.0", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 praxis-proxy-benchmarks = "0.2.2"
 openssl = "0.10.81"
@@ -96,9 +93,9 @@ sha2 = "0.11.0"
 subtle = "2.6.1"
 rcgen = "0.14.10"
 regex = "1.13.1"
-# No provider feature: the provider is selected by praxis-proxy-tls's
-# `openssl` / `aws-lc-rs` features and installed once at startup. Leaving
-# rustls' defaults on would silently re-enable aws-lc-rs for every build.
+# No built-in provider: praxis-proxy-tls installs the OpenSSL-backed one
+# below at startup (see crates/tls/src/provider.rs). Leaving rustls' defaults
+# on would silently link aws-lc-rs into every build, and
 # `prefer-post-quantum` is omitted because it implies `aws_lc_rs`.
 rustls = { version = "0.23.45", default-features = false, features = ["logging", "std", "tls12"] }
 # The OpenSSL-backed rustls provider, vendored and published from the Pingora

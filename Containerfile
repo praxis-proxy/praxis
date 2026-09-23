@@ -4,9 +4,13 @@
 # Stage 1: Build
 # ------------------------------------------------------------------------------
 
-FROM rust:1.96-alpine AS builder
+FROM rust:1.96-alpine3.23 AS builder
 
-RUN apk add --no-cache musl-dev pkgconf cmake make g++
+# praxis performs all of its cryptography in the system OpenSSL and links it
+# dynamically, so the musl target must not produce a static executable (the
+# Alpine Rust image's default) and the builder needs the OpenSSL headers.
+ENV RUSTFLAGS="-C target-feature=-crt-static"
+RUN apk add --no-cache musl-dev pkgconf cmake make g++ openssl-dev
 
 WORKDIR /src
 
@@ -93,9 +97,14 @@ LABEL org.opencontainers.image.source="https://github.com/praxis-proxy/praxis" \
 
 # Install runtime dependencies:
 #   ca-certificates: TLS certificate validation
+#   libcrypto3, libssl3: the system OpenSSL the binary links dynamically
+#   libgcc: the unwinder (libgcc_s) a dynamically linked musl binary needs
 #   wget: HEALTHCHECK probe (Alpine includes wget by default, but explicit for clarity)
 RUN apk add --no-cache \
     ca-certificates \
+    libcrypto3 \
+    libssl3 \
+    libgcc \
     wget \
     && addgroup -S praxis \
     && adduser -S -G praxis -h /nonexistent -s /sbin/nologin praxis \

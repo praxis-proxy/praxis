@@ -14,9 +14,6 @@ publish = true
 name = "praxis_protocol"
 
 [features]
-# Crypto provider passthrough — see crates/tls/src/provider.rs.
-openssl = ["praxis-tls/openssl"]
-aws-lc-rs = ["praxis-tls/aws-lc-rs"]
 default = []
 # Certificate + config hot-reload (filesystem watching). Enables the
 # reload/watcher machinery in praxis-tls. Off => static TLS, no notify.

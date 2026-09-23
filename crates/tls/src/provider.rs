@@ -1,37 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Crypto provider selection.
+//! The rustls crypto provider.
 //!
 //! rustls performs no cryptography of its own: it drives the TLS protocol and
-//! delegates every primitive to a [`CryptoProvider`]. Praxis chooses that
-//! provider at build time and installs it once during startup.
+//! delegates every primitive to a [`CryptoProvider`]. Praxis uses exactly one,
+//! the OpenSSL-backed [`rustls_openssl`] provider, and installs it once during
+//! startup.
 //!
-//! # Why the choice lives here
+//! # Why one provider, and why this one
 //!
-//! The Pingora fork installs no provider, and enables rustls'
-//! `custom-provider` feature, which removes rustls' implicit fallback to
-//! whichever built-in its features happen to enable. Nothing below this crate
-//! has an opinion, so a provider that is not installed here is not installed
-//! at all — and the process fails loudly rather than picking one silently.
+//! Every hash, MAC, key derivation, key exchange, signature, verification and
+//! random byte goes through the system `libcrypto.so`. On a FIPS-enabled Red
+//! Hat Enterprise Linux host that library's provider is the platform's
+//! validated module, which is the deployment Praxis targets for FIPS 140-3. A
+//! second, statically linked provider would only give a build that cannot make
+//! that claim, so there is no feature to pick one.
 //!
-//! # Selecting a provider
-//!
-//! At least one of the `openssl` and `aws-lc-rs` features must be enabled;
-//! selecting neither is a compile error. Enabling both is permitted and
-//! `openssl` wins, so that `--all-features` builds work; see the note beside
-//! the `compile_error!` below.
-//!
-//! - `openssl` (default) — [`rustls_openssl`], backed by the system OpenSSL library. The cryptography is performed by
-//!   `libcrypto.so`, which on a FIPS-enabled host is the platform's validated module. This is the configuration Praxis
-//!   targets for FIPS 140-3.
-//! - `aws-lc-rs` — rustls' built-in AWS-LC provider. Statically linked, so it builds anywhere without system OpenSSL,
-//!   but the module is AWS's rather than the platform's.
-//!
-//! ```console
-//! cargo build                                                  # OpenSSL
-//! cargo build --no-default-features --features aws-lc-rs       # AWS-LC
-//! ```
+//! The Pingora fork installs no provider and enables rustls' `custom-provider`
+//! feature, which removes rustls' implicit fallback to a built-in. Nothing
+//! below this crate has an opinion, so a provider that is not installed here
+//! is not installed at all, and the process fails loudly rather than picking
+//! one silently.
 //!
 //! # Install early
 //!
@@ -39,7 +29,8 @@
 //! Pingora constructs its upstream connectors while the proxy *service* is
 //! created, which is earlier than most callers expect: "before
 //! `run_forever()`" is too late. Praxis installs during server bootstrap,
-//! ahead of service registration.
+//! ahead of service registration, and on every CLI path that builds a
+//! connector.
 //!
 //! [`CryptoProvider`]: rustls::crypto::CryptoProvider
 
@@ -47,54 +38,22 @@ use std::sync::Arc;
 
 use rustls::crypto::CryptoProvider;
 
-#[cfg(not(any(feature = "openssl", feature = "aws-lc-rs")))]
-compile_error!("no crypto provider selected: enable exactly one of the `openssl` or `aws-lc-rs` features");
-
-// Enabling both is allowed, and `openssl` wins. It is not made a compile
-// error because `cargo test --workspace --all-features` — how this repo runs
-// its suite — turns on every feature by definition, and there is no way to
-// exclude one. rustls takes the same position with its own `ring` and
-// `aws_lc_rs` features.
-//
-// Allowing both is safe because it does not make the choice ambiguous at
-// runtime: exactly one provider is ever installed, `name()` reports which,
-// and Task 5's assertion checks it. The cost is that a both-features build
-// *links* the unused provider, so a release build must select one — which
-// `default = ["openssl"]` does.
-//
-// The dangerous case, selecting neither, stays a hard error: that build would
-// compile and then panic on the first TLS operation.
-
 /// Name of the provider compiled into this build.
 ///
 /// Intended for startup logging and for the runtime assertion that the
 /// expected provider is the one actually serving connections.
 ///
 /// ```
-/// assert!(!praxis_tls::provider::name().is_empty());
+/// assert_eq!(praxis_tls::provider::name(), "openssl");
 /// ```
 #[must_use]
 pub const fn name() -> &'static str {
-    #[cfg(feature = "openssl")]
-    {
-        "openssl"
-    }
-    #[cfg(all(feature = "aws-lc-rs", not(feature = "openssl")))]
-    {
-        "aws-lc-rs"
-    }
+    "openssl"
 }
 
 /// Build the provider compiled into this build.
 fn build() -> CryptoProvider {
-    #[cfg(feature = "openssl")]
-    {
-        rustls_openssl::default_provider()
-    }
-    #[cfg(all(feature = "aws-lc-rs", not(feature = "openssl")))]
-    {
-        rustls::crypto::aws_lc_rs::default_provider()
-    }
+    rustls_openssl::default_provider()
 }
 
 /// Install the compiled-in provider as the process-wide default.
@@ -162,12 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn name_matches_the_selected_feature() {
-        // `openssl` takes precedence when both are enabled, as under
-        // `--all-features`.
-        #[cfg(feature = "openssl")]
+    fn name_is_the_openssl_provider() {
         assert_eq!(name(), "openssl");
-        #[cfg(all(feature = "aws-lc-rs", not(feature = "openssl")))]
-        assert_eq!(name(), "aws-lc-rs");
     }
 }
