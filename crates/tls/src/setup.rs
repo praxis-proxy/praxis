@@ -23,15 +23,18 @@ use rustls::{ServerConfig, server::WantsServerCert, version};
 use crate::{CipherSuiteId, ClientCertMode, ListenerTls, TlsError, TlsVersion, client_auth};
 
 /// Apply the settings every listener config shares once its certificates are
-/// wired: the ALPN list and the Extended Master Secret requirement.
-fn finish_server_config(mut config: ServerConfig, advertise_http_alpn: bool) -> ServerConfig {
+/// wired: the ALPN list and the Extended Master Secret requirement. When the
+/// deployment requires FIPS mode, a config that would not operate in it is an
+/// error rather than a listener.
+fn finish_server_config(mut config: ServerConfig, advertise_http_alpn: bool) -> Result<ServerConfig, TlsError> {
     config.alpn_protocols = if advertise_http_alpn {
         alpn_protocols()
     } else {
         Vec::new()
     };
     require_extended_master_secret(&mut config);
-    config
+    crate::provider::check_config_fips(config.fips(), "listener")?;
+    Ok(config)
 }
 
 /// Require the Extended Master Secret extension (RFC 7627) on every TLS 1.2
@@ -102,7 +105,7 @@ pub fn build_server_config(tls: &ListenerTls, advertise_http_alpn: bool) -> Resu
         builder.with_cert_resolver(Arc::new(resolver))
     };
 
-    let config = finish_server_config(config, advertise_http_alpn);
+    let config = finish_server_config(config, advertise_http_alpn)?;
     Ok(Arc::new(config))
 }
 
@@ -170,7 +173,7 @@ pub fn build_reloadable_server_config(
     let cert_handle = resolver.arc();
 
     let config = builder.with_cert_resolver(Arc::new(resolver));
-    let config = finish_server_config(config, advertise_http_alpn);
+    let config = finish_server_config(config, advertise_http_alpn)?;
 
     Ok(ReloadableServerConfig {
         config: Arc::new(config),

@@ -62,6 +62,19 @@ pub enum TlsError {
     )]
     NoCryptoProvider,
 
+    /// FIPS mode is required (`PRAXIS_REQUIRE_FIPS`) but this TLS config would
+    /// not operate in it.
+    ///
+    /// rustls' `fips()` on a config is false when the provider is not running
+    /// FIPS-approved algorithms only, or when TLS 1.2 is allowed without the
+    /// Extended Master Secret. Praxis sets the latter unconditionally, so in
+    /// practice this means the OpenSSL provider is not in FIPS mode.
+    #[error("FIPS mode is required but the {context} TLS config would not operate in FIPS mode")]
+    FipsRequired {
+        /// Which config: "listener" or "upstream client".
+        context: &'static str,
+    },
+
     /// A `server_name` appears more than once across certificates.
     #[error("duplicate server_name '{name}' in certificate {path}")]
     DuplicateServerName {

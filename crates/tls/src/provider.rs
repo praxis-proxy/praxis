@@ -111,6 +111,47 @@ pub struct Status {
 /// Path of the kernel's FIPS mode flag.
 const KERNEL_FIPS_FLAG: &str = "/proc/sys/crypto/fips_enabled";
 
+/// Environment variable that makes FIPS mode a hard requirement.
+///
+/// Set it to `1`, `true`, `yes` or `on` (case-insensitive) and praxis refuses
+/// to start unless [`Status::unmet`] is empty. It is a check, never a switch:
+/// FIPS mode itself comes from the host (on Red Hat Enterprise Linux, the
+/// kernel flag activates the validated OpenSSL provider and the system crypto
+/// policy), and praxis never enables a provider on its own.
+pub const REQUIRE_FIPS_ENV: &str = "PRAXIS_REQUIRE_FIPS";
+
+/// Whether this deployment requires FIPS mode; see [`REQUIRE_FIPS_ENV`].
+#[must_use]
+pub fn required() -> bool {
+    std::env::var(REQUIRE_FIPS_ENV).is_ok_and(|value| is_truthy(&value))
+}
+
+/// The affirmative spellings [`REQUIRE_FIPS_ENV`] accepts.
+fn is_truthy(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+}
+
+impl Status {
+    /// Why the process is not in FIPS mode, one reason per missing signal.
+    /// Empty when both signals are present.
+    #[must_use]
+    pub fn unmet(&self) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if !self.installed {
+            reasons.push("no crypto provider is installed");
+        } else if !self.provider_fips {
+            reasons
+                .push("the OpenSSL provider does not report FIPS-approved algorithms (is the fips provider active?)");
+        }
+        match self.kernel_fips {
+            Some(true) => {},
+            Some(false) => reasons.push("the kernel is not in FIPS mode (/proc/sys/crypto/fips_enabled is 0)"),
+            None => reasons.push("the kernel FIPS flag cannot be read (/proc/sys/crypto/fips_enabled)"),
+        }
+        reasons
+    }
+}
+
 /// Read the process's FIPS status.
 ///
 /// Reads the kernel flag on every call; it is cheap and cannot change once the
@@ -145,6 +186,15 @@ fn kernel_fips_from(contents: &str) -> Option<bool> {
         "0" => Some(false),
         _ => None,
     }
+}
+
+/// Fail closed when the deployment requires FIPS mode and a TLS config would
+/// not operate in it. `fips` is rustls' answer for that config.
+pub(crate) fn check_config_fips(fips: bool, context: &'static str) -> Result<(), crate::TlsError> {
+    if required() && !fips {
+        return Err(crate::TlsError::FipsRequired { context });
+    }
+    Ok(())
 }
 
 /// The installed process-wide provider.
@@ -195,6 +245,76 @@ mod tests {
         assert_eq!(kernel_fips_from(""), None, "an empty file is unknown, not off");
         assert_eq!(kernel_fips_from("2\n"), None, "an unexpected value is unknown");
         assert_eq!(kernel_fips_from("garbage"), None);
+    }
+
+    #[test]
+    fn required_accepts_the_usual_spellings() {
+        for value in ["1", "true", "TRUE", "yes", "on", " On "] {
+            assert!(is_truthy(value), "{value:?} should require FIPS");
+        }
+        for value in ["", "0", "false", "no", "off", "maybe"] {
+            assert!(!is_truthy(value), "{value:?} should not require FIPS");
+        }
+    }
+
+    /// A status with both signals present.
+    const SATISFIED: Status = Status {
+        name: "openssl",
+        installed: true,
+        provider_fips: true,
+        kernel_fips: Some(true),
+    };
+
+    #[test]
+    fn unmet_is_empty_when_both_signals_are_present() {
+        assert!(SATISFIED.unmet().is_empty());
+    }
+
+    #[test]
+    fn unmet_names_a_kernel_that_is_not_in_fips_mode() {
+        let kernel_off = Status {
+            kernel_fips: Some(false),
+            ..SATISFIED
+        };
+        let reasons = kernel_off.unmet();
+        assert_eq!(reasons.len(), 1);
+        assert!(
+            reasons
+                .first()
+                .is_some_and(|reason| reason.contains("kernel is not in FIPS mode"))
+        );
+    }
+
+    #[test]
+    fn unmet_names_a_provider_that_is_not_fips() {
+        let provider_off = Status {
+            provider_fips: false,
+            ..SATISFIED
+        };
+        assert!(
+            provider_off
+                .unmet()
+                .first()
+                .is_some_and(|reason| reason.contains("OpenSSL provider"))
+        );
+    }
+
+    #[test]
+    fn unmet_reports_a_missing_provider_and_an_unreadable_flag_separately() {
+        let nothing = Status {
+            installed: false,
+            provider_fips: false,
+            kernel_fips: None,
+            ..SATISFIED
+        };
+        let reasons = nothing.unmet();
+        assert_eq!(reasons.len(), 2);
+        assert!(
+            reasons
+                .first()
+                .is_some_and(|reason| reason.contains("no crypto provider"))
+        );
+        assert!(reasons.get(1).is_some_and(|reason| reason.contains("cannot be read")));
     }
 
     #[test]

@@ -57,7 +57,8 @@ const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
 // Crypto Provider
 // -----------------------------------------------------------------------------
 
-/// Install the rustls crypto provider selected at build time.
+/// Install the rustls crypto provider and, when the deployment requires FIPS
+/// mode (`PRAXIS_REQUIRE_FIPS`), refuse to start unless it is in effect.
 ///
 /// Must run before anything constructs a listener or an upstream connector.
 /// Pingora builds its upstream connectors while the proxy *service* is
@@ -85,8 +86,20 @@ pub fn install_crypto_provider() {
         provider = status.name,
         provider_fips = status.provider_fips,
         kernel_fips = ?status.kernel_fips,
+        fips_required = praxis_tls::provider::required(),
         "installed rustls crypto provider"
     );
+
+    if praxis_tls::provider::required() {
+        let unmet = status.unmet();
+        if !unmet.is_empty() {
+            fatal(&format!(
+                "{} is set but FIPS mode is not in effect: {}",
+                praxis_tls::provider::REQUIRE_FIPS_ENV,
+                unmet.join("; ")
+            ));
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------

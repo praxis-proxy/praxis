@@ -166,6 +166,7 @@ pub fn pinned_client_config(
     // Extended Master Secret (RFC 7627) on TLS 1.2, as the listeners require;
     // see `setup::require_extended_master_secret` for why.
     config.require_ems = true;
+    crate::provider::check_config_fips(config.fips(), "upstream client")?;
 
     Ok(config)
 }
