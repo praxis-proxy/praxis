@@ -84,12 +84,13 @@ praxis-protocol = { version = "0.6.0", path = "crates/protocol", package = "prax
 praxis-tls = { version = "0.6.0", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 praxis-proxy-benchmarks = "0.2.2"
+# System OpenSSL bindings, the same crate the rustls provider below uses; never
+# with the `vendored` feature, the platform library is the validated module.
 openssl = "0.10.81"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 smallvec = "1.16.1"
 serde_json = "1.0.151"
-sha2 = "0.11.0"
 subtle = "2.6.1"
 rcgen = "0.14.10"
 regex = "1.13.1"
