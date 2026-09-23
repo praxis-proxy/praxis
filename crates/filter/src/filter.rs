@@ -171,7 +171,7 @@ pub trait HttpFilter: Send + Sync {
     ///
     /// Framework filters that own nested pipelines override this when a nested
     /// consumer can be reached before any nested binding filter. This is
-    /// distinct from [`consumes_bound_upstream`]: a nested condition or body
+    /// distinct from [`HttpFilter::consumes_bound_upstream`]: a nested condition or body
     /// participant observes the binding without selecting a cluster from it.
     fn requires_bound_upstream_on_entry(&self) -> bool {
         false
