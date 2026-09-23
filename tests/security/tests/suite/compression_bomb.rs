@@ -48,7 +48,7 @@ fn gzip_compression_bomb_from_upstream_handled_safely() {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Test Utilities
 // -----------------------------------------------------------------------------
 
 fn compression_proxy_yaml(proxy_port: u16, backend_port: u16) -> String {

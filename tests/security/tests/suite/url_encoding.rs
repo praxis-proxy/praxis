@@ -110,7 +110,7 @@ fn double_encoded_path_segments_do_not_bypass_matching() {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Test Utilities
 // -----------------------------------------------------------------------------
 
 fn simple_catch_all_yaml(proxy_port: u16, backend_port: u16) -> String {

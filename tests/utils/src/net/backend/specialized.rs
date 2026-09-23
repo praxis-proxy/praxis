@@ -193,20 +193,6 @@ pub fn start_malicious_response_header_backend(malformed_header: Vec<u8>) -> Bac
     })
 }
 
-/// Start a backend that sends the given raw HTTP response bytes
-/// after reading request headers.
-///
-/// # Panics
-///
-/// Panics if the server fails to bind or accept connections.
-pub fn start_raw_response_backend(response: Vec<u8>) -> BackendGuard {
-    spawn_tcp_server_with_shutdown(move |mut stream| {
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let _headers = read_until_headers_complete(&mut stream);
-        let _sent = stream.write_all(&response);
-    })
-}
-
 /// Start a backend that writes a partial response (status +
 /// `Content-Length`) then drops the connection before finishing
 /// headers or body. Used for mid-response failure tests.

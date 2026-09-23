@@ -132,7 +132,7 @@ insecure_options:
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Test Utilities
 // -----------------------------------------------------------------------------
 
 fn build_tls12_only_client(certs: &TestCertificates) -> Arc<ClientConfig> {
