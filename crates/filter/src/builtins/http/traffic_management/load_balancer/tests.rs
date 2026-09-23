@@ -1012,6 +1012,25 @@ async fn bound_upstream_source_ignores_context_cluster() {
 }
 
 #[tokio::test]
+async fn bound_upstream_source_clears_retry_policy_for_replaced_cluster() {
+    let lb = LoadBalancerFilter::try_new_with_source(
+        &[test_cluster("backend", &["127.0.0.1:8080"])],
+        super::ClusterSource::BoundUpstream,
+    )
+    .unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("stale"));
+    ctx.route_retry_policy = Some(Arc::new(praxis_core::config::RetryPolicy::default()));
+    ctx.publish_bound_upstream(Arc::from("backend"), None, None).unwrap();
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+
+    assert!(ctx.route_retry_policy.is_none());
+    assert_eq!(ctx.cluster.as_deref(), Some("backend"));
+}
+
+#[tokio::test]
 async fn bound_upstream_source_errors_when_unbound() {
     let lb = LoadBalancerFilter::try_new_with_source(
         &[test_cluster("backend", &["127.0.0.1:8080"])],

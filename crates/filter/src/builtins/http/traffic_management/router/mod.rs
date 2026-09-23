@@ -280,9 +280,6 @@ impl RouterFilter {
     /// case (validation forbids a second binding after the barrier), so treat it
     /// as an internal error.
     fn apply_matched_route(ctx: &mut HttpFilterContext<'_>, resolved: &ResolvedRoute) -> FilterAction {
-        ctx.metrics_route = Some(resolved.metrics_label.clone());
-        ctx.cluster = Some(Arc::clone(&resolved.route.cluster));
-        ctx.route_retry_policy = resolved.retry_policy.as_ref().map(Arc::clone);
         if let Err(frozen) = ctx.bind_upstream(Arc::clone(&resolved.route.cluster)) {
             warn!(
                 frozen = %frozen.frozen,
@@ -291,6 +288,9 @@ impl RouterFilter {
             );
             return FilterAction::Reject(Rejection::status(500));
         }
+        ctx.metrics_route = Some(resolved.metrics_label.clone());
+        ctx.cluster = Some(Arc::clone(&resolved.route.cluster));
+        ctx.route_retry_policy = resolved.retry_policy.as_ref().map(Arc::clone);
         FilterAction::Continue
     }
 }

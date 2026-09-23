@@ -91,9 +91,65 @@ use crate::{
     SubRequestResponseMode, SubResponse,
     actions::Rejection,
     context::PendingStreamChunks,
-    extensions::{RequestExtensions, SelectedClusterApplication},
+    extensions::{BoundUpstream, BoundUpstreamFrozen, RequestExtensions, SelectedClusterApplication},
+    pipeline::catalog::ClusterApplicationCatalog,
     results::RetainedFilterResults,
 };
+
+/// Parent routing state shadowed while a nested pipeline executes.
+struct ParentUpstreamState {
+    /// Parent pipeline's application-metadata catalog.
+    catalog: Option<Arc<ClusterApplicationCatalog>>,
+    /// Parent request's logical cluster binding.
+    binding: Option<BoundUpstream>,
+    /// Whether the parent binding had already reached its freeze point.
+    frozen: bool,
+}
+
+/// Stack form supports filtered sub-requests nested inside another filtered
+/// sub-request without overwriting the outer restoration checkpoint.
+#[derive(Default)]
+struct ParentUpstreamStates(Vec<ParentUpstreamState>);
+
+/// Save parent routing state and install the nested pipeline's catalog.
+fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, pipeline: &FilterPipeline) {
+    let state = ParentUpstreamState {
+        catalog: extensions.remove::<Arc<ClusterApplicationCatalog>>(),
+        binding: extensions.get::<BoundUpstream>().cloned(),
+        frozen: extensions.get::<BoundUpstreamFrozen>().is_some(),
+    };
+    let mut states = extensions.remove::<ParentUpstreamStates>().unwrap_or_default();
+    states.0.push(state);
+    extensions.insert(states);
+    extensions.remove::<SelectedClusterApplication>();
+    pipeline.inject_cluster_catalog(extensions);
+}
+
+/// Remove nested routing state and restore the most recent parent checkpoint.
+fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
+    extensions.remove::<SelectedClusterApplication>();
+    let Some(mut states) = extensions.remove::<ParentUpstreamStates>() else {
+        return;
+    };
+    let Some(state) = states.0.pop() else {
+        return;
+    };
+    extensions.remove::<Arc<ClusterApplicationCatalog>>();
+    extensions.remove::<BoundUpstream>();
+    extensions.remove::<BoundUpstreamFrozen>();
+    if let Some(catalog) = state.catalog {
+        extensions.insert(catalog);
+    }
+    if let Some(binding) = state.binding {
+        extensions.insert(binding);
+    }
+    if state.frozen {
+        extensions.insert(BoundUpstreamFrozen);
+    }
+    if !states.0.is_empty() {
+        extensions.insert(states);
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -165,9 +221,7 @@ impl FilteredSubrequestError {
     /// existing behavior, while callers that need the classification read it
     /// through [`too_large`](Self::too_large) first.
     pub(crate) fn into_parts(mut self) -> (FilterError, RequestExtensions) {
-        // #1138 Correction 1: never leak the child's selected-cluster application
-        // metadata back to the parent on any error path.
-        self.extensions.remove::<SelectedClusterApplication>();
+        restore_parent_upstream_scope(&mut self.extensions);
         (self.error, self.extensions)
     }
 }
@@ -605,15 +659,7 @@ impl FilteredSubrequestExecutor {
         };
         let mut filter_ctx = build_sub_filter_context(pipeline, &sub_req, resources);
         filter_ctx.extensions = std::mem::take(&mut extensions);
-        // #1138 decision B: a child must not inherit the parent's selected-cluster
-        // application metadata. `run`/`run_classified` thread the caller's
-        // extensions straight in (unlike the IRR, which clears at step entry).
-        filter_ctx.extensions.remove::<SelectedClusterApplication>();
-        // The caller's extensions carry the *parent* pipeline's cluster catalog.
-        // Swap in this nested pipeline's own catalog (or drop the stale parent one
-        // when the nested pipeline declares none) so a router binding inside the
-        // sub-request resolves application metadata against the right declarations.
-        pipeline.inject_cluster_catalog(&mut filter_ctx.extensions);
+        enter_nested_upstream_scope(&mut filter_ctx.extensions, pipeline);
         filter_ctx.extensions.insert(RetainedFilterResults::default());
         filter_ctx.enable_stream_chunk_emission(self.max_state_bytes);
         // A callout may stage a pre-resolved upstream (for example a URL prepared
@@ -682,6 +728,7 @@ impl FilteredSubrequestExecutor {
                 filter_ctx.pre_read_mutations.clear();
                 sub_headers.clone_from(&routed_req.headers);
                 filter_ctx.request = &routed_req;
+                filter_ctx.buffered_request_body.clone_from(&request_body);
             }
 
             let action = pipeline.execute_http_request(&mut filter_ctx).await?;
@@ -690,6 +737,9 @@ impl FilteredSubrequestExecutor {
             }
             if self.accounting.exceeds_limit(&filter_ctx.extensions) {
                 return Ok(RawResponse::Rejected(Rejection::status(413)));
+            }
+            if pipeline.body_capabilities().any_bound_upstream_request_body_writer {
+                request_body.clone_from(&filter_ctx.buffered_request_body);
             }
             if !pre_read_body {
                 let action = pipeline

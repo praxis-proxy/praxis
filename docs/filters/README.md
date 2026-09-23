@@ -77,6 +77,8 @@ influence downstream processing:
 | `on_request` | Forward (pipeline order) | Request |
 | `on_response` | Reverse (pipeline order) | Response |
 | `on_request_body` | Forward | Request body chunks |
+| `on_bound_upstream_request_body` | Forward, once | Complete body after logical binding, before endpoint selection |
+| `on_selected_upstream_request_body` | Forward, per exchange | Complete body after endpoint selection |
 | `on_response_body` | Reverse | Response body chunks |
 
 Request `conditions` gate both the request and body
@@ -90,6 +92,17 @@ The one exception is a `stream_buffer` pre-read, which
 runs the request-body hooks *before* the request phase.
 Nothing has been skipped at that point, so every filter
 declaring request-body access runs.
+
+Filters that need the logical route must instead declare
+`bound_upstream_request_body_access` and implement
+`on_bound_upstream_request_body`. That hook runs once after
+the binding router freezes `BoundUpstream`; a read-write
+participant replaces the canonical body used by direct
+dispatch, IRR, retries, and selected-upstream adaptation.
+Use `binds_upstream`, `consumes_bound_upstream`,
+`bound_upstream_clusters`, and `declared_cluster_metadata`
+only for routing filters whose capabilities must be visible
+to pipeline validation.
 
 ### Common Patterns
 

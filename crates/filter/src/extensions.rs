@@ -176,8 +176,9 @@ impl SelectedClusterApplication {
 /// type. The metadata comes from the pipeline's cluster catalog, keyed by the
 /// selected cluster name.
 ///
-/// A later router may replace the binding, so the last router reached on the
-/// request path wins.
+/// The executor freezes the first successfully published binding before branch
+/// evaluation. Republishing the same cluster is idempotent; attempting to bind
+/// a different cluster after that point fails closed.
 ///
 /// [`HttpFilterContext::publish_bound_upstream`]: crate::HttpFilterContext::publish_bound_upstream
 /// [`HttpFilterContext::bound_cluster`]: crate::HttpFilterContext::bound_cluster
@@ -192,6 +193,11 @@ pub(crate) struct BoundUpstream {
     /// Opaque application provider of the bound cluster, if tagged.
     application_provider: Option<Arc<str>>,
 }
+
+/// Request-scoped marker that freezes [`BoundUpstream`] and records that the
+/// once-per-request bound-body barrier has run.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BoundUpstreamFrozen;
 
 impl BoundUpstream {
     /// Build a binding for `cluster` with its catalog-resolved application

@@ -364,26 +364,8 @@ fn validate_entry_selected_upstream(
     entry: &FilterEntry,
     declared: &DeclaredUpstreams<'_>,
 ) -> Result<(), ProxyError> {
-    for (idx, condition) in entry.conditions.iter().enumerate() {
-        let matcher = match condition {
-            Condition::When(inner) | Condition::Unless(inner) => inner,
-        };
-        if let Some(selected) = &matcher.selected_upstream {
-            check_selected_upstream_values(chain_name, &entry.filter_type, idx, selected, declared)?;
-        }
-    }
-
-    if let Some(branches) = &entry.branch_chains {
-        for branch in branches {
-            for chain_ref in &branch.chains {
-                if let ChainRef::Inline { filters, .. } = chain_ref {
-                    for inline_entry in filters {
-                        validate_entry_selected_upstream(chain_name, inline_entry, declared)?;
-                    }
-                }
-            }
-        }
-    }
+    validate_entry_application_conditions(chain_name, entry, declared)?;
+    validate_branch_application_conditions(chain_name, entry, declared)?;
 
     if entry.filter_type == super::inline_clusters::STEP_BEARING_FILTER {
         for nested in super::inline_clusters::extract_step_filters(chain_name, entry)? {
@@ -393,69 +375,149 @@ fn validate_entry_selected_upstream(
     Ok(())
 }
 
-/// Reject a single `selected_upstream` matcher that no upstream can satisfy:
-/// a protocol or provider naming no declared cluster, or a both-fields pair no
-/// single cluster declares together.
-fn check_selected_upstream_values(
+/// Check the application-metadata conditions attached directly to one entry.
+fn validate_entry_application_conditions(
     chain_name: &str,
-    filter: &str,
-    idx: usize,
-    matcher: &SelectedUpstreamMatch,
+    entry: &FilterEntry,
+    declared: &DeclaredUpstreams<'_>,
+) -> Result<(), ProxyError> {
+    for (idx, condition) in entry.conditions.iter().enumerate() {
+        let matcher = match condition {
+            Condition::When(inner) | Condition::Unless(inner) => inner,
+        };
+        if let Some(selected) = &matcher.selected_upstream {
+            check_application_match_values(
+                &ApplicationMatcherLocation::new(chain_name, entry, idx, "selected_upstream", selected),
+                declared,
+            )?;
+        }
+        if matches!(condition, Condition::When(_))
+            && let Some(bound) = &matcher.bound_upstream
+        {
+            check_application_match_values(
+                &ApplicationMatcherLocation::new(chain_name, entry, idx, "bound_upstream", bound),
+                declared,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Recurse through inline branch chains attached to one entry.
+fn validate_branch_application_conditions(
+    chain_name: &str,
+    entry: &FilterEntry,
+    declared: &DeclaredUpstreams<'_>,
+) -> Result<(), ProxyError> {
+    if let Some(branches) = &entry.branch_chains {
+        for inline_entry in branches
+            .iter()
+            .flat_map(|branch| &branch.chains)
+            .filter_map(|chain_ref| match chain_ref {
+                ChainRef::Inline { filters, .. } => Some(filters.as_slice()),
+                ChainRef::Named(_) => None,
+            })
+            .flatten()
+        {
+            validate_entry_selected_upstream(chain_name, inline_entry, declared)?;
+        }
+    }
+    Ok(())
+}
+
+/// Source location and predicate for one application-metadata condition.
+struct ApplicationMatcherLocation<'cfg> {
+    /// Containing filter-chain name.
+    chain_name: &'cfg str,
+    /// Filter type carrying the condition.
+    filter: &'cfg str,
+    /// Zero-based condition index on the filter.
+    index: usize,
+    /// Application-metadata axis (`selected_upstream` or `bound_upstream`).
+    axis: &'static str,
+    /// Predicate values to validate.
+    matcher: &'cfg SelectedUpstreamMatch,
+}
+
+impl<'cfg> ApplicationMatcherLocation<'cfg> {
+    /// Build a matcher location from its containing filter entry.
+    fn new(
+        chain_name: &'cfg str,
+        entry: &'cfg FilterEntry,
+        index: usize,
+        axis: &'static str,
+        matcher: &'cfg SelectedUpstreamMatch,
+    ) -> Self {
+        Self {
+            chain_name,
+            filter: &entry.filter_type,
+            index,
+            axis,
+            matcher,
+        }
+    }
+}
+
+/// Reject a single application matcher that no upstream can satisfy: a
+/// protocol or provider naming no declared cluster, or a both-fields pair no
+/// single cluster declares together.
+fn check_application_match_values(
+    location: &ApplicationMatcherLocation<'_>,
     declared: &DeclaredUpstreams<'_>,
 ) -> Result<(), ProxyError> {
     for (field, value, set) in [
         (
             "application_protocol",
-            &matcher.application_protocol,
+            location.matcher.application_protocol.as_deref(),
             &declared.protocols,
         ),
         (
             "application_provider",
-            &matcher.application_provider,
+            location.matcher.application_provider.as_deref(),
             &declared.providers,
         ),
     ] {
         if let Some(value) = value
-            && !set.contains(value.as_str())
+            && !set.contains(value)
         {
             return Err(ProxyError::Config(format!(
-                "filter '{filter}' in chain '{chain_name}': condition {idx} \
-                 selected_upstream.{field} '{value}' matches no cluster's \
+                "filter '{filter}' in chain '{chain_name}': condition {index} \
+                 {axis}.{field} '{value}' matches no cluster's \
                  {field}; no load balancer can select an upstream that satisfies \
                  it, so the condition fails closed on every request. Declare a \
-                 cluster with this {field} or correct the value"
+                 cluster with this {field} or correct the value",
+                filter = location.filter,
+                chain_name = location.chain_name,
+                index = location.index,
+                axis = location.axis,
             )));
         }
     }
-    check_selected_upstream_pair(chain_name, filter, idx, matcher, declared)
+    check_application_match_pair(location, declared)
 }
 
-/// Reject a `selected_upstream` matcher naming both fields as a pair no single
-/// cluster declares together.
-///
-/// The per-field checks pass when each value exists on *some* cluster, but a
-/// load balancer selects one upstream and publishes its protocol and provider
-/// together (from the same cluster). A matcher whose two values come from
-/// different clusters can therefore never match, so require the pair to exist on
-/// *one* cluster.
-fn check_selected_upstream_pair(
-    chain_name: &str,
-    filter: &str,
-    idx: usize,
-    matcher: &SelectedUpstreamMatch,
+/// Reject a matcher naming both fields as a pair no single cluster declares.
+fn check_application_match_pair(
+    location: &ApplicationMatcherLocation<'_>,
     declared: &DeclaredUpstreams<'_>,
 ) -> Result<(), ProxyError> {
-    if let (Some(protocol), Some(provider)) = (&matcher.application_protocol, &matcher.application_provider)
-        && !declared.pairs.contains(&(protocol.as_str(), provider.as_str()))
+    if let (Some(protocol), Some(provider)) = (
+        location.matcher.application_protocol.as_deref(),
+        location.matcher.application_provider.as_deref(),
+    ) && !declared.pairs.contains(&(protocol, provider))
     {
         return Err(ProxyError::Config(format!(
-            "filter '{filter}' in chain '{chain_name}': condition {idx} \
-             selected_upstream requires application_protocol '{protocol}' and \
+            "filter '{filter}' in chain '{chain_name}': condition {index} \
+             {axis} requires application_protocol '{protocol}' and \
              application_provider '{provider}' together, but no single cluster \
              declares both; a load balancer selects one upstream, so a matcher \
              whose values come from different clusters can never match and the \
              condition fails closed on every request. Declare a cluster with \
-             both, or split the matcher"
+             both, or split the matcher",
+            filter = location.filter,
+            chain_name = location.chain_name,
+            index = location.index,
+            axis = location.axis,
         )));
     }
     Ok(())
@@ -750,6 +812,9 @@ filter_chains:
       - filter: load_balancer
         clusters:
           - name: backend
+            http:
+              application_protocol: "openai_responses"
+              application_provider: "openai"
             endpoints:
               - "127.0.0.1:3000"
 insecure_options:
@@ -1196,6 +1261,42 @@ clusters:
                 .contains("application_protocol 'openai_responses' matches no cluster"),
             "a selected_upstream protocol that names no declared cluster must be rejected: {err}"
         );
+    }
+
+    #[test]
+    fn reject_bound_upstream_provider_matching_no_cluster() {
+        let yaml = r#"
+listeners: [{name: web, address: "127.0.0.1:8080", filter_chains: [main]}]
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+        conditions: [{when: {bound_upstream: {application_provider: openai}}}]
+clusters:
+  - {name: backend, http: {application_provider: vllm}, endpoints: ["10.0.0.1:80"]}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("bound_upstream.application_provider 'openai' matches no cluster"),
+            "a bound matcher naming no declared provider must fail: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_bound_upstream_matcher_with_untagged_fallthrough_cluster() {
+        let yaml = r#"
+listeners: [{name: web, address: "127.0.0.1:8080", filter_chains: [main]}]
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+        conditions: [{when: {bound_upstream: {application_provider: openai}}}]
+clusters:
+  - {name: openai, http: {application_provider: openai}, endpoints: ["10.0.0.1:80"]}
+  - {name: generic, endpoints: ["10.0.0.2:80"]}
+"#;
+        Config::from_yaml(yaml).expect("one satisfiable bound matcher permits other untagged clusters");
     }
 
     #[test]

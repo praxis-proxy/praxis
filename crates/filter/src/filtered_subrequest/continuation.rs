@@ -17,10 +17,11 @@ use std::{
 
 use bytes::Bytes;
 
+use super::restore_parent_upstream_scope;
 use crate::{
     FilterPipeline, StreamTermination,
     context::PendingStreamChunks,
-    extensions::{RequestExtensions, SelectedClusterApplication},
+    extensions::RequestExtensions,
     results::{FilterResultSet, RetainedFilterResults},
 };
 
@@ -133,7 +134,7 @@ impl FilteredSubrequestContinuation {
     /// Caller-injected extension types remain for the caller to strip before
     /// returning them to the parent request context.
     pub(crate) fn into_parent_extensions(mut self) -> RequestExtensions {
-        self.extensions.remove::<SelectedClusterApplication>();
+        restore_parent_upstream_scope(&mut self.extensions);
         self.extensions.remove::<PendingStreamChunks>();
         self.extensions.remove::<RetainedFilterResults>();
         self.extensions.remove::<StreamTermination>();
@@ -145,7 +146,7 @@ impl FilteredSubrequestContinuation {
     /// Executor-owned mechanisms are lifted into typed fields; caller-injected
     /// extension types remain inside [`SubrequestCompletion::extensions`].
     pub(crate) fn into_completion(mut self) -> SubrequestCompletion {
-        self.extensions.remove::<SelectedClusterApplication>();
+        restore_parent_upstream_scope(&mut self.extensions);
         let pending_chunks = self
             .extensions
             .remove::<PendingStreamChunks>()

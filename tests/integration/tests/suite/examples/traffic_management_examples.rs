@@ -7,7 +7,8 @@ use std::collections::HashMap;
 
 use praxis_core::config::{Cluster, Config};
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_header, parse_status, start_backend_with_shutdown, start_proxy,
+    free_port, http_get, http_send, parse_header, parse_status, start_backend_with_shutdown, start_full_proxy,
+    start_proxy,
 };
 
 // ---------------------------------------------------------------------------
@@ -155,7 +156,7 @@ fn bound_upstream_condition_example_gates_on_bound_cluster() {
         proxy_port,
         HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
     );
-    let proxy = start_proxy(&config);
+    let proxy = start_full_proxy(&config);
 
     // Routed to the tagged cluster: the bound_upstream condition matches and
     // the headers filter injects the response header.

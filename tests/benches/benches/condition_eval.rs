@@ -12,16 +12,19 @@
 
 use std::{collections::HashMap, hint::black_box};
 
-use criterion::{Criterion, criterion_group, criterion_main};
+mod common;
+
+use common::{bench_runtime, make_ctx, make_request as make_get_request};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use http::{HeaderMap, HeaderValue, Method, Uri};
 use praxis_core::config::{Condition, ConditionMatch};
-use praxis_filter::{Request, should_execute};
+use praxis_filter::{FilterEntry, FilterPipeline, FilterRegistry, Request, should_execute};
 
 // -----------------------------------------------------------------------------
 // Benchmarks
 // -----------------------------------------------------------------------------
 
-criterion_group!(benches, bench_condition_eval);
+criterion_group!(benches, bench_condition_eval, bench_bound_pipeline_eval);
 criterion_main!(benches);
 
 /// Benchmark condition evaluation across a range of scenarios.
@@ -112,6 +115,55 @@ fn bench_condition_eval(c: &mut Criterion) {
     }
 
     group.finish();
+}
+
+/// Benchmark the real router publication and a populated bound-upstream gate.
+fn bench_bound_pipeline_eval(c: &mut Criterion) {
+    let runtime = bench_runtime();
+    let registry = FilterRegistry::with_builtins();
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: router
+  routes:
+    - path_prefix: "/"
+      cluster: inference
+- filter: headers
+  conditions:
+    - when:
+        bound_upstream:
+          application_provider: openai
+  request_add:
+    - name: x-bench
+      value: matched
+- filter: load_balancer
+  conditions:
+    - when:
+        path: "/never"
+  clusters:
+    - name: inference
+      http:
+        application_provider: openai
+      endpoints: ["127.0.0.1:9"]
+"#,
+    )
+    .expect("valid benchmark pipeline");
+    let pipeline = FilterPipeline::build(&mut entries, &registry).expect("benchmark pipeline builds");
+
+    c.bench_function("condition_eval/router_bound_provider_hit", |b| {
+        b.to_async(&runtime).iter_batched(
+            || make_get_request("/api"),
+            |request| {
+                let pipeline = &pipeline;
+                async move {
+                    let mut ctx = make_ctx(&request);
+                    drop(
+                        black_box(pipeline.execute_http_request(black_box(&mut ctx)).await).expect("pipeline executes"),
+                    );
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
 }
 
 // -----------------------------------------------------------------------------

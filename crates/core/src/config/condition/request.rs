@@ -152,12 +152,20 @@ pub struct ApplicationMatch {
     pub application_provider: Option<String>,
 }
 
+impl ApplicationMatch {
+    /// Whether this predicate constrains neither application field.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.application_protocol.is_none() && self.application_provider.is_none()
+    }
+}
+
 // -----------------------------------------------------------------------------
 // SelectedUpstreamMatch
 // -----------------------------------------------------------------------------
 
-/// Match predicate over the load balancer's selected-upstream metadata
-/// (AND semantics).
+/// Backward-compatible name for the shared application-metadata predicate used
+/// by `selected_upstream` and `bound_upstream` conditions.
 ///
 /// Both fields are optional; an unset field imposes no constraint. Matching
 /// reads the typed selection the load balancer published for the exchange,
@@ -181,29 +189,7 @@ pub struct ApplicationMatch {
 /// );
 /// assert_eq!(m.application_provider.as_deref(), Some("vllm"));
 /// ```
-#[derive(Clone, Debug, Deserialize, serde::Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SelectedUpstreamMatch {
-    /// The selected cluster's opaque application protocol must equal this.
-    #[serde(default)]
-    pub application_protocol: Option<String>,
-
-    /// The selected cluster's opaque application provider must equal this.
-    #[serde(default)]
-    pub application_provider: Option<String>,
-}
-
-impl SelectedUpstreamMatch {
-    /// Whether this predicate constrains nothing (both fields unset).
-    ///
-    /// A configured-but-empty `selected_upstream: {}` gates on no metadata at
-    /// all, so validation rejects it the same way an empty top-level predicate
-    /// is rejected.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.application_protocol.is_none() && self.application_provider.is_none()
-    }
-}
+pub type SelectedUpstreamMatch = ApplicationMatch;
 
 // -----------------------------------------------------------------------------
 // Tests

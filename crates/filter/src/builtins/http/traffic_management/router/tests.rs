@@ -332,8 +332,8 @@ async fn on_request_rebind_replaces_previous_binding() {
         "the first match binds the cluster"
     );
 
-    // A later router on the request path replaces the binding: the last router
-    // reached wins.
+    // Publication remains replaceable until the executor freezes the first
+    // successful pipeline binding.
     let rerouter = make_router(vec![prefix_route("/", "other")]);
     let action = rerouter.on_request(&mut ctx).await.unwrap();
     assert!(matches!(action, FilterAction::Continue), "a rebind continues normally");
@@ -342,6 +342,52 @@ async fn on_request_rebind_replaces_previous_binding() {
         Some("other"),
         "the later binding replaces the previous cluster"
     );
+}
+
+#[tokio::test]
+async fn frozen_same_cluster_republication_is_idempotent() {
+    let router = make_router(vec![prefix_route("/", "stable")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    assert!(matches!(
+        router.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+    ctx.freeze_bound_upstream();
+    assert!(matches!(
+        router.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+
+    assert_eq!(ctx.bound_cluster(), Some("stable"));
+    assert_eq!(ctx.cluster.as_deref(), Some("stable"));
+}
+
+#[tokio::test]
+async fn frozen_rebind_rejects_without_mutating_route_context() {
+    let first = make_router(vec![prefix_route("/", "first")]);
+    let second = make_router(vec![prefix_route("/", "second")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    assert!(matches!(
+        first.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+    ctx.freeze_bound_upstream();
+    let prior_route = ctx.metrics_route.clone();
+    let prior_cluster = ctx.cluster.clone();
+    let prior_policy = ctx.route_retry_policy.clone();
+
+    assert!(matches!(
+        second.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Reject(rejection) if rejection.status == 500
+    ));
+    assert_eq!(ctx.bound_cluster(), Some("first"));
+    assert_eq!(ctx.cluster, prior_cluster);
+    assert_eq!(ctx.metrics_route, prior_route);
+    assert_eq!(ctx.route_retry_policy, prior_policy);
 }
 
 #[tokio::test]

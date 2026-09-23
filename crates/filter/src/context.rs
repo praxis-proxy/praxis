@@ -22,7 +22,7 @@ use crate::{
     FilterError, IterationState,
     body::BodyMode,
     condition::{ConditionError, HeaderSource},
-    extensions::{BoundUpstream, RequestExtensions, SelectedClusterApplication},
+    extensions::{BoundUpstream, BoundUpstreamFrozen, RequestExtensions, SelectedClusterApplication},
     pipeline::{body::merge_body_mode, catalog::ClusterApplicationCatalog},
     results::FilterResultSet,
 };
@@ -85,18 +85,6 @@ impl PendingStreamChunks {
         std::mem::take(&mut self.chunks)
     }
 }
-
-/// Once-per-request marker that the bound-upstream body barrier has run.
-///
-/// Stored in [`RequestExtensions`] rather than a context field because the
-/// extensions map is threaded across IRR iterations and survives `ReEnter`
-/// loops on the same context, so the barrier fires at most once for the whole
-/// downstream request regardless of how many times the pipeline re-executes.
-///
-/// Presence of this marker also freezes the logical binding: once it is set,
-/// [`HttpFilterContext::publish_bound_upstream`] refuses to retarget the
-/// request to a different cluster.
-struct BoundUpstreamBarrierRan;
 
 /// A binding-publish attempt rejected because the logical binding is frozen
 /// and the attempted cluster differs from the frozen one.
@@ -678,22 +666,21 @@ impl HttpFilterContext<'_> {
     /// cluster. `protocol`/`provider` come from the pipeline cluster catalog,
     /// keyed by `cluster`.
     ///
-    /// Before the bound-upstream barrier freezes the binding, a later router
-    /// replaces the previous value, so the last router reached wins. Once the
-    /// barrier has run (see [`bound_upstream_barrier_ran`]), the binding is
-    /// frozen: republishing the same cluster is an idempotent no-op, and
+    /// Before the executor freezes the binding, a later router replaces the
+    /// previous value. Once frozen (see [`bound_upstream_frozen`]), republishing
+    /// the same cluster is an idempotent no-op, and
     /// attempting to publish a different cluster fails closed with
     /// [`BindingFrozen`] so exchange-local routing cannot retarget a request
     /// whose body was already processed against the frozen binding.
     ///
-    /// [`bound_upstream_barrier_ran`]: Self::bound_upstream_barrier_ran
+    /// [`bound_upstream_frozen`]: Self::bound_upstream_frozen
     pub(crate) fn publish_bound_upstream(
         &mut self,
         cluster: Arc<str>,
         protocol: Option<Arc<str>>,
         provider: Option<Arc<str>>,
     ) -> Result<(), BindingFrozen> {
-        if self.bound_upstream_barrier_ran() {
+        if self.bound_upstream_frozen() {
             match self.bound_cluster() {
                 Some(existing) if existing == cluster.as_ref() => return Ok(()),
                 Some(existing) => {
@@ -716,8 +703,8 @@ impl HttpFilterContext<'_> {
     /// Resolve `cluster` through the injected pipeline catalog and publish the
     /// binding.
     ///
-    /// The trusted built-in router calls this right after it sets
-    /// [`cluster`](Self::cluster). Application metadata (protocol/provider) is
+    /// The trusted built-in router calls this before it commits its
+    /// exchange-local route fields. Application metadata (protocol/provider) is
     /// looked up in the pipeline cluster catalog; a cluster absent from the
     /// catalog — or one declared without tags — binds with no metadata rather
     /// than failing, so plain routing pipelines keep working.
@@ -735,23 +722,24 @@ impl HttpFilterContext<'_> {
         self.publish_bound_upstream(cluster, protocol, provider)
     }
 
-    /// Whether the bound-upstream request-body barrier has already run.
+    /// Whether the request's logical upstream binding is frozen.
     ///
-    /// The barrier is a once-per-request pass: it consults this marker so a
-    /// `ReEnter` loop or an IRR iteration that re-executes the pipeline does
-    /// not replay the bound-upstream body hooks against an already-mutated
-    /// body.
-    pub(crate) fn bound_upstream_barrier_ran(&self) -> bool {
-        self.extensions.get::<BoundUpstreamBarrierRan>().is_some()
+    /// Freezing also serves as the once-per-request marker for the bound-body
+    /// phase: a `ReEnter` loop or IRR continuation cannot replay the hooks or
+    /// retarget the request after body processing.
+    pub(crate) fn bound_upstream_frozen(&self) -> bool {
+        self.extensions.get::<BoundUpstreamFrozen>().is_some()
     }
 
-    /// Record that the bound-upstream request-body barrier has run.
+    /// Freeze the request's logical upstream binding.
     ///
-    /// Idempotent; called by the executor immediately after the binding
-    /// router publishes its [`BoundUpstream`] and the barrier drains its
-    /// participants, before any branch chains evaluate.
-    pub(crate) fn mark_bound_upstream_barrier_ran(&mut self) {
-        self.extensions.insert(BoundUpstreamBarrierRan);
+    /// Idempotent; called by the executor immediately after the first binding
+    /// router publishes [`BoundUpstream`], before bound-body participants and
+    /// branch chains run. It is set even when there are no body participants,
+    /// keeping the logical binding request-stable for conditions, bound load
+    /// balancers, and IRR continuations.
+    pub(crate) fn freeze_bound_upstream(&mut self) {
+        self.extensions.insert(BoundUpstreamFrozen);
     }
 
     /// Shared sub-request client, if set.
@@ -3020,7 +3008,7 @@ content-length: 0
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.publish_bound_upstream(Arc::from("inference"), Some(Arc::from("p1")), None)
             .expect("publish before freeze succeeds");
-        ctx.mark_bound_upstream_barrier_ran();
+        ctx.freeze_bound_upstream();
 
         let err = ctx
             .publish_bound_upstream(Arc::from("other"), Some(Arc::from("p2")), None)
@@ -3045,7 +3033,7 @@ content-length: 0
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.publish_bound_upstream(Arc::from("inference"), Some(Arc::from("p1")), Some(Arc::from("vllm")))
             .expect("publish before freeze succeeds");
-        ctx.mark_bound_upstream_barrier_ran();
+        ctx.freeze_bound_upstream();
 
         ctx.publish_bound_upstream(Arc::from("inference"), None, None)
             .expect("republishing the same cluster after freeze is a no-op");

@@ -481,6 +481,18 @@ impl HttpFilter for IterativeRequestRouterFilter {
             .any(|pipeline| pipeline.consumes_bound_upstream())
     }
 
+    fn requires_bound_upstream_on_entry(&self) -> bool {
+        self.step_pipelines
+            .values()
+            .any(|pipeline| pipeline.requires_bound_upstream_on_entry())
+    }
+
+    fn conflicts_with_inherited_bound_upstream(&self) -> bool {
+        self.step_pipelines
+            .values()
+            .any(|pipeline| pipeline.publishes_bound_upstream())
+    }
+
     fn bound_upstream_clusters(&self) -> Vec<String> {
         self.step_pipelines
             .values()
@@ -854,10 +866,13 @@ impl IterativeRequestRouterFilter {
                                     .iter()
                                     .chain(completed_pending_chunks.iter())
                                     .chain(std::iter::once(&outcome.response.body))
-                                    .try_fold(0_usize, |total, chunk| total.checked_add(chunk.len()))
-                                    .ok_or_else(|| -> FilterError {
-                                        "iterative_request_router: completion body byte count overflow".into()
-                                    })?;
+                                    .try_fold(0_usize, |total, chunk| total.checked_add(chunk.len()));
+                                let Some(combined_bytes) = combined_bytes else {
+                                    ctx.extensions = restore_parent_extensions(extensions, parent_catalog.as_ref());
+                                    return Err("iterative_request_router: completion body byte count overflow"
+                                        .to_owned()
+                                        .into());
+                                };
                                 if combined_bytes > max_response_bytes {
                                     ctx.extensions = restore_parent_extensions(extensions, parent_catalog.as_ref());
                                     return Err(

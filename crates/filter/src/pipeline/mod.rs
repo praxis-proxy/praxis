@@ -82,6 +82,7 @@ use tracing::{error, warn};
 use self::filter::PipelineFilter;
 use crate::{
     FilterError,
+    any_filter::AnyFilter,
     body::{BodyCapabilities, BodyMode},
     builtins::http::payload_processing::compression_config::CompressionConfig,
     extensions::RequestExtensions,
@@ -447,7 +448,7 @@ impl FilterPipeline {
     pub fn terminal_filters(&self) -> Vec<&'static str> {
         let mut names = Vec::new();
         for_each_pipeline_filter(&self.filters, &mut |pf| {
-            if let crate::any_filter::AnyFilter::Http(filter) = &pf.filter
+            if let AnyFilter::Http(filter) = &pf.filter
                 && filter.produces_terminal_response()
             {
                 names.push(filter.name());
@@ -664,7 +665,7 @@ impl FilterPipeline {
     pub fn referenced_files(&self) -> Vec<std::path::PathBuf> {
         let mut files = Vec::new();
         for_each_pipeline_filter(&self.filters, &mut |pf| {
-            if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+            if let AnyFilter::Http(f) = &pf.filter {
                 files.extend(f.referenced_files());
             }
         });
@@ -701,7 +702,7 @@ impl FilterPipeline {
     /// [`InsecureOptions`]: praxis_core::config::InsecureOptions
     pub fn apply_insecure_options(&self, options: &InsecureOptions) {
         for_each_pipeline_filter(&self.filters, &mut |pf| {
-            if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+            if let AnyFilter::Http(f) = &pf.filter {
                 f.apply_insecure_options(options);
             }
         });
@@ -727,11 +728,31 @@ impl FilterPipeline {
     pub(crate) fn consumes_bound_upstream(&self) -> bool {
         let mut found = false;
         for_each_pipeline_filter(&self.filters, &mut |pf| {
-            if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+            if let AnyFilter::Http(f) = &pf.filter {
                 found = found || f.consumes_bound_upstream();
             }
         });
         found
+    }
+
+    /// Whether any bound dependency in this pipeline is reachable before a
+    /// local unconditional binding filter establishes the logical upstream.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn requires_bound_upstream_on_entry(&self) -> bool {
+        checks::requires_bound_upstream_on_entry(&self.filters)
+    }
+
+    /// Whether this pipeline contains a binding publisher at any branch depth.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn publishes_bound_upstream(&self) -> bool {
+        fn contains(filters: &[PipelineFilter]) -> bool {
+            filters.iter().any(|pf| {
+                matches!(&pf.filter, AnyFilter::Http(filter) if filter.binds_upstream())
+                    || pf.branches.iter().any(|branch| contains(&branch.filters))
+            })
+        }
+
+        contains(&self.filters)
     }
 
     /// Cluster names every bound-consuming filter in this pipeline declares,
@@ -740,7 +761,7 @@ impl FilterPipeline {
     pub(crate) fn bound_upstream_clusters(&self) -> Vec<String> {
         let mut out = Vec::new();
         for_each_pipeline_filter(&self.filters, &mut |pf| {
-            if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+            if let AnyFilter::Http(f) = &pf.filter {
                 out.extend(f.bound_upstream_clusters());
             }
         });
@@ -787,7 +808,7 @@ fn for_each_pipeline_filter(filters: &[PipelineFilter], visit: &mut dyn FnMut(&P
 pub(super) fn collect_cluster_declarations(filters: &[PipelineFilter]) -> Vec<catalog::ClusterMetadataDeclaration> {
     let mut declarations = Vec::new();
     for_each_pipeline_filter(filters, &mut |pf| {
-        if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+        if let AnyFilter::Http(f) = &pf.filter {
             declarations.extend(f.declared_cluster_metadata());
         }
     });
@@ -802,7 +823,7 @@ pub(super) fn collect_cluster_declarations(filters: &[PipelineFilter]) -> Vec<ca
 /// [`visit_nested_pipelines`]: crate::HttpFilter::visit_nested_pipelines
 fn visit_branch_nested_pipelines(filters: &mut [PipelineFilter], visitor: &mut dyn FnMut(&mut FilterPipeline)) {
     for pf in filters {
-        if let crate::any_filter::AnyFilter::Http(filter) = &mut pf.filter {
+        if let AnyFilter::Http(filter) = &mut pf.filter {
             filter.visit_nested_pipelines(visitor);
         }
         for branch in &mut pf.branches {

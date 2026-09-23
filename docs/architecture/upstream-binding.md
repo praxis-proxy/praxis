@@ -27,8 +27,10 @@ would guarantee they agreed.
 > filter is gated behind the off-by-default
 > `iterative-request-router` build feature (see
 > [Build Features](../operating/build-features.md)). A
-> router always records a binding; with no consumer it
-> is simply inert.
+> router always records and freezes a binding after its
+> first successful match. With no consumer that value is
+> unobserved, but publication still incurs its small catalog
+> lookup and extension cost.
 
 ## Terminology
 
@@ -37,7 +39,7 @@ would guarantee they agreed.
 | **Logical binding** | The `(cluster name, application protocol, application provider)` tuple pinned to a request. Read-only after it is published. Physical endpoints are never stored. |
 | **Binding router** | Any built-in `router`. When it matches a route it publishes that route's cluster as the request's binding. There is no separate "binding" config key. |
 | **Cluster catalog** | A metadata-only map, built once at pipeline construction, that resolves a cluster name to its declared application protocol/provider so the router can publish metadata without owning endpoint state. |
-| **Freeze barrier** | The once-per-request bound-body pass. Running it freezes the binding: a later router may no longer retarget the request to a different cluster. |
+| **Freeze barrier** | The executor boundary immediately after the first binding router. It freezes the binding and then runs any once-per-request bound-body participants before branch evaluation. |
 | **Bound-consuming load balancer** | A `load_balancer` with `cluster_source: bound_upstream`. It resolves the frozen binding and selects an endpoint with no preceding router. |
 | **Bound condition** | A `when`/`unless` clause of the form `bound_upstream: { application_protocol: ..., application_provider: ... }`, matched verbatim against the frozen binding's metadata. |
 
@@ -56,11 +58,12 @@ Praxis defines no enum of known protocols or providers
 — consuming filters and bound conditions interpret the
 strings; the proxy only matches them verbatim.
 
-Before the freeze barrier, a later router on the request
-path replaces the binding (last-writer-wins). This is
-how a coarse first router and a finer second router
-compose. After the barrier the binding is frozen (see
-below).
+The executor freezes the first successful top-level binding
+before evaluating that router's branches or the next filter.
+Pipeline validation permits one request-level binding router;
+nested and IRR pipelines inherit the binding and may not
+retarget it. Republishing the same cluster is an idempotent
+runtime backstop, while a different cluster fails closed.
 
 Source: `crates/filter/src/builtins/http/traffic_management/router/mod.rs`,
 `crates/filter/src/extensions.rs` (`BoundUpstream`).
@@ -116,7 +119,9 @@ stable target. Praxis guarantees this with a
 which bound-body hooks run against the fully buffered
 request body. Two invariants follow:
 
-1. **The binding freezes.** Once the barrier has run,
+1. **The binding freezes.** The executor freezes immediately
+   after the first successful binding, even when no body hook
+   participates. Once frozen,
    a later router that tries to bind a *different*
    cluster is rejected and the request fails closed
    with a 500. Re-publishing the *same* cluster is an
@@ -134,8 +139,18 @@ request body. Two invariants follow:
    times the pipeline re-executes.
 
 Source: `crates/filter/src/context.rs`
-(`BoundUpstreamBarrierRan`, `publish_bound_upstream`),
+(`BoundUpstreamFrozen`, `publish_bound_upstream`),
 `crates/filter/src/pipeline/http.rs`.
+
+Bound-body participants declare a bounded `StreamBuffer` mode
+and `bound_upstream_request_body_access`. They run in top-level
+pipeline order at this barrier, against the original request
+snapshot plus the frozen binding. Endpoint-local
+`selected_upstream` metadata does not exist yet and is rejected
+on these participants. A writer's output becomes the canonical
+body used by direct dispatch, IRR input, retries, and later
+selected-upstream adaptation; rewritten output is checked
+against the request-body ceiling before execution continues.
 
 ## Consuming the Binding
 
@@ -190,6 +205,12 @@ and the individual checks in
 
 ## Example
 
+For the smallest all-builds example, see
+[`bound-upstream-condition.yaml`](../../examples/configs/traffic-management/bound-upstream-condition.yaml).
+It demonstrates a condition over an OpenAI-tagged binding while
+an untagged generic cluster simply falls through without
+matching.
+
 [`examples/configs/traffic-management/bound-upstream-dispatch.yaml`](../../examples/configs/traffic-management/bound-upstream-dispatch.yaml)
 drives **two ownership modes from one binding**:
 
@@ -205,6 +226,12 @@ drives **two ownership modes from one binding**:
    dispatched by an `iterative_request_router` step
    whose bound-consuming load balancer reads the same
    binding.
+
+The no-op `headers` filter is deliberately used as the
+conditional branch host. Because body capabilities are
+computed for the whole pipeline, the IRR's bounded
+`StreamBuffer` also pre-reads direct-path request bodies and
+applies its body ceiling even when the IRR is later skipped.
 
 Neither path uses a second router or a top-level load
 balancer. Run it and watch both modes:

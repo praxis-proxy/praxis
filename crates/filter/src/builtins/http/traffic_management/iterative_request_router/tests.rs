@@ -2831,7 +2831,7 @@ steps:
         Some(std::sync::Arc::from("bound_prov")),
     )
     .unwrap();
-    ctx.mark_bound_upstream_barrier_ran();
+    ctx.freeze_bound_upstream();
 
     let action = filter.on_request(&mut ctx).await.unwrap();
     backend.abort();
@@ -2905,7 +2905,7 @@ steps:
         None,
     )
     .unwrap();
-    ctx.mark_bound_upstream_barrier_ran();
+    ctx.freeze_bound_upstream();
 
     let result = filter.on_request(&mut ctx).await;
 
@@ -2956,7 +2956,7 @@ steps:
         None,
     )
     .unwrap();
-    ctx.mark_bound_upstream_barrier_ran();
+    ctx.freeze_bound_upstream();
 
     let action = filter.on_request(&mut ctx).await.unwrap();
     backend.abort();
@@ -3526,6 +3526,105 @@ steps:
     assert!(
         err.to_string().contains("invalid step"),
         "error must mention the invalid step: {err}"
+    );
+}
+
+#[test]
+fn outer_pipeline_requires_binding_for_step_bound_condition() {
+    let registry = crate::FilterRegistry::with_builtins();
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: dispatch
+steps:
+  - name: dispatch
+    filters:
+      - filter: headers
+        conditions:
+          - when:
+              bound_upstream:
+                application_provider: openai
+        response_set:
+          - name: x-provider
+            value: openai
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let mut entries = vec![crate::FilterEntry {
+        branch_chains: None,
+        conditions: Vec::new(),
+        filter_type: "iterative_request_router".to_owned(),
+        config,
+        name: None,
+        response_conditions: Vec::new(),
+        failure_mode: praxis_core::config::FailureMode::default(),
+    }];
+    let pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+
+    let errors = pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("requires a bound logical upstream")),
+        "a nested bound condition must propagate its entry requirement: {errors:?}"
+    );
+}
+
+#[test]
+fn step_router_is_rejected_when_binding_is_inherited() {
+    let irr: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+initial_step: dispatch
+steps:
+  - name: dispatch
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:9"]
+    on_result:
+      - default: true
+        done: true
+"#,
+    )
+    .unwrap();
+    let router: serde_yaml::Value =
+        serde_yaml::from_str("routes:\n  - path_prefix: /\n    cluster: backend\n").unwrap();
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries = vec![
+        crate::FilterEntry {
+            branch_chains: None,
+            conditions: Vec::new(),
+            filter_type: "router".to_owned(),
+            config: router,
+            name: None,
+            response_conditions: Vec::new(),
+            failure_mode: praxis_core::config::FailureMode::default(),
+        },
+        crate::FilterEntry {
+            branch_chains: None,
+            conditions: Vec::new(),
+            filter_type: "iterative_request_router".to_owned(),
+            config: irr,
+            name: None,
+            response_conditions: Vec::new(),
+            failure_mode: praxis_core::config::FailureMode::default(),
+        },
+    ];
+    let pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+    let errors = pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("nested pipeline") && error.contains("already frozen")),
+        "a step cannot replace its parent's frozen logical binding: {errors:?}"
     );
 }
 

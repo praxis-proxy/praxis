@@ -25,7 +25,7 @@ use super::{
         },
         body_util::clamp_body_mode_to_ceiling,
     },
-    body_handling::{selected_upstream_body_limit, store_adapted_request_body},
+    body_handling::{selected_upstream_body_limit, store_adapted_request_body, store_canonical_request_body},
     error_handling::handle_pre_read_io_error,
     header_mutations::{apply_pending_header_mutations, apply_pre_read_mutations},
     request_utils::{create_request_span, reject_reserved_internal_headers, snapshot_for_early_exit, templated_route},
@@ -63,6 +63,13 @@ struct PipelineResult {
 /// the inner `Option<Bytes>` is the frozen adapted body (`None`/empty = empty
 /// body forwarded under `Content-Length: 0`).
 struct AdaptedRequestBody(Option<Bytes>);
+
+/// Canonical request body after the once-per-request bound-upstream phase.
+///
+/// Kept distinct from [`AdaptedRequestBody`]: this representation is replayed
+/// for direct dispatch and is also the input to exchange-local selected-upstream
+/// adaptation.
+struct CanonicalRequestBody(Option<Bytes>);
 
 // -----------------------------------------------------------------------------
 // Request Filters
@@ -284,32 +291,22 @@ async fn run_pipeline(
         // on_request. Cleared below to prevent stale provenance reuse.
         _pre_read_mutations,
         structured_metadata,
+        canonical_body,
         adapted_body,
     ) = {
         let selected_upstream_participates = pipeline.body_capabilities().needs_selected_upstream_request_body;
-        // Canonical pre-read body for the selected-upstream phase. Read before
-        // building the filter context, which borrows nothing from `ctx`.
-        let mut working_body = if selected_upstream_participates {
-            ctx.pre_read_body.as_ref().and_then(|chunks| {
-                // `StreamBuffer` accumulation freezes the whole pre-read body into
-                // a single chunk (mirrored by `store_adapted_request_body`), so the
-                // phase only ever consumes the front chunk. Assert the invariant so
-                // a future multi-chunk representation cannot silently truncate the
-                // body handed to the selected-upstream phase.
-                debug_assert!(
-                    chunks.len() <= 1,
-                    "pre_read_body should be a single frozen chunk, found {}",
-                    chunks.len()
-                );
-                chunks.front().cloned()
-            })
-        } else {
-            None
-        };
-
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
         let mut action = pipeline.execute_http_request(&mut filter_ctx).await;
+        let canonical_body = pipeline
+            .body_capabilities()
+            .any_bound_upstream_request_body_writer
+            .then(|| CanonicalRequestBody(filter_ctx.buffered_request_body.clone()));
+        // Selected-upstream adaptation must observe the canonical output of the
+        // bound-upstream phase, not the original pre-read transport buffer.
+        let mut working_body = selected_upstream_participates
+            .then(|| filter_ctx.buffered_request_body.clone())
+            .flatten();
 
         // #1139: selected-upstream request-body phase. Runs on the SAME live
         // filter_ctx after upstream selection, before the fields are extracted.
@@ -379,6 +376,7 @@ async fn run_pipeline(
             filter_ctx.body_done_indices,
             filter_ctx.pre_read_mutations,
             filter_ctx.structured_metadata,
+            canonical_body,
             adapted_body,
         )
     };
@@ -435,6 +433,9 @@ async fn run_pipeline(
             ctx.attempted_endpoints = attempted_endpoints;
             ctx.retry_policy = retry_policy;
             ctx.route_retry_policy = route_retry_policy;
+            if let Some(CanonicalRequestBody(body)) = canonical_body {
+                store_canonical_request_body(ctx, body);
+            }
             if let Some(AdaptedRequestBody(body)) = adapted_body {
                 store_adapted_request_body(ctx, body);
             }

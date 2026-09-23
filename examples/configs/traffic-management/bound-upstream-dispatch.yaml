@@ -14,7 +14,7 @@
 # dispatched by the IRR step's bound-consuming load balancer.
 #
 # Usage:
-#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/bound-upstream-dispatch.yaml
+#   cargo run -p praxis-proxy --features iterative-request-router -- -c examples/configs/traffic-management/bound-upstream-dispatch.yaml
 #   curl -i http://localhost:8080/openai/v1/responses   # direct dispatch
 #   curl -i http://localhost:8080/v1/chat/completions   # gateway + IRR dispatch
 
@@ -41,7 +41,12 @@ filter_chains:
       # 2. Direct provider path: gated on the bound provider, this branch
       #    dispatches straight from the binding via a bound-consuming load
       #    balancer and rejoins `terminal`, so the gateway processing and
-      #    IRR below never run for a provider-owned request.
+      #    IRR below never run for a provider-owned request. The headers
+      #    filter intentionally has no mutations; it is the branch host.
+      #
+      #    The IRR's bounded StreamBuffer is a pipeline-wide capability, so
+      #    direct requests are still fully pre-read and share its body limit
+      #    before routing decides which path runs.
       - filter: headers
         conditions:
           - when:

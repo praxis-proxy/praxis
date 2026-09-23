@@ -42,6 +42,23 @@ pub(super) fn store_adapted_request_body(ctx: &mut PingoraRequestCtx, body: Opti
     ctx.adapted_request_body_len = Some(len);
 }
 
+/// Store the canonical body produced by the bound-upstream phase.
+///
+/// Direct dispatch drains `pre_read_body`; retries are re-seeded from the
+/// retained copy. Updating the authoritative mutated length keeps framing and
+/// retry replay aligned when a bound-body writer grows, shrinks, or removes the
+/// body.
+pub(super) fn store_canonical_request_body(ctx: &mut PingoraRequestCtx, body: Option<Bytes>) {
+    let len = body.as_ref().map_or(0, Bytes::len);
+    let chunks = match body {
+        Some(body) if !body.is_empty() => VecDeque::from([body]),
+        _ => VecDeque::new(),
+    };
+    ctx.retained_pre_read_body = Some(chunks.clone());
+    ctx.pre_read_body = Some(chunks);
+    ctx.mutated_request_body_len = Some(len);
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -190,6 +207,27 @@ mod tests {
             "retained marker is still Some for an empty adapted body"
         );
         assert_eq!(ctx.adapted_request_body_len, Some(0), "empty body length is 0");
+    }
+
+    #[test]
+    fn store_canonical_request_body_updates_direct_and_retry_representations() {
+        let mut ctx = make_ctx();
+        store_canonical_request_body(&mut ctx, Some(Bytes::from_static(b"BOUND")));
+
+        let expected = Some(VecDeque::from([Bytes::from_static(b"BOUND")]));
+        assert_eq!(ctx.pre_read_body, expected);
+        assert_eq!(ctx.retained_pre_read_body, expected);
+        assert_eq!(ctx.mutated_request_body_len, Some(5));
+    }
+
+    #[test]
+    fn store_canonical_request_body_preserves_empty_replay_marker() {
+        let mut ctx = make_ctx();
+        store_canonical_request_body(&mut ctx, None);
+
+        assert_eq!(ctx.pre_read_body, Some(VecDeque::new()));
+        assert_eq!(ctx.retained_pre_read_body, Some(VecDeque::new()));
+        assert_eq!(ctx.mutated_request_body_len, Some(0));
     }
 
     #[test]

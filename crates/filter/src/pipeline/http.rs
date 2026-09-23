@@ -32,7 +32,7 @@ use crate::{
     FilterError,
     actions::{BoundUpstreamBodyOutcome, FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
-    condition::should_execute_bound_selected,
+    condition::{SelectedUpstream, should_execute_bound_selected},
     context::{EffectiveHeaders, HttpFilterContext},
     trace_context::{TraceContext, ensure_trace_context},
 };
@@ -359,7 +359,7 @@ impl FilterPipeline {
     /// evaluate. The barrier drains the bound-upstream body participants
     /// exactly once per downstream request, and only once `binding_filter`
     /// has actually bound a logical upstream. Pipelines with no bound-upstream
-    /// participants pay nothing beyond an empty-slice check.
+    /// participants still freeze the binding, but skip body execution.
     ///
     /// # Errors
     ///
@@ -372,14 +372,21 @@ impl FilterPipeline {
         binding_filter: &dyn crate::filter::HttpFilter,
         ctx: &mut HttpFilterContext<'_>,
     ) -> Result<FilterAction, FilterError> {
+        if !binding_filter.binds_upstream() || ctx.bound_upstream_frozen() || ctx.bound_cluster().is_none() {
+            return Ok(FilterAction::Continue);
+        }
+        ctx.freeze_bound_upstream();
         if self.bound_upstream_request_body_filter_indices.is_empty() {
             return Ok(FilterAction::Continue);
         }
-        if !binding_filter.binds_upstream() || ctx.bound_upstream_barrier_ran() || ctx.bound_cluster().is_none() {
-            return Ok(FilterAction::Continue);
+        let action = self.execute_http_bound_upstream_request_body(ctx).await?;
+        if matches!(action, FilterAction::Continue)
+            && self.body_capabilities.any_bound_upstream_request_body_writer
+            && ctx.buffered_request_body.as_ref().map_or(0, Bytes::len) > self.selected_upstream_request_body_limit()
+        {
+            return Ok(FilterAction::Reject(Rejection::status(413)));
         }
-        ctx.mark_bound_upstream_barrier_ran();
-        self.execute_http_bound_upstream_request_body(ctx).await
+        Ok(action)
     }
 
     /// Drain the bound-upstream request-body participants over the buffered
@@ -419,7 +426,15 @@ impl FilterPipeline {
             let Some(pf) = self.filters.get(idx) else {
                 continue;
             };
-            if !should_execute_bound(&pf.conditions, ctx.request, ctx.bound_upstream_view()) {
+            // This barrier fires inside the request phase, before the load
+            // balancer publishes an upstream selection, so any `selected_upstream`
+            // predicate on a participant fails closed (`SelectedUpstream::none`).
+            if !should_execute_bound_selected(
+                &pf.conditions,
+                ctx.request,
+                ctx.bound_upstream_view(),
+                SelectedUpstream::none(),
+            ) {
                 trace!(
                     filter = pf.filter.name(),
                     "skipped bound-upstream request body (conditions)"

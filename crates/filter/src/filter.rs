@@ -166,6 +166,23 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Whether this composite filter requires a logical binding to exist when
+    /// its own execution begins.
+    ///
+    /// Framework filters that own nested pipelines override this when a nested
+    /// consumer can be reached before any nested binding filter. This is
+    /// distinct from [`consumes_bound_upstream`]: a nested condition or body
+    /// participant observes the binding without selecting a cluster from it.
+    fn requires_bound_upstream_on_entry(&self) -> bool {
+        false
+    }
+
+    /// Whether a nested pipeline owned by this filter may publish its own
+    /// logical binding and therefore cannot run after a parent binding freezes.
+    fn conflicts_with_inherited_bound_upstream(&self) -> bool {
+        false
+    }
+
     /// Cluster names this filter can select from the frozen logical binding.
     ///
     /// A load balancer with `cluster_source: bound_upstream` reports the
@@ -483,7 +500,9 @@ pub trait HttpFilter: Send + Sync {
     /// [`bound_upstream_request_body_access`] other than
     /// [`BodyAccess::None`], in pipeline order, and only when the filter's
     /// request conditions (including any `bound_upstream` predicate) match
-    /// the frozen binding. `body` holds the complete request body (`None`
+    /// the frozen binding. Conditions are evaluated at the barrier, not at the
+    /// participant's later header-phase position, so they must not depend on
+    /// headers or results produced by later request filters. `body` holds the complete request body (`None`
     /// when the request had no body). Filters that declared
     /// [`BodyAccess::ReadWrite`] may mutate `body` in place; the rewritten
     /// buffer becomes the canonical body observed by the remaining pipeline,

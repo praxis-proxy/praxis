@@ -96,6 +96,15 @@ impl AnyFilter {
             Self::Tcp(_) => false,
         }
     }
+
+    /// Cluster names this filter can load balance from the frozen logical
+    /// binding. TCP filters never consume HTTP request bindings.
+    pub fn bound_upstream_clusters(&self) -> Vec<String> {
+        match self {
+            Self::Http(f) => f.bound_upstream_clusters(),
+            Self::Tcp(_) => Vec::new(),
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -165,6 +174,11 @@ mod tests {
         assert!(
             f.consumes_bound_upstream(),
             "Http variant should delegate consumes_bound_upstream"
+        );
+        assert_eq!(
+            f.bound_upstream_clusters(),
+            vec!["web".to_owned(), "api".to_owned()],
+            "Http variant should delegate bound_upstream_clusters"
         );
     }
 
@@ -279,6 +293,10 @@ mod tests {
 
         fn consumes_bound_upstream(&self) -> bool {
             true
+        }
+
+        fn bound_upstream_clusters(&self) -> Vec<String> {
+            vec!["web".to_owned(), "api".to_owned()]
         }
 
         async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {

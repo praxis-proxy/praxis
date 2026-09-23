@@ -1099,6 +1099,47 @@ fn error_into_parts_scrubs_selected_application() {
 }
 
 #[test]
+fn nested_upstream_scope_restores_parent_catalog_binding_and_freeze() {
+    use std::sync::Arc;
+
+    let registry = crate::FilterRegistry::with_builtins();
+    let child = crate::FilterPipeline::build(&mut [], &registry).unwrap();
+    let parent_catalog = Arc::new(crate::pipeline::catalog::ClusterApplicationCatalog::default());
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(Arc::clone(&parent_catalog));
+    extensions.insert(crate::extensions::BoundUpstream::new(
+        Arc::from("parent"),
+        Some(Arc::from("parent_protocol")),
+        Some(Arc::from("parent_provider")),
+    ));
+    extensions.insert(crate::extensions::BoundUpstreamFrozen);
+
+    super::enter_nested_upstream_scope(&mut extensions, &child);
+    extensions.insert(crate::extensions::BoundUpstream::new(Arc::from("child"), None, None));
+    extensions.remove::<crate::extensions::BoundUpstreamFrozen>();
+    extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("child"))).unwrap());
+
+    super::restore_parent_upstream_scope(&mut extensions);
+
+    assert!(Arc::ptr_eq(
+        extensions
+            .get::<Arc<crate::pipeline::catalog::ClusterApplicationCatalog>>()
+            .unwrap(),
+        &parent_catalog,
+    ));
+    let binding = extensions.get::<crate::extensions::BoundUpstream>().unwrap();
+    assert_eq!(binding.cluster(), "parent");
+    assert_eq!(binding.application_protocol(), Some("parent_protocol"));
+    assert_eq!(binding.application_provider(), Some("parent_provider"));
+    assert!(extensions.get::<crate::extensions::BoundUpstreamFrozen>().is_some());
+    assert!(
+        extensions
+            .get::<crate::extensions::SelectedClusterApplication>()
+            .is_none()
+    );
+}
+
+#[test]
 fn into_parent_extensions_scrubs_selected_application() {
     use std::sync::Arc;
 

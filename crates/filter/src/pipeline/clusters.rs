@@ -96,9 +96,8 @@ pub(super) fn reachable_lb_clusters(filters: &[PipelineFilter]) -> HashSet<Strin
 ///
 /// The binding router records only a cluster name in the logical binding; these
 /// are exactly the names a bound-consuming load balancer must be able to
-/// resolve. Pipeline validation compares this set against
-/// [`extract_bound_upstream_clusters`] so every bindable cluster is served by
-/// some bound-consuming load balancer.
+/// resolve. Pipeline validation compares this set against reachable consumer
+/// coverage so every bindable cluster is served on its request path.
 pub(super) fn bindable_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
     let mut out = HashSet::new();
     for pf in filters {
@@ -109,27 +108,6 @@ pub(super) fn bindable_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
         }
         for branch in &pf.branches {
             out.extend(bindable_clusters(&branch.filters));
-        }
-    }
-    out
-}
-
-/// Cluster names that bound-consuming load balancers can resolve from the
-/// frozen logical binding, recursing into branch sub-chains.
-///
-/// A framework filter that owns nested pipelines (the IRR) folds its steps'
-/// bound-consuming declarations up through
-/// [`bound_upstream_clusters`](crate::HttpFilter::bound_upstream_clusters), so
-/// an IRR-step bound load balancer contributes here even though branch
-/// recursion alone does not descend into step pipelines.
-pub(super) fn extract_bound_upstream_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for pf in filters {
-        if let AnyFilter::Http(f) = &pf.filter {
-            out.extend(f.bound_upstream_clusters());
-        }
-        for branch in &pf.branches {
-            out.extend(extract_bound_upstream_clusters(&branch.filters));
         }
     }
     out

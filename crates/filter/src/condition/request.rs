@@ -1136,6 +1136,45 @@ mod tests {
     }
 
     #[test]
+    fn unless_bound_upstream_runs_when_unbound_or_field_missing() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let condition = unless(bound_upstream_match(None, Some("openai")));
+
+        assert!(should_execute_bound(
+            std::slice::from_ref(&condition),
+            &req,
+            BoundUpstreamView::default(),
+        ));
+        assert!(should_execute_bound(
+            &[condition],
+            &req,
+            bound_view(Some("openai_responses"), None),
+        ));
+    }
+
+    #[test]
+    fn bound_and_selected_upstream_axes_are_anded() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let conditions = [
+            when(bound_upstream_match(None, Some("openai"))),
+            when(selected_upstream_match(None, Some("azure"))),
+        ];
+        let bound = bound_view(Some("openai_responses"), Some("openai"));
+        let selected = SelectedUpstream {
+            application_protocol: Some("openai_responses"),
+            application_provider: Some("azure"),
+        };
+
+        assert!(should_execute_bound_selected(&conditions, &req, bound, selected));
+        assert!(!should_execute_bound_selected(
+            &conditions,
+            &req,
+            bound,
+            SelectedUpstream::none(),
+        ));
+    }
+
+    #[test]
     fn bound_upstream_ands_with_path() {
         let view = bound_view(Some("openai_responses"), Some("openai"));
         let conditions = vec![

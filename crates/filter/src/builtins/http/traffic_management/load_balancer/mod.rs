@@ -234,6 +234,16 @@ impl LoadBalancerFilter {
             format!("load_balancer filter: bound cluster '{bound}' not declared in this load_balancer").into()
         })?;
         let cluster = Arc::clone(key);
+        if ctx
+            .cluster
+            .as_deref()
+            .is_some_and(|selected| selected != cluster.as_ref())
+        {
+            // Route-level retry overrides belong to the router-selected
+            // exchange cluster. A bound-source LB that replaces a stale or
+            // custom selection must not apply that policy to another cluster.
+            ctx.route_retry_policy = None;
+        }
         ctx.cluster = Some(Arc::clone(&cluster));
         Ok((cluster, entry))
     }

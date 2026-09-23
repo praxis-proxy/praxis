@@ -452,6 +452,16 @@ off-by-default `iterative-request-router` build
 feature — can do the same on every exchange. See
 [Upstream Binding](../architecture/upstream-binding.md).
 
+The bound cluster must be declared by that load balancer;
+otherwise the request fails before endpoint selection. Bound
+mode seeds `ctx.cluster` so retry, passive health, endpoint
+reselection, and response cleanup use the bound cluster. If
+it replaces a stale exchange-local cluster, Praxis clears the
+old router retry override rather than applying it to the wrong
+cluster. When `ctx.upstream` is already set, the load balancer
+skips selection entirely and does not overwrite either the
+existing upstream or `ctx.cluster`.
+
 ## Dynamic Reload
 
 Load-balancing configuration is dynamically

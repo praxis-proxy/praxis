@@ -261,26 +261,36 @@ impl FilterPipeline {
             super::checks::check_duplicate_rewrite_filters(&names, entries, &mut errors);
         }
         super::checks::check_condition_header_names(&self.filters, &mut errors);
+        super::checks::check_trace_context_upstream_conditions(&self.filters, &mut errors);
         super::checks::check_skip_to_bypasses_security(&self.filters, &mut errors);
         super::checks::check_terminal_rejoin_bypasses_security(&self.filters, &mut errors);
         super::checks::check_branch_body_filters(&self.filters, &mut errors);
         super::checks::check_branch_selected_upstream_body_filters(&self.filters, &mut errors);
         super::checks::check_selected_upstream_body_mode(&self.filters, &mut errors);
+        super::checks::check_cluster_metadata_conflicts(&self.filters, &mut errors);
+        super::checks::check_bound_upstream_requires_binding(&self.filters, entry_binding_guaranteed, &mut errors);
+        super::checks::check_bound_condition_with_pre_read_body(
+            &self.filters,
+            self.body_capabilities.request_body_mode,
+            &mut errors,
+        );
+        super::checks::check_bound_upstream_body_mode(&self.filters, &mut errors);
+        super::checks::check_branch_bound_upstream_body_filters(&self.filters, &mut errors);
+        if entry_binding_guaranteed {
+            super::checks::check_step_bound_upstream_body_filters(&self.filters, &mut errors);
+        }
+        if !entry_binding_guaranteed && !skip.duplicate_routers {
+            super::checks::check_no_rebind_after_binding(&self.filters, false, &mut errors);
+        }
+        super::checks::check_bound_cluster_coverage(&self.filters, &mut errors);
+        super::checks::check_untagged_bound_cluster_fields(&self.filters, &mut errors);
+        super::checks::check_irr_coexistence(&self.filters, &names, &mut errors);
         super::checks::check_selected_upstream_condition_ordering(&self.filters, &mut errors);
         super::checks::check_selected_upstream_condition_pre_read(
             &self.filters,
             self.body_capabilities.request_body_mode,
             &mut errors,
         );
-        super::checks::check_cluster_metadata_conflicts(&self.filters, &mut errors);
-        super::checks::check_bound_upstream_requires_binding(&self.filters, entry_binding_guaranteed, &mut errors);
-        super::checks::check_bound_condition_with_pre_read_body(&self.filters, &mut errors);
-        super::checks::check_bound_upstream_body_mode(&self.filters, &mut errors);
-        super::checks::check_branch_bound_upstream_body_filters(&self.filters, &mut errors);
-        super::checks::check_no_rebind_after_binding(&self.filters, entry_binding_guaranteed, &mut errors);
-        super::checks::check_bound_cluster_coverage(&self.filters, &mut errors);
-        super::checks::check_untagged_bound_cluster_fields(&self.filters, &mut errors);
-        super::checks::check_irr_coexistence(&self.filters, &names, &mut errors);
         if self.may_select_streaming_subrequest_response
             && matches!(
                 self.body_capabilities.response_body_mode,
@@ -318,8 +328,8 @@ impl FilterPipeline {
     ///             path_prefix: Some("/api".to_owned()),
     ///             methods: None,
     ///             headers: None,
-    ///             selected_upstream: None,
     ///             bound_upstream: None,
+    ///             selected_upstream: None,
     ///         },
     ///     )],
     ///     name: None,
