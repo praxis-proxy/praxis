@@ -29,6 +29,7 @@ RUST_TARGETS := all build release check \
 	test-config-validation test-config \
 	bench build-benches \
 	lint fmt doc audit coverage coverage-check \
+	fips-deps fips-report \
 	run-echo run-debug
 NIGHTLY_FMT_TARGETS  := lint fmt
 CMAKE_TARGETS := all build release check \
@@ -57,9 +58,10 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	mutants \
 	coverage coverage-check \
 	fuzz fuzz-build \
-	require-container-engine \
+	require-container-engine require-podman \
 	container container-run \
 	test-container test-container-run \
+	fips-check fips-check-ubi fips-deps fips-report fips-verify-image \
 	run-echo run-debug \
 	tools clean-tools \
 	check-prereqs \
@@ -252,6 +254,58 @@ container: | require-container-engine
 
 container-run: | require-container-engine
 	$(CONTAINER_ENGINE) run --rm --network=host $(IMAGE):$(VERSION) 2>&1
+
+# -------------------------------------------------------------------
+# FIPS
+# -------------------------------------------------------------------
+#
+# Local, reproducible checks that a build is on the path to FIPS 140-3
+# compliance on RHEL. They mirror Red Hat's release scanner
+# (openshift/check-payload); see docs/developing/fips.md and
+# docs/developing/getting-started.md.
+#
+#   make fips-check        build on UBI 9 with Red Hat's toolchain and print
+#                          the compliance report (alias for fips-check-ubi)
+#   make fips-report       the same report against an existing local binary
+#   make fips-deps         dependency graph only (seconds, no build)
+#
+# The report and the image verification are `cargo xtask fips` commands
+# (xtask/src/fips/). XTASK_FIPS builds xtask without its default features,
+# so these targets never compile the standard proxy build to run.
+#
+# The UBI base image is pinned by digest and its Red Hat signature is
+# verified before every build. Update FIPS_UBI9_DIGEST together with the
+# default in Containerfile.fips.
+
+FIPS_BIN         ?= target/release/praxis
+FIPS_UBI9_DIGEST := sha256:a4b9ec09b1e790a53ef25b7777c539976abe519248264298e5194dcbceac8c31
+FIPS_UBI9_IMAGE  := registry.access.redhat.com/ubi9/ubi@$(FIPS_UBI9_DIGEST)
+FIPS_CHECK_IMAGE ?= praxis-fips-check
+XTASK_FIPS       := cargo run -q -p xtask --no-default-features --
+
+require-podman:
+	@command -v podman >/dev/null || { echo "podman is required: Red Hat image signatures can only be verified with podman"; exit 1; }
+
+fips-check: fips-check-ubi
+
+fips-verify-image: | require-podman
+	$(XTASK_FIPS) fips verify-image --pinned-in Containerfile.fips $(FIPS_UBI9_IMAGE)
+
+fips-check-ubi: fips-verify-image
+	podman build -f Containerfile.fips --target report \
+		--build-arg UBI9_DIGEST=$(FIPS_UBI9_DIGEST) \
+		-t $(FIPS_CHECK_IMAGE) .
+	podman run --rm $(FIPS_CHECK_IMAGE)
+
+fips-report:
+	$(XTASK_FIPS) fips report $(FIPS_BIN)
+
+# The graph check is `cargo xtask fips report` (cargo tree scoped to the
+# binary and its feature set) rather than cargo-deny: cargo-deny resolves features
+# workspace-wide, and the test crates always enable the policy engine on
+# the binary, so it cannot see a feature-reduced build's real graph.
+fips-deps:
+	$(XTASK_FIPS) fips report --deps-only
 
 # -------------------------------------------------------------------
 # Test
@@ -492,6 +546,12 @@ help:
 	@echo "  container-run        run container in foreground (host network)"
 	@echo "  test-container       build test container image"
 	@echo "  test-container-run   build and run test suite in container"
+	@echo ""
+	@echo "FIPS:"
+	@echo "  fips-check           build on UBI 9 (Red Hat toolchain, signature-verified base) and print the compliance report"
+	@echo "  fips-report          compliance report against an existing binary (FIPS_BIN=target/release/praxis)"
+	@echo "  fips-deps            dependency graph vs Red Hat's crypto denylist (seconds, no build)"
+	@echo "  fips-verify-image    verify the pinned UBI 9 base image is Red Hat's (digest + signature)"
 	@echo ""
 	@echo "Binutils (target/praxis-binutils/):"
 	@echo "  tools                download all external CLI tools"

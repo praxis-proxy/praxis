@@ -46,6 +46,8 @@ dhat = "0.3.3"
 governor = "0.10.4"
 dashmap = "6.2.1"
 futures = "0.3.34"
+# Same backend pingora already builds (zlib-ng), so xtask adds no crate to the lockfile.
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-ng"] }
 h2 = "0.4.19"
 http = "1.5.0"
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
@@ -53,6 +55,7 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
 notify = "8.2.0"
+object = { version = "0.37.3", default-features = false, features = ["read_core", "elf", "std"] }
 opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
@@ -81,6 +84,7 @@ praxis-protocol = { version = "0.6.0", path = "crates/protocol", package = "prax
 praxis-tls = { version = "0.6.0", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 praxis-proxy-benchmarks = "0.2.1"
+openssl = "0.10.81"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 smallvec = "1.16.1"

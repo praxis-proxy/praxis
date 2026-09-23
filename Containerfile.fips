@@ -1,0 +1,88 @@
+# syntax=docker/dockerfile:1
+
+# ------------------------------------------------------------------------------
+# FIPS compliance check on UBI 9
+# ------------------------------------------------------------------------------
+#
+# Builds praxis on Red Hat Universal Base Image 9 with Red Hat's own Rust
+# toolchain and OpenSSL, then runs `cargo xtask fips report` against the
+# result. `make fips-check` verifies the base image's Red Hat signature,
+# builds this file, and prints the report; the exit status is the report's.
+#
+# This is a check image, not a runtime image.
+#
+# The base image is pinned by digest. Update the digest here and in the
+# Makefile (FIPS_UBI9_DIGEST) together, after `cargo xtask fips verify-image`
+# has accepted the new one.
+
+ARG UBI9_DIGEST=sha256:a4b9ec09b1e790a53ef25b7777c539976abe519248264298e5194dcbceac8c31
+
+# Red Hat's rust-toolset may trail the workspace's rust-version; the check
+# passes --ignore-rust-version so the toolchain that Red Hat ships is what
+# gets exercised. If the tree needs a newer compiler, this step is where it
+# shows, and that is a finding in its own right.
+ARG CARGO_ARGS="--ignore-rust-version"
+
+# ------------------------------------------------------------------------------
+# Stage 1: build with Red Hat's toolchain
+# ------------------------------------------------------------------------------
+
+FROM registry.access.redhat.com/ubi9/ubi@${UBI9_DIGEST} AS builder
+
+# Everything comes from Red Hat's UBI repositories (GPG-checked by dnf):
+#   rust-toolset   Red Hat's rustc and cargo
+#   openssl-devel  headers so openssl-sys links the system libcrypto
+RUN dnf install -y --setopt=install_weak_deps=False \
+        rust-toolset openssl-devel gcc gcc-c++ cmake make \
+    && dnf clean all
+
+# Never vendor OpenSSL; the system library is the validated module.
+ENV OPENSSL_NO_VENDOR=1 \
+    CARGO_HOME=/cargo
+
+# The build caches below carry explicit ids. Without them podman and BuildKit
+# key a cache mount by its target path, so this file and Containerfile (which
+# also builds under /src/target, with a different toolchain) would share one
+# target directory, and a `cargo clean` here could delete the binary the other
+# build is about to copy.
+
+WORKDIR /src
+
+# The whole workspace, so the build resolves the committed lockfile as is
+# (--locked) and the report stage can run `cargo xtask fips`.
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY tests tests
+COPY xtask xtask
+COPY examples examples
+
+ARG CARGO_ARGS
+
+RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
+    --mount=type=cache,id=praxis-fips-target,target=/src/target \
+    cargo build --release --locked -p praxis-proxy ${CARGO_ARGS} \
+    && mkdir -p /fips \
+    && cp target/release/praxis /fips/praxis
+
+# ------------------------------------------------------------------------------
+# Stage 2: compliance report
+# ------------------------------------------------------------------------------
+
+# Only built when this stage is the target (make fips-check). The report runs
+# at build time, while the cargo cache is mounted, so `cargo tree` can
+# resolve the graph offline. xtask is built without its default features,
+# which keeps the standard proxy build (and its non-FIPS dependencies) out of
+# this image. The exit status is kept so the image can be run to print the
+# report and fail accordingly.
+FROM builder AS report
+
+ARG CARGO_ARGS
+
+RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
+    --mount=type=cache,id=praxis-fips-target,target=/src/target \
+    { cargo run --quiet --locked -p xtask --no-default-features ${CARGO_ARGS} -- \
+        fips report /fips/praxis --offline --out /fips/report.txt; \
+      echo $? > /fips/status; } \
+    ; true
+
+CMD ["sh", "-c", "cat /fips/report.txt; exit $(cat /fips/status)"]

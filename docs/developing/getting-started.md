@@ -96,6 +96,28 @@ structure and crate dependencies.
 See [security-hardening.md](../operating/security-hardening.md) for
 deployment guidance.
 
+### FIPS Compliance Check
+
+Praxis targets FIPS 140-3 on Red Hat Enterprise Linux by performing all
+cryptography in the RHEL OpenSSL FIPS provider. Three targets check a
+build against the rules Red Hat's release scanner
+(`openshift/check-payload`) applies to Rust binaries, and explain every
+finding with a reason and a pointer:
+
+```console
+make fips-deps     # dependency graph vs the crypto denylist (seconds, no build)
+make fips-report   # full report against target/release/praxis
+make fips-check    # build on UBI 9 with Red Hat's toolchain, then report
+```
+
+The report and the image verification are `cargo xtask fips` commands;
+the Makefile targets wrap them. `make fips-check` needs a Linux podman
+(rootless or root): the UBI 9 base image is pinned by digest and its Red
+Hat signature is verified before the build (`cargo xtask fips
+verify-image`). The report's exit status is non-zero while findings
+remain. See [FIPS Tooling](fips.md) for what is checked and the
+provenance of the pinned image and signing key.
+
 ## Security: Binding Low Ports
 
 Praxis refuses to start when running as root (UID 0)

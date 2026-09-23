@@ -44,6 +44,9 @@ and security. AI Gateway docs live in
 - [Dependencies](developing/dependencies.md):
   dependency policy, supply-chain checks, provenance
   review
+- [FIPS Tooling](developing/fips.md):
+  compliance report, Red Hat image verification,
+  cargo-auditable and the SBOM precursor
 - [Adding Filters](developing/adding-filters.md):
   new filter checklist
 - [Adding Protocols](developing/adding-protocols.md)
