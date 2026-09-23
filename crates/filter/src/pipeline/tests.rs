@@ -125,6 +125,86 @@ fn ordinary_router_in_terminal_branch_does_not_enable_binding() {
 }
 
 #[test]
+fn ordinary_routing_does_not_require_global_cluster_metadata_agreement() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: router
+  routes:
+    - path_prefix: "/"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints: ["127.0.0.1:9"]
+- filter: load_balancer
+  clusters:
+    - name: backend
+      http:
+        application_provider: openai
+      endpoints: ["127.0.0.1:10"]
+"#,
+    )
+    .unwrap();
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
+
+    assert!(
+        pipeline.cluster_application_catalog.is_none(),
+        "ordinary routing must not build a pipeline-wide binding catalog"
+    );
+    assert!(
+        errors
+            .iter()
+            .all(|error| !error.contains("conflicting application metadata")),
+        "independent ordinary dispatch paths own their metadata locally: {errors:?}"
+    );
+}
+
+#[test]
+fn binding_enabled_routing_requires_global_cluster_metadata_agreement() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: router
+  routes:
+    - path_prefix: "/"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints: ["127.0.0.1:9"]
+- filter: load_balancer
+  clusters:
+    - name: backend
+      http:
+        application_provider: openai
+      endpoints: ["127.0.0.1:10"]
+- filter: headers
+  conditions:
+    - when:
+        bound_upstream:
+          application_provider: openai
+  request_set: [{name: x-bound, value: "true"}]
+"#,
+    )
+    .unwrap();
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
+
+    assert!(
+        pipeline.cluster_application_catalog.is_some(),
+        "binding-aware routing must build the global metadata catalog"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("conflicting application metadata")),
+        "binding metadata must remain unambiguous: {errors:?}"
+    );
+}
+
+#[test]
 fn binding_enabled_router_in_branch_is_rejected_from_yaml() {
     let registry = FilterRegistry::with_builtins();
     let mut entries: Vec<FilterEntry> = serde_yaml::from_str(

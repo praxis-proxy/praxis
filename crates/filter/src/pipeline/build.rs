@@ -127,7 +127,7 @@ impl FilterPipeline {
         let selected_upstream_request_body_filter_indices = selected_upstream_request_body_indices(&filters);
         let bound_upstream_request_body_filter_indices = bound_upstream_request_body_indices(&filters);
         let response_trailer_filter_indices = super::body::response_trailer_filter_indices(&filters);
-        let cluster_application_catalog = build_cluster_application_catalog(&filters);
+        let cluster_application_catalog = build_cluster_application_catalog(&filters, bound_upstream_enabled);
         let id_generator = Arc::new(IdGenerator::new());
         let time_source: Arc<dyn praxis_core::time::TimeSource> = Arc::new(SystemTimeSource);
         let mut pipeline = Self {
@@ -272,7 +272,9 @@ impl FilterPipeline {
         super::checks::check_branch_body_filters(&self.filters, &mut errors);
         super::checks::check_branch_selected_upstream_body_filters(&self.filters, &mut errors);
         super::checks::check_selected_upstream_body_mode(&self.filters, &mut errors);
-        super::checks::check_cluster_metadata_conflicts(&self.filters, &mut errors);
+        if uses_bound_upstream {
+            super::checks::check_cluster_metadata_conflicts(&self.filters, &mut errors);
+        }
         super::checks::check_bound_upstream_requires_binding(&self.filters, entry_binding_guaranteed, &mut errors);
         super::checks::check_bound_condition_with_pre_read_body(
             &self.filters,
@@ -403,12 +405,15 @@ fn warn_tcp_unsupported_fields(filter: &AnyFilter, entry: &FilterEntry) {
     }
 }
 
-/// Build the metadata-only cluster catalog from every reachable cluster
-/// declaration (top-level filters and branch sub-chains).
+/// Build the metadata-only cluster catalog for a binding-enabled pipeline from
+/// every reachable cluster declaration (top-level filters and branch
+/// sub-chains).
 ///
-/// Returns `None` when no filter declares a cluster, so pipelines that do
-/// not route pay nothing at request time. Conflicting declarations are
-/// ignored here and surfaced separately by
+/// Ordinary routing resolves metadata from the load balancer that owns the
+/// selected endpoint, so it neither needs this global catalog nor requires
+/// declarations in independent dispatch paths to agree. Returns `None` when
+/// binding is disabled or no filter declares a cluster. Conflicting
+/// declarations in a binding-enabled pipeline are ignored here and surfaced by
 /// [`check_cluster_metadata_conflicts`], which blocks a conflicting
 /// pipeline from serving traffic; the runtime map is only consulted once
 /// validation has passed.
@@ -416,7 +421,11 @@ fn warn_tcp_unsupported_fields(filter: &AnyFilter, entry: &FilterEntry) {
 /// [`check_cluster_metadata_conflicts`]: super::checks::check_cluster_metadata_conflicts
 fn build_cluster_application_catalog(
     filters: &[PipelineFilter],
+    bound_upstream_enabled: bool,
 ) -> Option<Arc<super::catalog::ClusterApplicationCatalog>> {
+    if !bound_upstream_enabled {
+        return None;
+    }
     let (catalog, _conflicts) = super::catalog::build_catalog(super::collect_cluster_declarations(filters));
     (!catalog.is_empty()).then(|| Arc::new(catalog))
 }

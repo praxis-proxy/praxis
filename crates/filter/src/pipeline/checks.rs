@@ -928,7 +928,8 @@ pub(super) fn check_selected_upstream_condition_pre_read(
 // Bound-Upstream Checks
 // -----------------------------------------------------------------------------
 
-/// Cluster declarations that disagree on application metadata.
+/// Cluster declarations in a binding-enabled pipeline that disagree on
+/// application metadata.
 ///
 /// The binding router resolves a matched cluster's opaque protocol and
 /// provider through the pipeline catalog. When two filters declare the same
@@ -936,8 +937,10 @@ pub(super) fn check_selected_upstream_condition_pre_read(
 /// value: [`build_catalog`] keeps the first-seen declaration for determinism,
 /// and this check turns every disagreement into a configuration error before
 /// the pipeline serves traffic, so the runtime map is only consulted once no
-/// conflicts remain. Agreeing re-declarations (the normal multi-load-balancer
-/// case) are silent.
+/// conflicts remain. The caller skips this check for ordinary routing, where
+/// each load balancer owns its selected endpoint metadata and declarations in
+/// independent dispatch paths need not agree. Agreeing re-declarations in a
+/// binding-enabled pipeline are silent.
 ///
 /// [`build_catalog`]: super::catalog::build_catalog
 pub(super) fn check_cluster_metadata_conflicts(filters: &[PipelineFilter], errors: &mut Vec<String>) {

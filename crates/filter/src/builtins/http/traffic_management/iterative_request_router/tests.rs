@@ -3712,9 +3712,8 @@ initial_step: first
 steps:
   - name: first
     filters:
-      - filter: router
-        routes: [{path_prefix: "/", cluster: shared}]
       - filter: load_balancer
+        cluster_source: bound_upstream
         clusters:
           - name: shared
             http: {application_provider: openai}
@@ -3722,9 +3721,8 @@ steps:
     on_result: [{default: true, next: second}]
   - name: second
     filters:
-      - filter: router
-        routes: [{path_prefix: "/", cluster: shared}]
       - filter: load_balancer
+        cluster_source: bound_upstream
         clusters:
           - name: shared
             http: {application_provider: azure}
@@ -3733,15 +3731,26 @@ steps:
 "#,
     )
     .unwrap();
-    let mut entries = vec![crate::FilterEntry {
-        branch_chains: None,
-        conditions: Vec::new(),
-        filter_type: "iterative_request_router".to_owned(),
-        config,
-        name: None,
-        response_conditions: Vec::new(),
-        failure_mode: praxis_core::config::FailureMode::default(),
-    }];
+    let mut entries = vec![
+        crate::FilterEntry {
+            branch_chains: None,
+            conditions: Vec::new(),
+            filter_type: "router".to_owned(),
+            config: serde_yaml::from_str("routes: [{path_prefix: /, cluster: shared}]").unwrap(),
+            name: None,
+            response_conditions: Vec::new(),
+            failure_mode: praxis_core::config::FailureMode::default(),
+        },
+        crate::FilterEntry {
+            branch_chains: None,
+            conditions: Vec::new(),
+            filter_type: "iterative_request_router".to_owned(),
+            config,
+            name: None,
+            response_conditions: Vec::new(),
+            failure_mode: praxis_core::config::FailureMode::default(),
+        },
+    ];
     let pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
 
     let errors = pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());

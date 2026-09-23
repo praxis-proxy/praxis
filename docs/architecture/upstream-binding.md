@@ -213,7 +213,9 @@ serves traffic if, among other rules:
 - `trace_context` uses a bound or selected-upstream condition even though
   propagation is decided before routing;
 - cluster metadata declarations conflict across the
-  top-level pipeline, a branch, and an IRR step.
+  top-level pipeline, a branch, and an IRR step when the pipeline uses logical
+  binding. Ordinary router/load-balancer dispatch paths keep their local
+  metadata ownership and do not need to agree with one another.
 
 These checks run in `FilterPipeline::ordering_errors`
 and the individual checks in

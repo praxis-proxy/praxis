@@ -137,10 +137,10 @@ pub(super) fn strip_iteration_extensions(mut extensions: RequestExtensions) -> R
 /// Reconcile the threaded extensions back to the parent's end state before they
 /// cross back into the parent request context.
 ///
-/// Beyond [`strip_iteration_extensions`], each step pipeline installs its own
-/// [`ClusterApplicationCatalog`] into the threaded extensions (via
-/// [`prepare_extensions`]), so without this the terminal step's catalog would
-/// ride back into the parent in place of the parent's own. Restoring
+/// Beyond [`strip_iteration_extensions`], a binding-enabled step pipeline
+/// installs its own [`ClusterApplicationCatalog`] into the threaded extensions
+/// (via [`prepare_extensions`]), so without this a terminal step's catalog
+/// could ride back into the parent in place of the parent's own. Restoring
 /// `parent_catalog` at every parent-facing write-back keeps the parent pipeline
 /// resolving cluster metadata against its own declarations after the IRR
 /// returns; a `parent_catalog` of `None` means the parent declared none, so any
