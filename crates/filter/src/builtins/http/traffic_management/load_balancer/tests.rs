@@ -989,7 +989,7 @@ async fn bound_upstream_source_does_not_mutate_binding() {
 }
 
 #[tokio::test]
-async fn bound_upstream_source_ignores_context_cluster() {
+async fn bound_upstream_source_rejects_conflicting_context_cluster() {
     let lb = LoadBalancerFilter::try_new_with_source(
         &[test_cluster("backend", &["127.0.0.1:8080"])],
         super::ClusterSource::BoundUpstream,
@@ -997,22 +997,28 @@ async fn bound_upstream_source_ignores_context_cluster() {
     .unwrap();
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    // A stale exchange-local cluster the bound source must not read.
     ctx.cluster = Some(Arc::from("stale"));
     ctx.publish_bound_upstream(Arc::from("backend"), None, None).unwrap();
 
-    drop(lb.on_request(&mut ctx).await.unwrap());
+    let error = lb.on_request(&mut ctx).await.unwrap_err();
 
-    assert!(ctx.upstream.is_some(), "the bound cluster's endpoint must be selected");
     assert_eq!(
         ctx.cluster.as_deref(),
-        Some("backend"),
-        "the bound source must overwrite the stale ctx.cluster with the bound cluster"
+        Some("stale"),
+        "a conflicting exchange selection must remain visible for diagnostics"
+    );
+    assert!(
+        ctx.upstream.is_none(),
+        "a conflicting selection must not choose an endpoint"
+    );
+    assert!(
+        error.to_string().contains("conflicts with bound cluster 'backend'"),
+        "the error must name both selection domains: {error}"
     );
 }
 
 #[tokio::test]
-async fn bound_upstream_source_clears_retry_policy_for_replaced_cluster() {
+async fn bound_upstream_source_preserves_retry_policy_when_conflict_is_rejected() {
     let lb = LoadBalancerFilter::try_new_with_source(
         &[test_cluster("backend", &["127.0.0.1:8080"])],
         super::ClusterSource::BoundUpstream,
@@ -1024,10 +1030,118 @@ async fn bound_upstream_source_clears_retry_policy_for_replaced_cluster() {
     ctx.route_retry_policy = Some(Arc::new(praxis_core::config::RetryPolicy::default()));
     ctx.publish_bound_upstream(Arc::from("backend"), None, None).unwrap();
 
+    let error = lb.on_request(&mut ctx).await.unwrap_err();
+
+    assert!(
+        ctx.route_retry_policy.is_some(),
+        "rejected resolution must not mutate retry state"
+    );
+    assert_eq!(ctx.cluster.as_deref(), Some("stale"));
+    assert!(error.to_string().contains("conflicts with bound cluster"));
+}
+
+#[tokio::test]
+async fn bound_upstream_source_with_existing_upstream_preserves_context() {
+    let lb = LoadBalancerFilter::try_new_with_source(
+        &[test_cluster("backend", &["127.0.0.1:8080"])],
+        super::ClusterSource::BoundUpstream,
+    )
+    .unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("already-selected"));
+    ctx.upstream = Some(praxis_core::connectivity::Upstream {
+        address: Arc::from("127.0.0.1:9090"),
+        authority: None,
+        connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+    });
+    ctx.publish_bound_upstream(Arc::from("backend"), None, None).unwrap();
+
+    let action = lb.on_request(&mut ctx).await.unwrap();
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(ctx.cluster.as_deref(), Some("already-selected"));
+    assert_eq!(
+        ctx.upstream.as_ref().map(|upstream| upstream.address.as_ref()),
+        Some("127.0.0.1:9090")
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_source_honors_session_affinity() {
+    let lb = LoadBalancerFilter::try_new_with_source(
+        &[test_cluster("backend", &["127.0.0.1:8080", "127.0.0.1:8081"])],
+        super::ClusterSource::BoundUpstream,
+    )
+    .unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.publish_bound_upstream(Arc::from("backend"), None, None).unwrap();
+    ctx.pinned_endpoint_address = Some(Arc::from("127.0.0.1:8081"));
+
     drop(lb.on_request(&mut ctx).await.unwrap());
 
-    assert!(ctx.route_retry_policy.is_none());
+    assert_eq!(
+        ctx.upstream.as_ref().map(|upstream| upstream.address.as_ref()),
+        Some("127.0.0.1:8081")
+    );
     assert_eq!(ctx.cluster.as_deref(), Some("backend"));
+}
+
+#[tokio::test]
+async fn bound_upstream_source_uses_cluster_health_state() {
+    let endpoints = ["127.0.0.1:8080", "127.0.0.1:8081"];
+    let lb = LoadBalancerFilter::try_new_with_source(
+        &[test_cluster("backend", &endpoints)],
+        super::ClusterSource::BoundUpstream,
+    )
+    .unwrap();
+    let registry = all_unhealthy_registry("backend", &endpoints);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.publish_bound_upstream(Arc::from("backend"), None, None).unwrap();
+    ctx.health_registry = Some(&registry);
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+
+    assert!(
+        ctx.upstream.is_some(),
+        "panic mode must still select from the bound cluster"
+    );
+    assert!(
+        ctx.selected_endpoint_index.is_some(),
+        "health-indexed selection must be recorded"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_source_preserves_consistent_hash_selection() {
+    let cluster = cluster_with_strategy(
+        "backend",
+        &["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"],
+        LoadBalancerStrategy::Parameterised(ParameterisedStrategy::ConsistentHash(ConsistentHashOpts {
+            header: Some("x-session".to_owned()),
+        })),
+    );
+    let lb = LoadBalancerFilter::try_new_with_source(&[cluster], super::ClusterSource::BoundUpstream).unwrap();
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/different-paths-do-not-matter");
+    req.headers
+        .insert("x-session", http::HeaderValue::from_static("stable-key"));
+
+    let mut first = crate::test_utils::make_filter_context(&req);
+    first.publish_bound_upstream(Arc::from("backend"), None, None).unwrap();
+    drop(lb.on_request(&mut first).await.unwrap());
+
+    let mut second = crate::test_utils::make_filter_context(&req);
+    second.publish_bound_upstream(Arc::from("backend"), None, None).unwrap();
+    drop(lb.on_request(&mut second).await.unwrap());
+
+    assert_eq!(
+        first.upstream.as_ref().map(|upstream| upstream.address.as_ref()),
+        second.upstream.as_ref().map(|upstream| upstream.address.as_ref()),
+        "bound selection must use the same strategy and hash key as router-source selection"
+    );
 }
 
 #[tokio::test]

@@ -98,6 +98,9 @@ use crate::{
 /// [`rewritten_path`]: crate::HttpFilterContext::rewritten_path
 #[derive(Debug)]
 pub struct RouterFilter {
+    /// Whether this pipeline has a bound-upstream observer or consumer.
+    binding_enabled: bool,
+
     /// Enable multi-level subdomain matching for wildcard hosts.
     multi_level_subdomain_matching: bool,
 
@@ -191,6 +194,7 @@ impl RouterFilter {
         let resolved = resolve_routes(routes);
         debug!(routes = resolved.len(), "router initialized");
         Self {
+            binding_enabled: false,
             multi_level_subdomain_matching: false,
             routes: resolved,
         }
@@ -279,8 +283,10 @@ impl RouterFilter {
     /// to a different cluster fails closed. Valid configurations never hit that
     /// case (validation forbids a second binding after the barrier), so treat it
     /// as an internal error.
-    fn apply_matched_route(ctx: &mut HttpFilterContext<'_>, resolved: &ResolvedRoute) -> FilterAction {
-        if let Err(frozen) = ctx.bind_upstream(Arc::clone(&resolved.route.cluster)) {
+    fn apply_matched_route(&self, ctx: &mut HttpFilterContext<'_>, resolved: &ResolvedRoute) -> FilterAction {
+        if self.binding_enabled
+            && let Err(frozen) = ctx.bind_upstream(Arc::clone(&resolved.route.cluster))
+        {
             warn!(
                 frozen = %frozen.frozen,
                 attempted = %frozen.attempted,
@@ -507,7 +513,11 @@ impl HttpFilter for RouterFilter {
     }
 
     fn binds_upstream(&self) -> bool {
-        true
+        self.binding_enabled
+    }
+
+    fn enable_upstream_binding(&mut self) {
+        self.binding_enabled = true;
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -533,6 +543,6 @@ impl HttpFilter for RouterFilter {
             return Ok(FilterAction::Reject(Rejection::status(404)));
         };
         debug!(path = %path, cluster = %resolved.route.cluster, "route matched");
-        Ok(Self::apply_matched_route(ctx, resolved))
+        Ok(self.apply_matched_route(ctx, resolved))
     }
 }

@@ -26,18 +26,19 @@ would guarantee they agreed.
 > [`iterative_request_router`](../filters/http/traffic_management/iterative_request_router.md)
 > filter is gated behind the off-by-default
 > `iterative-request-router` build feature (see
-> [Build Features](../operating/build-features.md)). A
-> router always records and freezes a binding after its
-> first successful match. With no consumer that value is
-> unobserved, but publication still incurs its small catalog
-> lookup and extension cost.
+> [Build Features](../operating/build-features.md)).
+>
+> Pipeline construction enables binding publication only when the resolved
+> pipeline contains a bound condition, bound-body participant, or bound-source
+> consumer. Ordinary router pipelines keep their historical behavior and do
+> not perform catalog lookups or write binding extensions.
 
 ## Terminology
 
 | Term | Definition |
 |------|-----------|
 | **Logical binding** | The `(cluster name, application protocol, application provider)` tuple pinned to a request. Read-only after it is published. Physical endpoints are never stored. |
-| **Binding router** | Any built-in `router`. When it matches a route it publishes that route's cluster as the request's binding. There is no separate "binding" config key. |
+| **Binding router** | A built-in `router` in a pipeline that has a bound observer or consumer. When it matches a route it publishes that route's cluster as the request's binding. There is no separate "binding" config key. |
 | **Cluster catalog** | A metadata-only map, built once at pipeline construction, that resolves a cluster name to its declared application protocol/provider so the router can publish metadata without owning endpoint state. |
 | **Freeze barrier** | The executor boundary immediately after the first binding router. It freezes the binding and then runs any once-per-request bound-body participants before branch evaluation. |
 | **Bound-consuming load balancer** | A `load_balancer` with `cluster_source: bound_upstream`. It resolves the frozen binding and selects an endpoint with no preceding router. |
@@ -45,12 +46,13 @@ would guarantee they agreed.
 
 ## Binding a Logical Upstream
 
-A binding is published by the trusted built-in
-`router`, and only by it. When the router matches a
-route it records that route's cluster as the request's
-binding, resolving the cluster's application metadata
-through the pipeline catalog. The router still sets
-`ctx.cluster` as before; it does not pick an endpoint.
+A binding is published by the trusted built-in `router`, and only by it, when
+pipeline construction has enabled binding for a real observer or consumer.
+When that router matches a route it records the route's cluster as the
+request's binding, resolving the cluster's application metadata through the
+pipeline catalog. The router still sets `ctx.cluster` as before; it does not
+pick an endpoint. A router in an ordinary pipeline only sets the historical
+route fields and publishes no binding.
 
 The metadata identifiers (application protocol,
 application provider) are **opaque to Praxis core**.
@@ -58,12 +60,13 @@ Praxis defines no enum of known protocols or providers
 — consuming filters and bound conditions interpret the
 strings; the proxy only matches them verbatim.
 
-The executor freezes the first successful top-level binding
-before evaluating that router's branches or the next filter.
-Pipeline validation permits one request-level binding router;
-nested and IRR pipelines inherit the binding and may not
-retarget it. Republishing the same cluster is an idempotent
-runtime backstop, while a different cluster fails closed.
+The executor freezes the first successful top-level binding before evaluating
+that router's branches or the next filter. Pipeline validation permits one
+request-level binding router. Routers inside branches cannot publish binding,
+and IRR steps that observe or consume binding must inherit it from the parent;
+their own ordinary routers remain exchange-local. A `ReEnter` edge may not run
+the binding router again. Republishing the same cluster is an idempotent runtime
+backstop, while a different cluster fails closed.
 
 Source: `crates/filter/src/builtins/http/traffic_management/router/mod.rs`,
 `crates/filter/src/extensions.rs` (`BoundUpstream`).
@@ -110,6 +113,10 @@ For general condition syntax see
 [Payload Processing](payload-processing.md); for how
 conditions interact with branches see
 [Branch Chains](../filters/branch-chains.md).
+The minimal runnable example is
+[`bound-upstream-condition.yaml`](../../examples/configs/traffic-management/bound-upstream-condition.yaml).
+The full direct/IRR dispatch shape is
+[`bound-upstream-dispatch.yaml`](../../examples/configs/traffic-management/bound-upstream-dispatch.yaml).
 
 ## The Freeze Barrier
 
@@ -135,11 +142,12 @@ request body. Two invariants follow:
 2. **It runs at most once.** The barrier marker lives in
    the request extension map, which is threaded across
    IRR iterations and survives `ReEnter` loops, so the
-   bound-body pass fires exactly once no matter how many
-   times the pipeline re-executes.
+   bound-body pass fires at most once no matter how many
+   times the pipeline re-executes. It does not fire when routing stops before
+   publishing a binding.
 
-Source: `crates/filter/src/context.rs`
-(`BoundUpstreamFrozen`, `publish_bound_upstream`),
+Source: `crates/filter/src/extensions.rs` (`BoundUpstreamFrozen`),
+`crates/filter/src/context.rs` (`publish_bound_upstream`),
 `crates/filter/src/pipeline/http.rs`.
 
 Bound-body participants declare a bounded `StreamBuffer` mode
@@ -191,11 +199,19 @@ serves traffic if, among other rules:
   have a binding on every path that reaches it (a
   missing, merely conditional, or bypassed binding);
 - a router would rebind after the freeze barrier;
+- a binding-enabled router appears inside a branch, an IRR step, or a
+  `ReEnter` path that can execute it again;
 - an ordinary pre-read body hook is combined with a
   bound condition (the body hook runs before any binding
   exists);
 - a bound-consuming load balancer names a cluster that
   is not declared on it;
+- a bindable cluster has no guaranteed endpoint consumer on its reachable
+  path, or a `when bound_upstream` matcher cannot match any declared cluster;
+- a bound-body hook appears inside a branch or IRR step, where that lifecycle
+  is not executed;
+- `trace_context` uses a bound or selected-upstream condition even though
+  propagation is decided before routing;
 - cluster metadata declarations conflict across the
   top-level pipeline, a branch, and an IRR step.
 

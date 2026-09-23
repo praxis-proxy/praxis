@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Transport coverage for the once-per-request bound-upstream body phase.
+//! Transport coverage for the at-most-once bound-upstream body phase.
 
 use bytes::Bytes;
 use praxis_core::config::Config;
@@ -123,6 +123,8 @@ impl HttpFilter for OversizedBoundRewrite {
 
 struct RejectBoundBody;
 
+struct ErrorBoundBody;
+
 #[async_trait::async_trait]
 impl HttpFilter for RejectBoundBody {
     fn name(&self) -> &'static str {
@@ -147,6 +149,33 @@ impl HttpFilter for RejectBoundBody {
         _body: &mut Option<Bytes>,
     ) -> Result<BoundUpstreamBodyOutcome, FilterError> {
         Ok(BoundUpstreamBodyOutcome::Reject(Rejection::status(403)))
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpFilter for ErrorBoundBody {
+    fn name(&self) -> &'static str {
+        "error_bound_body"
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn bound_upstream_request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer { max_bytes: Some(4096) }
+    }
+
+    async fn on_bound_upstream_request_body(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+    ) -> Result<BoundUpstreamBodyOutcome, FilterError> {
+        Err("bound body failure".to_owned().into())
     }
 }
 
@@ -415,6 +444,49 @@ fn rejection_stops_before_upstream_transport() {
     let (status, _body) = http_post(proxy.addr(), "/echo", "blocked");
 
     assert_eq!(status, 403);
+}
+
+#[test]
+fn oversized_inbound_body_rejects_before_binding_barrier() {
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&direct_yaml(proxy_port, free_port(), "append_bound_marker")).unwrap();
+    let registry = registry_with("append_bound_marker", || Box::new(AppendBoundMarker));
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let body = "x".repeat(4097);
+    let (status, _body) = http_post(proxy.addr(), "/echo", &body);
+
+    assert_eq!(status, 413);
+}
+
+#[test]
+fn closed_bound_body_failure_stops_before_transport() {
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&direct_yaml(proxy_port, free_port(), "error_bound_body")).unwrap();
+    let registry = registry_with("error_bound_body", || Box::new(ErrorBoundBody));
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let (status, _body) = http_post(proxy.addr(), "/echo", "payload");
+
+    assert_eq!(status, 500);
+}
+
+#[test]
+fn open_bound_body_failure_continues_to_transport() {
+    let backend = start_echo_backend();
+    let proxy_port = free_port();
+    let yaml = direct_yaml(proxy_port, backend.port(), "error_bound_body").replace(
+        "      - filter: error_bound_body\n",
+        "      - filter: error_bound_body\n        failure_mode: open\n",
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("error_bound_body", || Box::new(ErrorBoundBody));
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let (status, body) = http_post(proxy.addr(), "/echo", "payload");
+
+    assert_eq!(status, 200);
+    assert_eq!(body, "payload");
 }
 
 #[cfg(feature = "iterative-request-router")]

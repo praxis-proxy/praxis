@@ -450,17 +450,32 @@ earlier in the pipeline; an
 `iterative_request_router` step — which needs the
 off-by-default `iterative-request-router` build
 feature — can do the same on every exchange. See
-[Upstream Binding](../architecture/upstream-binding.md).
+[Upstream Binding](../architecture/upstream-binding.md) and the complete
+[`bound-upstream-dispatch.yaml`](../../examples/configs/traffic-management/bound-upstream-dispatch.yaml)
+example.
+
+```yaml
+- filter: router
+  routes:
+    - path_prefix: "/"
+      cluster: inference
+- filter: load_balancer
+  cluster_source: bound_upstream
+  clusters:
+    - name: inference
+      endpoints: ["10.0.0.1:8080"]
+```
 
 The bound cluster must be declared by that load balancer;
 otherwise the request fails before endpoint selection. Bound
-mode seeds `ctx.cluster` so retry, passive health, endpoint
-reselection, and response cleanup use the bound cluster. If
-it replaces a stale exchange-local cluster, Praxis clears the
-old router retry override rather than applying it to the wrong
-cluster. When `ctx.upstream` is already set, the load balancer
-skips selection entirely and does not overwrite either the
-existing upstream or `ctx.cluster`.
+mode seeds `ctx.cluster` so retry, passive health, endpoint reselection, and
+response cleanup use the bound cluster. A different existing `ctx.cluster`
+fails closed before endpoint selection, preventing retry or health state from
+one cluster being applied to another. A missing binding, an undeclared bound
+cluster, or a conflicting exchange cluster produces a 500 filter error; an
+unreachable selected endpoint remains a 502 transport error. When
+`ctx.upstream` is already set, the load balancer skips selection entirely and
+does not overwrite either the existing upstream or `ctx.cluster`.
 
 ## Dynamic Reload
 

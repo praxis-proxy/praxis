@@ -5,10 +5,13 @@
 //!
 //! Detects structural misconfigurations that would cause runtime
 //! failures: load balancers without a preceding cluster selector,
-//! unreachable filters behind unconditional static responses,
-//! conditional security filters (bypass risk), duplicate routers or
-//! load balancers, and cluster name mismatches. Each check is
-//! individually skippable via [`SkipPipelineChecks`].
+//! unreachable filters behind unconditional static responses, conditional
+//! security filters (bypass risk), duplicate routers or load balancers,
+//! cluster name mismatches, and logical-binding reachability, coverage, body
+//! lifecycle, and re-entry violations. Operator-facing legacy checks honor
+//! their corresponding [`SkipPipelineChecks`] flags; binding invariants and
+//! security/lifecycle checks are not suppressible unless explicitly wired to
+//! an existing skip flag at the call site.
 //!
 //! Called by [`FilterPipeline::ordering_errors`] at startup and on
 //! dynamic config reload.
@@ -1003,40 +1006,21 @@ pub(super) fn check_bound_upstream_requires_binding(
     }
 }
 
-/// Whether a pipeline has a bound dependency that is not dominated by a local
-/// unconditional binding filter.
+/// Whether this pipeline or one of its branches observes or consumes the
+/// logical upstream binding.
 ///
-/// Nested-pipeline owners use this to propagate their true entry requirement to
-/// the enclosing pipeline rather than assuming the parent supplied a binding.
-#[cfg(feature = "iterative-request-router")]
-pub(super) fn requires_bound_upstream_on_entry(filters: &[PipelineFilter]) -> bool {
-    let guaranteed = compute_binding_guaranteed(filters, false);
-    guaranteed.iter().zip(filters).any(|(&binding_here, pf)| {
-        (!binding_here && binding_requirement_reason(pf).is_some())
-            || pf.branches.iter().any(|branch| {
-                branch_requires_binding_on_entry(&branch.filters, binding_here || unconditional_binds(pf))
-            })
+/// Binding publishers are deliberately excluded: a router is enabled only
+/// because some other filter needs the binding, never merely because the
+/// router exists.
+pub(super) fn uses_bound_upstream(filters: &[PipelineFilter]) -> bool {
+    filters.iter().any(|pf| {
+        has_bound_upstream_condition(pf)
+            || matches!(&pf.filter, AnyFilter::Http(filter)
+                if filter.bound_upstream_request_body_access() != BodyAccess::None
+                    || filter.consumes_bound_upstream()
+                    || filter.requires_bound_upstream_on_entry())
+            || pf.branches.iter().any(|branch| uses_bound_upstream(&branch.filters))
     })
-}
-
-/// Recurse through branch-local dependencies while tracking local publishers.
-#[cfg(feature = "iterative-request-router")]
-fn branch_requires_binding_on_entry(filters: &[PipelineFilter], mut binding_before: bool) -> bool {
-    for pf in filters {
-        if !binding_before && binding_requirement_reason(pf).is_some() {
-            return true;
-        }
-        let nested_binding = binding_before || unconditional_binds(pf);
-        if pf
-            .branches
-            .iter()
-            .any(|branch| branch_requires_binding_on_entry(&branch.filters, nested_binding))
-        {
-            return true;
-        }
-        binding_before = nested_binding;
-    }
-    false
 }
 
 /// Walk a branch sub-chain in order, tracking whether a binding is guaranteed,
@@ -1090,11 +1074,35 @@ fn compute_binding_guaranteed(filters: &[PipelineFilter], entry_binding_guarante
     }
 
     let edges = binding_control_flow_edges(filters);
+    let reachable = binding_reachable_nodes(len, &edges);
     // Values start optimistic (`true`) and only ever weaken; iterate the
     // relaxation pass until it reaches a fixpoint (needed for `ReEnter` back
     // edges).
-    while relax_binding_guarantees(filters, &edges, &mut guaranteed, entry_binding_guaranteed) {}
+    while relax_binding_guarantees(filters, &edges, &reachable, &mut guaranteed, entry_binding_guaranteed) {}
     guaranteed
+}
+
+/// Nodes reachable from pipeline entry, independent of binding state.
+fn binding_reachable_nodes(len: usize, edges: &[(usize, usize, bool)]) -> Vec<bool> {
+    let mut reachable = vec![false; len];
+    if let Some(entry) = reachable.first_mut() {
+        *entry = true;
+    }
+    loop {
+        let mut changed = false;
+        for &(from, to, _) in edges {
+            if reachable.get(from).copied().unwrap_or(false)
+                && let Some(target) = reachable.get_mut(to)
+                && !*target
+            {
+                *target = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return reachable;
+        }
+    }
 }
 
 /// Control-flow edges `(from, to, fall_through)` over the top-level pipeline: the
@@ -1110,7 +1118,13 @@ fn binding_control_flow_edges(filters: &[PipelineFilter]) -> Vec<(usize, usize, 
     let len = filters.len();
     let mut edges: Vec<(usize, usize, bool)> = Vec::new();
     for (idx, pf) in filters.iter().enumerate() {
-        if idx + 1 < len {
+        let unconditional_terminal = pf.conditions.is_empty()
+            && matches!(&pf.filter, AnyFilter::Http(filter) if filter.produces_terminal_response());
+        let unconditional_skip = pf.conditions.is_empty()
+            && pf.branches.iter().any(|branch| {
+                branch.condition.is_none() && matches!(branch.rejoin, RejoinTarget::SkipTo(_) | RejoinTarget::Terminal)
+            });
+        if idx + 1 < len && !unconditional_terminal && !unconditional_skip {
             edges.push((idx, idx + 1, true));
         }
         for branch in &pf.branches {
@@ -1131,22 +1145,11 @@ fn binding_control_flow_edges(filters: &[PipelineFilter]) -> Vec<(usize, usize, 
 fn relax_binding_guarantees(
     filters: &[PipelineFilter],
     edges: &[(usize, usize, bool)],
+    reachable: &[bool],
     guaranteed: &mut [bool],
     entry_binding_guaranteed: bool,
 ) -> bool {
-    // Per-node "binding guaranteed on exit". Keep separate vectors for the
-    // edge model even though branch-local publishers are rejected and both are
-    // therefore based on the host filter itself.
-    let out_fall_through: Vec<bool> = guaranteed
-        .iter()
-        .zip(filters)
-        .map(|(&g, pf)| g || filter_exit_binds(pf))
-        .collect();
-    let out_jump: Vec<bool> = guaranteed
-        .iter()
-        .zip(filters)
-        .map(|(&g, pf)| g || unconditional_binds(pf))
-        .collect();
+    let (out_fall_through, out_jump) = binding_exit_values(filters, guaranteed);
 
     let mut incoming: Vec<Option<bool>> = vec![None; guaranteed.len()];
     // The entry node's inbound binding state: nothing bound for a top-level
@@ -1155,6 +1158,9 @@ fn relax_binding_guarantees(
         *entry = Some(entry_binding_guaranteed);
     }
     for &(from, to, fall_through) in edges {
+        if !reachable.get(from).copied().unwrap_or(false) {
+            continue;
+        }
         let out = if fall_through { &out_fall_through } else { &out_jump };
         let Some(&edge_out) = out.get(from) else { continue };
         if let Some(slot) = incoming.get_mut(to) {
@@ -1164,8 +1170,8 @@ fn relax_binding_guarantees(
 
     let mut changed = false;
     for (slot, incoming_val) in guaranteed.iter_mut().zip(&incoming) {
-        // An unreachable node (no incoming edge) resolves to `false`, the safe
-        // (reject) direction.
+        // Unreachable nodes resolve to `false`, but do not contribute to the
+        // meet at reachable successors.
         let next = incoming_val.unwrap_or(false);
         if next != *slot {
             *slot = next;
@@ -1173,6 +1179,21 @@ fn relax_binding_guarantees(
         }
     }
     changed
+}
+
+/// Compute the binding guarantee carried by each kind of outgoing edge.
+fn binding_exit_values(filters: &[PipelineFilter], guaranteed: &[bool]) -> (Vec<bool>, Vec<bool>) {
+    let fall_through = guaranteed
+        .iter()
+        .zip(filters)
+        .map(|(&bound, pf)| bound || filter_exit_binds(pf))
+        .collect();
+    let jump = guaranteed
+        .iter()
+        .zip(filters)
+        .map(|(&bound, pf)| bound || unconditional_binds(pf))
+        .collect();
+    (fall_through, jump)
 }
 
 /// `iterative_request_router` coexisting with a top-level `router` or
@@ -1280,6 +1301,34 @@ fn guaranteed_bound_cluster_coverage(
         .collect()
 }
 
+/// Bound-source clusters a pipeline guarantees to consume whenever it runs.
+///
+/// Unlike [`guaranteed_bound_cluster_coverage`], candidates come from the
+/// consumers themselves rather than local routers. This lets a framework
+/// owner such as the IRR fold up only its initial step's guaranteed coverage
+/// without crediting optional or later steps.
+#[cfg(feature = "iterative-request-router")]
+pub(super) fn guaranteed_bound_consumer_clusters(filters: &[PipelineFilter]) -> std::collections::HashSet<String> {
+    let mut candidates = std::collections::HashSet::new();
+    collect_bound_consumer_clusters(filters, &mut candidates);
+    let (catalog, _) = super::catalog::build_catalog(super::collect_cluster_declarations(filters));
+    candidates
+        .into_iter()
+        .filter(|cluster| cluster_has_guaranteed_bound_consumer(filters, cluster, catalog.lookup(cluster), false))
+        .collect()
+}
+
+/// Collect bound-source cluster declarations at every branch depth.
+#[cfg(feature = "iterative-request-router")]
+fn collect_bound_consumer_clusters(filters: &[PipelineFilter], out: &mut std::collections::HashSet<String>) {
+    for pf in filters {
+        out.extend(pf.filter.bound_upstream_clusters());
+        for branch in &pf.branches {
+            collect_bound_consumer_clusters(&branch.filters, out);
+        }
+    }
+}
+
 /// Whether the given cluster is guaranteed to reach a compatible consumer
 /// before an unconditional terminal filter stops the path.
 fn cluster_has_guaranteed_bound_consumer(
@@ -1288,27 +1337,174 @@ fn cluster_has_guaranteed_bound_consumer(
     metadata: Option<&super::catalog::ClusterApplicationMetadata>,
     include_router_source_load_balancers: bool,
 ) -> bool {
-    for pf in filters {
-        if !conditions_definitely_execute_for_binding(&pf.conditions, metadata) {
-            continue;
-        }
-        if filter_guarantees_bound_consumer(pf, cluster, metadata, include_router_source_load_balancers) {
-            return true;
-        }
-        if pf.conditions.is_empty()
-            && matches!(&pf.filter, AnyFilter::Http(filter) if filter.produces_terminal_response())
-        {
-            return false;
-        }
+    BoundConsumerSearch {
+        cluster,
+        metadata,
+        include_router_source_load_balancers,
     }
-    false
+    .pipeline_has_consumer(filters)
 }
 
-/// Whether one executing filter or an unconditional branch serves `cluster`.
-fn filter_guarantees_bound_consumer(
+/// Immutable inputs for exploring whether every path reaches a consumer.
+struct BoundConsumerSearch<'a> {
+    /// Cluster whose binding must be consumed.
+    cluster: &'a str,
+    /// Application metadata associated with `cluster`.
+    metadata: Option<&'a super::catalog::ClusterApplicationMetadata>,
+    /// Whether a router-source load balancer counts as a consumer.
+    include_router_source_load_balancers: bool,
+}
+
+/// Mutable worklist state for one pipeline exploration.
+struct BoundConsumerTraversal {
+    /// Filter indexes still to explore.
+    pending: Vec<usize>,
+    /// Filter indexes already explored in this pipeline.
+    visited: std::collections::HashSet<usize>,
+    /// Outcomes observed across all explored paths.
+    outcomes: std::collections::HashSet<BoundConsumerOutcome>,
+}
+
+/// Outcome of one path through a bound-consumer search.
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum BoundConsumerOutcome {
+    /// A compatible endpoint consumer ran.
+    Consumed,
+    /// The pipeline ended without a compatible consumer.
+    Unconsumed,
+    /// An incompatible or terminal filter stopped the path.
+    Blocked,
+}
+
+impl BoundConsumerSearch<'_> {
+    /// Explore one pipeline, including its nested branches.
+    fn pipeline_has_consumer(&self, filters: &[PipelineFilter]) -> bool {
+        let coverage = self.pipeline_coverage(filters);
+        coverage.outcomes.len() == 1 && coverage.outcomes.contains(&BoundConsumerOutcome::Consumed)
+    }
+
+    /// Classify every path through one pipeline for a caller that will apply a
+    /// branch rejoin to paths that reach the end unconsumed.
+    fn pipeline_coverage(&self, filters: &[PipelineFilter]) -> BoundConsumerTraversal {
+        let mut traversal = BoundConsumerTraversal {
+            pending: vec![0],
+            visited: std::collections::HashSet::new(),
+            outcomes: std::collections::HashSet::new(),
+        };
+        if filters.is_empty() {
+            traversal.outcomes.insert(BoundConsumerOutcome::Unconsumed);
+            return traversal;
+        }
+        while let Some(idx) = traversal.pending.pop() {
+            self.visit_filter(filters, idx, &mut traversal);
+        }
+        traversal
+    }
+
+    /// Explore one reachable filter and enqueue its surviving continuations.
+    fn visit_filter(&self, filters: &[PipelineFilter], idx: usize, traversal: &mut BoundConsumerTraversal) {
+        let Some(pf) = filters.get(idx) else {
+            traversal.outcomes.insert(BoundConsumerOutcome::Unconsumed);
+            return;
+        };
+        if !traversal.visited.insert(idx) {
+            return;
+        }
+        if !self.filter_can_execute(pf, idx, traversal) {
+            return;
+        }
+        if filter_itself_guarantees_bound_consumer(pf, self.cluster, self.include_router_source_load_balancers) {
+            traversal.outcomes.insert(BoundConsumerOutcome::Consumed);
+            return;
+        }
+        if filter_blocks_bound_cluster(pf, self.cluster, self.include_router_source_load_balancers) {
+            traversal.outcomes.insert(BoundConsumerOutcome::Blocked);
+            return;
+        }
+        if is_unconditional_terminal(pf) {
+            traversal.outcomes.insert(BoundConsumerOutcome::Blocked);
+            return;
+        }
+        let Some(fall_through) = self.enqueue_branches(pf, idx, traversal) else {
+            traversal.outcomes.insert(BoundConsumerOutcome::Blocked);
+            return;
+        };
+        if fall_through {
+            traversal.pending.push(idx + 1);
+        }
+    }
+
+    /// Enqueue a request-condition miss and report whether the filter can run.
+    fn filter_can_execute(&self, pf: &PipelineFilter, idx: usize, traversal: &mut BoundConsumerTraversal) -> bool {
+        match binding_condition_state(&pf.conditions, self.metadata) {
+            BindingConditionState::Never => {
+                traversal.pending.push(idx + 1);
+                false
+            },
+            BindingConditionState::Maybe => {
+                traversal.pending.push(idx + 1);
+                true
+            },
+            BindingConditionState::Always => true,
+        }
+    }
+
+    /// Add branch continuations and report whether the host can fall through.
+    fn enqueue_branches(
+        &self,
+        pf: &PipelineFilter,
+        idx: usize,
+        traversal: &mut BoundConsumerTraversal,
+    ) -> Option<bool> {
+        let mut fall_through = true;
+        for branch in &pf.branches {
+            let branch_coverage = self.pipeline_coverage(&branch.filters);
+            if branch_coverage.outcomes.contains(&BoundConsumerOutcome::Blocked) {
+                return None;
+            }
+            if branch_coverage.outcomes.contains(&BoundConsumerOutcome::Consumed) {
+                traversal.outcomes.insert(BoundConsumerOutcome::Consumed);
+            }
+            if branch_coverage.outcomes.contains(&BoundConsumerOutcome::Unconsumed) {
+                enqueue_unconsumed_branch_rejoin(&branch.rejoin, idx, &mut traversal.pending)?;
+            }
+            if branch.condition.is_none() {
+                fall_through = unconditional_branch_falls_through(&branch.rejoin, idx, &mut traversal.pending);
+            }
+        }
+        Some(fall_through)
+    }
+}
+
+/// Whether this filter always stops request-pipeline execution when reached.
+fn is_unconditional_terminal(pf: &PipelineFilter) -> bool {
+    pf.conditions.is_empty() && matches!(&pf.filter, AnyFilter::Http(filter) if filter.produces_terminal_response())
+}
+
+/// Follow a branch that did not contain a compatible bound consumer.
+fn enqueue_unconsumed_branch_rejoin(rejoin: &RejoinTarget, idx: usize, pending: &mut Vec<usize>) -> Option<()> {
+    match rejoin {
+        RejoinTarget::Next => pending.push(idx + 1),
+        RejoinTarget::SkipTo(target) | RejoinTarget::ReEnter(target) => pending.push(*target),
+        RejoinTarget::Terminal => return None,
+    }
+    Some(())
+}
+
+/// Account for the host pipeline path when an unconditional branch is taken.
+fn unconditional_branch_falls_through(rejoin: &RejoinTarget, idx: usize, pending: &mut Vec<usize>) -> bool {
+    if matches!(rejoin, RejoinTarget::ReEnter(_)) {
+        pending.push(idx + 1);
+        true
+    } else {
+        false
+    }
+}
+
+/// Whether the executing filter itself serves `cluster`.
+fn filter_itself_guarantees_bound_consumer(
     pf: &PipelineFilter,
     cluster: &str,
-    metadata: Option<&super::catalog::ClusterApplicationMetadata>,
     include_router_source_load_balancers: bool,
 ) -> bool {
     pf.filter
@@ -1321,58 +1517,87 @@ fn filter_guarantees_bound_consumer(
                 .load_balancer_clusters()
                 .iter()
                 .any(|declared| declared == cluster)
-        || pf.branches.iter().any(|branch| {
-            branch.condition.is_none()
-                && cluster_has_guaranteed_bound_consumer(
-                    &branch.filters,
-                    cluster,
-                    metadata,
-                    include_router_source_load_balancers,
-                )
-        })
 }
 
-/// Whether every filter condition is decidable from, and true for, the bound
-/// cluster's application metadata alone.
-fn conditions_definitely_execute_for_binding(
+/// Whether running this selector for `cluster` deterministically fails before
+/// a later consumer can run.
+fn filter_blocks_bound_cluster(pf: &PipelineFilter, cluster: &str, include_router_source_load_balancers: bool) -> bool {
+    let declared = if pf.filter.consumes_bound_upstream() {
+        pf.filter.bound_upstream_clusters()
+    } else if include_router_source_load_balancers && pf.filter.name() == "load_balancer" {
+        pf.filter.load_balancer_clusters()
+    } else {
+        return false;
+    };
+    !declared.iter().any(|candidate| candidate == cluster)
+}
+
+/// Whether request conditions always, never, or only sometimes match for the
+/// bound cluster's application metadata.
+fn binding_condition_state(
     conditions: &[Condition],
     metadata: Option<&super::catalog::ClusterApplicationMetadata>,
-) -> bool {
-    conditions.iter().all(|condition| {
-        let (kind_when, matcher) = match condition {
-            Condition::When(matcher) => (true, matcher),
-            Condition::Unless(matcher) => (false, matcher),
-        };
-        if matcher.grpc.is_some()
-            || matcher.path.is_some()
-            || matcher.path_prefix.is_some()
-            || matcher.methods.is_some()
-            || matcher.headers.is_some()
-            || matcher.selected_upstream.is_some()
-        {
-            return false;
+) -> BindingConditionState {
+    let mut state = BindingConditionState::Always;
+    for condition in conditions {
+        match single_binding_condition_state(condition, metadata) {
+            BindingConditionState::Never => return BindingConditionState::Never,
+            BindingConditionState::Maybe => state = BindingConditionState::Maybe,
+            BindingConditionState::Always => {},
         }
-        let Some(bound) = &matcher.bound_upstream else {
-            return false;
-        };
-        let matches = bound.application_protocol.as_deref().is_none_or(|expected| {
-            metadata.and_then(super::catalog::ClusterApplicationMetadata::protocol) == Some(expected)
-        }) && bound.application_provider.as_deref().is_none_or(|expected| {
-            metadata.and_then(super::catalog::ClusterApplicationMetadata::provider) == Some(expected)
-        });
-        matches == kind_when
-    })
+    }
+    state
 }
 
-/// A different logical binding must not be publishable after the bound-body
-/// barrier freezes the first one.
+/// Classify one `when` or `unless` condition for a known bound cluster.
+fn single_binding_condition_state(
+    condition: &Condition,
+    metadata: Option<&super::catalog::ClusterApplicationMetadata>,
+) -> BindingConditionState {
+    let (kind_when, matcher) = match condition {
+        Condition::When(matcher) => (true, matcher),
+        Condition::Unless(matcher) => (false, matcher),
+    };
+    let has_unknown = matcher.grpc.is_some()
+        || matcher.path.is_some()
+        || matcher.path_prefix.is_some()
+        || matcher.methods.is_some()
+        || matcher.headers.is_some()
+        || matcher.selected_upstream.is_some();
+    let Some(bound) = &matcher.bound_upstream else {
+        return BindingConditionState::Maybe;
+    };
+    let matches = bound.application_protocol.as_deref().is_none_or(|expected| {
+        metadata.and_then(super::catalog::ClusterApplicationMetadata::protocol) == Some(expected)
+    }) && bound.application_provider.as_deref().is_none_or(|expected| {
+        metadata.and_then(super::catalog::ClusterApplicationMetadata::provider) == Some(expected)
+    });
+    match (kind_when, matches, has_unknown) {
+        (true, false, _) | (false, true, false) => BindingConditionState::Never,
+        (_, true, true) => BindingConditionState::Maybe,
+        (true, true, false) | (false, false, _) => BindingConditionState::Always,
+    }
+}
+
+/// Static truth value of request conditions for one bound cluster.
+#[derive(Clone, Copy)]
+enum BindingConditionState {
+    /// Every predicate is determined by the bound metadata and matches.
+    Always,
+    /// Bound metadata alone proves at least one predicate cannot match.
+    Never,
+    /// Request-dependent predicates can either match or miss.
+    Maybe,
+}
+
+/// A different logical binding must not be publishable after any earlier path
+/// may already have established one.
 ///
-/// The barrier freezes the logical binding at the first *guaranteed* binding.
-/// A later binding filter reachable after that point could publish a different
-/// logical cluster, which fails closed at runtime; reject it at build. The
-/// establishing binding itself is not flagged: it runs with no binding
-/// guaranteed on entry. Republishing is judged over the control-flow graph, so
-/// a binding filter in a branch reached only after the barrier is caught too.
+/// The executor freezes the first actual binding. A later binding filter—or a
+/// `ReEnter` edge that reaches the same router again—could therefore publish a
+/// different cluster and fail closed at runtime. A forward may-be-bound
+/// analysis rejects every such path at build time, including conditional
+/// publishers and back edges.
 ///
 /// Every successful binding is frozen, even when no bound-body participant is
 /// registered, so this invariant applies to every pipeline.
@@ -1381,45 +1606,59 @@ pub(super) fn check_no_rebind_after_binding(
     entry_binding_guaranteed: bool,
     errors: &mut Vec<String>,
 ) {
-    let mut binding_seen = entry_binding_guaranteed;
-    collect_rebind_errors(filters, &mut binding_seen, false, errors);
-}
-
-/// Enforce one logical binding publisher for the whole downstream request.
-///
-/// Mutually exclusive or conditional publishers are intentionally not treated
-/// as composable: the binding is request-scoped and immutable, so nested and
-/// IRR pipelines inherit it rather than publishing a second candidate.
-fn collect_rebind_errors(
-    filters: &[PipelineFilter],
-    binding_seen: &mut bool,
-    inside_branch: bool,
-    errors: &mut Vec<String>,
-) {
-    for pf in filters {
-        if *binding_seen
+    let may_be_bound = compute_binding_may_be_bound(filters, entry_binding_guaranteed);
+    for (&bound_before, pf) in may_be_bound.iter().zip(filters) {
+        if bound_before
             && matches!(&pf.filter, AnyFilter::Http(filter) if filter.conflicts_with_inherited_bound_upstream())
         {
             errors.push(format!(
-                "filter '{}' owns a nested pipeline that publishes a logical upstream binding, but the parent binding is already frozen; remove the nested router or the parent binding router",
+                "filter '{}' owns a nested pipeline that publishes a logical upstream binding, but the parent binding may already be frozen; remove the nested router or the parent binding router",
                 pf.filter.name(),
             ));
         }
-        if filter_binds_upstream(pf) {
-            if inside_branch {
+        if bound_before && filter_binds_upstream(pf) {
+            errors.push(rebind_error(pf.filter.name()));
+        }
+        collect_branch_binding_publishers(&pf.branches, errors);
+    }
+}
+
+/// Report binding publishers nested inside branches.
+fn collect_branch_binding_publishers(branches: &[ResolvedBranch], errors: &mut Vec<String>) {
+    for branch in branches {
+        for pf in &branch.filters {
+            if filter_binds_upstream(pf) {
                 errors.push(format!(
                     "filter '{}' publishes a logical upstream binding inside a branch; the request-scoped binding router must be top-level",
                     pf.filter.name(),
                 ));
-            } else if *binding_seen {
-                errors.push(rebind_error(pf.filter.name()));
-            } else {
-                *binding_seen = true;
+            }
+            collect_branch_binding_publishers(&pf.branches, errors);
+        }
+    }
+}
+
+/// Forward OR dataflow computing whether any path reaches each filter with a
+/// logical binding already published.
+fn compute_binding_may_be_bound(filters: &[PipelineFilter], entry_binding: bool) -> Vec<bool> {
+    let edges = binding_control_flow_edges(filters);
+    let mut may_be_bound = vec![false; filters.len()];
+    loop {
+        let mut incoming = vec![false; filters.len()];
+        if let Some(entry) = incoming.first_mut() {
+            *entry = entry_binding;
+        }
+        for &(from, to, _fall_through) in &edges {
+            let Some(source) = filters.get(from) else { continue };
+            let edge_bound = may_be_bound.get(from).copied().unwrap_or(false) || filter_binds_upstream(source);
+            if let Some(target) = incoming.get_mut(to) {
+                *target |= edge_bound;
             }
         }
-        for branch in &pf.branches {
-            collect_rebind_errors(&branch.filters, binding_seen, true, errors);
+        if incoming == may_be_bound {
+            return may_be_bound;
         }
+        may_be_bound = incoming;
     }
 }
 
@@ -1427,8 +1666,8 @@ fn collect_rebind_errors(
 fn rebind_error(name: &str) -> String {
     format!(
         "filter '{name}' publishes a logical upstream binding, but a binding is already \
-         guaranteed before it; the binding freezes at the first guaranteed binding and a \
-         later binding would try to publish a different logical cluster (fail-closed). \
+         possible before it; the first actual binding freezes and a later binding could \
+         try to publish a different logical cluster (fail-closed). \
          Keep exactly one binding router before the bound-body barrier"
     )
 }
@@ -1780,7 +2019,9 @@ fn binding_requirement_reason(pf: &PipelineFilter) -> Option<&'static str> {
     let AnyFilter::Http(f) = &pf.filter else {
         return None;
     };
-    if f.bound_upstream_request_body_access() != BodyAccess::None {
+    if f.requires_bound_upstream_on_entry() && f.name() == "iterative_request_router" {
+        Some("an iterative_request_router step that observes or consumes bound_upstream")
+    } else if f.bound_upstream_request_body_access() != BodyAccess::None {
         Some("a bound-upstream request-body hook")
     } else if f.consumes_bound_upstream() {
         Some("a bound_upstream load balancer")
@@ -4183,9 +4424,6 @@ mod tests {
         assert!(errors.is_empty(), "no IRR means no conflict");
     }
 
-    // Rule 2: a bound_upstream condition on a filter that also runs an ordinary
-    // pre-read request-body hook.
-
     #[test]
     fn bound_condition_with_pre_read_body_errors() {
         let mut pf = body_filter(); // declares request_body_access = ReadOnly
@@ -4272,8 +4510,6 @@ mod tests {
         }
     }
 
-    // Rule 3: bound-upstream body participants must buffer the full body.
-
     #[test]
     fn bound_upstream_body_mode_rejects_stream() {
         let filters = vec![bound_body_filter("bound_body", BodyAccess::ReadOnly, BodyMode::Stream)];
@@ -4341,8 +4577,6 @@ mod tests {
         );
     }
 
-    // Rule 4: bound-upstream body-access filters inside branch chains.
-
     #[test]
     fn branch_bound_upstream_body_filter_errors() {
         let mut host = named_noop_filter("headers", vec![]);
@@ -4404,9 +4638,6 @@ mod tests {
         );
     }
 
-    // Rule 7: a bound-consuming load balancer or bound-upstream body hook
-    // requires a guaranteed preceding binding.
-
     #[test]
     fn bound_lb_without_binding_errors() {
         let filters = vec![bound_lb(&["inference"])];
@@ -4463,8 +4694,6 @@ mod tests {
         );
     }
 
-    // Rule 8: a bound-upstream load balancer must resolve every bindable cluster.
-
     #[test]
     fn bound_coverage_without_consumer_no_error() {
         let filters = vec![binding_router(&["inference"])];
@@ -4477,9 +4706,7 @@ mod tests {
     }
 
     #[test]
-    fn bound_coverage_union_across_paths_no_error() {
-        // §6 dual-path shape: a binding router publishes two clusters; each is
-        // resolved by a bound LB on a different reachable path.
+    fn incompatible_unconditional_bound_consumer_blocks_later_consumer() {
         let mut host_a = named_noop_filter("headers", vec![]);
         host_a.branches = vec![make_branch_with_filters("a", vec![bound_lb(&["openai-responses"])])];
         let mut host_b = named_noop_filter("headers", vec![]);
@@ -4487,10 +4714,12 @@ mod tests {
         let filters = vec![binding_router(&["openai-responses", "chat-backend"]), host_a, host_b];
         let mut errors = Vec::new();
         check_bound_cluster_coverage(&filters, &mut errors);
-        assert!(
-            errors.is_empty(),
-            "the union of bound coverage across paths must accept both bindable clusters: {errors:?}"
+        assert_eq!(
+            errors.len(),
+            1,
+            "the first unconditional bound LB rejects chat-backend before its later consumer: {errors:?}"
         );
+        assert!(errors[0].contains("chat-backend"));
     }
 
     #[test]
@@ -4558,8 +4787,50 @@ mod tests {
         );
     }
 
-    // Rule 9: a different logical binding must not be publishable after the
-    // bound-body barrier freezes the first one.
+    #[test]
+    fn skip_to_bypassing_bound_consumer_does_not_count_as_coverage() {
+        let mut host = named_noop_filter("host", vec![]);
+        host.branches = vec![make_skip_branch("bypass", 3)];
+        let filters = vec![
+            binding_router(&["inference"]),
+            host,
+            bound_lb(&["inference"]),
+            named_noop_filter("after", vec![]),
+        ];
+        let mut errors = Vec::new();
+
+        check_bound_cluster_coverage(&filters, &mut errors);
+
+        assert_eq!(errors.len(), 1, "the bypassed consumer cannot cover the skip path");
+    }
+
+    #[test]
+    fn terminal_branch_before_bound_consumer_does_not_count_as_coverage() {
+        let mut host = named_noop_filter("host", vec![]);
+        host.branches = vec![make_terminal_branch("stop", vec![])];
+        let filters = vec![binding_router(&["inference"]), host, bound_lb(&["inference"])];
+        let mut errors = Vec::new();
+
+        check_bound_cluster_coverage(&filters, &mut errors);
+
+        assert_eq!(errors.len(), 1, "a consumer after a terminal rejoin is unreachable");
+    }
+
+    #[test]
+    fn conditional_host_terminal_path_does_not_count_later_consumer() {
+        let mut host = named_noop_filter("host", vec![make_condition()]);
+        host.branches = vec![make_terminal_branch("stop", vec![])];
+        let filters = vec![binding_router(&["inference"]), host, bound_lb(&["inference"])];
+        let mut errors = Vec::new();
+
+        check_bound_cluster_coverage(&filters, &mut errors);
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "both outcomes of request-dependent host conditions must be explored"
+        );
+    }
 
     #[test]
     fn single_binding_no_rebind_error() {
@@ -4600,6 +4871,80 @@ mod tests {
     }
 
     #[test]
+    fn same_cluster_republication_is_rejected_at_validation() {
+        let filters = vec![
+            binding_router(&["same"]),
+            binding_router(&["same"]),
+            bound_lb(&["same"]),
+        ];
+        let mut errors = Vec::new();
+
+        check_no_rebind_after_binding(&filters, false, &mut errors);
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "validation keeps one publisher even though same-cluster runtime replay is idempotent"
+        );
+    }
+
+    #[test]
+    fn conditional_binding_before_second_router_rebind_errors() {
+        let mut first = binding_router(&["a"]);
+        first.conditions = vec![make_condition()];
+        let filters = vec![first, binding_router(&["b"]), bound_lb(&["a", "b"])];
+        let mut errors = Vec::new();
+
+        check_no_rebind_after_binding(&filters, false, &mut errors);
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "the second router can run after the conditional router has bound: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn reenter_over_binding_router_rebind_errors() {
+        let mut router = binding_router(&["a"]);
+        router.branches = vec![ResolvedBranch {
+            condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
+                filter_name: Arc::from("router"),
+                key: Arc::from("retry"),
+                value: Arc::from("yes"),
+            }),
+            filters: vec![],
+            max_iterations: Some(1),
+            name: Arc::from("reroute"),
+            rejoin: RejoinTarget::ReEnter(0),
+        }];
+        let filters = vec![router, bound_lb(&["a"])];
+        let mut errors = Vec::new();
+
+        check_no_rebind_after_binding(&filters, false, &mut errors);
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "the back edge can execute the binding router with a frozen binding: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn entry_binding_rejects_step_router_even_with_bound_consumer() {
+        let filters = vec![binding_router(&["a"]), bound_lb(&["a"])];
+        let mut errors = Vec::new();
+
+        check_no_rebind_after_binding(&filters, true, &mut errors);
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "an IRR step must inherit the request binding instead of publishing another: {errors:?}"
+        );
+    }
+
+    #[test]
     fn rebind_in_branch_after_binding_errors() {
         let mut host = named_noop_filter("headers", vec![]);
         host.branches = vec![make_branch_with_filters("br", vec![binding_router(&["b"])])];
@@ -4613,8 +4958,76 @@ mod tests {
         );
     }
 
-    // Rule 12: an untagged bindable cluster reaching a `when bound_upstream`
-    // condition that requires the field it lacks.
+    #[test]
+    fn binding_control_flow_next_adds_only_sequential_edge() {
+        let filters = vec![named_noop_filter("a", vec![]), named_noop_filter("b", vec![])];
+
+        assert_eq!(binding_control_flow_edges(&filters), vec![(0, 1, true)]);
+    }
+
+    #[test]
+    fn binding_control_flow_unconditional_skip_replaces_fallthrough() {
+        let mut host = named_noop_filter("host", vec![]);
+        host.branches = vec![make_skip_branch("skip", 2)];
+        let filters = vec![
+            host,
+            named_noop_filter("skipped", vec![]),
+            named_noop_filter("target", vec![]),
+        ];
+
+        assert_eq!(binding_control_flow_edges(&filters), vec![(0, 2, false), (1, 2, true)]);
+    }
+
+    #[test]
+    fn binding_control_flow_conditional_skip_keeps_fallthrough() {
+        let mut host = named_noop_filter("host", vec![]);
+        host.branches = vec![conditional_branch("skip", vec![], RejoinTarget::SkipTo(2))];
+        let filters = vec![
+            host,
+            named_noop_filter("fallthrough", vec![]),
+            named_noop_filter("target", vec![]),
+        ];
+
+        assert_eq!(
+            binding_control_flow_edges(&filters),
+            vec![(0, 1, true), (0, 2, false), (1, 2, true)]
+        );
+    }
+
+    #[test]
+    fn binding_control_flow_skip_on_conditional_host_keeps_fallthrough() {
+        let mut host = named_noop_filter("host", vec![make_condition()]);
+        host.branches = vec![make_skip_branch("skip", 2)];
+        let filters = vec![
+            host,
+            named_noop_filter("fallthrough", vec![]),
+            named_noop_filter("target", vec![]),
+        ];
+
+        assert_eq!(
+            binding_control_flow_edges(&filters),
+            vec![(0, 1, true), (0, 2, false), (1, 2, true)]
+        );
+    }
+
+    #[test]
+    fn binding_control_flow_terminal_host_has_no_exit() {
+        let filters = vec![
+            crate::pipeline::test_filters::terminal_filter("terminal"),
+            named_noop_filter("unreachable", vec![]),
+        ];
+
+        assert!(binding_control_flow_edges(&filters).is_empty());
+    }
+
+    #[test]
+    fn binding_control_flow_drops_out_of_range_jump() {
+        let mut host = named_noop_filter("host", vec![]);
+        host.branches = vec![make_skip_branch("invalid", 99)];
+        let filters = vec![host, named_noop_filter("later", vec![])];
+
+        assert!(binding_control_flow_edges(&filters).is_empty());
+    }
 
     #[test]
     fn untagged_bound_cluster_when_condition_errors() {

@@ -484,7 +484,7 @@ impl HttpFilter for IterativeRequestRouterFilter {
     fn requires_bound_upstream_on_entry(&self) -> bool {
         self.step_pipelines
             .values()
-            .any(|pipeline| pipeline.requires_bound_upstream_on_entry())
+            .any(|pipeline| pipeline.uses_bound_upstream())
     }
 
     fn conflicts_with_inherited_bound_upstream(&self) -> bool {
@@ -495,9 +495,8 @@ impl HttpFilter for IterativeRequestRouterFilter {
 
     fn bound_upstream_clusters(&self) -> Vec<String> {
         self.step_pipelines
-            .values()
-            .flat_map(|pipeline| pipeline.bound_upstream_clusters())
-            .collect()
+            .get(&self.initial_step)
+            .map_or_else(Vec::new, |pipeline| pipeline.guaranteed_bound_upstream_clusters())
     }
 
     fn declared_cluster_metadata(&self) -> Vec<ClusterMetadataDeclaration> {

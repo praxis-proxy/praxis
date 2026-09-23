@@ -39,6 +39,14 @@ pub(in crate::pipeline) fn noop_filter(name: &'static str) -> PipelineFilter {
     })
 }
 
+pub(in crate::pipeline) fn terminal_filter(name: &'static str) -> PipelineFilter {
+    capability_filter(CapabilityFilter {
+        name,
+        produces_terminal_response: true,
+        ..CapabilityFilter::default()
+    })
+}
+
 /// A binding router stand-in: selects and *binds* one of `clusters` as the
 /// logical upstream.
 pub(in crate::pipeline) fn binding_router(clusters: &[&str]) -> PipelineFilter {
@@ -139,6 +147,7 @@ struct CapabilityFilter {
     request_body_access: BodyAccess,
     request_body_mode: Option<BodyMode>,
     declared_metadata: Vec<ClusterMetadataDeclaration>,
+    produces_terminal_response: bool,
 }
 
 #[async_trait]
@@ -181,6 +190,10 @@ impl HttpFilter for CapabilityFilter {
 
     fn request_body_mode(&self) -> BodyMode {
         self.request_body_mode.unwrap_or_default()
+    }
+
+    fn produces_terminal_response(&self) -> bool {
+        self.produces_terminal_response
     }
 
     fn declared_cluster_metadata(&self) -> Vec<ClusterMetadataDeclaration> {

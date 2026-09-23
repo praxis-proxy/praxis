@@ -77,16 +77,16 @@ influence downstream processing:
 | `on_request` | Forward (pipeline order) | Request |
 | `on_response` | Reverse (pipeline order) | Response |
 | `on_request_body` | Forward | Request body chunks |
-| `on_bound_upstream_request_body` | Forward, once | Complete body after logical binding, before endpoint selection |
+| `on_bound_upstream_request_body` | Forward, at most once | Complete body after logical binding, before endpoint selection |
 | `on_selected_upstream_request_body` | Forward, per exchange | Complete body after endpoint selection |
 | `on_response_body` | Reverse | Response body chunks |
 
-Request `conditions` gate both the request and body
-hooks. Response `response_conditions` gate only the
-response hooks. A filter skipped on request is also
-skipped on response and on both body hooks. A filter
-that never saw the request headers is never handed the
-body either.
+Request `conditions` gate the request and ordinary body hooks. Response
+`response_conditions` gate only the response hooks. A filter skipped on
+request is also skipped on response and on selected-upstream body hooks. The
+bound-upstream body hook is the deliberate exception: its conditions are
+evaluated at the binding barrier, so a later top-level participant can receive
+the body before its own `on_request` position is reached.
 
 The one exception is a `stream_buffer` pre-read, which
 runs the request-body hooks *before* the request phase.
@@ -95,7 +95,7 @@ declaring request-body access runs.
 
 Filters that need the logical route must instead declare
 `bound_upstream_request_body_access` and implement
-`on_bound_upstream_request_body`. That hook runs once after
+`on_bound_upstream_request_body`. That hook runs at most once after
 the binding router freezes `BoundUpstream`; a read-write
 participant replaces the canonical body used by direct
 dispatch, IRR, retries, and selected-upstream adaptation.

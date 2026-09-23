@@ -672,7 +672,7 @@ fn validate_listener_references(chains: &[FilterChainConfig], listeners: &[Liste
 mod tests {
     use std::fmt::Write as _;
 
-    use crate::config::Config;
+    use crate::config::{Condition, Config};
 
     #[test]
     fn reject_empty_chain_name() {
@@ -899,6 +899,121 @@ insecure_options:
             err.to_string().contains("lowercase ASCII"),
             "an uppercase identifier could never name a cluster tag and must be rejected: {err}"
         );
+    }
+
+    #[test]
+    fn reject_malformed_bound_upstream_identifier() {
+        let yaml = r#"
+listeners: [{name: web, address: "127.0.0.1:8080", filter_chains: [main]}]
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+        conditions: [{when: {bound_upstream: {application_protocol: "openai/responses"}}}]
+clusters:
+  - {name: backend, http: {application_protocol: openai_responses}, endpoints: ["10.0.0.1:80"]}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("lowercase ASCII"),
+            "a delimiter outside the canonical identifier alphabet must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_bound_upstream_identifier() {
+        let yaml = r#"
+listeners: [{name: web, address: "127.0.0.1:8080", filter_chains: [main]}]
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+        conditions: [{when: {bound_upstream: {application_provider: ""}}}]
+clusters: [{name: backend, endpoints: ["10.0.0.1:80"]}]
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "an empty bound metadata identifier must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_scalar_bound_upstream_condition() {
+        let error = serde_yaml::from_str::<Condition>("when:\n  bound_upstream: openai\n").unwrap_err();
+        assert!(
+            error.to_string().contains("struct") || error.to_string().contains("map"),
+            "bound_upstream must deserialize from a mapping: {error}"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_unless_round_trips() {
+        let condition: Condition =
+            serde_yaml::from_str("unless:\n  bound_upstream:\n    application_provider: openai\n").unwrap();
+        let serialized = serde_yaml::to_string(&condition).unwrap();
+        let reparsed: Condition = serde_yaml::from_str(&serialized).unwrap();
+        assert!(
+            matches!(reparsed, Condition::Unless(_)),
+            "the unless variant must survive serialization"
+        );
+        let Condition::Unless(matcher) = reparsed else {
+            return;
+        };
+        assert_eq!(
+            matcher
+                .bound_upstream
+                .and_then(|bound| bound.application_provider)
+                .as_deref(),
+            Some("openai")
+        );
+    }
+
+    #[test]
+    fn reject_bound_upstream_typo_in_inline_branch_and_irr_step() {
+        for (location, nested) in [
+            (
+                "inline branch",
+                r#"
+      - filter: headers
+        branch_chains:
+          - name: branch
+            chains:
+              - name: inline
+                filters:
+                  - filter: request_id
+                    conditions: [{when: {bound_upstream: {application_provider: ollama}}}]
+"#,
+            ),
+            (
+                "IRR step",
+                r#"
+      - filter: iterative_request_router
+        steps:
+          - name: call
+            url: "http://backend"
+            filters:
+              - filter: request_id
+                conditions: [{when: {bound_upstream: {application_provider: ollama}}}]
+"#,
+            ),
+        ] {
+            let yaml = format!(
+                r#"listeners: [{{name: web, address: "127.0.0.1:8080", filter_chains: [main]}}]
+filter_chains:
+  - name: main
+    filters:
+{nested}clusters:
+  - {{name: backend, http: {{application_provider: vllm}}, endpoints: ["10.0.0.1:80"]}}
+"#
+            );
+            let err = Config::from_yaml(&yaml).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("bound_upstream.application_provider 'ollama' matches no cluster"),
+                "a bound matcher typo in an {location} must be rejected: {err}"
+            );
+        }
     }
 
     #[test]

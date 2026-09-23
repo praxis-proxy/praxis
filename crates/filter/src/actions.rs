@@ -225,10 +225,11 @@ pub enum SelectedUpstreamBodyOutcome {
 
 /// Result of a filter's bound-upstream request-body processing.
 ///
-/// The bound-upstream request-body phase runs exactly once per downstream
+/// The bound-upstream request-body phase runs at most once per downstream
 /// request, at the barrier immediately after the `router` binds a logical
-/// upstream and before any gateway-owned request filters or IRR run, over
-/// the fully buffered request body. Like [`SelectedUpstreamBodyOutcome`] it
+/// upstream and before any gateway-owned request filters or IRR run, over the
+/// fully buffered request body. It does not run when routing stops before a
+/// binding is published. Like [`SelectedUpstreamBodyOutcome`] it
 /// has no streaming controls ([`Release`], [`BodyDone`]) and no
 /// terminal-response variants: the body is already complete and the phase
 /// either forwards it (unchanged or modified in place) with [`Continue`],

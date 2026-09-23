@@ -110,7 +110,11 @@ impl FilterPipeline {
         clippy::too_many_lines,
         reason = "single construction choke point: one precompute per body phase plus the full struct literal"
     )]
-    pub(crate) fn from_filters(filters: Vec<PipelineFilter>) -> Self {
+    pub(crate) fn from_filters(mut filters: Vec<PipelineFilter>) -> Self {
+        let bound_upstream_enabled = super::checks::uses_bound_upstream(&filters);
+        if bound_upstream_enabled {
+            enable_upstream_binding(&mut filters);
+        }
         let body_capabilities = compute_body_capabilities(&filters);
         let compression = extract_compression_config(&filters);
         let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);
@@ -232,6 +236,7 @@ impl FilterPipeline {
         entry_binding_guaranteed: bool,
     ) -> Vec<String> {
         let names: Vec<&str> = self.filters.iter().map(|pf| pf.filter.name()).collect();
+        let uses_bound_upstream = super::checks::uses_bound_upstream(&self.filters);
 
         let mut errors = Vec::new();
 
@@ -279,8 +284,8 @@ impl FilterPipeline {
         if entry_binding_guaranteed {
             super::checks::check_step_bound_upstream_body_filters(&self.filters, &mut errors);
         }
-        if !entry_binding_guaranteed && !skip.duplicate_routers {
-            super::checks::check_no_rebind_after_binding(&self.filters, false, &mut errors);
+        if uses_bound_upstream {
+            super::checks::check_no_rebind_after_binding(&self.filters, entry_binding_guaranteed, &mut errors);
         }
         super::checks::check_bound_cluster_coverage(&self.filters, &mut errors);
         super::checks::check_untagged_bound_cluster_fields(&self.filters, &mut errors);
@@ -354,6 +359,18 @@ impl FilterPipeline {
         super::checks::check_security_filter_in_conditional_branch(&self.filters, &mut warnings);
 
         warnings
+    }
+}
+
+/// Enable logical binding only on routers in a pipeline that actually uses it.
+fn enable_upstream_binding(filters: &mut [PipelineFilter]) {
+    for pf in filters {
+        if let AnyFilter::Http(filter) = &mut pf.filter {
+            filter.enable_upstream_binding();
+        }
+        for branch in &mut pf.branches {
+            enable_upstream_binding(&mut branch.filters);
+        }
     }
 }
 

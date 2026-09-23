@@ -1071,6 +1071,77 @@ mod tests {
     }
 
     #[test]
+    fn bound_upstream_provider_only_mismatch() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let view = bound_view(Some("openai_responses"), Some("azure"));
+        assert!(
+            !should_execute_bound(&[when(bound_upstream_match(None, Some("openai")))], &req, view),
+            "a differing bound provider should not match"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_when_and_unless_across_metadata_axes() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let conditions = [
+            when(bound_upstream_match(Some("openai_responses"), None)),
+            unless(bound_upstream_match(None, Some("azure"))),
+        ];
+
+        assert!(
+            should_execute_bound(&conditions, &req, bound_view(Some("openai_responses"), Some("openai"))),
+            "matching protocol and a non-excluded provider should execute"
+        );
+        assert!(
+            !should_execute_bound(&conditions, &req, bound_view(Some("openai_responses"), Some("azure"))),
+            "the provider exclusion must veto a matching protocol"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_ands_with_method_and_header() {
+        let mut matcher = bound_upstream_match(None, Some("openai"));
+        matcher.methods = Some(vec!["POST".to_owned()]);
+        matcher.headers = Some(HashMap::from([("x-tenant".to_owned(), "acme".to_owned())]));
+        let condition = when(matcher);
+        let view = bound_view(None, Some("openai"));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tenant", HeaderValue::from_static("acme"));
+
+        assert!(should_execute_bound(
+            std::slice::from_ref(&condition),
+            &make_request(Method::POST, "/", headers.clone()),
+            view,
+        ));
+        assert!(!should_execute_bound(
+            std::slice::from_ref(&condition),
+            &make_request(Method::GET, "/", headers.clone()),
+            view,
+        ));
+        headers.insert("x-tenant", HeaderValue::from_static("other"));
+        assert!(!should_execute_bound(
+            &[condition],
+            &make_request(Method::POST, "/", headers),
+            view,
+        ));
+    }
+
+    #[test]
+    fn public_should_execute_treats_bound_upstream_as_unbound() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        let matcher = bound_upstream_match(None, Some("openai"));
+
+        assert!(
+            !should_execute(&[when(matcher.clone())], &req),
+            "the public header-only evaluator must fail closed for a positive bound predicate"
+        );
+        assert!(
+            should_execute(&[unless(matcher)], &req),
+            "the public header-only evaluator must preserve unless fail-open semantics when unbound"
+        );
+    }
+
+    #[test]
     fn bound_upstream_combined_matches() {
         let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
         let view = bound_view(Some("openai_responses"), Some("openai"));

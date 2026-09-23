@@ -86,6 +86,8 @@ fn bench_pipeline_execute_request(c: &mut Criterion) {
 
     // Also benchmark the router alone for comparison.
     let mut group = c.benchmark_group("pipeline_execute_request");
+    // No bound observer or consumer: this is the hot-path baseline proving an
+    // ordinary router does not publish logical binding state.
     group.bench_function("router_only", |b| {
         let router = &router;
         b.to_async(&rt).iter_batched(
@@ -98,6 +100,7 @@ fn bench_pipeline_execute_request(c: &mut Criterion) {
         );
     });
 
+    // Same no-binding baseline with a representative downstream filter.
     group.bench_function("router_plus_headers", |b| {
         let pipeline = &pipeline;
         b.to_async(&rt).iter_batched(

@@ -86,6 +86,139 @@ fn build_with_valid_filters() {
 }
 
 #[test]
+fn ordinary_router_in_terminal_branch_does_not_enable_binding() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: headers
+  branch_chains:
+    - name: route
+      rejoin: terminal
+      chains:
+        - name: inline
+          filters:
+            - filter: router
+              routes:
+                - path_prefix: "/"
+                  cluster: backend
+            - filter: load_balancer
+              clusters:
+                - name: backend
+                  endpoints: ["127.0.0.1:9"]
+"#,
+    )
+    .unwrap();
+    let chains = HashMap::new();
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &chains,
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap();
+    let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
+
+    assert!(
+        errors.iter().all(|error| !error.contains("logical upstream binding")),
+        "ordinary branch routing must retain its historical shape: {errors:?}"
+    );
+}
+
+#[test]
+fn binding_enabled_router_in_branch_is_rejected_from_yaml() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: router
+  routes:
+    - path_prefix: "/"
+      cluster: backend
+- filter: headers
+  conditions:
+    - when:
+        bound_upstream:
+          application_provider: openai
+  branch_chains:
+    - name: reroute
+      rejoin: terminal
+      chains:
+        - name: inline
+          filters:
+            - filter: router
+              routes:
+                - path_prefix: "/"
+                  cluster: backend
+            - filter: load_balancer
+              clusters:
+                - name: backend
+                  http:
+                    application_provider: openai
+                  endpoints: ["127.0.0.1:9"]
+"#,
+    )
+    .unwrap();
+    let chains = HashMap::new();
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &chains,
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        pipeline
+            .filters
+            .iter()
+            .flat_map(|filter| &filter.branches)
+            .any(|branch| {
+                branch
+                    .filters
+                    .iter()
+                    .any(|filter| matches!(&filter.filter, AnyFilter::Http(filter) if filter.binds_upstream()))
+            }),
+        "binding opt-in must recurse into branch routers"
+    );
+    let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| { error.contains("publishes a logical upstream binding inside a branch") }),
+        "binding-aware routers must stay top-level: {errors:?}"
+    );
+}
+
+#[tokio::test]
+async fn unmatched_conditional_router_publishes_no_binding_or_route_metrics() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: router
+  conditions:
+    - when: {path_prefix: "/routed"}
+  routes:
+    - path_prefix: "/"
+      cluster: backend
+- filter: headers
+  conditions:
+    - when:
+        bound_upstream: {application_provider: openai}
+  request_set: [{name: x-routed, value: "true"}]
+"#,
+    )
+    .unwrap();
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    let req = crate::test_utils::make_request(Method::GET, "/skipped");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    assert!(ctx.bound_cluster().is_none());
+    assert!(ctx.cluster.is_none());
+    assert!(ctx.metrics_route.is_none());
+}
+
+#[test]
 fn build_stops_on_first_error() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![
@@ -5972,6 +6105,90 @@ async fn bound_upstream_condition_skips_filter_on_mismatch() {
     );
 }
 
+#[tokio::test]
+async fn bound_upstream_condition_runs_inside_branch_subchain() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let condition: Vec<praxis_core::config::Condition> =
+        serde_yaml::from_str("- when:\n    bound_upstream:\n      application_provider: openai\n").unwrap();
+    let mut host = PipelineFilter::new(
+        1,
+        AnyFilter::Http(Box::new(CountingFilter {
+            counter: Arc::new(AtomicUsize::new(0)),
+        })),
+        vec![],
+        vec![],
+    );
+    host.branches = vec![ResolvedBranch {
+        condition: None,
+        filters: vec![PipelineFilter::new(
+            2,
+            AnyFilter::Http(Box::new(CountingFilter {
+                counter: Arc::clone(&counter),
+            })),
+            condition,
+            vec![],
+        )],
+        max_iterations: None,
+        name: Arc::from("bound"),
+        rejoin: RejoinTarget::Next,
+    }];
+    let pipeline = test_pipeline(
+        BodyCapabilities::default(),
+        vec![
+            PipelineFilter::new(
+                0,
+                AnyFilter::Http(Box::new(BindingRouterFilter {
+                    cluster: "inference",
+                    protocol: None,
+                    provider: Some("openai"),
+                })),
+                vec![],
+                vec![],
+            ),
+            host,
+        ],
+    );
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn bound_upstream_request_gate_controls_response_hook() {
+    for (protocol, expected) in [("p1", vec!["gated"]), ("other", vec![])] {
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let condition: Vec<praxis_core::config::Condition> =
+            serde_yaml::from_str("- when:\n    bound_upstream:\n      application_protocol: p1\n").unwrap();
+        let pipeline = make_pipeline_with_conditions(vec![
+            (
+                Box::new(BindingRouterFilter {
+                    cluster: "inference",
+                    protocol: Some(protocol),
+                    provider: None,
+                }),
+                vec![],
+            ),
+            (
+                Box::new(LoggingFilter {
+                    label: "gated",
+                    log: Arc::clone(&log),
+                }),
+                condition,
+            ),
+        ]);
+        let req = crate::test_utils::make_request(Method::POST, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+        drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+
+        assert_eq!(*log.lock().unwrap(), expected);
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Bound-Upstream Request-Body Barrier
 // -----------------------------------------------------------------------------
@@ -6291,6 +6508,52 @@ async fn bound_upstream_barrier_noop_without_bound_cluster() {
     );
 }
 
+#[tokio::test]
+async fn bound_upstream_barrier_runs_for_request_without_body() {
+    let (participant, ran, seen) = BoundBodyRecordingFilter::new("bound_body", BoundBodyBehavior::Continue);
+    let pipeline = make_pipeline(vec![binding_router("inference"), Box::new(participant)]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+    assert!(
+        seen.lock().unwrap().is_none(),
+        "the no-body snapshot must remain absent"
+    );
+}
+
+#[tokio::test]
+async fn bound_upstream_barrier_runs_before_skip_to_rejoin() {
+    let (participant, ran, _) = BoundBodyRecordingFilter::new("bound_body", BoundBodyBehavior::Continue);
+    let mut pipeline = make_pipeline(vec![
+        binding_router("inference"),
+        Box::new(participant),
+        Box::new(CountingFilter {
+            counter: Arc::new(AtomicUsize::new(0)),
+        }),
+    ]);
+    pipeline.filters[0].branches = vec![ResolvedBranch {
+        condition: None,
+        filters: vec![],
+        max_iterations: None,
+        name: Arc::from("skip_participant_request_position"),
+        rejoin: RejoinTarget::SkipTo(2),
+    }];
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.buffered_request_body = Some(Bytes::from_static(b"payload"));
+
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ran.load(Ordering::SeqCst),
+        1,
+        "the binding barrier runs before branches can skip the participant's request position"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // filter_request_conditions_match (selection axis)
 // -----------------------------------------------------------------------------
@@ -6392,6 +6655,27 @@ fn filter_request_conditions_match_honors_bound_upstream_view() {
     assert!(
         pipeline.filter_request_conditions_match("access_log", &ctx_bound),
         "a request bound to the matching protocol must match the access_log filter's condition"
+    );
+}
+
+#[test]
+fn filter_request_conditions_match_fails_closed_for_untagged_binding() {
+    let condition: Vec<praxis_core::config::Condition> =
+        serde_yaml::from_str("- when:\n    bound_upstream:\n      application_provider: openai\n").unwrap();
+    let pipeline = make_pipeline_with_conditions(vec![(
+        Box::new(LoggingFilter {
+            label: "access_log",
+            log: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+        condition,
+    )]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.publish_bound_upstream(Arc::from("generic"), None, None).unwrap();
+
+    assert!(
+        !pipeline.filter_request_conditions_match("access_log", &ctx),
+        "an untagged binding must not satisfy a provider-scoped fallback"
     );
 }
 

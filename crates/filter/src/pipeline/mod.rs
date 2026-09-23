@@ -735,11 +735,10 @@ impl FilterPipeline {
         found
     }
 
-    /// Whether any bound dependency in this pipeline is reachable before a
-    /// local unconditional binding filter establishes the logical upstream.
+    /// Whether this pipeline contains any logical-binding observer or consumer.
     #[cfg(feature = "iterative-request-router")]
-    pub(crate) fn requires_bound_upstream_on_entry(&self) -> bool {
-        checks::requires_bound_upstream_on_entry(&self.filters)
+    pub(crate) fn uses_bound_upstream(&self) -> bool {
+        checks::uses_bound_upstream(&self.filters)
     }
 
     /// Whether this pipeline contains a binding publisher at any branch depth.
@@ -755,17 +754,12 @@ impl FilterPipeline {
         contains(&self.filters)
     }
 
-    /// Cluster names every bound-consuming filter in this pipeline declares,
-    /// descending into branch sub-chains and nested framework pipelines.
+    /// Bound-source clusters guaranteed to be consumed when this pipeline runs.
     #[cfg(feature = "iterative-request-router")]
-    pub(crate) fn bound_upstream_clusters(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        for_each_pipeline_filter(&self.filters, &mut |pf| {
-            if let AnyFilter::Http(f) = &pf.filter {
-                out.extend(f.bound_upstream_clusters());
-            }
-        });
-        out
+    pub(crate) fn guaranteed_bound_upstream_clusters(&self) -> Vec<String> {
+        checks::guaranteed_bound_consumer_clusters(&self.filters)
+            .into_iter()
+            .collect()
     }
 
     /// Cluster application-metadata declarations from every filter in this

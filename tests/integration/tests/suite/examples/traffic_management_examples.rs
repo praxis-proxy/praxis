@@ -149,12 +149,13 @@ fn cluster_application_metadata_example_proxies_request() {
 
 #[test]
 fn bound_upstream_condition_example_gates_on_bound_cluster() {
-    let backend_guard = start_backend_with_shutdown("ok");
+    let openai = start_backend_with_shutdown("openai");
+    let generic = start_backend_with_shutdown("generic");
     let proxy_port = free_port();
     let config = super::load_example_config(
         "traffic-management/bound-upstream-condition.yaml",
         proxy_port,
-        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+        HashMap::from([("127.0.0.1:3001", openai.port()), ("127.0.0.1:3002", generic.port())]),
     );
     let proxy = start_full_proxy(&config);
 
@@ -165,6 +166,7 @@ fn bound_upstream_condition_example_gates_on_bound_cluster() {
         "GET /openai/v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     );
     assert_eq!(parse_status(&matched), 200, "bound route should proxy successfully");
+    assert_eq!(praxis_test_utils::parse_body(&matched), "openai");
     assert_eq!(
         parse_header(&matched, "X-Bound-Provider").as_deref(),
         Some("openai"),
@@ -178,6 +180,7 @@ fn bound_upstream_condition_example_gates_on_bound_cluster() {
         "GET /anything HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     );
     assert_eq!(parse_status(&unmatched), 200, "generic route should proxy successfully");
+    assert_eq!(praxis_test_utils::parse_body(&unmatched), "generic");
     assert_eq!(
         parse_header(&unmatched, "X-Bound-Provider"),
         None,

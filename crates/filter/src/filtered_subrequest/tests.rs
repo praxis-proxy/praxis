@@ -1082,20 +1082,77 @@ async fn staged_upstream_clears_discarded_selection_metadata() {
     );
 }
 
-#[test]
-fn error_into_parts_scrubs_selected_application() {
+fn nested_upstream_extensions(
+    with_parent_catalog: bool,
+) -> (
+    crate::RequestExtensions,
+    Option<std::sync::Arc<crate::pipeline::catalog::ClusterApplicationCatalog>>,
+) {
     use std::sync::Arc;
 
+    let registry = crate::FilterRegistry::with_builtins();
+    let child = crate::FilterPipeline::build(&mut [], &registry).unwrap();
+    let parent_catalog =
+        with_parent_catalog.then(|| Arc::new(crate::pipeline::catalog::ClusterApplicationCatalog::default()));
     let mut extensions = crate::RequestExtensions::default();
+    if let Some(catalog) = &parent_catalog {
+        extensions.insert(Arc::clone(catalog));
+    }
+    extensions.insert(crate::extensions::BoundUpstream::new(
+        Arc::from("parent"),
+        Some(Arc::from("parent_protocol")),
+        Some(Arc::from("parent_provider")),
+    ));
+    extensions.insert(crate::extensions::BoundUpstreamFrozen);
+
+    super::enter_nested_upstream_scope(&mut extensions, &child);
+    extensions.insert(crate::extensions::BoundUpstream::new(
+        Arc::from("child"),
+        Some(Arc::from("child_protocol")),
+        Some(Arc::from("child_provider")),
+    ));
+    extensions.remove::<crate::extensions::BoundUpstreamFrozen>();
     extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("leak"))).unwrap());
-    let error = super::FilteredSubrequestError::new("boom".to_owned().into(), extensions);
-    let (_error, extensions) = error.into_parts();
+
+    (extensions, parent_catalog)
+}
+
+fn assert_parent_upstream_scope(
+    extensions: &crate::RequestExtensions,
+    parent_catalog: Option<&std::sync::Arc<crate::pipeline::catalog::ClusterApplicationCatalog>>,
+) {
+    let restored_catalog = extensions.get::<std::sync::Arc<crate::pipeline::catalog::ClusterApplicationCatalog>>();
+    match parent_catalog {
+        Some(expected) => assert!(
+            restored_catalog.is_some_and(|actual| std::sync::Arc::ptr_eq(actual, expected)),
+            "the exact parent catalog must be restored"
+        ),
+        None => assert!(
+            restored_catalog.is_none(),
+            "a child catalog must not escape when the parent had no catalog"
+        ),
+    }
+    let binding = extensions
+        .get::<crate::extensions::BoundUpstream>()
+        .expect("the parent binding must be restored");
+    assert_eq!(binding.cluster(), "parent");
+    assert_eq!(binding.application_protocol(), Some("parent_protocol"));
+    assert_eq!(binding.application_provider(), Some("parent_provider"));
+    assert!(extensions.get::<crate::extensions::BoundUpstreamFrozen>().is_some());
     assert!(
         extensions
             .get::<crate::extensions::SelectedClusterApplication>()
             .is_none(),
-        "into_parts must scrub SelectedClusterApplication before returning extensions to the parent"
+        "child selected metadata must be scrubbed"
     );
+}
+
+#[test]
+fn error_into_parts_restores_parent_upstream_scope_without_catalog() {
+    let (extensions, parent_catalog) = nested_upstream_extensions(false);
+    let error = super::FilteredSubrequestError::new("boom".to_owned().into(), extensions);
+    let (_error, extensions) = error.into_parts();
+    assert_parent_upstream_scope(&extensions, parent_catalog.as_ref());
 }
 
 #[test]
@@ -1140,7 +1197,7 @@ fn nested_upstream_scope_restores_parent_catalog_binding_and_freeze() {
 }
 
 #[test]
-fn into_parent_extensions_scrubs_selected_application() {
+fn into_parent_extensions_restores_parent_upstream_scope() {
     use std::sync::Arc;
 
     let registry = crate::FilterRegistry::with_builtins();
@@ -1154,8 +1211,7 @@ fn into_parent_extensions_scrubs_selected_application() {
         headers: HeaderMap::new(),
         status: http::StatusCode::OK,
     };
-    let mut extensions = crate::RequestExtensions::default();
-    extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("leak"))).unwrap());
+    let (extensions, parent_catalog) = nested_upstream_extensions(true);
 
     let continuation = super::continuation::FilteredSubrequestContinuation {
         pipeline,
@@ -1179,16 +1235,11 @@ fn into_parent_extensions_scrubs_selected_application() {
     };
 
     let extensions = continuation.into_parent_extensions();
-    assert!(
-        extensions
-            .get::<crate::extensions::SelectedClusterApplication>()
-            .is_none(),
-        "into_parent_extensions must scrub SelectedClusterApplication before returning extensions to the parent"
-    );
+    assert_parent_upstream_scope(&extensions, parent_catalog.as_ref());
 }
 
 #[test]
-fn into_completion_scrubs_selected_application() {
+fn into_completion_restores_parent_upstream_scope() {
     use std::sync::Arc;
 
     let registry = crate::FilterRegistry::with_builtins();
@@ -1202,8 +1253,7 @@ fn into_completion_scrubs_selected_application() {
         headers: HeaderMap::new(),
         status: http::StatusCode::OK,
     };
-    let mut extensions = crate::RequestExtensions::default();
-    extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("leak"))).unwrap());
+    let (extensions, parent_catalog) = nested_upstream_extensions(true);
 
     let continuation = super::continuation::FilteredSubrequestContinuation {
         pipeline,
@@ -1227,13 +1277,7 @@ fn into_completion_scrubs_selected_application() {
     };
 
     let completion = continuation.into_completion();
-    assert!(
-        completion
-            .extensions
-            .get::<crate::extensions::SelectedClusterApplication>()
-            .is_none(),
-        "into_completion must scrub SelectedClusterApplication before returning extensions to the parent"
-    );
+    assert_parent_upstream_scope(&completion.extensions, parent_catalog.as_ref());
 }
 
 #[tokio::test]

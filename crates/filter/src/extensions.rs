@@ -159,8 +159,9 @@ impl SelectedClusterApplication {
 
 /// Logical upstream cluster bound once for the whole downstream request.
 ///
-/// Published by the trusted built-in `router` after it matches a route and
-/// selects that route's cluster, then read-only thereafter. Unlike
+/// Published by the trusted built-in `router` after it matches a route in a
+/// pipeline that has a bound observer or consumer, then read-only thereafter.
+/// Ordinary router pipelines do not create this extension. Unlike
 /// [`SelectedClusterApplication`] — which is exchange-local and cleared
 /// between IRR rounds — `BoundUpstream` is stable for the entire downstream
 /// request and survives every IRR iteration, so request, bound-body,
@@ -178,7 +179,9 @@ impl SelectedClusterApplication {
 ///
 /// The executor freezes the first successfully published binding before branch
 /// evaluation. Republishing the same cluster is idempotent; attempting to bind
-/// a different cluster after that point fails closed.
+/// a different cluster after that point fails closed. Validation rejects
+/// branch publishers, IRR-step publishers, and `ReEnter` paths that could run
+/// a binding router again.
 ///
 /// [`HttpFilterContext::publish_bound_upstream`]: crate::HttpFilterContext::publish_bound_upstream
 /// [`HttpFilterContext::bound_cluster`]: crate::HttpFilterContext::bound_cluster

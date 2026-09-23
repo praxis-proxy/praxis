@@ -941,6 +941,10 @@ struct ParentExtension(&'static str);
 
 struct StepErrorFilter;
 
+struct ReplaceChildBindingFilter;
+
+struct BoundBodyStepFilter;
+
 struct RemoveIterationStateFilter;
 
 #[async_trait::async_trait]
@@ -954,6 +958,48 @@ impl crate::HttpFilter for StepErrorFilter {
         _ctx: &mut crate::HttpFilterContext<'_>,
     ) -> Result<crate::FilterAction, crate::FilterError> {
         Err("nested step failure".to_owned().into())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for ReplaceChildBindingFilter {
+    fn name(&self) -> &'static str {
+        "test_replace_child_binding"
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        ctx.extensions.insert(crate::extensions::BoundUpstream::new(
+            std::sync::Arc::from("child-only"),
+            Some(std::sync::Arc::from("child_proto")),
+            Some(std::sync::Arc::from("child_provider")),
+        ));
+        ctx.extensions.remove::<crate::extensions::BoundUpstreamFrozen>();
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for BoundBodyStepFilter {
+    fn name(&self) -> &'static str {
+        "test_bound_body_step"
+    }
+
+    fn bound_upstream_request_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> crate::BodyMode {
+        crate::BodyMode::StreamBuffer { max_bytes: Some(1024) }
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
     }
 }
 
@@ -2626,6 +2672,18 @@ fn test_registry() -> crate::FilterRegistry {
         )
         .unwrap();
     registry
+        .register(
+            "test_replace_child_binding",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(ReplaceChildBindingFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_bound_body_step",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(BoundBodyStepFilter)))),
+        )
+        .unwrap();
+    registry
 }
 
 /// Filter that stalls in `on_request` longer than any test step timeout.
@@ -2811,6 +2869,7 @@ initial_step: s
 steps:
   - name: s
     filters:
+      - filter: test_replace_child_binding
 {}
     on_result:
       - default: true
@@ -2818,7 +2877,7 @@ steps:
 ",
         routed_step_yaml(addr)
     );
-    let filter = irr_from_yaml(&yaml);
+    let filter = irr_from_yaml_with_test_registry(&yaml).unwrap();
     let client = make_client();
     let req = crate::test_utils::make_request(http::Method::POST, "/");
     let mut ctx = make_iteration_context(&req, &client, b"payload");
@@ -2881,12 +2940,19 @@ async fn step_error_restores_parent_catalog_and_preserves_binding() {
             crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StepErrorFilter)))),
         )
         .unwrap();
+    registry
+        .register(
+            "test_replace_child_binding",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(ReplaceChildBindingFilter)))),
+        )
+        .unwrap();
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         "
 initial_step: failing
 steps:
   - name: failing
     filters:
+      - filter: test_replace_child_binding
       - filter: test_step_error
     on_result:
       - default: true
@@ -2937,6 +3003,7 @@ initial_step: s
 steps:
   - name: s
     filters:
+      - filter: test_replace_child_binding
       - filter: test_streaming_selector
 {}
     on_result:
@@ -3574,6 +3641,120 @@ steps:
 }
 
 #[test]
+fn outer_pipeline_requires_binding_for_step_bound_load_balancer() {
+    let registry = crate::FilterRegistry::with_builtins();
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+initial_step: dispatch
+steps:
+  - name: dispatch
+    filters:
+      - filter: load_balancer
+        cluster_source: bound_upstream
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:9"]
+    on_result:
+      - default: true
+        done: true
+"#,
+    )
+    .unwrap();
+    let mut entries = vec![crate::FilterEntry {
+        branch_chains: None,
+        conditions: Vec::new(),
+        filter_type: "iterative_request_router".to_owned(),
+        config,
+        name: None,
+        response_conditions: Vec::new(),
+        failure_mode: praxis_core::config::FailureMode::default(),
+    }];
+    let pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+
+    let errors = pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| { error.contains("iterative_request_router step") && error.contains("bound_upstream") }),
+        "a step bound LB cannot invent a parent binding: {errors:?}"
+    );
+}
+
+#[test]
+fn step_bound_body_hook_is_rejected() {
+    let yaml = "
+initial_step: dispatch
+steps:
+  - name: dispatch
+    filters:
+      - filter: test_bound_body_step
+    on_result:
+      - default: true
+        done: true
+";
+
+    let Err(error) = irr_from_yaml_with_test_registry(yaml) else {
+        panic!("bound-body hooks are request-level and must not be accepted in a step");
+    };
+    assert!(
+        error.to_string().contains("inside an iterative_request_router step"),
+        "the diagnostic must identify the unsupported lifecycle: {error}"
+    );
+}
+
+#[test]
+fn step_cluster_metadata_conflicts_fold_to_parent_validation() {
+    let registry = crate::FilterRegistry::with_builtins();
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+initial_step: first
+steps:
+  - name: first
+    filters:
+      - filter: router
+        routes: [{path_prefix: "/", cluster: shared}]
+      - filter: load_balancer
+        clusters:
+          - name: shared
+            http: {application_provider: openai}
+            endpoints: ["127.0.0.1:9"]
+    on_result: [{default: true, next: second}]
+  - name: second
+    filters:
+      - filter: router
+        routes: [{path_prefix: "/", cluster: shared}]
+      - filter: load_balancer
+        clusters:
+          - name: shared
+            http: {application_provider: azure}
+            endpoints: ["127.0.0.1:10"]
+    on_result: [{default: true, done: true}]
+"#,
+    )
+    .unwrap();
+    let mut entries = vec![crate::FilterEntry {
+        branch_chains: None,
+        conditions: Vec::new(),
+        filter_type: "iterative_request_router".to_owned(),
+        config,
+        name: None,
+        response_conditions: Vec::new(),
+        failure_mode: praxis_core::config::FailureMode::default(),
+    }];
+    let pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+
+    let errors = pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
+
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.contains("conflicting application metadata")),
+        "step declarations must participate in the parent catalog conflict check: {errors:?}"
+    );
+}
+
+#[test]
 fn step_router_is_rejected_when_binding_is_inherited() {
     let irr: serde_yaml::Value = serde_yaml::from_str(
         r#"
@@ -3586,6 +3767,7 @@ steps:
           - path_prefix: "/"
             cluster: backend
       - filter: load_balancer
+        cluster_source: bound_upstream
         clusters:
           - name: backend
             endpoints: ["127.0.0.1:9"]
@@ -3595,36 +3777,81 @@ steps:
 "#,
     )
     .unwrap();
-    let router: serde_yaml::Value =
-        serde_yaml::from_str("routes:\n  - path_prefix: /\n    cluster: backend\n").unwrap();
-    let registry = crate::FilterRegistry::with_builtins();
-    let mut entries = vec![
-        crate::FilterEntry {
-            branch_chains: None,
-            conditions: Vec::new(),
-            filter_type: "router".to_owned(),
-            config: router,
-            name: None,
-            response_conditions: Vec::new(),
-            failure_mode: praxis_core::config::FailureMode::default(),
-        },
-        crate::FilterEntry {
-            branch_chains: None,
-            conditions: Vec::new(),
-            filter_type: "iterative_request_router".to_owned(),
-            config: irr,
-            name: None,
-            response_conditions: Vec::new(),
-            failure_mode: praxis_core::config::FailureMode::default(),
-        },
-    ];
-    let pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
+    let Err(error) = super::IterativeRequestRouterFilter::from_config(&irr) else {
+        panic!("a binding-aware step router must be rejected");
+    };
     assert!(
-        errors
-            .iter()
-            .any(|error| error.contains("nested pipeline") && error.contains("already frozen")),
-        "a step cannot replace its parent's frozen logical binding: {errors:?}"
+        error.to_string().contains("binding is already possible"),
+        "a step cannot replace its parent's frozen logical binding: {error}"
+    );
+}
+
+#[test]
+fn bound_cluster_coverage_comes_only_from_the_initial_step() {
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+initial_step: first
+steps:
+  - name: first
+    filters:
+      - filter: load_balancer
+        cluster_source: bound_upstream
+        clusters:
+          - name: initial
+            endpoints: ["127.0.0.1:9"]
+    on_result:
+      - default: true
+        next: later
+  - name: later
+    filters:
+      - filter: load_balancer
+        cluster_source: bound_upstream
+        clusters:
+          - name: later
+            endpoints: ["127.0.0.1:10"]
+    on_result:
+      - default: true
+        done: true
+"#,
+    )
+    .unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config(&config).unwrap();
+
+    assert_eq!(filter.bound_upstream_clusters(), vec!["initial".to_owned()]);
+    assert!(filter.requires_bound_upstream_on_entry());
+}
+
+#[test]
+fn later_step_bound_consumer_requires_binding_but_gives_no_initial_coverage() {
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+initial_step: first
+steps:
+  - name: first
+    filters:
+      - filter: request_id
+    on_result:
+      - default: true
+        next: later
+  - name: later
+    filters:
+      - filter: load_balancer
+        cluster_source: bound_upstream
+        clusters:
+          - name: later
+            endpoints: ["127.0.0.1:10"]
+    on_result:
+      - default: true
+        done: true
+"#,
+    )
+    .unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config(&config).unwrap();
+
+    assert!(filter.requires_bound_upstream_on_entry());
+    assert!(
+        filter.bound_upstream_clusters().is_empty(),
+        "a later step is not guaranteed to transport the initial exchange"
     );
 }
 

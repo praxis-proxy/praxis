@@ -356,9 +356,9 @@ impl FilterPipeline {
     ///
     /// Called from [`execute_http_request`] immediately after a filter's
     /// `on_request` sets its executed index and before its branch chains
-    /// evaluate. The barrier drains the bound-upstream body participants
-    /// exactly once per downstream request, and only once `binding_filter`
-    /// has actually bound a logical upstream. Pipelines with no bound-upstream
+    /// evaluate. The barrier drains the bound-upstream body participants at
+    /// most once per downstream request, and only once `binding_filter` has
+    /// actually bound a logical upstream. Pipelines with no bound-upstream
     /// participants still freeze the binding, but skip body execution.
     ///
     /// # Errors

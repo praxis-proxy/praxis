@@ -615,9 +615,10 @@ impl HttpFilterContext<'_> {
 
     /// Logical cluster bound for the whole downstream request, if any.
     ///
-    /// Published by the router when it matches a route and stable across every
-    /// IRR iteration (unlike the exchange-local selected-upstream metadata).
-    /// `None` before any router has bound a cluster.
+    /// Published by the router when it matches a route in a binding-enabled
+    /// pipeline and stable across every IRR iteration (unlike the
+    /// exchange-local selected-upstream metadata). `None` in ordinary router
+    /// pipelines and before a binding router has matched.
     pub fn bound_cluster(&self) -> Option<&str> {
         self.extensions.get::<BoundUpstream>().map(BoundUpstream::cluster)
     }

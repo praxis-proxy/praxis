@@ -128,7 +128,7 @@ pub(super) fn bindable_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
 )]
 mod tests {
     use super::*;
-    use crate::pipeline::test_filters::{lb_filter, noop_filter, selector_filter};
+    use crate::pipeline::test_filters::{binding_router, lb_filter, noop_filter, selector_filter};
 
     #[test]
     fn extracts_selected_clusters() {
@@ -320,5 +320,29 @@ mod tests {
             !reachable_lb_clusters(&[outer]).contains("deep"),
             "a conditional nested branch stops the reachability fold"
         );
+    }
+
+    #[test]
+    fn bindable_clusters_collects_only_binding_publishers() {
+        let filters = vec![
+            selector_filter("ordinary_router", &["ordinary"]),
+            binding_router(&["bound-a", "bound-b"]),
+            lb_filter(&["endpoint-only"]),
+        ];
+
+        let clusters = bindable_clusters(&filters);
+
+        assert_eq!(clusters.len(), 2);
+        assert!(clusters.contains("bound-a"));
+        assert!(clusters.contains("bound-b"));
+        assert!(!clusters.contains("ordinary"));
+        assert!(!clusters.contains("endpoint-only"));
+    }
+
+    #[test]
+    fn bindable_clusters_recurses_into_branches() {
+        let filters = vec![host_with(None, vec![binding_router(&["nested"])])];
+
+        assert_eq!(bindable_clusters(&filters), HashSet::from(["nested".to_owned()]));
     }
 }

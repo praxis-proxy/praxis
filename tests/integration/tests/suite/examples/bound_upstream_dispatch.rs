@@ -12,7 +12,9 @@
 
 use std::collections::HashMap;
 
-use praxis_test_utils::{free_port, http_send, parse_body, parse_header, parse_status, start_backend_with_shutdown};
+use praxis_test_utils::{
+    free_port, http_send, parse_body, parse_header, parse_status, start_backend_with_shutdown, start_echo_backend,
+};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -62,5 +64,59 @@ fn dual_path_dispatches_both_modes_from_one_binding() {
         parse_header(&raw, "X-Gateway-Processed").as_deref(),
         Some("true"),
         "non-provider path should run gateway-owned processing"
+    );
+
+    let query = http_send(
+        proxy.addr(),
+        "GET /openai/v1/responses?stream=false HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_body(&query),
+        "openai",
+        "the query string must not change prefix routing"
+    );
+
+    let boundary = http_send(
+        proxy.addr(),
+        "GET /openai HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_body(&boundary),
+        "openai",
+        "the configured trailing slash is normalized at the /openai segment boundary"
+    );
+}
+
+#[test]
+fn direct_path_preserves_body_and_applies_pipeline_wide_limit() {
+    let openai = start_echo_backend();
+    let chat = start_backend_with_shutdown("chat");
+    let proxy_port = free_port();
+    let config = super::load_example_config(
+        "traffic-management/bound-upstream-dispatch.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", openai.port()), ("127.0.0.1:3002", chat.port())]),
+    );
+    let proxy = praxis_test_utils::start_full_proxy(&config);
+
+    let body = "provider-body";
+    let request = format!(
+        "POST /openai/v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let response = http_send(proxy.addr(), &request);
+    assert_eq!(parse_status(&response), 200);
+    assert_eq!(parse_body(&response), body, "buffering must preserve direct-path bytes");
+
+    let oversized = "x".repeat(65_537);
+    let request = format!(
+        "POST /openai/v1/responses HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{oversized}",
+        oversized.len()
+    );
+    let response = http_send(proxy.addr(), &request);
+    assert_eq!(
+        parse_status(&response),
+        413,
+        "the IRR StreamBuffer ceiling applies before the direct branch"
     );
 }

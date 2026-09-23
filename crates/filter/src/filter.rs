@@ -150,6 +150,14 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Enable logical-upstream publication for this filter.
+    ///
+    /// Pipeline construction calls this only when the resolved pipeline
+    /// contains a bound-upstream observer or consumer. The built-in `router`
+    /// uses the hook to keep ordinary routing pipelines on their pre-binding
+    /// fast path; other filters leave the default no-op implementation.
+    fn enable_upstream_binding(&mut self) {}
+
     /// Whether this filter selects its cluster from the frozen logical
     /// binding (`BoundUpstream`) rather than a preceding `router`'s
     /// exchange-local [`HttpFilterContext::cluster`].
@@ -302,10 +310,11 @@ pub trait HttpFilter: Send + Sync {
     /// Declares what access this filter needs to the request body during
     /// the bound-upstream phase.
     ///
-    /// The bound-upstream request-body phase runs exactly once per
-    /// downstream request, at the barrier immediately after the `router`
-    /// binds a logical upstream (`BoundUpstream`) and before any
-    /// gateway-owned request filters or IRR run. It gives a filter a
+    /// The bound-upstream request-body phase runs at most once per downstream
+    /// request, at the barrier immediately after the `router` binds a logical
+    /// upstream (`BoundUpstream`) and before any gateway-owned request filters
+    /// or IRR run. It is skipped when routing stops before a binding is
+    /// published. It gives a filter a
     /// chance to inspect or rewrite the request body against the frozen
     /// logical binding — before an endpoint is selected. Return
     /// [`BodyAccess::None`] (the default) to opt out,
@@ -492,9 +501,10 @@ pub trait HttpFilter: Send + Sync {
         Ok(SelectedUpstreamBodyOutcome::Continue)
     }
 
-    /// Called once with the fully buffered request body at the bound-upstream
-    /// barrier, immediately after the `router` binds a logical upstream and
-    /// before any gateway-owned request filters or IRR run.
+    /// Called at most once with the fully buffered request body at the
+    /// bound-upstream barrier, immediately after the `router` binds a logical
+    /// upstream and before any gateway-owned request filters or IRR run. It is
+    /// not called when routing stops before a binding is published.
     ///
     /// Runs only for filters that declare
     /// [`bound_upstream_request_body_access`] other than

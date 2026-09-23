@@ -284,6 +284,22 @@ async fn on_request_publishes_name_only_binding_without_catalog() {
 }
 
 #[tokio::test]
+async fn router_without_pipeline_binding_opt_in_skips_logical_publication() {
+    let router = RouterFilter::new(vec![prefix_route("/", "default")]).unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = router.on_request(&mut ctx).await.unwrap();
+
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(ctx.cluster.as_deref(), Some("default"));
+    assert!(
+        ctx.bound_cluster().is_none(),
+        "an ordinary router pipeline must not pay for or expose logical binding"
+    );
+}
+
+#[tokio::test]
 async fn on_request_resolves_binding_metadata_from_catalog() {
     use std::sync::Arc;
 
@@ -317,6 +333,23 @@ async fn on_request_resolves_binding_metadata_from_catalog() {
         Some("openai"),
         "the binding resolves the cluster's provider from the catalog"
     );
+}
+
+#[tokio::test]
+async fn on_request_catalog_miss_publishes_name_only_binding() {
+    use std::sync::Arc;
+
+    let router = make_router(vec![prefix_route("/", "not-declared")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions
+        .insert(Arc::new(crate::pipeline::catalog::ClusterApplicationCatalog::default()));
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(ctx.bound_cluster(), Some("not-declared"));
+    assert_eq!(ctx.bound_application_protocol(), None);
+    assert_eq!(ctx.bound_application_provider(), None);
 }
 
 #[tokio::test]
@@ -366,8 +399,36 @@ async fn frozen_same_cluster_republication_is_idempotent() {
 
 #[tokio::test]
 async fn frozen_rebind_rejects_without_mutating_route_context() {
-    let first = make_router(vec![prefix_route("/", "first")]);
-    let second = make_router(vec![prefix_route("/", "second")]);
+    let mut first = RouterFilter::from_config(
+        &serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+routes:
+  - path: "/"
+    cluster: first
+    retry_policy:
+      per_try_timeout_ms: 101
+      request_timeout_ms: 1001
+"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut second = RouterFilter::from_config(
+        &serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+routes:
+  - path_prefix: "/"
+    cluster: second
+    retry_policy:
+      per_try_timeout_ms: 202
+      request_timeout_ms: 2002
+"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    first.enable_upstream_binding();
+    second.enable_upstream_binding();
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -375,6 +436,8 @@ async fn frozen_rebind_rejects_without_mutating_route_context() {
         first.on_request(&mut ctx).await.unwrap(),
         FilterAction::Continue
     ));
+    assert_eq!(ctx.metrics_route.as_deref(), Some("/"));
+    assert_eq!(ctx.route_retry_policy.as_ref().unwrap().per_try_timeout_ms, Some(101));
     ctx.freeze_bound_upstream();
     let prior_route = ctx.metrics_route.clone();
     let prior_cluster = ctx.cluster.clone();
@@ -461,6 +524,8 @@ async fn on_request_rejects_on_no_match() {
         "unmatched route should reject with 404"
     );
     assert!(ctx.cluster.is_none(), "cluster should remain unset on no match");
+    assert!(ctx.bound_cluster().is_none(), "no match must not publish a binding");
+    assert!(ctx.metrics_route.is_none(), "no match must not publish a route label");
 }
 
 #[tokio::test]
@@ -2096,7 +2161,9 @@ fn json_alias_max_bytes_at_upper_bound_passes_bounds_check() {
 // -----------------------------------------------------------------------------
 
 fn make_router(routes: Vec<Route>) -> RouterFilter {
-    RouterFilter::new(routes).expect("test routes should be valid")
+    let mut router = RouterFilter::new(routes).expect("test routes should be valid");
+    router.enable_upstream_binding();
+    router
 }
 
 #[cfg(feature = "router-json-aliases")]

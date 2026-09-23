@@ -84,6 +84,7 @@ filter_chains:
       #    needed here.
       - filter: iterative_request_router
         initial_step: inference
+        max_state_bytes: 65536
         steps:
           - name: inference
             filters:

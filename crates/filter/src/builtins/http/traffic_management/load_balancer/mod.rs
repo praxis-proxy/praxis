@@ -98,8 +98,10 @@ enum ClusterSource {
     Router,
 
     /// Use the logical cluster frozen in the request's `BoundUpstream`,
-    /// letting a direct branch or IRR step select an endpoint from the
-    /// binding without a second router.
+    /// letting a direct branch or IRR step select an endpoint from the binding
+    /// without a second router. The bound name must exist in this load
+    /// balancer; a conflicting exchange-local cluster fails closed. Selection
+    /// is skipped entirely when an upstream is already present.
     BoundUpstream,
 }
 
@@ -115,7 +117,10 @@ struct LoadBalancerConfig {
     /// the cluster a preceding `router` selected into the request context;
     /// `bound_upstream` resolves the frozen logical binding a binding router
     /// published, letting a direct branch or an `iterative_request_router` step
-    /// select an endpoint with no second router. Omit for `router`.
+    /// select an endpoint with no second router. The bound cluster must be
+    /// declared here and must not conflict with an existing exchange-local
+    /// cluster. If `ctx.upstream` is already set, selection is skipped and
+    /// `ctx.cluster` is left unchanged. Omit for `router`.
     #[serde(default)]
     cluster_source: ClusterSource,
 }
@@ -186,8 +191,11 @@ impl LoadBalancerFilter {
     /// For [`ClusterSource::BoundUpstream`] the logical binding also seeds
     /// [`HttpFilterContext::cluster`] so the retry, health, and
     /// `on_response` release paths key off the same cluster a preceding
-    /// `router` would have set. The frozen `BoundUpstream` is never
-    /// mutated.
+    /// `router` would have set. A conflicting exchange-local cluster is
+    /// rejected rather than silently applying its retry policy to the bound
+    /// cluster. The frozen `BoundUpstream` is never mutated. When
+    /// [`HttpFilterContext::upstream`] is already set, `on_request` skips this
+    /// resolver and preserves all cluster state.
     fn resolve_cluster<'a>(
         &'a self,
         ctx: &mut HttpFilterContext<'_>,
@@ -218,7 +226,9 @@ impl LoadBalancerFilter {
     }
 
     /// Resolve the frozen logical binding, seeding [`HttpFilterContext::cluster`]
-    /// so retry, health, and `on_response` release paths key off it.
+    /// so retry, health, and `on_response` release paths key off it. A
+    /// different existing cluster is an invalid mixed-selection state and
+    /// fails closed. This method is not called when an upstream is already set.
     fn resolve_from_bound_upstream<'a>(
         &'a self,
         ctx: &mut HttpFilterContext<'_>,
@@ -234,15 +244,14 @@ impl LoadBalancerFilter {
             format!("load_balancer filter: bound cluster '{bound}' not declared in this load_balancer").into()
         })?;
         let cluster = Arc::clone(key);
-        if ctx
-            .cluster
-            .as_deref()
-            .is_some_and(|selected| selected != cluster.as_ref())
+        if let Some(selected) = ctx.cluster.as_deref()
+            && selected != cluster.as_ref()
         {
-            // Route-level retry overrides belong to the router-selected
-            // exchange cluster. A bound-source LB that replaces a stale or
-            // custom selection must not apply that policy to another cluster.
-            ctx.route_retry_policy = None;
+            return Err(format!(
+                "load_balancer filter: exchange cluster '{selected}' conflicts with bound cluster '{}'",
+                cluster.as_ref(),
+            )
+            .into());
         }
         ctx.cluster = Some(Arc::clone(&cluster));
         Ok((cluster, entry))
