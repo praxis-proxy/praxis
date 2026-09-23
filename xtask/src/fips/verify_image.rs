@@ -69,7 +69,7 @@ fn verify(image: &str, pinned_in: Option<&Path>) -> Result<(), String> {
     }
     check_key()?;
     check_gnupg()?;
-    check_signature_store()?;
+    check_signature_store(&registries_d())?;
     let work = tempfile::tempdir().map_err(|err| format!("cannot create a temporary directory: {err}"))?;
     pull_under_policy(work.path(), image)?;
     let labels = labels(image)?;
@@ -166,18 +166,15 @@ fn registries_d() -> PathBuf {
 /// podman must know where Red Hat's detached signatures live, or a signed
 /// image looks unsigned. containers-common ships the entry; print it when it
 /// is missing so the host gets fixed rather than the image blamed.
-fn check_signature_store() -> Result<(), String> {
-    let dir = registries_d();
-    let entries = std::fs::read_dir(&dir).map_err(|err| format!("cannot read {}: {err}", dir.display()))?;
-    let configured = entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "yaml"))
-        .filter_map(|path| std::fs::read_to_string(path).ok())
-        .any(|text| names_signature_store(&text));
-    if !configured {
+fn check_signature_store(dir: &Path) -> Result<(), String> {
+    if !names_signature_store_in(dir)? {
+        let state = if dir.is_dir() {
+            format!("names no signature store for {REGISTRY}")
+        } else {
+            "does not exist".to_owned()
+        };
         return Err(format!(
-            "{} names no signature store for {REGISTRY}; install this as {}/registry.access.redhat.com.yaml:\n{}",
+            "{} {state}; install this as {}/registry.access.redhat.com.yaml:\n{}",
             dir.display(),
             dir.display(),
             assets::REDHAT_REGISTRIES_D
@@ -188,6 +185,24 @@ fn check_signature_store() -> Result<(), String> {
         dir.display()
     );
     Ok(())
+}
+
+/// Whether any `.yaml` file in a registries.d gives Red Hat's registry a
+/// signature store. A directory that does not exist configures nothing,
+/// which is how a host whose podman packaging ships no registries.d at all
+/// looks; any other failure to read it is an error.
+fn names_signature_store_in(dir: &Path) -> Result<bool, String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(format!("cannot read {}: {err}", dir.display())),
+    };
+    Ok(entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "yaml"))
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .any(|text| names_signature_store(&text)))
 }
 
 /// Whether a registries.d file gives Red Hat's registry a signature store.
@@ -301,6 +316,42 @@ mod tests {
         assert!(
             !names_signature_store("docker:\n  registry.redhat.io:\n    lookaside: x\n"),
             "another registry does not count"
+        );
+    }
+
+    #[test]
+    fn a_missing_registries_d_is_an_unconfigured_store_with_install_instructions() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("registries.d");
+        let err = check_signature_store(&missing).expect_err("nothing is configured");
+        assert!(
+            err.contains("does not exist"),
+            "the reason is the missing directory: {err}"
+        );
+        assert!(
+            err.contains(assets::REDHAT_REGISTRIES_D),
+            "the entry to install is printed: {err}"
+        );
+        assert!(!err.contains("cannot read"), "not reported as an I/O failure: {err}");
+
+        std::fs::create_dir(&missing).expect("create");
+        let err = check_signature_store(&missing).expect_err("an empty directory configures nothing");
+        assert!(err.contains("names no signature store"), "{err}");
+
+        std::fs::write(
+            missing.join("other.yaml"),
+            "docker:\n  registry.redhat.io:\n    lookaside: x\n",
+        )
+        .expect("write");
+        assert!(
+            check_signature_store(&missing).is_err(),
+            "another registry's entry does not count"
+        );
+
+        std::fs::write(missing.join("redhat.yaml"), assets::REDHAT_REGISTRIES_D).expect("write");
+        assert!(
+            check_signature_store(&missing).is_ok(),
+            "the bundled entry, under any file name, satisfies the check"
         );
     }
 
