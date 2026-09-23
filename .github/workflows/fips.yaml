@@ -1,0 +1,76 @@
+name: FIPS
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+#
+# The FIPS build on UBI 9, checked the way Red Hat checks it: first the
+# compliance report (a reason and a pointer for every finding), then Red Hat's
+# own scanner, openshift/check-payload at its Rust-support revision, against
+# the runtime image with warnings fatal. Runs on every pull request and push
+# to main so a change that breaks FIPS compliance never reaches a release.
+#
+# Everything runs through the Makefile targets developers use locally (see
+# docs/developing/fips.md), with podman: Red Hat's image signatures can only
+# be verified with podman, and the scanner reads podman's image store.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions: {}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # UBI 9 image: compliance report, then Red Hat's scanner
+  # ----------------------------------------------------------------------------
+
+  ubi-image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+        with:
+          # Only xtask (without its default features) is built on the host;
+          # keep that off the shared cache key and skip caching its target.
+          cache-suffix: fips
+          cache-target: "false"
+
+      - name: Set up Go (builds Red Hat's scanner)
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26"
+          # The scanner is fetched by make fips-scanner and vendors its modules.
+          cache: false
+
+      - name: Build Red Hat's scanner (check-payload) at the pinned revision
+        run: make fips-scanner
+
+      - name: Verify the Red Hat base images are signed by Red Hat
+        run: make fips-verify-image
+
+      - name: Build on UBI 9 with Red Hat's toolchain and print the compliance report
+        run: make fips-check
+
+      - name: Build the FIPS runtime image
+        run: make container-fips
+
+      - name: Run the image once (validates its config with the system OpenSSL)
+        run: make fips-smoke
+
+      - name: Scan the image with check-payload (warnings fatal)
+        run: make fips-scan

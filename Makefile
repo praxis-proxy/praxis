@@ -64,6 +64,7 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	build-fips release-fips check-fips lint-fips test-fips \
 	container-fips container-fips-run \
 	fips-check fips-check-ubi fips-deps fips-report fips-verify-image \
+	fips-scan fips-scanner fips-smoke \
 	run-echo run-debug \
 	tools clean-tools \
 	check-prereqs \
@@ -283,7 +284,13 @@ container-run: | require-container-engine
 #                          signature-verified base images)
 #   make fips-check        build on UBI 9 and print the compliance report
 #   make fips-report       the same report against the local FIPS build
-#   make fips-deps         dependency graph only (seconds, no build)
+#   make fips-deps         dependency graph only (seconds, no build; also
+#                          runs under `make lint`, so a PR cannot reintroduce
+#                          a denied crate into the FIPS build)
+#   make fips-smoke        run the FIPS image once (validates its config)
+#   make fips-scan         run Red Hat's scanner (check-payload) on the
+#                          FIPS image, warnings fatal: the actual gate
+#   make fips-scanner      build check-payload at the pinned revision
 #
 # The report and the image verification are `cargo xtask fips` commands
 # (xtask/src/fips/). XTASK_FIPS builds xtask without its default features,
@@ -307,8 +314,27 @@ FIPS_BUILD_ARGS         := --build-arg UBI9_DIGEST=$(FIPS_UBI9_DIGEST) \
 	--build-arg UBI9_MINIMAL_DIGEST=$(FIPS_UBI9_MINIMAL_DIGEST) \
 	--build-arg CARGO_FEATURES=$(FIPS_FEATURES)
 XTASK_FIPS              := cargo run -q -p xtask --no-default-features --
+# Red Hat's scanner, openshift/check-payload, at the revision that added Rust
+# support (the head of its PR #360, fetched by commit so a rewrite of the PR
+# cannot break the build). `make fips-scanner` builds it into target/fips;
+# point CHECK_PAYLOAD at another build to use it instead.
+CHECK_PAYLOAD_REPO      := https://github.com/openshift/check-payload
+CHECK_PAYLOAD_REV       := 1ce4e04ed214b98997797ce19a2442f794632e65
+CHECK_PAYLOAD_DIR       := $(FIPS_TARGET_DIR)/check-payload
+CHECK_PAYLOAD           ?= $(CHECK_PAYLOAD_DIR)/check-payload
+# The FIPS image as podman's storage names it: a bare name gets podman's
+# implicit localhost/ prefix, a registry-qualified IMAGE does not.
+_IMAGE_HEAD             := $(firstword $(subst /, ,$(IMAGE)))
+FIPS_IMAGE_REF          := $(if $(or $(findstring .,$(_IMAGE_HEAD)),$(findstring :,$(_IMAGE_HEAD)),$(filter localhost,$(_IMAGE_HEAD))),$(IMAGE),localhost/$(IMAGE)):$(VERSION)-fips
+# The scanner mounts the image from podman's store, which needs the user
+# namespace only for rootless podman.
+PODMAN_UNSHARE          := $(if $(filter 0,$(shell id -u)),,podman unshare)
+
 require-podman:
 	@command -v podman >/dev/null || { echo "podman is required: Red Hat image signatures can only be verified with podman"; exit 1; }
+
+require-go:
+	@command -v go >/dev/null || { echo "go is required to build check-payload"; exit 1; }
 
 build-fips:
 	cargo build $(FIPS_CARGO_ARGS)
@@ -346,6 +372,12 @@ container-fips: fips-verify-image
 container-fips-run: | require-podman
 	podman run --rm --network=host $(IMAGE):$(VERSION)-fips 2>&1
 
+# The binary starts on ubi-minimal, loads the system OpenSSL and accepts the
+# shipped config; a cheap proof that the image runs before the scan.
+fips-smoke: | require-podman
+	podman run --rm --entrypoint praxis $(IMAGE):$(VERSION)-fips \
+		--validate -c /etc/praxis/config.yaml
+
 fips-check: fips-check-ubi
 
 fips-check-ubi: fips-verify-image
@@ -362,6 +394,22 @@ fips-report:
 # the binary, so it cannot see the FIPS build's real graph.
 fips-deps:
 	$(XTASK_FIPS) fips report --deps-only --features $(FIPS_FEATURES)
+
+# --fail-on-warnings makes an inconclusive verdict (for example a binary
+# without a crate manifest) fail, as Red Hat's gated scans do. Needs a Linux
+# podman (rootless or root), not a podman machine.
+fips-scan: | require-podman
+	@[ -x "$(CHECK_PAYLOAD)" ] || { echo "check-payload not found at $(CHECK_PAYLOAD): run 'make fips-scanner' (needs go) or set CHECK_PAYLOAD"; exit 1; }
+	$(PODMAN_UNSHARE) $(CHECK_PAYLOAD) scan image \
+		--spec containers-storage:$(FIPS_IMAGE_REF) --fail-on-warnings
+
+# Built as upstream builds it (CGO_ENABLED=0, vendored modules).
+fips-scanner: | require-go
+	@mkdir -p $(CHECK_PAYLOAD_DIR)
+	@[ -d $(CHECK_PAYLOAD_DIR)/.git ] || git -C $(CHECK_PAYLOAD_DIR) init --quiet
+	git -C $(CHECK_PAYLOAD_DIR) fetch --quiet --depth 1 $(CHECK_PAYLOAD_REPO) $(CHECK_PAYLOAD_REV)
+	git -C $(CHECK_PAYLOAD_DIR) checkout --quiet FETCH_HEAD
+	cd $(CHECK_PAYLOAD_DIR) && CGO_ENABLED=0 go build -o check-payload .
 
 # -------------------------------------------------------------------
 # Test
@@ -458,6 +506,7 @@ lint:
 	cargo xtask lint-example-tests
 	cargo xtask sync-example-readme
 	cargo xtask lint-filter-docs
+	$(MAKE) --no-print-directory fips-deps
 
 lint-extra: check-prereqs-extra
 	typos
@@ -613,6 +662,9 @@ help:
 	@echo "  container-fips-run   run the FIPS image in foreground (host network)"
 	@echo "  fips-check           build on UBI 9 and print the compliance report (fails while findings remain)"
 	@echo "  fips-report          compliance report against the local FIPS build (FIPS_BIN=target/fips/release/praxis)"
+	@echo "  fips-smoke           run the FIPS image once to validate its config"
+	@echo "  fips-scan            run Red Hat's scanner (check-payload) on the FIPS image, warnings fatal"
+	@echo "  fips-scanner         build check-payload at the pinned revision into target/fips (needs go)"
 	@echo "  fips-deps            dependency graph vs Red Hat's crypto denylist (seconds, no build)"
 	@echo "  fips-verify-image    verify the pinned UBI 9 base images are Red Hat's (digest + signature)"
 	@echo ""
