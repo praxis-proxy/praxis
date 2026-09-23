@@ -28,7 +28,7 @@ members = [
 [workspace.package]
 version = "0.6.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.92"
 authors = ["Shane Utt <shaneutt@linux.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/praxis-proxy/praxis"

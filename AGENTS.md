@@ -9,7 +9,7 @@ contributor responsible for the change.
 
 ## Requirements
 
-- Rust stable 1.96+
+- Rust stable 1.92+
 - Rust nightly (for `rustfmt`)
 - CMake 3.31+
 - Docker 29.3.0+ or Podman (for container builds)
