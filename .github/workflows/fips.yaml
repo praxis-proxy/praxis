@@ -13,6 +13,9 @@ name: FIPS
 # Everything runs through the Makefile targets developers use locally (see
 # docs/developing/fips.md), with podman: Red Hat's image signatures can only
 # be verified with podman, and the scanner reads podman's image store.
+# Ubuntu's podman packaging ships no registries.d entry for Red Hat's
+# registry, so the job first tells podman where the signatures live
+# (make fips-signature-store), as a developer on Debian or Ubuntu would.
 
 on:
   push:
@@ -59,6 +62,9 @@ jobs:
 
       - name: Build Red Hat's scanner (check-payload) at the pinned revision
         run: make fips-scanner
+
+      - name: Point podman at Red Hat's signature store (Ubuntu's podman has no entry for it)
+        run: make fips-signature-store
 
       - name: Verify the Red Hat base images are signed by Red Hat
         run: make fips-verify-image

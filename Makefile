@@ -63,7 +63,7 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	test-container test-container-run \
 	build-fips release-fips check-fips lint-fips test-fips \
 	container-fips container-fips-run \
-	fips-check fips-check-ubi fips-deps fips-report fips-verify-image \
+	fips-check fips-check-ubi fips-deps fips-report fips-signature-store fips-verify-image \
 	fips-scan fips-scanner fips-smoke \
 	run-echo run-debug \
 	tools clean-tools \
@@ -291,10 +291,14 @@ container-run: | require-container-engine
 #   make fips-scan         run Red Hat's scanner (check-payload) on the
 #                          FIPS image, warnings fatal: the actual gate
 #   make fips-scanner      build check-payload at the pinned revision
+#   make fips-signature-store
+#                          point podman at Red Hat's signature store; needed
+#                          once on Debian/Ubuntu hosts, a no-op elsewhere
 #
-# The report and the image verification are `cargo xtask fips` commands
-# (xtask/src/fips/). XTASK_FIPS builds xtask without its default features,
-# so these targets never compile the standard proxy build to run.
+# The report, the image verification and the signature-store setup are
+# `cargo xtask fips` commands (xtask/src/fips/). XTASK_FIPS builds xtask
+# without its default features, so these targets never compile the standard
+# proxy build to run.
 #
 # See docs/developing/fips.md and docs/developing/getting-started.md.
 
@@ -392,6 +396,15 @@ test-fips:
 		-p praxis-proxy -p praxis-proxy-protocol -p praxis-proxy-filter \
 		-p praxis-proxy-core -p praxis-proxy-tls \
 		--features $(FIPS_FEATURES_QUALIFIED) $(_NOCAPTURE)
+
+# podman finds Red Hat's detached image signatures through its registries.d
+# (containers-registries.d(5)). Fedora and RHEL ship the entry; Debian and
+# Ubuntu, GitHub's runners included, ship no registries.d at all, and then
+# every Red Hat image looks unsigned. This installs the bundled entry for the
+# current user when the registries.d podman reads names none, and does
+# nothing otherwise. CI runs it before fips-verify-image.
+fips-signature-store:
+	$(XTASK_FIPS) fips signature-store --install
 
 fips-verify-image: | require-podman
 	$(XTASK_FIPS) fips verify-image --pinned-in Containerfile.fips $(FIPS_UBI9_IMAGE)
@@ -699,6 +712,7 @@ help:
 	@echo "  fips-scanner         build check-payload at the pinned revision into target/fips (needs go)"
 	@echo "  fips-deps            dependency graph vs Red Hat's crypto denylist (seconds, no build)"
 	@echo "  fips-verify-image    verify the pinned UBI 9 base images are Red Hat's (digest + signature)"
+	@echo "  fips-signature-store point podman at Red Hat's signature store (once, on Debian/Ubuntu hosts)"
 	@echo ""
 	@echo "Binutils (target/praxis-binutils/):"
 	@echo "  tools                download all external CLI tools"

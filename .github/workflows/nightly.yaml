@@ -229,6 +229,9 @@ jobs:
           # The restored target/ would otherwise be swept into the build context.
           cache-target: "false"
 
+      - name: Point podman at Red Hat's signature store (Ubuntu's podman has no entry for it)
+        run: make fips-signature-store
+
       - name: Verify the Red Hat base images are signed by Red Hat
         run: make fips-verify-image
 

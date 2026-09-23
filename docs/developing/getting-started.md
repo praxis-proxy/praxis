@@ -131,7 +131,9 @@ Makefile targets wrap them. `make container-fips`, `make fips-check`,
 `make fips-smoke` and `make fips-scan` need a Linux podman (rootless or
 root): the UBI 9 base images are pinned by digest and their Red Hat
 signatures are verified before every build (`cargo xtask fips
-verify-image`), and the scanner reads podman's image store. The FIPS
+verify-image`), and the scanner reads podman's image store. On Debian
+and Ubuntu, whose podman packaging ships no `registries.d` entry for Red
+Hat's registry, run `make fips-signature-store` once first. The FIPS
 image is built with Red Hat's `rust-toolset` and links the system
 OpenSSL; nothing is installed into the runtime image beyond the binary
 and its config. The report's exit status is non-zero while findings

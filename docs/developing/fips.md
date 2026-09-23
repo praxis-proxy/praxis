@@ -17,6 +17,7 @@ build to run; the same invocation runs inside the report stage of
 |---|---|---|
 | `cargo xtask fips report [--deps-only] [--features LIST] [--offline] [--out FILE] [BINARY]` | `fips-deps`, `fips-report`, `fips-check` | The compliance report: environment, dependency graph, binary structure, source guards, with a reason and a pointer for every finding. Exit status 1 while findings remain. |
 | `cargo xtask fips verify-image REFERENCE` | `fips-verify-image` (run by `container-fips` and `fips-check` first) | Refuses any base image that is not digest-pinned, from `registry.access.redhat.com`, and signed by Red Hat's release key. |
+| `cargo xtask fips signature-store [--install]` | `fips-signature-store` | Whether podman's `registries.d` names Red Hat's signature store, without which every Red Hat image looks unsigned; `--install` adds the bundled entry for the current user on hosts whose podman packaging ships none (Debian, Ubuntu, GitHub's runners). CI runs it before `fips-verify-image`. |
 | `check-payload scan image ...` | `fips-scanner`, `fips-scan` | Red Hat's own scanner at a pinned revision, run against the FIPS image with warnings fatal: the actual gate. |
 
 ## What the report checks
@@ -44,7 +45,7 @@ From `xtask/assets/fips/`:
 | File | Purpose |
 |---|---|
 | `redhat-release-key-2.asc` | Red Hat, Inc. (release key 2), the GPG key Red Hat signs its container images with. See provenance below. |
-| `registry.access.redhat.com.yaml` | The `registries.d` entry that tells podman where Red Hat's signature store is. podman reads only its own `registries.d` (`~/.config/containers/registries.d` or `/etc/containers/registries.d`; containers-common installs the same entry), so `verify-image` checks the host has one and prints this file to install when it does not. |
+| `registry.access.redhat.com.yaml` | The `registries.d` entry that tells podman where Red Hat's signature store is. podman reads only its own `registries.d` (`~/.config/containers/registries.d` when it exists, else `/etc/containers/registries.d`), so `verify-image` checks the directory podman reads names the store, and `signature-store --install` (`make fips-signature-store`) writes this file into the user's directory when it does not. Fedora and RHEL ship the same entry in containers-common; Debian and Ubuntu ship no `registries.d` at all. |
 | `fips-provider.cnf` | An `OPENSSL_CONF` that activates the RHEL FIPS provider for one process, used by the report to probe FIPS behaviour on hosts that are not in FIPS mode. Test infrastructure only; the application never enables FIPS itself. |
 
 ### Provenance of the signing key

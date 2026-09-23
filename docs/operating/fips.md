@@ -111,6 +111,7 @@ fatal: PRAXIS_REQUIRE_FIPS is set but FIPS mode is not in effect: the OpenSSL pr
 On a developer machine (no FIPS host needed):
 
 ```console
+make fips-signature-store  # once on Debian/Ubuntu: their podman has no entry for Red Hat's signature store
 make fips-check    # build on UBI 9 with Red Hat's toolchain, print the compliance report
 make container-fips
 make fips-scanner  # build Red Hat's scanner (check-payload) at its pinned revision; needs Go

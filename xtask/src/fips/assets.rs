@@ -10,6 +10,9 @@ pub(crate) const REDHAT_RELEASE_KEY_2: &str = include_str!("../../assets/fips/re
 /// The fingerprint Red Hat publishes for that key.
 pub(crate) const REDHAT_RELEASE_KEY_2_FINGERPRINT: &str = "567E347AD0044ADE55BA8A5F199E2F91FD431D51";
 
+/// Red Hat's public registry, the only one the FIPS tasks take images from.
+pub(crate) const REDHAT_REGISTRY: &str = "registry.access.redhat.com";
+
 /// The `registries.d` entry that tells podman where Red Hat's detached
 /// ("simple signing") container signatures live, Red Hat's public signature
 /// store at <https://access.redhat.com/webassets/docker/content/sigstore>.

@@ -1,8 +1,11 @@
 # Where podman fetches Red Hat's detached (GPG "simple signing") container
 # signatures from. podman only reads this from its own registries.d
-# (~/.config/containers/registries.d or /etc/containers/registries.d, where
-# containers-common installs the same entry); `cargo xtask fips verify-image`
-# checks the host has one and prints this file to install when it does not.
+# (~/.config/containers/registries.d when it exists, else
+# /etc/containers/registries.d, where Fedora's and RHEL's containers-common
+# install the same entry; Debian's and Ubuntu's ship none). `cargo xtask fips
+# verify-image` checks the host has it, and `cargo xtask fips signature-store
+# --install` (make fips-signature-store) installs this file for the current
+# user when it does not.
 # Red Hat's public signature store:
 #   https://access.redhat.com/webassets/docker/content/sigstore
 docker:
