@@ -305,6 +305,26 @@ FIPS_FEATURES_QUALIFIED := $(subst $(_COMMA),$(_COMMA)praxis-proxy/,praxis-proxy
 FIPS_TARGET_DIR         := target/fips
 FIPS_BIN                ?= $(FIPS_TARGET_DIR)/release/praxis
 FIPS_CARGO_ARGS         := -p praxis-proxy --no-default-features --features $(FIPS_FEATURES) --target-dir $(FIPS_TARGET_DIR)
+# Red Hat's scanner reads the crate list that `cargo auditable` embeds in the
+# binary (the .dep-v0 section); without it a binary is graded inconclusive.
+# `make release-fips` embeds it when cargo-auditable is installed (`cargo
+# install cargo-auditable --version 0.7.6 --locked`); the report says so when
+# it was not.
+#
+# The list must be exactly the crates compiled in. On a stable toolchain
+# cargo-auditable derives it from `cargo metadata`, which unifies features
+# across the whole workspace and activates weak features (`dep?/feature`)
+# the real build never turns on; with rustls that puts `ring` in the manifest
+# of a binary that never compiled it, and the scanner fails on the name alone.
+# Cargo's SBOM precursor (`-Zsbom`, unstable) is the exact list, so the
+# release build enables it: RUSTC_BOOTSTRAP=1 lets stable cargo accept the
+# flag, and the env overrides hand rustc and every build script
+# RUSTC_BOOTSTRAP=-1, which forbids unstable features, so the code compiled is
+# the stable code. Drop this once cargo's `build.sbom` is stable
+# (rust-lang/cargo#13709). Same recipe in Containerfile.fips.
+CARGO_AUDITABLE         := $(shell command -v cargo-auditable >/dev/null 2>&1 && echo "cargo auditable" || echo "cargo")
+FIPS_SBOM_ENV           := RUSTC_BOOTSTRAP=1 CARGO_BUILD_SBOM=true
+FIPS_SBOM_ARGS          := -Zsbom --config 'env.RUSTC_BOOTSTRAP.value="-1"' --config 'env.RUSTC_BOOTSTRAP.force=true'
 FIPS_UBI9_DIGEST        := sha256:a4b9ec09b1e790a53ef25b7777c539976abe519248264298e5194dcbceac8c31
 FIPS_UBI9_MINIMAL_DIGEST := sha256:8ebe2ad8fdf3cab3e5a53c1edc69194c98209cfadab24b884f4ad9ebcf7bbbfc
 FIPS_UBI9_IMAGE         := registry.access.redhat.com/ubi9/ubi@$(FIPS_UBI9_DIGEST)
@@ -336,11 +356,23 @@ require-podman:
 require-go:
 	@command -v go >/dev/null || { echo "go is required to build check-payload"; exit 1; }
 
+# The debug build is the edit-compile loop; only the release build carries
+# the manifest.
 build-fips:
 	cargo build $(FIPS_CARGO_ARGS)
 
+# cargo before 1.99 does not relink a binary when only the SBOM setting
+# changed (rust-lang/cargo#15695, fixed by #17216), so the old binary goes
+# first; everything else stays cached. Drop the clean once the toolchains in
+# use (here and the UBI rust-toolset) are 1.99 or newer.
 release-fips:
+ifeq ($(CARGO_AUDITABLE),cargo auditable)
+	cargo clean --release -p praxis-proxy --target-dir $(FIPS_TARGET_DIR)
+	$(FIPS_SBOM_ENV) cargo auditable $(FIPS_SBOM_ARGS) build --release $(FIPS_CARGO_ARGS)
+else
+	@echo "warning: cargo-auditable is not installed; no crate manifest will be embedded (cargo install cargo-auditable --version 0.7.6 --locked)"
 	cargo build --release $(FIPS_CARGO_ARGS)
+endif
 
 check-fips:
 	cargo check $(FIPS_CARGO_ARGS)
@@ -654,7 +686,7 @@ help:
 	@echo ""
 	@echo "FIPS (feature set: $(FIPS_FEATURES); policy engine off):"
 	@echo "  build-fips           FIPS build, debug profile, into target/fips"
-	@echo "  release-fips         FIPS build, release profile, into target/fips"
+	@echo "  release-fips         FIPS build, release profile, into target/fips, with the embedded crate manifest"
 	@echo "  check-fips           cargo check of the FIPS build"
 	@echo "  lint-fips            clippy (all targets) + rustfmt check for the FIPS feature set"
 	@echo "  test-fips            unit tests resolved as the FIPS build (no defaults, FIPS_FEATURES on the binary)"

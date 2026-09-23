@@ -110,7 +110,7 @@ pick. The feature set is defined once, as `FIPS_FEATURES` in the
 
 ```console
 make release-fips    # FIPS build, release profile, into target/fips
-make build-fips      # same, debug profile
+make build-fips      # same, debug profile, without the crate manifest
 make container-fips  # FIPS runtime image on UBI 9, tagged praxis:<version>-fips
 ```
 
@@ -135,8 +135,9 @@ verify-image`), and the scanner reads podman's image store. The FIPS
 image is built with Red Hat's `rust-toolset` and links the system
 OpenSSL; nothing is installed into the runtime image beyond the binary
 and its config. The report's exit status is non-zero while findings
-remain. See [FIPS Tooling](fips.md) for what is checked and the
-provenance of the pinned images and signing key.
+remain. See [FIPS Tooling](fips.md) for what is checked, the provenance
+of the pinned images and signing key, and why the build uses cargo's SBOM
+precursor.
 
 ## Security: Binding Low Ports
 

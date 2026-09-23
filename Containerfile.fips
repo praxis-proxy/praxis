@@ -54,6 +54,14 @@ ENV OPENSSL_NO_VENDOR=1 \
 # target directory, and a `cargo clean` here could delete the binary the other
 # build is about to copy.
 
+# cargo-auditable embeds the list of crates compiled into the binary, which is
+# the manifest Red Hat's scanner reads to find pure-Rust cryptography that
+# leaves no symbol. Not a Red Hat package: installed from crates.io at a pinned
+# version (Rust Secure Code Working Group; see docs/developing/fips.md).
+ARG CARGO_AUDITABLE_VERSION=0.7.6
+RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
+    cargo install cargo-auditable --version "${CARGO_AUDITABLE_VERSION}" --locked
+
 WORKDIR /src
 
 # The whole workspace, so the build resolves the committed lockfile as is
@@ -67,9 +75,28 @@ COPY examples examples
 ARG CARGO_FEATURES
 ARG CARGO_ARGS
 
+# The embedded manifest must list exactly the crates compiled in. On a stable
+# toolchain cargo-auditable derives it from `cargo metadata`, which activates
+# weak features the build never enables (rustls-webpki's `ring?/alloc` puts
+# ring in the manifest of a binary that never compiled it) and unifies
+# features across workspace members; the scanner fails on the name alone.
+# Cargo's SBOM precursor is the exact list but unstable (-Zsbom):
+# RUSTC_BOOTSTRAP=1 lets Red Hat's stable cargo accept the flag, and the env
+# overrides hand rustc and every build script RUSTC_BOOTSTRAP=-1, which forbids
+# unstable features, so the code compiled is the stable code. Drop this once
+# cargo's `build.sbom` is stable (rust-lang/cargo#13709).
+#
+# cargo before 1.99 does not relink a binary when only the SBOM setting
+# changed (rust-lang/cargo#15695, fixed by #17216), so the old binary in the
+# cached target goes first. Drop the clean once rust-toolset is 1.99 or newer.
 RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
     --mount=type=cache,id=praxis-fips-target,target=/src/target \
-    cargo build --release --locked -p praxis-proxy \
+    cargo clean --release -p praxis-proxy \
+    && RUSTC_BOOTSTRAP=1 CARGO_BUILD_SBOM=true \
+       cargo auditable -Zsbom \
+        --config 'env.RUSTC_BOOTSTRAP.value="-1"' \
+        --config 'env.RUSTC_BOOTSTRAP.force=true' \
+        build --release --locked -p praxis-proxy \
         --no-default-features --features "${CARGO_FEATURES}" ${CARGO_ARGS} \
     && mkdir -p /fips \
     && cp target/release/praxis /fips/praxis
