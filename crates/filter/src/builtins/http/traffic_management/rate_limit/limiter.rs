@@ -6,7 +6,6 @@
 use std::{net::IpAddr, sync::atomic::Ordering};
 
 use dashmap::mapref::entry::Entry;
-use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{
     HARD_CAP_PER_IP_ENTRIES, HEADER_RATELIMIT_LIMIT, HEADER_RATELIMIT_REMAINING, HEADER_RATELIMIT_RESET,
@@ -134,9 +133,7 @@ impl RateLimitFilter {
 
     /// Try to acquire a token for the given request context.
     ///
-    /// IPv4-mapped IPv6 addresses are normalized to plain IPv4 before
-    /// keying the per-IP map (defense in depth; the Pingora boundary
-    /// normalizes too).
+    /// Per-IP buckets are keyed by [`PerIpState::bucket_key`].
     pub(super) fn try_acquire_for(&self, client_addr: Option<IpAddr>) -> Result<f64, f64> {
         let now = self.now_nanos();
         match &self.state {
@@ -150,7 +147,7 @@ impl RateLimitFilter {
     /// Rejects unknown IPs when the map exceeds [`HARD_CAP_PER_IP_ENTRIES`]
     /// to prevent unbounded memory growth via address rotation.
     fn acquire_per_ip(&self, state: &PerIpState, client_addr: Option<IpAddr>, now: u64) -> Result<f64, f64> {
-        let Some(ip) = client_addr.map(normalize_mapped_ipv4) else {
+        let Some(ip) = client_addr.map(|addr| state.bucket_key(addr)) else {
             tracing::info!("rate_limit: rejecting request with no client address");
             return Err(0.0);
         };
@@ -194,14 +191,13 @@ impl RateLimitFilter {
 
     /// Read current tokens for response header injection.
     ///
-    /// Normalizes IPv4-mapped IPv6 addresses before lookup (defense in
-    /// depth).
+    /// Looks up the same [`PerIpState::bucket_key`] as acquisition.
     pub(super) fn current_remaining(&self, client_addr: Option<IpAddr>) -> f64 {
         let now = self.now_nanos();
         match &self.state {
             RateLimitState::Global(bucket) => bucket.current_tokens(self.rate, self.burst, now),
             RateLimitState::PerIp(state) => {
-                let Some(ip) = client_addr.map(normalize_mapped_ipv4) else {
+                let Some(ip) = client_addr.map(|addr| state.bucket_key(addr)) else {
                     return 0.0;
                 };
                 state

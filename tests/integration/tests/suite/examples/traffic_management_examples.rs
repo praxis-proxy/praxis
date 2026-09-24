@@ -9,7 +9,8 @@ use praxis_core::config::{Cluster, Config};
 #[cfg(feature = "upstream-binding")]
 use praxis_test_utils::start_full_proxy;
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_header, parse_status, start_backend_with_shutdown, start_proxy,
+    free_port, free_port_v6, http_get, http_get_v6, http_send, ipv6_available, parse_header, parse_status,
+    start_backend_with_shutdown, start_proxy,
 };
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,36 @@ fn rate_limiting_example_allows_then_rejects() {
         }
     }
     assert!(got_429, "rate limiter should return 429 after exhausting burst");
+}
+
+#[test]
+fn rate_limiting_example_limits_ipv6_clients_by_prefix() {
+    if !ipv6_available() {
+        eprintln!("SKIPPED: IPv6 loopback not available");
+        return;
+    }
+
+    let backend_guard = start_backend_with_shutdown("ok");
+    let proxy_port = free_port_v6();
+    let global_port = free_port();
+    let mut config = super::load_example_config(
+        "traffic-management/rate-limiting.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:3000", backend_guard.port()),
+            ("127.0.0.1:8081", global_port),
+        ]),
+    );
+    // Serve the per-IP chain (`ipv6_prefix_len: 64`) to an IPv6 client.
+    config.listeners[0].address = format!("[::1]:{proxy_port}");
+    let proxy = start_proxy(&config);
+
+    let (first_status, body) = http_get_v6(proxy.addr(), "/");
+    assert_eq!(first_status, 200, "first IPv6 request within burst should succeed");
+    assert_eq!(body, "ok", "IPv6 request should reach the backend");
+
+    let got_429 = (0..50).any(|_| http_get_v6(proxy.addr(), "/").0 == 429);
+    assert!(got_429, "IPv6 client should be limited by its /64 bucket");
 }
 
 #[test]

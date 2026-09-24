@@ -9,7 +9,8 @@ use dashmap::DashMap;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{
-    EVICTION_INTERVAL_NANOS, HARD_CAP_PER_IP_ENTRIES, MAX_PER_IP_ENTRIES, PerIpState, RateLimitFilter, RateLimitState,
+    EVICTION_INTERVAL_NANOS, HARD_CAP_PER_IP_ENTRIES, Ipv6PrefixLen, MAX_PER_IP_ENTRIES, PerIpState, RateLimitFilter,
+    RateLimitState, config::RateLimitConfig,
 };
 use crate::{FilterAction, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilter as _};
 
@@ -305,9 +306,9 @@ fn per_ip_eviction_skips_when_below_threshold() {
         map.insert(ip, bucket);
     }
 
-    let state = PerIpState::from_buckets(map);
+    let state = PerIpState::from_buckets(map, Ipv6PrefixLen::default());
     let filter = RateLimitFilter {
-        state: RateLimitState::PerIp(PerIpState::new()),
+        state: RateLimitState::PerIp(PerIpState::new(Ipv6PrefixLen::default())),
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
@@ -324,7 +325,7 @@ fn per_ip_eviction_skips_when_below_threshold() {
 
 #[test]
 fn eviction_pass_is_claimed_at_most_once_per_interval() {
-    let state = PerIpState::new();
+    let state = PerIpState::new(Ipv6PrefixLen::default());
     let first = EVICTION_INTERVAL_NANOS;
 
     assert!(
@@ -449,7 +450,7 @@ fn hard_cap_rejects_new_ips() {
     assert_eq!(map.len(), HARD_CAP_PER_IP_ENTRIES, "map should be exactly at hard cap");
 
     let filter = RateLimitFilter {
-        state: RateLimitState::PerIp(PerIpState::from_buckets(map)),
+        state: RateLimitState::PerIp(PerIpState::from_buckets(map, Ipv6PrefixLen::default())),
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
@@ -484,7 +485,7 @@ fn hard_cap_allows_known_ips() {
     assert_eq!(map.len(), HARD_CAP_PER_IP_ENTRIES, "map should be exactly at hard cap");
 
     let filter = RateLimitFilter {
-        state: RateLimitState::PerIp(PerIpState::from_buckets(map)),
+        state: RateLimitState::PerIp(PerIpState::from_buckets(map, Ipv6PrefixLen::default())),
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
@@ -577,13 +578,214 @@ fn from_config_rejects_negative_infinity_rate() {
     );
 }
 
+#[test]
+fn ipv6_prefix_len_defaults_to_128() {
+    let cfg: RateLimitConfig = serde_yaml::from_str("mode: per_ip\nrate: 1\nburst: 1").unwrap();
+    assert_eq!(
+        cfg.ipv6_prefix_len,
+        Ipv6PrefixLen::try_from(128_u8).unwrap(),
+        "omitted ipv6_prefix_len should key IPv6 clients by full address"
+    );
+}
+
+#[test]
+fn ipv6_prefix_len_accepts_bounds() {
+    for len in [1_u8, 60, 64, 127, 128] {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&format!("mode: per_ip\nrate: 1\nburst: 1\nipv6_prefix_len: {len}")).unwrap();
+        assert!(
+            RateLimitFilter::from_config(&yaml).is_ok(),
+            "ipv6_prefix_len {len} should be accepted"
+        );
+    }
+}
+
+#[test]
+fn ipv6_prefix_len_rejects_out_of_range() {
+    for len in ["0", "129"] {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&format!("mode: per_ip\nrate: 1\nburst: 1\nipv6_prefix_len: {len}")).unwrap();
+        let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
+        assert!(
+            err.to_string().contains("ipv6_prefix_len must be in 1..=128"),
+            "ipv6_prefix_len {len} should be rejected: {err}"
+        );
+    }
+}
+
+#[test]
+fn ipv6_prefix_len_rejects_non_integer() {
+    for len in ["256", "-1", "64.5", "\"64\"", "abc", "null"] {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&format!("mode: per_ip\nrate: 1\nburst: 1\nipv6_prefix_len: {len}")).unwrap();
+        assert!(
+            RateLimitFilter::from_config(&yaml).is_err(),
+            "ipv6_prefix_len {len} should be rejected"
+        );
+    }
+}
+
+#[test]
+fn ipv6_prefix_len_mask_values() {
+    let cases = [
+        (1_u8, 0x8000_0000_0000_0000_0000_0000_0000_0000_u128),
+        (60, 0xFFFF_FFFF_FFFF_FFF0_0000_0000_0000_0000),
+        (64, 0xFFFF_FFFF_FFFF_FFFF_0000_0000_0000_0000),
+        (127, u128::MAX - 1),
+        (128, u128::MAX),
+    ];
+    for (len, expected) in cases {
+        assert_eq!(
+            Ipv6PrefixLen::try_from(len).unwrap().mask(),
+            expected,
+            "mask for /{len} should have the top {len} bits set"
+        );
+    }
+}
+
+#[test]
+fn bucket_key_masks_ipv6_to_prefix() {
+    let cases = [
+        (64_u8, "2001:db8:1:2:aaaa:bbbb:cccc:dddd", "2001:db8:1:2::"),
+        (
+            128,
+            "2001:db8:1:2:aaaa:bbbb:cccc:dddd",
+            "2001:db8:1:2:aaaa:bbbb:cccc:dddd",
+        ),
+        (1, "ffff:db8::1", "8000::"),
+        (1, "2001:db8::1", "::"),
+        (127, "2001:db8::3", "2001:db8::2"),
+        (60, "2001:db8:1:234f:ffff::1", "2001:db8:1:2340::"),
+    ];
+    for (len, addr, expected) in cases {
+        let state = PerIpState::new(Ipv6PrefixLen::try_from(len).unwrap());
+        assert_eq!(
+            state.bucket_key(addr.parse().unwrap()),
+            expected.parse::<IpAddr>().unwrap(),
+            "{addr} at /{len} should key as {expected}"
+        );
+    }
+}
+
+#[test]
+fn bucket_key_leaves_ipv4_and_mapped_ipv4_unmasked() {
+    let state = PerIpState::new(Ipv6PrefixLen::try_from(1_u8).unwrap());
+    let native: IpAddr = "10.0.0.255".parse().unwrap();
+    assert_eq!(state.bucket_key(native), native, "IPv4 should be keyed by full address");
+    assert_eq!(
+        state.bucket_key("::ffff:10.0.0.255".parse().unwrap()),
+        native,
+        "mapped IPv4 should normalize to full IPv4 before any IPv6 masking"
+    );
+}
+
+#[test]
+fn per_ip_same_ipv6_64_shares_bucket() {
+    let filter = make_filter("per_ip", 10.0, 1);
+    let first: IpAddr = "2001:db8:1:2::1".parse().unwrap();
+    let rotated: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
+
+    assert!(filter.try_acquire_for(Some(first)).is_ok(), "first request should pass");
+    assert!(
+        filter.try_acquire_for(Some(rotated)).is_err(),
+        "rotating within the same /64 should hit the same exhausted bucket"
+    );
+    assert!(
+        filter.current_remaining(Some(rotated)) < 1.0,
+        "response headers should report the shared /64 bucket"
+    );
+}
+
+#[test]
+fn per_ip_different_ipv6_64s_are_isolated() {
+    let filter = make_filter("per_ip", 10.0, 1);
+    assert!(
+        filter.try_acquire_for(Some("2001:db8:1:2::1".parse().unwrap())).is_ok(),
+        "first /64 should pass"
+    );
+    assert!(
+        filter.try_acquire_for(Some("2001:db8:1:3::1".parse().unwrap())).is_ok(),
+        "adjacent /64 should get its own bucket"
+    );
+}
+
+#[test]
+fn per_ip_ipv6_128_keys_full_address() {
+    let filter = make_ipv6_filter(128, 1);
+    assert!(
+        filter.try_acquire_for(Some("2001:db8::1".parse().unwrap())).is_ok(),
+        "first address should pass"
+    );
+    assert!(
+        filter.try_acquire_for(Some("2001:db8::2".parse().unwrap())).is_ok(),
+        "/128 should give each address its own bucket"
+    );
+}
+
+#[test]
+fn per_ip_ipv6_rotation_does_not_grow_map() {
+    let filter = make_filter("per_ip", 0.001, 1);
+    let passed = (0..1_000_u128)
+        .map(|host| std::net::Ipv6Addr::from_bits(0x2001_0DB8_0001_0002_0000_0000_0000_0000 | host))
+        .filter(|addr| filter.try_acquire_for(Some(IpAddr::V6(*addr))).is_ok())
+        .count();
+    assert_eq!(
+        passed, 1,
+        "rotating source addresses within a /64 should not refresh the burst"
+    );
+    let RateLimitState::PerIp(state) = &filter.state else {
+        panic!("expected per-IP state");
+    };
+    assert_eq!(state.entries(), 1, "one /64 should occupy a single map entry");
+    assert_eq!(state.buckets.len(), 1, "one /64 should occupy a single map entry");
+}
+
+#[test]
+fn per_ip_ipv4_unaffected_by_ipv6_prefix_len() {
+    let filter = make_ipv6_filter(1, 1);
+    assert!(
+        filter.try_acquire_for(Some("10.0.0.1".parse().unwrap())).is_ok(),
+        "first IPv4 client should pass"
+    );
+    assert!(
+        filter.try_acquire_for(Some("::ffff:10.0.0.2".parse().unwrap())).is_ok(),
+        "a different mapped IPv4 client should get its own bucket"
+    );
+    assert!(
+        filter
+            .try_acquire_for(Some("::ffff:10.0.0.1".parse().unwrap()))
+            .is_err(),
+        "mapped IPv4 should still share the plain IPv4 bucket"
+    );
+}
+
+#[test]
+fn global_mode_ignores_ipv6_prefix_len() {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("mode: global\nrate: 1\nburst: 1\nipv6_prefix_len: 128").unwrap();
+    assert!(
+        RateLimitFilter::from_config(&yaml).is_ok(),
+        "ipv6_prefix_len should parse in global mode"
+    );
+
+    let filter = make_filter("global", 10.0, 1);
+    assert!(
+        filter.try_acquire_for(Some("2001:db8:1::1".parse().unwrap())).is_ok(),
+        "first request should pass"
+    );
+    assert!(
+        filter.try_acquire_for(Some("2001:db8:2::1".parse().unwrap())).is_err(),
+        "global mode should share one bucket across all prefixes"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
 /// Populate a [`DashMap`] with `count` stale entries (last activity at t=0).
 fn populate_stale_state(count: usize, rate: f64, burst: f64) -> PerIpState {
-    PerIpState::from_buckets(populate_stale_map(count, rate, burst))
+    PerIpState::from_buckets(populate_stale_map(count, rate, burst), Ipv6PrefixLen::default())
 }
 
 /// Build a per-IP map of `count` fully idle buckets.
@@ -604,7 +806,7 @@ fn populate_stale_map(count: usize, rate: f64, burst: f64) -> DashMap<IpAddr, To
 /// Build a [`RateLimitFilter`] with a throwaway per-IP map for eviction tests.
 fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
     RateLimitFilter {
-        state: RateLimitState::PerIp(PerIpState::new()),
+        state: RateLimitState::PerIp(PerIpState::new(Ipv6PrefixLen::default())),
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
@@ -616,12 +818,20 @@ fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
     }
 }
 
+/// Build a per-IP [`RateLimitFilter`] grouping IPv6 clients by `prefix_len`.
+fn make_ipv6_filter(prefix_len: u8, burst: u32) -> RateLimitFilter {
+    RateLimitFilter {
+        state: RateLimitState::PerIp(PerIpState::new(Ipv6PrefixLen::try_from(prefix_len).unwrap())),
+        ..make_filter("per_ip", 10.0, burst)
+    }
+}
+
 /// Build a [`RateLimitFilter`] directly (bypassing YAML parsing).
 fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
     let burst_f = f64::from(burst);
     let state = match mode {
         "global" => RateLimitState::Global(TokenBucket::new(burst_f)),
-        "per_ip" => RateLimitState::PerIp(PerIpState::new()),
+        "per_ip" => RateLimitState::PerIp(PerIpState::new(Ipv6PrefixLen::default())),
         _ => panic!("invalid mode in test utility"),
     };
     RateLimitFilter {

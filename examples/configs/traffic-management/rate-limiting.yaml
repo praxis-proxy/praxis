@@ -4,7 +4,11 @@
 # Rejects excess traffic with 429 and standard rate limit headers.
 #
 # This example shows per-IP limiting on :8080 and global limiting
-# on :8081 sharing a single bucket across all clients.
+# on :8081 sharing a single bucket across all clients. Per-IP mode
+# keys IPv4 clients by address and IPv6 clients by network prefix
+# (one address by default; this example groups by /64 as an
+# internet-facing listener should), so rotating addresses within one
+# IPv6 allocation does not reset the limit.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/rate-limiting.yaml
@@ -30,6 +34,7 @@ filter_chains:
         mode: per_ip         # independent bucket per source IP
         rate: 10             # demo value; tune for production
         burst: 20            # demo value; tune for production
+        ipv6_prefix_len: 64  # IPv6 clients share one bucket per /64 (default 128)
 
       - filter: router
         routes:

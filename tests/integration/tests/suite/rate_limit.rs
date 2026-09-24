@@ -5,7 +5,8 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_header, parse_status, start_backend_with_shutdown, start_proxy,
+    free_port, free_port_v6, http_get, http_get_v6, http_send, ipv6_available, parse_header, parse_status,
+    start_backend_v6, start_backend_with_shutdown, start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -218,6 +219,55 @@ fn rate_limit_per_ip_isolates_clients() {
     );
     let status = parse_status(&raw);
     assert_eq!(status, 429, "request exceeding per-IP burst should be rate limited");
+}
+
+/// End-to-end IPv6 per-prefix keying through the proxy.
+///
+/// The loopback interface only offers `::1`, so the harness cannot open
+/// connections from distinct addresses in one /64; grouping across
+/// addresses is covered by the filter's unit tests. This proves the
+/// option parses through the full config path and that an IPv6 client
+/// is limited by its masked bucket and reported in response headers.
+#[test]
+fn rate_limit_per_ip_ipv6_prefix_len() {
+    if !ipv6_available() {
+        eprintln!("SKIPPED: IPv6 loopback not available");
+        return;
+    }
+
+    let backend_port = start_backend_v6("ok");
+    let proxy_port = free_port_v6();
+    let yaml = rate_limit_yaml(proxy_port, backend_port, "per_ip", 1.0, 2)
+        .replace("127.0.0.1:", "[::1]:")
+        .replace("        burst: 2\n", "        burst: 2\n        ipv6_prefix_len: 64\n");
+    assert!(
+        yaml.contains("ipv6_prefix_len: 64"),
+        "test config should set ipv6_prefix_len"
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let (status, body) = http_get_v6(proxy.addr(), "/");
+    assert_eq!(status, 200, "first IPv6 request within burst should return 200");
+    assert_eq!(body, "ok", "first IPv6 request should return backend response");
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "second IPv6 request within burst should return 200"
+    );
+    assert_eq!(
+        parse_header(&raw, "x-ratelimit-remaining").as_deref(),
+        Some("0"),
+        "response should report the IPv6 prefix bucket as drained"
+    );
+
+    let (status, _) = http_get_v6(proxy.addr(), "/");
+    assert_eq!(status, 429, "IPv6 request past the prefix burst should be rate limited");
 }
 
 // -----------------------------------------------------------------------------

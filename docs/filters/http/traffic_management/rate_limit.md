@@ -7,7 +7,9 @@ Token bucket rate limiter that rejects excess traffic with 429.
 
 ## Configuration Notes
 
-Supports `global` (one shared bucket) and `per_ip` (one bucket per source IP) modes. Rate limit headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`) are injected into both 429 rejections and successful responses.
+Supports `global` (one shared bucket) and `per_ip` (one bucket per source IPv4 address or IPv6 network prefix) modes. Rate limit headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`) are injected into both 429 rejections and successful responses.
+
+In `per_ip` mode, IPv6 clients are keyed by network prefix (`ipv6_prefix_len`, default 128: one bucket per address). On an internet-facing listener set 64: a /64 is the standard IPv6 subnet size (RFC 4291 interface identifiers, required by SLAAC), so one subscriber normally controls at least one /64 and often a /56 or /48, and keying by full address lets that client rotate source addresses to get a fresh burst on every request and fill the per-IP table until new clients are rejected. Keep 128 inside a cluster or LAN: Kubernetes gives each node a /64 pod range and a SLAAC segment shares one /64, so a /64 key would put every pod on a node, or every host on the segment, in one bucket. IPv4 clients are always keyed by full address. If IPv4 clients reach Praxis through a stateless IPv4/IPv6 translator (SIIT, e.g. `64:ff9b::/96`), they arrive as IPv6 addresses sharing a prefix; keep the default 128 there so translated clients are not grouped together.
 
 State is all managed locally.
 
@@ -18,6 +20,7 @@ State is all managed locally.
 | `mode` | `global` \| `per_ip` | yes | Whether to use a single global bucket or per-IP buckets. |
 | `rate` | number | yes | Tokens replenished per second. |
 | `burst` | integer | yes | Maximum bucket capacity. |
+| `ipv6_prefix_len` | integer | no | IPv6 network prefix length (1-128) that `per_ip` mode groups clients by. Defaults to 128, one bucket per address. Set 64 on internet-facing listeners, where one subscriber controls a whole /64 and can rotate addresses to evade the limit; keep 128 inside a cluster or LAN, where a node or segment shares one /64. IPv4 clients are keyed by full address. Ignored in `global` mode. |
 
 ## Example
 
@@ -26,4 +29,5 @@ filter: rate_limit
 mode: per_ip        # "per_ip" or "global"
 rate: 100           # tokens per second
 burst: 200          # max bucket capacity
+ipv6_prefix_len: 64 # per_ip: group IPv6 clients by /64 (default 128)
 ```

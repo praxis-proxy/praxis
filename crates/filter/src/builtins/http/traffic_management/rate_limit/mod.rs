@@ -23,15 +23,16 @@ pub use self::config::RateLimitMode;
 mod tests;
 
 use std::{
-    net::IpAddr,
+    net::{IpAddr, Ipv6Addr},
     sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     time::Instant,
 };
 
 use async_trait::async_trait;
 use dashmap::DashMap;
+use praxis_core::connectivity::normalize_mapped_ipv4;
 
-use self::config::RateLimitConfig;
+use self::config::{Ipv6PrefixLen, RateLimitConfig};
 use super::token_bucket::TokenBucket;
 use crate::{
     FilterAction, FilterError, Rejection,
@@ -85,7 +86,7 @@ enum RateLimitState {
     /// One shared bucket for all clients.
     Global(TokenBucket),
 
-    /// Independent bucket per source IP address.
+    /// Independent bucket per source IPv4 address or IPv6 prefix.
     PerIp(PerIpState),
 }
 
@@ -115,21 +116,40 @@ struct PerIpState {
 
     /// Filter-epoch nanos at which the last eviction pass was claimed.
     last_eviction_nanos: AtomicU64,
+
+    /// Network mask applied to IPv6 client addresses before keying.
+    ipv6_mask: u128,
 }
 
 impl PerIpState {
-    /// Create empty per-IP state.
-    fn new() -> Self {
-        Self::from_buckets(DashMap::new())
+    /// Create empty per-IP state grouping IPv6 clients by `ipv6_prefix_len`.
+    fn new(ipv6_prefix_len: Ipv6PrefixLen) -> Self {
+        Self::from_buckets(DashMap::new(), ipv6_prefix_len)
     }
 
     /// Wrap an existing bucket map, seeding the entry count from it.
-    fn from_buckets(buckets: DashMap<IpAddr, TokenBucket>) -> Self {
+    fn from_buckets(buckets: DashMap<IpAddr, TokenBucket>, ipv6_prefix_len: Ipv6PrefixLen) -> Self {
         let entries = AtomicUsize::new(buckets.len());
         Self {
             buckets,
             entries,
             last_eviction_nanos: AtomicU64::new(0),
+            ipv6_mask: ipv6_prefix_len.mask(),
+        }
+    }
+
+    /// Map a client address to its bucket key.
+    ///
+    /// IPv4-mapped IPv6 addresses are normalized to plain IPv4 first
+    /// (defense in depth; the Pingora boundary normalizes too) and
+    /// keyed by full address. Native IPv6 addresses are truncated to
+    /// their network prefix, since one client typically controls a
+    /// whole /64 and could otherwise rotate source addresses to get a
+    /// fresh bucket per request and fill the map to the hard cap.
+    fn bucket_key(&self, ip: IpAddr) -> IpAddr {
+        match normalize_mapped_ipv4(ip) {
+            IpAddr::V6(v6) => IpAddr::V6(Ipv6Addr::from_bits(v6.to_bits() & self.ipv6_mask)),
+            v4 @ IpAddr::V4(_) => v4,
         }
     }
 
@@ -162,9 +182,26 @@ impl PerIpState {
 /// Token bucket rate limiter that rejects excess traffic with 429.
 ///
 /// Supports `global` (one shared bucket) and `per_ip` (one bucket per
-/// source IP) modes. Rate limit headers (`X-RateLimit-Limit`,
-/// `X-RateLimit-Remaining`, `X-RateLimit-Reset`) are injected into
-/// both 429 rejections and successful responses.
+/// source IPv4 address or IPv6 network prefix) modes.
+/// Rate limit headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`,
+/// `X-RateLimit-Reset`) are injected into both 429 rejections and
+/// successful responses.
+///
+/// In `per_ip` mode, IPv6 clients are keyed by network prefix
+/// (`ipv6_prefix_len`, default 128: one bucket per address). On an
+/// internet-facing listener set 64: a /64 is the standard IPv6 subnet
+/// size (RFC 4291 interface identifiers, required by SLAAC), so one
+/// subscriber normally controls at least one /64 and often a /56 or /48,
+/// and keying by full address lets that client rotate source addresses
+/// to get a fresh burst on every request and fill the per-IP table
+/// until new clients are rejected. Keep 128 inside a cluster or LAN:
+/// Kubernetes gives each node a /64 pod range and a SLAAC segment shares
+/// one /64, so a /64 key would put every pod on a node, or every host on
+/// the segment, in one bucket. IPv4 clients are always keyed by full
+/// address.
+/// If IPv4 clients reach Praxis through a stateless IPv4/IPv6 translator
+/// (SIIT, e.g. `64:ff9b::/96`), they arrive as IPv6 addresses sharing a
+/// prefix; keep the default 128 there so translated clients are not grouped together.
 ///
 /// State is all managed locally.
 ///
@@ -175,6 +212,7 @@ impl PerIpState {
 /// mode: per_ip        # "per_ip" or "global"
 /// rate: 100           # tokens per second
 /// burst: 200          # max bucket capacity
+/// ipv6_prefix_len: 64 # per_ip: group IPv6 clients by /64 (default 128)
 /// ```
 ///
 /// # Example
@@ -270,7 +308,7 @@ impl RateLimitFilter {
         let burst = f64::from(cfg.burst);
         let state = match cfg.mode {
             RateLimitMode::Global => RateLimitState::Global(TokenBucket::new(burst)),
-            RateLimitMode::PerIp => RateLimitState::PerIp(PerIpState::new()),
+            RateLimitMode::PerIp => RateLimitState::PerIp(PerIpState::new(cfg.ipv6_prefix_len)),
         };
 
         let burst_string = cfg.burst.to_string();

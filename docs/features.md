@@ -29,7 +29,8 @@
 - **Static responses** - return fixed status, headers,
   and body without upstream
 - **Rate limiting** - token bucket rate limiter with
-  per-IP and global modes, burst allowance, 429
+  per-IP (IPv6 optionally grouped by prefix) and global
+  modes, burst allowance, 429
   responses with `Retry-After`, and `X-RateLimit-*`
   headers
 - **Active health checks** - HTTP and TCP health check
