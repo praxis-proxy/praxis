@@ -39,6 +39,7 @@ use super::{
         entity_for_protocol_method, entity_for_protocol_method_post, llm_entity_post, llm_entity_pre,
     },
     config::{BodyAccessMode, PolicyFilterConfig},
+    dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
         llm_deny_rejection, llm_error_envelope_bytes_within,
@@ -124,8 +125,17 @@ enum GatedIdentity {
 /// `cmf.llm_output` for non-streaming inference responses. APL field
 /// mutators do not rewrite inference bodies.
 ///
+/// Response-body hooks run on a small dedicated runtime while the worker
+/// waits, for at most twice the engine's per-plugin timeout
+/// (`engine_settings.plugin_timeout`, so 60 seconds by default). A hook
+/// that does not finish in time is aborted and the response fails under
+/// the filter's `failure_mode`: `closed` truncates the response, `open`
+/// passes the body through unfiltered.
+///
 /// Outbound policy calls share the proxy's sub-request limits and circuit
-/// breaker, use HTTP/1.1, and keep a separate 1 MiB response ceiling. TLS
+/// breaker, use HTTP/1.1, and keep a separate 1 MiB response ceiling. Calls
+/// made by response-body hooks use their own pool on the dispatch runtime,
+/// with the same connection limit but no circuit breaker. TLS
 /// uses the platform trust store; cluster private CAs and client
 /// certificates do not apply. Private destinations require
 /// `allow_private_idp`.
@@ -163,9 +173,8 @@ pub struct PolicyFilter {
     /// counterparts can branch on `body_access` per request.
     cfg: PolicyFilterConfig,
     /// Policy engine plugin manager — owns the loaded plugin instances and
-    /// dispatches hook chains. Wrapped in `Arc` so the response-phase
-    /// `spawn_blocking` closure can hold its own handle without
-    /// borrowing `&self`.
+    /// dispatches hook chains. Wrapped in `Arc` so offloaded hook
+    /// dispatches can hold their own handle without borrowing `&self`.
     mgr: Arc<PolicyEngine>,
     /// Derived from the loaded policy at construction: the `global` policy
     /// wired the entity-less HTTP path (`http.request`). When true and
@@ -194,6 +203,9 @@ pub struct PolicyFilter {
     llm_request_mutator_warned: AtomicBool,
     /// Whether the inference response-mutator warning was emitted.
     llm_response_mutator_warned: AtomicBool,
+    /// Bound on one response-phase hook dispatch, derived from the engine's
+    /// per-plugin timeout.
+    response_dispatch_timeout: std::time::Duration,
 }
 
 impl PolicyFilter {
@@ -370,6 +382,11 @@ impl PolicyFilter {
                 )
                 .into()
             })?;
+        let dispatch_timeout = response_dispatch_timeout(policy_config.engine_settings.plugin_timeout);
+        if entity_routes {
+            ensure_dispatch_runtime()
+                .map_err(|e| -> FilterError { format!("policy: response hooks cannot run: {e}").into() })?;
+        }
         let request_assertions = GovernedNames::from_config(&policy_config, Direction::Request);
         let response_assertions = GovernedNames::from_config(&policy_config, Direction::Response);
 
@@ -410,6 +427,7 @@ impl PolicyFilter {
             llm_route_table,
             llm_request_mutator_warned: AtomicBool::new(false),
             llm_response_mutator_warned: AtomicBool::new(false),
+            response_dispatch_timeout: dispatch_timeout,
         })
     }
 
@@ -1033,19 +1051,7 @@ impl PolicyFilter {
         let payload = MessagePayload {
             message: response_message(&parsed),
         };
-        let mgr = Arc::clone(&self.mgr);
-        let handle = tokio::runtime::Handle::current();
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        tokio::task::spawn_blocking(move || {
-            let result = handle.block_on(async move {
-                let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
-                r
-            });
-            drop(tx.send(result));
-        });
-        let cmf_result = rx.recv().map_err(|_recv| -> FilterError {
-            "policy: inference response-phase dispatch failed (spawn_blocking channel closed)".into()
-        })?;
+        let cmf_result = self.dispatch_response_cmf(hook_name, payload, extensions, "inference response-phase")?;
 
         if !cmf_result.continue_processing {
             tracing::warn!(
@@ -1252,6 +1258,29 @@ impl PolicyFilter {
             .invoke_named::<HttpHook>(hook, HttpPayload, extensions, None)
             .await;
         result
+    }
+
+    /// Dispatch a CMF hook from the synchronous response-body phase, blocking
+    /// for at most the filter's response dispatch bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] when the hook times out or yields no result,
+    /// so the response fails under the filter's `failure_mode`.
+    fn dispatch_response_cmf(
+        &self,
+        hook: &'static str,
+        payload: MessagePayload,
+        extensions: Extensions,
+        phase: &str,
+    ) -> Result<ppe::praxis_policy_core::executor::PipelineResult, FilterError> {
+        let mgr = Arc::clone(&self.mgr);
+        let invoke = async move {
+            let (r, _bg) = mgr.invoke_named::<CmfHook>(hook, payload, extensions, None).await;
+            r
+        };
+        block_on_bounded(invoke, self.response_dispatch_timeout)
+            .map_err(|e| -> FilterError { format!("policy: {phase} dispatch failed: {e}").into() })
     }
 
     /// Put the rendered response contract on the response the client receives.
@@ -1895,19 +1924,7 @@ impl HttpFilter for PolicyFilter {
         let payload = MessagePayload {
             message: Message::with_content(Role::Assistant, content),
         };
-        let mgr = Arc::clone(&self.mgr);
-        let handle = tokio::runtime::Handle::current();
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        tokio::task::spawn_blocking(move || {
-            let result = handle.block_on(async move {
-                let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
-                r
-            });
-            drop(tx.send(result));
-        });
-        let cmf_result = rx.recv().map_err(|_recv| -> FilterError {
-            "policy: response-phase CMF dispatch failed (spawn_blocking channel closed)".into()
-        })?;
+        let cmf_result = self.dispatch_response_cmf(hook_name, payload, extensions, "response-phase CMF")?;
 
         // Post-phase deny — the upstream's response carries something
         // the operator wants suppressed (output PII, late policy

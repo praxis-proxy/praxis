@@ -4498,6 +4498,36 @@ async fn inference_round_trip(
     body.expect("response body")
 }
 
+#[test]
+fn a_response_hook_does_not_deadlock_a_current_thread_worker() {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (_dir, path) = write_llm_post_config();
+        let filter = build_read_write_filter(path);
+        let worker = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let body = worker.block_on(inference_round_trip(
+            &filter,
+            r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+            WITHIN_BUDGET_RESPONSE,
+            "application/json",
+        ));
+        drop(done_tx.send(body));
+    });
+
+    let body = done_rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("a response hook must complete on a current-thread worker instead of deadlocking");
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or_else(|e| panic!("the response must stay JSON; got {body:?} ({e})"));
+    assert!(
+        parsed.is_object(),
+        "the admitted completion must reach the client; got {body:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deny_too_large_for_the_committed_length_stays_valid_json() {
     let (_dir, path) = write_llm_post_config();

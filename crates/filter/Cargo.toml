@@ -17,6 +17,7 @@ name = "praxis_filter"
 default = ["policy-engine"]
 policy-engine = [
     "dep:ppe",
+    "tokio/rt-multi-thread",
 ]
 basic-auth-filter = [
     "dep:openssl",

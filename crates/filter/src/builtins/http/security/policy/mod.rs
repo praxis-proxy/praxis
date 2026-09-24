@@ -141,9 +141,14 @@
 //!
 //! # Runtime compatibility
 //!
-//! The response phase uses `spawn_blocking` to dispatch async CMF hooks
-//! from the sync `on_response_body` trait method. This works on both
-//! multi-threaded and current-thread tokio runtimes.
+//! The sync `on_response_body` trait method dispatches async CMF hooks on a
+//! small dedicated runtime and blocks for at most twice the engine's
+//! per-plugin timeout (`engine_settings.plugin_timeout`), so a hook cannot
+//! deadlock a current-thread (`runtime.work_stealing: false`) or single-worker
+//! proxy. Calls made from that runtime use their own connection pool, since a
+//! pooled connection belongs to the worker runtime that opened it. A dispatch
+//! that times out fails under the filter's `failure_mode`: closed truncates
+//! the response, open passes the body through unfiltered.
 //!
 //! # See also
 //!
@@ -156,6 +161,7 @@
 mod assertions;
 mod common_message_format;
 mod config;
+mod dispatch;
 mod error;
 mod filter;
 mod host_plugins;

@@ -50,6 +50,11 @@ pub(super) struct PolicyHttpTransport {
     /// Built on first call from [`Self::registered`].
     client: OnceLock<SubRequestClient>,
 
+    /// Built on first call made from the response-hook dispatch runtime. A
+    /// pooled connection is driven by the runtime that opened it, and that
+    /// can be a worker blocked waiting for the very hook making the call.
+    dispatch_client: OnceLock<SubRequestClient>,
+
     /// Whether private and loopback destinations are permitted.
     allow_private: bool,
 }
@@ -65,12 +70,24 @@ impl PolicyHttpTransport {
         Self {
             registered,
             client: OnceLock::new(),
+            dispatch_client: OnceLock::new(),
             allow_private,
         }
     }
 
-    /// The client, built lazily from the captured connector.
+    /// The client for the calling runtime, built lazily. Calls from the
+    /// response-hook dispatch runtime get a pool of their own.
     fn client(&self) -> &SubRequestClient {
+        if super::dispatch::on_dispatch_runtime() {
+            return self.dispatch_client.get_or_init(|| {
+                let max_connections = self
+                    .registered
+                    .as_ref()
+                    .and_then(SubRequestConnector::configured_max_connections);
+                let connector = SubRequestConnector::new(DEFAULT_SUBREQUEST_POOL_SIZE, max_connections);
+                SubRequestClient::with_max_response_bytes(connector, DEFAULT_MAX_RESPONSE_BYTES)
+            });
+        }
         self.client.get_or_init(|| build_client(self.registered.clone()))
     }
 

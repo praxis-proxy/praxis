@@ -19,7 +19,9 @@ Policies with `llm:` routes authorize the top-level request `model` through `cmf
 
 `body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also enables `cmf.llm_output` for non-streaming inference responses. APL field mutators do not rewrite inference bodies.
 
-Outbound policy calls share the proxy's sub-request limits and circuit breaker, use HTTP/1.1, and keep a separate 1 MiB response ceiling. TLS uses the platform trust store; cluster private CAs and client certificates do not apply. Private destinations require `allow_private_idp`.
+Response-body hooks run on a small dedicated runtime while the worker waits, for at most twice the engine's per-plugin timeout (`engine_settings.plugin_timeout`, so 60 seconds by default). A hook that does not finish in time is aborted and the response fails under the filter's `failure_mode`: `closed` truncates the response, `open` passes the body through unfiltered.
+
+Outbound policy calls share the proxy's sub-request limits and circuit breaker, use HTTP/1.1, and keep a separate 1 MiB response ceiling. Calls made by response-body hooks use their own pool on the dispatch runtime, with the same connection limit but no circuit breaker. TLS uses the platform trust store; cluster private CAs and client certificates do not apply. Private destinations require `allow_private_idp`.
 
 An endpoint URL may name an IP address over `http`, but not over `https`: an IP carries no SNI, and Pingora peers skip certificate verification entirely when SNI is empty. Use a hostname for `https`.
 
