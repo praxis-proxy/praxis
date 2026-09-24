@@ -13,7 +13,10 @@ use pingora_core::{
 use praxis_core::kv::KvStoreRegistry;
 use tracing::{info, warn};
 
-use crate::http::pingora::{health::escape_json_string, json::json_response};
+use crate::http::pingora::{
+    health::{admin_host, escape_json_string},
+    json::json_response,
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -38,12 +41,18 @@ const MAX_BODY_BYTES: usize = 1_048_576; // 1 MiB
 pub struct PingoraKvService {
     /// Shared KV store registry.
     registry: KvStoreRegistry,
+
+    /// When `true`, reject requests whose `Host` is not loopback.
+    require_loopback_host: bool,
 }
 
 impl PingoraKvService {
     /// Create a new KV admin service.
     pub fn new(registry: KvStoreRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            require_loopback_host: false,
+        }
     }
 }
 
@@ -109,6 +118,12 @@ fn resolve_kv_route(method: &str, path: &str) -> KvRoute {
 #[async_trait]
 impl ServeHttp for PingoraKvService {
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
+        if self.require_loopback_host
+            && let Some(resp) = admin_host::reject_non_loopback_host(http_session.req_header())
+        {
+            return resp;
+        }
+
         dispatch_kv_request(&self.registry, http_session).await
     }
 }
@@ -216,7 +231,9 @@ fn handle_list(registry: &KvStoreRegistry, store: &str) -> Response<Vec<u8>> {
 
 /// Register KV admin endpoints on the admin listener.
 ///
-/// Binds to the same admin address as health endpoints.
+/// Binds to the same admin address as health endpoints. A loopback bind
+/// rejects requests whose `Host` is not loopback, as the combined admin
+/// service does.
 ///
 /// # Deprecation
 ///
@@ -228,7 +245,11 @@ fn handle_list(registry: &KvStoreRegistry, store: &str) -> Response<Vec<u8>> {
 /// [`add_admin_endpoints_to_pingora_server`]: crate::http::pingora::health::add_admin_endpoints_to_pingora_server
 #[deprecated(note = "pass KvStoreRegistry to add_admin_endpoints_to_pingora_server instead")]
 pub fn add_kv_endpoint_to_pingora_server(server: &mut Server, admin_addr: &str, registry: KvStoreRegistry) {
-    let mut service = Service::new("kv-admin".to_owned(), PingoraKvService::new(registry));
+    let kv = PingoraKvService {
+        registry,
+        require_loopback_host: admin_host::is_loopback_host(admin_addr),
+    };
+    let mut service = Service::new("kv-admin".to_owned(), kv);
     service.add_tcp(admin_addr);
     info!(address = %admin_addr, "kv admin endpoints enabled");
     server.add_service(service);
@@ -562,6 +583,39 @@ mod tests {
             session_for(b"PUT /api/kv/test/cut HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc".to_vec()).await;
         let resp = dispatch_kv_request(&registry, &mut session).await;
         assert_eq!(resp.status().as_u16(), 502, "a truncated body read must return 502");
+    }
+
+    #[tokio::test]
+    async fn legacy_kv_service_rejects_rebound_host_when_loopback_bound() {
+        let registry = make_registry_with("test", &[("color", "blue")]);
+        let svc = PingoraKvService {
+            registry: registry.clone(),
+            require_loopback_host: true,
+        };
+        let mut session = session_for(
+            b"PUT /api/kv/test/color HTTP/1.1\r\nHost: attacker.example\r\nContent-Length: 3\r\n\r\nred".to_vec(),
+        )
+        .await;
+        let resp = svc.response(&mut session).await;
+        assert_eq!(resp.status().as_u16(), 421, "rebound PUT must be 421");
+        assert_eq!(
+            registry.get("test").unwrap().get("color").as_deref(),
+            Some("blue"),
+            "rejected PUT must leave the store untouched"
+        );
+
+        let mut session = session_for(b"GET /api/kv/test HTTP/1.1\r\nHost: localhost:9901\r\n\r\n".to_vec()).await;
+        let resp = svc.response(&mut session).await;
+        assert_eq!(resp.status().as_u16(), 200, "loopback Host must be served");
+    }
+
+    #[tokio::test]
+    async fn legacy_kv_service_serves_any_host_by_default() {
+        let registry = make_registry_with("test", &[("color", "blue")]);
+        let svc = PingoraKvService::new(registry);
+        let mut session = session_for(b"GET /api/kv/test HTTP/1.1\r\nHost: attacker.example\r\n\r\n".to_vec()).await;
+        let resp = svc.response(&mut session).await;
+        assert_eq!(resp.status().as_u16(), 200, "new() must keep the Host check off");
     }
 
     #[tokio::test]

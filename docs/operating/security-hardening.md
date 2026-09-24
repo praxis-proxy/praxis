@@ -19,6 +19,10 @@ ambiguous configuration:
 - Admin endpoints are restricted to loopback; non-loopback
   binding is a validation error unless
   `insecure_options.allow_public_admin` is set.
+- A loopback admin listener rejects requests whose `Host`
+  is not a loopback name, blocking DNS rebinding from
+  the operator's browser (see
+  [Admin DNS Rebinding](#admin-dns-rebinding)).
 - `unsafe_code = "deny"` in workspace lints; no unsafe
   Rust in the Praxis codebase.
 - Rustls for TLS (no OpenSSL, no C FFI in the TLS
@@ -74,6 +78,42 @@ ambiguous configuration:
   internal networks or loopback addresses. The KV admin
   API allows runtime modification of routing and
   transformation data.
+
+### Admin DNS Rebinding
+
+The admin API has no authentication; loopback binding is
+its access control. A web page the operator visits can
+rebind its own DNS name to `127.0.0.1`, after which the
+browser treats the admin API as same-origin and can read
+`/api/pipelines`, `/api/stats`, and KV values, or send
+`PUT`/`DELETE` to `/api/log-level` and `/api/kv/*`.
+
+Every such request still carries the attacker's name in
+`Host`. When `admin.address` is a loopback address, every
+admin route (including `/healthy`, `/ready`, and
+`/metrics`) answers `421 Misdirected Request` with
+`{"error":"misdirected request"}` unless each `Host`
+header (and any absolute-form request authority) is one
+of:
+
+- a loopback IP literal: `127.0.0.0/8`, `[::1]`, or
+  IPv4-mapped loopback, with or without a port
+- `localhost`, in any case, optionally with a trailing
+  dot and a port
+
+A request with no `Host` at all (HTTP/1.0) is served:
+browsers always send `Host`, so only a client that
+already reaches the socket directly can omit it. Probe
+and scrape the admin port as `127.0.0.1`, `[::1]`, or
+`localhost`; a local DNS alias for the admin address is
+rejected.
+
+The check is skipped when the admin listener binds a
+non-loopback address (`allow_public_admin`), because
+operators may legitimately reach it by DNS name. Such a
+listener is still reachable through loopback on the same
+host, so protect it with network controls rather than
+relying on the bind address.
 
 ## TLS Best Practices
 

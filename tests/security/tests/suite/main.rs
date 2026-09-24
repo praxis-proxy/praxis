@@ -48,6 +48,7 @@
     reason = "test code"
 )]
 
+mod admin_host;
 mod cors;
 mod cors_validation;
 mod filter_leakage;

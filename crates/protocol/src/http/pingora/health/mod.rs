@@ -3,6 +3,9 @@
 
 //! Health check infrastructure: admin endpoints, probes, and background runner.
 
+/// DNS rebinding defence (`Host` check) for a loopback-bound admin listener.
+#[cfg(feature = "admin-api")]
+pub(crate) mod admin_host;
 /// Cluster endpoint metadata for `/api/stats`. Kept ungated for reload.
 pub mod cluster_meta;
 /// gRPC health check probe (`grpc.health.v1.Health/Check`).

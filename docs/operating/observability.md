@@ -30,6 +30,13 @@ must bind to a loopback address by default. Binding
 to a non-loopback address requires
 `insecure_options.allow_public_admin: true`.
 
+A loopback admin listener answers `421` on every path
+unless `Host` is a loopback IP literal or `localhost`
+(a request without `Host` is served), which blocks
+DNS rebinding attacks from a browser. Point probes and
+scrapers at `127.0.0.1`, `[::1]`, or `localhost`. See
+[Admin DNS Rebinding](security-hardening.md#admin-dns-rebinding).
+
 The admin surface (including `/metrics`) is compiled
 in by the `admin-api` build feature, on by default. A
 binary built without it exposes no admin endpoints

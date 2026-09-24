@@ -20,7 +20,7 @@ use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
 use tokio::time::Duration;
 use tracing::{error, info};
 
-use super::{listener_meta::ListenerMetaStore, log_level_admin, pipelines_admin, stats_admin};
+use super::{admin_host, listener_meta::ListenerMetaStore, log_level_admin, pipelines_admin, stats_admin};
 use crate::http::pingora::{json::json_response, kv::dispatch_kv_request, metrics};
 
 /// Recorder upkeep runs independently of Prometheus scrape traffic.
@@ -213,6 +213,9 @@ pub struct PingoraAdminService {
     /// Optional runtime log-level state for `/api/log-level`.
     log_level: Option<Arc<praxis_core::logging::LogLevelState>>,
 
+    /// When `true`, reject requests whose `Host` is not loopback.
+    require_loopback_host: bool,
+
     /// Optional `/api/stats` snapshot state.
     stats: Option<stats_admin::StatsAdminState>,
 
@@ -239,9 +242,21 @@ impl PingoraAdminService {
             kv_registry,
             pipelines: pipelines.map(|(pipelines, meta)| pipelines_admin::PipelinesAdminState { pipelines, meta }),
             log_level,
+            require_loopback_host: false,
             stats,
             verbose,
         }
+    }
+
+    /// Answer only requests whose `Host` names loopback (off by default).
+    ///
+    /// Enable this when the service is bound to a loopback address, so a web
+    /// page that rebinds its DNS name to `127.0.0.1` cannot reach the admin
+    /// API through the operator's browser. Rejected requests get `421`.
+    #[must_use]
+    pub fn require_loopback_host(mut self, enabled: bool) -> Self {
+        self.require_loopback_host = enabled;
+        self
     }
 
     /// Build the `/ready` response status and body.
@@ -311,6 +326,12 @@ impl PingoraAdminService {
 impl ServeHttp for PingoraAdminService {
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
         let req = http_session.req_header();
+        if self.require_loopback_host
+            && let Some(resp) = admin_host::reject_non_loopback_host(req)
+        {
+            return resp;
+        }
+
         let path = req.uri.path().to_owned();
         let method = req.method.as_str().to_owned();
         let query = req.uri.query().map(str::to_owned);
@@ -341,6 +362,11 @@ impl ServeHttp for PingoraAdminService {
 /// `/healthy`, `/metrics`, (when `kv_registry` is `Some`)
 /// `/api/kv/*`, and (when `pipelines` is `Some`) `GET /api/pipelines`
 /// on a single port.
+///
+/// When `admin_addr` is a loopback address, requests whose `Host` is not
+/// loopback are rejected (see [`PingoraAdminService::require_loopback_host`]).
+/// A non-loopback bind skips the check because operators may reach it by DNS
+/// name.
 ///
 /// ```ignore
 /// use pingora_core::server::Server;
@@ -453,6 +479,7 @@ pub fn add_admin_endpoints_to_pingora_server_with_recorder(
     recorder: PrometheusAdminRecorder,
 ) {
     let verbose = options.verbose;
+    let require_loopback_host = admin_host::is_loopback_host(admin_addr);
     let handle = recorder.handle;
     let upkeep = PrometheusUpkeepService { handle };
     server.add_service(background_service("Prometheus upkeep", upkeep));
@@ -463,10 +490,11 @@ pub fn add_admin_endpoints_to_pingora_server_with_recorder(
         options.log_level,
         options.stats,
         verbose,
-    );
+    )
+    .require_loopback_host(require_loopback_host);
     let mut service = Service::new("admin".to_owned(), admin);
     service.add_tcp(admin_addr);
-    info!(address = %admin_addr, verbose, "admin endpoints enabled (health + metrics + kv + pipelines + log-level + stats)");
+    info!(address = %admin_addr, verbose, require_loopback_host, "admin endpoints enabled (health + metrics + kv + pipelines + log-level + stats)");
     server.add_service(service);
 }
 
@@ -936,9 +964,142 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn loopback_bound_admin_rejects_rebound_host_on_every_route() {
+        let (svc, _registry) = kv_admin(true);
+        for path in [
+            "/healthy",
+            "/ready",
+            "/metrics",
+            "/api/kv/test",
+            "/api/kv/test/color",
+            "/api/pipelines",
+            "/api/stats",
+            "/api/log-level",
+            "/unknown",
+        ] {
+            let raw = format!("GET {path} HTTP/1.1\r\nHost: attacker.example:9901\r\n\r\n");
+            let resp = serve(&svc, raw.as_bytes()).await;
+            assert_eq!(
+                resp.status().as_u16(),
+                421,
+                "GET {path} with a rebound Host must be 421"
+            );
+            assert_eq!(
+                resp.body(),
+                br#"{"error":"misdirected request"}"#,
+                "GET {path} rejection must be the JSON error"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn loopback_bound_admin_rejects_rebound_kv_mutations() {
+        let (svc, registry) = kv_admin(true);
+
+        let put = b"PUT /api/kv/test/color HTTP/1.1\r\nHost: attacker.example\r\nContent-Length: 3\r\n\r\nred";
+        assert_eq!(serve(&svc, put).await.status().as_u16(), 421, "rebound PUT must be 421");
+
+        let delete = b"DELETE /api/kv/test/color HTTP/1.1\r\nHost: attacker.example\r\n\r\n";
+        assert_eq!(
+            serve(&svc, delete).await.status().as_u16(),
+            421,
+            "rebound DELETE must be 421"
+        );
+
+        assert_eq!(
+            registry.get("test").unwrap().get("color").as_deref(),
+            Some("blue"),
+            "rejected mutations must leave the store untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_bound_admin_serves_loopback_hosts() {
+        let (svc, registry) = kv_admin(true);
+
+        let put = b"PUT /api/kv/test/color HTTP/1.1\r\nHost: 127.0.0.1:9901\r\nContent-Length: 3\r\n\r\nred";
+        assert_eq!(
+            serve(&svc, put).await.status().as_u16(),
+            200,
+            "IPv4 loopback PUT must pass"
+        );
+        assert_eq!(
+            registry.get("test").unwrap().get("color").as_deref(),
+            Some("red"),
+            "loopback PUT must update the store"
+        );
+
+        for host in ["localhost", "LOCALHOST.:9901", "[::1]:9901"] {
+            let raw = format!("GET /api/kv/test HTTP/1.1\r\nHost: {host}\r\n\r\n");
+            let resp = serve(&svc, raw.as_bytes()).await;
+            assert_eq!(resp.status().as_u16(), 200, "Host {host} must be served");
+        }
+
+        let healthy = serve(&svc, b"GET /healthy HTTP/1.1\r\nHost: localhost:9901\r\n\r\n").await;
+        assert_eq!(
+            healthy.body(),
+            br#"{"status":"ok"}"#,
+            "/healthy semantics are unchanged for loopback Hosts"
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_bound_admin_serves_http10_request_without_host() {
+        let (svc, _registry) = kv_admin(true);
+        let resp = serve(&svc, b"GET /healthy HTTP/1.0\r\n\r\n").await;
+        assert_eq!(resp.status().as_u16(), 200, "a Host-less HTTP/1.0 probe must be served");
+    }
+
+    #[tokio::test]
+    async fn admin_without_loopback_requirement_serves_any_host() {
+        let (svc, registry) = kv_admin(false);
+        let put = b"PUT /api/kv/test/color HTTP/1.1\r\nHost: admin.internal.example\r\nContent-Length: 3\r\n\r\nred";
+        assert_eq!(
+            serve(&svc, put).await.status().as_u16(),
+            200,
+            "a non-loopback bind must accept DNS-name Hosts"
+        );
+        assert_eq!(
+            registry.get("test").unwrap().get("color").as_deref(),
+            Some("red"),
+            "a non-loopback bind must keep mutations working"
+        );
+    }
+
+    #[test]
+    fn admin_host_check_is_off_by_default() {
+        let svc = PingoraAdminService::new(None, None, None, None, None, false);
+        assert!(
+            !svc.require_loopback_host,
+            "PingoraAdminService::new must not change behaviour for embedders"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Build an admin service with a `test` KV store holding `color=blue`.
+    fn kv_admin(require_loopback_host: bool) -> (PingoraAdminService, KvStoreRegistry) {
+        let registry = KvStoreRegistry::new();
+        registry.get_or_create("test").set("color", Arc::from("blue"));
+        let svc = PingoraAdminService::new(None, Some(registry.clone()), None, None, None, false)
+            .require_loopback_host(require_loopback_host);
+        (svc, registry)
+    }
+
+    /// Serve one raw HTTP request through `svc` over an in-memory stream.
+    async fn serve(svc: &PingoraAdminService, raw: &[u8]) -> Response<Vec<u8>> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut client, server) = tokio::io::duplex(65_536); // 64 KiB
+        client.write_all(raw).await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut session = ServerSession::new_http1(Box::new(server));
+        assert!(session.read_request().await.unwrap(), "request header must parse");
+        svc.response(&mut session).await
+    }
 
     /// Build a [`ClusterHealthState`] with `n` healthy endpoints for tests.
     fn make_health_entry(n: usize) -> praxis_core::health::ClusterHealthState {
