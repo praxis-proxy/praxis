@@ -123,21 +123,11 @@ impl Config {
 
 /// Emit a warning for each active insecure option flag.
 fn warn_active_insecure_options(opts: &InsecureOptions) {
-    for (name, active) in [
-        ("allow_open_security_filters", opts.allow_open_security_filters),
-        ("allow_private_endpoints", opts.allow_private_endpoints),
-        ("allow_private_health_checks", opts.allow_private_health_checks),
-        ("allow_private_upstreams", opts.allow_private_upstreams),
-        ("allow_public_admin", opts.allow_public_admin),
-        ("allow_root", opts.allow_root),
-        ("allow_tls_without_sni", opts.allow_tls_without_sni),
-        ("allow_unbounded_body", opts.allow_unbounded_body),
-        ("csrf_log_only", opts.csrf_log_only),
-        ("skip_pipeline_validation", opts.skip_pipeline_validation),
-    ] {
-        if active {
-            warn!(flag = name, "insecure_options flag is active");
-        }
+    for flag in opts.flags().into_iter().filter(|flag| flag.active) {
+        warn!(
+            flag = flag.name,
+            "insecure_options flag is active: {}", flag.description
+        );
     }
     warn_active_pipeline_checks(&opts.skip_pipeline_checks);
 }
@@ -470,7 +460,44 @@ fn validate_telemetry(telemetry: &crate::config::TelemetryConfig) -> Result<(), 
     reason = "tests use unwrap/expect/indexing/raw strings for brevity"
 )]
 mod tests {
-    use crate::config::{Config, DEFAULT_MAX_BODY_BYTES, ProtocolKind};
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    use crate::config::{Config, DEFAULT_MAX_BODY_BYTES, InsecureOptions, ProtocolKind};
+
+    #[test]
+    fn default_insecure_options_warn_nothing() {
+        let warned = capture_warned_flags(|| super::warn_active_insecure_options(&InsecureOptions::default()));
+        assert!(warned.is_empty(), "default options should not warn: {warned:?}");
+    }
+
+    #[test]
+    fn warns_once_per_active_insecure_flag() {
+        let opts: InsecureOptions = serde_yaml::from_str(
+            "allow_root: true\nallow_tls_no_verify: true\nskip_pipeline_checks:\n  duplicate_routers: true\n",
+        )
+        .unwrap();
+        let warned = capture_warned_flags(|| super::warn_active_insecure_options(&opts));
+        assert_eq!(
+            warned,
+            [
+                "allow_root",
+                "allow_tls_no_verify",
+                "skip_pipeline_checks.duplicate_routers"
+            ],
+            "each active flag should warn exactly once"
+        );
+    }
+
+    #[test]
+    fn warns_for_every_insecure_flag() {
+        let names = InsecureOptions::default().flags().map(|flag| flag.name);
+        let yaml: String = names.iter().map(|name| format!("{name}: true\n")).collect();
+        let opts: InsecureOptions = serde_yaml::from_str(&yaml).unwrap();
+        let warned = capture_warned_flags(|| super::warn_active_insecure_options(&opts));
+        assert_eq!(warned, names, "every top-level flag should warn, in declaration order");
+    }
 
     #[test]
     fn reject_invalid_admin_address() {
@@ -1528,5 +1555,41 @@ filter_chains:
         status: 200
 "#;
         Config::from_yaml(yaml).unwrap();
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// Run `run` and return the `flag` field of every WARN event it emits.
+    fn capture_warned_flags(run: impl FnOnce()) -> Vec<String> {
+        let flags = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(FlagCapture(Arc::clone(&flags)));
+        tracing::subscriber::with_default(subscriber, run);
+        std::mem::take(&mut *flags.lock().unwrap())
+    }
+
+    /// Layer recording the `flag` field of WARN events.
+    struct FlagCapture(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for FlagCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                event.record(&mut FlagVisitor(&mut self.0.lock().unwrap()));
+            }
+        }
+    }
+
+    /// Field visitor pushing the `flag` field's string value.
+    struct FlagVisitor<'flags>(&'flags mut Vec<String>);
+
+    impl tracing::field::Visit for FlagVisitor<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "flag" {
+                self.0.push(value.to_owned());
+            }
+        }
+
+        fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {}
     }
 }

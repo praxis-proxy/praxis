@@ -298,17 +298,8 @@ fn detect_metrics_labels_change(old: &Config, new: &Config) {
 // Insecure Option Escalation Detection
 // -----------------------------------------------------------------------------
 
-/// Produce `(name, old_val, new_val)` tuples for every [`InsecureOptions`] flag.
-///
-/// [`InsecureOptions`]: praxis_core::config::InsecureOptions
-macro_rules! insecure_flag_pairs {
-    ($old:expr, $new:expr, [$($field:ident),* $(,)?]) => {
-        [$(  (stringify!($field), $old.$field, $new.$field)  ),*]
-    };
-}
-
-/// Like [`insecure_flag_pairs!`] but for [`SkipPipelineChecks`] sub-fields,
-/// prefixing each name with `skip_pipeline_checks.`.
+/// Produce `(name, old_val, new_val)` tuples for [`SkipPipelineChecks`]
+/// sub-fields, prefixing each name with `skip_pipeline_checks.`.
 ///
 /// [`SkipPipelineChecks`]: praxis_core::config::SkipPipelineChecks
 macro_rules! pipeline_check_pairs {
@@ -342,27 +333,13 @@ pub(crate) fn collect_escalated_flags(
     old: &praxis_core::config::InsecureOptions,
     new: &praxis_core::config::InsecureOptions,
 ) -> Vec<&'static str> {
-    let mut result: Vec<&str> = insecure_flag_pairs!(
-        old,
-        new,
-        [
-            allow_open_security_filters,
-            allow_private_endpoints,
-            allow_private_health_checks,
-            allow_private_upstreams,
-            allow_public_admin,
-            allow_root,
-            allow_tls_no_verify,
-            allow_tls_without_sni,
-            allow_unbounded_body,
-            csrf_log_only,
-            skip_pipeline_validation,
-        ]
-    )
-    .into_iter()
-    .filter(|(_, old_val, new_val)| !old_val && *new_val)
-    .map(|(name, ..)| name)
-    .collect();
+    let mut result: Vec<&str> = old
+        .flags()
+        .into_iter()
+        .zip(new.flags())
+        .filter(|(old_flag, new_flag)| !old_flag.active && new_flag.active)
+        .map(|(_, new_flag)| new_flag.name)
+        .collect();
 
     collect_escalated_pipeline_checks(&old.skip_pipeline_checks, &new.skip_pipeline_checks, &mut result);
     result

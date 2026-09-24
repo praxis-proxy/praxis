@@ -4,58 +4,7 @@
 //! Startup security checks: root privilege enforcement, insecure option
 //! warnings, and TLS key permission validation.
 
-use praxis_core::config::{Config, InsecureOptions};
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// An insecure option accessor paired with the warning it emits when active.
-type InsecureWarning = (fn(&InsecureOptions) -> bool, &'static str);
-
-/// Each insecure option and the warning it emits when active.
-const INSECURE_WARNINGS: &[InsecureWarning] = &[
-    (
-        |options| options.allow_unbounded_body,
-        "allow_unbounded_body: body size ceiling relaxed",
-    ),
-    (
-        |options| options.allow_open_security_filters,
-        "allow_open_security_filters: open failure_mode allowed",
-    ),
-    (
-        |options| options.allow_private_endpoints,
-        "allow_private_endpoints: SSRF-sensitive endpoint addresses allowed",
-    ),
-    (
-        |options| options.allow_private_health_checks,
-        "allow_private_health_checks: loopback health checks allowed",
-    ),
-    (
-        |options| options.allow_private_upstreams,
-        "allow_private_upstreams: runtime SSRF protection disabled for upstream connections",
-    ),
-    (
-        |options| options.allow_public_admin,
-        "allow_public_admin: admin may bind non-loopback addresses",
-    ),
-    (
-        |options| options.allow_tls_no_verify,
-        "allow_tls_no_verify: upstream TLS certificate verification disabled",
-    ),
-    (
-        |options| options.allow_tls_without_sni,
-        "allow_tls_without_sni: TLS hostname verification weakened",
-    ),
-    (
-        |options| options.csrf_log_only,
-        "csrf_log_only: CSRF violations logged, not rejected",
-    ),
-    (
-        |options| options.skip_pipeline_validation,
-        "skip_pipeline_validation: pipeline errors demoted to warnings",
-    ),
-];
+use praxis_core::config::Config;
 
 // -----------------------------------------------------------------------------
 // Insecure Options Warnings
@@ -64,8 +13,8 @@ const INSECURE_WARNINGS: &[InsecureWarning] = &[
 /// Emit startup warnings for every active insecure option.
 pub(crate) fn warn_insecure_options(config: &Config) {
     let opts = &config.insecure_options;
-    for &(is_active, message) in INSECURE_WARNINGS {
-        insecure_warn(is_active(opts), message);
+    for flag in opts.flags().into_iter().filter(|flag| flag.active) {
+        tracing::warn!("insecure_options.{}: {}", flag.name, flag.description);
     }
     warn_pipeline_check_skips(&opts.skip_pipeline_checks);
 }
@@ -443,6 +392,7 @@ mod tests {
             }),
             ("allow_private_upstreams", |opts| opts.allow_private_upstreams = true),
             ("allow_public_admin", |opts| opts.allow_public_admin = true),
+            ("allow_root", |opts| opts.allow_root = true),
             ("allow_tls_no_verify", |opts| opts.allow_tls_no_verify = true),
             ("allow_tls_without_sni", |opts| opts.allow_tls_without_sni = true),
             ("csrf_log_only", |opts| opts.csrf_log_only = true),
@@ -473,8 +423,8 @@ mod tests {
         let warnings = capture_warnings(|| super::warn_insecure_options(&config));
         assert_eq!(
             warnings.len(),
-            18,
-            "expected 18 warnings (10 options + 8 pipeline checks): {warnings:?}"
+            19,
+            "expected 19 warnings (11 options + 8 pipeline checks): {warnings:?}"
         );
     }
 

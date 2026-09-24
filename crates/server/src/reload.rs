@@ -1461,6 +1461,18 @@ filter_chains:
     }
 
     #[test]
+    fn escalation_detects_every_flag() {
+        for name in InsecureOptions::default().flags().map(|flag| flag.name) {
+            let new: InsecureOptions = serde_yaml::from_str(&format!("{name}: true")).unwrap();
+            assert_eq!(
+                collect_escalated_flags(&InsecureOptions::default(), &new),
+                vec![name],
+                "enabling {name} should be reported as an escalation"
+            );
+        }
+    }
+
+    #[test]
     fn no_escalation_when_identical() {
         let opts = InsecureOptions::default();
         let escalated = collect_escalated_flags(&opts, &opts);

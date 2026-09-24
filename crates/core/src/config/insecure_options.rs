@@ -106,6 +106,39 @@ impl SkipPipelineChecks {
 }
 
 // -----------------------------------------------------------------------------
+// InsecureFlag
+// -----------------------------------------------------------------------------
+
+/// Build the [`InsecureOptions::flags`] table, naming each flag after its field.
+///
+/// Destructures exhaustively, so a new [`InsecureOptions`] field fails to
+/// compile until it is listed as a flag or explicitly skipped.
+macro_rules! insecure_flags {
+    ($opts:expr; $($field:ident: $description:literal,)* ; $($skipped:ident),*) => {{
+        #[expect(clippy::unneeded_field_pattern, reason = "`..` would defeat the exhaustiveness check")]
+        let InsecureOptions { $($field,)* $($skipped: _,)* } = *$opts;
+        [$(InsecureFlag { name: stringify!($field), active: $field, description: $description },)*]
+    }};
+}
+
+/// One top-level boolean [`InsecureOptions`] flag and its current state.
+///
+/// Produced by [`InsecureOptions::flags`], the single list every warning
+/// and reload diagnostic iterates, so a new flag cannot be missed by one
+/// of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InsecureFlag {
+    /// YAML key under `insecure_options`.
+    pub name: &'static str,
+
+    /// Whether the flag is enabled.
+    pub active: bool,
+
+    /// What enabling the flag weakens.
+    pub description: &'static str,
+}
+
+// -----------------------------------------------------------------------------
 // InsecureOptions
 // -----------------------------------------------------------------------------
 
@@ -244,6 +277,41 @@ impl InsecureOptions {
         } else {
             self.skip_pipeline_checks.clone()
         }
+    }
+
+    /// Every top-level boolean flag, in declaration order.
+    ///
+    /// The granular [`skip_pipeline_checks`] are not included; they are
+    /// reported by name under the `skip_pipeline_checks.` prefix.
+    ///
+    /// ```
+    /// use praxis_core::config::InsecureOptions;
+    ///
+    /// let opts: InsecureOptions = serde_yaml::from_str("allow_root: true").unwrap();
+    /// let active: Vec<_> = opts
+    ///     .flags()
+    ///     .into_iter()
+    ///     .filter(|flag| flag.active)
+    ///     .collect();
+    /// assert_eq!(active.len(), 1);
+    /// assert_eq!(active[0].name, "allow_root");
+    /// ```
+    ///
+    /// [`skip_pipeline_checks`]: InsecureOptions::skip_pipeline_checks
+    pub fn flags(&self) -> [InsecureFlag; 11] {
+        insecure_flags!(self;
+            allow_open_security_filters: "open failure_mode allowed on security filters",
+            allow_private_endpoints: "SSRF-sensitive endpoint addresses allowed",
+            allow_private_health_checks: "loopback health checks allowed",
+            allow_private_upstreams: "runtime SSRF protection disabled for upstream connections",
+            allow_public_admin: "admin may bind non-loopback addresses",
+            allow_root: "running as root (UID 0) allowed",
+            allow_tls_no_verify: "upstream TLS certificate verification may be disabled",
+            allow_tls_without_sni: "TLS hostname verification weakened",
+            allow_unbounded_body: "body size ceiling relaxed",
+            csrf_log_only: "CSRF violations logged, not rejected",
+            skip_pipeline_validation: "pipeline errors demoted to warnings",
+        ; skip_pipeline_checks)
     }
 }
 
@@ -394,6 +462,83 @@ mod tests {
             "lb_without_router should remain false"
         );
         assert!(!opts.skip_pipeline_validation, "blanket flag should remain false");
+    }
+
+    #[test]
+    fn flags_cover_every_bool_field_in_declaration_order() {
+        let value = serde_yaml::to_value(InsecureOptions::default()).unwrap();
+        let fields = value
+            .as_mapping()
+            .expect("InsecureOptions should serialize to a mapping");
+        let bool_fields: Vec<&str> = fields
+            .iter()
+            .filter(|(_, field)| field.is_bool())
+            .map(|(key, _)| key.as_str().unwrap())
+            .collect();
+        let names: Vec<&str> = InsecureOptions::default()
+            .flags()
+            .iter()
+            .map(|flag| flag.name)
+            .collect();
+        assert_eq!(
+            names, bool_fields,
+            "flags() must list every bool field in declaration order"
+        );
+    }
+
+    #[test]
+    fn flags_all_active_after_all_true_round_trip() {
+        let mut value = serde_yaml::to_value(InsecureOptions::default()).unwrap();
+        let fields = value
+            .as_mapping_mut()
+            .expect("InsecureOptions should serialize to a mapping");
+        for field in fields.values_mut().filter(|field| field.is_bool()) {
+            *field = serde_yaml::Value::Bool(true);
+        }
+        let all: InsecureOptions = serde_yaml::from_value(value).unwrap();
+        for flag in all.flags() {
+            assert!(flag.active, "{} should be active in an all-true config", flag.name);
+        }
+    }
+
+    #[test]
+    fn flags_all_inactive_by_default() {
+        for flag in InsecureOptions::default().flags() {
+            assert!(!flag.active, "{} should be inactive by default", flag.name);
+        }
+    }
+
+    #[test]
+    fn each_flag_reads_its_own_field() {
+        for name in InsecureOptions::default().flags().map(|flag| flag.name) {
+            let opts: InsecureOptions = serde_yaml::from_str(&format!("{name}: true")).unwrap();
+            let active: Vec<&str> = opts
+                .flags()
+                .iter()
+                .filter(|flag| flag.active)
+                .map(|flag| flag.name)
+                .collect();
+            assert_eq!(active, vec![name], "setting only {name} should activate only {name}");
+        }
+    }
+
+    #[test]
+    fn flags_ignore_granular_pipeline_checks() {
+        let opts = InsecureOptions {
+            skip_pipeline_checks: SkipPipelineChecks::all(),
+            ..Default::default()
+        };
+        assert!(
+            opts.flags().iter().all(|flag| !flag.active),
+            "granular pipeline checks are reported separately, not as top-level flags"
+        );
+    }
+
+    #[test]
+    fn flags_have_descriptions() {
+        for flag in InsecureOptions::default().flags() {
+            assert!(!flag.description.is_empty(), "{} should have a description", flag.name);
+        }
     }
 
     #[test]
