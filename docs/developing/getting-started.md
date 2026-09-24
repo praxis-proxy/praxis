@@ -101,46 +101,43 @@ deployment guidance.
 
 ### FIPS Build and Compliance Check
 
-Praxis targets FIPS 140-3 on Red Hat Enterprise Linux by performing all
-cryptography in the RHEL OpenSSL FIPS provider. The standard build
-(`make build`, `make release`, `make container`) enables everything by
-default. The FIPS build turns off what is known not to be compliant yet,
-currently the policy engine, so nobody has to know which features to
-pick. The feature set is defined once, as `FIPS_FEATURES` in the
-`Makefile`:
+The FIPS build does all cryptography in the system OpenSSL, which on a Red
+Hat Enterprise Linux host in FIPS mode is the validated FIPS provider. It
+leaves out the features that are not yet FIPS compliant, currently the policy
+engine. The feature set is defined once, as `FIPS_FEATURES` in the
+`Makefile`. The standard build (`make build`, `make release`,
+`make container`) uses the default features.
 
 ```console
 make release-fips    # FIPS build, release profile, into target/fips
 make build-fips      # same, debug profile, without the crate manifest
 make container-fips  # FIPS runtime image on UBI 9, tagged praxis:<version>-fips
+make lint-fips       # clippy and rustfmt for the FIPS feature set (CI runs it)
+make test-fips       # unit tests for the FIPS feature set (CI runs it)
 ```
 
-Three targets check a build against the rules Red Hat's release scanner
-(`openshift/check-payload`) applies to Rust binaries, and explain every
-finding with a reason and a pointer:
+`fips-deps`, `fips-report` and `fips-check` check a build against the rules
+Red Hat's release scanner (`openshift/check-payload`) applies to Rust
+binaries, explain each finding, and exit non-zero while findings remain.
+`fips-scanner` and `fips-scan` build and run the scanner itself:
 
 ```console
-make fips-deps     # dependency graph vs the crypto denylist (seconds, no build)
+make fips-deps     # dependency graph and source guards (seconds, no build)
 make fips-report   # full report against target/fips/release/praxis
 make fips-check    # build on UBI 9 with Red Hat's toolchain, then report
 make fips-scanner  # build Red Hat's scanner (check-payload) at its pinned revision
 make fips-scan     # run that scanner on the FIPS image, warnings fatal: the gate
 ```
 
-The report and the image verification are `cargo xtask fips` commands; the
-Makefile targets wrap them. `make container-fips`, `make fips-check`,
-`make fips-smoke` and `make fips-scan` need a Linux podman (rootless or
-root): the UBI 9 base images are pinned by digest and their Red Hat
-signatures are verified before every build (`cargo xtask fips
-verify-image`), and the scanner reads podman's image store. On Debian
-and Ubuntu, whose podman packaging ships no `registries.d` entry for Red
-Hat's registry, run `make fips-signature-store` once first. The FIPS
-image is built with Red Hat's `rust-toolset` and links the system
-OpenSSL; nothing is installed into the runtime image beyond the binary
-and its config. The report's exit status is non-zero while findings
-remain. See [FIPS Tooling](fips.md) for what is checked, the provenance
-of the pinned images and signing key, and why the build uses cargo's SBOM
-precursor.
+`make container-fips`, `make fips-check`, `make fips-smoke` and
+`make fips-scan` need a Linux podman, rootless or root. The first two verify
+the Red Hat signatures of the digest-pinned UBI 9 base images before every
+build (`make fips-verify-image`). On Debian and Ubuntu, whose podman ships no
+`registries.d` entry for Red Hat's registry, run `make fips-signature-store`
+once first. The image is built with Red Hat's `rust-toolset`, and its runtime
+stage installs nothing on `ubi9/ubi-minimal` beyond the binary and its config.
+See [FIPS Tooling](fips.md) for what the report checks, the provenance of the
+pinned images and signing key, and why the build uses cargo's SBOM precursor.
 
 ## Security: Binding Low Ports
 
