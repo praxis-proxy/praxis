@@ -26,7 +26,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Shane Utt <shaneutt@linux.com>"]
@@ -73,15 +73,15 @@ portable-atomic = "1.15.0"
 proptest = "1.11.0"
 quote = "1.0.47"
 praxis = { path = "crates/server", package = "praxis-proxy" }
-praxis-core = { version = "0.6.0", path = "crates/core", package = "praxis-proxy-core" }
+praxis-core = { version = "0.7.0", path = "crates/core", package = "praxis-proxy-core" }
 # default-features = false: the filter crate's own default (`policy-engine`)
 # must not leak in through this dependency edge, or a build that turns the
 # policy engine off at the binary (`--no-default-features`, the FIPS build)
 # would still link it. The `praxis-proxy` binary's default feature set forwards
 # `policy-engine` explicitly, so the standard build is unchanged.
-praxis-filter = { version = "0.6.0", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
-praxis-protocol = { version = "0.6.0", path = "crates/protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.6.0", path = "crates/tls", package = "praxis-proxy-tls" }
+praxis-filter = { version = "0.7.0", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
+praxis-protocol = { version = "0.7.0", path = "crates/protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.7.0", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 praxis-proxy-benchmarks = "0.2.2"
 # System OpenSSL bindings, the same crate the rustls provider below uses; never
