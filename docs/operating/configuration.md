@@ -120,6 +120,18 @@ their state on reload. Operators should expect a brief
 burst window for rate limiters and a closed circuit for
 circuit breakers immediately after reload.
 
+Three kinds of state survive a reload: key-value store
+entries; sticky-session bindings for a cluster whose
+`max_entries`, `ttl` and eviction policy did not change
+(a change to any of them starts that cluster's sessions
+afresh); and endpoint health (which endpoints are marked
+unhealthy) for a cluster whose `health_check` did not
+change. Only the unhealthy flag is carried, not the
+failure count behind it, so the new probes must confirm
+recovery before such an endpoint rejoins rotation. Clear
+or rewrite key-value entries through the admin API when
+a reload changes what they mean.
+
 See [hot-reload.yaml] for an example.
 
 [hot-reload.yaml]: ../../examples/configs/operations/hot-reload.yaml
@@ -625,8 +637,8 @@ threads. Unknown store names return 404.
 ### Runtime Cache Semantics
 
 Key-value stores are **runtime caches, not durable
-storage**. Data lives in memory and is lost on process
-exit.
+storage**. Data lives in memory, survives config
+reloads, and is lost on process exit.
 
 The store is designed for operational overrides (routing
 tables, feature flags, config knobs) that can be
