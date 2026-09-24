@@ -278,14 +278,7 @@ impl SessionStore {
                 continue;
             }
 
-            let expired = now.duration_since(entry.last_accessed) >= self.ttl;
-            let accessed_since_enqueue = entry.last_accessed > entry.enqueued_at;
-            let second_chance = matches!(self.eviction, EvictionPolicy::Lru)
-                && !expired
-                && accessed_since_enqueue
-                && chances < EVICTION_SECOND_CHANCES;
-
-            if second_chance {
+            if chances < EVICTION_SECOND_CHANCES && self.earns_second_chance(&entry, now) {
                 chances += 1;
                 let regeneration = self.next_generation.fetch_add(1, Ordering::Relaxed);
                 entry.enqueued_at = now;
@@ -296,12 +289,27 @@ impl SessionStore {
             }
 
             drop(entry);
-            self.map.remove(key.as_ref());
-            return true;
+            // The shard lock was released above, so the key may have expired
+            // and been re-put since; only evict the entry this occurrence saw.
+            if self
+                .map
+                .remove_if(key.as_ref(), |_, current| current.generation == generation)
+                .is_some()
+            {
+                return true;
+            }
         }
         // Queue drained without a victim: possible only when a concurrent
         // put's enqueue is still pending behind its map insert.
         false
+    }
+
+    /// Whether LRU eviction should requeue `entry` rather than evict it: it
+    /// has not expired and was accessed since it was enqueued.
+    fn earns_second_chance(&self, entry: &SessionEntry, now: Instant) -> bool {
+        matches!(self.eviction, EvictionPolicy::Lru)
+            && now.duration_since(entry.last_accessed) < self.ttl
+            && entry.last_accessed > entry.enqueued_at
     }
 
     /// Current eviction-queue length, for bound assertions.
