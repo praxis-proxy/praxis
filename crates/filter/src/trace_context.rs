@@ -314,13 +314,20 @@ fn combined_tracestate(headers: &http::HeaderMap) -> Option<String> {
     }
 }
 
-/// Parse W3C `tracestate` list-members. `None` if malformed or duplicated keys.
+/// Parse W3C `tracestate` list-members. `None` if malformed, duplicated
+/// keys, or no members.
+///
+/// Empty and whitespace-only members are skipped, as [W3C Trace Context
+/// Section 3.3.1.1] requires: joining several `tracestate` fields, or a
+/// trailing comma, produces them.
+///
+/// [W3C Trace Context Section 3.3.1.1]: https://www.w3.org/TR/trace-context/#list
 fn parse_tracestate(combined: &str) -> Option<String> {
     let mut members: Vec<(&str, &str)> = Vec::new();
     for member in combined.split(',') {
         let member = trim_ows(member);
         if member.is_empty() {
-            return None;
+            continue;
         }
         let (key, value) = member.split_once('=')?;
         let key = trim_ows(key);
@@ -693,11 +700,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_tracestate_rejects_empty_list_members() {
-        assert!(parse_tracestate(",congo=t61rcWkgMzE").is_none());
-        assert!(parse_tracestate("congo=t61rcWkgMzE,").is_none());
-        assert!(parse_tracestate("congo=t61rcWkgMzE,,rojo=00f067aa0ba902b7").is_none());
-        assert!(parse_tracestate("congo=t61rcWkgMzE, ,rojo=00f067aa0ba902b7").is_none());
+    fn parse_tracestate_skips_empty_list_members() {
+        assert_eq!(
+            parse_tracestate(",congo=t61rcWkgMzE").as_deref(),
+            Some("congo=t61rcWkgMzE")
+        );
+        assert_eq!(
+            parse_tracestate("congo=t61rcWkgMzE,").as_deref(),
+            Some("congo=t61rcWkgMzE")
+        );
+        assert_eq!(
+            parse_tracestate("congo=t61rcWkgMzE,,rojo=00f067aa0ba902b7").as_deref(),
+            Some("congo=t61rcWkgMzE,rojo=00f067aa0ba902b7")
+        );
+        assert_eq!(
+            parse_tracestate("congo=t61rcWkgMzE, \t ,rojo=00f067aa0ba902b7").as_deref(),
+            Some("congo=t61rcWkgMzE,rojo=00f067aa0ba902b7")
+        );
+        assert!(
+            parse_tracestate(" , ").is_none(),
+            "only empty members leaves nothing to forward"
+        );
     }
 
     #[test]
