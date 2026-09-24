@@ -13,7 +13,7 @@
 
 use bytes::Bytes;
 use praxis_core::config::FailureMode;
-use tracing::{Instrument as _, debug, info_span, trace, warn};
+use tracing::{Instrument as _, debug, debug_span, trace, warn};
 
 use super::{check_failure_mode, filter::PipelineFilter};
 use crate::{
@@ -318,7 +318,7 @@ pub(super) async fn run_request_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
-    let filter_span = info_span!(
+    let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:request", http_filter.name()),
         "filter.name" = http_filter.name(),
@@ -340,12 +340,13 @@ pub(super) async fn run_request_filter(
         } else {
             http_filter.on_request(ctx).await
         };
-        // Recording from inside the instrumented future spares the span
-        // clone (a subscriber clone_span/try_close pair per hook).
-        record_filter_result(&tracing::Span::current(), &result);
+        // Record on the filter span itself: `Span::current()` would resolve
+        // to the parent request span whenever the filter span is disabled
+        // and pay a subscriber clone per hook for nothing.
+        record_filter_result(&filter_span, &result);
         result
     }
-    .instrument(filter_span)
+    .instrument(filter_span.clone())
     .await;
     match request_result {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
@@ -392,7 +393,7 @@ pub(super) async fn run_request_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
-    let filter_span = info_span!(
+    let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:request_body", http_filter.name()),
         "filter.name" = http_filter.name(),
@@ -414,17 +415,17 @@ pub(super) async fn run_request_body_filter(
         } else {
             http_filter.on_request_body(ctx, body, end_of_stream).await
         };
-        record_filter_result(&tracing::Span::current(), &result);
+        record_filter_result(&filter_span, &result);
         result
     }
-    .instrument(filter_span)
+    .instrument(filter_span.clone())
     .await;
     dispatch_body_result(body_result, http_filter.name(), "request body", failure_mode)
 }
 
 /// The tracing span for one body hook invocation.
 fn body_hook_span(filter_name: &'static str, phase: &'static str) -> tracing::Span {
-    info_span!(
+    debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{filter_name}:{phase}"),
         "filter.name" = filter_name,
@@ -484,10 +485,10 @@ pub(super) async fn run_selected_upstream_request_body_filter(
             http_filter.on_selected_upstream_request_body(ctx, target),
         )
         .await;
-        record_selected_upstream_result(&tracing::Span::current(), &result);
+        record_selected_upstream_result(&filter_span, &result);
         result
     }
-    .instrument(filter_span)
+    .instrument(filter_span.clone())
     .await;
     if body_result.is_err() {
         *body = before;
@@ -529,10 +530,10 @@ pub(super) async fn run_bound_upstream_request_body_filter(
             http_filter.on_bound_upstream_request_body(ctx, target),
         )
         .await;
-        record_bound_upstream_result(&tracing::Span::current(), &result);
+        record_bound_upstream_result(&filter_span, &result);
         result
     }
-    .instrument(filter_span)
+    .instrument(filter_span.clone())
     .await;
     let rewrote = writer && body_result.is_ok();
     if body_result.is_err() {
@@ -551,7 +552,7 @@ pub(super) fn run_response_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
-    let filter_span = info_span!(
+    let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:response_body", http_filter.name()),
         "filter.name" = http_filter.name(),
@@ -598,7 +599,7 @@ pub(super) async fn run_response_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
-    let filter_span = info_span!(
+    let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:response", http_filter.name()),
         "filter.name" = http_filter.name(),
@@ -620,10 +621,10 @@ pub(super) async fn run_response_filter(
         } else {
             http_filter.on_response(ctx).await
         };
-        record_filter_result(&tracing::Span::current(), &result);
+        record_filter_result(&filter_span, &result);
         result
     }
-    .instrument(filter_span)
+    .instrument(filter_span.clone())
     .await;
     match response_result {
         Ok(

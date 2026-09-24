@@ -661,6 +661,13 @@ are additive - they set the level for specific
 modules without changing the base level. Valid
 levels: `error`, `warn`, `info`, `debug`, `trace`.
 
+Each filter hook runs in its own `filter` span
+(`filter:<name>:<phase>` in OpenTelemetry). These spans
+are at `debug` level, so the default `info` level does
+not create them and adds no per-filter tracing cost. To
+export them, raise the pipeline module:
+`praxis_filter::pipeline: debug`.
+
 ### Process Logging Destination
 
 `runtime.logging` controls where Praxis writes process
