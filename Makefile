@@ -285,9 +285,11 @@ container-run: | require-container-engine
 #                          signature-verified base images)
 #   make fips-check        build on UBI 9 and print the compliance report
 #   make fips-report       the same report against the local FIPS build
-#   make fips-deps         dependency graph and source guards (seconds, no build; also
-#                          runs under `make lint`, so a PR cannot reintroduce
-#                          a denied crate into the FIPS build)
+#   make fips-deps         dependency graph, source guards and the
+#                          Containerfile.fips feature check (seconds, no
+#                          build; also runs under `make lint`, so a PR
+#                          cannot reintroduce a denied crate into the FIPS
+#                          build)
 #   make fips-smoke        run the FIPS image once (validates its config)
 #   make fips-scan         run Red Hat's scanner (check-payload) on the
 #                          FIPS image, warnings fatal: the actual gate
@@ -335,9 +337,12 @@ FIPS_UBI9_MINIMAL_DIGEST := sha256:8ebe2ad8fdf3cab3e5a53c1edc69194c98209cfadab24
 FIPS_UBI9_IMAGE         := registry.access.redhat.com/ubi9/ubi@$(FIPS_UBI9_DIGEST)
 FIPS_UBI9_MINIMAL_IMAGE := registry.access.redhat.com/ubi9/ubi-minimal@$(FIPS_UBI9_MINIMAL_DIGEST)
 FIPS_CHECK_IMAGE        ?= praxis-fips-check
+# CARGO_FEATURES is left to the Containerfile default, which is what the
+# release workflows build; fips-deps checks it matches FIPS_FEATURES. So
+# overriding FIPS_FEATURES on the command line does not change the image:
+# edit both FIPS_FEATURES and the Containerfile.fips default instead.
 FIPS_BUILD_ARGS         := --build-arg UBI9_DIGEST=$(FIPS_UBI9_DIGEST) \
-	--build-arg UBI9_MINIMAL_DIGEST=$(FIPS_UBI9_MINIMAL_DIGEST) \
-	--build-arg CARGO_FEATURES=$(FIPS_FEATURES)
+	--build-arg UBI9_MINIMAL_DIGEST=$(FIPS_UBI9_MINIMAL_DIGEST)
 XTASK_FIPS              := cargo run -q -p xtask --no-default-features --
 # Red Hat's scanner, openshift/check-payload, at the revision that added Rust
 # support (the head of its PR #360, fetched by commit so a rewrite of the PR
@@ -442,6 +447,8 @@ fips-report:
 # workspace-wide, and the test crates always enable the policy engine on
 # the binary, so it cannot see the FIPS build's real graph.
 fips-deps:
+	@grep -qx 'ARG CARGO_FEATURES="$(FIPS_FEATURES)"' Containerfile.fips || { \
+		echo "Containerfile.fips CARGO_FEATURES default differs from FIPS_FEATURES ($(FIPS_FEATURES))"; exit 1; }
 	$(XTASK_FIPS) fips report --deps-only --features $(FIPS_FEATURES)
 
 # --fail-on-warnings makes an inconclusive verdict (for example a binary
