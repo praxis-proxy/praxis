@@ -30,7 +30,12 @@ pub(crate) fn section(report: &mut Report, binary: Option<&Path>) {
         return;
     };
     if !binary.is_file() {
-        report.warn(&format!("binary not found at {}; skipped", binary.display()));
+        report.fail(Finding {
+            title: "binary not found".to_owned(),
+            why: "the binary checks cannot pass without a binary to check".to_owned(),
+            location: binary.display().to_string(),
+            fix: "build it first (make release-fips) or pass the right path".to_owned(),
+        });
         return;
     }
     report.info(&format!("path: {}", binary.display()));
@@ -374,6 +379,16 @@ mod tests {
             finding.title.contains("format 0, expected 8"),
             "the finding names both formats: {}",
             finding.title
+        );
+    }
+
+    #[test]
+    fn a_missing_binary_is_a_finding() {
+        let mut report = Report::default();
+        section(&mut report, Some(Path::new("/nonexistent/praxis")));
+        assert!(
+            report.failed() && report.has_finding("binary not found"),
+            "a named binary that does not exist must fail the report, not pass it unchecked"
         );
     }
 
