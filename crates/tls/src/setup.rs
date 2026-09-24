@@ -18,12 +18,34 @@ pub mod sni;
 use std::sync::Arc;
 
 pub(crate) use loader::default_crypto_provider;
-use rustls::{ServerConfig, server::WantsServerCert, version};
+use rustls::{
+    ServerConfig,
+    server::{ServerSessionMemoryCache, StoresServerSessions, WantsServerCert},
+    version,
+};
 
 use crate::{CipherSuiteId, ClientCertMode, ListenerTls, TlsError, TlsVersion, client_auth};
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Stateful TLS session cache entries per listener. The rustls default of 256
+/// turns over every 128 connections, since each TLS 1.3 handshake stores two
+/// tickets, so resumption rarely succeeded. An entry is a few hundred bytes
+/// (more with client certificates), so this costs about a megabyte per
+/// listener. Stateless tickets would avoid the cache, but the OpenSSL provider
+/// has no ticketer and rustls would not check one for FIPS.
+const SESSION_CACHE_ENTRIES: usize = 4_096;
+
+/// The session cache every listener config uses.
+fn session_storage() -> Arc<dyn StoresServerSessions + Send + Sync> {
+    ServerSessionMemoryCache::new(SESSION_CACHE_ENTRIES)
+}
+
 /// Apply the settings every listener config shares once its certificates are
-/// wired: the ALPN list and the Extended Master Secret requirement. When the
+/// wired: the ALPN list, the session cache and the Extended Master Secret
+/// requirement. When the
 /// deployment requires FIPS mode, a config that would not operate in it is an
 /// error rather than a listener.
 fn finish_server_config(mut config: ServerConfig, advertise_http_alpn: bool) -> Result<ServerConfig, TlsError> {
@@ -32,6 +54,7 @@ fn finish_server_config(mut config: ServerConfig, advertise_http_alpn: bool) -> 
     } else {
         Vec::new()
     };
+    config.session_storage = session_storage();
     require_extended_master_secret(&mut config);
     crate::provider::check_config_fips(config.fips(), "listener")?;
     Ok(config)
@@ -361,6 +384,21 @@ mod tests {
         CaConfig, CertKeyPair,
         test_utils::{ensure_crypto_provider, gen_test_certs},
     };
+
+    #[test]
+    fn the_session_cache_outlives_the_rustls_default() {
+        let storage = session_storage();
+        for id in 0..1_024_u32 {
+            assert!(
+                storage.put(id.to_be_bytes().to_vec(), vec![0; 32]),
+                "the cache must accept sessions"
+            );
+        }
+        assert!(
+            storage.get(&0_u32.to_be_bytes()).is_some(),
+            "a session must survive a thousand newer ones, which the 256-entry default would not"
+        );
+    }
 
     #[test]
     fn build_server_config_single_cert() {
