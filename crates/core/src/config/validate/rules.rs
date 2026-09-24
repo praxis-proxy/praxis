@@ -538,13 +538,14 @@ insecure_options:
   allow_root: true
   csrf_log_only: true
 "#;
+        let mut config = Config::from_yaml(yaml).unwrap();
         let warned = capture_warned_flags(|| {
-            Config::from_yaml(yaml).unwrap();
+            config.validate().unwrap();
         });
         assert_eq!(
             warned,
             ["allow_root", "csrf_log_only"],
-            "loading a config should warn exactly once per active flag"
+            "validating a config should warn exactly once per active flag"
         );
     }
 
@@ -1614,7 +1615,12 @@ filter_chains:
     fn capture_warned_flags(run: impl FnOnce()) -> Vec<String> {
         let flags = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(FlagCapture(Arc::clone(&flags)));
-        tracing::subscriber::with_default(subscriber, run);
+        tracing::subscriber::with_default(subscriber, || {
+            // Another test in this binary may install a global subscriber
+            // concurrently, leaving callsite interest cached without this one.
+            tracing::callsite::rebuild_interest_cache();
+            run();
+        });
         std::mem::take(&mut *flags.lock().unwrap())
     }
 
