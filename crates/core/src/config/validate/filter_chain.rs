@@ -305,7 +305,8 @@ fn validate_response_predicate_values(
         .iter()
         .flatten()
         .map(|(name, _)| name)
-        .find(|name| http::header::HeaderName::from_bytes(name.as_bytes()).is_err())
+        .filter(|name| http::header::HeaderName::from_bytes(name.as_bytes()).is_err())
+        .min()
     {
         return Err(ProxyError::Config(format!(
             "filter '{filter}' in chain '{chain_name}': response condition {idx} \
