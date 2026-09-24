@@ -192,6 +192,7 @@ async fn watch_loop(
 
     let mut backoff_ms = DEBOUNCE_MS;
     let mut watch_shutdown = true;
+    let mut retry_pending = false;
 
     loop {
         tokio::select! {
@@ -202,18 +203,11 @@ async fn watch_loop(
                     return;
                 }
 
-                let cert_ok = reload_cert(&current, &pair);
-                let verifier_ok = reload_client_verifier(verifier_reload.as_ref());
-
-                if cert_ok && verifier_ok {
-                    backoff_ms = MIN_SUCCESS_COOLDOWN_MS;
-                } else {
-                    backoff_ms = backoff_ms.saturating_mul(2).min(MAX_BACKOFF_MS);
-                    tracing::warn!(
-                        next_backoff_ms = backoff_ms,
-                        "reload failed, increasing backoff"
-                    );
-                }
+                retry_pending = !reload_with_backoff(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms);
+            }
+            () = tokio::time::sleep(Duration::from_millis(backoff_ms)), if retry_pending => {
+                tracing::info!("retrying the failed certificate reload");
+                retry_pending = !reload_with_backoff(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms);
             }
             result = shutdown.changed(), if watch_shutdown => {
                 // Copy the flag out of the borrow guard before the match so the
@@ -305,6 +299,38 @@ async fn drain_and_debounce(
     }
     while rx.try_recv().is_ok() {}
     false
+}
+
+/// Reload the certificate and client verifier and update `backoff_ms`,
+/// returning whether both loaded. A failure is retried on the backoff timer,
+/// so a file caught mid-write heals without waiting for the next change.
+fn reload_with_backoff(
+    current: &Arc<ArcSwap<CertifiedKey>>,
+    pair: &CertKeyPair,
+    verifier_reload: Option<&ClientVerifierReload>,
+    backoff_ms: &mut u64,
+) -> bool {
+    let cert_ok = reload_cert(current, pair);
+    let verifier_ok = reload_client_verifier(verifier_reload);
+    let reloaded = cert_ok && verifier_ok;
+    *backoff_ms = next_backoff(reloaded, *backoff_ms);
+    if !reloaded {
+        tracing::warn!(
+            retry_in_ms = *backoff_ms,
+            "certificate reload failed; retrying after backoff"
+        );
+    }
+    reloaded
+}
+
+/// The delay before the next reload: a cooldown after a success, or the
+/// previous delay doubled, up to [`MAX_BACKOFF_MS`], after a failure.
+fn next_backoff(reloaded: bool, backoff_ms: u64) -> u64 {
+    if reloaded {
+        MIN_SUCCESS_COOLDOWN_MS
+    } else {
+        backoff_ms.saturating_mul(2).min(MAX_BACKOFF_MS)
+    }
 }
 
 /// Attempt to reload the certificate, logging success or failure.
@@ -557,6 +583,25 @@ mod tests {
 
         let success = reload_cert(&current, &new_pair);
         assert!(success, "reload with valid paths should return true");
+    }
+
+    #[test]
+    fn a_failed_reload_doubles_the_retry_delay_up_to_the_cap() {
+        assert_eq!(
+            next_backoff(false, DEBOUNCE_MS),
+            DEBOUNCE_MS * 2,
+            "a failure must double the delay before the retry"
+        );
+        assert_eq!(
+            next_backoff(false, MAX_BACKOFF_MS),
+            MAX_BACKOFF_MS,
+            "repeated failures must keep retrying at the cap, not stop"
+        );
+        assert_eq!(
+            next_backoff(true, MAX_BACKOFF_MS),
+            MIN_SUCCESS_COOLDOWN_MS,
+            "a success must reset to the cooldown"
+        );
     }
 
     #[test]

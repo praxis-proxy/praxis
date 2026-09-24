@@ -82,8 +82,10 @@ the certificate statically. See
   Multi-cert SNI configs are automatically excluded.
 - If the new certificate fails to parse, the proxy logs
   a warning and continues serving the previous valid
-  certificate. Consecutive failures trigger exponential
-  backoff (up to 60s) to avoid log spam.
+  certificate. A failed reload is retried on a timer
+  even without a further file change, backing off
+  exponentially up to 60s between attempts, so a file
+  caught mid-write is picked up once it is complete.
 
 **Debounce behavior:** filesystem events are debounced by
 500ms to handle atomic rename patterns used by Kubernetes
