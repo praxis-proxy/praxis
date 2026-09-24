@@ -424,6 +424,29 @@ fn released_stream_buffer_body_still_honors_global_limit() {
 }
 
 #[test]
+fn buffering_stream_buffer_body_honors_global_limit() {
+    let backend_port_guard = start_echo_backend();
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&body_limit_yaml_with_filter(
+        proxy_port,
+        backend_port,
+        16,
+        "buffer_without_release",
+    ))
+    .unwrap();
+    let registry = registry_with("buffer_without_release", || Box::new(BufferWithoutReleaseFilter));
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let (status, _) = http_post(proxy.addr(), "/echo", &"x".repeat(512));
+
+    assert_eq!(
+        status, 413,
+        "a runtime StreamBuffer larger than max_request_bytes must not lift the global limit"
+    );
+}
+
+#[test]
 fn response_body_over_limit_returns_error() {
     let large_body = "z".repeat(512);
     let backend_port_guard = start_backend_with_shutdown(&large_body);
@@ -623,6 +646,35 @@ impl HttpFilter for ReleaseFirstChunkFilter {
     ) -> Result<FilterAction, FilterError> {
         RELEASE_OBSERVED.store(true, Ordering::SeqCst);
         Ok(FilterAction::Release)
+    }
+}
+
+/// Upgrades to a StreamBuffer larger than the global limit at request time
+/// and never releases, so the body stays in the buffering path.
+struct BufferWithoutReleaseFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for BufferWithoutReleaseFilter {
+    fn name(&self) -> &'static str {
+        "buffer_without_release"
+    }
+
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        ctx.set_request_body_mode(BodyMode::StreamBuffer { max_bytes: Some(1024) });
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
     }
 }
 

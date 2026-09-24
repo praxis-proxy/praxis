@@ -21,7 +21,7 @@ use tracing::{debug, error};
 use super::{
     super::context::PingoraRequestCtx,
     body_util::{
-        BodyFilterOutput, accumulate_stream_buffer, check_body_size_limit, release_stream_buffer,
+        BodyFilterOutput, accumulate_stream_buffer, check_body_size_limit, exceeds_body_ceiling, release_stream_buffer,
         suppress_stream_buffer_chunk,
     },
 };
@@ -51,6 +51,20 @@ pub(super) fn execute(
 
     let is_stream_buffer = matches!(ctx.response_body_mode, BodyMode::StreamBuffer { .. });
 
+    // The global body_limits ceiling applies in every mode but SizeLimit,
+    // which carries its own cap: Stream only counts, and a runtime
+    // StreamBuffer's cap comes from the filter, before and after Release.
+    // The projection does not mutate the counter; the filter pipeline below
+    // is the accumulator. `None` is only reachable with allow_unbounded_body.
+    if !matches!(ctx.response_body_mode, BodyMode::SizeLimit { .. })
+        && exceeds_body_ceiling(pipeline.response_body_ceiling(), ctx.response_body_bytes, body.as_ref())
+    {
+        return Err(pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            "response body exceeds global body limit",
+        ));
+    }
+
     match ctx.response_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
             if check_body_size_limit(body.as_ref(), &mut ctx.response_body_bytes, max_bytes) {
@@ -61,23 +75,6 @@ pub(super) fn execute(
             }
             mark_delivered_at_eos(ctx, end_of_stream);
             return Ok(None);
-        },
-
-        BodyMode::Stream => {
-            // The global body_limits ceiling applies to streamed bodies too;
-            // Stream mode just counts instead of buffering. The projection
-            // does not mutate the counter — the filter pipeline below is
-            // the accumulator. `None` is only reachable with
-            // allow_unbounded_body.
-            let chunk_len = body.as_ref().map_or(0, Bytes::len) as u64;
-            if let Some(max) = pipeline.response_body_ceiling()
-                && ctx.response_body_bytes.saturating_add(chunk_len) > max as u64
-            {
-                return Err(pingora_core::Error::explain(
-                    pingora_core::ErrorType::InternalError,
-                    "streamed response body exceeds global body limit",
-                ));
-            }
         },
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.response_body_released => {
@@ -96,19 +93,7 @@ pub(super) fn execute(
             }
         },
 
-        // After Release the body streams unbuffered; the global ceiling
-        // still applies (StreamBuffer's own cap no longer runs).
-        BodyMode::StreamBuffer { .. } => {
-            let chunk_len = body.as_ref().map_or(0, Bytes::len) as u64;
-            if let Some(max) = pipeline.response_body_ceiling()
-                && ctx.response_body_bytes.saturating_add(chunk_len) > max as u64
-            {
-                return Err(pingora_core::Error::explain(
-                    pingora_core::ErrorType::InternalError,
-                    "released response body exceeds global body limit",
-                ));
-            }
-        },
+        BodyMode::Stream | BodyMode::StreamBuffer { .. } => {},
         _ => tracing::error!("unhandled BodyMode variant in response body filter"),
     }
 

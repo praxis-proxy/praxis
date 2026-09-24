@@ -60,6 +60,13 @@ pub(super) fn check_body_size_limit(body: Option<&Bytes>, accumulated_bytes: &mu
     false
 }
 
+/// Whether `chunk` would take a body already `counted` bytes long past the
+/// global `ceiling`. Does not update the count.
+pub(super) fn exceeds_body_ceiling(ceiling: Option<usize>, counted: u64, chunk: Option<&Bytes>) -> bool {
+    let chunk_len = chunk.map_or(0, Bytes::len) as u64;
+    ceiling.is_some_and(|max| counted.saturating_add(chunk_len) > max as u64)
+}
+
 /// Push `chunk` into the stream buffer, creating it if absent. At end-of-stream
 /// the buffer is frozen into `body`. Returns `true` when the push overflows.
 pub(super) fn accumulate_stream_buffer(
