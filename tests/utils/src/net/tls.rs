@@ -427,7 +427,11 @@ pub struct ClientCert {
 // -----------------------------------------------------------------------------
 
 /// Generate a self-signed CA certificate, parameters, and key pair.
+///
+/// Also installs the crypto provider: tests build rustls client configs
+/// from these certificates, often before any proxy has started.
 fn generate_ca(cn: &str) -> (KeyPair, CertificateParams, rcgen::Certificate) {
+    ensure_crypto_provider();
     let ca_key = KeyPair::generate().expect("CA key generation");
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
     ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);

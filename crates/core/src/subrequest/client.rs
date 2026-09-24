@@ -660,7 +660,7 @@ mod tests {
 
     #[test]
     fn new_client_uses_absolute_max_body_bytes() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
         let client = SubRequestClient::new(connector);
 
         assert_eq!(
@@ -672,7 +672,7 @@ mod tests {
 
     #[test]
     fn with_max_response_bytes_sets_ceiling() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
         let custom_ceiling = 1_048_576;
         let client = SubRequestClient::with_max_response_bytes(connector, custom_ceiling);
 
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn connector_accessor_returns_stored_connector() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
         let client = SubRequestClient::new(connector.clone());
 
         let retrieved = client.connector();
@@ -696,7 +696,7 @@ mod tests {
 
     #[test]
     fn evict_idle_circuits_returns_zero_without_circuit_breaker() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
         let client = SubRequestClient::new(connector);
 
         let evicted = client.evict_idle_circuits(Duration::from_secs(60));
@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn debug_output_names_the_type() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
         let client = SubRequestClient::new(connector);
 
         let debug_str = format!("{client:?}");
@@ -729,7 +729,7 @@ mod tests {
 
     #[test]
     fn clone_preserves_ceiling() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
         let client = SubRequestClient::with_max_response_bytes(connector, 5_000_000);
 
         let cloned = client.clone();
@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn with_max_response_bytes_sets_various_ceilings() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
 
         let test_cases = vec![
             (1_000, "small ceiling"),
@@ -760,7 +760,7 @@ mod tests {
 
     #[test]
     fn with_max_response_bytes_accepts_boundary_values() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
 
         let zero_client = SubRequestClient::with_max_response_bytes(connector.clone(), 0);
         assert_eq!(
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn per_call_limit_clamps_to_client_ceiling() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
 
         let client_ceiling = 1_048_576;
         let client = SubRequestClient::with_max_response_bytes(connector, client_ceiling);
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn limit_clamping_across_various_ceilings() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
 
         struct TestCase {
             client_ceiling: usize,
@@ -916,7 +916,7 @@ mod tests {
 
     #[test]
     fn multiple_clients_keep_independent_limits() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
 
         let client_a = SubRequestClient::with_max_response_bytes(connector.clone(), 1_000_000);
         let client_b = SubRequestClient::with_max_response_bytes(connector.clone(), 5_000_000);
@@ -939,7 +939,7 @@ mod tests {
 
     #[test]
     fn evict_idle_circuits_returns_zero_for_any_duration() {
-        let connector = SubRequestConnector::new(128, None);
+        let connector = test_connector();
         let client = SubRequestClient::new(connector);
 
         let durations = vec![
@@ -958,5 +958,16 @@ mod tests {
                 "should always return 0 when no circuit breaker, duration: {duration:?}"
             );
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// Build a connector with the crypto provider installed first. The server
+    /// bootstrap normally installs it, but these tests never run that code.
+    fn test_connector() -> SubRequestConnector {
+        praxis_tls::provider::install();
+        SubRequestConnector::new(128, None)
     }
 }

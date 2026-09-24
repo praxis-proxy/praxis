@@ -985,7 +985,7 @@ async fn selected_upstream_phase_does_not_inherit_parent_provider() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
     let seen: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
@@ -1008,7 +1008,7 @@ async fn selected_upstream_phase_does_not_inherit_parent_provider() {
         serde_yaml::from_str("- filter: test_selected_provider_recorder").unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1043,7 +1043,7 @@ async fn staged_upstream_clears_discarded_selection_metadata() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
     let seen: Arc<Mutex<Option<Option<String>>>> = Arc::new(Mutex::new(None));
@@ -1066,7 +1066,7 @@ async fn staged_upstream_clears_discarded_selection_metadata() {
         serde_yaml::from_str("- filter: test_selected_provider_recorder").unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -3374,7 +3374,7 @@ async fn selected_upstream_reject_short_circuits_before_dialing() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let (_reserved, dead) = crate::test_support::refusing_addr();
 
@@ -3390,7 +3390,7 @@ async fn selected_upstream_reject_short_circuits_before_dialing() {
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("- filter: test_selected_upstream_reject").unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -3427,7 +3427,7 @@ async fn selected_upstream_oversized_output_is_rejected_with_413() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let (_reserved, dead) = crate::test_support::refusing_addr();
 
@@ -3446,7 +3446,7 @@ async fn selected_upstream_oversized_output_is_rejected_with_413() {
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("- filter: test_selected_upstream_expand").unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -3612,7 +3612,7 @@ async fn selected_upstream_phase_re_pins_staged_upstream_over_body_filter_rewrit
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let (staged_addr, staged_backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nstaged").await;
     let (attacker_addr, attacker_backend) =
@@ -3633,7 +3633,7 @@ async fn selected_upstream_phase_re_pins_staged_upstream_over_body_filter_rewrit
         serde_yaml::from_str("- filter: test_selected_upstream_body_hijack").unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -3685,7 +3685,7 @@ async fn selected_upstream_phase_enforces_retained_state_ceiling() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
     let (backend_addr, backend) =
@@ -3707,7 +3707,7 @@ async fn selected_upstream_phase_enforces_retained_state_ceiling() {
         serde_yaml::from_str("- filter: test_selected_upstream_state_expand").unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor = crate::FilteredSubrequestExecutor::new(
         Box::new(IterationStateCeiling { max_state_bytes: 64 }),

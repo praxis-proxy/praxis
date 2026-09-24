@@ -726,6 +726,7 @@ fn a_new_transport_builds_its_client_lazily() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_transport_that_was_never_handed_a_client_builds_its_own_and_dispatches() {
+    praxis_tls::provider::install();
     let backend = Backend::spawn(Reply::Keepalive(OK_RESPONSE));
     let transport = PolicyHttpTransport::new(true);
     assert!(transport.client.get().is_none(), "nothing built yet");
@@ -813,6 +814,7 @@ fn a_transport_built_after_registration_uses_the_registered_pool() {
 
 #[test]
 fn a_transport_built_without_a_registration_falls_back() {
+    praxis_tls::provider::install();
     let transport = PolicyHttpTransport::with_connector(None, true);
     assert!(transport.client.get().is_none(), "nothing built before first use");
     let _client = transport.client();
@@ -842,6 +844,7 @@ fn two_transports_from_one_registration_share_a_pool() {
 
 #[test]
 fn an_unregistered_host_falls_back_to_its_own_pool() {
+    praxis_tls::provider::install();
     let first = build_client(None);
     let second = build_client(None);
     assert!(

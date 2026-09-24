@@ -2854,7 +2854,7 @@ async fn streaming_body_deadline_expires_before_first_read() {
         socket.flush().await.unwrap();
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -2909,7 +2909,7 @@ async fn streaming_body_read_timeout_distinct_from_idle() {
         tokio::time::sleep(Duration::from_secs(10)).await;
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let mut peer_opts = peer.options.clone();
@@ -2981,7 +2981,7 @@ async fn streaming_body_byte_limit_boundary() {
         socket.flush().await.unwrap();
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -3057,7 +3057,7 @@ async fn streaming_body_metrics_recorded_on_idle_timeout() {
         drop(socket);
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
