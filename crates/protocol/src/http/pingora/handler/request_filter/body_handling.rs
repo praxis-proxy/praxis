@@ -11,6 +11,7 @@
 use std::collections::VecDeque;
 
 use bytes::Bytes;
+use praxis_core::config::MAX_RETRY_BODY_LIMIT_BYTES;
 use praxis_filter::FilterPipeline;
 
 use super::super::super::context::PingoraRequestCtx;
@@ -27,6 +28,16 @@ pub(super) fn selected_upstream_body_limit(pipeline: &FilterPipeline) -> usize {
     pipeline.selected_upstream_request_body_limit()
 }
 
+/// A copy of a rewritten body for retry replay, or `None` when no retry can
+/// replay it. `should_retry` refuses any request whose transformed body is
+/// over [`MAX_RETRY_BODY_LIMIT_BYTES`], so a larger copy would only pin the
+/// body, up to the request ceiling, for the whole request.
+pub(super) fn retry_copy(chunks: &VecDeque<Bytes>, len: usize) -> Option<VecDeque<Bytes>> {
+    u64::try_from(len)
+        .is_ok_and(|len| len <= MAX_RETRY_BODY_LIMIT_BYTES)
+        .then(|| chunks.clone())
+}
+
 /// Store the adapted selected-upstream request body (#1139).
 ///
 /// Mirrors the pre-read storage: a single frozen chunk (or empty deque), a
@@ -39,7 +50,7 @@ pub(super) fn store_adapted_request_body(ctx: &mut PingoraRequestCtx, body: Opti
         Some(b) if !b.is_empty() => VecDeque::from([b]),
         _ => VecDeque::new(),
     };
-    ctx.retained_adapted_request_body = Some(chunks.clone());
+    ctx.retained_adapted_request_body = Some(retry_copy(&chunks, len).unwrap_or_default());
     ctx.adapted_request_body = Some(chunks);
     ctx.adapted_request_body_len = Some(len);
 }
@@ -57,7 +68,7 @@ pub(super) fn store_canonical_request_body(ctx: &mut PingoraRequestCtx, body: By
     } else {
         VecDeque::from([body])
     };
-    ctx.retained_pre_read_body = Some(chunks.clone());
+    ctx.retained_pre_read_body = retry_copy(&chunks, len);
     ctx.pre_read_body = Some(chunks);
     ctx.mutated_request_body_len = Some(len);
 }
@@ -195,6 +206,45 @@ mod tests {
     }
 
     #[test]
+    fn an_unreplayable_adapted_body_keeps_only_the_marker() {
+        let mut ctx = make_ctx();
+        let oversized = Bytes::from(vec![b'a'; replay_cap() + 1]);
+        store_adapted_request_body(&mut ctx, Some(oversized));
+
+        assert_eq!(
+            ctx.retained_adapted_request_body,
+            Some(VecDeque::new()),
+            "a body no retry can replay keeps the adaptation marker but not the bytes"
+        );
+        assert_eq!(
+            ctx.adapted_request_body_len,
+            Some(replay_cap() + 1),
+            "the length stays authoritative so should_retry refuses the replay"
+        );
+    }
+
+    #[test]
+    fn an_unreplayable_canonical_body_is_not_retained() {
+        let mut ctx = make_ctx();
+        store_canonical_request_body(&mut ctx, Bytes::from(vec![b'a'; replay_cap() + 1]));
+
+        assert_eq!(
+            ctx.retained_pre_read_body, None,
+            "a body no retry can replay must not be pinned for the request"
+        );
+    }
+
+    #[test]
+    fn a_body_at_the_replay_cap_is_retained() {
+        let chunks = VecDeque::from([Bytes::from(vec![b'a'; replay_cap()])]);
+        assert_eq!(
+            retry_copy(&chunks, replay_cap()).as_ref(),
+            Some(&chunks),
+            "a body a retry may replay must be kept"
+        );
+    }
+
+    #[test]
     fn store_adapted_request_body_empty_body_yields_empty_deques() {
         let mut ctx = make_ctx();
         store_adapted_request_body(&mut ctx, Some(Bytes::new()));
@@ -309,5 +359,9 @@ mod tests {
             pipeline.selected_upstream_request_body_limit(),
             "wrapper must delegate to pipeline method"
         );
+    }
+
+    fn replay_cap() -> usize {
+        usize::try_from(MAX_RETRY_BODY_LIMIT_BYTES).expect("the replay cap fits in usize")
     }
 }

@@ -244,8 +244,9 @@ pub(super) async fn pre_read_body(
     // when a ReadWrite filter shrinks the forwarded payload.
     ctx.request_body_bytes = original_body_bytes;
     let writer_ran = caps.any_request_body_writer;
+    let forwarded_len = forwarded.len();
     if writer_ran {
-        ctx.mutated_request_body_len = Some(forwarded.len());
+        ctx.mutated_request_body_len = Some(forwarded_len);
     }
     let chunks = if forwarded.is_empty() {
         VecDeque::new()
@@ -258,7 +259,7 @@ pub(super) async fn pre_read_body(
     // upstream_request_filter can re-seed it per retry, keeping the replayed
     // body matched to the re-stamped Content-Length.
     if writer_ran {
-        ctx.retained_pre_read_body = Some(chunks.clone());
+        ctx.retained_pre_read_body = super::body_handling::retry_copy(&chunks, forwarded_len);
     }
     ctx.pre_read_body = Some(chunks);
 
