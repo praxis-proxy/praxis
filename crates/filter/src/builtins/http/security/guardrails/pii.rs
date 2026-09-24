@@ -18,11 +18,15 @@ use serde::Deserialize;
 // -----------------------------------------------------------------------------
 
 /// Matches US SSNs in the canonical `NNN-NN-NNNN` format.
+///
+/// Every PII pattern disables Unicode (`(?-u)`): the patterns are ASCII, and
+/// a Unicode `\b` forces the regex engine off its fast path on the first
+/// non-ASCII byte of a body.
 #[expect(
     clippy::expect_used,
     reason = "hardcoded regex patterns are known-valid at compile time"
 )]
-static SSN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("SSN regex"));
+static SSN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u)\b\d{3}-\d{2}-\d{4}\b").expect("SSN regex"));
 
 /// Matches credit/debit card numbers for major networks.
 ///
@@ -36,7 +40,7 @@ static SSN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{3}-\d{2}-\d{
 )]
 static CREDIT_CARD_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?x)
+        r"(?x-u)
         \b
         (?:
             # Visa 16-digit (4xxx xxxx xxxx xxxx)
@@ -66,7 +70,7 @@ static CREDIT_CARD_RE: LazyLock<Regex> = LazyLock::new(|| {
 )]
 static PHONE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?x)
+        r"(?x-u)
         (?:
             (?:\+?1[\ .\-])?           # optional US country code + separator
             \(?[2-9]\d{2}\)?           # area code (optionally parenthesised)
@@ -86,7 +90,7 @@ static PHONE_RE: LazyLock<Regex> = LazyLock::new(|| {
     reason = "hardcoded regex patterns are known-valid at compile time"
 )]
 static EMAIL_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b").expect("email regex"));
+    LazyLock::new(|| Regex::new(r"(?-u)\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b").expect("email regex"));
 
 // -----------------------------------------------------------------------------
 // PII Kind
@@ -144,4 +148,32 @@ pub(super) fn matches_any(kinds: &[PiiKind], haystack: &str) -> Option<PiiKind> 
         }
     }
     None
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{PiiKind, matches_any};
+
+    #[test]
+    fn detects_pii_in_a_body_with_non_ascii_text() {
+        let body = "Grüße, meine Nummer ist 123-45-6789 und café@example.com zählt nicht";
+        assert_eq!(
+            matches_any(&[PiiKind::Ssn], body),
+            Some(PiiKind::Ssn),
+            "an SSN surrounded by non-ASCII text must still be detected"
+        );
+    }
+
+    #[test]
+    fn a_non_ascii_letter_is_a_word_boundary() {
+        assert_eq!(
+            matches_any(&[PiiKind::Ssn], "é123-45-6789"),
+            Some(PiiKind::Ssn),
+            "a number glued to an accented letter must still be detected"
+        );
+    }
 }
