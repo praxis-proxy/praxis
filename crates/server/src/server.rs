@@ -115,6 +115,13 @@ fn run_startup_checks(config: &Config) {
 }
 
 /// Root, insecure-option, and file-permission checks before the server starts.
+///
+/// Config validation already warned about each active insecure option, but
+/// that ran before [`init_tracing`] could install the configured subscriber,
+/// so the warning is repeated here so file, JSON and `OTel` sinks record it at
+/// startup as well as on every reload.
+///
+/// [`init_tracing`]: praxis_core::logging::init_tracing
 fn run_startup_security_checks(config: &Config) {
     #[cfg(feature = "experimental")]
     warn_experimental_features();
@@ -212,7 +219,15 @@ pub fn run_server_with_registry(
 /// Assumes tracing is already initialized. Blocks until the process is
 /// terminated; never returns.
 ///
+/// Config validation warns about active `insecure_options` while the config
+/// is loaded, which is before the configured subscriber can exist: load it
+/// under [`with_bootstrap_logging`] so those warnings reach stderr. The
+/// startup checks here repeat them under the configured subscriber so the
+/// log sink records them too.
+///
 /// Config is owned for the server's lifetime (never returns).
+///
+/// [`with_bootstrap_logging`]: praxis_core::logging::with_bootstrap_logging
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server_with_composition(

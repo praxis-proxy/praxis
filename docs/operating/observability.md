@@ -627,6 +627,15 @@ PRAXIS_LOG_FORMAT=json cargo run -p praxis-proxy
 The default format is human-readable text. Both
 formats include the same structured fields.
 
+Warnings raised while the config is loaded and
+validated (active `insecure_options`, degraded upstream
+TLS, likely filter config typos) are emitted before the
+configured subscriber exists, so they go to stderr in
+this format. `--validate` and `--dump` stop there. On
+the serving path the active `insecure_options` are
+warned about again once logging is initialized, so
+`runtime.logging.output` records them as well.
+
 ### Log Level Overrides
 
 Control per-module log verbosity via

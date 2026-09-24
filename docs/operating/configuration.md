@@ -34,9 +34,12 @@ praxis --validate --config praxis.yaml
 praxis -t -c praxis.yaml
 ```
 
-Exits `0` on success (no output). Exits non-zero and
-prints an error to stderr on failure. Does not bind
-listener ports or enter the server runtime.
+Exits `0` on success. Exits non-zero and prints an
+error to stderr on failure. Validation warnings (active
+`insecure_options`, degraded upstream TLS, likely filter
+config typos) are printed to stderr either way, in the
+`PRAXIS_LOG_FORMAT` format. Does not bind listener ports
+or enter the server runtime.
 
 ## Dumping Effective Configuration
 
@@ -53,6 +56,7 @@ praxis -T -c praxis.yaml
 
 Exits `0` on valid config, writing YAML to stdout.
 Exits non-zero and writes errors to stderr on failure.
+Validation warnings go to stderr, as with `--validate`.
 Does not start the proxy or bind listeners. `--dump`
 and `--validate` are mutually exclusive.
 

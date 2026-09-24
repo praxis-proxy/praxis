@@ -464,7 +464,7 @@ mod tests {
 
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    use crate::config::{Config, DEFAULT_MAX_BODY_BYTES, InsecureOptions, ProtocolKind};
+    use crate::config::{Config, DEFAULT_MAX_BODY_BYTES, InsecureOptions, ProtocolKind, SkipPipelineChecks};
 
     #[test]
     fn default_insecure_options_warn_nothing() {
@@ -497,6 +497,55 @@ mod tests {
         let opts: InsecureOptions = serde_yaml::from_str(&yaml).unwrap();
         let warned = capture_warned_flags(|| super::warn_active_insecure_options(&opts));
         assert_eq!(warned, names, "every top-level flag should warn, in declaration order");
+    }
+
+    #[test]
+    fn warns_for_every_pipeline_check_skip() {
+        let opts = InsecureOptions {
+            skip_pipeline_checks: SkipPipelineChecks::all(),
+            ..InsecureOptions::default()
+        };
+        let warned = capture_warned_flags(|| super::warn_active_insecure_options(&opts));
+        assert_eq!(
+            warned,
+            [
+                "skip_pipeline_checks.conditional_security",
+                "skip_pipeline_checks.conflicting_cluster_selectors",
+                "skip_pipeline_checks.duplicate_load_balancers",
+                "skip_pipeline_checks.duplicate_rewrite_filters",
+                "skip_pipeline_checks.duplicate_routers",
+                "skip_pipeline_checks.lb_without_router",
+                "skip_pipeline_checks.misaligned_clusters",
+                "skip_pipeline_checks.unreachable_filters",
+            ],
+            "every granular pipeline check skip should warn once"
+        );
+    }
+
+    #[test]
+    fn config_validation_warns_once_per_active_flag() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+insecure_options:
+  allow_root: true
+  csrf_log_only: true
+"#;
+        let warned = capture_warned_flags(|| {
+            Config::from_yaml(yaml).unwrap();
+        });
+        assert_eq!(
+            warned,
+            ["allow_root", "csrf_log_only"],
+            "loading a config should warn exactly once per active flag"
+        );
     }
 
     #[test]

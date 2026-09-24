@@ -104,7 +104,7 @@ pub fn init_tracing(config: &Config) -> Result<TracingGuard, ProxyError> {
     let (filter_layer, reload_handle) = reload::Layer::new(env_filter);
     let log_level = LogLevelState::new(baseline, reload_handle);
 
-    let json = std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|value| value.eq_ignore_ascii_case("json"));
+    let json = json_log_format();
     let telemetry = config.telemetry.resolve();
     let writer_bundle = writer::build_log_writer(&config.runtime.logging)?;
 
@@ -115,7 +115,7 @@ pub fn init_tracing(config: &Config) -> Result<TracingGuard, ProxyError> {
 
     #[cfg(not(feature = "otel"))]
     {
-        init_fmt_only(filter_layer, json, writer_bundle.writer);
+        init_fmt_only(filter_layer, json, writer_bundle.writer)?;
         Ok(TracingGuard {
             worker_guard: writer_bundle.worker_guard,
             log_level,
@@ -160,6 +160,49 @@ pub fn validate_log_overrides(config: &Config) -> Result<(), ProxyError> {
 /// Returns [`ProxyError::Config`] when logging settings are invalid.
 pub fn validate_logging(config: &Config) -> Result<(), ProxyError> {
     config.runtime.logging.validate().map_err(ProxyError::Config)
+}
+
+// -----------------------------------------------------------------------------
+// Bootstrap Logging
+// -----------------------------------------------------------------------------
+
+/// Run `run` under a temporary subscriber that writes warnings and errors to
+/// stderr, in the `PRAXIS_LOG_FORMAT` format.
+///
+/// Config loading validates, and warns, before [`init_tracing`] can install
+/// the configured subscriber (it needs the loaded config), and the check-only
+/// CLI modes never install one. Without a subscriber in scope, those
+/// warnings would be dropped.
+///
+/// ```
+/// use praxis_core::{config::Config, logging::with_bootstrap_logging};
+///
+/// let config = with_bootstrap_logging(|| Config::from_yaml(praxis_core::config::DEFAULT_CONFIG));
+/// assert!(config.is_ok());
+/// ```
+pub fn with_bootstrap_logging<T, F: FnOnce() -> T>(run: F) -> T {
+    with_bootstrap_writer(std::io::stderr, json_log_format(), run)
+}
+
+/// Run `run` under a scoped WARN-level fmt subscriber writing to `writer`.
+fn with_bootstrap_writer<W, T, F>(writer: W, json: bool, run: F) -> T
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+    F: FnOnce() -> T,
+{
+    let builder = tracing_subscriber::fmt()
+        .with_writer(writer)
+        .with_max_level(tracing::Level::WARN);
+    if json {
+        tracing::subscriber::with_default(builder.json().finish(), run)
+    } else {
+        tracing::subscriber::with_default(builder.finish(), run)
+    }
+}
+
+/// Whether `PRAXIS_LOG_FORMAT` selects JSON output.
+fn json_log_format() -> bool {
+    std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|value| value.eq_ignore_ascii_case("json"))
 }
 
 // -----------------------------------------------------------------------------
@@ -340,7 +383,8 @@ fn init_with_otel(
                     .with_span_list(true),
             )
             .with(otel_layer)
-            .init();
+            .try_init()
+            .map_err(subscriber_init_error)?;
     } else {
         let otel_layer = provider
             .as_ref()
@@ -349,7 +393,8 @@ fn init_with_otel(
             .with(filter_layer)
             .with(tracing_subscriber::fmt::layer().with_writer(writer))
             .with(otel_layer)
-            .init();
+            .try_init()
+            .map_err(subscriber_init_error)?;
     }
 
     Ok(TracingGuard {
@@ -368,7 +413,7 @@ fn init_fmt_only(
     filter_layer: reload::Layer<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>,
     json: bool,
     writer: tracing_subscriber::fmt::writer::BoxMakeWriter,
-) {
+) -> Result<(), ProxyError> {
     if json {
         tracing_subscriber::registry()
             .with(filter_layer)
@@ -379,13 +424,20 @@ fn init_fmt_only(
                     .with_current_span(true)
                     .with_span_list(true),
             )
-            .init();
+            .try_init()
     } else {
         tracing_subscriber::registry()
             .with(filter_layer)
             .with(tracing_subscriber::fmt::layer().with_writer(writer))
-            .init();
+            .try_init()
     }
+    .map_err(subscriber_init_error)
+}
+
+/// Map a failed global subscriber install (one is already set) to a config error.
+#[expect(clippy::needless_pass_by_value, reason = "used as a `map_err` callback")]
+fn subscriber_init_error(err: tracing_subscriber::util::TryInitError) -> ProxyError {
+    ProxyError::Config(format!("failed to install tracing subscriber: {err}"))
 }
 
 // -----------------------------------------------------------------------------
@@ -1116,6 +1168,39 @@ filter_chains:
     // Test Utilities
     // -------------------------------------------------------------------------
 
+    /// Minimal valid config YAML, extendable with top-level sections.
+    const MINIMAL_YAML: &str = "listeners:\n  - name: web\n    address: \"127.0.0.1:8080\"\n    filter_chains: [main]\nfilter_chains:\n  - name: main\n    filters:\n      - filter: static_response\n        status: 200\n";
+
+    /// Cloneable in-memory log sink for the bootstrap subscriber.
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl SharedBuffer {
+        /// Everything written so far, as UTF-8.
+        fn contents(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl std::io::Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for SharedBuffer {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
     /// Build a minimal [`Config`] with the given log overrides.
     fn config_with_overrides(overrides: HashMap<String, String>) -> Config {
         let yaml = r#"
@@ -1151,7 +1236,81 @@ filter_chains:
         // the only test allowed to call init_tracing.
         let config = config_with_overrides(HashMap::new());
         let guard = init_tracing(&config).expect("tracing initialization should succeed");
+        let err = init_tracing(&config)
+            .err()
+            .expect("a second global subscriber must be refused");
+        assert!(
+            err.to_string().contains("failed to install tracing subscriber"),
+            "second init should return an error, not panic: {err}"
+        );
         drop(guard);
+    }
+
+    #[test]
+    fn bootstrap_logging_shows_config_validation_warnings() {
+        let output = SharedBuffer::default();
+        let result = with_bootstrap_writer(output.clone(), false, || {
+            Config::from_yaml(&format!(
+                "{MINIMAL_YAML}insecure_options:\n  allow_tls_no_verify: true\n"
+            ))
+        });
+        assert!(result.is_ok(), "config should load: {:?}", result.err());
+        let text = output.contents();
+        assert!(
+            text.contains("insecure_options flag is active") && text.contains("allow_tls_no_verify"),
+            "validation warning should reach the bootstrap subscriber: {text:?}"
+        );
+    }
+
+    #[test]
+    fn bootstrap_logging_json_emits_one_object_per_warning() {
+        let output = SharedBuffer::default();
+        with_bootstrap_writer(output.clone(), true, || {
+            tracing::warn!(flag = "allow_root", "bootstrap json");
+        });
+        let text = output.contents();
+        let lines: Vec<serde_json::Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(lines.len(), 1, "one warning should produce one JSON line: {text:?}");
+        assert_eq!(lines[0]["level"], "WARN", "JSON line should carry the level");
+        assert_eq!(
+            lines[0]["fields"]["flag"], "allow_root",
+            "JSON line should carry fields"
+        );
+    }
+
+    #[test]
+    fn bootstrap_logging_drops_events_below_warn() {
+        let output = SharedBuffer::default();
+        with_bootstrap_writer(output.clone(), false, || {
+            tracing::info!("bootstrap info");
+            tracing::debug!("bootstrap debug");
+            tracing::error!("bootstrap error");
+        });
+        let text = output.contents();
+        assert!(!text.contains("bootstrap info"), "INFO should be filtered: {text:?}");
+        assert!(!text.contains("bootstrap debug"), "DEBUG should be filtered: {text:?}");
+        assert!(text.contains("bootstrap error"), "ERROR should be shown: {text:?}");
+    }
+
+    #[test]
+    fn bootstrap_logging_is_scoped_to_the_closure() {
+        let output = SharedBuffer::default();
+        let value = with_bootstrap_writer(output.clone(), false, || 42);
+        tracing::warn!("after bootstrap scope");
+        assert_eq!(value, 42, "closure result should be returned");
+        assert!(
+            !output.contents().contains("after bootstrap scope"),
+            "events after the closure must not reach the bootstrap subscriber"
+        );
+    }
+
+    #[test]
+    fn with_bootstrap_logging_returns_closure_result() {
+        assert_eq!(
+            with_bootstrap_logging(|| "loaded"),
+            "loaded",
+            "result should pass through"
+        );
     }
 
     #[test]

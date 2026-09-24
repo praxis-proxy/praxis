@@ -39,7 +39,7 @@ pub use composition::{CompositionError, ExtensionContext, RegistryContext, Serve
 pub use pipelines::{build_full_registry, build_subrequest_client, resolve_pipelines};
 pub use praxis_core::{
     config::load_config,
-    logging::{TracingGuard, init_tracing},
+    logging::{TracingGuard, init_tracing, with_bootstrap_logging},
 };
 pub use praxis_filter::{PipelineExtension, RequestExtensions};
 pub use server::{

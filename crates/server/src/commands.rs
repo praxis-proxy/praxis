@@ -31,6 +31,10 @@ use crate::dump;
 /// filter factory instantiation, chain expansion, ordering checks, and
 /// body-limit application.
 ///
+/// No global subscriber exists in these modes, so warnings raised along the
+/// way (insecure overrides, filter-key typos, degraded TLS) are written to
+/// stderr, keeping `--dump`'s stdout clean YAML.
+///
 /// # Errors
 ///
 /// Returns an error if loading or validation fails. Any error returned here
@@ -38,9 +42,11 @@ use crate::dump;
 pub(crate) fn load_and_validate_for_cli(
     explicit: Option<&str>,
 ) -> Result<Config, Box<dyn std::error::Error + Send + Sync>> {
-    let config = praxis::load_config(explicit)?;
-    validate_config_for_startup(&config)?;
-    Ok(config)
+    praxis::with_bootstrap_logging(|| {
+        let config = praxis::load_config(explicit)?;
+        validate_config_for_startup(&config)?;
+        Ok(config)
+    })
 }
 
 /// Validate a parsed configuration by building filter pipelines.
