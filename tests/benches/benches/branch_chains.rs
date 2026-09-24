@@ -10,22 +10,20 @@
 //! counts and nesting levels.
 
 #![expect(
-    clippy::arithmetic_side_effects,
     clippy::min_ident_chars,
     clippy::unwrap_used,
-    clippy::indexing_slicing,
     clippy::too_many_lines,
     reason = "benchmarks"
 )]
 
 mod common;
 
-use std::hint::black_box;
+use std::{collections::HashMap, hint::black_box};
 
 use common::{bench_runtime, make_ctx, make_request};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef};
-use praxis_filter::{FilterEntry, FilterPipeline, FilterRegistry, FilterResultSet};
+use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, InsecureOptions};
+use praxis_filter::{FilterEntry, FilterPipeline, FilterRegistry, FilterResultSet, Request};
 
 // -----------------------------------------------------------------------------
 // Benchmarks
@@ -66,13 +64,14 @@ fn bench_pipeline_no_branches(c: &mut Criterion) {
     });
 }
 
-/// Benchmark pipeline execution with varying numbers of branches.
+/// Benchmark pipeline execution with varying numbers of unconditional branches.
 fn bench_pipeline_with_branches(c: &mut Criterion) {
     let rt = bench_runtime();
     let mut group = c.benchmark_group("branch_chains/with_branches");
 
     for &(label, branch_count) in &[("1", 1), ("3", 3), ("5", 5)] {
         let pipeline = build_pipeline_with_branches(branch_count);
+        assert_branch_ran(&rt, &pipeline, &make_request("/api/data"), "X-Branch");
         group.bench_with_input(BenchmarkId::from_parameter(label), &pipeline, |b, pipeline| {
             b.to_async(&rt).iter_batched(
                 || make_request("/api/data"),
@@ -88,54 +87,33 @@ fn bench_pipeline_with_branches(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark branch condition matching logic.
+/// Benchmark `on_result` branch matching against `grpc_detection` results.
 fn bench_branch_condition_matching(c: &mut Criterion) {
     let rt = bench_runtime();
     let mut group = c.benchmark_group("branch_chains/condition_matching");
+    let pipeline = build_pipeline_with_conditional_branches();
 
-    // Build three different pipelines for different match scenarios
-    let pipeline_api = build_pipeline_with_conditional_branches(3, "api");
-    let _pipeline_app = build_pipeline_with_conditional_branches(3, "app");
-    let pipeline_other = build_pipeline_with_conditional_branches(3, "other");
-
-    // Condition that matches (first branch fires)
-    group.bench_function("match_first", |b| {
-        let pipeline = &pipeline_api;
-        b.to_async(&rt).iter_batched(
-            || make_request("/api/data"),
-            |req| async move {
-                let mut ctx = make_ctx(&req);
-                let _result = black_box(pipeline.execute_http_request(black_box(&mut ctx)).await.unwrap());
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    // Condition that matches last branch
-    group.bench_function("match_last", |b| {
-        let pipeline = &pipeline_other;
-        b.to_async(&rt).iter_batched(
-            || make_request("/other/data"),
-            |req| async move {
-                let mut ctx = make_ctx(&req);
-                let _result = black_box(pipeline.execute_http_request(black_box(&mut ctx)).await.unwrap());
-            },
-            BatchSize::SmallInput,
-        );
-    });
-
-    // No condition matches (all branches skipped)
-    group.bench_function("no_match", |b| {
-        let pipeline = &pipeline_api;
-        b.to_async(&rt).iter_batched(
-            || make_request("/unknown/data"),
-            |req| async move {
-                let mut ctx = make_ctx(&req);
-                let _result = black_box(pipeline.execute_http_request(black_box(&mut ctx)).await.unwrap());
-            },
-            BatchSize::SmallInput,
-        );
-    });
+    for (label, content_type) in [
+        ("match_first", Some("application/grpc")),
+        ("match_last", Some("application/grpc+json")),
+        ("no_match", None),
+    ] {
+        let request = grpc_request(content_type);
+        if content_type.is_some() {
+            assert_branch_ran(&rt, &pipeline, &request, "X-Kind");
+        }
+        group.bench_function(label, |b| {
+            let pipeline = &pipeline;
+            b.to_async(&rt).iter_batched(
+                || request.clone(),
+                |req| async move {
+                    let mut ctx = make_ctx(&req);
+                    let _result = black_box(pipeline.execute_http_request(black_box(&mut ctx)).await.unwrap());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
 
     group.finish();
 }
@@ -145,7 +123,7 @@ fn bench_result_set_snapshot(c: &mut Criterion) {
     let mut group = c.benchmark_group("branch_chains/result_snapshot");
 
     for &(label, result_count) in &[("1", 1), ("5", 5), ("10", 10)] {
-        let mut results = std::collections::HashMap::new();
+        let mut results = HashMap::new();
         for i in 0..result_count {
             let mut result_set = FilterResultSet::new();
             result_set.set("status", "success").unwrap();
@@ -168,90 +146,95 @@ fn bench_result_set_snapshot(c: &mut Criterion) {
 // Pipeline Construction
 // -----------------------------------------------------------------------------
 
-/// Build a pipeline with `n` branches on a single filter.
+/// Build a pipeline whose router hosts `branch_count` unconditional branches.
 fn build_pipeline_with_branches(branch_count: usize) -> FilterPipeline {
-    let registry = FilterRegistry::with_builtins();
-
-    let branch_chains: Vec<BranchChainConfig> = (0..branch_count)
-        .map(|i| BranchChainConfig {
-            name: format!("branch_{i}"),
-            on_result: Some(BranchCondition {
-                filter: "router".to_owned(),
-                key: "cluster".to_owned(),
-                value: "api".to_owned(),
-            }),
-            rejoin: "next".to_owned(),
-            max_iterations: None,
-            chains: vec![ChainRef::Inline {
-                name: format!("chain_{i}"),
-                filters: vec![filter_entry(
-                    "headers",
-                    &format!("request_add:\n  - name: X-Branch\n    value: branch_{i}"),
-                )],
-            }],
-        })
+    let branch_chains = (0..branch_count)
+        .map(|i| branch(&format!("branch_{i}"), None, "X-Branch"))
         .collect();
-
     let mut entries = vec![
         FilterEntry {
-            filter_type: "router".into(),
-            config: serde_yaml::from_str(
+            branch_chains: Some(branch_chains),
+            ..filter_entry(
+                "router",
                 "routes:\n  - path_prefix: /api/\n    cluster: api\n  - path_prefix: /\n    cluster: default",
             )
-            .unwrap(),
-            conditions: vec![],
-            response_conditions: vec![],
-            name: None,
-            failure_mode: praxis_core::config::FailureMode::default(),
-            branch_chains: Some(branch_chains),
         },
         filter_entry("headers", "response_add:\n  - name: X-Done\n    value: \"true\""),
     ];
-
-    FilterPipeline::build(&mut entries, &registry).unwrap()
+    build_with_chains(&mut entries)
 }
 
-/// Build a pipeline with conditional branches that match different cluster values.
-fn build_pipeline_with_conditional_branches(branch_count: usize, _target_match: &str) -> FilterPipeline {
-    let registry = FilterRegistry::with_builtins();
-
-    let cluster_values = ["api", "app", "other"];
-    let branch_chains: Vec<BranchChainConfig> = (0..branch_count)
-        .map(|i| {
-            let cluster = cluster_values[i % cluster_values.len()];
-            BranchChainConfig {
-                name: format!("branch_{cluster}"),
-                on_result: Some(BranchCondition {
-                    filter: "router".to_owned(),
-                    key: "cluster".to_owned(),
-                    value: cluster.to_owned(),
-                }),
-                rejoin: "next".to_owned(),
-                max_iterations: None,
-                chains: vec![ChainRef::Inline {
-                    name: format!("chain_{cluster}"),
-                    filters: vec![filter_entry(
-                        "headers",
-                        &format!("request_add:\n  - name: X-Cluster\n    value: {cluster}"),
-                    )],
-                }],
-            }
+/// Build a pipeline whose `grpc_detection` filter hosts one branch per gRPC
+/// kind, in the order `grpc`, `grpc+proto`, `grpc+json`.
+fn build_pipeline_with_conditional_branches() -> FilterPipeline {
+    let branch_chains = ["grpc", "grpc+proto", "grpc+json"]
+        .into_iter()
+        .enumerate()
+        .map(|(i, kind)| {
+            let condition = BranchCondition {
+                filter: "grpc_detection".to_owned(),
+                key: "kind".to_owned(),
+                value: kind.to_owned(),
+            };
+            branch(&format!("branch_{i}"), Some(condition), "X-Kind")
         })
         .collect();
-
     let mut entries = vec![
         FilterEntry {
-            filter_type: "router".into(),
-            config: serde_yaml::from_str("routes:\n  - path_prefix: /api/\n    cluster: api\n  - path_prefix: /app/\n    cluster: app\n  - path_prefix: /other/\n    cluster: other\n  - path_prefix: /\n    cluster: default").unwrap(),
-            conditions: vec![],
-            response_conditions: vec![],
-            name: None,
-            failure_mode: praxis_core::config::FailureMode::default(),
             branch_chains: Some(branch_chains),
+            ..filter_entry("grpc_detection", "{}")
         },
+        filter_entry("router", "routes:\n  - path_prefix: /\n    cluster: default"),
     ];
+    build_with_chains(&mut entries)
+}
 
-    FilterPipeline::build(&mut entries, &registry).unwrap()
+/// A branch that rejoins at the next filter after adding `header`.
+fn branch(name: &str, on_result: Option<BranchCondition>, header: &str) -> BranchChainConfig {
+    BranchChainConfig {
+        name: name.to_owned(),
+        on_result,
+        rejoin: "next".to_owned(),
+        max_iterations: None,
+        chains: vec![ChainRef::Inline {
+            name: format!("chain_{name}"),
+            filters: vec![filter_entry(
+                "headers",
+                &format!("request_add:\n  - name: {header}\n    value: {name}"),
+            )],
+        }],
+    }
+}
+
+/// Build a pipeline with its branch chains resolved.
+fn build_with_chains(entries: &mut [FilterEntry]) -> FilterPipeline {
+    let registry = FilterRegistry::with_builtins();
+    FilterPipeline::build_with_chains(entries, &registry, &HashMap::new(), &InsecureOptions::default()).unwrap()
+}
+
+/// Build a POST request with an optional `content-type`.
+fn grpc_request(content_type: Option<&str>) -> Request {
+    let mut request = make_request("/svc/Method");
+    request.method = http::Method::POST;
+    if let Some(content_type) = content_type {
+        request
+            .headers
+            .insert(http::header::CONTENT_TYPE, content_type.parse().unwrap());
+    }
+    request
+}
+
+/// Run `request` once and panic unless a branch added `header`, so a
+/// broken config cannot silently time the branch-free path.
+fn assert_branch_ran(rt: &tokio::runtime::Runtime, pipeline: &FilterPipeline, request: &Request, header: &str) {
+    let mut ctx = make_ctx(request);
+    let _action = rt.block_on(pipeline.execute_http_request(&mut ctx)).unwrap();
+    assert!(
+        ctx.extra_request_headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(header)),
+        "a branch should have added {header}"
+    );
 }
 
 /// Build a [`FilterEntry`] from a filter type name and YAML config string.
