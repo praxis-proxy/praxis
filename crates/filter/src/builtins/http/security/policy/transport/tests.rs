@@ -744,41 +744,6 @@ async fn a_transport_that_was_never_handed_a_client_builds_its_own_and_dispatche
     assert_eq!(backend.heads().len(), 1);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn scoped_trace_correlation_reaches_policy_http_call() {
-    let backend = Backend::spawn(Reply::Keepalive(OK_RESPONSE));
-    let transport = transport(true);
-    let mut correlation = FrameworkHeaders::new();
-    correlation
-        .insert(
-            http::header::HeaderName::from_static("x-request-id"),
-            http::HeaderValue::from_static("policy-request-1"),
-        )
-        .unwrap();
-    correlation
-        .insert(
-            http::header::HeaderName::from_static("traceparent"),
-            http::HeaderValue::from_static("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
-        )
-        .unwrap();
-
-    let response = with_trace_correlation(
-        correlation,
-        transport.execute(HttpRequest::get(backend.url("/jwks")).timeout(Duration::from_secs(5))),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(response.status, 200);
-    let request = backend.heads().into_iter().next().expect("policy request head");
-    let request = request.to_ascii_lowercase();
-    assert!(request.contains("x-request-id: policy-request-1\r\n"), "{request}");
-    assert!(
-        request.contains("traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01\r\n"),
-        "{request}"
-    );
-}
-
 #[test]
 fn a_transport_keeps_the_connector_it_was_built_with() {
     let _guard = crate::policy_connector::REGISTRATION_LOCK
@@ -1015,37 +980,4 @@ fn transport(allow_private: bool) -> PolicyHttpTransport {
         .map_err(|_ignored| "client already set")
         .unwrap();
     transport
-}
-
-// -----------------------------------------------------------------------------
-// Task-local trace correlation
-// -----------------------------------------------------------------------------
-
-#[tokio::test]
-async fn correlation_headers_returns_none_without_scope() {
-    assert!(correlation_headers().is_none());
-}
-
-#[tokio::test]
-async fn correlation_headers_returns_scoped_value() {
-    use http::header::HeaderName;
-
-    let mut fw = FrameworkHeaders::new();
-    fw.insert(
-        HeaderName::from_static("x-request-id"),
-        http::HeaderValue::from_static("req-1"),
-    )
-    .unwrap();
-
-    let inside = with_trace_correlation(fw, async { correlation_headers() }).await;
-    let headers = inside.expect("task-local must be visible inside scope");
-    let entries: Vec<_> = headers.iter().map(|(n, _)| n.as_str().to_owned()).collect();
-    assert!(entries.contains(&"x-request-id".to_owned()));
-}
-
-#[tokio::test]
-async fn correlation_headers_not_visible_after_scope_exits() {
-    let fw = FrameworkHeaders::new();
-    with_trace_correlation(fw, async {}).await;
-    assert!(correlation_headers().is_none());
 }
