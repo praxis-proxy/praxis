@@ -28,7 +28,7 @@ use tokio::{
     net::TcpStream,
     sync::{Semaphore, watch},
 };
-use tracing::{Instrument as _, Span, error, info, info_span, trace, warn};
+use tracing::{Instrument as _, Span, debug, error, info, info_span, trace, warn};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -891,7 +891,15 @@ async fn resolve_and_connect(upstream_addr: &str, allow_private: bool) -> Option
     }
 
     match TcpStream::connect(addrs.as_slice()).await {
-        Ok(s) => Some(s),
+        Ok(s) => {
+            // A proxy forwards bytes as they arrive; Nagle plus delayed ACK
+            // can stall each exchange of a request/response protocol (Redis,
+            // Postgres) by up to about 40 ms.
+            if let Err(e) = s.set_nodelay(true) {
+                debug!(upstream = %upstream_addr, error = %e, "could not set TCP_NODELAY on the upstream");
+            }
+            Some(s)
+        },
         Err(e) => {
             warn!(upstream = %upstream_addr, error = %e, phase = "connect", "connection_error");
             None
