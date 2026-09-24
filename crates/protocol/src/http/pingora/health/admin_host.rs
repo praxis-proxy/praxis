@@ -23,8 +23,11 @@ use crate::http::pingora::json::json_response;
 
 /// Return a `421` response when the request names a non-loopback host.
 ///
-/// Every `Host` header and any absolute-form URI authority must satisfy
-/// [`is_loopback_host`]. A request that names no host at all (HTTP/1.0) is
+/// Every `Host` header and any URI authority (the HTTP/2 `:authority`) must
+/// satisfy [`is_loopback_host`]. An HTTP/1.1 absolute-form target keeps its
+/// authority out of the URI, but the Pingora fork rejects one that disagrees
+/// with `Host` at ingress, so the `Host` check covers it. A request that names
+/// no host at all (HTTP/1.0) is
 /// allowed: browsers always send `Host`, so its absence cannot come from a
 /// rebound page, only from a client that already reaches the socket directly.
 ///
@@ -245,11 +248,12 @@ mod tests {
     }
 
     #[test]
-    fn guard_rejects_non_loopback_absolute_form_authority() {
-        let req = request_with_hosts(b"http://attacker.example/api/stats", &[b"localhost"]);
+    fn guard_rejects_non_loopback_request_authority() {
+        let mut req = request_with_hosts(b"/api/stats", &[b"localhost"]);
+        req.set_uri(http::Uri::from_static("http://attacker.example/api/stats"));
         assert!(
             reject_non_loopback_host(&req).is_some(),
-            "an absolute-form authority must also name loopback"
+            "a request authority (HTTP/2 :authority) must also name loopback"
         );
     }
 
