@@ -25,6 +25,7 @@ clap = { workspace = true }
 notify = { workspace = true, optional = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
+praxis-tls = { workspace = true }
 praxis-protocol = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -46,6 +47,7 @@ tracing-subscriber = { workspace = true }
 
 [features]
 default = ["config-reload", "admin-api", "policy-engine"]
+
 # Config-file and TLS certificate hot-reload (filesystem watching via
 # `notify`). On by default; disable for a leaner build that drops the
 # watchers and the `notify`/`arc-swap`/`tokio` deps they pull into tls.
@@ -57,18 +59,25 @@ admin-api = ["praxis-protocol/admin-api"]
 dev = ["basic-auth-filter"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter", "experimental"]
 cloud-events-filter = ["praxis-filter/cloud-events-filter", "experimental"]
+# Logical upstream binding (`bound_upstream` conditions, bound load balancers).
+# Off by default; experimental. Implied by the two features below.
+upstream-binding = ["praxis-filter/upstream-binding", "praxis-protocol/upstream-binding", "experimental"]
 # The `iterative_request_router` filter. Off by default; experimental.
 iterative-request-router = ["praxis-filter/iterative-request-router", "experimental"]
 # The `router` filter's JSON-alias body-routing groundwork. Off by default; experimental.
 router-json-aliases = ["praxis-filter/router-json-aliases", "experimental"]
+# The bound-upstream request-body hook. Off by default; experimental.
+bound-upstream-request-body = ["praxis-filter/bound-upstream-request-body", "experimental"]
 # The chain-binding registry extension API. Off by default; experimental.
 chain-binding = ["praxis-filter/chain-binding", "experimental"]
 # SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
 spiffe = ["praxis-protocol/spiffe", "praxis-filter/spiffe", "experimental"]
-# The `policy` filter (Praxis Policy Engine). On by default; the server
-# depends on praxis-filter without dependency defaults, so a
-# `--no-default-features` build excludes the filter and the `ppe` tree.
-policy-engine = ["praxis-filter/policy-engine"]
+# The `policy` filter (Praxis Policy Engine). On by default. The workspace
+# declares praxis-filter with `default-features = false`, so this feature is
+# the only thing that turns the filter's `policy-engine` on; a
+# `--no-default-features` build (`make build-fips`) excludes the filter and
+# the whole `ppe` tree.
+policy-engine = ["praxis-filter/policy-engine", "praxis-protocol/policy-engine"]
 # Marker feature activated transitively by any experimental feature.
 # Used to gate the startup warning in startup_checks::warn_experimental_features.
 experimental = []

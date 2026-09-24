@@ -34,6 +34,8 @@ pub(crate) mod body;
 pub(crate) mod branch;
 mod build;
 pub(crate) mod build_branch;
+#[cfg(feature = "upstream-binding")]
+pub(crate) mod catalog;
 mod checks;
 mod clusters;
 pub(crate) mod evaluate;
@@ -81,6 +83,7 @@ use tracing::{error, warn};
 use self::filter::PipelineFilter;
 use crate::{
     FilterError,
+    any_filter::AnyFilter,
     body::{BodyCapabilities, BodyMode},
     builtins::http::payload_processing::compression_config::CompressionConfig,
     extensions::RequestExtensions,
@@ -162,6 +165,14 @@ pub struct FilterPipeline {
     /// Indices into `filters` of filters declaring selected-upstream
     /// request-body access.
     selected_upstream_request_body_filter_indices: Vec<usize>,
+
+    /// Indices into `filters` of top-level filters declaring bound-upstream
+    /// request-body access, drained once per request by the barrier in
+    /// [`execute_http_request`].
+    ///
+    /// [`execute_http_request`]: FilterPipeline::execute_http_request
+    #[cfg(feature = "bound-upstream-request-body")]
+    bound_upstream_request_body_filter_indices: Vec<usize>,
 
     /// Whether upstream hostnames may resolve to private or reserved IPs.
     ///
@@ -363,7 +374,13 @@ impl FilterPipeline {
             let Some(pf) = self.filters.get(idx) else {
                 continue;
             };
-            if crate::condition::should_execute_from(&pf.conditions, request, headers)? {
+            if crate::condition::should_execute_from(
+                &pf.conditions,
+                request,
+                headers,
+                crate::condition::BoundUpstreamView::default(),
+                crate::condition::SelectedUpstream::none(),
+            )? {
                 return Ok(true);
             }
         }
@@ -427,7 +444,7 @@ impl FilterPipeline {
     pub fn terminal_filters(&self) -> Vec<&'static str> {
         let mut names = Vec::new();
         for_each_pipeline_filter(&self.filters, &mut |pf| {
-            if let crate::any_filter::AnyFilter::Http(filter) = &pf.filter
+            if let AnyFilter::Http(filter) = &pf.filter
                 && filter.produces_terminal_response()
             {
                 names.push(filter.name());
@@ -436,17 +453,27 @@ impl FilterPipeline {
         names
     }
 
-    /// Whether any filter of `type_name` has request conditions matching
-    /// `request` (an unconditional entry always matches).
+    /// Whether any filter of `type_name` has request conditions matching the
+    /// request carried by `ctx` (an unconditional entry always matches).
     ///
     /// Used by protocol-level fallbacks that emit on a filter's behalf, so
     /// an operator's `when`/`unless` scoping is honored outside the normal
-    /// request phase.
-    pub fn filter_request_conditions_match(&self, type_name: &str, request: &crate::Request) -> bool {
+    /// request phase. Evaluates against both the request's bound-upstream view
+    /// and the load balancer's published selection carried by `ctx`, so
+    /// `bound_upstream` and `selected_upstream` predicates are honored on the
+    /// fallback path exactly as during the normal request phase. The selection
+    /// restored by `logging_cleanup` is on the context, so a
+    /// `selected_upstream`-scoped filter is matched against it rather than
+    /// silently dropped; passing the request alone would evaluate every such
+    /// predicate against an empty view and mis-gate the fallback record. Absent
+    /// metadata still fails closed.
+    pub fn filter_request_conditions_match(&self, type_name: &str, ctx: &crate::HttpFilterContext<'_>) -> bool {
+        let bound = ctx.bound_upstream_view();
+        let selected = http_utils::ctx_selected_upstream(ctx);
         self.filters
             .iter()
             .filter(|pf| pf.filter.name() == type_name)
-            .any(|pf| crate::condition::should_execute(&pf.conditions, request))
+            .any(|pf| crate::condition::should_execute_bound_selected(&pf.conditions, ctx.request, bound, selected))
     }
 
     /// Ask each filter to emit its end-of-request record, returning
@@ -608,7 +635,7 @@ impl FilterPipeline {
     pub fn referenced_files(&self) -> Vec<std::path::PathBuf> {
         let mut files = Vec::new();
         for_each_pipeline_filter(&self.filters, &mut |pf| {
-            if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+            if let AnyFilter::Http(f) = &pf.filter {
                 files.extend(f.referenced_files());
             }
         });
@@ -645,7 +672,7 @@ impl FilterPipeline {
     /// [`InsecureOptions`]: praxis_core::config::InsecureOptions
     pub fn apply_insecure_options(&self, options: &InsecureOptions) {
         for_each_pipeline_filter(&self.filters, &mut |pf| {
-            if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+            if let AnyFilter::Http(f) = &pf.filter {
                 f.apply_insecure_options(options);
             }
         });
@@ -655,6 +682,72 @@ impl FilterPipeline {
     /// including filters nested inside branch sub-chains.
     fn visit_nested_pipelines(&mut self, visitor: &mut dyn FnMut(&mut FilterPipeline)) {
         visit_branch_nested_pipelines(&mut self.filters, visitor);
+    }
+
+    /// Whether any filter in this pipeline (including branch sub-chains and
+    /// nested framework pipelines) selects its cluster from the frozen logical
+    /// binding.
+    ///
+    /// A framework filter that owns nested pipelines (the IRR) folds its
+    /// reachable steps' consumption up through [`consumes_bound_upstream`], so
+    /// this walk sees an IRR-step bound consumer even though
+    /// [`for_each_pipeline_filter`] does not descend into step pipelines
+    /// directly.
+    ///
+    /// [`consumes_bound_upstream`]: crate::HttpFilter::consumes_bound_upstream
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn consumes_bound_upstream(&self) -> bool {
+        let mut found = false;
+        for_each_pipeline_filter(&self.filters, &mut |pf| {
+            if let AnyFilter::Http(f) = &pf.filter {
+                found = found || f.consumes_bound_upstream();
+            }
+        });
+        found
+    }
+
+    /// Whether this pipeline contains any logical-binding observer or consumer.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn uses_bound_upstream(&self) -> bool {
+        checks::uses_bound_upstream(&self.filters)
+    }
+
+    /// Clusters this pipeline's bound-source consumers declare, at any branch
+    /// depth.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn bound_upstream_candidates(&self) -> std::collections::HashSet<String> {
+        checks::bound_consumer_clusters(&self.filters)
+    }
+
+    /// The `when: bound_upstream` matchers on this pipeline's filters, at any
+    /// branch depth, in pipeline order.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn bound_when_matchers(&self) -> Vec<praxis_core::config::ApplicationMatch> {
+        checks::bound_when_matchers(&self.filters)
+    }
+
+    /// Whether every path through this pipeline, entered already bound to
+    /// `cluster`, reaches a load balancer serving it or an answer.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn serves_bound_cluster(
+        &self,
+        cluster: &str,
+        metadata: Option<&catalog::ClusterApplicationMetadata>,
+    ) -> bool {
+        checks::serves_bound_cluster(&self.filters, cluster, metadata)
+    }
+
+    /// Cluster application-metadata declarations from every filter in this
+    /// pipeline, descending into branch sub-chains.
+    ///
+    /// A framework filter that owns nested pipelines folds its steps'
+    /// declarations up through [`declared_cluster_metadata`], so an IRR step's
+    /// cluster metadata reaches the parent catalog and its conflict check.
+    ///
+    /// [`declared_cluster_metadata`]: crate::HttpFilter::declared_cluster_metadata
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn cluster_metadata_declarations(&self) -> Vec<catalog::ClusterMetadataDeclaration> {
+        collect_cluster_declarations(&self.filters)
     }
 }
 
@@ -674,6 +767,24 @@ fn for_each_pipeline_filter(filters: &[PipelineFilter], visit: &mut dyn FnMut(&P
     }
 }
 
+/// Collect every filter's cluster application-metadata declarations,
+/// descending into branch sub-chains.
+///
+/// Shared by pipeline construction (which folds these into the runtime
+/// catalog) and validation (which detects conflicting declarations). Walks
+/// the same reachable filter set as the other pipeline-wide scans so a
+/// cluster declared only inside a branch still contributes.
+#[cfg(feature = "upstream-binding")]
+pub(super) fn collect_cluster_declarations(filters: &[PipelineFilter]) -> Vec<catalog::ClusterMetadataDeclaration> {
+    let mut declarations = Vec::new();
+    for_each_pipeline_filter(filters, &mut |pf| {
+        if let AnyFilter::Http(f) = &pf.filter {
+            declarations.extend(f.declared_cluster_metadata());
+        }
+    });
+    declarations
+}
+
 /// Invoke each filter's [`visit_nested_pipelines`], descending recursively into
 /// branch sub-chains so pipelines embedded by branch-contained filters (for
 /// example an outbound chain bound by a callout placed inside a branch) receive
@@ -682,7 +793,7 @@ fn for_each_pipeline_filter(filters: &[PipelineFilter], visit: &mut dyn FnMut(&P
 /// [`visit_nested_pipelines`]: crate::HttpFilter::visit_nested_pipelines
 fn visit_branch_nested_pipelines(filters: &mut [PipelineFilter], visitor: &mut dyn FnMut(&mut FilterPipeline)) {
     for pf in filters {
-        if let crate::any_filter::AnyFilter::Http(filter) = &mut pf.filter {
+        if let AnyFilter::Http(filter) = &mut pf.filter {
             filter.visit_nested_pipelines(visitor);
         }
         for branch in &mut pf.branches {

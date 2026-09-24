@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn watcher_reloads_on_file_change() {
         let certs = gen_test_certs();
-        let temp_dir = certs._temp_dir.as_ref().expect("temp dir");
+        let temp_dir = certs.temp_dir.as_ref().expect("temp dir");
         let pair = CertKeyPair {
             cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
             default: false,

@@ -6,6 +6,8 @@
 use std::collections::HashMap;
 
 use praxis_core::config::{Cluster, Config};
+#[cfg(feature = "upstream-binding")]
+use praxis_test_utils::start_full_proxy;
 use praxis_test_utils::{
     free_port, http_get, http_send, parse_header, parse_status, start_backend_with_shutdown, start_proxy,
 };
@@ -144,6 +146,52 @@ fn cluster_application_metadata_example_proxies_request() {
     let (status, body) = http_get(proxy.addr(), "/v1/chat/completions", None);
     assert_eq!(status, 200, "tagged cluster should still proxy traffic normally");
     assert_eq!(body, "llm", "response body should come from the tagged backend");
+}
+
+#[cfg(feature = "upstream-binding")]
+#[test]
+fn bound_upstream_condition_example_gates_on_bound_cluster() {
+    let openai = start_backend_with_shutdown("openai");
+    let generic = start_backend_with_shutdown("generic");
+    let proxy_port = free_port();
+    let config = super::load_example_config(
+        "traffic-management/bound-upstream-condition.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", openai.port()), ("127.0.0.1:3002", generic.port())]),
+    );
+    let proxy = start_full_proxy(&config);
+
+    let matched = http_send(
+        proxy.addr(),
+        "GET /openai/v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&matched), 200, "bound route should proxy successfully");
+    assert_eq!(
+        praxis_test_utils::parse_body(&matched),
+        "openai",
+        "the bound route should reach the openai backend"
+    );
+    assert_eq!(
+        parse_header(&matched, "X-Bound-Provider").as_deref(),
+        Some("openai"),
+        "the bound_upstream condition matches the tagged cluster, so the headers filter adds the provider header"
+    );
+
+    let unmatched = http_send(
+        proxy.addr(),
+        "GET /anything HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&unmatched), 200, "generic route should proxy successfully");
+    assert_eq!(
+        praxis_test_utils::parse_body(&unmatched),
+        "generic",
+        "the generic route should reach the generic backend"
+    );
+    assert_eq!(
+        parse_header(&unmatched, "X-Bound-Provider"),
+        None,
+        "the bound_upstream condition must not match the untagged cluster, so no provider header"
+    );
 }
 
 // ---------------------------------------------------------------------------

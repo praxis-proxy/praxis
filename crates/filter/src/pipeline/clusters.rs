@@ -13,6 +13,8 @@
 use std::collections::HashSet;
 
 use super::filter::PipelineFilter;
+#[cfg(feature = "upstream-binding")]
+use crate::any_filter::AnyFilter;
 
 // -----------------------------------------------------------------------------
 // Cluster Extraction
@@ -90,6 +92,29 @@ pub(super) fn reachable_lb_clusters(filters: &[PipelineFilter]) -> HashSet<Strin
     out
 }
 
+/// Cluster names that a binding filter (`binds_upstream`) may publish as the
+/// logical upstream, recursing into branch sub-chains.
+///
+/// The binding router records only a cluster name in the logical binding; these
+/// are exactly the names a bound-consuming load balancer must be able to
+/// resolve. Pipeline validation compares this set against reachable consumer
+/// coverage so every bindable cluster is served on its request path.
+#[cfg(feature = "upstream-binding")]
+pub(super) fn bindable_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for pf in filters {
+        if let AnyFilter::Http(f) = &pf.filter
+            && f.binds_upstream()
+        {
+            out.extend(f.selected_clusters());
+        }
+        for branch in &pf.branches {
+            out.extend(bindable_clusters(&branch.filters));
+        }
+    }
+    out
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -105,6 +130,8 @@ pub(super) fn reachable_lb_clusters(filters: &[PipelineFilter]) -> HashSet<Strin
 )]
 mod tests {
     use super::*;
+    #[cfg(feature = "upstream-binding")]
+    use crate::pipeline::test_filters::binding_router;
     use crate::pipeline::test_filters::{lb_filter, noop_filter, selector_filter};
 
     #[test]
@@ -263,6 +290,8 @@ mod tests {
             path_prefix: Some("/x".to_owned()),
             methods: None,
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         })];
         host.branches = vec![ResolvedBranch {
             condition: None,
@@ -294,6 +323,52 @@ mod tests {
         assert!(
             !reachable_lb_clusters(&[outer]).contains("deep"),
             "a conditional nested branch stops the reachability fold"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn bindable_clusters_collects_only_binding_publishers() {
+        let filters = vec![
+            selector_filter("ordinary_router", &["ordinary"]),
+            binding_router(&["bound-a", "bound-b"]),
+            lb_filter(&["endpoint-only"]),
+        ];
+
+        let clusters = bindable_clusters(&filters);
+
+        assert_eq!(
+            clusters.len(),
+            2,
+            "only the binding router's clusters are bindable: {clusters:?}"
+        );
+        assert!(
+            clusters.contains("bound-a"),
+            "the binding router's first cluster is bindable: {clusters:?}"
+        );
+        assert!(
+            clusters.contains("bound-b"),
+            "the binding router's second cluster is bindable: {clusters:?}"
+        );
+        assert!(
+            !clusters.contains("ordinary"),
+            "an ordinary router's cluster is not bindable: {clusters:?}"
+        );
+        assert!(
+            !clusters.contains("endpoint-only"),
+            "a load balancer's cluster is not bindable: {clusters:?}"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn bindable_clusters_recurses_into_branches() {
+        let filters = vec![host_with(None, vec![binding_router(&["nested"])])];
+
+        assert_eq!(
+            bindable_clusters(&filters),
+            HashSet::from(["nested".to_owned()]),
+            "a binding router inside a branch should contribute its bindable cluster"
         );
     }
 }

@@ -9,6 +9,7 @@ publish = false
 
 [features]
 spiffe = ["praxis-core/spiffe"]
+upstream-binding = ["praxis-core/upstream-binding"]
 cloud-events-filter = ["praxis-filter/cloud-events-filter"]
 
 [lints]

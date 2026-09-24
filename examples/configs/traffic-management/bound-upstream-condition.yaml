@@ -1,0 +1,68 @@
+# Bound Upstream Condition
+#
+# Gates a filter on the logical upstream the router bound for the request.
+# The router publishes a stable binding to the matched cluster; a
+# `bound_upstream` condition then matches that cluster's declared
+# `application_protocol` / `application_provider` metadata, resolved through
+# the pipeline's cluster catalog. This lets a downstream filter act on
+# *where* a request is bound without re-deriving it from the path or headers.
+#
+# Requests routed to the OpenAI-flavored cluster gain an `X-Bound-Provider`
+# response header; requests routed to the generic cluster do not. The
+# condition must sit after a binding filter (the router), otherwise the
+# binding it reads would not yet exist and validation rejects the config.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features upstream-binding -- -c examples/configs/traffic-management/bound-upstream-condition.yaml
+#   curl -i http://localhost:8080/openai/v1/chat/completions   # X-Bound-Provider: openai
+#   curl -i http://localhost:8080/anything                     # no X-Bound-Provider
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # 1. The router binds the matched cluster as the logical upstream.
+      - filter: router
+        routes:
+          - path_prefix: "/openai/"
+            cluster: openai_backend
+
+          - path_prefix: "/"
+            cluster: generic_backend
+
+      # 2. Gate on the bound cluster's declared application metadata. The
+      #    binding already exists here because the router ran first; the
+      #    condition matches the metadata resolved through the cluster
+      #    catalog, not the request path.
+      - filter: headers
+        response_set:
+          - name: "X-Bound-Provider"
+            value: "openai"
+        conditions:
+          - when:
+              bound_upstream:
+                application_protocol: openai_responses
+                application_provider: openai
+
+      # 3. The load balancer declares each cluster's endpoints and the
+      #    application metadata the catalog resolves for the binding.
+      - filter: load_balancer
+        clusters:
+          - name: openai_backend
+            http:
+              application_protocol: openai_responses
+              application_provider: openai
+            endpoints:
+              - "127.0.0.1:3001"
+
+          - name: generic_backend
+            endpoints:
+              - "127.0.0.1:3002"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

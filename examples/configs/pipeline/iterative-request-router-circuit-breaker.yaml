@@ -7,8 +7,11 @@
 # fail fast with a transport-level circuit_open error,
 # which triggers an immediate failover to the fallback.
 #
+# ⚠️  EXPERIMENTAL: This example uses the `iterative-request-router` experimental feature.
+# Not recommended for production use. Build with --features iterative-request-router.
+#
 # Usage:
-#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/iterative-request-router-circuit-breaker.yaml
+#   cargo run -p praxis-proxy --features iterative-request-router -- -c examples/configs/pipeline/iterative-request-router-circuit-breaker.yaml
 #   curl http://localhost:8080/
 
 runtime:

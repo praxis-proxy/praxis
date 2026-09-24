@@ -1189,6 +1189,8 @@ mod tests {
         let port = spawn_loopback_backend("hello-parity").await;
         let url = format!("http://127.0.0.1:{port}/");
         let deadline = Instant::now() + Duration::from_secs(5);
+        // Direct construction misses the bootstrap that installs the provider.
+        praxis_tls::provider::install();
         let client = SubRequestClient::new(SubRequestConnector::new(1, None));
 
         let target = prepare_url_target(&url, deadline, |_| Ok(())).await.unwrap();

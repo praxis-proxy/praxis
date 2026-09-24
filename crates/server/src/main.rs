@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Praxis server entry point.
 //!
 //! Loads configuration, initializes tracing (with optional JSON output and
@@ -49,6 +51,12 @@ struct Cli {
 /// Entry point.
 #[expect(clippy::print_stderr, reason = "fatal error output")]
 fn main() {
+    // Before anything that might build a TLS config. `--validate` and `--dump`
+    // return without reaching `run_server`, and both construct a sub-request
+    // connector, so installing only on the serving path would leave those two
+    // subcommands panicking inside rustls.
+    praxis::install_crypto_provider();
+
     let cli = Cli::parse();
     let explicit = cli.config.or_else(|| std::env::var("PRAXIS_CONFIG").ok());
 
@@ -68,8 +76,11 @@ fn main() {
         return;
     }
 
+    // Load from the resolved path rather than re-probing the filesystem, so
+    // the config that runs is the one the reload watcher will watch.
     let config_path = praxis::resolve_config_path(explicit.as_deref());
-    let config = praxis::load_config(explicit.as_deref()).unwrap_or_else(|error| praxis::fatal(&error));
+    let config = praxis_core::config::Config::load_from(config_path.as_deref(), praxis_core::config::DEFAULT_CONFIG)
+        .unwrap_or_else(|error| praxis::fatal(&error));
     let tracing_guard = praxis::init_tracing(&config).unwrap_or_else(|error| praxis::fatal(&error));
     let log_level = Some(tracing_guard.log_level_state());
     info!(version = env!("PRAXIS_VERSION"), "starting server");

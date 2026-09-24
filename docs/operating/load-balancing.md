@@ -436,6 +436,68 @@ filter_chains:
               - "10.0.1.3:8080"
 ```
 
+## Cluster Source
+
+By default a `load_balancer` reads the target
+cluster from `ctx.cluster`, which a preceding
+`router` set (`cluster_source: router`). It can
+instead read `cluster_source: bound_upstream`
+(with the off-by-default `upstream-binding` build
+feature), resolving the frozen logical binding a
+binding router published and selecting an endpoint
+with no second router. This is how a direct dispatch
+branch picks an endpoint from a cluster that was
+bound once earlier in the pipeline; an
+`iterative_request_router` step (the
+`iterative-request-router` feature) can do the same
+on every exchange. See
+[Upstream Binding](../architecture/upstream-binding.md) and the complete
+[`bound-upstream-dispatch.yaml`](../../examples/configs/traffic-management/bound-upstream-dispatch.yaml)
+example.
+
+```yaml
+- filter: router
+  routes:
+    - path_prefix: "/openai/"
+      cluster: openai
+    - path_prefix: "/"
+      cluster: chat
+- filter: headers
+  conditions:
+    - when:
+        bound_upstream:
+          application_provider: openai
+  branch_chains:
+    - name: direct
+      rejoin: terminal
+      chains:
+        - name: direct-dispatch
+          filters:
+            - filter: load_balancer
+              cluster_source: bound_upstream
+              clusters:
+                - name: openai
+                  http:
+                    application_provider: openai
+                  endpoints: ["10.0.0.1:8080"]
+- filter: load_balancer
+  clusters:
+    - name: chat
+      endpoints: ["10.0.0.2:8080"]
+```
+
+Startup validation makes sure every cluster the router can
+bind reaches a load balancer that declares it; the runtime
+error below is only a backstop. Bound
+mode seeds `ctx.cluster` so retry, passive health, endpoint reselection, and
+response cleanup use the bound cluster. A different existing `ctx.cluster`
+fails closed before endpoint selection, preventing retry or health state from
+one cluster being applied to another. A missing binding, an undeclared bound
+cluster, or a conflicting exchange cluster produces a 500 filter error; an
+unreachable selected endpoint remains a 502 transport error. When
+`ctx.upstream` is already set, the load balancer skips selection entirely and
+does not overwrite either the existing upstream or `ctx.cluster`.
+
 ## Dynamic Reload
 
 Load-balancing configuration is dynamically

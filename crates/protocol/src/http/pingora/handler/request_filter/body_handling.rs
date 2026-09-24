@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Request body handling utilities for selected-upstream phase.
+//! Request body handling utilities for the body phases that run after
+//! routing.
 //!
-//! Manages adapted request body storage and body size limit resolution
-//! for the selected-upstream request-body phase introduced in #1139.
+//! Manages adapted request body storage and body size limit resolution for
+//! the selected-upstream request-body phase introduced in #1139, and the
+//! canonical body the bound-upstream phase can produce.
 
 use std::collections::VecDeque;
 
@@ -40,6 +42,24 @@ pub(super) fn store_adapted_request_body(ctx: &mut PingoraRequestCtx, body: Opti
     ctx.retained_adapted_request_body = Some(chunks.clone());
     ctx.adapted_request_body = Some(chunks);
     ctx.adapted_request_body_len = Some(len);
+}
+
+/// Store the canonical body produced by the bound-upstream phase.
+///
+/// Direct dispatch drains `pre_read_body`; retries are re-seeded from the
+/// retained copy. Updating the authoritative mutated length keeps framing and
+/// retry replay aligned when a bound-body writer grows, shrinks, or empties
+/// the body (an emptied body is stored as no chunks with a length of zero).
+pub(super) fn store_canonical_request_body(ctx: &mut PingoraRequestCtx, body: Bytes) {
+    let len = body.len();
+    let chunks = if body.is_empty() {
+        VecDeque::new()
+    } else {
+        VecDeque::from([body])
+    };
+    ctx.retained_pre_read_body = Some(chunks.clone());
+    ctx.pre_read_body = Some(chunks);
+    ctx.mutated_request_body_len = Some(len);
 }
 
 // -----------------------------------------------------------------------------
@@ -190,6 +210,49 @@ mod tests {
             "retained marker is still Some for an empty adapted body"
         );
         assert_eq!(ctx.adapted_request_body_len, Some(0), "empty body length is 0");
+    }
+
+    #[test]
+    fn store_canonical_request_body_updates_direct_and_retry_representations() {
+        let mut ctx = make_ctx();
+        store_canonical_request_body(&mut ctx, Bytes::from_static(b"BOUND"));
+
+        let expected = Some(VecDeque::from([Bytes::from_static(b"BOUND")]));
+        assert_eq!(
+            ctx.pre_read_body, expected,
+            "the direct body should hold the canonical bytes"
+        );
+        assert_eq!(
+            ctx.retained_pre_read_body, expected,
+            "the retry body should hold the canonical bytes"
+        );
+        assert_eq!(
+            ctx.mutated_request_body_len,
+            Some(5),
+            "the mutated length should match the canonical body"
+        );
+    }
+
+    #[test]
+    fn store_canonical_request_body_preserves_empty_replay_marker() {
+        let mut ctx = make_ctx();
+        store_canonical_request_body(&mut ctx, Bytes::new());
+
+        assert_eq!(
+            ctx.pre_read_body,
+            Some(VecDeque::new()),
+            "an absent canonical body still leaves an empty direct body"
+        );
+        assert_eq!(
+            ctx.retained_pre_read_body,
+            Some(VecDeque::new()),
+            "an absent canonical body keeps the empty replay marker"
+        );
+        assert_eq!(
+            ctx.mutated_request_body_len,
+            Some(0),
+            "an absent canonical body has length 0"
+        );
     }
 
     #[test]

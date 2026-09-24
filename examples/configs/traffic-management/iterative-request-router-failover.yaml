@@ -5,8 +5,11 @@
 # backend returns 5xx, the request automatically
 # retries against a fallback provider.
 #
+# ⚠️  EXPERIMENTAL: This example uses the `iterative-request-router` experimental feature.
+# Not recommended for production use. Build with --features iterative-request-router.
+#
 # Usage:
-#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/iterative-request-router-failover.yaml
+#   cargo run -p praxis-proxy --features iterative-request-router -- -c examples/configs/traffic-management/iterative-request-router-failover.yaml
 #   curl http://localhost:8080/
 
 listeners:

@@ -50,6 +50,8 @@ mod adversarial;
 mod body;
 mod body_filter_failures;
 mod body_pipeline;
+#[cfg(feature = "bound-upstream-request-body")]
+mod bound_upstream_body;
 mod compression;
 mod conditions;
 mod cors;

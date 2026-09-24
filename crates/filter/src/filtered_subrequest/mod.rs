@@ -11,14 +11,18 @@
 //! either buffered or streaming mode, and captures a
 //! [`FilteredSubrequestContinuation`] the caller drives to completion.
 //!
-//! The executor owns three transient extension mechanisms end-to-end —
-//! [`RetainedFilterResults`], [`PendingStreamChunks`], and
-//! [`StreamTermination`] — and recognizes two framework-defined caller-staged
+//! The executor owns three transient extension mechanisms end-to-end
+//! ([`RetainedFilterResults`], [`PendingStreamChunks`], and
+//! [`StreamTermination`]) and recognizes two framework-defined caller-staged
 //! channels: [`PendingCredentials`], which it drains to materialize each
 //! authority-bound secret only after resolving the destination (see
 //! [`DeferredCredential`](crate::DeferredCredential)), and [`StagedUpstream`],
 //! which it drains to seed the sub-request's upstream before the request phase so
 //! a callout can dial a known destination without an upstream-selecting filter.
+//! It also scopes the parent's upstream state: on entry it clears the
+//! exchange-local upstream selection and, with the `upstream-binding` feature,
+//! sets the parent's logical binding aside (an IRR step keeps seeing it, a
+//! callout starts unbound), and it restores that checkpoint on every exit.
 //! It otherwise never
 //! inspects caller-injected extension types. Callers that stash their own state
 //! in the request extensions recover it from
@@ -86,6 +90,10 @@ pub(crate) use self::{
 pub(crate) use self::{continuation::SubrequestCompletion, sanitize::normalize_response_status};
 #[cfg(feature = "chain-binding")]
 use crate::credentials::{PendingCredentials, ResolvedDestination};
+#[cfg(feature = "bound-upstream-request-body")]
+use crate::extensions::BoundRequestBodyRewrite;
+#[cfg(feature = "upstream-binding")]
+use crate::extensions::{BoundUpstream, BoundUpstreamFrozen};
 use crate::{
     FilterAction, FilterError, FilterPipeline, StreamTermination, StreamTerminationCause, SubRequest,
     SubRequestResponseMode, SubResponse,
@@ -94,6 +102,101 @@ use crate::{
     extensions::{RequestExtensions, SelectedClusterApplication},
     results::RetainedFilterResults,
 };
+
+/// Parent routing state shadowed while a nested pipeline executes.
+#[cfg(feature = "upstream-binding")]
+struct ParentUpstreamState {
+    /// Parent request's logical cluster binding.
+    binding: Option<BoundUpstream>,
+    /// Whether the parent binding had already reached its freeze point.
+    frozen: bool,
+    /// Body the parent's bound-upstream phase rewrote, kept away from the
+    /// nested pipeline so its executor cannot take it as its own.
+    #[cfg(feature = "bound-upstream-request-body")]
+    body_rewrite: Option<BoundRequestBodyRewrite>,
+}
+
+/// Stack form supports filtered sub-requests nested inside another filtered
+/// sub-request without overwriting the outer restoration checkpoint.
+#[cfg(feature = "upstream-binding")]
+#[derive(Default)]
+struct ParentUpstreamStates(Vec<ParentUpstreamState>);
+
+/// Save parent routing state before a nested pipeline runs.
+///
+/// A nested pipeline that `inherits_binding` (an IRR step) keeps seeing the
+/// parent's binding; any other (an outbound callout) starts unbound, so its own
+/// binding router can publish without colliding with the parent's frozen one.
+/// The parent's bound-body rewrite is always set aside so the nested executor
+/// cannot take it as its own.
+#[cfg(feature = "upstream-binding")]
+fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, inherits_binding: bool) {
+    let (binding, frozen) = if inherits_binding {
+        (
+            extensions.get::<BoundUpstream>().cloned(),
+            extensions.get::<BoundUpstreamFrozen>().is_some(),
+        )
+    } else {
+        (
+            extensions.remove::<BoundUpstream>(),
+            extensions.remove::<BoundUpstreamFrozen>().is_some(),
+        )
+    };
+    let state = ParentUpstreamState {
+        binding,
+        frozen,
+        #[cfg(feature = "bound-upstream-request-body")]
+        body_rewrite: extensions.remove::<BoundRequestBodyRewrite>(),
+    };
+    let mut states = extensions.remove::<ParentUpstreamStates>().unwrap_or_default();
+    states.0.push(state);
+    extensions.insert(states);
+    extensions.remove::<SelectedClusterApplication>();
+}
+
+/// Without the `upstream-binding` feature there is no binding to shadow; a
+/// nested pipeline only starts without the parent's upstream selection.
+#[cfg(not(feature = "upstream-binding"))]
+fn enter_nested_upstream_scope(extensions: &mut RequestExtensions, _inherits_binding: bool) {
+    extensions.remove::<SelectedClusterApplication>();
+}
+
+/// Remove nested routing state and restore the most recent parent checkpoint.
+#[cfg(feature = "upstream-binding")]
+fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
+    extensions.remove::<SelectedClusterApplication>();
+    let Some(mut states) = extensions.remove::<ParentUpstreamStates>() else {
+        return;
+    };
+    let Some(state) = states.0.pop() else {
+        return;
+    };
+    extensions.remove::<BoundUpstream>();
+    extensions.remove::<BoundUpstreamFrozen>();
+    if let Some(binding) = state.binding {
+        extensions.insert(binding);
+    }
+    if state.frozen {
+        extensions.insert(BoundUpstreamFrozen);
+    }
+    #[cfg(feature = "bound-upstream-request-body")]
+    {
+        extensions.remove::<BoundRequestBodyRewrite>();
+        if let Some(body_rewrite) = state.body_rewrite {
+            extensions.insert(body_rewrite);
+        }
+    }
+    if !states.0.is_empty() {
+        extensions.insert(states);
+    }
+}
+
+/// Without the `upstream-binding` feature the only nested state to clear is
+/// the nested pipeline's upstream selection.
+#[cfg(not(feature = "upstream-binding"))]
+fn restore_parent_upstream_scope(extensions: &mut RequestExtensions) {
+    extensions.remove::<SelectedClusterApplication>();
+}
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -160,14 +263,15 @@ impl FilteredSubrequestError {
 
     /// Split the error from the extensions its caller must restore.
     ///
+    /// The parent's upstream scope (its selection and, with binding, its
+    /// logical binding) has already been restored into these extensions.
+    ///
     /// The typed overflow detail is intentionally dropped here: string-based
     /// callers (the iterative request router's `IrrStepRunner`) keep their
     /// existing behavior, while callers that need the classification read it
     /// through [`too_large`](Self::too_large) first.
     pub(crate) fn into_parts(mut self) -> (FilterError, RequestExtensions) {
-        // #1138 Correction 1: never leak the child's selected-cluster application
-        // metadata back to the parent on any error path.
-        self.extensions.remove::<SelectedClusterApplication>();
+        restore_parent_upstream_scope(&mut self.extensions);
         (self.error, self.extensions)
     }
 }
@@ -335,6 +439,7 @@ impl FilteredSubrequestExecutor {
     ///
     ///     // At request time the callout builds an executor from the shared client
     ///     // and the downstream attributes it reads off its `HttpFilterContext`.
+    ///     praxis_tls::provider::install(); // required before any connector is built
     ///     let client = SubRequestClient::new(SubRequestConnector::new(1, None));
     ///     let downstream = SubrequestRuntime::new(None, false, None, Instant::now());
     ///     let executor = FilteredSubrequestExecutor::for_callout(
@@ -380,14 +485,7 @@ impl FilteredSubrequestExecutor {
         extensions: RequestExtensions,
         deadline: Instant,
     ) -> Result<CalloutResponse, FilterError> {
-        let input = FilteredSubrequestInput {
-            pipeline,
-            request,
-            label: "callout",
-            iteration: 0,
-            deadline,
-            extensions,
-        };
+        let input = FilteredSubrequestInput::callout(pipeline, request, deadline, extensions);
         let opened = self.execute(input).await.map_err(|error| error.into_parts().0)?;
         Ok(self.callout_response_from(opened))
     }
@@ -445,6 +543,7 @@ impl FilteredSubrequestExecutor {
     ///     .unwrap();
     ///     let outbound = Arc::new(FilterPipeline::build(&mut chain, &registry).unwrap());
     ///
+    ///     praxis_tls::provider::install(); // required before any connector is built
     ///     let client = SubRequestClient::new(SubRequestConnector::new(1, None));
     ///     let downstream = SubrequestRuntime::new(None, false, None, Instant::now());
     ///     let executor = FilteredSubrequestExecutor::for_callout(
@@ -493,14 +592,7 @@ impl FilteredSubrequestExecutor {
         extensions: RequestExtensions,
         deadline: Instant,
     ) -> Result<CalloutOutcome, FilterError> {
-        let input = FilteredSubrequestInput {
-            pipeline,
-            request,
-            label: "callout",
-            iteration: 0,
-            deadline,
-            extensions,
-        };
+        let input = FilteredSubrequestInput::callout(pipeline, request, deadline, extensions);
         match self.execute(input).await {
             Ok(opened) => {
                 // A transport-level overflow rides in the completed outcome's
@@ -565,7 +657,11 @@ impl FilteredSubrequestExecutor {
             iteration,
             deadline,
             mut extensions,
+            inherits_binding,
         } = input;
+        // Every error below is handed back through `into_parts`, which restores
+        // one parent checkpoint, so enter the scope before the first of them.
+        enter_nested_upstream_scope(&mut extensions, inherits_binding);
 
         let remaining = deadline
             .checked_duration_since(Instant::now())
@@ -603,10 +699,6 @@ impl FilteredSubrequestExecutor {
         };
         let mut filter_ctx = build_sub_filter_context(pipeline, &sub_req, resources);
         filter_ctx.extensions = std::mem::take(&mut extensions);
-        // #1138 decision B: a child must not inherit the parent's selected-cluster
-        // application metadata. `run`/`run_classified` thread the caller's
-        // extensions straight in (unlike the IRR, which clears at step entry).
-        filter_ctx.extensions.remove::<SelectedClusterApplication>();
         filter_ctx.extensions.insert(RetainedFilterResults::default());
         filter_ctx.enable_stream_chunk_emission(self.max_state_bytes);
         // A callout may stage a pre-resolved upstream (for example a URL prepared
@@ -675,6 +767,7 @@ impl FilteredSubrequestExecutor {
                 filter_ctx.pre_read_mutations.clear();
                 sub_headers.clone_from(&routed_req.headers);
                 filter_ctx.request = &routed_req;
+                filter_ctx.buffered_request_body.clone_from(&request_body);
             }
 
             let action = pipeline.execute_http_request(&mut filter_ctx).await?;
@@ -683,6 +776,9 @@ impl FilteredSubrequestExecutor {
             }
             if self.accounting.exceeds_limit(&filter_ctx.extensions) {
                 return Ok(RawResponse::Rejected(Rejection::status(413)));
+            }
+            if let Some(rewritten) = filter_ctx.take_bound_request_body_rewrite() {
+                request_body = Some(rewritten);
             }
             if !pre_read_body {
                 let action = pipeline

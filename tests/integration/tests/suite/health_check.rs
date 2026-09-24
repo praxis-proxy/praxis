@@ -579,6 +579,109 @@ filter_chains:
     );
 }
 
+#[cfg(feature = "upstream-binding")]
+#[test]
+fn bound_load_balancer_distributes_and_routes_away_from_unhealthy_backend() {
+    let stable_port_guard = start_backend_with_shutdown("stable");
+    let stable_port = stable_port_guard.port();
+    let stoppable = StoppableBackend::start("stoppable");
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_health_checks: true
+clusters:
+  - name: backend
+    endpoints:
+      - "127.0.0.1:{stable_port}"
+      - "127.0.0.1:{stoppable_port}"
+    health_check:
+      type: http
+      path: "/healthz"
+      expected_status: 200
+      interval_ms: 200
+      timeout_ms: 100
+      unhealthy_threshold: 1
+      healthy_threshold: 1
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: headers
+        branch_chains:
+          - name: dispatch
+            rejoin: terminal
+            chains:
+              - name: bound-dispatch
+                filters:
+                  - filter: load_balancer
+                    cluster_source: bound_upstream
+                    clusters:
+                      - name: backend
+                        endpoints:
+                          - "127.0.0.1:{stable_port}"
+                          - "127.0.0.1:{stoppable_port}"
+"#,
+        stoppable_port = stoppable.port,
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let _proxy = start_full_proxy(&config);
+
+    let addr = format!("127.0.0.1:{proxy_port}");
+    wait_for_http(&addr);
+
+    let mut saw_stable = false;
+    let mut saw_stoppable = false;
+    for _ in 0..20 {
+        let (status, body) = http_get(&addr, "/", None);
+        assert_eq!(
+            status, 200,
+            "bound dispatch should succeed while both backends are healthy"
+        );
+        saw_stable |= body == "stable";
+        saw_stoppable |= body == "stoppable";
+        if saw_stable && saw_stoppable {
+            break;
+        }
+    }
+    assert!(saw_stable, "the bound load balancer should reach the stable backend");
+    assert!(
+        saw_stoppable,
+        "the bound load balancer should spread traffic to both backends"
+    );
+
+    stoppable.stop();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut consecutive_stable = 0;
+    while std::time::Instant::now() < deadline {
+        let (status, body) = http_get(&addr, "/", None);
+        if status == 200 && body == "stable" {
+            consecutive_stable += 1;
+            if consecutive_stable >= 5 {
+                break;
+            }
+        } else {
+            consecutive_stable = 0;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        consecutive_stable >= 5,
+        "active health checks should steer the bound load balancer to the stable backend (got {consecutive_stable} consecutive)"
+    );
+}
+
 #[test]
 fn h2_probe_succeeds_against_proxy_listener() {
     let backend_guard = start_backend_with_shutdown("ok");

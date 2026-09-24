@@ -30,14 +30,20 @@ use crate::net::wait::{DEFAULT_HTTP_TIMEOUT, poll_until_ready, ready_timeout};
 
 /// Install the rustls [`CryptoProvider`] for test environments.
 ///
-/// Both `ring` and `aws-lc-rs` features are enabled transitively
-/// via Pingora, so rustls cannot auto-select. This function
-/// installs `ring` as the process-wide default. Safe to call
-/// multiple times — subsequent calls are no-ops.
+/// Delegates to [`praxis_tls::provider::install`] so tests exercise whichever
+/// provider the build selected, rather than pinning one of their own. rustls
+/// has no implicit fallback — the Pingora fork enables `custom-provider` — so
+/// a test that builds any config must install one first. Safe to call
+/// multiple times; subsequent calls are no-ops.
+///
+/// Previously this installed `ring` directly, on the basis that "both `ring`
+/// and `aws-lc-rs` features are enabled transitively via Pingora". That
+/// stopped being true when ring was removed from the fork, and it meant the
+/// integration suite had been running on a provider nobody selected.
 ///
 /// [`CryptoProvider`]: rustls::crypto::CryptoProvider
 pub fn ensure_crypto_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    praxis_tls::provider::install();
 }
 
 /// Parse a PEM certificate chain and private key into rustls DER types.

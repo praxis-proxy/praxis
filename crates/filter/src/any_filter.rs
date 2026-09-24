@@ -86,6 +86,27 @@ impl AnyFilter {
             Self::Tcp(_) => Vec::new(),
         }
     }
+
+    /// Whether the filter selects its target cluster from the frozen logical
+    /// binding rather than a preceding router (a `cluster_source:
+    /// bound_upstream` load balancer). TCP filters never do.
+    #[cfg(feature = "upstream-binding")]
+    pub fn consumes_bound_upstream(&self) -> bool {
+        match self {
+            Self::Http(f) => f.consumes_bound_upstream(),
+            Self::Tcp(_) => false,
+        }
+    }
+
+    /// Cluster names this filter can load balance from the frozen logical
+    /// binding. TCP filters never consume HTTP request bindings.
+    #[cfg(feature = "upstream-binding")]
+    pub fn bound_upstream_clusters(&self) -> Vec<String> {
+        match self {
+            Self::Http(f) => f.bound_upstream_clusters(),
+            Self::Tcp(_) => Vec::new(),
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -138,6 +159,7 @@ mod tests {
         assert_eq!(f.name(), "stub_tcp", "Tcp variant should delegate name to inner filter");
     }
 
+    #[cfg(feature = "upstream-binding")]
     #[test]
     fn http_variant_cluster_capabilities_delegate_to_inner_filter() {
         let f = AnyFilter::Http(Box::new(ClusterSelectingHttpFilter));
@@ -152,8 +174,18 @@ mod tests {
             vec!["web".to_owned(), "api".to_owned()],
             "Http variant should delegate load_balancer_clusters"
         );
+        assert!(
+            f.consumes_bound_upstream(),
+            "Http variant should delegate consumes_bound_upstream"
+        );
+        assert_eq!(
+            f.bound_upstream_clusters(),
+            vec!["web".to_owned(), "api".to_owned()],
+            "Http variant should delegate bound_upstream_clusters"
+        );
     }
 
+    #[cfg(feature = "upstream-binding")]
     #[test]
     fn http_variant_default_cluster_capabilities_are_empty() {
         let f = AnyFilter::Http(Box::new(StubHttpFilter));
@@ -169,8 +201,13 @@ mod tests {
             f.load_balancer_clusters().is_empty(),
             "Http variant should default to no load-balancer clusters"
         );
+        assert!(
+            !f.consumes_bound_upstream(),
+            "Http variant should default to not consuming the bound upstream"
+        );
     }
 
+    #[cfg(feature = "upstream-binding")]
     #[test]
     fn tcp_variant_has_no_http_cluster_capabilities() {
         let f = AnyFilter::Tcp(Box::new(StubTcpFilter));
@@ -185,6 +222,10 @@ mod tests {
         assert!(
             f.load_balancer_clusters().is_empty(),
             "Tcp variant should not report HTTP load-balancer clusters"
+        );
+        assert!(
+            !f.consumes_bound_upstream(),
+            "Tcp variant should not report consuming the bound upstream"
         );
     }
 
@@ -234,9 +275,11 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "upstream-binding")]
     /// Stub HTTP filter with pipeline cluster capabilities.
     struct ClusterSelectingHttpFilter;
 
+    #[cfg(feature = "upstream-binding")]
     #[async_trait]
     impl HttpFilter for ClusterSelectingHttpFilter {
         fn name(&self) -> &'static str {
@@ -252,6 +295,16 @@ mod tests {
         }
 
         fn load_balancer_clusters(&self) -> Vec<String> {
+            vec!["web".to_owned(), "api".to_owned()]
+        }
+
+        #[cfg(feature = "upstream-binding")]
+        fn consumes_bound_upstream(&self) -> bool {
+            true
+        }
+
+        #[cfg(feature = "upstream-binding")]
+        fn bound_upstream_clusters(&self) -> Vec<String> {
             vec!["web".to_owned(), "api".to_owned()]
         }
 

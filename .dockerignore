@@ -11,10 +11,10 @@ LICENSE*
 rustfmt.toml
 deny.toml
 
-# Ignore devtools and test crates
+# Ignore devtools. The test crates and xtask stay in the context: the FIPS
+# build (Containerfile.fips) resolves the whole locked workspace and runs
+# the compliance report with `cargo xtask fips`.
 Makefile
-tests/
-xtask/
 benchmarks/
 
 # Ignore all examples except the default container config

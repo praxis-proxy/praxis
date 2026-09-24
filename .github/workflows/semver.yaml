@@ -51,7 +51,10 @@ jobs:
 
       - name: Install cargo-semver-checks
         if: steps.cache-semver.outputs.cache-hit != 'true'
-        run: cargo install cargo-semver-checks --locked
+        # setup-rust's rust-cache also restores ~/.cargo/bin, so the binary may
+        # already be present when this step's own cache key misses. Install only
+        # when it is absent; otherwise cargo install aborts "binary exists".
+        run: command -v cargo-semver-checks > /dev/null || cargo install cargo-semver-checks --locked
 
       - name: Check SemVer compliance
         run: make semver

@@ -11,7 +11,7 @@ mod request;
 mod response;
 
 pub use request::should_execute;
-pub(crate) use request::should_execute_from;
+pub(crate) use request::{BoundUpstreamView, SelectedUpstream, should_execute_bound_selected, should_execute_from};
 pub use response::{should_execute_response, should_execute_response_ref};
 
 // -----------------------------------------------------------------------------

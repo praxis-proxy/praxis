@@ -7,7 +7,7 @@ pre-v1, so there are NO supported versions yet.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.x     | No        |
+| 0.x.x   | No        |
 
 A supported-version policy begins at `v1.0.0`. From that release
 onward, the latest patch of each supported minor version will

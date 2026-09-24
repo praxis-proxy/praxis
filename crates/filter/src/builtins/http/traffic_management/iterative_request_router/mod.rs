@@ -75,7 +75,7 @@ use crate::{
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
     filtered_subrequest::{FilteredStreamingBody, SubrequestRuntime, normalize_response_status},
-    pipeline::subrequest::DEPTH_HEADER,
+    pipeline::{catalog::ClusterMetadataDeclaration, subrequest::DEPTH_HEADER},
 };
 
 // -----------------------------------------------------------------------------
@@ -130,14 +130,14 @@ pub(super) fn strip_iteration_extensions(mut extensions: RequestExtensions) -> R
 /// Drop any selected-cluster application metadata a prior step published, so a
 /// new step never inherits it through the threaded [`RequestExtensions`].
 ///
-/// Called at each iteration boundary — the top of the run loop and the top of a
-/// streaming resume (`IrrStreamingSession::open_next`) — before the
+/// Called at each iteration boundary (the top of the run loop and the top of a
+/// streaming resume in `IrrStreamingSession::open_next`), before the
 /// max-iteration and deadline guards can early-return the threaded extensions to
 /// the parent, and before the step's body hooks run (which precede its load
 /// balancer under a `StreamBuffer` pre-read). The step's load balancer
-/// republishes for the current step during `on_request`, so the terminal step's
-/// value survives while no early exit and no pre-selection hook observes a stale
-/// one.
+/// republishes for the current step during `on_request`, so no early exit and
+/// no pre-selection hook observes a stale value. The parent never sees any of
+/// them: every exit strips the selection again.
 pub(super) fn clear_selected_application(extensions: &mut RequestExtensions) {
     extensions.remove::<SelectedClusterApplication>();
 }
@@ -159,6 +159,11 @@ pub(super) fn clear_selected_application(extensions: &mut RequestExtensions) {
 /// Streaming steps remain pull-based. Header-safe failover rules run before
 /// any bytes are exposed; all other `on_result` rules run after clean EOF and
 /// may resume another step inside the same committed downstream response.
+///
+/// Steps inherit the request's logical upstream binding, so a step's
+/// `load_balancer` with `cluster_source: bound_upstream` dispatches to the
+/// cluster the parent's router bound, with no router of its own. See
+/// `docs/architecture/upstream-binding.md`.
 ///
 /// # YAML configuration
 ///
@@ -326,8 +331,13 @@ impl IterativeRequestRouterFilter {
             // operator's declared posture — runtime `apply_insecure_options` runs
             // too late to undo a build rejection.
             let pipeline = ctx.build_nested_step_pipeline(&mut entries)?;
+            // A step runs as a continuation of this IRR's parent, which already
+            // guarantees a logical binding on entry (the parent's own
+            // bound-upstream reachability check enforces that a binding precedes
+            // the IRR). Validate the step with that binding assumed present so a
+            // bound-consuming load balancer needs no second binding router.
             let ordering_errors =
-                pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
+                pipeline.step_ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
             if !ordering_errors.is_empty() {
                 return Err(format!(
                     "iterative_request_router: invalid step '{}': {}",
@@ -394,6 +404,36 @@ impl IterativeRequestRouterFilter {
             timeout,
         }))
     }
+
+    /// Steps a request can reach from the initial step, by name.
+    ///
+    /// Follows every transition up to and including a step's first `default`,
+    /// since evaluation stops there. Transition conditions are not evaluated,
+    /// so this over-approximates the steps a real request visits.
+    fn reachable_steps(&self) -> impl Iterator<Item = (&str, &FilterPipeline)> {
+        let mut reachable = std::collections::HashSet::from([self.initial_step.as_ref()]);
+        let mut pending = vec![self.initial_step.as_ref()];
+        while let Some(step) = pending.pop() {
+            let transitions = self.step_transitions.get(step).map_or(&[][..], Vec::as_slice);
+            let live = transitions
+                .iter()
+                .position(|transition| transition.default)
+                .map_or(transitions.len(), |first_default| first_default + 1);
+            let next_steps = transitions
+                .iter()
+                .take(live)
+                .filter_map(|transition| transition.next.as_deref());
+            for next in next_steps {
+                if reachable.insert(next) {
+                    pending.push(next);
+                }
+            }
+        }
+        self.step_pipelines
+            .iter()
+            .filter(move |(name, _)| reachable.contains(name.as_ref()))
+            .map(|(name, pipeline)| (name.as_ref(), pipeline.as_ref()))
+    }
 }
 
 #[async_trait]
@@ -408,6 +448,81 @@ impl HttpFilter for IterativeRequestRouterFilter {
         // chain. Declaring the capability lets bind-time validation reject it
         // without relying on a name match.
         true
+    }
+
+    fn consumes_bound_upstream(&self) -> bool {
+        // The IRR owns no cluster selection itself; it consumes the binding
+        // when a step a request can reach carries a bound-consuming load
+        // balancer. Surfacing this lets pipeline validation reason about
+        // router/IRR coexistence and binding requirements without parsing the
+        // step configuration again.
+        self.reachable_steps()
+            .any(|(_, pipeline)| pipeline.consumes_bound_upstream())
+    }
+
+    fn nested_bound_upstream_readers(&self) -> Vec<String> {
+        let mut readers: Vec<String> = self
+            .reachable_steps()
+            .filter(|(_, pipeline)| pipeline.uses_bound_upstream())
+            .map(|(name, _)| name.to_owned())
+            .collect();
+        readers.sort();
+        readers
+    }
+
+    fn nested_bound_upstream_matchers(&self) -> Vec<(String, praxis_core::config::ApplicationMatch)> {
+        let mut matchers: Vec<(String, praxis_core::config::ApplicationMatch)> = self
+            .reachable_steps()
+            .flat_map(|(name, pipeline)| {
+                pipeline
+                    .bound_when_matchers()
+                    .into_iter()
+                    .map(move |matcher| (name.to_owned(), matcher))
+            })
+            .collect();
+        matchers.sort_by(|left, right| left.0.cmp(&right.0));
+        matchers
+    }
+
+    fn bound_upstream_clusters(&self) -> Vec<String> {
+        // Any reachable step that load balances from the binding can run for
+        // the bound cluster, so the IRR only serves the clusters every such
+        // step serves, whether by load balancing or by answering itself.
+        let consuming: Vec<&FilterPipeline> = self
+            .reachable_steps()
+            .map(|(_, pipeline)| pipeline)
+            .filter(|pipeline| pipeline.consumes_bound_upstream())
+            .collect();
+        let (catalog, _) = crate::pipeline::catalog::build_catalog(self.declared_cluster_metadata());
+        let candidates: std::collections::HashSet<String> = consuming
+            .iter()
+            .flat_map(|pipeline| pipeline.bound_upstream_candidates())
+            .collect();
+        let mut served: Vec<String> = candidates
+            .into_iter()
+            .filter(|cluster| {
+                consuming
+                    .iter()
+                    .all(|pipeline| pipeline.serves_bound_cluster(cluster, catalog.lookup(cluster)))
+            })
+            .collect();
+        served.sort();
+        served
+    }
+
+    fn declared_cluster_metadata(&self) -> Vec<ClusterMetadataDeclaration> {
+        // Fold the reachable steps' cluster declarations into the parent
+        // catalog so a step cluster's application metadata resolves at runtime
+        // and participates in the parent's conflict and matcher checks. A step
+        // no request reaches declares nothing, like the other step hooks.
+        // Steps go in name order so the catalog, and which side of a conflict
+        // is reported first, do not depend on hash order.
+        let mut steps: Vec<_> = self.reachable_steps().collect();
+        steps.sort_by_key(|&(name, _)| name);
+        steps
+            .into_iter()
+            .flat_map(|(_, pipeline)| pipeline.cluster_metadata_declarations())
+            .collect()
     }
 
     fn request_body_access(&self) -> crate::body::BodyAccess {
@@ -747,14 +862,17 @@ impl IterativeRequestRouterFilter {
                         },
                         TransitionResult::Done | TransitionResult::NoMatch => {
                             if handled_abnormal_stream_completion {
-                                let combined_bytes = pending_chunks
+                                let Some(combined_bytes) = pending_chunks
                                     .iter()
                                     .chain(completed_pending_chunks.iter())
                                     .chain(std::iter::once(&outcome.response.body))
                                     .try_fold(0_usize, |total, chunk| total.checked_add(chunk.len()))
-                                    .ok_or_else(|| -> FilterError {
-                                        "iterative_request_router: completion body byte count overflow".into()
-                                    })?;
+                                else {
+                                    ctx.extensions = extensions;
+                                    return Err("iterative_request_router: completion body byte count overflow"
+                                        .to_owned()
+                                        .into());
+                                };
                                 if combined_bytes > max_response_bytes {
                                     ctx.extensions = extensions;
                                     return Err(

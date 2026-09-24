@@ -180,6 +180,20 @@ cluster, upstream, rewritten path, extensions,
 metadata, filter state. Body mode is clamped to the
 baseline ceiling via `clamp_body_mode_to_ceiling`.
 
+**Bound-upstream request-body phase:**
+
+When the request pipeline reaches the first successful
+binding router, it freezes the logical binding before
+evaluating that router's branches. In builds with the
+experimental `bound-upstream-request-body` feature, any top-level
+`on_bound_upstream_request_body` participants then run in
+pipeline order over the complete pre-read body. Read-write
+output is stored as the new canonical `pre_read_body` and
+retained for retry replay; an oversized rewrite becomes a
+local 413 before transport. An IRR step never runs this
+phase: it inherits the parent's frozen binding, and the
+parent's binding is restored on every step exit.
+
 **Selected-upstream request-body phase:**
 
 After the request-filter pipeline completes and an

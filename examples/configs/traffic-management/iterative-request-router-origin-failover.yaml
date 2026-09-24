@@ -6,8 +6,11 @@
 # filter) does not match, preventing infinite
 # retry loops.
 #
+# ⚠️  EXPERIMENTAL: This example uses the `iterative-request-router` experimental feature.
+# Not recommended for production use. Build with --features iterative-request-router.
+#
 # Usage:
-#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/iterative-request-router-origin-failover.yaml
+#   cargo run -p praxis-proxy --features iterative-request-router -- -c examples/configs/traffic-management/iterative-request-router-origin-failover.yaml
 #   curl http://localhost:8080/
 
 listeners:

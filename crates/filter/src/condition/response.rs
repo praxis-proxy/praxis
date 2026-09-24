@@ -107,7 +107,7 @@ fn header_value_matches(name: &str, actual: &http::HeaderValue, expected: &str) 
 
     if name.eq_ignore_ascii_case("content-type") {
         if has_parameters(expected) {
-            return media_type(actual).eq_ignore_ascii_case(media_type(expected)) && params(actual) == params(expected);
+            return media_type(actual).eq_ignore_ascii_case(media_type(expected)) && params_match(actual, expected);
         }
         return media_type(actual).eq_ignore_ascii_case(media_type(expected));
     }
@@ -127,9 +127,92 @@ fn has_parameters(value: &str) -> bool {
         .is_some_and(|(_, params)| !params.trim().is_empty())
 }
 
-/// Extract the parameter portion of a header value (everything after the first `;`).
-fn params(value: &str) -> &str {
-    value.split_once(';').map_or("", |(_, p)| p)
+/// Compare media-type parameters as a multiset, ignoring order,
+/// surrounding whitespace, quotes, and the ASCII case of parameter names.
+///
+/// Values are compared exactly, except `charset`, which RFC 9110 §8.3.1
+/// defines as case-insensitive (`charset=UTF-8` equals `charset=utf-8`).
+/// A multipart `boundary` is case-sensitive and must not fold.
+///
+/// Every parameter must occur the same number of times on both sides, so
+/// a duplicated name cannot stand in for a missing one
+/// (`charset=utf-8; charset=utf-8` does not match `charset=utf-8; foo=bar`).
+///
+/// Compares in place rather than normalizing into owned strings, since this
+/// runs on the response path for every evaluation of such a condition;
+/// parameter lists are short enough that the quadratic scan is cheaper
+/// than allocating.
+fn params_match(actual: &str, expected: &str) -> bool {
+    params(actual).count() == params(expected).count()
+        && params(expected).all(|param| count_matching(actual, param) == count_matching(expected, param))
+}
+
+/// How many parameters of `value` equal `param` under its name's case rule.
+fn count_matching(value: &str, (name, val): (&str, &str)) -> usize {
+    params(value)
+        .filter(|(other_name, other_val)| {
+            other_name.eq_ignore_ascii_case(name) && param_value_matches(name, other_val, val)
+        })
+        .count()
+}
+
+/// Compare one parameter value under the case rule its name implies.
+fn param_value_matches(name: &str, actual: &str, expected: &str) -> bool {
+    if name.eq_ignore_ascii_case("charset") {
+        value_chars(actual)
+            .map(|ch| ch.to_ascii_lowercase())
+            .eq(value_chars(expected).map(|ch| ch.to_ascii_lowercase()))
+    } else {
+        value_chars(actual).eq(value_chars(expected))
+    }
+}
+
+/// The `name=value` parameters after the first `;`, trimmed.
+///
+/// Splits only on semicolons outside a quoted-string, so
+/// `boundary="a;b"` stays one parameter (RFC 9110 §5.6.4). Values keep
+/// their quotes; [`value_chars`] removes them at comparison time.
+fn params(value: &str) -> impl Iterator<Item = (&str, &str)> {
+    split_outside_quotes(value.split_once(';').map_or("", |(_, params)| params))
+        .filter_map(|param| param.split_once('='))
+        .map(|(name, val)| (name.trim(), val.trim()))
+}
+
+/// Split `params` on `;`, ignoring semicolons inside double quotes and
+/// honoring `\"` quoted-pairs.
+fn split_outside_quotes(params: &str) -> impl Iterator<Item = &str> {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    params.split(move |ch: char| {
+        let is_separator = ch == ';' && !in_quotes;
+        match ch {
+            _ if escaped => escaped = false,
+            '\\' if in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            _ => {},
+        }
+        is_separator
+    })
+}
+
+/// The characters of a parameter value with one pair of surrounding double
+/// quotes removed and quoted-pairs decoded, so `"foo\;bar"` equals
+/// `"foo;bar"` (RFC 9110 §5.6.4). An unquoted token yields its characters
+/// as written.
+fn value_chars(value: &str) -> impl Iterator<Item = char> + '_ {
+    let quoted = value.strip_prefix('"').and_then(|inner| inner.strip_suffix('"'));
+    let mut chars = quoted.unwrap_or(value).chars();
+    let decode = quoted.is_some();
+    std::iter::from_fn(move || {
+        let ch = chars.next()?;
+        // A backslash with nothing after it is a malformed quoted-string;
+        // keep it literal rather than dropping it.
+        Some(if decode && ch == '\\' {
+            chars.next().unwrap_or(ch)
+        } else {
+            ch
+        })
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -351,6 +434,167 @@ mod tests {
             )]))],
             &resp
         ));
+    }
+
+    #[test]
+    fn content_type_parameters_ignore_whitespace_and_value_case() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("application/json;charset=UTF-8"),
+        );
+        let resp = make_response(200, headers);
+        assert!(should_execute_response(
+            &[resp_when(resp_header_match(&[(
+                "content-type",
+                "application/json; charset=utf-8"
+            )]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_parameters_ignore_order_and_quotes() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("multipart/form-data; boundary=\"abc\"; charset=utf-8"),
+        );
+        let resp = make_response(200, headers);
+        assert!(should_execute_response(
+            &[resp_when(resp_header_match(&[(
+                "content-type",
+                "multipart/form-data; charset=utf-8; boundary=abc"
+            )]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_boundary_value_is_case_sensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("multipart/form-data; boundary=ABC"),
+        );
+        let resp = make_response(200, headers);
+        assert!(
+            !should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "multipart/form-data; boundary=abc"
+                )]))],
+                &resp
+            ),
+            "only charset values are case-insensitive (RFC 9110 §8.3.1)"
+        );
+    }
+
+    #[test]
+    fn content_type_quoted_parameter_value_keeps_semicolons() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("multipart/form-data; boundary=\"foo;one\""),
+        );
+        let resp = make_response(200, headers);
+        assert!(
+            !should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "multipart/form-data; boundary=\"foo;two\""
+                )]))],
+                &resp
+            ),
+            "a semicolon inside a quoted-string must not split the parameter"
+        );
+        assert!(
+            should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "multipart/form-data; boundary=\"foo;one\""
+                )]))],
+                &resp
+            ),
+            "the same quoted value must still match"
+        );
+    }
+
+    #[test]
+    fn content_type_quoted_pair_decodes_before_compare() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("multipart/form-data; boundary=\"foo\\;bar\""),
+        );
+        let resp = make_response(200, headers);
+        assert!(
+            should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "multipart/form-data; boundary=\"foo;bar\""
+                )]))],
+                &resp
+            ),
+            "`\\;` inside a quoted-string is the same octet as `;` (RFC 9110 §5.6.4)"
+        );
+        assert!(
+            !should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "multipart/form-data; boundary=\"foo;baz\""
+                )]))],
+                &resp
+            ),
+            "decoding must not make different values match"
+        );
+    }
+
+    #[test]
+    fn content_type_duplicate_parameter_is_not_a_subset_match() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("text/plain; charset=utf-8; foo=bar"),
+        );
+        let resp = make_response(200, headers);
+        assert!(
+            !should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "text/plain; charset=utf-8; charset=utf-8"
+                )]))],
+                &resp
+            ),
+            "a repeated parameter must not stand in for a missing one"
+        );
+    }
+
+    #[test]
+    fn content_type_parameters_compare_as_multiset() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("text/plain; a=1; a=1; b=2"));
+        let resp = make_response(200, headers);
+        assert!(
+            !should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "text/plain; a=1; b=2; b=2"
+                )]))],
+                &resp
+            ),
+            "equal counts and mutual containment are not enough; multiplicities must agree"
+        );
+        assert!(
+            should_execute_response(
+                &[resp_when(resp_header_match(&[(
+                    "content-type",
+                    "text/plain; b=2; a=1; a=1"
+                )]))],
+                &resp
+            ),
+            "the same multiset in another order must still match"
+        );
     }
 
     #[test]

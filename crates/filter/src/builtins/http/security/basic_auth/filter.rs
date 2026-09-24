@@ -10,7 +10,7 @@ use std::{
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use sha2::{Digest as _, Sha256};
+use openssl::hash::{MessageDigest, hash};
 use subtle::ConstantTimeEq as _;
 
 use super::config::{BasicAuthConfig, CredentialSourceConfig, InlineCredential};
@@ -46,7 +46,9 @@ impl CredentialSource {
             let key = Arc::<str>::from(cred.username.as_str());
             match map.entry(key) {
                 Entry::Occupied(_) => return Err(format!("basic_auth: duplicate username '{}'", cred.username).into()),
-                Entry::Vacant(e) => e.insert(hash_password(raw.as_bytes())),
+                Entry::Vacant(e) => {
+                    e.insert(hash_password(raw.as_bytes()).ok_or("basic_auth: SHA-256 is not available from OpenSSL")?)
+                },
             };
         }
         Ok(Self::Inline(map))
@@ -62,7 +64,9 @@ impl CredentialSource {
 
     /// Verify against inline credential map.
     fn verify_inline(credentials: &HashMap<Arc<str>, [u8; 32]>, username: &str, password: &str) -> bool {
-        let provided = hash_password(password.as_bytes());
+        let Some(provided) = hash_password(password.as_bytes()) else {
+            return false;
+        };
         verify_password_hash(&provided, credentials.get(username))
     }
 
@@ -76,10 +80,17 @@ impl CredentialSource {
             tracing::warn!(store = %store_name, "KV store not found, denying request");
             return false;
         };
-        let provided = hash_password(password.as_bytes());
+        let Some(provided) = hash_password(password.as_bytes()) else {
+            return false;
+        };
+        // Hash something even for an unknown user so the two paths take the
+        // same time; a hash failure denies either way.
         let (stored_hash, user_found) = match store.get(username) {
             Some(v) => (hash_password(v.as_ref().as_bytes()), true),
             None => (hash_password(b""), false),
+        };
+        let Some(stored_hash) = stored_hash else {
+            return false;
         };
         let stored = user_found.then_some(stored_hash);
         verify_password_hash(&provided, stored.as_ref())
@@ -232,7 +243,14 @@ fn challenge_rejection(challenge: &str) -> FilterAction {
     FilterAction::Reject(Rejection::status(401).with_header("WWW-Authenticate", challenge))
 }
 
-/// Returns the SHA-256 digest of the given bytes.
-fn hash_password(password: &[u8]) -> [u8; 32] {
-    Sha256::digest(password).into()
+/// Returns the SHA-256 digest of the given bytes, computed by the system
+/// OpenSSL so that on a FIPS host it runs inside the validated module rather
+/// than in a hash implementation compiled into this binary.
+///
+/// `None` only when OpenSSL cannot supply SHA-256, which no supported
+/// configuration does; every caller treats it as a failed verification.
+fn hash_password(password: &[u8]) -> Option<[u8; 32]> {
+    hash(MessageDigest::sha256(), password)
+        .ok()
+        .and_then(|digest| digest.as_ref().try_into().ok())
 }

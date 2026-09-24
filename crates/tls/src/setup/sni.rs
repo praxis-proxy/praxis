@@ -34,7 +34,43 @@ use crate::{CertKeyPair, TlsError};
 /// ```
 ///
 /// [`CertifiedKey`]: rustls::sign::CertifiedKey
+#[cfg(not(feature = "bench-utils"))]
 pub(crate) struct SniCertResolver {
+    /// Hostname-to-certificate mapping (exact matches).
+    certs: HashMap<String, Arc<CertifiedKey>>,
+
+    /// Wildcard subdomain suffix to certificate mapping.
+    ///
+    /// For `*.example.com`, stores `("example.com", cert)` — the
+    /// suffix after the wildcard label's dot. Only single-level
+    /// subdomains match: stripping the SNI's first label yields the
+    /// unique candidate key, so lookup is one hash probe instead of
+    /// a scan over every wildcard entry.
+    wildcard_certs: HashMap<String, Arc<CertifiedKey>>,
+
+    /// Fallback certificate when SNI does not match any entry.
+    default: Option<Arc<CertifiedKey>>,
+}
+
+/// Selects a TLS certificate based on the client's SNI hostname.
+///
+/// Maps each `server_names` entry to its [`CertifiedKey`]. Requests
+/// whose SNI matches a registered hostname get that certificate;
+/// all others receive the certificate marked `default: true`. If
+/// no entry is marked `default: true`, unmatched SNI is rejected.
+///
+/// Wildcard entries like `*.example.com` match single-level
+/// subdomains (e.g. `app.example.com` matches but
+/// `a.b.example.com` does not).
+///
+/// ```ignore
+/// let resolver = SniCertResolver { certs, default };
+/// // rustls calls resolver.resolve(client_hello) during handshake
+/// ```
+///
+/// [`CertifiedKey`]: rustls::sign::CertifiedKey
+#[cfg(feature = "bench-utils")]
+pub struct SniCertResolver {
     /// Hostname-to-certificate mapping (exact matches).
     certs: HashMap<String, Arc<CertifiedKey>>,
 
@@ -98,7 +134,26 @@ impl SniCertResolver {
     ///
     /// [`ResolvesServerCert`]: rustls::server::ResolvesServerCert
     /// [`ClientHello`]: rustls::server::ClientHello
+    #[cfg(not(feature = "bench-utils"))]
     fn lookup(&self, sni: Option<&str>) -> Option<Arc<CertifiedKey>> {
+        self.lookup_impl(sni)
+    }
+
+    /// Look up a certificate by SNI hostname.
+    ///
+    /// Public variant for benchmarks (enabled with bench-utils feature).
+    ///
+    /// [`ResolvesServerCert`]: rustls::server::ResolvesServerCert
+    /// [`ClientHello`]: rustls::server::ClientHello
+    #[cfg(feature = "bench-utils")]
+    pub fn lookup(&self, sni: Option<&str>) -> Option<Arc<CertifiedKey>> {
+        self.lookup_impl(sni)
+    }
+
+    /// Perform SNI lookup with case-insensitive matching and wildcard support.
+    ///
+    /// Returns the exact match if found, falls back to wildcard match, then default.
+    fn lookup_impl(&self, sni: Option<&str>) -> Option<Arc<CertifiedKey>> {
         let Some(sni) = sni else {
             return self.default.as_ref().map(Arc::clone);
         };
@@ -144,7 +199,31 @@ impl ResolvesServerCert for SniCertResolver {
 /// The entry with `default: true` becomes the fallback certificate.
 /// If no entry has `default: true`, unmatched SNI is rejected
 /// (the resolver returns `None`).
+///
+/// # Errors
+///
+/// Returns an error if certificate loading fails or if duplicate server names are registered.
+#[cfg(not(feature = "bench-utils"))]
 pub(super) fn build_sni_resolver(certificates: &[CertKeyPair]) -> Result<SniCertResolver, TlsError> {
+    build_sni_resolver_impl(certificates)
+}
+
+/// Build an [`SniCertResolver`] from a list of certificate entries.
+///
+/// Public variant for benchmarks (enabled with bench-utils feature).
+///
+/// # Errors
+///
+/// Returns an error if certificate loading fails or if duplicate server names are registered.
+#[cfg(feature = "bench-utils")]
+pub fn build_sni_resolver(certificates: &[CertKeyPair]) -> Result<SniCertResolver, TlsError> {
+    build_sni_resolver_impl(certificates)
+}
+
+/// Build the SNI resolver from certificate entries.
+///
+/// Shared implementation for both the public and private variants of `build_sni_resolver`.
+fn build_sni_resolver_impl(certificates: &[CertKeyPair]) -> Result<SniCertResolver, TlsError> {
     let mut certs = HashMap::new();
     let mut wildcard_certs = HashMap::new();
     let mut default: Option<Arc<CertifiedKey>> = None;

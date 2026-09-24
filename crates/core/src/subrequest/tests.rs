@@ -13,7 +13,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use http::HeaderMap;
+use http::{HeaderMap, HeaderValue};
 
 use super::{internals::*, types::*};
 use crate::circuit::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitCheck, PeerKey};
@@ -32,6 +32,25 @@ fn install_metrics_recorder() -> &'static metrics_exporter_prometheus::Prometheu
     })
 }
 
+/// Build a connector, installing the crypto provider first.
+///
+/// These tests construct connectors directly, so they never reach the server
+/// bootstrap that installs the provider. Pingora builds a TLS client config
+/// while the connector is created, and rustls has no implicit fallback — the
+/// Pingora fork enables `custom-provider` — so the constructor would panic.
+/// Idempotent, so every test can call it.
+fn test_connector(keepalive_pool_size: usize, max_connections: Option<usize>) -> SubRequestConnector {
+    praxis_tls::provider::install();
+    SubRequestConnector::new(keepalive_pool_size, max_connections)
+}
+
+/// As [`test_connector`], for the options-taking constructor.
+fn test_connector_with_options(options: SubRequestConnectorOptions) -> SubRequestConnector {
+    praxis_tls::provider::install();
+    SubRequestConnector::with_options(options)
+}
+
+
 fn render_metrics() -> String {
     install_metrics_recorder().render()
 }
@@ -42,7 +61,7 @@ fn render_metrics() -> String {
 
 #[test]
 fn clone_shares_same_arc() {
-    let a = SubRequestConnector::new(16, None);
+    let a = test_connector(16, None);
     let b = a.clone();
     assert!(
         Arc::ptr_eq(&a.inner, &b.inner),
@@ -52,7 +71,7 @@ fn clone_shares_same_arc() {
 
 #[test]
 fn debug_impl_does_not_panic() {
-    let connector = SubRequestConnector::new(8, None);
+    let connector = test_connector(8, None);
     let debug = format!("{connector:?}");
     assert!(
         debug.contains("SubRequestConnector"),
@@ -62,7 +81,7 @@ fn debug_impl_does_not_panic() {
 
 #[test]
 fn unbounded_connector_has_no_admission() {
-    let connector = SubRequestConnector::new(8, None);
+    let connector = test_connector(8, None);
     assert!(
         connector.admission.is_none(),
         "no max_connections should mean no semaphore"
@@ -71,7 +90,7 @@ fn unbounded_connector_has_no_admission() {
 
 #[test]
 fn bounded_connector_has_admission_semaphore() {
-    let connector = SubRequestConnector::new(8, Some(16));
+    let connector = test_connector(8, Some(16));
     let semaphore = connector
         .admission
         .as_ref()
@@ -85,7 +104,7 @@ fn bounded_connector_has_admission_semaphore() {
 
 #[tokio::test]
 async fn acquire_permit_returns_none_without_limit() {
-    let connector = SubRequestConnector::new(4, None);
+    let connector = test_connector(4, None);
     assert!(
         connector.acquire_permit().await.is_none(),
         "unbounded connector should return None"
@@ -94,7 +113,7 @@ async fn acquire_permit_returns_none_without_limit() {
 
 #[tokio::test]
 async fn acquire_permit_returns_some_with_limit() {
-    let connector = SubRequestConnector::new(4, Some(2));
+    let connector = test_connector(4, Some(2));
     assert!(
         connector.acquire_permit().await.is_some(),
         "bounded connector should return a permit"
@@ -103,7 +122,7 @@ async fn acquire_permit_returns_some_with_limit() {
 
 #[tokio::test]
 async fn dropping_permit_restores_capacity() {
-    let connector = SubRequestConnector::new(4, Some(1));
+    let connector = test_connector(4, Some(1));
     let permit = connector.acquire_permit().await.unwrap();
     assert_eq!(
         connector.admission.as_ref().unwrap().available_permits(),
@@ -120,7 +139,7 @@ async fn dropping_permit_restores_capacity() {
 
 #[test]
 fn clone_shares_admission_semaphore() {
-    let a = SubRequestConnector::new(4, Some(8));
+    let a = test_connector(4, Some(8));
     let b = a.clone();
     assert!(
         Arc::ptr_eq(a.admission.as_ref().unwrap(), b.admission.as_ref().unwrap()),
@@ -163,7 +182,7 @@ fn subresponse_clone_preserves_fields() {
 
 #[test]
 fn client_wraps_connector() {
-    let connector = SubRequestConnector::new(8, None);
+    let connector = test_connector(8, None);
     let client = super::client::SubRequestClient::new(connector);
     let debug = format!("{client:?}");
     assert!(
@@ -174,7 +193,7 @@ fn client_wraps_connector() {
 
 #[test]
 fn client_clone_shares_connector() {
-    let connector = SubRequestConnector::new(8, Some(4));
+    let connector = test_connector(8, Some(4));
     let a = super::client::SubRequestClient::new(connector);
     let b = a.clone();
     assert!(
@@ -373,6 +392,18 @@ fn nominated_tokens_match_case_insensitively() {
 }
 
 #[test]
+fn nominated_tokens_survive_an_obs_text_byte_in_the_same_value() {
+    let mut headers = HeaderMap::new();
+    headers.insert("connection", HeaderValue::from_bytes(b"x-custom, \xff").unwrap());
+    headers.insert("x-custom", "value".parse().unwrap());
+    let nominated = connection_nominated_tokens(&headers);
+    assert!(
+        is_request_stripped(&"x-custom".parse().unwrap(), &nominated),
+        "a non-UTF-8 sibling token must not disable the valid nomination"
+    );
+}
+
+#[test]
 fn connection_token_cannot_strip_a_protected_forwarding_header() {
     let mut headers = HeaderMap::new();
     headers.insert("connection", "x-forwarded-for, host".parse().unwrap());
@@ -465,7 +496,7 @@ async fn deadline_bounds_the_complete_exchange() {
         let (_socket, _) = listener.accept().await.unwrap();
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(address.to_string(), false, String::new());
     let request = SubRequest {
@@ -489,7 +520,7 @@ async fn deadline_bounds_the_complete_exchange() {
 
 #[tokio::test]
 async fn admission_timeout_returns_typed_error() {
-    let connector = SubRequestConnector::new(4, Some(1));
+    let connector = test_connector(4, Some(1));
     let permit = connector.acquire_permit().await.unwrap();
 
     let result = connector.try_acquire_permit(Duration::from_millis(10)).await;
@@ -505,7 +536,7 @@ async fn admission_timeout_returns_typed_error() {
 #[tokio::test]
 async fn admission_timeout_reports_configured_max() {
     let configured_limit = 4;
-    let connector = SubRequestConnector::new(4, Some(configured_limit));
+    let connector = test_connector(4, Some(configured_limit));
     let mut permits = Vec::new();
     for _ in 0..configured_limit {
         permits.push(connector.acquire_permit().await.unwrap());
@@ -527,7 +558,7 @@ async fn admission_timeout_reports_configured_max() {
 
 #[tokio::test]
 async fn try_acquire_permit_returns_none_without_limit() {
-    let connector = SubRequestConnector::new(4, None);
+    let connector = test_connector(4, None);
     let result = connector.try_acquire_permit(Duration::from_millis(10)).await;
     assert!(
         matches!(result, Ok(None)),
@@ -542,14 +573,14 @@ async fn try_acquire_permit_returns_none_without_limit() {
 
 #[test]
 fn client_with_custom_ceiling() {
-    let connector = SubRequestConnector::new(8, None);
+    let connector = test_connector(8, None);
     let client = super::client::SubRequestClient::with_max_response_bytes(connector, 4096);
     assert_eq!(client.max_response_bytes, 4096);
 }
 
 #[test]
 fn client_default_ceiling_is_absolute_max() {
-    let connector = SubRequestConnector::new(8, None);
+    let connector = test_connector(8, None);
     let client = super::client::SubRequestClient::new(connector);
     assert_eq!(
         client.max_response_bytes,
@@ -625,7 +656,7 @@ fn predicate_keeps_all_safe_headers() {
 
 #[test]
 fn connector_stores_configured_max_connections() {
-    let connector = SubRequestConnector::new(4, Some(256));
+    let connector = test_connector(4, Some(256));
     assert_eq!(connector.configured_max_connections, Some(256));
     assert_eq!(
         connector.configured_max_connections(),
@@ -634,7 +665,7 @@ fn connector_stores_configured_max_connections() {
     );
     assert!(!connector.has_circuit_breaker(), "new() never wires a circuit breaker");
 
-    let unbounded = SubRequestConnector::new(4, None);
+    let unbounded = test_connector(4, None);
     assert_eq!(unbounded.configured_max_connections, None);
     assert_eq!(unbounded.configured_max_connections(), None, "accessor matches field");
 }
@@ -645,7 +676,7 @@ fn connector_stores_configured_max_connections() {
 
 #[test]
 fn with_options_creates_connector() {
-    let connector = SubRequestConnector::with_options(SubRequestConnectorOptions {
+    let connector = test_connector_with_options(SubRequestConnectorOptions {
         keepalive_pool_size: 32,
         max_connections: Some(64),
         circuit_breaker: None,
@@ -664,7 +695,7 @@ fn with_options_creates_connector() {
 
 #[test]
 fn with_options_circuit_breaker_enabled() {
-    let connector = SubRequestConnector::with_options(SubRequestConnectorOptions {
+    let connector = test_connector_with_options(SubRequestConnectorOptions {
         keepalive_pool_size: 16,
         max_connections: None,
         circuit_breaker: Some(CircuitBreakerConfig {
@@ -828,7 +859,7 @@ fn is_transport_header_rejects_hop_by_hop_and_framing() {
 #[test]
 fn framework_headers_rejects_transport_headers() {
     let mut fw = FrameworkHeaders::new();
-    let val = http::HeaderValue::from_static("1");
+    let val = HeaderValue::from_static("1");
     let result = fw.insert(http::header::CONTENT_LENGTH, val);
     assert!(result.is_err(), "transport header should be rejected");
     assert!(fw.is_empty());
@@ -837,7 +868,7 @@ fn framework_headers_rejects_transport_headers() {
 #[test]
 fn framework_headers_rejects_reserved_headers() {
     let mut fw = FrameworkHeaders::new();
-    let val = http::HeaderValue::from_static("1");
+    let val = HeaderValue::from_static("1");
     let name: http::header::HeaderName = "x-praxis-depth".parse().unwrap();
     let result = fw.insert(name, val);
     assert!(result.is_err(), "reserved header should be rejected");
@@ -847,7 +878,7 @@ fn framework_headers_rejects_reserved_headers() {
 #[test]
 fn framework_headers_accepts_non_reserved_non_transport() {
     let mut fw = FrameworkHeaders::new();
-    let val = http::HeaderValue::from_static("3");
+    let val = HeaderValue::from_static("3");
     let name: http::header::HeaderName = "x-request-id".parse().unwrap();
     fw.insert(name, val).unwrap();
     assert!(!fw.is_empty());
@@ -1008,7 +1039,7 @@ async fn send_streaming_receives_chunks_incrementally() {
     let chunks: Vec<&[u8]> = vec![b"chunk1", b"chunk2", b"chunk3"];
     let (addr, backend) = spawn_http_backend(chunks.clone(), Duration::ZERO).await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1051,7 +1082,7 @@ async fn send_streaming_records_metrics() {
     let chunks: Vec<&[u8]> = vec![b"hello", b"world"];
     let (addr, backend) = spawn_http_backend(chunks, Duration::ZERO).await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1091,7 +1122,7 @@ async fn send_streaming_idle_timeout_fires() {
     use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_stalling_backend().await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1130,7 +1161,7 @@ async fn send_streaming_read_timeout_fires_as_io_error() {
     use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_stalling_backend().await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let mut peer = HttpPeer::new(addr.to_string(), false, String::new());
     peer.options.read_timeout = Some(Duration::from_millis(30));
@@ -1226,7 +1257,7 @@ async fn send_streaming_cancel_after_eof_is_noop() {
     let chunks: Vec<&[u8]> = vec![b"one", b"two"];
     let (addr, backend) = spawn_http_backend(chunks, Duration::ZERO).await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1261,7 +1292,7 @@ async fn send_streaming_max_stream_duration_fires() {
     let chunks: Vec<&[u8]> = vec![b"a"; 100];
     let (addr, backend) = spawn_http_backend(chunks, Duration::from_millis(10)).await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1306,7 +1337,7 @@ async fn send_streaming_max_total_bytes_enforced() {
     let chunks: Vec<&[u8]> = vec![b"12345"; 10];
     let (addr, backend) = spawn_http_backend(chunks, Duration::ZERO).await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1349,7 +1380,7 @@ async fn send_streaming_cancel_shuts_down_session() {
     use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_stalling_backend().await;
 
-    let connector = SubRequestConnector::new(1, Some(1));
+    let connector = test_connector(1, Some(1));
     let client = super::client::SubRequestClient::new(connector.clone());
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1388,7 +1419,7 @@ async fn send_streaming_drop_before_eof_releases_permit() {
     use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_stalling_backend().await;
 
-    let connector = SubRequestConnector::new(1, Some(1));
+    let connector = test_connector(1, Some(1));
     let client = super::client::SubRequestClient::new(connector.clone());
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1429,7 +1460,7 @@ async fn send_streaming_circuit_success_at_headers() {
     let chunks: Vec<&[u8]> = vec![b"data"];
     let (addr, backend) = spawn_http_backend(chunks, Duration::ZERO).await;
 
-    let connector = SubRequestConnector::with_options(SubRequestConnectorOptions {
+    let connector = test_connector_with_options(SubRequestConnectorOptions {
         keepalive_pool_size: 1,
         max_connections: None,
         circuit_breaker: Some(CircuitBreakerConfig {
@@ -1475,7 +1506,7 @@ async fn send_streaming_permit_held_until_completion() {
     let chunks: Vec<&[u8]> = vec![b"a", b"b", b"c"];
     let (addr, backend) = spawn_http_backend(chunks, Duration::from_millis(20)).await;
 
-    let connector = SubRequestConnector::new(1, Some(1));
+    let connector = test_connector(1, Some(1));
     let client = super::client::SubRequestClient::new(connector.clone());
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1549,7 +1580,7 @@ async fn send_streaming_backpressure_blocks_producer() {
         tokio::time::sleep(Duration::from_secs(2)).await;
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1622,7 +1653,7 @@ async fn send_streaming_connection_reused_after_clean_eof() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -1686,7 +1717,7 @@ async fn send_streaming_circuit_half_open_probe_recovers() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
 
-    let connector = SubRequestConnector::with_options(SubRequestConnectorOptions {
+    let connector = test_connector_with_options(SubRequestConnectorOptions {
         keepalive_pool_size: 1,
         max_connections: None,
         circuit_breaker: Some(CircuitBreakerConfig {
@@ -1793,7 +1824,7 @@ async fn send_streaming_h2_cleartext_receives_chunks() {
     let chunks: Vec<&[u8]> = vec![b"h2-chunk-1", b"h2-chunk-2", b"h2-chunk-3"];
     let (addr, backend) = spawn_h2_backend(chunks.clone(), Duration::ZERO).await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = h2_peer(addr);
     let request = SubRequest {
@@ -1873,7 +1904,7 @@ async fn send_streaming_h2_cleartext_cancel_resets_stream_and_connection_survive
     });
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    let connector = SubRequestConnector::new(4, Some(4));
+    let connector = test_connector(4, Some(4));
     let client = super::client::SubRequestClient::new(connector.clone());
     let peer = h2_peer(addr);
     let request = SubRequest {
@@ -1951,7 +1982,7 @@ async fn send_streaming_h2_cleartext_connection_reused() {
     });
     tokio::time::sleep(Duration::from_millis(10)).await;
 
-    let connector = SubRequestConnector::new(4, None);
+    let connector = test_connector(4, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = h2_peer(addr);
     let request = SubRequest {
@@ -2014,7 +2045,7 @@ async fn send_streaming_h1_incomplete_body_not_reused() {
         }
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -2095,7 +2126,7 @@ async fn send_streaming_h1_cancel_does_not_reuse_connection() {
         }
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -2162,7 +2193,7 @@ async fn send_streaming_204_returns_done_body() {
     use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_204_backend().await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -2227,7 +2258,7 @@ async fn send_streaming_propagates_framework_headers() {
     use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_echo_headers_backend().await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -2283,7 +2314,7 @@ fn get_request(path: &str) -> SubRequest {
 
 #[test]
 fn evict_idle_circuits_without_breaker_returns_zero() {
-    let connector = SubRequestConnector::new(4, None);
+    let connector = test_connector(4, None);
     let client = super::client::SubRequestClient::new(connector);
     assert_eq!(
         client.evict_idle_circuits(Duration::from_secs(1)),
@@ -2294,7 +2325,7 @@ fn evict_idle_circuits_without_breaker_returns_zero() {
 
 #[test]
 fn evict_idle_circuits_with_breaker_delegates_to_registry() {
-    let connector = SubRequestConnector::with_options(SubRequestConnectorOptions {
+    let connector = test_connector_with_options(SubRequestConnectorOptions {
         keepalive_pool_size: 4,
         max_connections: None,
         circuit_breaker: Some(CircuitBreakerConfig {
@@ -2314,7 +2345,7 @@ fn evict_idle_circuits_with_breaker_delegates_to_registry() {
 #[tokio::test]
 async fn execute_with_overflowing_timeout_returns_deadline_exceeded() {
     let addr: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
 
     let result = Box::pin(client.execute(&peer_for(addr), &get_request("/"), 1024, Duration::MAX, None)).await;
@@ -2328,7 +2359,7 @@ async fn execute_with_overflowing_timeout_returns_deadline_exceeded() {
 #[tokio::test]
 async fn execute_with_zero_timeout_returns_deadline_exceeded() {
     let addr: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
 
     let result = Box::pin(client.execute(&peer_for(addr), &get_request("/"), 1024, Duration::ZERO, None)).await;
@@ -2362,7 +2393,7 @@ async fn execute_rejects_body_exceeding_per_call_limit() {
     let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}", body.len());
     let (addr, backend) = spawn_one_shot_backend(response.into_bytes()).await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let result =
         Box::pin(client.execute(&peer_for(addr), &get_request("/big"), 16, Duration::from_secs(5), None)).await;
@@ -2395,7 +2426,7 @@ async fn execute_maps_mid_body_disconnect_to_io_error() {
         drop(socket);
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let result = Box::pin(client.execute(
         &peer_for(addr),
@@ -2431,7 +2462,7 @@ async fn execute_enforces_deadline_during_body_read() {
         tokio::time::sleep(Duration::from_secs(60)).await;
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let result = Box::pin(client.execute(
         &peer_for(addr),
@@ -2453,7 +2484,7 @@ async fn execute_enforces_deadline_during_body_read() {
 async fn execute_rejects_out_of_range_response_status() {
     let (addr, backend) = spawn_one_shot_backend(b"HTTP/1.1 700 Weird\r\nContent-Length: 0\r\n\r\n".to_vec()).await;
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let result = Box::pin(client.execute(
         &peer_for(addr),
@@ -2490,7 +2521,7 @@ async fn send_streaming_with_overflowing_stream_duration_fails() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let limits = StreamLimits {
         idle_timeout: Duration::from_secs(5),
@@ -2531,7 +2562,7 @@ async fn open_stalled_stream_with_read_timeout(
     use pingora_core::upstreams::peer::HttpPeer;
 
     let (addr, backend) = spawn_stalling_backend().await;
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let mut peer = HttpPeer::new(addr.to_string(), false, String::new());
     peer.options.read_timeout = read_timeout;
@@ -2553,7 +2584,7 @@ async fn streaming_body_counts_chunks() {
 
     let chunks: Vec<&[u8]> = vec![b"one", b"two"];
     let (addr, backend) = spawn_http_backend(chunks, Duration::ZERO).await;
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -2665,7 +2696,7 @@ async fn streaming_body_maps_unclean_close_to_io_error() {
         drop(socket);
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -2727,7 +2758,7 @@ async fn interim_1xx_response_is_skipped_not_panicked() {
         drop(socket);
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {
@@ -2768,7 +2799,7 @@ async fn excessive_interim_1xx_responses_are_rejected() {
         let _hold = socket.read(&mut buf).await;
     });
 
-    let connector = SubRequestConnector::new(1, None);
+    let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let peer = HttpPeer::new(addr.to_string(), false, String::new());
     let request = SubRequest {

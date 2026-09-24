@@ -456,10 +456,7 @@ fn sub_filter_context_inherits_parent_runtime_resources() {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use praxis_core::{
-        health::HealthRegistry,
-        id::IdGenerator,
-        kv::KvStoreRegistry,
-        subrequest::{SubRequestClient, SubRequestConnector},
+        health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, subrequest::SubRequestClient,
         time::FixedTimeSource,
     };
 
@@ -473,7 +470,7 @@ fn sub_filter_context_inherits_parent_runtime_resources() {
     let health_registry: HealthRegistry = Arc::new(HashMap::new());
     let id_generator = IdGenerator::with_seed(42);
     let kv_stores = KvStoreRegistry::new();
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let time_source = FixedTimeSource::new(Duration::from_secs(123));
 
     let ctx = super::context::build_sub_filter_context(
@@ -576,7 +573,7 @@ async fn run_returns_buffered_for_locally_produced_response() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let registry = crate::FilterRegistry::with_builtins();
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(
@@ -589,7 +586,7 @@ async fn run_returns_buffered_for_locally_produced_response() {
     .unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -632,19 +629,16 @@ async fn run_falls_back_to_next_staged_address_on_connection_refusal() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
-    let dead = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap()
-    };
+    let (_reserved, dead) = crate::test_support::refusing_addr();
     let (live_addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
 
     let registry = crate::FilterRegistry::with_builtins();
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("[]").unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1085,24 +1079,147 @@ async fn staged_upstream_clears_discarded_selection_metadata() {
     );
 }
 
-#[test]
-fn error_into_parts_scrubs_selected_application() {
+#[cfg(feature = "upstream-binding")]
+fn nested_upstream_extensions() -> crate::RequestExtensions {
     use std::sync::Arc;
 
     let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(crate::extensions::BoundUpstream::new(
+        Arc::from("parent"),
+        Some(Arc::from("parent_protocol")),
+        Some(Arc::from("parent_provider")),
+    ));
+    extensions.insert(crate::extensions::BoundUpstreamFrozen);
+
+    super::enter_nested_upstream_scope(&mut extensions, true);
+    extensions.insert(crate::extensions::BoundUpstream::new(
+        Arc::from("child"),
+        Some(Arc::from("child_protocol")),
+        Some(Arc::from("child_provider")),
+    ));
+    extensions.remove::<crate::extensions::BoundUpstreamFrozen>();
     extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("leak"))).unwrap());
-    let error = super::FilteredSubrequestError::new("boom".to_owned().into(), extensions);
-    let (_error, extensions) = error.into_parts();
+
+    extensions
+}
+
+#[cfg(feature = "upstream-binding")]
+fn assert_parent_upstream_scope(extensions: &crate::RequestExtensions) {
+    let binding = extensions
+        .get::<crate::extensions::BoundUpstream>()
+        .expect("the parent binding must be restored");
+    assert_eq!(
+        binding.cluster(),
+        "parent",
+        "the parent binding cluster must be restored"
+    );
+    assert_eq!(
+        binding.application_protocol(),
+        Some("parent_protocol"),
+        "the parent binding protocol must be restored"
+    );
+    assert_eq!(
+        binding.application_provider(),
+        Some("parent_provider"),
+        "the parent binding provider must be restored"
+    );
+    assert!(
+        extensions.get::<crate::extensions::BoundUpstreamFrozen>().is_some(),
+        "the parent's binding freeze must be restored"
+    );
     assert!(
         extensions
             .get::<crate::extensions::SelectedClusterApplication>()
             .is_none(),
-        "into_parts must scrub SelectedClusterApplication before returning extensions to the parent"
+        "child selected metadata must be scrubbed"
     );
 }
 
+#[cfg(feature = "upstream-binding")]
 #[test]
-fn into_parent_extensions_scrubs_selected_application() {
+fn error_into_parts_restores_parent_upstream_scope() {
+    let extensions = nested_upstream_extensions();
+    let error = super::FilteredSubrequestError::new("boom".to_owned().into(), extensions);
+    let (_error, extensions) = error.into_parts();
+    assert_parent_upstream_scope(&extensions);
+}
+
+#[cfg(feature = "bound-upstream-request-body")]
+#[test]
+fn nested_upstream_scope_shields_parent_body_rewrite() {
+    use crate::extensions::BoundRequestBodyRewrite;
+
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(BoundRequestBodyRewrite(bytes::Bytes::from_static(b"parent")));
+
+    super::enter_nested_upstream_scope(&mut extensions, true);
+    assert!(
+        extensions.get::<BoundRequestBodyRewrite>().is_none(),
+        "the nested pipeline's executor must not take the parent's rewrite as its own"
+    );
+    extensions.insert(BoundRequestBodyRewrite(bytes::Bytes::from_static(b"child")));
+    super::restore_parent_upstream_scope(&mut extensions);
+
+    assert_eq!(
+        extensions
+            .get::<BoundRequestBodyRewrite>()
+            .map(|rewrite| rewrite.0.as_ref()),
+        Some(&b"parent"[..]),
+        "leaving the nested scope must drop the child's rewrite and restore the parent's"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[test]
+fn nested_upstream_scope_restores_parent_binding_and_freeze() {
+    use std::sync::Arc;
+
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(crate::extensions::BoundUpstream::new(
+        Arc::from("parent"),
+        Some(Arc::from("parent_protocol")),
+        Some(Arc::from("parent_provider")),
+    ));
+    extensions.insert(crate::extensions::BoundUpstreamFrozen);
+
+    super::enter_nested_upstream_scope(&mut extensions, true);
+    extensions.insert(crate::extensions::BoundUpstream::new(Arc::from("child"), None, None));
+    extensions.remove::<crate::extensions::BoundUpstreamFrozen>();
+    extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("child"))).unwrap());
+
+    super::restore_parent_upstream_scope(&mut extensions);
+
+    let binding = extensions.get::<crate::extensions::BoundUpstream>().unwrap();
+    assert_eq!(
+        binding.cluster(),
+        "parent",
+        "the parent binding cluster must be restored"
+    );
+    assert_eq!(
+        binding.application_protocol(),
+        Some("parent_protocol"),
+        "the parent binding protocol must be restored"
+    );
+    assert_eq!(
+        binding.application_provider(),
+        Some("parent_provider"),
+        "the parent binding provider must be restored"
+    );
+    assert!(
+        extensions.get::<crate::extensions::BoundUpstreamFrozen>().is_some(),
+        "the parent's binding freeze must be restored"
+    );
+    assert!(
+        extensions
+            .get::<crate::extensions::SelectedClusterApplication>()
+            .is_none(),
+        "child selected metadata must be scrubbed"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[test]
+fn into_parent_extensions_restores_parent_upstream_scope() {
     use std::sync::Arc;
 
     let registry = crate::FilterRegistry::with_builtins();
@@ -1116,8 +1233,7 @@ fn into_parent_extensions_scrubs_selected_application() {
         headers: HeaderMap::new(),
         status: http::StatusCode::OK,
     };
-    let mut extensions = crate::RequestExtensions::default();
-    extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("leak"))).unwrap());
+    let extensions = nested_upstream_extensions();
 
     let continuation = super::continuation::FilteredSubrequestContinuation {
         pipeline,
@@ -1141,16 +1257,12 @@ fn into_parent_extensions_scrubs_selected_application() {
     };
 
     let extensions = continuation.into_parent_extensions();
-    assert!(
-        extensions
-            .get::<crate::extensions::SelectedClusterApplication>()
-            .is_none(),
-        "into_parent_extensions must scrub SelectedClusterApplication before returning extensions to the parent"
-    );
+    assert_parent_upstream_scope(&extensions);
 }
 
+#[cfg(feature = "upstream-binding")]
 #[test]
-fn into_completion_scrubs_selected_application() {
+fn into_completion_restores_parent_upstream_scope() {
     use std::sync::Arc;
 
     let registry = crate::FilterRegistry::with_builtins();
@@ -1164,8 +1276,7 @@ fn into_completion_scrubs_selected_application() {
         headers: HeaderMap::new(),
         status: http::StatusCode::OK,
     };
-    let mut extensions = crate::RequestExtensions::default();
-    extensions.insert(crate::extensions::SelectedClusterApplication::new(None, Some(Arc::from("leak"))).unwrap());
+    let extensions = nested_upstream_extensions();
 
     let continuation = super::continuation::FilteredSubrequestContinuation {
         pipeline,
@@ -1189,12 +1300,307 @@ fn into_completion_scrubs_selected_application() {
     };
 
     let completion = continuation.into_completion();
+    assert_parent_upstream_scope(&completion.extensions);
+}
+
+#[cfg(feature = "upstream-binding")]
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn expired_deadline_keeps_the_outer_scope_checkpoint() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::SubRequestClient;
+
+    let registry = crate::FilterRegistry::with_builtins();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut [], &registry).unwrap());
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(crate::extensions::BoundUpstream::new(Arc::from("parent"), None, None));
+    super::enter_nested_upstream_scope(&mut extensions, true);
+    extensions.insert(crate::extensions::BoundUpstream::new(
+        Arc::from("outer-step"),
+        None,
+        None,
+    ));
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+
+    let Err(error) = executor
+        .execute(super::FilteredSubrequestInput::callout(
+            &pipeline,
+            &request,
+            Instant::now(),
+            extensions,
+        ))
+        .await
+    else {
+        panic!("an expired deadline must fail the sub-request");
+    };
+    let (_error, extensions) = error.into_parts();
+
+    assert_eq!(
+        extensions
+            .get::<crate::extensions::BoundUpstream>()
+            .map(crate::extensions::BoundUpstream::cluster),
+        Some("outer-step"),
+        "a failed inner call must hand back the outer step's view, not pop the outer checkpoint"
+    );
+    assert_eq!(
+        extensions
+            .get::<super::ParentUpstreamStates>()
+            .map(|states| states.0.len()),
+        Some(1),
+        "the outer scope's checkpoint must survive for its own restore"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn execute_restores_the_parent_binding_after_a_child_rebinds() {
+    for (inherits_binding, fails) in [(true, false), (true, true), (false, false), (false, true)] {
+        let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let pipeline = rebinding_pipeline(addr, &seen, fails);
+        let executor = test_callout_executor();
+        let request = crate::SubRequest {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers: HeaderMap::new(),
+            body: bytes::Bytes::new(),
+        };
+        let mut input = super::FilteredSubrequestInput::callout(
+            &pipeline,
+            &request,
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            frozen_parent_extensions(),
+        );
+        input.inherits_binding = inherits_binding;
+
+        let extensions = match executor.execute(input).await {
+            Ok(opened) => opened.continuation.into_completion().extensions,
+            Err(error) => error.into_parts().1,
+        };
+        backend.abort();
+
+        let expected_seen = inherits_binding.then(|| "parent".to_owned());
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![expected_seen],
+            "the child sees the parent binding only when it inherits it \
+             (inherits = {inherits_binding}, fails = {fails})"
+        );
+        assert_eq!(
+            extensions
+                .get::<crate::extensions::BoundUpstream>()
+                .map(crate::extensions::BoundUpstream::cluster),
+            Some("parent"),
+            "the parent binding must come back (inherits = {inherits_binding}, fails = {fails})"
+        );
+        assert!(
+            extensions.get::<crate::extensions::BoundUpstreamFrozen>().is_some(),
+            "the parent freeze must come back (inherits = {inherits_binding}, fails = {fails})"
+        );
+        assert!(
+            extensions.get::<super::ParentUpstreamStates>().is_none(),
+            "the scope checkpoint must be consumed (inherits = {inherits_binding}, fails = {fails})"
+        );
+    }
+}
+
+#[cfg(feature = "upstream-binding")]
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn execute_leaves_an_unbound_parent_unbound_after_a_callout_binds() {
+    use crate::extensions::{BoundUpstream, BoundUpstreamFrozen};
+
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = rebinding_pipeline(addr, &seen, false);
+    let executor = test_callout_executor();
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let input = super::FilteredSubrequestInput::callout(
+        &pipeline,
+        &request,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+        crate::RequestExtensions::default(),
+    );
+
+    let extensions = executor
+        .execute(input)
+        .await
+        .map(|opened| opened.continuation.into_completion().extensions)
+        .map_err(|error| error.into_parts().0)
+        .expect("the callout reaches its own backend");
+    backend.abort();
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![None],
+        "the callout starts unbound, then binds its own cluster"
+    );
     assert!(
-        completion
-            .extensions
-            .get::<crate::extensions::SelectedClusterApplication>()
-            .is_none(),
-        "into_completion must scrub SelectedClusterApplication before returning extensions to the parent"
+        extensions.get::<BoundUpstream>().is_none(),
+        "an unbound parent must not inherit the callout's binding"
+    );
+    assert!(
+        extensions.get::<BoundUpstreamFrozen>().is_none(),
+        "an unbound parent must not inherit the callout's freeze"
+    );
+    assert!(
+        extensions.get::<super::ParentUpstreamStates>().is_none(),
+        "the scope checkpoint must be consumed"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[test]
+fn restore_clears_a_child_binding_the_parent_never_had() {
+    use crate::extensions::{BoundUpstream, BoundUpstreamFrozen};
+
+    let mut extensions = crate::RequestExtensions::default();
+    super::enter_nested_upstream_scope(&mut extensions, false);
+    extensions.insert(BoundUpstream::new(std::sync::Arc::from("callout"), None, None));
+    extensions.insert(BoundUpstreamFrozen);
+    #[cfg(feature = "bound-upstream-request-body")]
+    extensions.insert(crate::extensions::BoundRequestBodyRewrite(bytes::Bytes::from_static(
+        b"callout",
+    )));
+
+    super::restore_parent_upstream_scope(&mut extensions);
+
+    assert!(
+        extensions.get::<BoundUpstream>().is_none(),
+        "an unbound parent must not inherit the callout's binding"
+    );
+    assert!(
+        extensions.get::<BoundUpstreamFrozen>().is_none(),
+        "an unbound parent must not inherit the callout's freeze"
+    );
+    #[cfg(feature = "bound-upstream-request-body")]
+    assert!(
+        extensions.get::<crate::extensions::BoundRequestBodyRewrite>().is_none(),
+        "an unbound parent must not inherit the callout's body rewrite"
+    );
+    assert!(
+        extensions.get::<super::ParentUpstreamStates>().is_none(),
+        "the scope checkpoint must be consumed"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[test]
+fn callout_scope_starts_unbound_and_restores_the_parent_binding() {
+    use std::sync::Arc;
+
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(crate::extensions::BoundUpstream::new(
+        Arc::from("parent"),
+        Some(Arc::from("parent_protocol")),
+        None,
+    ));
+    extensions.insert(crate::extensions::BoundUpstreamFrozen);
+
+    super::enter_nested_upstream_scope(&mut extensions, false);
+    assert!(
+        extensions.get::<crate::extensions::BoundUpstream>().is_none(),
+        "an outbound callout is a separate request and must start unbound"
+    );
+    assert!(
+        extensions.get::<crate::extensions::BoundUpstreamFrozen>().is_none(),
+        "the parent's freeze must not block the callout's own binding router"
+    );
+    extensions.insert(crate::extensions::BoundUpstream::new(Arc::from("callout"), None, None));
+    extensions.insert(crate::extensions::BoundUpstreamFrozen);
+    super::restore_parent_upstream_scope(&mut extensions);
+
+    assert_eq!(
+        extensions
+            .get::<crate::extensions::BoundUpstream>()
+            .map(crate::extensions::BoundUpstream::cluster),
+        Some("parent"),
+        "leaving the callout restores the parent's binding"
+    );
+    assert!(
+        extensions.get::<crate::extensions::BoundUpstreamFrozen>().is_some(),
+        "leaving the callout restores the parent's freeze"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn callout_with_its_own_binding_router_ignores_the_parent_binding() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::SubRequestClient;
+
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\ncallout").await;
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&format!(
+        r#"
+- filter: router
+  routes:
+    - path_prefix: "/"
+      cluster: outbound
+- filter: load_balancer
+  cluster_source: bound_upstream
+  clusters:
+    - name: outbound
+      endpoints: ["{addr}"]
+"#
+    ))
+    .unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(crate::extensions::BoundUpstream::new(Arc::from("parent"), None, None));
+    extensions.insert(crate::extensions::BoundUpstreamFrozen);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+
+    let outcome = executor
+        .run(&pipeline, &request, extensions, Instant::now() + Duration::from_secs(5))
+        .await;
+    backend.abort();
+
+    let response = match outcome.expect("the callout should reach its own bound upstream") {
+        crate::CalloutResponse::Buffered(response) => response,
+        crate::CalloutResponse::Streaming { .. } => panic!("the outbound chain is buffered"),
+    };
+    assert_eq!(
+        response.status, 200,
+        "the callout binds its own cluster instead of failing on the parent's frozen binding"
+    );
+    assert_eq!(
+        response.body.as_ref(),
+        b"callout",
+        "the callout reaches its own backend"
     );
 }
 
@@ -1206,7 +1612,7 @@ async fn run_re_pins_staged_upstream_over_chain_filter_rewrite() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let (staged_addr, staged_backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nstaged").await;
     let (attacker_addr, attacker_backend) =
@@ -1227,7 +1633,7 @@ async fn run_re_pins_staged_upstream_over_chain_filter_rewrite() {
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str("- filter: test_upstream_hijack").unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1350,7 +1756,7 @@ async fn buffered_subrequest_context_inherits_parent_session_stores() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let saw_on_request = Arc::new(AtomicBool::new(false));
     let saw_on_response_body = Arc::new(AtomicBool::new(false));
@@ -1369,7 +1775,7 @@ async fn buffered_subrequest_context_inherits_parent_session_stores() {
     pipeline.set_session_stores(Arc::new(crate::SessionStoreRegistry::new()));
     let pipeline = Arc::new(pipeline);
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1402,7 +1808,7 @@ async fn subrequest_binds_credentials_to_logical_authority_not_transport() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (addr, backend) =
@@ -1447,7 +1853,7 @@ async fn subrequest_binds_credentials_to_logical_authority_not_transport() {
     let mut extensions = crate::RequestExtensions::default();
     extensions.insert(pending);
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1487,7 +1893,7 @@ async fn subrequest_sends_logical_authority_as_host_not_transport() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (addr, backend) =
@@ -1512,7 +1918,7 @@ async fn subrequest_sends_logical_authority_as_host_not_transport() {
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&chain).unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1559,7 +1965,7 @@ async fn subrequest_credential_injection_pins_host_to_credential_authority() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (addr, backend) =
@@ -1595,7 +2001,7 @@ async fn subrequest_credential_injection_pins_host_to_credential_authority() {
     let mut extensions = crate::RequestExtensions::default();
     extensions.insert(pending);
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1645,7 +2051,7 @@ async fn subrequest_unmatched_staged_credential_preserves_custom_host() {
         time::{Duration, Instant},
     };
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (addr, backend) =
@@ -1680,7 +2086,7 @@ async fn subrequest_unmatched_staged_credential_preserves_custom_host() {
     let mut extensions = crate::RequestExtensions::default();
     extensions.insert(pending);
 
-    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     let executor =
         crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
@@ -1987,9 +2393,9 @@ fn routed_chain_yaml(addr: std::net::SocketAddr, extra: &str) -> String {
 fn streaming_executor(max_response_bytes: usize) -> crate::FilteredSubrequestExecutor {
     use std::time::{Duration, Instant};
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
-    let client = SubRequestClient::new(SubRequestConnector::new(4, None));
+    let client = SubRequestClient::new(crate::test_support::connector(4, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, max_response_bytes, Duration::from_secs(5))
 }
@@ -2094,10 +2500,7 @@ async fn run_streaming_falls_back_to_next_staged_address_on_connection_refusal()
         time::{Duration, Instant},
     };
 
-    let dead = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap()
-    };
+    let (_reserved, dead) = crate::test_support::refusing_addr();
     let (live_addr, backend) =
         spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
 
@@ -2560,9 +2963,9 @@ impl crate::HttpFilter for BodyExpandingFilter {
 fn buffered_executor(max_response_bytes: usize) -> crate::FilteredSubrequestExecutor {
     use std::time::{Duration, Instant};
 
-    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    use praxis_core::subrequest::SubRequestClient;
 
-    let client = SubRequestClient::new(SubRequestConnector::new(4, None));
+    let client = SubRequestClient::new(crate::test_support::connector(4, None));
     let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
     crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, max_response_bytes, Duration::from_secs(5))
 }
@@ -2954,10 +3357,7 @@ async fn selected_upstream_reject_short_circuits_before_dialing() {
 
     use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
 
-    let dead = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap()
-    };
+    let (_reserved, dead) = crate::test_support::refusing_addr();
 
     let mut registry = crate::FilterRegistry::with_builtins();
     registry
@@ -3010,10 +3410,7 @@ async fn selected_upstream_oversized_output_is_rejected_with_413() {
 
     use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
 
-    let dead = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap()
-    };
+    let (_reserved, dead) = crate::test_support::refusing_addr();
 
     let mut registry = crate::FilterRegistry::with_builtins();
     registry
@@ -3333,4 +3730,99 @@ async fn selected_upstream_phase_enforces_retained_state_ceiling() {
          413. A non-empty capture means the executor dialed first and only rejected \
          post-transport"
     );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities: binding restore
+// -----------------------------------------------------------------------------
+
+#[cfg(feature = "upstream-binding")]
+/// Records the binding it sees, then replaces it with a child binding and
+/// clears the freeze, optionally failing afterwards.
+struct RebindChildFilter {
+    seen: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    fails: bool,
+}
+
+#[cfg(feature = "upstream-binding")]
+#[async_trait::async_trait]
+impl crate::HttpFilter for RebindChildFilter {
+    fn name(&self) -> &'static str {
+        "test_rebind_child"
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        self.seen.lock().unwrap().push(ctx.bound_cluster().map(str::to_owned));
+        ctx.extensions.insert(crate::extensions::BoundUpstream::new(
+            std::sync::Arc::from("child"),
+            None,
+            None,
+        ));
+        ctx.extensions.remove::<crate::extensions::BoundUpstreamFrozen>();
+        if self.fails {
+            return Err("child step failed".to_owned().into());
+        }
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+#[cfg(feature = "upstream-binding")]
+/// A pipeline whose first filter rebinds, then routes to `addr`.
+fn rebinding_pipeline(
+    addr: std::net::SocketAddr,
+    seen: &std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    fails: bool,
+) -> std::sync::Arc<crate::FilterPipeline> {
+    let mut registry = crate::FilterRegistry::with_builtins();
+    let recorder = std::sync::Arc::clone(seen);
+    registry
+        .register(
+            "test_rebind_child",
+            crate::FilterFactory::Http(std::sync::Arc::new(move |_| {
+                Ok(Box::new(RebindChildFilter {
+                    seen: std::sync::Arc::clone(&recorder),
+                    fails,
+                }))
+            })),
+        )
+        .unwrap();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&format!(
+        r#"
+- filter: test_rebind_child
+- filter: router
+  routes:
+    - path_prefix: "/"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints: ["{addr}"]
+"#
+    ))
+    .unwrap();
+    std::sync::Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap())
+}
+
+/// Request extensions carrying a frozen parent binding.
+#[cfg(feature = "upstream-binding")]
+fn frozen_parent_extensions() -> crate::RequestExtensions {
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(crate::extensions::BoundUpstream::new(
+        std::sync::Arc::from("parent"),
+        None,
+        None,
+    ));
+    extensions.insert(crate::extensions::BoundUpstreamFrozen);
+    extensions
+}
+
+#[cfg(feature = "upstream-binding")]
+/// A callout executor over a test connector.
+fn test_callout_executor() -> crate::FilteredSubrequestExecutor {
+    let client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, std::time::Instant::now());
+    crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, std::time::Duration::from_secs(5))
 }

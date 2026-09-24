@@ -3,14 +3,13 @@
 This file provides guidance to coding agents when working with code in this
 repository.
 
-AI tools may assist with implementation, but **do not add any AI tool as a commit
-collaborator, co-author, or signatory**. Do not add `Co-Authored-By: Claude` or
-similar trailers. Commit sign-off belongs to the human contributor responsible
-for the change.
+Tools may assist with implementation, but **do not add any tool as a commit
+collaborator, co-author, or signatory**. Commit sign-off belongs to the human
+contributor responsible for the change.
 
 ## Requirements
 
-- Rust stable 1.96+
+- Rust stable 1.92+
 - Rust nightly (for `rustfmt`)
 - CMake 3.31+
 - Docker 29.3.0+ or Podman (for container builds)

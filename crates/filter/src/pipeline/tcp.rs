@@ -479,6 +479,8 @@ mod tests {
             request_body_filter_indices: Vec::new(),
             response_body_filter_indices: Vec::new(),
             selected_upstream_request_body_filter_indices: Vec::new(),
+            #[cfg(feature = "bound-upstream-request-body")]
+            bound_upstream_request_body_filter_indices: Vec::new(),
             allow_private_upstreams: false,
             response_trailer_filter_indices: Vec::new(),
         }

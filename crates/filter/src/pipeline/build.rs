@@ -23,6 +23,8 @@ use praxis_core::{
 };
 use tracing::{debug, warn};
 
+#[cfg(feature = "upstream-binding")]
+use super::catalog::ClusterApplicationCatalog;
 use super::{
     FilterPipeline,
     body::{body_filter_indices, compute_body_capabilities, selected_upstream_request_body_indices},
@@ -107,7 +109,18 @@ impl FilterPipeline {
         clippy::too_many_lines,
         reason = "single construction choke point: one precompute per body phase plus the full struct literal"
     )]
-    pub(crate) fn from_filters(filters: Vec<PipelineFilter>) -> Self {
+    pub(crate) fn from_filters(
+        #[cfg_attr(
+            not(feature = "upstream-binding"),
+            expect(unused_mut, reason = "only binding enablement mutates the filters")
+        )]
+        mut filters: Vec<PipelineFilter>,
+    ) -> Self {
+        #[cfg(feature = "upstream-binding")]
+        if super::checks::uses_bound_upstream(&filters) {
+            let catalog = build_cluster_application_catalog(&filters);
+            enable_upstream_binding(&mut filters, &catalog);
+        }
         let body_capabilities = compute_body_capabilities(&filters);
         let compression = extract_compression_config(&filters);
         let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);
@@ -118,6 +131,8 @@ impl FilterPipeline {
             .collect();
         let (request_body_filter_indices, response_body_filter_indices) = body_filter_indices(&filters);
         let selected_upstream_request_body_filter_indices = selected_upstream_request_body_indices(&filters);
+        #[cfg(feature = "bound-upstream-request-body")]
+        let bound_upstream_request_body_filter_indices = super::body::bound_upstream_request_body_indices(&filters);
         let response_trailer_filter_indices = super::body::response_trailer_filter_indices(&filters);
         let id_generator = Arc::new(IdGenerator::new());
         let time_source: Arc<dyn praxis_core::time::TimeSource> = Arc::new(SystemTimeSource);
@@ -128,6 +143,8 @@ impl FilterPipeline {
             request_body_filter_indices,
             response_body_filter_indices,
             selected_upstream_request_body_filter_indices,
+            #[cfg(feature = "bound-upstream-request-body")]
+            bound_upstream_request_body_filter_indices,
             allow_private_upstreams: false,
             response_trailer_filter_indices,
             health_registry: None,
@@ -183,15 +200,72 @@ impl FilterPipeline {
     ///
     /// [`build`]: FilterPipeline::build
     /// [`SkipPipelineChecks`]: praxis_core::config::SkipPipelineChecks
-    #[expect(
-        clippy::too_many_lines,
-        reason = "streaming capability check adds one validation pass"
-    )]
     pub fn ordering_errors(
         &self,
         entries: &[FilterEntry],
         allow_open_security: bool,
         skip: &SkipPipelineChecks,
+    ) -> Vec<String> {
+        // A top-level pipeline starts with nothing bound.
+        self.ordering_errors_inner(entries, allow_open_security, skip, false)
+    }
+
+    /// The binding checks, run after the ordinary ordering checks.
+    ///
+    /// `in_irr_step` is `true` for an IRR step continuation, which inherits its
+    /// parent's binding and may not publish its own.
+    #[cfg(feature = "upstream-binding")]
+    fn binding_errors(&self, in_irr_step: bool, names: &[&str], errors: &mut Vec<String>) {
+        let uses_bound_upstream = super::checks::uses_bound_upstream(&self.filters);
+        if uses_bound_upstream {
+            super::checks::check_cluster_metadata_conflicts(&self.filters, errors);
+        }
+        super::checks::check_bound_upstream_requires_binding(&self.filters, in_irr_step, errors);
+        super::checks::check_bound_condition_with_pre_read_body(
+            &self.filters,
+            self.body_capabilities.request_body_mode,
+            errors,
+        );
+        #[cfg(feature = "bound-upstream-request-body")]
+        super::checks::check_bound_upstream_body_participants(&self.filters, in_irr_step, errors);
+        if uses_bound_upstream {
+            super::checks::check_no_rebind_after_binding(&self.filters, in_irr_step, errors);
+        }
+        super::checks::check_bound_cluster_coverage(&self.filters, errors);
+        super::checks::check_untagged_bound_cluster_fields(&self.filters, errors);
+        super::checks::check_irr_coexistence(&self.filters, names, errors);
+    }
+
+    /// Validate an `iterative_request_router` step pipeline, which runs as a
+    /// continuation of a parent that already guarantees a logical binding before
+    /// the IRR (the parent's own bound-upstream reachability check enforces
+    /// this). The step's bound consumers are therefore validated with a binding
+    /// assumed present on entry.
+    #[cfg(feature = "iterative-request-router")]
+    pub(crate) fn step_ordering_errors(
+        &self,
+        entries: &[FilterEntry],
+        allow_open_security: bool,
+        skip: &SkipPipelineChecks,
+    ) -> Vec<String> {
+        self.ordering_errors_inner(entries, allow_open_security, skip, true)
+    }
+
+    /// Shared body of [`Self::ordering_errors`] and the feature-gated
+    /// `step_ordering_errors` (the IRR-step variant).
+    ///
+    /// `in_irr_step` is `true` for an IRR step continuation, which inherits its
+    /// parent's binding and may not publish its own.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one sequential invocation per ordering check, including the bound-upstream passes"
+    )]
+    fn ordering_errors_inner(
+        &self,
+        entries: &[FilterEntry],
+        allow_open_security: bool,
+        skip: &SkipPipelineChecks,
+        in_irr_step: bool,
     ) -> Vec<String> {
         let names: Vec<&str> = self.filters.iter().map(|pf| pf.filter.name()).collect();
 
@@ -223,12 +297,22 @@ impl FilterPipeline {
             super::checks::check_duplicate_rewrite_filters(&names, entries, &mut errors);
         }
         super::checks::check_condition_header_names(&self.filters, &mut errors);
+        super::checks::check_trace_context_upstream_conditions(&self.filters, &mut errors);
         super::checks::check_skip_to_bypasses_security(&self.filters, &mut errors);
         super::checks::check_terminal_rejoin_bypasses_security(&self.filters, &mut errors);
         super::checks::check_branch_body_filters(&self.filters, &mut errors);
         super::checks::check_branch_selected_upstream_body_filters(&self.filters, &mut errors);
         super::checks::check_selected_upstream_body_mode(&self.filters, &mut errors);
-        super::checks::check_irr_with_router_or_lb(&names, &mut errors);
+        #[cfg(feature = "upstream-binding")]
+        self.binding_errors(in_irr_step, &names, &mut errors);
+        #[cfg(not(feature = "upstream-binding"))]
+        let _ = in_irr_step;
+        super::checks::check_selected_upstream_condition_ordering(&self.filters, &mut errors);
+        super::checks::check_selected_upstream_condition_pre_read(
+            &self.filters,
+            self.body_capabilities.request_body_mode,
+            &mut errors,
+        );
         if self.may_select_streaming_subrequest_response
             && matches!(
                 self.body_capabilities.response_body_mode,
@@ -266,6 +350,8 @@ impl FilterPipeline {
     ///             path_prefix: Some("/api".to_owned()),
     ///             methods: None,
     ///             headers: None,
+    ///             bound_upstream: None,
+    ///             selected_upstream: None,
     ///         },
     ///     )],
     ///     name: None,
@@ -285,11 +371,25 @@ impl FilterPipeline {
 
         let mut warnings = Vec::new();
 
-        super::checks::check_router_without_lb(&names, &mut warnings);
+        super::checks::check_router_without_lb(&self.filters, &names, &mut warnings);
         super::checks::check_all_routers_conditional(&names, &self.filters, &mut warnings);
         super::checks::check_security_filter_in_conditional_branch(&self.filters, &mut warnings);
 
         warnings
+    }
+}
+
+/// Enable logical binding only on routers in a pipeline that actually uses it,
+/// handing each the pipeline's cluster catalog.
+#[cfg(feature = "upstream-binding")]
+fn enable_upstream_binding(filters: &mut [PipelineFilter], catalog: &Arc<ClusterApplicationCatalog>) {
+    for pf in filters {
+        if let AnyFilter::Http(filter) = &mut pf.filter {
+            filter.enable_upstream_binding(Arc::clone(catalog));
+        }
+        for branch in &mut pf.branches {
+            enable_upstream_binding(&mut branch.filters, catalog);
+        }
     }
 }
 
@@ -320,6 +420,24 @@ fn warn_tcp_unsupported_fields(filter: &AnyFilter, entry: &FilterEntry) {
              branching is only supported for HTTP filters"
         );
     }
+}
+
+/// Build the metadata-only cluster catalog for a binding-enabled pipeline from
+/// every reachable cluster declaration (top-level filters and branch
+/// sub-chains).
+///
+/// Ordinary routing resolves metadata from the load balancer that owns the
+/// selected endpoint, so it neither needs this global catalog nor requires
+/// declarations in independent dispatch paths to agree. Conflicting
+/// declarations are ignored here and surfaced by
+/// [`check_cluster_metadata_conflicts`], which blocks a conflicting pipeline
+/// from serving traffic.
+///
+/// [`check_cluster_metadata_conflicts`]: super::checks::check_cluster_metadata_conflicts
+#[cfg(feature = "upstream-binding")]
+fn build_cluster_application_catalog(filters: &[PipelineFilter]) -> Arc<ClusterApplicationCatalog> {
+    let (catalog, _conflicts) = super::catalog::build_catalog(super::collect_cluster_declarations(filters));
+    Arc::new(catalog)
 }
 
 /// Scan the filter list for a compression filter and extract its config.

@@ -449,6 +449,17 @@ fn validate_transitions(
 
 /// Warn about unreachable steps.
 fn validate_reachability(cfg: &IterativeRequestRouterConfig, step_names: &[&str]) {
+    for name in unreachable_steps(cfg, step_names) {
+        tracing::warn!(step = name, "iterative_request_router: step is unreachable");
+    }
+}
+
+/// The configured steps no request can reach from `initial_step`.
+///
+/// Follows each step's transitions up to and including its first `default`,
+/// since evaluation stops there, so a step named only by a transition listed
+/// after a default is unreachable.
+pub(super) fn unreachable_steps<'a>(cfg: &'a IterativeRequestRouterConfig, step_names: &[&'a str]) -> Vec<&'a str> {
     let mut reachable = std::collections::HashSet::new();
     reachable.insert(cfg.initial_step.as_str());
 
@@ -459,7 +470,12 @@ fn validate_reachability(cfg: &IterativeRequestRouterConfig, step_names: &[&str]
             if !reachable.contains(step.name.as_str()) {
                 continue;
             }
-            for t in &step.on_result {
+            let live = step
+                .on_result
+                .iter()
+                .position(|t| t.default)
+                .map_or(step.on_result.len(), |first_default| first_default + 1);
+            for t in step.on_result.iter().take(live) {
                 if let Some(next) = &t.next
                     && reachable.insert(next.as_str())
                 {
@@ -469,11 +485,11 @@ fn validate_reachability(cfg: &IterativeRequestRouterConfig, step_names: &[&str]
         }
     }
 
-    for name in step_names {
-        if !reachable.contains(name) {
-            tracing::warn!(step = name, "iterative_request_router: step is unreachable");
-        }
-    }
+    step_names
+        .iter()
+        .copied()
+        .filter(|name| !reachable.contains(name))
+        .collect()
 }
 
 /// Returns the maximum iterative depth for loop prevention.

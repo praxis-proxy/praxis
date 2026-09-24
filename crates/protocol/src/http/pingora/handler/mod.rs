@@ -174,7 +174,6 @@ where
     Ok(())
 }
 
-
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -1030,6 +1029,33 @@ mod tests {
         assert_eq!(events.len(), 1, "in-scope incomplete requests still get a record");
     }
 
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn fallback_access_log_honors_a_bound_upstream_condition() {
+        for (axis, bound_records, unbound_records) in [("when", 1, 0), ("unless", 0, 1)] {
+            let pipeline = access_log_pipeline_gated_on_binding(axis);
+            let mut bound = make_fallback_ctx();
+            bind_through_the_pipeline(&pipeline, &mut bound);
+            let mut unbound = make_fallback_ctx();
+
+            let bound_events =
+                capture_access_events(|| logging_util::maybe_emit_fallback_access_log(&pipeline, 502, &mut bound));
+            let unbound_events =
+                capture_access_events(|| logging_util::maybe_emit_fallback_access_log(&pipeline, 502, &mut unbound));
+
+            assert_eq!(
+                bound_events.len(),
+                bound_records,
+                "{axis}: a request the router bound to openai is matched against its real binding"
+            );
+            assert_eq!(
+                unbound_events.len(),
+                unbound_records,
+                "{axis}: a request that failed before routing has no binding to match"
+            );
+        }
+    }
+
     #[test]
     fn aborted_response_body_at_eos_is_not_marked_delivered() {
         let pipeline = access_log_pipeline();
@@ -1337,6 +1363,42 @@ mod tests {
     }
 
     /// Build a context with a request snapshot for fallback logging tests.
+    /// A router, an `access_log` gated on the openai binding with `axis`, and a
+    /// load balancer whose cluster carries the openai tag.
+    #[cfg(feature = "upstream-binding")]
+    fn access_log_pipeline_gated_on_binding(axis: &str) -> FilterPipeline {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(&format!(
+            r#"
+- filter: router
+  routes: [{{path_prefix: "/", cluster: backend}}]
+- filter: access_log
+  conditions: [{{{axis}: {{bound_upstream: {{application_provider: openai}}}}}}]
+- filter: load_balancer
+  clusters: [{{name: backend, http: {{application_provider: openai}}, endpoints: ["127.0.0.1:9"]}}]
+"#
+        ))
+        .unwrap();
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    /// Run the request phase so the router publishes the binding into `ctx`,
+    /// the way the handler leaves it for a request that later fails.
+    #[cfg(feature = "upstream-binding")]
+    fn bind_through_the_pipeline(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx) {
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let extensions = {
+            let mut filter_ctx = ctx.filter_context_for(pipeline, None).expect("the snapshot is present");
+            drop(
+                runtime
+                    .block_on(pipeline.execute_http_request(&mut filter_ctx))
+                    .expect("the router binds the catch-all route"),
+            );
+            std::mem::take(&mut filter_ctx.extensions)
+        };
+        ctx.extensions = extensions;
+    }
+
     fn make_fallback_ctx() -> PingoraRequestCtx {
         let mut ctx = PingoraRequestCtx::default();
         ctx.request_snapshot = Some(praxis_filter::Request {

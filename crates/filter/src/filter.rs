@@ -5,11 +5,16 @@
 //!
 //! Every HTTP filter implements this trait.
 
+#[cfg(feature = "upstream-binding")]
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_core::config::InsecureOptions;
 
 pub(crate) use crate::context::HttpFilterContext;
+#[cfg(feature = "upstream-binding")]
+use crate::pipeline::catalog::{ClusterApplicationCatalog, ClusterMetadataDeclaration};
 use crate::{
     actions::{FilterAction, SelectedUpstreamBodyOutcome},
     body::{BodyAccess, BodyMode},
@@ -119,6 +124,106 @@ pub trait HttpFilter: Send + Sync {
         Vec::new()
     }
 
+    /// Application metadata for the clusters this filter declares.
+    ///
+    /// The pipeline folds every filter's declarations into a single
+    /// metadata catalog so a binding `router` can resolve a matched
+    /// cluster's opaque application protocol and provider without owning
+    /// endpoint state. Load-balancing filters override this and declare the
+    /// same names they report from [`load_balancer_clusters`]; a name declared
+    /// here but not served there would tag a binding nothing can dispatch.
+    /// Filters that declare no clusters leave the default empty list.
+    ///
+    /// [`load_balancer_clusters`]: HttpFilter::load_balancer_clusters
+    #[cfg(feature = "upstream-binding")]
+    fn declared_cluster_metadata(&self) -> Vec<ClusterMetadataDeclaration> {
+        Vec::new()
+    }
+
+    /// Whether this filter publishes the request's logical upstream binding.
+    ///
+    /// Framework-internal: only the built-in `router` can publish, because the
+    /// context API that writes the binding is crate-private, and it reports
+    /// `true` only after [`enable_upstream_binding`] handed it a catalog.
+    /// Pipeline validation treats the first filter that reports `true` as the
+    /// binding router, so an out-of-tree filter must leave the default.
+    ///
+    /// [`enable_upstream_binding`]: HttpFilter::enable_upstream_binding
+    #[doc(hidden)]
+    #[cfg(feature = "upstream-binding")]
+    fn binds_upstream(&self) -> bool {
+        false
+    }
+
+    /// Enable logical-upstream publication for this filter.
+    ///
+    /// Pipeline construction calls this only when the resolved pipeline
+    /// contains a bound-upstream observer or consumer, passing the pipeline's
+    /// cluster `catalog` so a published binding carries each cluster's
+    /// application metadata. The built-in `router` uses the hook to keep
+    /// ordinary routing pipelines on their pre-binding fast path; other
+    /// filters leave the default no-op implementation.
+    #[doc(hidden)]
+    #[cfg(feature = "upstream-binding")]
+    fn enable_upstream_binding(&mut self, _catalog: Arc<ClusterApplicationCatalog>) {}
+
+    /// Whether this filter selects its cluster from the frozen logical
+    /// binding (`BoundUpstream`) rather than a preceding `router`'s
+    /// exchange-local [`HttpFilterContext::cluster`].
+    ///
+    /// A load balancer configured with `cluster_source: bound_upstream`
+    /// overrides this. Pipeline validation uses it to reason about direct
+    /// branches and IRR-owned pipelines: a bound-consuming load balancer
+    /// needs a binding guaranteed on every reachable path and must declare
+    /// the bound cluster among its own [`load_balancer_clusters`].
+    ///
+    /// [`HttpFilterContext::cluster`]: crate::HttpFilterContext::cluster
+    /// [`load_balancer_clusters`]: HttpFilter::load_balancer_clusters
+    #[cfg(feature = "upstream-binding")]
+    fn consumes_bound_upstream(&self) -> bool {
+        false
+    }
+
+    /// Names of the nested steps this composite filter runs that read the
+    /// logical binding, sorted.
+    ///
+    /// Framework filters that own nested step pipelines (the IRR) override
+    /// this. A non-empty list means the filter needs a binding to
+    /// exist when its own execution begins, and pipeline validation names these
+    /// pipelines when no binding is guaranteed. This is broader than
+    /// [`HttpFilter::consumes_bound_upstream`]: a nested condition or body
+    /// participant observes the binding without selecting a cluster from it.
+    #[cfg(feature = "iterative-request-router")]
+    fn nested_bound_upstream_readers(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The `when: bound_upstream` matchers inside this composite filter's
+    /// nested steps, each with its step name, sorted by step.
+    ///
+    /// Framework filters that own nested step pipelines (the IRR) override
+    /// this so pipeline validation can judge a step's matchers against the
+    /// clusters the parent's router can bind, exactly as it judges the parent's
+    /// own conditions.
+    #[cfg(feature = "iterative-request-router")]
+    fn nested_bound_upstream_matchers(&self) -> Vec<(String, praxis_core::config::ApplicationMatch)> {
+        Vec::new()
+    }
+
+    /// Cluster names this filter can select from the frozen logical binding.
+    ///
+    /// A load balancer with `cluster_source: bound_upstream` reports the
+    /// cluster names it can resolve from `BoundUpstream`; framework filters
+    /// that own nested pipelines (the IRR) fold their steps' bound-consuming
+    /// declarations up through this hook. Pipeline validation unions these
+    /// across every reachable path so a cluster the binding router may bind
+    /// must be served by some bound-consuming load balancer. Filters that do
+    /// not consume the binding leave the default empty list.
+    #[cfg(feature = "upstream-binding")]
+    fn bound_upstream_clusters(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Whether this filter may select a streaming sub-request response.
     ///
     /// Pipeline validation uses this declaration to reject response
@@ -145,6 +250,11 @@ pub trait HttpFilter: Send + Sync {
     /// drop the action and then error that no upstream resolved. Any filter that
     /// can return a terminal action must override this, so detection is not
     /// limited to the hard-coded builtin terminal names in [`TERMINAL_FILTERS`].
+    ///
+    /// Binding validation reads this as "may answer": it keeps the path past
+    /// the filter alive and requires that path to be served too. Only the
+    /// built-in answering filters (`redirect`, `static_response`, and the IRR)
+    /// are treated as always ending the request.
     ///
     /// [`FilterAction`]: crate::FilterAction
     /// [`TERMINAL_FILTERS`]: praxis_core::config::TERMINAL_FILTERS
@@ -219,6 +329,39 @@ pub trait HttpFilter: Send + Sync {
     /// [`request_body_mode`]: HttpFilter::request_body_mode
     /// [`BodyMode::StreamBuffer`]: crate::BodyMode::StreamBuffer
     fn selected_upstream_request_body_access(&self) -> BodyAccess {
+        BodyAccess::None
+    }
+
+    /// Declares what access this filter needs to the request body during
+    /// the bound-upstream phase.
+    ///
+    /// Requires the experimental `bound-upstream-request-body` build feature.
+    ///
+    /// The bound-upstream request-body phase runs at most once per downstream
+    /// request, at the barrier immediately after the `router` binds a logical
+    /// upstream (`BoundUpstream`) and before any later request filters
+    /// or IRR run. It is skipped when routing stops before a binding is
+    /// published. It gives a filter a
+    /// chance to inspect or rewrite the request body against the frozen
+    /// logical binding, before an endpoint is selected. Return
+    /// [`BodyAccess::None`] (the default) to opt out,
+    /// [`BodyAccess::ReadOnly`] to observe the body in
+    /// [`on_bound_upstream_request_body`], or [`BodyAccess::ReadWrite`] to
+    /// mutate it.
+    ///
+    /// A participating filter must declare a bounded
+    /// [`BodyMode::StreamBuffer`] via [`request_body_mode`] so the complete
+    /// body is buffered before this phase runs; the phase reuses the same
+    /// request-body delivery mode rather than defining its own. Pipeline
+    /// validation rejects a participant whose [`request_body_mode`] is not a
+    /// bounded `StreamBuffer`, and rejects a participant that no binding
+    /// filter can precede.
+    ///
+    /// [`on_bound_upstream_request_body`]: HttpFilter::on_bound_upstream_request_body
+    /// [`request_body_mode`]: HttpFilter::request_body_mode
+    /// [`BodyMode::StreamBuffer`]: crate::BodyMode::StreamBuffer
+    #[cfg(feature = "bound-upstream-request-body")]
+    fn bound_upstream_request_body_access(&self) -> BodyAccess {
         BodyAccess::None
     }
 
@@ -384,6 +527,48 @@ pub trait HttpFilter: Send + Sync {
     ) -> Result<SelectedUpstreamBodyOutcome, FilterError> {
         let _ = (ctx, body);
         Ok(SelectedUpstreamBodyOutcome::Continue)
+    }
+
+    /// Called at most once with the fully buffered request body at the
+    /// bound-upstream barrier, immediately after the `router` binds a logical
+    /// upstream and before any later request filters or the IRR run. It is
+    /// not called when routing stops before a binding is published.
+    ///
+    /// Requires the experimental `bound-upstream-request-body` build feature.
+    ///
+    /// Runs only for filters that declare
+    /// [`bound_upstream_request_body_access`] other than
+    /// [`BodyAccess::None`], in pipeline order, and only when the filter's
+    /// request conditions (including any `bound_upstream` predicate) match
+    /// the frozen binding. Conditions are evaluated at the barrier, not at the
+    /// participant's later header-phase position, so they must not depend on
+    /// headers or results produced by later request filters. `body` holds the complete request body (`None`
+    /// when the request had no body). Filters that declared
+    /// [`BodyAccess::ReadWrite`] may mutate `body` in place; the rewritten
+    /// buffer becomes the canonical body observed by the remaining pipeline,
+    /// direct dispatch, IRR, and retries. Return
+    /// [`BoundUpstreamBodyOutcome::Reject`] to abort with an error response;
+    /// the pipeline stops and does not call later bound-upstream body
+    /// filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if body processing fails. The pipeline honors
+    /// the filter's `failure_mode`: a closed filter's error aborts the
+    /// request, an open filter's error is logged and treated as
+    /// [`BoundUpstreamBodyOutcome::Continue`].
+    ///
+    /// [`bound_upstream_request_body_access`]: HttpFilter::bound_upstream_request_body_access
+    /// [`BoundUpstreamBodyOutcome::Reject`]: crate::BoundUpstreamBodyOutcome::Reject
+    /// [`BoundUpstreamBodyOutcome::Continue`]: crate::BoundUpstreamBodyOutcome::Continue
+    #[cfg(feature = "bound-upstream-request-body")]
+    async fn on_bound_upstream_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<crate::BoundUpstreamBodyOutcome, FilterError> {
+        let _ = (ctx, body);
+        Ok(crate::BoundUpstreamBodyOutcome::Continue)
     }
 
     /// Whether this filter rewrites upstream response trailers.

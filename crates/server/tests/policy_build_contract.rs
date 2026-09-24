@@ -14,15 +14,6 @@
 //! on here. The manifest case is deliberately ungated so feature unification
 //! cannot mask it.
 
-// Integration tests carry the same suppressions the crate's in-module tests do:
-// the workspace gate denies panicking utilities and test functions outside a
-// cfg(test) module, neither of which applies to a standalone test binary.
-#![allow(
-    clippy::allow_attributes_without_reason,
-    clippy::expect_used,
-    clippy::tests_outside_test_module
-)]
-
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
@@ -56,6 +47,11 @@ filter_chains:
 // Tests
 // -----------------------------------------------------------------------------
 
+#[expect(
+    clippy::expect_used,
+    clippy::tests_outside_test_module,
+    reason = "integration tests are in tests/ directory, not in src"
+)]
 #[cfg(feature = "policy-engine")]
 #[test]
 fn resolving_pipelines_registers_the_proxy_pool_for_policy_calls() {
@@ -64,6 +60,9 @@ fn resolving_pipelines_registers_the_proxy_pool_for_policy_calls() {
     use praxis::{build_subrequest_client, resolve_pipelines};
     use praxis_core::config::Config;
     use praxis_filter::{FilterRegistry, SessionStoreRegistry, registered_policy_subrequest_connector};
+
+    // Calls resolve_pipelines directly, so it misses main()'s provider install.
+    praxis::install_crypto_provider();
 
     let config = Config::from_yaml(CONFIG).expect("the test config must parse");
     let client = build_subrequest_client(&config);
@@ -89,6 +88,11 @@ fn resolving_pipelines_registers_the_proxy_pool_for_policy_calls() {
     );
 }
 
+#[expect(
+    clippy::expect_used,
+    clippy::tests_outside_test_module,
+    reason = "integration tests are in tests/ directory, not in src"
+)]
 #[test]
 fn the_default_feature_set_includes_the_policy_engine() {
     let declaration = default_feature_declaration().expect("[features] must declare a `default` array");

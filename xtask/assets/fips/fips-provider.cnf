@@ -1,0 +1,26 @@
+# OpenSSL configuration that activates the FIPS provider for a single process
+# (OPENSSL_CONF=xtask/assets/fips/fips-provider.cnf <command>).
+#
+# Test infrastructure only. On a FIPS-enabled RHEL host the provider activates
+# by itself from the kernel flag, and Red Hat's guidance is that applications
+# must never enable FIPS mode themselves. This file exists so that hosts and
+# containers that are NOT in FIPS mode can still exercise the real RHEL FIPS
+# provider (the validated 3.0.7 module shipped in UBI 9) during development.
+openssl_conf = openssl_init
+
+[openssl_init]
+providers = provider_sect
+alg_section = algorithm_sect
+
+[provider_sect]
+fips = fips_sect
+base = base_sect
+
+[fips_sect]
+activate = 1
+
+[base_sect]
+activate = 1
+
+[algorithm_sect]
+default_properties = fips=yes

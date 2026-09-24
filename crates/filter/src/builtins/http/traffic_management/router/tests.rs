@@ -258,6 +258,252 @@ async fn on_request_sets_cluster_on_match() {
     );
 }
 
+#[cfg(feature = "upstream-binding")]
+#[tokio::test]
+async fn on_request_publishes_name_only_binding_with_empty_catalog() {
+    let router = make_router(vec![prefix_route("/", "default")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.bound_cluster(),
+        Some("default"),
+        "matching a route must publish the logical binding"
+    );
+    assert_eq!(
+        ctx.bound_application_protocol(),
+        None,
+        "a cluster the catalog does not declare binds without a protocol"
+    );
+    assert_eq!(
+        ctx.bound_application_provider(),
+        None,
+        "a cluster the catalog does not declare binds without a provider"
+    );
+}
+
+#[tokio::test]
+async fn router_without_pipeline_binding_opt_in_skips_logical_publication() {
+    let router = RouterFilter::new(vec![prefix_route("/", "default")]).unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = router.on_request(&mut ctx).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a matching route should continue the pipeline: {action:?}"
+    );
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("default"),
+        "the router should still select the physical cluster without the binding opt-in"
+    );
+    assert!(
+        ctx.bound_cluster().is_none(),
+        "an ordinary router pipeline must not pay for or expose logical binding"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[tokio::test]
+async fn on_request_resolves_binding_metadata_from_catalog() {
+    use std::sync::Arc;
+
+    use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration, build_catalog};
+
+    let (catalog, conflicts) = build_catalog([ClusterMetadataDeclaration {
+        name: Arc::from("inference"),
+        metadata: ClusterApplicationMetadata::new(Some(Arc::from("openai_responses")), Some(Arc::from("openai"))),
+    }]);
+    assert!(conflicts.is_empty(), "a single declaration cannot conflict");
+    let mut router = RouterFilter::new(vec![prefix_route("/", "inference")]).unwrap();
+    router.enable_upstream_binding(Arc::new(catalog));
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.bound_cluster(),
+        Some("inference"),
+        "the binding names the matched cluster"
+    );
+    assert_eq!(
+        ctx.bound_application_protocol(),
+        Some("openai_responses"),
+        "the binding resolves the cluster's protocol from the catalog"
+    );
+    assert_eq!(
+        ctx.bound_application_provider(),
+        Some("openai"),
+        "the binding resolves the cluster's provider from the catalog"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[tokio::test]
+async fn on_request_catalog_miss_publishes_name_only_binding() {
+    use std::sync::Arc;
+
+    use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration, build_catalog};
+
+    let (catalog, _) = build_catalog([ClusterMetadataDeclaration {
+        name: Arc::from("declared"),
+        metadata: ClusterApplicationMetadata::new(Some(Arc::from("openai_responses")), None),
+    }]);
+    let mut router = RouterFilter::new(vec![prefix_route("/", "not-declared")]).unwrap();
+    router.enable_upstream_binding(Arc::new(catalog));
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.bound_cluster(),
+        Some("not-declared"),
+        "a catalog miss still binds the matched cluster name"
+    );
+    assert_eq!(
+        ctx.bound_application_protocol(),
+        None,
+        "a catalog miss must not borrow another cluster's protocol"
+    );
+    assert_eq!(
+        ctx.bound_application_provider(),
+        None,
+        "a catalog miss binds without a provider"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[tokio::test]
+async fn on_request_rebind_replaces_previous_binding() {
+    let router = make_router(vec![prefix_route("/", "default")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        ctx.bound_cluster(),
+        Some("default"),
+        "the first match binds the cluster"
+    );
+
+    let rerouter = make_router(vec![prefix_route("/", "other")]);
+    let action = rerouter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "a rebind continues normally");
+    assert_eq!(
+        ctx.bound_cluster(),
+        Some("other"),
+        "until the executor freezes it, a later router replaces the binding"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[tokio::test]
+async fn frozen_same_cluster_republication_is_idempotent() {
+    let router = make_router(vec![prefix_route("/", "stable")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    assert!(
+        matches!(router.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "the first match binds and continues"
+    );
+    ctx.freeze_bound_upstream();
+    assert!(
+        matches!(router.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "republishing the frozen cluster is an idempotent no-op"
+    );
+
+    assert_eq!(ctx.bound_cluster(), Some("stable"), "the frozen binding is unchanged");
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("stable"),
+        "the exchange cluster still names the bound cluster"
+    );
+}
+
+#[cfg(feature = "upstream-binding")]
+#[tokio::test]
+async fn frozen_rebind_rejects_without_mutating_route_context() {
+    let mut first = RouterFilter::from_config(
+        &serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+routes:
+  - path: "/"
+    cluster: first
+    retry_policy:
+      per_try_timeout_ms: 101
+      request_timeout_ms: 1001
+"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut second = RouterFilter::from_config(
+        &serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+routes:
+  - path_prefix: "/"
+    cluster: second
+    retry_policy:
+      per_try_timeout_ms: 202
+      request_timeout_ms: 2002
+"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    first.enable_upstream_binding(std::sync::Arc::default());
+    second.enable_upstream_binding(std::sync::Arc::default());
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    assert!(
+        matches!(first.on_request(&mut ctx).await.unwrap(), FilterAction::Continue),
+        "the first router binds and continues"
+    );
+    assert_eq!(
+        ctx.metrics_route.as_deref(),
+        Some("/"),
+        "the first router labels its route"
+    );
+    assert_eq!(
+        ctx.route_retry_policy.as_ref().unwrap().per_try_timeout_ms,
+        Some(101),
+        "the first router installs its route retry policy"
+    );
+    ctx.freeze_bound_upstream();
+    let prior_route = ctx.metrics_route.clone();
+    let prior_cluster = ctx.cluster.clone();
+    let prior_policy = ctx.route_retry_policy.clone();
+
+    assert!(
+        matches!(
+            second.on_request(&mut ctx).await.unwrap(),
+            FilterAction::Reject(rejection) if rejection.status == 500
+        ),
+        "rebinding a different cluster after the freeze fails closed"
+    );
+    assert_eq!(ctx.bound_cluster(), Some("first"), "the frozen binding survives");
+    assert_eq!(
+        ctx.cluster, prior_cluster,
+        "the failed rebind must not move the cluster"
+    );
+    assert_eq!(
+        ctx.metrics_route, prior_route,
+        "the failed rebind must not relabel the route"
+    );
+    assert_eq!(
+        ctx.route_retry_policy, prior_policy,
+        "the failed rebind must not swap the retry policy"
+    );
+}
+
 #[tokio::test]
 async fn on_request_clears_stale_route_retry_policy_on_reroute() {
     let with_policy = RouterFilter::from_config(
@@ -329,6 +575,8 @@ async fn on_request_rejects_on_no_match() {
         "unmatched route should reject with 404"
     );
     assert!(ctx.cluster.is_none(), "cluster should remain unset on no match");
+    assert!(ctx.bound_cluster().is_none(), "no match must not publish a binding");
+    assert!(ctx.metrics_route.is_none(), "no match must not publish a route label");
 }
 
 #[tokio::test]
@@ -1964,7 +2212,14 @@ fn json_alias_max_bytes_at_upper_bound_passes_bounds_check() {
 // -----------------------------------------------------------------------------
 
 fn make_router(routes: Vec<Route>) -> RouterFilter {
-    RouterFilter::new(routes).expect("test routes should be valid")
+    #[cfg_attr(
+        not(feature = "upstream-binding"),
+        expect(unused_mut, reason = "only binding enablement mutates the router")
+    )]
+    let mut router = RouterFilter::new(routes).expect("test routes should be valid");
+    #[cfg(feature = "upstream-binding")]
+    router.enable_upstream_binding(std::sync::Arc::default());
+    router
 }
 
 #[cfg(feature = "router-json-aliases")]

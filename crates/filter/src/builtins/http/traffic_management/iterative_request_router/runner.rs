@@ -213,6 +213,7 @@ impl IrrStepRunner {
             iteration: state.iteration,
             deadline: state.deadline(),
             extensions,
+            inherits_binding: true,
         };
         match Box::pin(self.executor.execute(input)).await {
             Ok(opened) => Ok(OpenedStep::from_executor(opened)),

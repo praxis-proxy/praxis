@@ -298,6 +298,67 @@ fn status_5xx_retry_reaches_healthy_backend() {
     assert_eq!(body, "ok");
 }
 
+#[cfg(feature = "upstream-binding")]
+#[test]
+fn status_5xx_retry_reaches_healthy_backend_through_bound_load_balancer() {
+    let failing = Backend::status(503, "unavailable").start();
+    let healthy = Backend::fixed("ok").start();
+    let proxy_port = free_port();
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: headers
+        branch_chains:
+          - name: dispatch
+            rejoin: terminal
+            chains:
+              - name: bound-dispatch
+                filters:
+                  - filter: load_balancer
+                    cluster_source: bound_upstream
+                    clusters:
+                      - name: "backend"
+                        endpoints:
+                          - "127.0.0.1:{failing}"
+                          - "127.0.0.1:{healthy}"
+                        retry_policy:
+                          max_retries: 3
+                          retriable_conditions: [connect_failure, status_5xx]
+                          backoff:
+                            base_interval_ms: 1
+                            max_interval_ms: 5
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = praxis_test_utils::start_full_proxy(&config);
+    praxis_test_utils::wait_for_tcp(proxy.addr());
+
+    for attempt in 0..2 {
+        let (status, body) = http_get(proxy.addr(), "/", None);
+
+        assert_eq!(
+            status, 200,
+            "request {attempt}: a 503 from the bound cluster should retry onto its healthy endpoint"
+        );
+        assert_eq!(
+            body, "ok",
+            "request {attempt}: the retry must land on the healthy endpoint"
+        );
+    }
+}
+
 #[test]
 fn status_5xx_without_policy_is_forwarded() {
     let failing = Backend::status(503, "unavailable").start();

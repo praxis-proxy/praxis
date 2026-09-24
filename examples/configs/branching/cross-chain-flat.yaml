@@ -26,14 +26,20 @@ listeners:
 filter_chains:
   - name: preprocessing
     filters:
+      # Security filters run before the branch host: a skip-to rejoin
+      # may never bypass one
+      - filter: cors
+        allow_origins:
+          - "*"
+
       # Classifier: detects fast-path eligibility
       - filter: headers
         request_add:
           - name: X-Preprocess
             value: "true"
         branch_chains:
-          # Fast-path requests skip remaining
-          # preprocessing (request_id, cors) and jump
+          # Fast-path requests skip the remaining
+          # preprocessing (request_id) and jump
           # directly to the routing chain
           - name: shortcut_to_route
             # Fires when classifier reports a fast-path
@@ -57,10 +63,6 @@ filter_chains:
 
       # Remaining preprocessing: skipped on fast-path
       - filter: request_id
-
-      - filter: cors
-        allow_origins:
-          - "*"
 
   - name: routing
     filters:

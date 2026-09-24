@@ -31,6 +31,8 @@ use tracing::{debug, warn};
 
 use self::entry::{ClusterEntry, build_cluster_entry};
 pub use self::reselector::EndpointReselector;
+#[cfg(feature = "upstream-binding")]
+use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration};
 use crate::{
     FilterError,
     actions::FilterAction,
@@ -58,6 +60,7 @@ use crate::{
 ///
 /// ```yaml
 /// filter: load_balancer
+/// # cluster_source: router      # the default; or bound_upstream (see below)
 /// clusters:
 ///   - name: backend
 ///     endpoints: ["10.0.0.1:80"]
@@ -82,6 +85,26 @@ use crate::{
 pub struct LoadBalancerFilter {
     /// Per-cluster resolved state (strategy, connection opts, TLS config).
     clusters: HashMap<Arc<str>, ClusterEntry>,
+
+    /// Where the target cluster name comes from for each request.
+    cluster_source: ClusterSource,
+}
+
+/// Where a load balancer reads the target cluster name for a request.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ClusterSource {
+    /// Use the exchange-local cluster a preceding `router` selected into
+    /// [`HttpFilterContext::cluster`]. The historical default.
+    #[default]
+    Router,
+
+    /// Use the logical cluster frozen in the request's `BoundUpstream`,
+    /// letting a direct branch or IRR step select an endpoint from the binding
+    /// without a second router. The bound name must exist in this load
+    /// balancer; a conflicting exchange-local cluster fails closed. Selection
+    /// is skipped entirely when an upstream is already present.
+    BoundUpstream,
 }
 
 /// Deserialization wrapper for the load balancer's YAML config.
@@ -91,6 +114,16 @@ struct LoadBalancerConfig {
     /// Cluster definitions.
     #[serde(default)]
     clusters: Vec<Cluster>,
+
+    /// Where the target cluster name comes from. `router` (the default) uses
+    /// the cluster a preceding `router` selected. `bound_upstream` (needs the
+    /// `upstream-binding` build feature) uses the request's logical binding,
+    /// which lets a direct dispatch branch or an `iterative_request_router`
+    /// step pick an endpoint with no router of its own; the bound cluster must
+    /// be one of the clusters declared here, which startup validation checks.
+    /// When an upstream was already selected, the filter does nothing.
+    #[serde(default)]
+    cluster_source: ClusterSource,
 }
 
 impl LoadBalancerFilter {
@@ -116,11 +149,25 @@ impl LoadBalancerFilter {
     /// Returns [`FilterError`] if any cluster's authority override
     /// is invalid.
     pub fn try_new(clusters: &[Cluster]) -> Result<Self, FilterError> {
+        Self::try_new_with_source(clusters, ClusterSource::default())
+    }
+
+    /// Try to create a load balancer, choosing where the target cluster
+    /// name is read from at request time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if any cluster's authority override
+    /// is invalid.
+    fn try_new_with_source(clusters: &[Cluster], cluster_source: ClusterSource) -> Result<Self, FilterError> {
         let map = clusters
             .iter()
             .map(|c| Ok((Arc::clone(&c.name), build_cluster_entry(c)?)))
             .collect::<Result<_, FilterError>>()?;
-        Ok(Self { clusters: map })
+        Ok(Self {
+            clusters: map,
+            cluster_source,
+        })
     }
 
     /// Create a load balancer from parsed YAML config.
@@ -135,7 +182,83 @@ impl LoadBalancerFilter {
         if cfg.clusters.is_empty() {
             return Err("load_balancer: 'clusters' is empty; every request would fail with 502".into());
         }
-        Ok(Box::new(Self::try_new(&cfg.clusters)?))
+        #[cfg(not(feature = "upstream-binding"))]
+        if cfg.cluster_source == ClusterSource::BoundUpstream {
+            return Err(
+                "load_balancer: cluster_source 'bound_upstream' needs the upstream-binding build feature".into(),
+            );
+        }
+        Ok(Box::new(Self::try_new_with_source(&cfg.clusters, cfg.cluster_source)?))
+    }
+
+    /// Resolve the target cluster for this request from the configured
+    /// [`ClusterSource`], returning the interned cluster name and its
+    /// resolved entry.
+    ///
+    /// For [`ClusterSource::BoundUpstream`] the logical binding also seeds
+    /// [`HttpFilterContext::cluster`] so the retry, health, and
+    /// `on_response` release paths key off the same cluster a preceding
+    /// `router` would have set. A conflicting exchange-local cluster is
+    /// rejected rather than silently applying its retry policy to the bound
+    /// cluster. The frozen `BoundUpstream` is never mutated. When
+    /// [`HttpFilterContext::upstream`] is already set, `on_request` skips this
+    /// resolver and preserves all cluster state.
+    fn resolve_cluster<'a>(
+        &'a self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<(&'a Arc<str>, &'a ClusterEntry), FilterError> {
+        match self.cluster_source {
+            ClusterSource::Router => self.resolve_from_router(ctx),
+            ClusterSource::BoundUpstream => self.resolve_from_bound_upstream(ctx),
+        }
+    }
+
+    /// Resolve the cluster a preceding `router` set in [`HttpFilterContext`].
+    fn resolve_from_router<'a>(
+        &'a self,
+        ctx: &HttpFilterContext<'_>,
+    ) -> Result<(&'a Arc<str>, &'a ClusterEntry), FilterError> {
+        let Some(cluster) = ctx.cluster.as_ref() else {
+            return Err(
+                "load_balancer filter: no cluster set in context (is a router filter configured before this?)".into(),
+            );
+        };
+        self.clusters
+            .get_key_value(cluster.as_ref())
+            .ok_or_else(|| -> FilterError {
+                format!("load_balancer filter: unknown cluster '{}'", cluster.as_ref()).into()
+            })
+    }
+
+    /// Resolve the frozen logical binding, seeding [`HttpFilterContext::cluster`]
+    /// so retry, health, and `on_response` release paths key off it. A
+    /// different existing cluster is an invalid mixed-selection state and
+    /// fails closed. This method is not called when an upstream is already set.
+    fn resolve_from_bound_upstream<'a>(
+        &'a self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<(&'a Arc<str>, &'a ClusterEntry), FilterError> {
+        let Some(bound) = ctx.bound_cluster() else {
+            return Err(
+                "load_balancer filter: cluster_source is bound_upstream but no upstream is bound \
+                        (is a binding router configured before this?)"
+                    .into(),
+            );
+        };
+        let (key, entry) = self.clusters.get_key_value(bound).ok_or_else(|| -> FilterError {
+            format!("load_balancer filter: bound cluster '{bound}' not declared in this load_balancer").into()
+        })?;
+        if let Some(selected) = ctx.cluster.as_deref()
+            && selected != key.as_ref()
+        {
+            return Err(format!(
+                "load_balancer filter: exchange cluster '{selected}' conflicts with bound cluster '{}'",
+                key.as_ref(),
+            )
+            .into());
+        }
+        ctx.cluster = Some(Arc::clone(key));
+        Ok((key, entry))
     }
 
     /// Look up health state for `cluster_name` from the context's
@@ -159,22 +282,45 @@ impl HttpFilter for LoadBalancerFilter {
         self.clusters.keys().map(ToString::to_string).collect()
     }
 
+    #[cfg(feature = "upstream-binding")]
+    fn consumes_bound_upstream(&self) -> bool {
+        self.cluster_source == ClusterSource::BoundUpstream
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    fn bound_upstream_clusters(&self) -> Vec<String> {
+        if self.cluster_source == ClusterSource::BoundUpstream {
+            self.clusters.keys().map(ToString::to_string).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    fn declared_cluster_metadata(&self) -> Vec<ClusterMetadataDeclaration> {
+        let mut declarations: Vec<ClusterMetadataDeclaration> = self
+            .clusters
+            .iter()
+            .map(|(name, entry)| ClusterMetadataDeclaration {
+                name: Arc::clone(name),
+                metadata: ClusterApplicationMetadata::new(
+                    entry.application_protocol.clone(),
+                    entry.application_provider.clone(),
+                ),
+            })
+            .collect();
+        declarations.sort_by(|left, right| left.name.cmp(&right.name));
+        declarations
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if ctx.upstream.is_some() {
             debug!("upstream already set, skipping LB selection");
             return Ok(FilterAction::Continue);
         }
 
-        let Some(cluster) = ctx.cluster.as_ref() else {
-            return Err(
-                "load_balancer filter: no cluster set in context (is a router filter configured before this?)".into(),
-            );
-        };
+        let (cluster, entry) = self.resolve_cluster(ctx)?;
         let cluster_name = cluster.as_ref();
-
-        let entry = self.clusters.get(cluster_name).ok_or_else(|| -> FilterError {
-            format!("load_balancer filter: unknown cluster '{cluster_name}'").into()
-        })?;
 
         let health = Self::cluster_health(ctx.health_registry, cluster_name);
 

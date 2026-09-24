@@ -17,6 +17,9 @@ name = "praxis_core"
 workspace = true
 
 [features]
+# Config support for logical upstream binding (`bound_upstream` conditions).
+# Off by default; experimental. The filter crate's `upstream-binding` turns it on.
+upstream-binding = []
 spiffe = ["praxis-tls/spiffe"]
 otel = [
     "dep:opentelemetry",

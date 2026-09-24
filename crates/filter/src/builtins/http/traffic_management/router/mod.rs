@@ -36,6 +36,8 @@ use http::HeaderMap;
 #[cfg(feature = "router-json-aliases")]
 use http::header::HeaderName;
 use praxis_core::config::{PathMatch, Route};
+#[cfg(feature = "upstream-binding")]
+use tracing::warn;
 use tracing::{debug, info, trace};
 
 #[cfg(feature = "router-json-aliases")]
@@ -46,6 +48,8 @@ use self::{
     config::{RouterConfig, RouterRouteConfig},
     matching::{route_matches_request, should_stop_early, update_best_match},
 };
+#[cfg(feature = "upstream-binding")]
+use crate::pipeline::catalog::ClusterApplicationCatalog;
 use crate::{
     FilterError,
     actions::{FilterAction, Rejection},
@@ -98,6 +102,12 @@ use crate::{
 /// [`rewritten_path`]: crate::HttpFilterContext::rewritten_path
 #[derive(Debug)]
 pub struct RouterFilter {
+    /// The pipeline's cluster catalog, present only when the pipeline has a
+    /// bound-upstream observer or consumer. Its presence is what makes this
+    /// router publish the logical binding.
+    #[cfg(feature = "upstream-binding")]
+    binding_catalog: Option<Arc<ClusterApplicationCatalog>>,
+
     /// Enable multi-level subdomain matching for wildcard hosts.
     multi_level_subdomain_matching: bool,
 
@@ -191,6 +201,8 @@ impl RouterFilter {
         let resolved = resolve_routes(routes);
         debug!(routes = resolved.len(), "router initialized");
         Self {
+            #[cfg(feature = "upstream-binding")]
+            binding_catalog: None,
             multi_level_subdomain_matching: false,
             routes: resolved,
         }
@@ -264,6 +276,42 @@ impl RouterFilter {
         }
 
         best.map(|(_, r)| r)
+    }
+
+    /// Apply a matched route to the request context: record metrics, select the
+    /// cluster, own the route-level retry override, and publish the logical
+    /// binding.
+    ///
+    /// The retry override is always reset for the matched route so a re-route
+    /// cannot inherit a policy the newly matched route did not declare.
+    ///
+    /// Publishing resolves the cluster's application metadata through the
+    /// pipeline catalog. The pipeline freezes the binding as soon as the first
+    /// router publishes it, so a later router, or this one run again by a
+    /// `ReEnter` loop, may only republish the same cluster; retargeting to a
+    /// different cluster fails closed. Valid configurations never hit that case
+    /// (validation allows one binding router and no `ReEnter` back over it), so
+    /// treat it as an internal error.
+    #[cfg_attr(
+        not(feature = "upstream-binding"),
+        expect(clippy::unused_self, reason = "only the binding catalog needs self")
+    )]
+    fn apply_matched_route(&self, ctx: &mut HttpFilterContext<'_>, resolved: &ResolvedRoute) -> FilterAction {
+        #[cfg(feature = "upstream-binding")]
+        if let Some(catalog) = &self.binding_catalog
+            && let Err(frozen) = ctx.bind_upstream(Arc::clone(&resolved.route.cluster), catalog)
+        {
+            warn!(
+                frozen = %frozen.frozen,
+                attempted = %frozen.attempted,
+                "router attempted to rebind a frozen logical upstream; failing closed",
+            );
+            return FilterAction::Reject(Rejection::status(500));
+        }
+        ctx.metrics_route = Some(resolved.metrics_label.clone());
+        ctx.cluster = Some(Arc::clone(&resolved.route.cluster));
+        ctx.route_retry_policy = resolved.retry_policy.as_ref().map(Arc::clone);
+        FilterAction::Continue
     }
 }
 
@@ -478,6 +526,16 @@ impl HttpFilter for RouterFilter {
             .collect()
     }
 
+    #[cfg(feature = "upstream-binding")]
+    fn binds_upstream(&self) -> bool {
+        self.binding_catalog.is_some()
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    fn enable_upstream_binding(&mut self, catalog: Arc<ClusterApplicationCatalog>) {
+        self.binding_catalog = Some(catalog);
+    }
+
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         // Match on the path only, excluding any query string. A preceding
         // path_rewrite/url_rewrite stores "<path>?<query>" in rewritten_path,
@@ -496,22 +554,11 @@ impl HttpFilter for RouterFilter {
             .or_else(|| ctx.request.uri.authority().map(http::uri::Authority::as_str));
 
         trace!(path = %path, host = host.unwrap_or(""), "matching route");
-        if let Some(resolved) = self.match_route(path, host, &ctx.request.headers) {
-            debug!(
-                path = %path,
-                cluster = %resolved.route.cluster,
-                "route matched"
-            );
-            ctx.metrics_route = Some(resolved.metrics_label.clone());
-            ctx.cluster = Some(Arc::clone(&resolved.route.cluster));
-            // Own the field for the matched route: clear any stale override
-            // from a previous route so a re-route cannot inherit a retry
-            // policy the newly matched route did not declare.
-            ctx.route_retry_policy = resolved.retry_policy.as_ref().map(Arc::clone);
-            Ok(FilterAction::Continue)
-        } else {
+        let Some(resolved) = self.match_route(path, host, &ctx.request.headers) else {
             debug!(path = %path, "no route matched");
-            Ok(FilterAction::Reject(Rejection::status(404)))
-        }
+            return Ok(FilterAction::Reject(Rejection::status(404)));
+        };
+        debug!(path = %path, cluster = %resolved.route.cluster, "route matched");
+        Ok(self.apply_matched_route(ctx, resolved))
     }
 }

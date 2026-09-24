@@ -135,6 +135,30 @@ pub(crate) struct FilteredSubrequestInput<'a> {
     pub(crate) deadline: Instant,
     /// Caller-provided request extensions, moved into the nested context.
     pub(crate) extensions: RequestExtensions,
+    /// Whether the nested pipeline continues the caller's request and so sees
+    /// its logical binding (an IRR step), rather than issuing a separate
+    /// outbound request that starts unbound (a callout).
+    pub(crate) inherits_binding: bool,
+}
+
+impl<'a> FilteredSubrequestInput<'a> {
+    /// Input for a one-shot outbound callout, which starts unbound.
+    pub(crate) fn callout(
+        pipeline: &'a Arc<FilterPipeline>,
+        request: &'a SubRequest,
+        deadline: Instant,
+        extensions: RequestExtensions,
+    ) -> Self {
+        Self {
+            pipeline,
+            request,
+            label: "callout",
+            iteration: 0,
+            deadline,
+            extensions,
+            inherits_binding: false,
+        }
+    }
 }
 
 /// A captured sub-response together with its origin classification.

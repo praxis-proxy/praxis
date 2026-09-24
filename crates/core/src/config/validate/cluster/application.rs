@@ -8,59 +8,29 @@
 //! strings interpreted by consuming filters, never by Praxis core, so
 //! this module only enforces that they are bounded, canonical
 //! identifiers — it deliberately does not know any protocol or provider
-//! name.
+//! name. The canonical form itself is enforced by the shared
+//! [`validate_application_identifier`] so cluster declarations and
+//! `bound_upstream` conditions accept exactly the same character set.
+//!
+//! [`validate_application_identifier`]: super::super::validate_application_identifier
 
-use crate::{config::Cluster, errors::ProxyError};
-
-/// Maximum length, in bytes, of an application metadata identifier.
-const MAX_IDENTIFIER_LEN: usize = 64;
+use crate::{
+    config::{Cluster, validate::validate_application_identifier},
+    errors::ProxyError,
+};
 
 /// Validate the optional application metadata identifiers on a cluster.
 ///
 /// Both fields are independently optional; an absent field is always
 /// valid. A present field must be a canonical identifier per
-/// [`validate_identifier`].
+/// [`validate_application_identifier`].
 pub(super) fn validate_application_metadata(cluster: &Cluster) -> Result<(), ProxyError> {
+    let context = format!("cluster '{}'", cluster.name);
     if let Some(protocol) = cluster.http.application_protocol.as_deref() {
-        validate_identifier(protocol, "application_protocol", &cluster.name)?;
+        validate_application_identifier(protocol, "application_protocol", &context)?;
     }
     if let Some(provider) = cluster.http.application_provider.as_deref() {
-        validate_identifier(provider, "application_provider", &cluster.name)?;
-    }
-    Ok(())
-}
-
-/// Validate one opaque application identifier.
-///
-/// The value must be 1..=[`MAX_IDENTIFIER_LEN`] bytes of lowercase
-/// ASCII letters, digits, `.`, `_`, or `-`, and must start and end with
-/// a letter or digit. The value itself stays opaque — no protocol or
-/// provider name is recognized here.
-fn validate_identifier(value: &str, field: &str, cluster_name: &str) -> Result<(), ProxyError> {
-    if value.is_empty() {
-        return Err(ProxyError::Config(format!(
-            "cluster '{cluster_name}': {field} must not be empty"
-        )));
-    }
-    if value.len() > MAX_IDENTIFIER_LEN {
-        return Err(ProxyError::Config(format!(
-            "cluster '{cluster_name}': {field} {value:?} exceeds {MAX_IDENTIFIER_LEN} bytes"
-        )));
-    }
-    let byte_allowed =
-        |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-');
-    if !value.bytes().all(byte_allowed) {
-        return Err(ProxyError::Config(format!(
-            "cluster '{cluster_name}': {field} {value:?} must use only lowercase ASCII \
-             letters, digits, '.', '_', or '-'"
-        )));
-    }
-    let alnum_boundary =
-        |maybe_byte: Option<&u8>| maybe_byte.is_some_and(|&byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
-    if !alnum_boundary(value.as_bytes().first()) || !alnum_boundary(value.as_bytes().last()) {
-        return Err(ProxyError::Config(format!(
-            "cluster '{cluster_name}': {field} {value:?} must start and end with a letter or digit"
-        )));
+        validate_application_identifier(provider, "application_provider", &context)?;
     }
     Ok(())
 }
@@ -82,6 +52,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::config::validate::MAX_APPLICATION_IDENTIFIER_LEN as MAX_IDENTIFIER_LEN;
 
     #[test]
     fn accept_canonical_identifiers() {

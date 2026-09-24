@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
+#![forbid(unsafe_code)]
 #![deny(unreachable_pub)]
 
 //! TLS configuration types for the Praxis proxy.
@@ -29,6 +30,7 @@ mod config;
 pub mod dns;
 mod error;
 mod identity;
+pub mod provider;
 #[cfg(feature = "config-reload")]
 pub mod reload;
 #[cfg(feature = "spiffe")]
@@ -38,10 +40,15 @@ pub mod sni;
 pub mod sni_name;
 #[cfg(feature = "spiffe")]
 pub(crate) mod spiffe;
-#[cfg(test)]
+#[cfg(any(test, feature = "bench-utils"))]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "test utilities")]
-mod test_utils;
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    dead_code,
+    reason = "test utilities not all used in every context"
+)]
+pub mod test_utils;
 #[cfg(feature = "config-reload")]
 pub mod watcher;
 

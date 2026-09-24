@@ -18,6 +18,13 @@ fn all_example_configs_parse() {
         if entry.file_name().is_some_and(|n| n == "tls-mtls-spiffe.yaml") {
             continue;
         }
+        #[cfg(not(feature = "upstream-binding"))]
+        if entry
+            .file_name()
+            .is_some_and(|n| n == "bound-upstream-condition.yaml" || n == "bound-upstream-dispatch.yaml")
+        {
+            continue;
+        }
         Config::from_file(&entry).unwrap_or_else(|e| panic!("{}: {e}", entry.display()));
         count += 1;
     }

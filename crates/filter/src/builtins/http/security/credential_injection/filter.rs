@@ -3,7 +3,11 @@
 
 //! [`CredentialInjectionFilter`] implementation and `HttpFilter` trait impl.
 
-use std::{borrow::Cow, collections::HashMap, sync::Arc};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, hash_map::Entry},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use secrecy::ExposeSecret as _;
@@ -122,6 +126,7 @@ impl CredentialInjectionFilter {
     ///
     /// Returns [`FilterError`] if:
     /// - `clusters` is empty
+    /// - Two rules name the same cluster
     /// - Both `value` and `env_var` are set (or neither)
     /// - An `env_var` is not set in the environment
     ///
@@ -137,7 +142,14 @@ impl CredentialInjectionFilter {
 
         for cluster_cfg in &cfg.clusters {
             let credential = resolve_credential(cluster_cfg)?;
-            credentials.insert(Arc::<str>::from(cluster_cfg.name.as_str()), credential);
+            match credentials.entry(Arc::<str>::from(cluster_cfg.name.as_str())) {
+                Entry::Occupied(_) => {
+                    return Err(format!("credential_injection: duplicate cluster '{}'", cluster_cfg.name).into());
+                },
+                Entry::Vacant(slot) => {
+                    slot.insert(credential);
+                },
+            }
         }
 
         Ok(Box::new(Self { credentials }))

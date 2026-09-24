@@ -72,6 +72,27 @@ clusters:
 }
 
 #[test]
+fn from_config_rejects_zero_half_open_timeout() {
+    let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+        "
+clusters:
+  - name: backend
+    consecutive_failures: 5
+    recovery_window_secs: 30
+    half_open_timeout_secs: 0
+",
+    )
+    .unwrap();
+    let err = CircuitBreakerFilter::from_config(&yaml)
+        .err()
+        .expect("should reject zero half-open timeout");
+    assert!(
+        err.to_string().contains("half_open_timeout_secs must be > 0"),
+        "should reject zero half-open timeout: {err}"
+    );
+}
+
+#[test]
 fn from_config_half_open_timeout_defaults() {
     let yaml = serde_yaml::from_str::<serde_yaml::Value>(
         "

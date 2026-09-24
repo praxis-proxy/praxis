@@ -7,12 +7,89 @@ use std::{borrow::Cow, collections::HashMap, convert::Infallible};
 
 use http::header::HeaderName;
 use praxis_core::{
-    config::{Condition, ConditionMatch},
+    config::{ApplicationMatch, Condition, ConditionMatch, SelectedUpstreamMatch},
     grpc::GrpcKind,
 };
 
 use super::HeaderSource;
 use crate::context::Request;
+
+// -----------------------------------------------------------------------------
+// Selected-Upstream View
+// -----------------------------------------------------------------------------
+
+/// Selected-upstream metadata visible to request conditions.
+///
+/// Built from the load balancer's published selection
+/// ([`HttpFilterContext::selected_application_protocol`] /
+/// [`HttpFilterContext::selected_application_provider`]). Both fields are
+/// `None` before any load balancer runs; a `selected_upstream` predicate over
+/// absent metadata never matches (fail-closed), independent of the
+/// `when`/`unless` polarity.
+///
+/// [`HttpFilterContext::selected_application_protocol`]: crate::HttpFilterContext::selected_application_protocol
+/// [`HttpFilterContext::selected_application_provider`]: crate::HttpFilterContext::selected_application_provider
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SelectedUpstream<'a> {
+    /// Opaque application protocol of the selected cluster, if any.
+    pub(crate) application_protocol: Option<&'a str>,
+
+    /// Opaque application provider of the selected cluster, if any.
+    pub(crate) application_provider: Option<&'a str>,
+}
+
+impl SelectedUpstream<'_> {
+    /// A view with no selected metadata.
+    ///
+    /// Used on paths with no load balancer selection in scope (the pre-read
+    /// fallback with no context, protocol-level condition probes); a
+    /// `selected_upstream` predicate against it always fails closed.
+    pub(crate) const fn none() -> Self {
+        Self {
+            application_protocol: None,
+            application_provider: None,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Bound-Upstream View
+// -----------------------------------------------------------------------------
+
+/// A read-only view of the request's bound logical upstream metadata,
+/// consulted by `bound_upstream` conditions.
+///
+/// Empty (both fields `None`) before the `router` binds an upstream, or
+/// when the bound cluster declares no application metadata. Cheap to copy
+/// (two borrowed string slices).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BoundUpstreamView<'a> {
+    /// The bound cluster's declared `application_protocol`, if any.
+    pub(crate) protocol: Option<&'a str>,
+
+    /// The bound cluster's declared `application_provider`, if any.
+    pub(crate) provider: Option<&'a str>,
+}
+
+impl BoundUpstreamView<'_> {
+    /// Returns true if every field the predicate sets equals the bound
+    /// value.
+    ///
+    /// A set field with no bound value (unbound request, or a cluster
+    /// that declares nothing for it) never matches. A predicate with no
+    /// field set is vacuously true, but validation rejects that shape.
+    fn matches(self, want: &ApplicationMatch) -> bool {
+        let protocol_ok = want
+            .application_protocol
+            .as_deref()
+            .is_none_or(|p| self.protocol == Some(p));
+        let provider_ok = want
+            .application_provider
+            .as_deref()
+            .is_none_or(|p| self.provider == Some(p));
+        protocol_ok && provider_ok
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Request Condition Evaluation
@@ -51,6 +128,8 @@ impl HeaderSource for Request {
 ///     path_prefix: Some("/api".into()),
 ///     methods: None,
 ///     headers: None,
+///     bound_upstream: None,
+///     selected_upstream: None,
 /// });
 /// assert!(should_execute(&[when], &req));
 ///
@@ -61,11 +140,36 @@ impl HeaderSource for Request {
 ///     path_prefix: Some("/api".into()),
 ///     methods: None,
 ///     headers: None,
+///     bound_upstream: None,
+///     selected_upstream: None,
 /// });
 /// assert!(!should_execute(&[unless], &req));
 /// ```
 pub fn should_execute(conditions: &[Condition], req: &Request) -> bool {
-    match should_execute_from(conditions, req, req) {
+    // Neither a router binding nor a load balancer selection is in scope here,
+    // so `bound_upstream` and `selected_upstream` predicates both fail closed.
+    // Request-phase callers with a context use `should_execute_bound_selected`
+    // to supply the bound view and the published selection.
+    should_execute_bound_selected(conditions, req, BoundUpstreamView::default(), SelectedUpstream::none())
+}
+
+/// Like [`should_execute`], but also evaluates `bound_upstream` predicates
+/// against the request's bound logical upstream and `selected_upstream`
+/// predicates against the load balancer's published selection.
+///
+/// The request phase and branch sub-chains use this after the `router` may have
+/// bound an upstream and a load balancer may have published a selection. An
+/// empty [`BoundUpstreamView`] makes every `bound_upstream` predicate a
+/// no-match; an absent [`SelectedUpstream`] makes every `selected_upstream`
+/// predicate fail closed. Both axes are evaluated together so a filter scoped
+/// to either predicate is gated correctly regardless of which one it uses.
+pub(crate) fn should_execute_bound_selected(
+    conditions: &[Condition],
+    req: &Request,
+    bound: BoundUpstreamView<'_>,
+    selected: SelectedUpstream<'_>,
+) -> bool {
+    match should_execute_from(conditions, req, req, bound, selected) {
         Ok(run) => run,
         // The `Request` header source is infallible; this arm is unreachable.
         Err(never) => match never {},
@@ -75,24 +179,27 @@ pub fn should_execute(conditions: &[Condition], req: &Request) -> bool {
 /// Returns whether the filter should execute, reading header values from
 /// `source` instead of the original request.
 ///
-/// Path and method predicates always read `req`; only the header predicate
-/// consults `source`. The request phase passes the request itself
-/// (infallible); the pre-read body phase passes an overlay that can fail when
-/// a conditioned header has no unambiguous effective value.
+/// Path and method predicates always read `req`; the header predicate consults
+/// `source`, the `bound_upstream` predicate consults `bound`, and the
+/// `selected_upstream` predicate consults `selected`. The request phase passes
+/// the request itself (infallible); the pre-read body phase passes an overlay
+/// that can fail when a conditioned header has no unambiguous effective value.
 pub(crate) fn should_execute_from<S: HeaderSource>(
     conditions: &[Condition],
     req: &Request,
     source: &S,
+    bound: BoundUpstreamView<'_>,
+    selected: SelectedUpstream<'_>,
 ) -> Result<bool, S::Error> {
     for condition in conditions {
         match condition {
             Condition::When(m) => {
-                if !matches_request_from(m, req, source)? {
+                if !matches_request_from(m, req, source, bound, selected)? {
                     return Ok(false);
                 }
             },
             Condition::Unless(m) => {
-                if matches_request_from(m, req, source)? {
+                if matches_request_from(m, req, source, bound, selected)? {
                     return Ok(false);
                 }
             },
@@ -101,26 +208,27 @@ pub(crate) fn should_execute_from<S: HeaderSource>(
     Ok(true)
 }
 
-/// Returns true if all specified fields in the predicate match the request,
-/// reading header values from `source`. Unset fields impose no constraint
-/// (vacuously true).
-fn matches_request_from<S: HeaderSource>(m: &ConditionMatch, req: &Request, source: &S) -> Result<bool, S::Error> {
+/// Returns true if the request's intrinsic attributes (gRPC kind, path, method)
+/// satisfy the predicate. These fields read only `req`, so they are independent
+/// of the header source and bound/selected-upstream metadata. Unset fields
+/// impose no constraint (vacuously true).
+fn matches_request_intrinsics(m: &ConditionMatch, req: &Request) -> bool {
     if let Some(want_grpc) = m.grpc
         && GrpcKind::from_headers(&req.headers).is_grpc() != want_grpc
     {
-        return Ok(false);
+        return false;
     }
 
     if let Some(exact) = &m.path
         && req.uri.path() != exact
     {
-        return Ok(false);
+        return false;
     }
 
     if let Some(prefix) = &m.path_prefix
         && !crate::path_match::path_prefix_matches(req.uri.path(), prefix)
     {
-        return Ok(false);
+        return false;
     }
 
     if let Some(methods) = &m.methods
@@ -128,22 +236,53 @@ fn matches_request_from<S: HeaderSource>(m: &ConditionMatch, req: &Request, sour
             .iter()
             .any(|method| method.eq_ignore_ascii_case(req.method.as_str()))
     {
+        return false;
+    }
+    true
+}
+
+/// Returns true if all specified fields in the predicate match the request,
+/// reading header values from `source`, bound-upstream metadata from `bound`,
+/// and selected-upstream metadata from `selected`. Unset fields impose no
+/// constraint (vacuously true).
+fn matches_request_from<S: HeaderSource>(
+    m: &ConditionMatch,
+    req: &Request,
+    source: &S,
+    bound: BoundUpstreamView<'_>,
+    selected: SelectedUpstream<'_>,
+) -> Result<bool, S::Error> {
+    if !matches_request_intrinsics(m, req) {
         return Ok(false);
     }
 
-    match &m.headers {
-        Some(headers) => matches_headers_from(headers, source),
-        None => Ok(true),
+    if let Some(headers) = &m.headers
+        && !headers_match(headers, source)?
+    {
+        return Ok(false);
     }
+
+    if let Some(want) = &m.bound_upstream
+        && !bound.matches(want)
+    {
+        return Ok(false);
+    }
+
+    if let Some(su) = &m.selected_upstream
+        && !selected_upstream_matches(su, selected)
+    {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
-/// Returns true if every required header is present with the expected
-/// value, reading values through `source`.
-fn matches_headers_from<S: HeaderSource>(headers: &HashMap<String, String>, source: &S) -> Result<bool, S::Error> {
+/// Whether every configured header predicate matches a value from `source`.
+///
+/// An unparseable condition header name can never equal a real request header,
+/// so it is a no-match (build validation rejects such names up front; this
+/// keeps evaluation total).
+fn headers_match<S: HeaderSource>(headers: &HashMap<String, String>, source: &S) -> Result<bool, S::Error> {
     for (name, value) in headers {
-        // An unparseable condition header name can never equal a real
-        // request header, so it is a no-match (build validation rejects
-        // such names up front; this keeps evaluation total).
         let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
             return Ok(false);
         };
@@ -153,6 +292,24 @@ fn matches_headers_from<S: HeaderSource>(headers: &HashMap<String, String>, sour
         }
     }
     Ok(true)
+}
+
+/// Whether the selected-upstream predicate matches the published selection.
+///
+/// Absent metadata never equals a configured value, so a predicate over an
+/// unselected exchange fails closed regardless of the `when`/`unless` polarity.
+fn selected_upstream_matches(su: &SelectedUpstreamMatch, selected: SelectedUpstream<'_>) -> bool {
+    if let Some(protocol) = &su.application_protocol
+        && selected.application_protocol != Some(protocol.as_str())
+    {
+        return false;
+    }
+    if let Some(provider) = &su.application_provider
+        && selected.application_provider != Some(provider.as_str())
+    {
+        return false;
+    }
+    true
 }
 
 // -----------------------------------------------------------------------------
@@ -169,7 +326,6 @@ fn matches_headers_from<S: HeaderSource>(headers: &HashMap<String, String>, sour
     reason = "tests"
 )]
 mod tests {
-
     use http::{HeaderMap, HeaderValue, Method, Uri};
 
     use super::*;
@@ -312,6 +468,8 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         };
         assert!(should_execute(&[when(m)], &req));
     }
@@ -325,6 +483,8 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         };
         assert!(!should_execute(&[when(m)], &req));
     }
@@ -338,6 +498,8 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         };
         assert!(!should_execute(&[when(m)], &req));
     }
@@ -356,6 +518,8 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: Some(hdr_map),
+            bound_upstream: None,
+            selected_upstream: None,
         };
         assert!(should_execute(&[when(m)], &req));
     }
@@ -374,6 +538,8 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: Some(hdr_map),
+            bound_upstream: None,
+            selected_upstream: None,
         };
         assert!(!should_execute(&[when(m)], &req));
     }
@@ -387,6 +553,8 @@ mod tests {
             path_prefix: Some("/healthz".to_owned()),
             methods: Some(vec!["GET".to_owned()]),
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         };
         assert!(
             !should_execute(&[unless(m)], &req),
@@ -403,6 +571,8 @@ mod tests {
             path_prefix: Some("/healthz".to_owned()),
             methods: Some(vec!["GET".to_owned()]),
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         };
         assert!(
             should_execute(&[unless(m)], &req),
@@ -419,6 +589,8 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         };
         assert!(should_execute(&[when(m)], &req), "empty match should be vacuously true");
     }
@@ -473,7 +645,14 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-gate", HeaderValue::from_static("on"));
         let req = make_request(Method::GET, "/", headers);
-        let run = should_execute_from(&[when(header_match(&[("x-gate", "on")]))], &req, &req).unwrap();
+        let run = should_execute_from(
+            &[when(header_match(&[("x-gate", "on")]))],
+            &req,
+            &req,
+            BoundUpstreamView::default(),
+            SelectedUpstream::none(),
+        )
+        .unwrap();
         assert!(run, "request source should match its own header");
     }
 
@@ -481,7 +660,14 @@ mod tests {
     fn should_execute_from_overlay_sees_added_header() {
         let req = make_request(Method::GET, "/", HeaderMap::new());
         let source = MockSource::with(&[("x-gate", "on")]);
-        let run = should_execute_from(&[when(header_match(&[("x-gate", "on")]))], &req, &source).unwrap();
+        let run = should_execute_from(
+            &[when(header_match(&[("x-gate", "on")]))],
+            &req,
+            &source,
+            BoundUpstreamView::default(),
+            SelectedUpstream::none(),
+        )
+        .unwrap();
         assert!(run, "overlay-added header should satisfy the condition");
     }
 
@@ -491,7 +677,14 @@ mod tests {
         headers.insert("x-gate", HeaderValue::from_static("on"));
         let req = make_request(Method::GET, "/", headers);
         let source = MockSource::empty();
-        let run = should_execute_from(&[when(header_match(&[("x-gate", "on")]))], &req, &source).unwrap();
+        let run = should_execute_from(
+            &[when(header_match(&[("x-gate", "on")]))],
+            &req,
+            &source,
+            BoundUpstreamView::default(),
+            SelectedUpstream::none(),
+        )
+        .unwrap();
         assert!(!run, "overlay masking the original header should skip the filter");
     }
 
@@ -499,7 +692,13 @@ mod tests {
     fn should_execute_from_overlay_propagates_ambiguity() {
         let req = make_request(Method::GET, "/", HeaderMap::new());
         let source = MockSource::ambiguous("x-gate");
-        let result = should_execute_from(&[when(header_match(&[("x-gate", "on")]))], &req, &source);
+        let result = should_execute_from(
+            &[when(header_match(&[("x-gate", "on")]))],
+            &req,
+            &source,
+            BoundUpstreamView::default(),
+            SelectedUpstream::none(),
+        );
         assert!(
             result.is_err(),
             "an ambiguous overlay value should propagate as an error"
@@ -509,8 +708,135 @@ mod tests {
     #[test]
     fn should_execute_from_invalid_condition_name_is_no_match() {
         let req = make_request(Method::GET, "/", HeaderMap::new());
-        let run = should_execute_from(&[when(header_match(&[("x gate", "on")]))], &req, &req).unwrap();
+        let run = should_execute_from(
+            &[when(header_match(&[("x gate", "on")]))],
+            &req,
+            &req,
+            BoundUpstreamView::default(),
+            SelectedUpstream::none(),
+        )
+        .unwrap();
         assert!(!run, "an invalid condition header name should be a no-match");
+    }
+
+    // -------------------------------------------------------------------------
+    // selected_upstream predicate
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn selected_upstream_protocol_only_matches() {
+        let req = make_request(Method::POST, "/v1/chat/completions", HeaderMap::new());
+        let selected = SelectedUpstream {
+            application_protocol: Some("openai_chat_completions"),
+            application_provider: Some("vllm"),
+        };
+        let cond = when(selected_upstream_match(Some("openai_chat_completions"), None));
+        assert!(
+            should_execute_selected(&[cond], &req, selected),
+            "protocol-only predicate should match on protocol alone"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_protocol_only_mismatch() {
+        let req = make_request(Method::POST, "/v1/chat/completions", HeaderMap::new());
+        let selected = SelectedUpstream {
+            application_protocol: Some("anthropic_messages"),
+            application_provider: None,
+        };
+        let cond = when(selected_upstream_match(Some("openai_chat_completions"), None));
+        assert!(
+            !should_execute_selected(&[cond], &req, selected),
+            "a differing protocol should not match"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_provider_only_matches() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        let selected = SelectedUpstream {
+            application_protocol: Some("openai_chat_completions"),
+            application_provider: Some("vllm"),
+        };
+        let cond = when(selected_upstream_match(None, Some("vllm")));
+        assert!(
+            should_execute_selected(&[cond], &req, selected),
+            "provider-only predicate should match on provider alone"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_combined_both_match() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        let selected = SelectedUpstream {
+            application_protocol: Some("openai_chat_completions"),
+            application_provider: Some("vllm"),
+        };
+        let cond = when(selected_upstream_match(Some("openai_chat_completions"), Some("vllm")));
+        assert!(
+            should_execute_selected(&[cond], &req, selected),
+            "both fields matching should execute"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_combined_one_mismatch() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        let selected = SelectedUpstream {
+            application_protocol: Some("openai_chat_completions"),
+            application_provider: Some("openai"),
+        };
+        let cond = when(selected_upstream_match(Some("openai_chat_completions"), Some("vllm")));
+        assert!(
+            !should_execute_selected(&[cond], &req, selected),
+            "a single differing field should not match (AND semantics)"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_missing_metadata_fails_closed_when() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        let cond = when(selected_upstream_match(Some("openai_chat_completions"), None));
+        assert!(
+            !should_execute_selected(&[cond], &req, SelectedUpstream::none()),
+            "absent metadata must not satisfy a `when` predicate (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_missing_metadata_fails_closed_unless() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        let cond = unless(selected_upstream_match(Some("openai_chat_completions"), None));
+        assert!(
+            should_execute_selected(&[cond], &req, SelectedUpstream::none()),
+            "absent metadata leaves an `unless` predicate unsatisfied, so the filter still runs"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_no_context_helper_fails_closed() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        let cond = when(selected_upstream_match(None, Some("vllm")));
+        assert!(
+            !should_execute(&[cond], &req),
+            "the no-context should_execute helper never satisfies selected_upstream"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_provider_absent_but_configured_fails_closed() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        // Protocol is present and matches, but the configured provider is absent
+        // from the selection: the predicate must still fail closed.
+        let selected = SelectedUpstream {
+            application_protocol: Some("openai_chat_completions"),
+            application_provider: None,
+        };
+        let cond = when(selected_upstream_match(Some("openai_chat_completions"), Some("vllm")));
+        assert!(
+            !should_execute_selected(&[cond], &req, selected),
+            "a configured provider with no selected provider must fail closed"
+        );
     }
 
     /// Test-only [`HeaderSource`] returning configured values or an error.
@@ -665,6 +991,8 @@ mod tests {
             path_prefix: Some("/pkg.Svc".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         };
         assert!(
             should_execute(&[when(m)], &req),
@@ -677,6 +1005,8 @@ mod tests {
             path_prefix: Some("/other".to_owned()),
             methods: None,
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         };
         assert!(
             !should_execute(&[when(m)], &req),
@@ -699,6 +1029,325 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // bound_upstream Predicate
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn bound_upstream_protocol_only_matches() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let view = bound_view(Some("openai_responses"), Some("openai"));
+        assert!(
+            should_execute_bound(
+                &[when(bound_upstream_match(Some("openai_responses"), None))],
+                &req,
+                view
+            ),
+            "a protocol-only predicate should match the bound protocol"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_protocol_only_mismatch() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let view = bound_view(Some("openai_chat_completions"), Some("openai"));
+        assert!(
+            !should_execute_bound(
+                &[when(bound_upstream_match(Some("openai_responses"), None))],
+                &req,
+                view
+            ),
+            "a differing bound protocol should not match"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_provider_only_matches() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let view = bound_view(Some("openai_responses"), Some("openai"));
+        assert!(
+            should_execute_bound(&[when(bound_upstream_match(None, Some("openai")))], &req, view),
+            "a provider-only predicate should match the bound provider"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_provider_only_mismatch() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let view = bound_view(Some("openai_responses"), Some("azure"));
+        assert!(
+            !should_execute_bound(&[when(bound_upstream_match(None, Some("openai")))], &req, view),
+            "a differing bound provider should not match"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_when_and_unless_across_metadata_axes() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let conditions = [
+            when(bound_upstream_match(Some("openai_responses"), None)),
+            unless(bound_upstream_match(None, Some("azure"))),
+        ];
+
+        assert!(
+            should_execute_bound(&conditions, &req, bound_view(Some("openai_responses"), Some("openai"))),
+            "matching protocol and a non-excluded provider should execute"
+        );
+        assert!(
+            !should_execute_bound(&conditions, &req, bound_view(Some("openai_responses"), Some("azure"))),
+            "the provider exclusion must veto a matching protocol"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_ands_with_method_and_header() {
+        let mut matcher = bound_upstream_match(None, Some("openai"));
+        matcher.methods = Some(vec!["POST".to_owned()]);
+        matcher.headers = Some(HashMap::from([("x-tenant".to_owned(), "acme".to_owned())]));
+        let condition = when(matcher);
+        let view = bound_view(None, Some("openai"));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tenant", HeaderValue::from_static("acme"));
+
+        assert!(
+            should_execute_bound(
+                std::slice::from_ref(&condition),
+                &make_request(Method::POST, "/", headers.clone()),
+                view,
+            ),
+            "matching bound provider, method, and header should run"
+        );
+        assert!(
+            !should_execute_bound(
+                std::slice::from_ref(&condition),
+                &make_request(Method::GET, "/", headers.clone()),
+                view,
+            ),
+            "a method mismatch should veto a matching bound provider"
+        );
+        headers.insert("x-tenant", HeaderValue::from_static("other"));
+        assert!(
+            !should_execute_bound(&[condition], &make_request(Method::POST, "/", headers), view),
+            "a header mismatch should veto a matching bound provider"
+        );
+    }
+
+    #[test]
+    fn public_should_execute_treats_bound_upstream_as_unbound() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        let matcher = bound_upstream_match(None, Some("openai"));
+
+        assert!(
+            !should_execute(&[when(matcher.clone())], &req),
+            "the public header-only evaluator must fail closed for a positive bound predicate"
+        );
+        assert!(
+            should_execute(&[unless(matcher)], &req),
+            "the public header-only evaluator must preserve unless fail-open semantics when unbound"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_combined_matches() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let view = bound_view(Some("openai_responses"), Some("openai"));
+        assert!(
+            should_execute_bound(
+                &[when(bound_upstream_match(Some("openai_responses"), Some("openai")))],
+                &req,
+                view
+            ),
+            "both fields equal should match"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_combined_partial_mismatch() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let view = bound_view(Some("openai_responses"), Some("azure"));
+        assert!(
+            !should_execute_bound(
+                &[when(bound_upstream_match(Some("openai_responses"), Some("openai")))],
+                &req,
+                view
+            ),
+            "a matching protocol cannot rescue a mismatched provider"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_unbound_never_matches() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        assert!(
+            !should_execute_bound(
+                &[when(bound_upstream_match(Some("openai_responses"), None))],
+                &req,
+                BoundUpstreamView::default()
+            ),
+            "an unbound request should never satisfy a bound_upstream predicate"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_missing_metadata_no_match() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let view = bound_view(Some("openai_responses"), None);
+        assert!(
+            !should_execute_bound(&[when(bound_upstream_match(None, Some("openai")))], &req, view),
+            "a cluster with no provider metadata should not satisfy a provider predicate"
+        );
+    }
+
+    #[test]
+    fn unless_bound_upstream_skips_when_bound() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let view = bound_view(Some("openai_responses"), Some("openai"));
+        assert!(
+            !should_execute_bound(
+                &[unless(bound_upstream_match(Some("openai_responses"), None))],
+                &req,
+                view
+            ),
+            "unless bound_upstream should skip a request bound to that protocol"
+        );
+    }
+
+    #[test]
+    fn unless_bound_upstream_runs_when_unbound_or_field_missing() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let condition = unless(bound_upstream_match(None, Some("openai")));
+
+        assert!(
+            should_execute_bound(std::slice::from_ref(&condition), &req, BoundUpstreamView::default()),
+            "unless bound_upstream should run an unbound request"
+        );
+        assert!(
+            should_execute_bound(&[condition], &req, bound_view(Some("openai_responses"), None)),
+            "unless bound_upstream should run a request whose binding lacks the provider field"
+        );
+    }
+
+    #[test]
+    fn bound_and_selected_upstream_axes_are_anded() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let conditions = [
+            when(bound_upstream_match(None, Some("openai"))),
+            when(selected_upstream_match(None, Some("azure"))),
+        ];
+        let bound = bound_view(Some("openai_responses"), Some("openai"));
+        let selected = SelectedUpstream {
+            application_protocol: Some("openai_responses"),
+            application_provider: Some("azure"),
+        };
+
+        assert!(
+            should_execute_bound_selected(&conditions, &req, bound, selected),
+            "both axes matching should run the filter"
+        );
+        assert!(
+            !should_execute_bound_selected(&conditions, &req, bound, SelectedUpstream::none()),
+            "a missing selection must fail the selected axis even when the bound axis matches"
+        );
+    }
+
+    #[test]
+    fn when_bound_unless_selected_mix_across_axes() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let conditions = [
+            when(bound_upstream_match(None, Some("openai"))),
+            unless(selected_upstream_match(None, Some("azure"))),
+        ];
+        let bound = bound_view(None, Some("openai"));
+        let azure = SelectedUpstream {
+            application_protocol: None,
+            application_provider: Some("azure"),
+        };
+        let openai = SelectedUpstream {
+            application_protocol: None,
+            application_provider: Some("openai"),
+        };
+
+        assert!(
+            should_execute_bound_selected(&conditions, &req, bound, openai),
+            "a matching binding and a non-excluded selection should run the filter"
+        );
+        assert!(
+            !should_execute_bound_selected(&conditions, &req, bound, azure),
+            "the excluded selection must veto a matching binding"
+        );
+        assert!(
+            !should_execute_bound_selected(&conditions, &req, BoundUpstreamView::default(), openai),
+            "an unbound request must fail the when-bound half"
+        );
+        assert!(
+            should_execute_bound_selected(&conditions, &req, bound, SelectedUpstream::none()),
+            "with no selection the unless-selected half cannot match, so it does not veto"
+        );
+    }
+
+    #[test]
+    fn unless_bound_when_selected_mix_across_axes() {
+        let req = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        let conditions = [
+            unless(bound_upstream_match(None, Some("openai"))),
+            when(selected_upstream_match(None, Some("vllm"))),
+        ];
+        let vllm = SelectedUpstream {
+            application_protocol: None,
+            application_provider: Some("vllm"),
+        };
+
+        assert!(
+            should_execute_bound_selected(&conditions, &req, bound_view(None, Some("local")), vllm),
+            "a non-excluded binding and a matching selection should run the filter"
+        );
+        assert!(
+            !should_execute_bound_selected(&conditions, &req, bound_view(None, Some("openai")), vllm),
+            "the excluded binding must veto a matching selection"
+        );
+        assert!(
+            should_execute_bound_selected(&conditions, &req, BoundUpstreamView::default(), vllm),
+            "an unbound request cannot match the unless-bound half, so it does not veto"
+        );
+        assert!(
+            !should_execute_bound_selected(
+                &conditions,
+                &req,
+                bound_view(None, Some("local")),
+                SelectedUpstream::none()
+            ),
+            "a missing selection fails the when-selected half"
+        );
+    }
+
+    #[test]
+    fn bound_upstream_ands_with_path() {
+        let view = bound_view(Some("openai_responses"), Some("openai"));
+        let conditions = vec![
+            when(path_match("/v1")),
+            when(bound_upstream_match(Some("openai_responses"), None)),
+        ];
+        let matching = make_request(Method::POST, "/v1/responses", HeaderMap::new());
+        assert!(
+            should_execute_bound(&conditions, &matching, view),
+            "path and bound_upstream both matching should run the filter"
+        );
+        let wrong_path = make_request(Method::POST, "/v2/responses", HeaderMap::new());
+        assert!(
+            !should_execute_bound(&conditions, &wrong_path, view),
+            "a mismatched path should veto a matching bound_upstream predicate"
+        );
+    }
+
+    #[test]
+    fn default_view_leaves_unbound_conditions_unaffected() {
+        let req = make_request(Method::GET, "/api/users", HeaderMap::new());
+        assert!(
+            should_execute_bound(&[when(path_match("/api"))], &req, BoundUpstreamView::default()),
+            "a predicate without bound_upstream should run regardless of the view"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
@@ -710,6 +1359,8 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         }
     }
 
@@ -747,6 +1398,8 @@ mod tests {
             path_prefix: Some(prefix.to_owned()),
             methods: None,
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         }
     }
 
@@ -758,6 +1411,8 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         }
     }
 
@@ -769,6 +1424,8 @@ mod tests {
             path_prefix: None,
             methods: Some(methods.iter().map(|s| (*s).to_owned()).collect()),
             headers: None,
+            bound_upstream: None,
+            selected_upstream: None,
         }
     }
 
@@ -784,7 +1441,60 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            bound_upstream: None,
+            selected_upstream: None,
         }
+    }
+
+    /// Build a condition matching selected-upstream metadata.
+    fn selected_upstream_match(protocol: Option<&str>, provider: Option<&str>) -> ConditionMatch {
+        ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: None,
+            methods: None,
+            headers: None,
+            bound_upstream: None,
+            selected_upstream: Some(SelectedUpstreamMatch {
+                application_protocol: protocol.map(str::to_owned),
+                application_provider: provider.map(str::to_owned),
+            }),
+        }
+    }
+
+    /// Build a condition matching the request's bound logical upstream.
+    fn bound_upstream_match(protocol: Option<&str>, provider: Option<&str>) -> ConditionMatch {
+        ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: None,
+            methods: None,
+            headers: None,
+            bound_upstream: Some(ApplicationMatch {
+                application_protocol: protocol.map(str::to_owned),
+                application_provider: provider.map(str::to_owned),
+            }),
+            selected_upstream: None,
+        }
+    }
+
+    /// Build a bound-upstream view from optional protocol/provider metadata.
+    fn bound_view<'a>(protocol: Option<&'a str>, provider: Option<&'a str>) -> BoundUpstreamView<'a> {
+        BoundUpstreamView { protocol, provider }
+    }
+
+    /// Evaluate conditions against a bound-upstream view alone, with no load
+    /// balancer selection in scope (a `selected_upstream` predicate fails
+    /// closed). Keeps the `bound_upstream` unit tests focused on one axis.
+    fn should_execute_bound(conditions: &[Condition], req: &Request, bound: BoundUpstreamView<'_>) -> bool {
+        should_execute_bound_selected(conditions, req, bound, SelectedUpstream::none())
+    }
+
+    /// Evaluate conditions against a published selection alone, with no router
+    /// binding in scope (a `bound_upstream` predicate fails closed). Keeps the
+    /// `selected_upstream` unit tests focused on one axis.
+    fn should_execute_selected(conditions: &[Condition], req: &Request, selected: SelectedUpstream<'_>) -> bool {
+        should_execute_bound_selected(conditions, req, BoundUpstreamView::default(), selected)
     }
 
     mod properties {
@@ -806,6 +1516,8 @@ mod tests {
                     path_prefix: None,
                     methods: None,
                     headers: None,
+                    bound_upstream: None,
+                    selected_upstream: None,
                 }),
                 path().prop_map(|p| ConditionMatch {
                     grpc: None,
@@ -813,6 +1525,8 @@ mod tests {
                     path_prefix: Some(p),
                     methods: None,
                     headers: None,
+                    bound_upstream: None,
+                    selected_upstream: None,
                 }),
                 proptest::collection::vec("(GET|POST|PUT|DELETE|PATCH)", 1..=3).prop_map(|ms| ConditionMatch {
                     grpc: None,
@@ -820,6 +1534,8 @@ mod tests {
                     path_prefix: None,
                     methods: Some(ms),
                     headers: None,
+                    bound_upstream: None,
+                    selected_upstream: None,
                 }),
             ]
         }

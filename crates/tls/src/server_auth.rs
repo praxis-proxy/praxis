@@ -152,7 +152,7 @@ pub fn pinned_client_config(
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(verifier));
 
-    let config = match identity_pem {
+    let mut config = match identity_pem {
         Some(pem) => {
             let (chain, key) = split_identity(pem)?;
             builder
@@ -163,6 +163,10 @@ pub fn pinned_client_config(
         },
         None => builder.with_no_client_auth(),
     };
+    // Extended Master Secret (RFC 7627) on TLS 1.2, as the listeners require;
+    // see `setup::require_extended_master_secret` for why.
+    config.require_ems = true;
+    crate::provider::check_config_fips(config.fips(), "upstream client")?;
 
     Ok(config)
 }
@@ -320,6 +324,10 @@ mod tests {
         let (ca_pem, leaf, key) = mint_serving("Grid CA", "spiffe://grid.internal/signals");
         let config =
             pinned_client_config(provider(), &ca_pem, "spiffe://grid.internal/signals", None).expect("client config");
+        assert!(
+            config.require_ems,
+            "TLS 1.2 sessions must require the Extended Master Secret"
+        );
         handshake(config, leaf, key).expect("the pinned peer's handshake completes");
     }
 
@@ -369,7 +377,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn provider() -> Arc<CryptoProvider> {
-        Arc::new(rustls::crypto::aws_lc_rs::default_provider())
+        Arc::new(rustls_openssl::default_provider())
     }
 
     /// Extended key usage a minted leaf should carry.

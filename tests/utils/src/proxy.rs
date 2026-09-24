@@ -229,6 +229,9 @@ impl Drop for ProxyGuard {
 ///
 /// [`Server`]: pingora_core::server::Server
 fn build_pingora_server(config: &Config, registry: &FilterRegistry) -> pingora_core::server::Server {
+    // `wire_service` builds Pingora's upstream connector, which constructs a rustls
+    // `ClientConfig` even for a listener that serves plain HTTP.
+    crate::net::tls::ensure_crypto_provider();
     let runtime = RuntimeOptions {
         threads: TEST_WORKER_THREADS,
         ..RuntimeOptions::default()
@@ -327,6 +330,10 @@ fn build_full_server(config: &Config) -> praxis_core::PingoraServerRuntime {
 /// [`PingoraServerRuntime`]: praxis_core::PingoraServerRuntime
 #[expect(clippy::too_many_lines, reason = "test utility wiring")]
 fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -> praxis_core::PingoraServerRuntime {
+    // Every full-proxy start builds a `SubRequestConnector`, which constructs a
+    // rustls `ClientConfig`. Hooking the certificate fixtures is not enough: a test
+    // that starts a proxy without TLS reaches rustls with no provider installed.
+    crate::net::tls::ensure_crypto_provider();
     let health_registry = build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
     let ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);

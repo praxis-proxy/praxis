@@ -2,24 +2,42 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     directory: "/"
+    cooldown:
+      default-days: 7
     schedule:
       interval: "weekly"
     groups:
-      rust-dependencies:
-        patterns:
-          - "*"
+      # Group minor and patch bumps; let each major update land on its own so a
+      # breaking bump never blocks the rest of the batch.
+      cargo-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "docker"
     directory: "/"
+    cooldown:
+      default-days: 7
     schedule:
       interval: "weekly"
+    ignore:
+      # The builder image tracks the MSRV, not Dependabot; allow Alpine patch
+      # bumps but hold rust major/minor.
+      - dependency-name: "rust"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   - package-ecosystem: "github-actions"
     directory: "/"
+    cooldown:
+      default-days: 7
     schedule:
       interval: "weekly"
 
   - package-ecosystem: "github-actions"
     directory: ".github/actions/install-nightly-rust"
+    cooldown:
+      default-days: 7
     schedule:
       interval: "weekly"

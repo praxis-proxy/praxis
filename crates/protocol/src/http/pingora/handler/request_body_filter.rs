@@ -138,7 +138,21 @@ pub(super) async fn execute(
             }
         },
 
-        BodyMode::StreamBuffer { .. } => {},
+        // After Release the body streams unbuffered; the global ceiling
+        // still applies (StreamBuffer's own cap no longer runs).
+        BodyMode::StreamBuffer { .. } => {
+            let chunk_len = body.as_ref().map_or(0, Bytes::len) as u64;
+            if let Some(max) = pipeline.request_body_ceiling()
+                && ctx.request_body_bytes.saturating_add(chunk_len) > max as u64
+            {
+                ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
+                send_rejection_for(session, Rejection::status(413), ctx).await;
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::HTTPStatus(413),
+                    "released request body exceeds global body limit",
+                ));
+            }
+        },
         _ => tracing::error!("unhandled BodyMode variant in request body filter"),
     }
 

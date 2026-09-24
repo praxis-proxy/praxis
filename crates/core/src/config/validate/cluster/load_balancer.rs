@@ -8,7 +8,8 @@ use crate::{
     errors::ProxyError,
 };
 
-/// Hard ceiling on ring-hash entries per cluster (`Σ weight × virtual_nodes`).
+/// Hard ceiling on hash-ring entries per cluster: `Σ weight × virtual_nodes`
+/// for `ring_hash`, `Σ weight` for `consistent_hash`.
 ///
 /// Each entry costs 16 bytes and the ring is rebuilt on every config reload,
 /// so an unbounded product of weights (≤1000), `virtual_nodes` (≤10000), and
@@ -31,6 +32,15 @@ pub(in crate::config::validate) fn validate_lb_strategy(cluster: &Cluster) -> Re
                     "cluster '{name}': ring_hash ring would have {entries} entries \
                      (sum of endpoint weight × virtual_nodes); maximum is {MAX_RING_ENTRIES} — \
                      lower virtual_nodes or endpoint weights",
+                )));
+            }
+        }
+        if let ParameterisedStrategy::ConsistentHash(_) = param {
+            let entries: u64 = cluster.endpoints.iter().map(|ep| u64::from(ep.weight())).sum();
+            if entries > MAX_RING_ENTRIES {
+                return Err(ProxyError::Config(format!(
+                    "cluster '{name}': consistent_hash ring would have {entries} entries \
+                     (sum of endpoint weights); maximum is {MAX_RING_ENTRIES} — lower endpoint weights",
                 )));
             }
         }
@@ -105,8 +115,8 @@ fn validate_parameterised(name: &str, param: &ParameterisedStrategy) -> Result<(
 mod tests {
     use super::validate_lb_strategy;
     use crate::config::{
-        Cluster, HashFunction, LoadBalancerStrategy, ParameterisedStrategy, PriorityOpts, RingHashOpts, SimpleStrategy,
-        SubsetFallbackPolicy, SubsetOpts, ZoneAwareOpts,
+        Cluster, ConsistentHashOpts, HashFunction, LoadBalancerStrategy, ParameterisedStrategy, PriorityOpts,
+        RingHashOpts, SimpleStrategy, SubsetFallbackPolicy, SubsetOpts, ZoneAwareOpts,
     };
 
     #[test]
@@ -228,6 +238,28 @@ mod tests {
     }
 
     #[test]
+    fn reject_consistent_hash_oversized_ring() {
+        let mut cluster = cluster_with_strategy(LoadBalancerStrategy::Parameterised(
+            ParameterisedStrategy::ConsistentHash(ConsistentHashOpts { header: None }),
+        ));
+        cluster.endpoints = weighted_endpoints(1_049, 1_000);
+        let err = validate_lb_strategy(&cluster).unwrap_err();
+        assert!(
+            err.to_string().contains("consistent_hash ring would have"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_consistent_hash_ring_at_max() {
+        let mut cluster = cluster_with_strategy(LoadBalancerStrategy::Parameterised(
+            ParameterisedStrategy::ConsistentHash(ConsistentHashOpts { header: None }),
+        ));
+        cluster.endpoints = weighted_endpoints(1_024, 1_024);
+        validate_lb_strategy(&cluster).expect("a ring of exactly MAX_RING_ENTRIES should be accepted");
+    }
+
+    #[test]
     fn accept_priority_valid_overprovisioning() {
         let cluster = cluster_with_strategy(LoadBalancerStrategy::Parameterised(ParameterisedStrategy::Priority(
             PriorityOpts {
@@ -276,5 +308,17 @@ mod tests {
         let mut cluster = Cluster::with_defaults("test", vec!["10.0.0.1:80".into()]);
         cluster.load_balancer_strategy = strategy;
         cluster
+    }
+
+    fn weighted_endpoints(count: usize, weight: u32) -> Vec<crate::config::Endpoint> {
+        (0..count)
+            .map(|i| crate::config::Endpoint::Weighted {
+                address: format!("10.0.0.1:{i}"),
+                weight,
+                metadata: std::collections::HashMap::new(),
+                priority: 0,
+                zone: None,
+            })
+            .collect()
     }
 }

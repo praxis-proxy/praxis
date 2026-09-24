@@ -33,20 +33,34 @@ cargo build -p praxis-proxy --release --no-default-features \
     --features config-reload,admin-api
 ```
 
-For that exact invocation in this workspace, the guarantee holds: the server
-depends on `praxis-proxy-filter` without dependency defaults, so dropping the
-server's `policy-engine` feature leaves the filter and the policy engine's
-dependency tree out of the build.
+For that exact invocation the guarantee holds: every Praxis crate depends on
+`praxis-proxy-filter` without dependency defaults, so dropping the server's
+`policy-engine` feature leaves the filter's `policy-engine` off and the policy
+engine's dependency tree out of the build. `make release-fips` is this build
+with the feature list kept in one place; see [FIPS 140-3](fips.md) for what
+that build is for and how to deploy it.
 
-Library embedders need more than one `default-features = false`. Cargo unions
-features across the whole dependency graph, so a single crate anywhere in that
-graph that depends on `praxis-proxy-filter` with its defaults turns
-`policy-engine` back on for everyone, and the `policy` filter registers itself
-on the filter crate's own feature rather than the server's, so it becomes
-nameable in config in a build believed to be policy-free. Every edge reaching
-`praxis-proxy-filter` must therefore set `default-features = false`. Verify with
-`cargo tree -i praxis-policy`: no output means the policy engine really is out
-of the build.
+### Disabling the policy engine as a library consumer
+
+The same holds when Praxis crates are embedded. Each crate that reaches the
+filter (`praxis-proxy`, `praxis-proxy-protocol`) depends on it without
+defaults and exposes its own `policy-engine` feature, forwarding to the
+filter's. So:
+
+- Depending on `praxis-proxy` (the server as a library) with
+  `default-features = false` and naming the features you want gives a
+  policy-free build; leaving defaults on gives the policy engine.
+- Depending on `praxis-proxy-protocol` or `praxis-proxy-filter` directly gives
+  no policy engine unless you enable `policy-engine` on them (the filter's own
+  default is on, so set `default-features = false` on that edge to keep it
+  off). `praxis-proxy-core` and `praxis-proxy-tls` never pull it.
+
+Cargo unions features across the whole dependency graph, so one crate anywhere
+in your graph that depends on `praxis-proxy-filter` with its defaults turns
+`policy-engine` back on for everyone, and the `policy` filter then becomes
+nameable in config in a build believed to be policy-free. Verify with
+`cargo tree -e normal -i praxis-policy`: no output means the policy engine
+really is out of the build.
 
 ## Feature summary
 
@@ -58,8 +72,10 @@ of the build.
 | `policy-engine` | on | The `policy` filter (Praxis Policy Engine: OPA-style route policy, JWT identity, token exchange). | Off for a deployment that does no policy-based authorization: it is the heaviest optional dependency, so dropping it is the largest single saving in build time and binary size. |
 | `basic-auth-filter` | off (experimental) | The `basic_auth` filter. | Dev and testing only. Slated for removal in favor of the policy engine ([praxis-proxy/policy]); prefer that for authentication. |
 | `cloud-events-filter` | off (experimental) | The `cloud_events` filter (serialize requests into CloudEvents and ship them to an HTTP receiver). | On for event export; delivery is best-effort. Adds `chrono` and `url`. |
-| `iterative-request-router` | off (experimental) | The `iterative_request_router` filter: a bounded loop of sub-requests for provider failover and agentic/tool loops. | On for callout and failover pipelines (the AI gateway relies on it). No extra dependencies. |
+| `upstream-binding` | off (experimental) | Logical upstream binding: the `router` publishes the matched cluster as a request-wide binding that `bound_upstream` conditions and `cluster_source: bound_upstream` load balancers read. | On when a pipeline gates filters on the bound cluster's application metadata or dispatches from the binding. Implied by the two features below. Off, those config forms are rejected at load time and the router never touches request extensions. |
+| `iterative-request-router` | off (experimental) | The `iterative_request_router` filter: a bounded loop of sub-requests for provider failover and agentic/tool loops. | On for callout and failover pipelines (the AI gateway relies on it). No extra dependencies; pulls in `upstream-binding`, since its steps dispatch from the binding. |
 | `router-json-aliases` | off (experimental) | The `router` filter's JSON-alias body-routing groundwork. | Groundwork only: it is not wired into routing, and a route that sets `json_aliases` is rejected at build even with the feature on. Default builds do not accept the keys. |
+| `bound-upstream-request-body` | off (experimental) | The `HttpFilter::on_bound_upstream_request_body` hook, run once at the logical-binding barrier. | For out-of-tree filters that must inspect or rewrite the request body against the bound upstream; no in-tree filter uses it yet. Pulls in `upstream-binding`. |
 | `chain-binding` | off (experimental) | The `register_chain_binding` outbound-callout API (`ChainBindingContext::bind_chain`) and its authority-bound deferred credentials (`PendingCredentials`, `DeferredCredential`). | For out-of-tree callout filters; no in-tree consumer yet. |
 | `spiffe` | off (experimental) | SPIFFE X.509-SVID mTLS peer identity (the `require_named` listener mode) and the `peer_identity_trust` filter. | On for mTLS peer-identity authorization. Adds `spiffe` and `x509-parser`. |
 | `dev` | off | Developer convenience bundle (currently enables `basic-auth-filter`). | Local development builds. |
@@ -79,6 +95,13 @@ production` at startup. Do not run an experimental build in production.
   request into a CloudEvent and ships it to a configured HTTP receiver.
   Delivery is best-effort and never changes the client response; review its
   limitations before relying on it.
+- **`upstream-binding`**: logical upstream binding. With it, a `router` in a
+  pipeline that reads the binding publishes the matched cluster once per
+  request, `bound_upstream` conditions match on that cluster's application
+  metadata, and a `load_balancer` with `cluster_source: bound_upstream` picks
+  an endpoint from it. Without it those two config forms fail validation and
+  nothing in the request path changes. See
+  [Upstream Binding](../architecture/upstream-binding.md).
 - **`iterative-request-router`**: the `iterative_request_router` filter, a
   bounded loop of sequential sub-requests through named step pipelines. It
   powers provider failover and LLM agentic/tool loops and is the flagship
@@ -89,6 +112,14 @@ production` at startup. Do not run an experimental build in production.
   wired into request routing, so a route that sets `json_aliases` is rejected
   at build even with the feature on. It is kept behind the flag for a future
   implementation; default builds do not carry the `json_aliases` keys at all.
+- **`bound-upstream-request-body`**: the once-per-request bound-upstream
+  request-body hook (`bound_upstream_request_body_access` and
+  `on_bound_upstream_request_body` on `HttpFilter`). It runs right after the
+  binding `router` freezes the request's
+  [logical upstream binding](../architecture/upstream-binding.md), over the
+  fully buffered body, and a read-write participant's output becomes the body
+  forwarded, retried, and handed to the IRR. Logical binding itself is not
+  gated; only this hook is. It has no in-tree consumer yet.
 - **`chain-binding`**: the `register_chain_binding` extension API and
   `ChainBindingContext::bind_chain`, together with the authority-bound
   deferred-credential channel (`PendingCredentials` / `DeferredCredential`)
@@ -116,10 +147,12 @@ production` at startup. Do not run an experimental build in production.
   `admin-api`, and `otel` is what trims the dependency tree and binary size,
   `policy-engine` by the widest margin. Most filters are always compiled in and
   share dependencies with the core proxy, so gating them individually would not
-  remove a crate. The experimental filter gates (`iterative-request-router`,
-  `chain-binding`, `router-json-aliases`) exist to keep unfinished or
-  not-for-production surface out of default builds rather than to save a crate;
-  `spiffe` and `cloud-events-filter` do additionally drop dependencies
+  remove a crate. The experimental filter gates (`upstream-binding`,
+  `iterative-request-router`, `chain-binding`, `router-json-aliases`,
+  `bound-upstream-request-body`) exist
+  to keep unfinished or not-for-production surface out of default builds
+  rather than to save a crate; `spiffe` and `cloud-events-filter` do
+  additionally drop dependencies
   (`spiffe` + `x509-parser`, and `chrono` + `url` respectively).
 
 ## See also

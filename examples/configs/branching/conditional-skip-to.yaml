@@ -1,13 +1,14 @@
 # Conditional Skip-To Branch (on_result + rejoin: <named>)
 #
-# Skips browser-facing middleware for clean requests.
+# Skips the remaining middleware for clean requests.
 # When guardrails reports status=passed, the branch
-# fires and resumes directly at the routing filter,
-# bypassing CORS and forwarded_headers that only add
-# overhead for already-validated traffic.
+# fires and resumes at the routing filter, jumping over
+# the inspection middleware in between. The security
+# filters (CORS, forwarded_headers) sit before the branch
+# host because a skip may never bypass one.
 #
 # Use case: clean requests that pass guardrails don't
-# need extra middleware processing.
+# need the extra inspection that flagged ones get.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/branching/conditional-skip-to.yaml
@@ -23,6 +24,14 @@ filter_chains:
       # Stamp each request for tracing
       - filter: request_id
 
+      # Browser-facing middleware runs before the branch host: a skip-to
+      # rejoin may never bypass a security filter, so these sit up front
+      - filter: cors
+        allow_origins:
+          - "*"
+
+      - filter: forwarded_headers
+
       # Guardrails: inspect headers. action: flag writes
       # results without rejecting, so branches decide.
       - filter: guardrails
@@ -32,14 +41,12 @@ filter_chains:
             name: "X-Danger"
             contains: "true"
         branch_chains:
-          # Clean requests skip browser middleware and
-          # jump straight to routing
+          # Clean requests jump straight to routing
           - name: skip_to_routing
             on_result:
               filter: guardrails
               result: passed
-            # Rejoin at the named "routing" filter,
-            # skipping cors and forwarded_headers
+            # Rejoin at the named "routing" filter
             rejoin: routing
             chains:
               - name: clean_prep
@@ -51,12 +58,12 @@ filter_chains:
                       - name: X-Clean
                         value: "true"
 
-      # Browser-facing middleware: skipped for clean
-      - filter: cors
-        allow_origins:
-          - "*"
-
-      - filter: forwarded_headers
+      # Inspection middleware: only flagged requests reach
+      # it, since clean ones skipped ahead to routing
+      - filter: headers
+        request_add:
+          - name: X-Inspected
+            value: "full"
 
       # Named target for skip-to rejoin
       - filter: router

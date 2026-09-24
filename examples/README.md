@@ -39,7 +39,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 
 | File | Description |
 | ------ | ------------- |
-| [conditional-skip-to.yaml](configs/branching/conditional-skip-to.yaml) | Skips browser-facing middleware for clean requests |
+| [conditional-skip-to.yaml](configs/branching/conditional-skip-to.yaml) | Skips the remaining middleware for clean requests |
 | [conditional-terminal.yaml](configs/branching/conditional-terminal.yaml) | Short-circuits the pipeline when guardrails detects a dangerous request header |
 | [cross-chain-flat.yaml](configs/branching/cross-chain-flat.yaml) | A listener references two chains: preprocessing and routing |
 | [multiple-branches.yaml](configs/branching/multiple-branches.yaml) | Multiple branches on a single filter, evaluated in order |
@@ -111,6 +111,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [grpc-condition.yaml](configs/pipeline/grpc-condition.yaml) | The `grpc` condition predicate gates a filter on whether the request carries gRPC, classified from the `content-type` header alone (`application/grpc`, `application/grpc+proto`, `application/grpc+json`, or any other `application/grpc+<codec>`) |
 | [iterative-request-router-circuit-breaker.yaml](configs/pipeline/iterative-request-router-circuit-breaker.yaml) | Demonstrates circuit breaker integration with the iterative request router |
 | [iterative-request-router-sequence.yaml](configs/pipeline/iterative-request-router-sequence.yaml) | Demonstrates sequential sub-request execution where each step completes before the next begins |
+| [selected-upstream-conditions.yaml](configs/pipeline/selected-upstream-conditions.yaml) | Gate a filter on the application metadata the load balancer publishes when it selects an upstream |
 
 ### Protocols
 
@@ -166,6 +167,8 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | ------ | ------------- |
 | [authority-override.yaml](configs/traffic-management/authority-override.yaml) | Demonstrates overriding the HTTP Host header sent to a specific upstream cluster, including requests received over HTTP/2 |
 | [basic-reverse-proxy.yaml](configs/traffic-management/basic-reverse-proxy.yaml) | Minimal config: one listener, one upstream, default filter chain |
+| [bound-upstream-condition.yaml](configs/traffic-management/bound-upstream-condition.yaml) | Gates a filter on the logical upstream the router bound for the request |
+| [bound-upstream-dispatch.yaml](configs/traffic-management/bound-upstream-dispatch.yaml) | Selects an upstream endpoint straight from the logical binding, with no second router |
 | [canary-routing.yaml](configs/traffic-management/canary-routing.yaml) | Sends ~10% of traffic to a canary backend while the stable backend handles the remaining ~90% |
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
 | [cluster-application-metadata.yaml](configs/traffic-management/cluster-application-metadata.yaml) | Tags an upstream cluster with opaque application metadata that consuming filters interpret |

@@ -69,6 +69,41 @@ pub mod sse;
 mod tcp_filter;
 mod trace_context;
 
+/// Test-only helpers.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use praxis_core::subrequest::SubRequestConnector;
+
+    /// Build a connector, installing the crypto provider first.
+    ///
+    /// Tests construct connectors directly and so never reach the server
+    /// bootstrap that installs the provider. Pingora builds a TLS client
+    /// config during construction, and rustls has no implicit fallback — the
+    /// Pingora fork enables `custom-provider` — so this would otherwise
+    /// panic. Idempotent.
+    pub(crate) fn connector(keepalive_pool_size: usize, max_connections: Option<usize>) -> SubRequestConnector {
+        praxis_tls::provider::install();
+        SubRequestConnector::new(keepalive_pool_size, max_connections)
+    }
+
+    /// A loopback address that refuses every connection for as long as the
+    /// returned socket lives.
+    ///
+    /// The socket is bound but never listens, so a connect attempt is refused
+    /// while the port stays taken. Binding a listener and dropping it would
+    /// hand the port back to the kernel, and a backend spawned by another test
+    /// in this binary could pick it up before the refusal is observed.
+    #[expect(clippy::unwrap_used, reason = "test helper")]
+    pub(crate) fn refusing_addr() -> (tokio::net::TcpSocket, std::net::SocketAddr) {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = socket.local_addr().unwrap();
+        (socket, addr)
+    }
+}
+
+#[cfg(feature = "bound-upstream-request-body")]
+pub use actions::BoundUpstreamBodyOutcome;
 pub use actions::{
     FilterAction, Rejection, SelectedUpstreamBodyOutcome, StreamingResponseBody, StreamingTerminalResponse,
     TerminalResponse,
@@ -111,6 +146,8 @@ pub use filtered_subrequest::{
     SubrequestRuntime,
 };
 pub use grpc_response::GrpcErrorMapping;
+#[cfg(feature = "upstream-binding")]
+pub use pipeline::catalog::{ClusterApplicationCatalog, ClusterApplicationMetadata, ClusterMetadataDeclaration};
 pub use pipeline::{
     FilterPipeline, PipelineExtension,
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},

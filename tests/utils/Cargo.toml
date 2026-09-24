@@ -19,6 +19,7 @@ praxis-filter = { workspace = true }
 # enabling these here propagates (via feature unification) to every test crate
 # that depends on the harness, so the full test surface is always built.
 praxis-protocol = { workspace = true, features = ["admin-api", "config-reload"] }
+praxis-tls = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 rcgen = { workspace = true }

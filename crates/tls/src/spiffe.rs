@@ -575,4 +575,242 @@ mod tests {
     fn svid_id_allowed(leaf_der: &[u8], allowed: &[Arc<str>]) -> bool {
         matches!(authorize_peer(leaf_der, allowed), PeerAuth::Allowed)
     }
+
+    // -------------------------------------------------------------------------
+    // Integration Tests: Full mTLS Handshakes
+    // -------------------------------------------------------------------------
+
+    /// Functional mTLS handshake tests for `RequireNamed` (X.509-SVID) listeners.
+    ///
+    /// Drives a real rustls handshake against a `ServerConfig` built the production
+    /// way, from YAML through [`crate::ListenerTls`] and
+    /// [`crate::setup::build_server_config`], and asserts that the SPIFFE
+    /// allowlist admits or rejects a peer at the handshake, before any request.
+    #[cfg(feature = "spiffe")]
+    mod handshake_integration {
+        use rcgen::Issuer;
+        use rustls::{
+            ClientConfig, ClientConnection, RootCertStore, ServerConnection,
+            pki_types::{CertificateDer, PrivateKeyDer, ServerName, pem::PemObject as _},
+        };
+
+        use super::*;
+        use crate::{ListenerTls, setup::build_server_config};
+
+        /// A SPIFFE ID present in the server's trust allowlist.
+        const ALLOWED_ID: &str = "spiffe://grid.internal/signals";
+
+        /// A SPIFFE ID the server does not allowlist.
+        const OTHER_ID: &str = "spiffe://grid.internal/other";
+
+        #[test]
+        fn an_allowlisted_svid_completes_the_handshake() {
+            let pki = TestPki::new();
+            let server = server_config(&pki, &[ALLOWED_ID]);
+            let client = client_config(&pki, Some(pki.mint_client(ALLOWED_ID, true)));
+            handshake(server, client).expect("an allowlisted SVID should complete the handshake");
+        }
+
+        #[test]
+        fn an_empty_allowlist_admits_any_conforming_svid() {
+            let pki = TestPki::new();
+            let server = server_config(&pki, &[]);
+            let client = client_config(&pki, Some(pki.mint_client(OTHER_ID, true)));
+            handshake(server, client).expect("an empty allowlist admits any valid SVID the CA signs");
+        }
+
+        #[test]
+        fn an_unlisted_svid_fails_the_handshake() {
+            let pki = TestPki::new();
+            let server = server_config(&pki, &[ALLOWED_ID]);
+            let client = client_config(&pki, Some(pki.mint_client(OTHER_ID, true)));
+            let err = handshake(server, client).expect_err("an unlisted SVID must be rejected");
+            assert!(matches!(err, rustls::Error::InvalidCertificate(_)), "got {err:?}");
+        }
+
+        #[test]
+        fn a_non_conforming_leaf_fails_the_handshake() {
+            let pki = TestPki::new();
+            let server = server_config(&pki, &[ALLOWED_ID]);
+            let client = client_config(&pki, Some(pki.mint_client(ALLOWED_ID, false)));
+            let err = handshake(server, client).expect_err("a non-conforming leaf (no keyUsage/EKU) must be rejected");
+            assert!(matches!(err, rustls::Error::InvalidCertificate(_)), "got {err:?}");
+        }
+
+        #[test]
+        fn a_missing_client_certificate_fails_the_handshake() {
+            let pki = TestPki::new();
+            let server = server_config(&pki, &[ALLOWED_ID]);
+            let client = client_config(&pki, None);
+            handshake(server, client).expect_err("require_named must reject a peer with no certificate");
+        }
+
+        /// Install the process-default provider. Idempotent.
+        fn install_provider() {
+            crate::provider::install();
+        }
+
+        /// A test CA that signs the server certificate and mints client SVID leaves.
+        struct TestPki {
+            ca_pem: String,
+            issuer: Issuer<'static, KeyPair>,
+            server_key_pem: String,
+            server_pem: String,
+        }
+
+        impl TestPki {
+            fn new() -> Self {
+                let ca_key = KeyPair::generate().expect("test CA key generation must succeed");
+                let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("test CA params must be valid");
+                ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+                ca_params.distinguished_name.push(DnType::CommonName, "grid test CA");
+                let ca_cert = ca_params
+                    .self_signed(&ca_key)
+                    .expect("test CA self-signing must succeed");
+                let ca_pem = ca_cert.pem();
+                let issuer = Issuer::new(ca_params, ca_key);
+
+                let server_key = KeyPair::generate().expect("test server key generation must succeed");
+                let mut server_params =
+                    CertificateParams::new(vec!["localhost".to_owned()]).expect("test server params must be valid");
+                server_params.distinguished_name.push(DnType::CommonName, "localhost");
+                let server_cert = server_params
+                    .signed_by(&server_key, &issuer)
+                    .expect("test server cert signing must succeed");
+
+                Self {
+                    ca_pem,
+                    issuer,
+                    server_key_pem: server_key.serialize_pem(),
+                    server_pem: server_cert.pem(),
+                }
+            }
+
+            /// Mint a client leaf signed by the CA with the given URI SAN. A conforming
+            /// SVID carries a critical keyUsage with digitalSignature and an EKU with both
+            /// serverAuth and clientAuth.
+            fn mint_client(
+                &self,
+                uri: &str,
+                conforming: bool,
+            ) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
+                let key = KeyPair::generate().expect("test client key generation must succeed");
+                let mut params =
+                    CertificateParams::new(Vec::<String>::new()).expect("test client params must be valid");
+                params.distinguished_name.push(DnType::CommonName, "peer");
+                params
+                    .subject_alt_names
+                    .push(SanType::URI(uri.try_into().expect("test URI must be valid")));
+                if conforming {
+                    params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+                    params.extended_key_usages =
+                        vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
+                }
+                let cert = params
+                    .signed_by(&key, &self.issuer)
+                    .expect("test client cert signing must succeed");
+                let chain = vec![cert.der().clone()];
+                let key_der = PrivateKeyDer::Pkcs8(key.serialize_der().into());
+                (chain, key_der)
+            }
+        }
+
+        /// Write the PKI to disk and build a production `ServerConfig` from YAML with
+        /// `require_named` and the given allowlist.
+        fn server_config(pki: &TestPki, allowlist: &[&str]) -> Arc<rustls::ServerConfig> {
+            install_provider();
+            let dir = tempfile::TempDir::new().expect("test temp dir must be created");
+            let ca = dir.path().join("ca.pem");
+            let cert = dir.path().join("server.pem");
+            let key = dir.path().join("server-key.pem");
+            std::fs::write(&ca, &pki.ca_pem).expect("test CA write must succeed");
+            std::fs::write(&cert, &pki.server_pem).expect("test cert write must succeed");
+            std::fs::write(&key, &pki.server_key_pem).expect("test key write must succeed");
+
+            let ids = allowlist
+                .iter()
+                .map(|id| format!("      - {id}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let yaml = format!(
+                "certificates:\n  - cert_path: {cert}\n    key_path: {key}\nclient_ca:\n  ca_path: {ca}\n\
+                 client_cert_mode: require_named\ntrusted_spiffe_ids:\n{ids}\nhot_reload: false\n",
+                cert = cert.display(),
+                key = key.display(),
+                ca = ca.display(),
+            );
+            let tls: ListenerTls = serde_yaml::from_str(&yaml).expect("valid require_named listener config");
+            // build_server_config reads the cert, key, and CA eagerly, so the temp dir may drop.
+            build_server_config(&tls, false).expect("build server config")
+        }
+
+        /// A client config trusting the test CA, optionally presenting a client leaf.
+        fn client_config(
+            pki: &TestPki,
+            identity: Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>,
+        ) -> Arc<ClientConfig> {
+            install_provider();
+            let mut roots = RootCertStore::empty();
+            roots
+                .add(CertificateDer::from_pem_slice(pki.ca_pem.as_bytes()).expect("test CA PEM must parse"))
+                .expect("test CA must be added to root store");
+            let provider = Arc::new(rustls_openssl::default_provider());
+            let builder = ClientConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .expect("test protocol versions must be valid")
+                .with_root_certificates(roots);
+            let config = match identity {
+                Some((chain, key)) => builder
+                    .with_client_auth_cert(chain, key)
+                    .expect("test client auth cert must be valid"),
+                None => builder.with_no_client_auth(),
+            };
+            Arc::new(config)
+        }
+
+        /// Drive an in-memory handshake to completion or error. `Ok` means both sides
+        /// finished; `Err` is the rustls error that ended it (an mTLS rejection).
+        #[allow(
+            clippy::panic,
+            reason = "panic signals test infrastructure failure, not handshake failure"
+        )]
+        fn handshake(
+            server_cfg: Arc<rustls::ServerConfig>,
+            client_cfg: Arc<ClientConfig>,
+        ) -> Result<(), rustls::Error> {
+            let mut server = ServerConnection::new(server_cfg).expect("test server connection must be created");
+            let mut client = ClientConnection::new(
+                client_cfg,
+                ServerName::try_from("localhost").expect("test server name must be valid"),
+            )
+            .expect("test client connection must be created");
+
+            for _ in 0..32 {
+                let mut c2s = Vec::new();
+                while client.wants_write() {
+                    client.write_tls(&mut c2s).expect("test TLS write must succeed");
+                }
+                let mut c2s_rd: &[u8] = &c2s;
+                while !c2s_rd.is_empty() {
+                    server.read_tls(&mut c2s_rd).expect("test TLS read must succeed");
+                }
+                server.process_new_packets()?;
+
+                let mut s2c = Vec::new();
+                while server.wants_write() {
+                    server.write_tls(&mut s2c).expect("test TLS write must succeed");
+                }
+                let mut s2c_rd: &[u8] = &s2c;
+                while !s2c_rd.is_empty() {
+                    client.read_tls(&mut s2c_rd).expect("test TLS read must succeed");
+                }
+                client.process_new_packets()?;
+
+                if !client.is_handshaking() && !server.is_handshaking() {
+                    return Ok(());
+                }
+            }
+            panic!("handshake did not settle within the round budget");
+        }
+    }
 }

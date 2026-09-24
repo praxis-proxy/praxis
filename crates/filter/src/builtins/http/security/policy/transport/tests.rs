@@ -314,7 +314,7 @@ fn a_policy_peer_never_shares_a_pool_entry_with_a_data_plane_peer() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_public_destination_is_refused_before_a_socket_is_opened() {
-    let closed = closed_port();
+    let (_reserved, closed) = crate::test_support::refusing_addr();
     let transport = transport(false);
     for url in [
         format!("http://{closed}/jwks"),
@@ -356,7 +356,7 @@ async fn the_refusal_reason_names_the_rule_that_was_broken() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn allowing_private_destinations_lets_a_loopback_idp_be_dialled() {
-    let closed = closed_port();
+    let (_reserved, closed) = crate::test_support::refusing_addr();
     let err = transport(true)
         .execute(HttpRequest::get(format!("http://{closed}/jwks")).timeout(Duration::from_secs(2)))
         .await
@@ -482,14 +482,10 @@ async fn an_unreachable_address_fails_over_to_a_healthy_one() {
     let backend = Backend::spawn(Reply::Keepalive(OK_RESPONSE));
     let target = Target::parse(&backend.url("/jwks")).unwrap();
     let request = HttpRequest::get(backend.url("/jwks")).timeout(Duration::from_secs(5));
+    let (_reserved, closed) = crate::test_support::refusing_addr();
 
     let response = transport(true)
-        .dispatch(
-            &target,
-            &request,
-            &[closed_port(), backend.address],
-            Duration::from_secs(5),
-        )
+        .dispatch(&target, &request, &[closed, backend.address], Duration::from_secs(5))
         .await
         .unwrap();
 
@@ -529,8 +525,8 @@ async fn a_delivered_request_is_never_retried_on_another_address() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_exhausted_budget_stops_the_walk_as_unsent() {
-    let first = closed_port();
-    let second = closed_port();
+    let (_first_reserved, first) = crate::test_support::refusing_addr();
+    let (_second_reserved, second) = crate::test_support::refusing_addr();
     let target = Target::parse("http://idp.example.com/jwks").unwrap();
     let request = HttpRequest::get("http://idp.example.com/jwks").timeout(Duration::from_millis(50));
 
@@ -787,10 +783,10 @@ fn a_transport_keeps_the_connector_it_was_built_with() {
     let _guard = crate::policy_connector::REGISTRATION_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let own = SubRequestConnector::new(8, None);
+    let own = crate::test_support::connector(8, None);
     let transport = PolicyHttpTransport::with_connector(Some(own.clone()), true);
 
-    crate::set_policy_subrequest_connector(&SubRequestConnector::new(1, None));
+    crate::set_policy_subrequest_connector(&crate::test_support::connector(1, None));
 
     assert!(
         std::ptr::eq(transport.client().connector().connector(), own.connector()),
@@ -803,7 +799,7 @@ fn a_transport_built_after_registration_uses_the_registered_pool() {
     let _guard = crate::policy_connector::REGISTRATION_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let shared = SubRequestConnector::new(16, None);
+    let shared = crate::test_support::connector(16, None);
     crate::set_policy_subrequest_connector(&shared);
 
     let transport = PolicyHttpTransport::new(true);
@@ -825,7 +821,7 @@ fn a_transport_built_without_a_registration_falls_back() {
 
 #[test]
 fn the_registered_connector_is_the_one_policy_calls_use() {
-    let shared = SubRequestConnector::new(16, None);
+    let shared = crate::test_support::connector(16, None);
     let client = build_client(Some(shared.clone()));
     assert!(
         std::ptr::eq(client.connector().connector(), shared.connector()),
@@ -835,7 +831,7 @@ fn the_registered_connector_is_the_one_policy_calls_use() {
 
 #[test]
 fn two_transports_from_one_registration_share_a_pool() {
-    let shared = SubRequestConnector::new(16, None);
+    let shared = crate::test_support::connector(16, None);
     let first = build_client(Some(shared.clone()));
     let second = build_client(Some(shared.clone()));
     assert!(std::ptr::eq(
@@ -1008,6 +1004,7 @@ fn drain_body(stream: &mut TcpStream, head: &str) {
 
 /// Build a transport with a private test pool.
 fn transport(allow_private: bool) -> PolicyHttpTransport {
+    praxis_tls::provider::install();
     let transport = PolicyHttpTransport::new(allow_private);
     transport
         .client
@@ -1015,14 +1012,6 @@ fn transport(allow_private: bool) -> PolicyHttpTransport {
         .map_err(|_ignored| "client already set")
         .unwrap();
     transport
-}
-
-/// Reserve and release a port.
-fn closed_port() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
-    address
 }
 
 // -----------------------------------------------------------------------------

@@ -24,6 +24,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "bound-upstream-request-body")]
+use bytes::Bytes;
+
 // -----------------------------------------------------------------------------
 // AuthenticatedIdentity
 // -----------------------------------------------------------------------------
@@ -113,7 +116,7 @@ impl AuthenticatedIdentity {
 /// life of the exchange. Absent when no cluster was selected or the
 /// selected cluster tagged neither field.
 ///
-/// The identifiers are opaque to Praxis core — consuming filters interpret
+/// The identifiers are opaque to Praxis core: consuming filters interpret
 /// them; Praxis defines no enum of known protocols or providers. The type
 /// is deliberately crate-private with read-only getters: only the load
 /// balancer constructs it (via
@@ -150,6 +153,104 @@ impl SelectedClusterApplication {
     /// Opaque application provider of the selected cluster, if tagged.
     pub(crate) fn provider(&self) -> Option<&str> {
         self.provider.as_deref()
+    }
+}
+
+// -----------------------------------------------------------------------------
+// BoundUpstream
+// -----------------------------------------------------------------------------
+
+/// Logical upstream cluster bound once for the whole downstream request.
+///
+/// Published by the trusted built-in `router` after it matches a route in a
+/// pipeline that reads the binding somewhere. Ordinary router pipelines never
+/// create this extension. Unlike [`SelectedClusterApplication`], which is
+/// exchange-local and cleared between IRR rounds, `BoundUpstream` stays put
+/// for the entire downstream request and survives every IRR iteration, so
+/// request, bound-body, response, and logging filters all see the same
+/// binding.
+///
+/// The identifiers are opaque to Praxis core: consuming filters interpret
+/// them, and Praxis defines no list of known protocols or providers. The type
+/// is crate-private with read-only getters. Only the router constructs it
+/// (through [`HttpFilterContext::publish_bound_upstream`]); filters read it
+/// through [`HttpFilterContext::bound_cluster`],
+/// [`HttpFilterContext::bound_application_protocol`], and
+/// [`HttpFilterContext::bound_application_provider`]. The metadata comes from
+/// the pipeline's cluster catalog, keyed by the cluster name.
+///
+/// The executor freezes the binding right after the first router publishes
+/// it, before that router's branches run. Until then a later binding router
+/// would replace it; after it, republishing the same cluster is a no-op and a
+/// different cluster fails closed. Validation rejects branch publishers,
+/// IRR-step publishers, and `ReEnter` paths that could run a binding router
+/// again, so only the no-op case happens in a valid config.
+///
+/// [`HttpFilterContext::publish_bound_upstream`]: crate::HttpFilterContext::publish_bound_upstream
+/// [`HttpFilterContext::bound_cluster`]: crate::HttpFilterContext::bound_cluster
+/// [`HttpFilterContext::bound_application_protocol`]: crate::HttpFilterContext::bound_application_protocol
+/// [`HttpFilterContext::bound_application_provider`]: crate::HttpFilterContext::bound_application_provider
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BoundUpstream {
+    /// Logical cluster name selected by the router.
+    cluster: Arc<str>,
+    /// Opaque application protocol of the bound cluster, if tagged.
+    application_protocol: Option<Arc<str>>,
+    /// Opaque application provider of the bound cluster, if tagged.
+    application_provider: Option<Arc<str>>,
+}
+
+/// The request body a bound-upstream read-write participant produced at the
+/// binding barrier.
+///
+/// Recorded only when a writer actually ran, so the transport forwards and
+/// replays the barrier's output even if a later request filter takes or
+/// replaces the buffered body. Crate-private so no filter can forge it; the
+/// transport reads it through
+/// [`HttpFilterContext::take_bound_request_body_rewrite`].
+///
+/// [`HttpFilterContext::take_bound_request_body_rewrite`]: crate::HttpFilterContext::take_bound_request_body_rewrite
+#[cfg(feature = "bound-upstream-request-body")]
+#[derive(Clone, Debug)]
+pub(crate) struct BoundRequestBodyRewrite(pub(crate) Bytes);
+
+/// Request-scoped marker that freezes [`BoundUpstream`] and records that the
+/// once-per-request bound-body barrier has run.
+#[cfg(feature = "upstream-binding")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BoundUpstreamFrozen;
+
+impl BoundUpstream {
+    /// Build a binding for `cluster` with its catalog-resolved application
+    /// metadata. The cluster name is mandatory (a route always names a
+    /// cluster); protocol and provider are present only when the cluster
+    /// declaration tagged them.
+    #[cfg(feature = "upstream-binding")]
+    pub(crate) fn new(
+        cluster: Arc<str>,
+        application_protocol: Option<Arc<str>>,
+        application_provider: Option<Arc<str>>,
+    ) -> Self {
+        Self {
+            cluster,
+            application_protocol,
+            application_provider,
+        }
+    }
+
+    /// Logical cluster name selected by the router.
+    pub(crate) fn cluster(&self) -> &str {
+        &self.cluster
+    }
+
+    /// Opaque application protocol of the bound cluster, if tagged.
+    pub(crate) fn application_protocol(&self) -> Option<&str> {
+        self.application_protocol.as_deref()
+    }
+
+    /// Opaque application provider of the bound cluster, if tagged.
+    pub(crate) fn application_provider(&self) -> Option<&str> {
+        self.application_provider.as_deref()
     }
 }
 
@@ -306,6 +407,50 @@ mod tests {
             .expect("a fully tagged cluster should produce a value");
         assert_eq!(app.protocol(), Some("openai_responses"), "protocol should read back");
         assert_eq!(app.provider(), Some("openai"), "provider should read back");
+    }
+
+    // -------------------------------------------------------------------------
+    // BoundUpstream Tests
+    // -------------------------------------------------------------------------
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn bound_upstream_exposes_cluster_and_metadata() {
+        let bound = BoundUpstream::new(
+            Arc::from("inference-backend"),
+            Some(Arc::from("openai_responses")),
+            Some(Arc::from("openai")),
+        );
+        assert_eq!(bound.cluster(), "inference-backend", "cluster name should read back");
+        assert_eq!(
+            bound.application_protocol(),
+            Some("openai_responses"),
+            "protocol should read back"
+        );
+        assert_eq!(
+            bound.application_provider(),
+            Some("openai"),
+            "provider should read back"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn bound_upstream_allows_untagged_cluster() {
+        let bound = BoundUpstream::new(Arc::from("backend"), None, None);
+        assert_eq!(
+            bound.cluster(),
+            "backend",
+            "an untagged cluster still produces a binding (the cluster name is mandatory)"
+        );
+        assert!(
+            bound.application_protocol().is_none(),
+            "absent protocol reads back as None"
+        );
+        assert!(
+            bound.application_provider().is_none(),
+            "absent provider reads back as None"
+        );
     }
 
     #[test]

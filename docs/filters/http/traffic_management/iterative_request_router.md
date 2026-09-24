@@ -15,6 +15,8 @@ Holds named steps, each backed by a pre-built sub-pipeline. During request proce
 
 Streaming steps remain pull-based. Header-safe failover rules run before any bytes are exposed; all other `on_result` rules run after clean EOF and may resume another step inside the same committed downstream response.
 
+Steps inherit the request's logical upstream binding, so a step's `load_balancer` with `cluster_source: bound_upstream` dispatches to the cluster the parent's router bound, with no router of its own. See `docs/architecture/upstream-binding.md`.
+
 ## Configuration
 
 | Field | Type | Required | Description |

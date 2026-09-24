@@ -28,7 +28,7 @@ members = [
 [workspace.package]
 version = "0.6.0"
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.92"
 authors = ["Shane Utt <shaneutt@linux.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/praxis-proxy/praxis"
@@ -46,6 +46,8 @@ dhat = "0.3.3"
 governor = "0.10.4"
 dashmap = "6.2.1"
 futures = "0.3.34"
+# Same backend pingora already builds (zlib-ng), so xtask adds no crate to the lockfile.
+flate2 = { version = "1.1.10", default-features = false, features = ["zlib-ng"] }
 h2 = "0.4.19"
 http = "1.5.0"
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
@@ -53,38 +55,54 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
 notify = "8.2.0"
+object = { version = "0.37.3", default-features = false, features = ["read_core", "elf", "std"] }
 opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
 opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["gen-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
-pingora-core = { version = "0.9.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
-pingora-http = { version = "0.9.0", package = "quixotic-plecostomus-http" }
-pingora-proxy = { version = "0.9.0", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
+pingora-core = { version = "0.10.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
+pingora-http = { version = "0.10.0", package = "quixotic-plecostomus-http" }
+pingora-proxy = { version = "0.10.0", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
 percent-encoding = "2.3.2"
 rand = "0.10.3"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
-ppe = { version = "0.3.0", package = "praxis-policy", features = ["builtins"] }
+ppe = { version = "0.3.1", package = "praxis-policy", features = ["builtins"] }
 parking_lot = "0.12.5"
 portable-atomic = "1.15.0"
 proptest = "1.11.0"
 quote = "1.0.47"
 praxis = { path = "crates/server", package = "praxis-proxy" }
 praxis-core = { version = "0.6.0", path = "crates/core", package = "praxis-proxy-core" }
-praxis-filter = { version = "0.6.0", path = "crates/filter", package = "praxis-proxy-filter" }
+# default-features = false: the filter crate's own default (`policy-engine`)
+# must not leak in through this dependency edge, or a build that turns the
+# policy engine off at the binary (`--no-default-features`, the FIPS build)
+# would still link it. The `praxis-proxy` binary's default feature set forwards
+# `policy-engine` explicitly, so the standard build is unchanged.
+praxis-filter = { version = "0.6.0", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
 praxis-protocol = { version = "0.6.0", path = "crates/protocol", package = "praxis-proxy-protocol" }
 praxis-tls = { version = "0.6.0", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
-praxis-proxy-benchmarks = "0.2.1"
+praxis-proxy-benchmarks = "0.2.2"
+# System OpenSSL bindings, the same crate the rustls provider below uses; never
+# with the `vendored` feature, the platform library is the validated module.
+openssl = "0.10.81"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 smallvec = "1.16.1"
 serde_json = "1.0.151"
-sha2 = "0.11.0"
 subtle = "2.6.1"
 rcgen = "0.14.10"
 regex = "1.13.1"
-rustls = "0.23.45"
+# No built-in provider: praxis-proxy-tls installs the OpenSSL-backed one
+# below at startup (see crates/tls/src/provider.rs). Leaving rustls' defaults
+# on would silently link aws-lc-rs into every build, and
+# `prefer-post-quantum` is omitted because it implies `aws_lc_rs`.
+rustls = { version = "0.23.45", default-features = false, features = ["logging", "std", "tls12"] }
+# The OpenSSL-backed rustls provider, vendored and published from the Pingora
+# fork (tofay/rustls-openssl 0.4.1 plus its FIPS provider-routing fixes); the
+# library name is still `rustls_openssl`.
+rustls-openssl = { version = "0.4.1", package = "quixotic-plecostomus-rustls-openssl", default-features = false, features = ["tls12"] }
 # parse-only: default-features off keeps the verify/ring crypto out of the graph.
 x509-parser = { version = "0.18.1", default-features = false }
 # SPIFFE-ID parsing only; default-features off keeps the workload-API client (tonic/grpc) and JWT support out of the graph.
@@ -95,7 +113,7 @@ syn = { version = "3.0.6", features = ["full", "extra-traits", "visit"] }
 tempfile = "3.27.0"
 tokio-rustls = "0.26.5"
 tokio-tungstenite = "0.30.0"
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 tikv-jemallocator = "0.7.0"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
@@ -130,7 +148,11 @@ opt-level = 2
 # don't trip the unexpected_cfgs lint under `-D warnings`.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
 dead_code = "deny"
-unsafe_code = "forbid"
+# Default is "deny" rather than "forbid" so `praxis-proxy-filter` can inherit
+# this whole lint set while letting its `json_ops::simd_scan` SIMD intrinsics
+# opt into unsafe with `#[expect(unsafe_code)]`. Crates that never need unsafe
+# raise it back with a crate-root `#![forbid(unsafe_code)]`.
+unsafe_code = "deny"
 missing_docs = "deny"
 unreachable_pub = "deny"
 unused_imports = "deny"
@@ -410,3 +432,5 @@ bare_urls = "deny"
 invalid_html_tags = "deny"
 missing_crate_level_docs = "deny"
 private_doc_tests = "allow"
+
+

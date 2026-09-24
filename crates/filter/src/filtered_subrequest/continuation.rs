@@ -17,10 +17,11 @@ use std::{
 
 use bytes::Bytes;
 
+use super::restore_parent_upstream_scope;
 use crate::{
     FilterPipeline, StreamTermination,
     context::PendingStreamChunks,
-    extensions::{RequestExtensions, SelectedClusterApplication},
+    extensions::RequestExtensions,
     results::{FilterResultSet, RetainedFilterResults},
 };
 
@@ -128,12 +129,13 @@ impl FilteredSubrequestContinuation {
 
     /// Recover caller-owned extensions, dropping executor-owned mechanisms.
     ///
-    /// Removes the executor's own transient extension types
-    /// (`RetainedFilterResults`, `PendingStreamChunks`, `StreamTermination`).
-    /// Caller-injected extension types remain for the caller to strip before
-    /// returning them to the parent request context.
+    /// Restores the parent's upstream scope, then removes the executor's own
+    /// transient extension types (`RetainedFilterResults`,
+    /// `PendingStreamChunks`, `StreamTermination`). Caller-injected extension
+    /// types remain for the caller to strip before returning them to the
+    /// parent request context.
     pub(crate) fn into_parent_extensions(mut self) -> RequestExtensions {
-        self.extensions.remove::<SelectedClusterApplication>();
+        restore_parent_upstream_scope(&mut self.extensions);
         self.extensions.remove::<PendingStreamChunks>();
         self.extensions.remove::<RetainedFilterResults>();
         self.extensions.remove::<StreamTermination>();
@@ -142,10 +144,11 @@ impl FilteredSubrequestContinuation {
 
     /// Consume the completed continuation into generic completion state.
     ///
-    /// Executor-owned mechanisms are lifted into typed fields; caller-injected
-    /// extension types remain inside [`SubrequestCompletion::extensions`].
+    /// Restores the parent's upstream scope, then lifts executor-owned
+    /// mechanisms into typed fields; caller-injected extension types remain
+    /// inside [`SubrequestCompletion::extensions`].
     pub(crate) fn into_completion(mut self) -> SubrequestCompletion {
-        self.extensions.remove::<SelectedClusterApplication>();
+        restore_parent_upstream_scope(&mut self.extensions);
         let pending_chunks = self
             .extensions
             .remove::<PendingStreamChunks>()

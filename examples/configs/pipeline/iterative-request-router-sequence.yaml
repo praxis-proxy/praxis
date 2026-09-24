@@ -5,8 +5,11 @@
 # Step A's response feeds into step B, which
 # produces the final response to the client.
 #
+# ⚠️  EXPERIMENTAL: This example uses the `iterative-request-router` experimental feature.
+# Not recommended for production use. Build with --features iterative-request-router.
+#
 # Usage:
-#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/iterative-request-router-sequence.yaml
+#   cargo run -p praxis-proxy --features iterative-request-router -- -c examples/configs/pipeline/iterative-request-router-sequence.yaml
 #   curl http://localhost:8080/
 
 listeners:

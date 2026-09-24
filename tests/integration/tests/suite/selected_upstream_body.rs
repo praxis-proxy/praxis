@@ -135,6 +135,39 @@ impl HttpFilter for ExpandSelectedUpstreamFilter {
     }
 }
 
+/// Replaces the request body with `none` when the phase handed it no body, or
+/// `some` when it handed it a buffer, so the backend reports what it observed.
+struct ReportBodyPresenceSelectedUpstreamFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for ReportBodyPresenceSelectedUpstreamFilter {
+    fn name(&self) -> &'static str {
+        "selected_upstream_report_presence"
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn selected_upstream_request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadWrite
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer { max_bytes: Some(64) }
+    }
+
+    async fn on_selected_upstream_request_body(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<SelectedUpstreamBodyOutcome, FilterError> {
+        let observed: &'static [u8] = if body.is_none() { b"none" } else { b"some" };
+        *body = Some(Bytes::from_static(observed));
+        Ok(SelectedUpstreamBodyOutcome::Continue)
+    }
+}
+
 /// Empties the request body during the selected-upstream phase.
 struct EmptySelectedUpstreamFilter;
 
@@ -482,6 +515,36 @@ fn oversized_adapted_output_is_rejected_with_413() {
     assert_eq!(
         status, 413,
         "adapted output over the effective limit is rejected with 413"
+    );
+}
+
+#[test]
+fn bodiless_request_reaches_participant_without_a_body() {
+    let backend = start_echo_backend();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&single_backend_yaml(
+        proxy_port,
+        backend.port(),
+        "selected_upstream_report_presence",
+    ))
+    .unwrap();
+    let registry = registry_with("selected_upstream_report_presence", || {
+        Box::new(ReportBodyPresenceSelectedUpstreamFilter)
+    });
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let (empty_status, empty_body) = http_post(proxy.addr(), "/echo", "");
+    let (full_status, full_body) = http_post(proxy.addr(), "/echo", "payload");
+
+    assert_eq!(empty_status, 200, "an empty POST should be forwarded");
+    assert_eq!(
+        empty_body, "none",
+        "a request without a body must reach the participant as None, not an empty buffer"
+    );
+    assert_eq!(full_status, 200, "a POST with a body should be forwarded");
+    assert_eq!(
+        full_body, "some",
+        "a request with a body must reach the participant as Some"
     );
 }
 

@@ -30,6 +30,9 @@ and security. AI Gateway docs live in
   production deployment guidance
 - [Build Features](operating/build-features.md):
   compile-time feature flags and when to toggle them
+- [FIPS 140-3](operating/fips.md):
+  the FIPS build, host prerequisites,
+  `PRAXIS_REQUIRE_FIPS`, verifying a deployment
 
 ## Contributing
 
@@ -44,6 +47,9 @@ and security. AI Gateway docs live in
 - [Dependencies](developing/dependencies.md):
   dependency policy, supply-chain checks, provenance
   review
+- [FIPS Tooling](developing/fips.md):
+  compliance report, Red Hat image verification,
+  cargo-auditable and the SBOM precursor
 - [Adding Filters](developing/adding-filters.md):
   new filter checklist
 - [Adding Protocols](developing/adding-protocols.md)
@@ -55,6 +61,9 @@ and security. AI Gateway docs live in
   design principles, protocol adapters, filter-first design
 - [Pipeline Concepts](architecture/pipeline-concepts.md):
   chains, pipelines, filter results, naming
+- [Upstream Binding](architecture/upstream-binding.md):
+  logical cluster binding, freeze barrier, bound
+  conditions
 - [Life of a Request](architecture/life-of-a-request.md):
   step-by-step request walkthrough
 - [Connection Lifecycle](architecture/connection-lifecycle.md):

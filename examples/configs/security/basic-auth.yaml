@@ -6,8 +6,11 @@
 # WWW-Authenticate challenge header. The Authorization header is
 # stripped before forwarding to prevent credential leakage upstream.
 #
+# ⚠️  EXPERIMENTAL: This example uses the `basic-auth-filter` experimental feature.
+# Not recommended for production use. Build with --features basic-auth-filter.
+#
 # Usage:
-#   cargo run -p praxis-proxy -- -c examples/configs/security/basic-auth.yaml
+#   cargo run -p praxis-proxy --features basic-auth-filter -- -c examples/configs/security/basic-auth.yaml
 #
 # Exercise:
 #   curl http://localhost:8080/                  # 401 Unauthorized

@@ -19,12 +19,23 @@ fn error_count(body: &str, error_type: &str) -> Option<f64> {
         .and_then(|value| value.parse::<f64>().ok())
 }
 
-fn wait_for_error(admin: &str, error_type: &str) -> String {
+/// Poll `/metrics` until the `error_type` counter rises above `baseline`,
+/// returning the scrape that observed the increase (or the last scrape once the
+/// deadline passes).
+///
+/// `praxis_errors_total` carries only a `type` label, so the series is shared
+/// across every test in this binary and is often already present at a nonzero
+/// value before a given request runs. Waiting for the series to merely appear
+/// races the metric recording: the request's response can return before its
+/// increment lands, so an appearance check can read a stale total. Waiting for
+/// a strict increase above the caller's own `before` reading pins the
+/// observation to this request's increment.
+fn wait_for_error(admin: &str, error_type: &str, baseline: f64) -> String {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut last = String::new();
     while std::time::Instant::now() < deadline {
         last = http_get(admin, "/metrics", None).1;
-        if error_count(&last, error_type).is_some() {
+        if error_count(&last, error_type).is_some_and(|count| count > baseline) {
             return last;
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -74,12 +85,14 @@ insecure_options:
     let admin = format!("127.0.0.1:{admin_port}");
     wait_for_tcp(&admin);
 
+    let before = error_count(&http_get(&admin, "/metrics", None).1, "filter_reject").unwrap_or(0.0);
+
     let (status, _) = http_get(proxy.addr(), "/blocked", None);
     assert_ne!(status, 200, "the ACL should reject the request");
 
-    let body = wait_for_error(&admin, "filter_reject");
+    let body = wait_for_error(&admin, "filter_reject", before);
     assert!(
-        error_count(&body, "filter_reject").is_some_and(|count| count >= 1.0),
+        error_count(&body, "filter_reject").is_some_and(|count| count > before),
         "a filter rejection should be counted as type=filter_reject:\n{body}"
     );
 }
@@ -128,7 +141,7 @@ insecure_options:
     // moved it rather than pinning an exact total. The once-per-request
     // guarantee is pinned deterministically by the stamp_error_type unit
     // tests in the protocol crate.
-    let body = wait_for_error(&admin, "upstream_unavailable");
+    let body = wait_for_error(&admin, "upstream_unavailable", before);
     let after = error_count(&body, "upstream_unavailable").unwrap_or(0.0);
     assert!(
         after > before,
@@ -225,6 +238,8 @@ insecure_options:
     let admin = format!("127.0.0.1:{admin_port}");
     wait_for_tcp(&admin);
 
+    let before = error_count(&http_get(&admin, "/metrics", None).1, "filter_reject").unwrap_or(0.0);
+
     let oversized = "x".repeat(4096);
     let (status, _) = http_post(proxy.addr(), "/api", &oversized);
     assert_eq!(
@@ -232,9 +247,9 @@ insecure_options:
         "a body over the configured limit should be rejected with 413"
     );
 
-    let body = wait_for_error(&admin, "filter_reject");
+    let body = wait_for_error(&admin, "filter_reject", before);
     assert!(
-        error_count(&body, "filter_reject").is_some_and(|count| count >= 1.0),
+        error_count(&body, "filter_reject").is_some_and(|count| count > before),
         "a request-body-phase rejection must be counted as type=filter_reject:\n{body}"
     );
 }

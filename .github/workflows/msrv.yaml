@@ -38,6 +38,10 @@ jobs:
       - name: Set up Rust (MSRV)
         uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
         with:
+          # Keep in sync with `rust-version` in Cargo.toml. The action's own
+          # default is the current stable, which would make this job check
+          # the wrong toolchain.
+          rust-version: "1.92.0"
           cache-suffix: msrv
 
       - name: Check workspace compiles on MSRV

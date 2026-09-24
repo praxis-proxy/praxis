@@ -3,9 +3,12 @@
 # The proxy authorizes a client at the TLS handshake by the SPIFFE ID in its
 # X.509-SVID client certificate. The certificate must chain to the trusted CA
 # and its SPIFFE ID must be in trusted_spiffe_ids. An empty allowlist accepts any
-# valid SVID the CA signs. Requires a build with the `spiffe` feature.
+# valid SVID the CA signs.
 #
 #   Client (SVID) -> mTLS + SPIFFE -> Praxis :8443 -> HTTP -> Backend :3000
+#
+# ⚠️  EXPERIMENTAL: This example uses the `spiffe` experimental feature.
+# Not recommended for production use. Build with --features spiffe.
 #
 # Usage:
 #   cargo run -p praxis-proxy --features spiffe -- -c examples/configs/protocols/tls-mtls-spiffe.yaml

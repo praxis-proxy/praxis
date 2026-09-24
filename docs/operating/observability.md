@@ -394,21 +394,22 @@ invocation in seconds.
 | Label | Values |
 | -------- | ------------------------------ |
 | `filter` | Filter name (e.g. `router`, `rate_limiter`, `access_log`) |
-| `phase` | `request`, `selected_upstream`, or `response` |
+| `phase` | `request`, `bound_upstream`, `selected_upstream`, or `response` |
 | `stream` | `headers` or `body` |
 
-The five hook combinations are:
+The six hook combinations are:
 
 | Phase + Stream | Hook |
 | -------------------- | -------------------- |
 | `request` + `headers` | `on_request` |
 | `request` + `body` | `on_request_body` |
+| `bound_upstream` + `body` | `on_bound_upstream_request_body` (experimental `bound-upstream-request-body` builds) |
 | `selected_upstream` + `body` | `on_selected_upstream_request_body` |
 | `response` + `headers` | `on_response` |
 | `response` + `body` | `on_response_body` |
 
-`selected_upstream` pairs only with `body`; the phase
-has no header hook.
+`bound_upstream` and `selected_upstream` pair only with
+`body`; neither phase has a header hook.
 
 Enabling `filter_duration` without `admin.address`
 records metrics internally but does not expose them.
@@ -609,9 +610,10 @@ filter_chains:
 ```
 
 `sample_rate` accepts values in `(0.0, 1.0]`. The
-value `0.1` logs approximately 10% of requests.
-Sampling uses a deterministic counter (every Nth
-request), not random selection.
+value `0.1` logs 10% of requests. Sampling uses a
+deterministic counter (of the first N requests,
+exactly `floor(N × sample_rate)` are logged), not
+random selection.
 
 ### Log Format
 

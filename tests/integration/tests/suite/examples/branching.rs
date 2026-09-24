@@ -109,6 +109,10 @@ fn conditional_skip_to_clean_request_gets_tag() {
         lower.contains("x-clean: true"),
         "clean request should get X-Clean header via skip-to branch, got:\n{body}"
     );
+    assert!(
+        !lower.contains("x-inspected"),
+        "clean request should skip the inspection middleware between the branch host and routing, got:\n{body}"
+    );
 }
 
 #[test]
@@ -135,6 +139,10 @@ fn conditional_skip_to_flagged_request_skips_branch() {
     assert!(
         !lower.contains("x-clean"),
         "flagged request should NOT get X-Clean header, got:\n{body}"
+    );
+    assert!(
+        lower.contains("x-inspected: full"),
+        "flagged request should fall through to the inspection middleware, got:\n{body}"
     );
 }
 

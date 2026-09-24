@@ -13,7 +13,7 @@ use tracing::warn;
 use super::{
     branch_chain::validate_branch_chains,
     cluster::validate_clusters,
-    filter_chain::validate_filter_chains,
+    filter_chain::{validate_filter_chains, validate_selected_upstream_matchers},
     inline_clusters::{validate_inline_clusters, validate_tcp_listener_clusters},
     listener::{validate_listener_names, validate_listeners},
 };
@@ -93,6 +93,7 @@ impl Config {
         validate_clusters(&self.clusters, &self.insecure_options)?;
         validate_inline_clusters(&self.filter_chains, &self.insecure_options)?;
         validate_tcp_listener_clusters(&self.listeners, &self.filter_chains)?;
+        validate_selected_upstream_matchers(&self.filter_chains, &self.clusters)?;
         self.validate_runtime()?;
         validate_shutdown_timeout(self.shutdown_timeout_secs)?;
         validate_telemetry(&self.telemetry)?;

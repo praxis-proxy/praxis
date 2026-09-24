@@ -77,19 +77,35 @@ influence downstream processing:
 | `on_request` | Forward (pipeline order) | Request |
 | `on_response` | Reverse (pipeline order) | Response |
 | `on_request_body` | Forward | Request body chunks |
+| `on_bound_upstream_request_body` | Forward, at most once | Complete body after logical binding, before endpoint selection (experimental `bound-upstream-request-body` builds only) |
+| `on_selected_upstream_request_body` | Forward, per exchange | Complete body after endpoint selection |
 | `on_response_body` | Reverse | Response body chunks |
 
-Request `conditions` gate both the request and body
-hooks. Response `response_conditions` gate only the
-response hooks. A filter skipped on request is also
-skipped on response and on both body hooks. A filter
-that never saw the request headers is never handed the
-body either.
+Request `conditions` gate the request and ordinary body hooks. Response
+`response_conditions` gate only the response hooks. A filter skipped on
+request is also skipped on response and on every body hook, ordinary and
+selected-upstream. The bound-upstream body hook is the deliberate exception:
+its conditions are evaluated at the freeze, right after the binding router, so
+a later top-level participant receives the body before its own `on_request`
+position is reached, and a condition on a header or result that a later filter
+would produce does not match, because that filter has not run yet.
 
 The one exception is a `stream_buffer` pre-read, which
 runs the request-body hooks *before* the request phase.
 Nothing has been skipped at that point, so every filter
 declaring request-body access runs.
+
+Filters that need the logical route must instead declare
+`bound_upstream_request_body_access` and implement
+`on_bound_upstream_request_body`, which requires the experimental
+`bound-upstream-request-body` build feature. That hook runs at most once after
+the binding router freezes `BoundUpstream`; a read-write
+participant replaces the canonical body used by direct
+dispatch, IRR, retries, and selected-upstream adaptation.
+Use `binds_upstream`, `consumes_bound_upstream`,
+`bound_upstream_clusters`, `declared_cluster_metadata`, and
+`nested_bound_upstream_readers` only for routing filters
+whose capabilities must be visible to pipeline validation.
 
 ### Common Patterns
 
@@ -454,13 +470,14 @@ headers in body hooks.
 Add `conditions` to any filter chain entry. Fields within a
 condition are ANDed; all conditions must pass.
 
-| Field         | Matches when                 |
-| ------------- | ---------------------------- |
-| `grpc`        | Request is (`true`) or is not (`false`) gRPC |
-| `path`        | URI exactly equals value     |
-| `path_prefix` | URI starts with value        |
-| `methods`     | Method in list               |
-| `headers`     | All listed headers match     |
+| Field               | Matches when                                    |
+| ------------------- | ----------------------------------------------- |
+| `grpc`              | Request is (`true`) or is not (`false`) gRPC    |
+| `path`              | URI exactly equals value                        |
+| `path_prefix`       | URI starts with value                           |
+| `methods`           | Method in list                                  |
+| `headers`           | All listed headers match                        |
+| `selected_upstream` | Load-balancer-selected upstream metadata match  |
 
 `grpc` classifies the request from its `content-type` header
 (`application/grpc`, `application/grpc+proto`, `application/grpc+json`,
@@ -505,7 +522,50 @@ Use `path` for exact matching (e.g., health checks on `/`):
   body: "ok"
 ```
 
-Skipped on request = skipped on response and on body hooks.
+Skipped on request = skipped on response and on ordinary
+body hooks. The bound-upstream body hook is the exception
+described above: it is gated at the binding barrier.
+
+### Selected-Upstream Conditions
+
+`selected_upstream` matches on the application metadata that
+the load balancer publishes when it selects an upstream. It
+has two optional sub-fields; when both are set they are ANDed:
+
+| Sub-field              | Matches when                              |
+| ---------------------- | ----------------------------------------- |
+| `application_protocol` | Selected upstream's protocol equals value |
+| `application_provider` | Selected upstream's provider equals value |
+
+```yaml
+- filter: path_rewrite
+  conditions:
+    - when:
+        selected_upstream:
+          application_protocol: openai_chat_completions
+          application_provider: vllm
+  # ...path_rewrite config...
+```
+
+This metadata is typed and framework-owned: it is read from
+the selection published by the load balancer, never from a
+request header or writable filter metadata. If no upstream
+has been selected yet, or the requested field is absent, the
+predicate **fails closed** — an unset value never satisfies a
+configured `when`, and never trips an `unless`.
+
+Because the metadata only exists after selection, a
+`selected_upstream` condition requires that an *unconditional*
+`load_balancer` is guaranteed to run earlier on every
+reachable path. Pipeline validation rejects the config
+otherwise (a conditional load balancer may not run, so it does
+not satisfy the guarantee). A load balancer nested in an
+unconditional branch, or one that hosts the branch containing
+the gated filter, does satisfy it.
+
+Selected-upstream predicates are evaluated once, during the
+normal request phase; they are not re-evaluated during body
+transformation.
 
 ### Response Conditions
 

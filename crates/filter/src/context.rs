@@ -18,14 +18,18 @@ use praxis_core::{
 };
 use praxis_tls::TlsPeerIdentity;
 
+#[cfg(feature = "bound-upstream-request-body")]
+use crate::extensions::BoundRequestBodyRewrite;
 use crate::{
     FilterError, IterationState,
     body::BodyMode,
     condition::{ConditionError, HeaderSource},
-    extensions::{RequestExtensions, SelectedClusterApplication},
+    extensions::{BoundUpstream, RequestExtensions, SelectedClusterApplication},
     pipeline::body::merge_body_mode,
     results::FilterResultSet,
 };
+#[cfg(feature = "upstream-binding")]
+use crate::{extensions::BoundUpstreamFrozen, pipeline::catalog::ClusterApplicationCatalog};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -84,6 +88,26 @@ impl PendingStreamChunks {
         self.retained_bytes = 0;
         std::mem::take(&mut self.chunks)
     }
+}
+
+/// A binding-publish attempt rejected because the logical binding is frozen
+/// and the attempted cluster differs from the frozen one.
+///
+/// The executor freezes the binding right after the first binding router
+/// publishes it, whether or not any body participant exists, so a later router
+/// cannot silently retarget a request whose body may already have been
+/// processed against the binding. Valid configurations never reach this at
+/// runtime (pipeline validation rejects any control flow that could publish a
+/// second, different binding), so the router treats it as a fail-closed
+/// backstop and returns a 500.
+#[cfg(feature = "upstream-binding")]
+#[derive(Debug)]
+pub(crate) struct BindingFrozen {
+    /// The frozen logical cluster that remains in effect.
+    pub(crate) frozen: Arc<str>,
+
+    /// The different cluster a later router attempted to bind.
+    pub(crate) attempted: Arc<str>,
 }
 
 /// Trusted header mutation recorded during pre-read body processing.
@@ -593,6 +617,179 @@ impl HttpFilterContext<'_> {
                 self.extensions.remove::<SelectedClusterApplication>();
             },
         }
+    }
+
+    /// Logical cluster bound for the whole downstream request, if any.
+    ///
+    /// Published by the router when it matches a route in a binding-enabled
+    /// pipeline and stable across every IRR iteration (unlike the
+    /// exchange-local selected-upstream metadata). `None` in ordinary router
+    /// pipelines and before a binding router has matched.
+    pub fn bound_cluster(&self) -> Option<&str> {
+        self.extensions.get::<BoundUpstream>().map(BoundUpstream::cluster)
+    }
+
+    /// Opaque application protocol of the bound cluster, if bound and tagged.
+    ///
+    /// Companion to [`bound_cluster`]; reflects the bound cluster's
+    /// `application_protocol` as resolved from the pipeline cluster catalog.
+    /// The value is opaque to Praxis core; consuming filters interpret it.
+    ///
+    /// [`bound_cluster`]: Self::bound_cluster
+    pub fn bound_application_protocol(&self) -> Option<&str> {
+        self.extensions
+            .get::<BoundUpstream>()
+            .and_then(BoundUpstream::application_protocol)
+    }
+
+    /// Opaque application provider of the bound cluster, if bound and tagged.
+    ///
+    /// Companion to [`bound_application_protocol`]; identical lifecycle and
+    /// opacity, reflecting the bound cluster's `application_provider`.
+    ///
+    /// [`bound_application_protocol`]: Self::bound_application_protocol
+    pub fn bound_application_provider(&self) -> Option<&str> {
+        self.extensions
+            .get::<BoundUpstream>()
+            .and_then(BoundUpstream::application_provider)
+    }
+
+    /// Borrow the bound upstream's application metadata as a condition view.
+    ///
+    /// Feeds request-phase condition evaluation so a `bound_upstream` predicate
+    /// can match on the router-published `application_protocol` /
+    /// `application_provider`. Returns an empty view (matching nothing) when no
+    /// upstream has been bound.
+    #[cfg(feature = "upstream-binding")]
+    pub(crate) fn bound_upstream_view(&self) -> crate::condition::BoundUpstreamView<'_> {
+        self.extensions
+            .get::<BoundUpstream>()
+            .map_or_else(crate::condition::BoundUpstreamView::default, |bound| {
+                crate::condition::BoundUpstreamView {
+                    protocol: bound.application_protocol(),
+                    provider: bound.application_provider(),
+                }
+            })
+    }
+
+    /// Without the `upstream-binding` feature nothing publishes a binding, so
+    /// the view is always empty and costs no lookup.
+    #[cfg(not(feature = "upstream-binding"))]
+    #[expect(clippy::unused_self, reason = "keeps the signature of the feature-on version")]
+    pub(crate) fn bound_upstream_view(&self) -> crate::condition::BoundUpstreamView<'_> {
+        crate::condition::BoundUpstreamView::default()
+    }
+
+    /// Publish (or replace) the logical upstream binding for this request.
+    ///
+    /// Called by the trusted built-in router after it selects a route's
+    /// cluster. `protocol`/`provider` come from the pipeline cluster catalog,
+    /// keyed by `cluster`.
+    ///
+    /// Before the executor freezes the binding, a later router replaces the
+    /// previous value. Once frozen (see [`bound_upstream_frozen`]), republishing
+    /// the same cluster is an idempotent no-op, and
+    /// attempting to publish a different cluster fails closed with
+    /// [`BindingFrozen`] so exchange-local routing cannot retarget a request
+    /// whose body was already processed against the frozen binding.
+    ///
+    /// [`bound_upstream_frozen`]: Self::bound_upstream_frozen
+    #[cfg(feature = "upstream-binding")]
+    pub(crate) fn publish_bound_upstream(
+        &mut self,
+        cluster: Arc<str>,
+        protocol: Option<Arc<str>>,
+        provider: Option<Arc<str>>,
+    ) -> Result<(), BindingFrozen> {
+        if self.bound_upstream_frozen() {
+            match self.bound_cluster() {
+                Some(existing) if existing == cluster.as_ref() => return Ok(()),
+                Some(existing) => {
+                    let frozen = Arc::from(existing);
+                    return Err(BindingFrozen {
+                        frozen,
+                        attempted: cluster,
+                    });
+                },
+                // The barrier only marks itself once a cluster is bound, so a
+                // frozen-but-unbound state cannot arise; fall through and
+                // publish defensively rather than panic.
+                None => {},
+            }
+        }
+        self.extensions.insert(BoundUpstream::new(cluster, protocol, provider));
+        Ok(())
+    }
+
+    /// Resolve `cluster` through the pipeline `catalog` and publish the binding.
+    ///
+    /// The trusted built-in router calls this before it commits its
+    /// exchange-local route fields. A cluster absent from the catalog, or one
+    /// declared without tags, binds with no metadata rather than failing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BindingFrozen`] if the binding is frozen and `cluster` differs
+    /// from the frozen one.
+    #[cfg(feature = "upstream-binding")]
+    pub(crate) fn bind_upstream(
+        &mut self,
+        cluster: Arc<str>,
+        catalog: &ClusterApplicationCatalog,
+    ) -> Result<(), BindingFrozen> {
+        let (protocol, provider) = catalog
+            .lookup(&cluster)
+            .map_or((None, None), |meta| (meta.protocol_arc(), meta.provider_arc()));
+        self.publish_bound_upstream(cluster, protocol, provider)
+    }
+
+    /// Whether the request's logical upstream binding is frozen.
+    ///
+    /// Freezing also serves as the once-per-request marker for the bound-body
+    /// phase: a `ReEnter` loop or IRR continuation cannot replay the hooks or
+    /// retarget the request after body processing.
+    #[cfg(feature = "upstream-binding")]
+    pub(crate) fn bound_upstream_frozen(&self) -> bool {
+        self.extensions.get::<BoundUpstreamFrozen>().is_some()
+    }
+
+    /// Take the request body the bound-upstream body phase rewrote, if a
+    /// read-write participant ran for this request.
+    ///
+    /// The transport calls this once after the request phase and forwards the
+    /// returned body, replaying it on retry, in place of the pre-read body.
+    /// `None` means the pre-read body stands.
+    #[doc(hidden)]
+    #[cfg(feature = "bound-upstream-request-body")]
+    pub fn take_bound_request_body_rewrite(&mut self) -> Option<bytes::Bytes> {
+        self.extensions
+            .remove::<BoundRequestBodyRewrite>()
+            .map(|rewrite| rewrite.0)
+    }
+
+    /// Without the `bound-upstream-request-body` feature no participant can
+    /// rewrite the body, so there is never anything to take.
+    #[doc(hidden)]
+    #[cfg(not(feature = "bound-upstream-request-body"))]
+    #[expect(
+        clippy::unused_self,
+        clippy::needless_pass_by_ref_mut,
+        reason = "keeps the signature of the feature-on version"
+    )]
+    pub fn take_bound_request_body_rewrite(&mut self) -> Option<bytes::Bytes> {
+        None
+    }
+
+    /// Freeze the request's logical upstream binding.
+    ///
+    /// Idempotent; called by the executor immediately after the first binding
+    /// router publishes [`BoundUpstream`], before bound-body participants and
+    /// branch chains run. It is set even when there are no body participants,
+    /// keeping the logical binding request-stable for conditions, bound load
+    /// balancers, and IRR continuations.
+    #[cfg(feature = "upstream-binding")]
+    pub(crate) fn freeze_bound_upstream(&mut self) {
+        self.extensions.insert(BoundUpstreamFrozen);
     }
 
     /// Shared sub-request client, if set.
@@ -1493,13 +1690,14 @@ mod tests {
         subrequest: praxis_core::subrequest::SubRequest,
         tc: crate::trace_context::TraceContext,
     ) -> String {
-        use praxis_core::subrequest::{FrameworkHeaders, SubRequestClient, SubRequestConnector};
+        use praxis_core::subrequest::{FrameworkHeaders, SubRequestClient};
 
         let (addr, server) = start_header_capture_server().await;
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.extensions.insert(tc);
-        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        // The helper installs the crypto provider the connector's TLS config needs.
+        let client = SubRequestClient::new(crate::test_support::connector(1, None));
         ctx.subrequest_client = Some(&client);
 
         let peer = pingora_core::upstreams::peer::HttpPeer::new(addr, false, "localhost".into());
@@ -2773,6 +2971,172 @@ content-length: 0
             ctx.selected_application_provider(),
             Some("bedrock"),
             "a later tagged selection must overwrite the prior provider"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Bound Upstream Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn bound_upstream_absent_by_default() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert!(ctx.bound_cluster().is_none(), "no cluster is bound before routing");
+        assert!(
+            ctx.bound_application_protocol().is_none(),
+            "protocol should be absent before binding"
+        );
+        assert!(
+            ctx.bound_application_provider().is_none(),
+            "provider should be absent before binding"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn publish_bound_upstream_exposes_cluster_and_metadata() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_bound_upstream(
+            Arc::from("inference-backend"),
+            Some(Arc::from("openai_responses")),
+            Some(Arc::from("openai")),
+        )
+        .expect("publish before freeze succeeds");
+        assert_eq!(
+            ctx.bound_cluster(),
+            Some("inference-backend"),
+            "bound cluster name should be readable"
+        );
+        assert_eq!(
+            ctx.bound_application_protocol(),
+            Some("openai_responses"),
+            "bound protocol should be readable"
+        );
+        assert_eq!(
+            ctx.bound_application_provider(),
+            Some("openai"),
+            "bound provider should be readable"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn publish_bound_upstream_untagged_cluster_still_binds() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_bound_upstream(Arc::from("backend"), None, None)
+            .expect("publish before freeze succeeds");
+        assert_eq!(
+            ctx.bound_cluster(),
+            Some("backend"),
+            "an untagged cluster still binds (the cluster name is always present)"
+        );
+        assert!(
+            ctx.bound_application_protocol().is_none(),
+            "an untagged binding should carry no application protocol"
+        );
+        assert!(
+            ctx.bound_application_provider().is_none(),
+            "an untagged binding should carry no application provider"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn publish_bound_upstream_replaces_previous_binding() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_bound_upstream(Arc::from("first"), Some(Arc::from("p1")), None)
+            .expect("publish before freeze succeeds");
+        ctx.publish_bound_upstream(Arc::from("second"), Some(Arc::from("p2")), Some(Arc::from("prov")))
+            .expect("replacing before freeze succeeds");
+        assert_eq!(
+            ctx.bound_cluster(),
+            Some("second"),
+            "the later binding replaces the previous one before the barrier freezes it"
+        );
+        assert_eq!(
+            ctx.bound_application_protocol(),
+            Some("p2"),
+            "the later binding's protocol replaces the previous one"
+        );
+        assert_eq!(
+            ctx.bound_application_provider(),
+            Some("prov"),
+            "the later binding's provider replaces the previous (absent) one"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn frozen_binding_rejects_a_different_cluster() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_bound_upstream(Arc::from("inference"), Some(Arc::from("p1")), None)
+            .expect("publish before freeze succeeds");
+        ctx.freeze_bound_upstream();
+
+        let err = ctx
+            .publish_bound_upstream(Arc::from("other"), Some(Arc::from("p2")), None)
+            .expect_err("a different cluster after freeze must fail closed");
+        assert_eq!(&*err.frozen, "inference", "the frozen cluster is reported");
+        assert_eq!(&*err.attempted, "other", "the attempted cluster is reported");
+        assert_eq!(
+            ctx.bound_cluster(),
+            Some("inference"),
+            "the frozen binding survives a rejected retarget"
+        );
+        assert_eq!(
+            ctx.bound_application_protocol(),
+            Some("p1"),
+            "the frozen metadata is not overwritten"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn frozen_binding_allows_idempotent_republish_of_same_cluster() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_bound_upstream(Arc::from("inference"), Some(Arc::from("p1")), Some(Arc::from("vllm")))
+            .expect("publish before freeze succeeds");
+        ctx.freeze_bound_upstream();
+
+        ctx.publish_bound_upstream(Arc::from("inference"), None, None)
+            .expect("republishing the same cluster after freeze is a no-op");
+        assert_eq!(ctx.bound_cluster(), Some("inference"), "the binding is unchanged");
+        assert_eq!(
+            ctx.bound_application_protocol(),
+            Some("p1"),
+            "an idempotent republish must not clear the frozen metadata"
+        );
+        assert_eq!(
+            ctx.bound_application_provider(),
+            Some("vllm"),
+            "an idempotent republish must not clear the frozen provider"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn freeze_before_any_binding_still_lets_the_first_publish_through() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.freeze_bound_upstream();
+
+        ctx.publish_bound_upstream(Arc::from("a"), None, None)
+            .expect("a frozen but unbound context publishes defensively instead of failing");
+
+        assert_eq!(
+            ctx.bound_cluster(),
+            Some("a"),
+            "the first binding lands even after an early freeze"
+        );
+        assert!(
+            ctx.bound_upstream_frozen(),
+            "the freeze marker survives the defensive publish"
         );
     }
 }

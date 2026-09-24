@@ -70,11 +70,13 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 | `clusters[].retry_policy.retry_budget.min_retries_per_second` | integer | no | Floor on tokens per second even at low traffic. |
 | `clusters[].retry_policy.retry_body_limit_bytes` | RetryBodyLimit | no | Max request body size eligible for replay (bytes). Defaults to 64 `KiB`. |
 | `clusters[].retry_policy.allow_non_idempotent` | bool | no | Allow retries for non-idempotent methods (POST/PATCH) when true. |
+| `cluster_source` | `router` \| `bound_upstream` | no | Where the target cluster name comes from. `router` (the default) uses the cluster a preceding `router` selected. `bound_upstream` (needs the `upstream-binding` build feature) uses the request's logical binding, which lets a direct dispatch branch or an `iterative_request_router` step pick an endpoint with no router of its own; the bound cluster must be one of the clusters declared here, which startup validation checks. When an upstream was already selected, the filter does nothing. |
 
 ## Example
 
 ```yaml
 filter: load_balancer
+# cluster_source: router      # the default; or bound_upstream (see below)
 clusters:
   - name: backend
     endpoints: ["10.0.0.1:80"]

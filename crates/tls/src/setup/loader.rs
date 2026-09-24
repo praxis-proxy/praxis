@@ -31,19 +31,22 @@ use crate::{CertKeyPair, TlsError};
 // Crypto Provider
 // -----------------------------------------------------------------------------
 
-/// Return the process-wide default [`CryptoProvider`], or fall back to
-/// `aws_lc_rs` if none has been installed yet.
+/// Return the process-wide [`CryptoProvider`] installed during bootstrap.
+///
+/// Fails with [`TlsError::NoCryptoProvider`] when none is installed. This
+/// used to fall back to `aws_lc_rs`, which meant the provider actually in use
+/// depended on construction order rather than on configuration — see
+/// [`crate::provider`].
 ///
 /// ```ignore
-/// let provider = praxis_tls::setup::default_crypto_provider();
+/// let provider = praxis_tls::setup::default_crypto_provider()?;
 /// assert!(!provider.cipher_suites.is_empty());
 /// ```
 ///
 /// [`CryptoProvider`]: rustls::crypto::CryptoProvider
-pub(crate) fn default_crypto_provider() -> Arc<CryptoProvider> {
-    CryptoProvider::get_default()
-        .cloned()
-        .unwrap_or_else(|| Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+/// [`TlsError::NoCryptoProvider`]: crate::TlsError::NoCryptoProvider
+pub(crate) fn default_crypto_provider() -> Result<Arc<CryptoProvider>, TlsError> {
+    crate::provider::installed_provider()
 }
 
 // -----------------------------------------------------------------------------
@@ -68,7 +71,17 @@ pub(crate) fn default_crypto_provider() -> Arc<CryptoProvider> {
 /// [`TlsError::FileLoadError`]: crate::TlsError::FileLoadError
 pub(crate) fn load_certified_key(pair: &CertKeyPair) -> Result<CertifiedKey, TlsError> {
     let (certs, key) = load_cert_and_key(pair)?;
-    let provider = default_crypto_provider();
+    certify(certs, key, pair)
+}
+
+/// Bind a certificate chain to its private key through the installed crypto
+/// provider, rejecting an unsupported key type or a chain that does not match.
+pub(crate) fn certify(
+    certs: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    pair: &CertKeyPair,
+) -> Result<CertifiedKey, TlsError> {
+    let provider = default_crypto_provider()?;
     let signing_key = provider
         .key_provider
         .load_private_key(key)
@@ -120,7 +133,7 @@ fn keys_match_error_detail(error: &rustls::Error) -> String {
 ///
 /// [`Zeroizing`]: zeroize::Zeroizing
 /// [`TlsError::FileLoadError`]: crate::TlsError::FileLoadError
-pub(super) fn load_cert_and_key(
+pub(crate) fn load_cert_and_key(
     pair: &CertKeyPair,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {
     let cert_pem = Zeroizing::new(std::fs::read(&pair.cert_path).map_err(|err| TlsError::FileLoadError {
@@ -172,7 +185,8 @@ mod tests {
 
     #[test]
     fn default_crypto_provider_returns_provider() {
-        let provider = default_crypto_provider();
+        crate::provider::install();
+        let provider = default_crypto_provider().expect("provider installed above");
         assert!(
             !provider.cipher_suites.is_empty(),
             "crypto provider should have at least one cipher suite"

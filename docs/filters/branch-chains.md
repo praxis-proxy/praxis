@@ -139,7 +139,7 @@ resumes at the rejoin point:
 | Rejoin value | Behavior |
 |-------------|----------|
 | `next` (default) | Continue with the filter after the branch point |
-| `terminal` or `client` | Stop the pipeline. If the branch selected a cluster (via `router` + `load_balancer`), the request is forwarded upstream. Otherwise the branch must produce the response (e.g. a `static_response` filter); a terminal branch that neither selects a cluster nor produces a response fails closed with a 500. |
+| `terminal` or `client` | Stop the pipeline. In an ordinary routing pipeline, a branch can select a cluster via `router` + `load_balancer` and forward upstream. A binding-enabled pipeline must publish its request-scoped binding from a top-level router instead; branch routers are rejected. Otherwise the branch must produce the response (e.g. a `static_response` filter); a terminal branch that neither selects a cluster nor produces a response fails closed with a 500. |
 | `<filter_name>` (forward) | Skip to the named filter (must be after the branch point) |
 | `<filter_name>` (backward) | Re-enter at the named filter; requires `max_iterations` |
 

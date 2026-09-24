@@ -422,6 +422,7 @@ patterns and data modeling examples.
   #[serde(deny_unknown_fields, default)]
   pub struct Foo {
   ```
+- Place a blank line between attribute blocks.
 - Separate distinct logical actions with blank lines.
   Function calls, variable bindings that begin a new
   step, and expression blocks that perform a discrete

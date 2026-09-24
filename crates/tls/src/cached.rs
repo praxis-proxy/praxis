@@ -237,12 +237,24 @@ impl CachedClientCert {
     /// # Errors
     ///
     /// Returns [`TlsError`] if either file cannot be read, contains
-    /// no valid PEM data, or the key file has no private key.
+    /// no valid PEM data, the key file has no private key, the certificate
+    /// is not valid X.509, or the certificate and key do not match.
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn from_pem_files(cert_path: &str, key_path: &str) -> Result<Self, TlsError> {
-        let cert_der = load_and_validate_certs(cert_path, "client cert")?;
-        let key_der = parse_key_pem(key_path)?;
+        // Same parsing and key-match checks the listener path runs, so a
+        // pair that could never complete an upstream handshake fails at
+        // config time rather than on the first connection.
+        let pair = crate::CertKeyPair {
+            cert_path: cert_path.to_owned(),
+            default: false,
+            key_path: key_path.to_owned(),
+            server_names: Vec::new(),
+        };
+        let (certs, key) = crate::setup::loader::load_cert_and_key(&pair)?;
+        let cert_der = certs.iter().map(|cert| cert.to_vec()).collect();
+        let key_der = Zeroizing::new(key.secret_der().to_vec());
+        crate::setup::loader::certify(certs, key, &pair)?;
         tracing::info!(cert_path, "cached client certificate");
         Ok(Self::new(cert_der, key_der))
     }
@@ -374,23 +386,6 @@ fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
         })
 }
 
-/// Read a PEM private key file and return the DER-encoded key bytes.
-fn parse_key_pem(key_path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
-    use rustls::pki_types::{PrivateKeyDer, pem::PemObject as _};
-
-    let pem = read_pem_file(key_path)?;
-    PrivateKeyDer::from_pem_slice(&pem)
-        .map_err(|err| TlsError::FileLoadError {
-            path: key_path.to_owned(),
-            detail: if matches!(err, rustls::pki_types::pem::Error::NoItemsFound) {
-                "no private key found".to_owned()
-            } else {
-                err.to_string()
-            },
-        })
-        .map(|key| Zeroizing::new(key.secret_der().to_vec()))
-}
-
 /// Read a file into a zeroizing byte vector, mapping I/O errors
 /// to [`TlsError`].
 ///
@@ -514,6 +509,19 @@ mod tests {
         assert!(
             msg.contains("no certificates found"),
             "error should mention missing certificates: {msg}"
+        );
+    }
+
+    #[test]
+    fn cached_client_cert_from_pem_mismatched_key_fails() {
+        let pair_a = gen_test_certs();
+        let pair_b = gen_test_certs();
+        let err =
+            CachedClientCert::from_pem_files(pair_a.cert_path.to_str().unwrap(), pair_b.key_path.to_str().unwrap())
+                .expect_err("a cert and a key from different pairs must be rejected at config time");
+        assert!(
+            err.to_string().contains("do not match"),
+            "error should mention the cert/key mismatch: {err}"
         );
     }
 

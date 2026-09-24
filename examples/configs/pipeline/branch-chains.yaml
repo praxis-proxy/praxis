@@ -56,6 +56,14 @@ filter_chains:
   # chains share one name index after concatenation.
   - name: preprocessing
     filters:
+      # Security filters run before any branch host: a skip-to rejoin
+      # may never bypass one.
+      - filter: cors
+        allow_origins:
+          - "*"
+
+      - filter: forwarded_headers
+
       - filter: headers
         request_add:
           - name: X-Preprocess
@@ -112,7 +120,7 @@ filter_chains:
                     status: 200
 
       # Scenario 3: conditional branch, rejoin to named filter.
-      # Skips cors and forwarded_headers, resuming at routing.
+      # Resumes at routing; the security filters already ran.
       - filter: headers
         request_add:
           - name: X-Pre
@@ -131,12 +139,6 @@ filter_chains:
                     request_add:
                       - name: X-Api
                         value: "true"
-
-      - filter: cors
-        allow_origins:
-          - "*"
-
-      - filter: forwarded_headers
 
       # Scenario 4: re-entrance with max_iterations.
       # Loops back to classify up to 2 times.

@@ -31,10 +31,12 @@ use crate::{
     FilterError,
     actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
-    condition::should_execute,
+    condition::should_execute_bound_selected,
     context::{EffectiveHeaders, HttpFilterContext},
     trace_context::{TraceContext, ensure_trace_context},
 };
+#[cfg(feature = "bound-upstream-request-body")]
+use crate::{actions::BoundUpstreamBodyOutcome, condition::SelectedUpstream, extensions::BoundRequestBodyRewrite};
 
 // -----------------------------------------------------------------------------
 // FilterPipeline HTTP
@@ -78,7 +80,16 @@ impl FilterPipeline {
                     continue;
                 },
             };
-            if !should_execute(&pf.conditions, ctx.request) {
+            // Unconditioned filters skip the binding and selection lookups
+            // entirely; this is the common hot path.
+            if !pf.conditions.is_empty()
+                && !should_execute_bound_selected(
+                    &pf.conditions,
+                    ctx.request,
+                    ctx.bound_upstream_view(),
+                    super::http_utils::ctx_selected_upstream(ctx),
+                )
+            {
                 trace!(filter = http_filter.name(), "skipped by conditions");
                 idx += 1;
                 continue;
@@ -103,6 +114,16 @@ impl FilterPipeline {
                 HeaderFilterOutcome::Continue => {},
             }
             ctx.executed_filter_indices[idx] = true;
+            // Freeze before this filter's branches run so they, every later
+            // filter, and any ReEnter pass all see the one binding.
+            #[cfg(feature = "upstream-binding")]
+            if published_first_binding(http_filter, ctx) {
+                ctx.freeze_bound_upstream();
+                #[cfg(feature = "bound-upstream-request-body")]
+                if let FilterAction::Reject(r) = self.run_bound_upstream_request_body(ctx).await? {
+                    return Ok(FilterAction::Reject(r));
+                }
+            }
             match super::evaluate::evaluate_branches(&pf.branches, ctx).await? {
                 BranchOutcome::Continue => idx += 1,
                 BranchOutcome::Terminal => {
@@ -340,6 +361,131 @@ impl FilterPipeline {
         Ok(FilterAction::Continue)
     }
 
+    /// Run the bound-upstream request-body participants once, right after the
+    /// first binding froze.
+    ///
+    /// Called from [`execute_http_request`] after the binding filter's
+    /// `on_request` and before its branch chains evaluate. The freeze doubles
+    /// as the once-per-request marker, so a `ReEnter` pass or IRR continuation
+    /// never reaches here again. A writer's output is size-checked and recorded
+    /// as the body to forward.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if a participant fails with a closed
+    /// `failure_mode`.
+    ///
+    /// [`execute_http_request`]: FilterPipeline::execute_http_request
+    #[cfg(feature = "bound-upstream-request-body")]
+    async fn run_bound_upstream_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<FilterAction, FilterError> {
+        if self.bound_upstream_request_body_filter_indices.is_empty() {
+            return Ok(FilterAction::Continue);
+        }
+        let (action, rewrote) = self.execute_http_bound_upstream_request_body(ctx).await?;
+        if rewrote && matches!(action, FilterAction::Continue) {
+            let rewritten = ctx.buffered_request_body.clone().unwrap_or_default();
+            if rewritten.len() > self.selected_upstream_request_body_limit() {
+                return Ok(FilterAction::Reject(Rejection::status(413)));
+            }
+            ctx.extensions.insert(BoundRequestBodyRewrite(rewritten));
+        }
+        Ok(action)
+    }
+
+    /// Drain the bound-upstream request-body participants over the buffered
+    /// request body.
+    ///
+    /// Unlike [`execute_http_selected_upstream_request_body`], which the
+    /// protocol layer drives over a caller-owned working body after upstream
+    /// selection, this barrier runs inside the request phase and mutates
+    /// [`buffered_request_body`] in place with a take/commit pattern: the body
+    /// is moved out, threaded through each participant as a borrow distinct
+    /// from `&mut ctx`, and committed back even when a participant rejects.
+    /// Participants see `None` for an empty body, as the hook documents.
+    ///
+    /// Each participant is gated by its own request conditions against the
+    /// frozen binding view rather than [`executed_filter_indices`], which is
+    /// not yet set for participants ordered after the binding filter when the
+    /// barrier fires. The returned flag is `true` when a read-write participant
+    /// ran, so the caller records a rewrite only when one can exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if a participant fails with a closed
+    /// `failure_mode`.
+    ///
+    /// [`buffered_request_body`]: HttpFilterContext::buffered_request_body
+    /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
+    /// [`execute_http_selected_upstream_request_body`]: FilterPipeline::execute_http_selected_upstream_request_body
+    #[cfg(feature = "bound-upstream-request-body")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "body hook loop with take/commit and per-filter skip checks"
+    )]
+    async fn execute_http_bound_upstream_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<(FilterAction, bool), FilterError> {
+        let had_buffer = ctx.buffered_request_body.is_some();
+        let mut body = ctx.buffered_request_body.take();
+        let mut result = Ok(FilterAction::Continue);
+        let mut rewrote = false;
+        for &idx in &self.bound_upstream_request_body_filter_indices {
+            let Some(pf) = self.filters.get(idx) else {
+                continue;
+            };
+            // This barrier fires inside the request phase, before the load
+            // balancer publishes an upstream selection, so any `selected_upstream`
+            // predicate on a participant fails closed (`SelectedUpstream::none`).
+            if !pf.conditions.is_empty()
+                && !should_execute_bound_selected(
+                    &pf.conditions,
+                    ctx.request,
+                    ctx.bound_upstream_view(),
+                    SelectedUpstream::none(),
+                )
+            {
+                trace!(
+                    filter = pf.filter.name(),
+                    "skipped bound-upstream request body (conditions)"
+                );
+                continue;
+            }
+            let AnyFilter::Http(http_filter) = &pf.filter else {
+                continue;
+            };
+            ctx.current_filter_id = Some(pf.filter_id);
+            body = body.filter(|bytes| !bytes.is_empty());
+            let outcome = super::http_utils::run_bound_upstream_request_body_filter(
+                http_filter.as_ref(),
+                ctx,
+                &mut body,
+                pf.failure_mode,
+                self.record_filter_duration_metrics,
+            )
+            .await;
+            ctx.current_filter_id = None;
+            match outcome {
+                Ok((BoundUpstreamBodyOutcome::Continue, wrote)) => rewrote |= wrote,
+                Ok((BoundUpstreamBodyOutcome::Reject(rejection), _)) => {
+                    result = Ok(FilterAction::Reject(rejection));
+                    break;
+                },
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                },
+            }
+        }
+        // Later request filters (the IRR) expect a buffer whenever the
+        // pre-read produced one, even if a participant removed the body.
+        ctx.buffered_request_body = body.or_else(|| had_buffer.then(Bytes::new));
+        result.map(|action| (action, rewrote))
+    }
+
     /// Run all HTTP response body filters in reverse order.
     ///
     /// Filters that previously returned [`BodyDone`] are skipped.
@@ -471,6 +617,16 @@ impl FilterPipeline {
         }
         Ok(None)
     }
+}
+
+// -----------------------------------------------------------------------------
+// Binding Utilities
+// -----------------------------------------------------------------------------
+
+/// Whether `filter` just published the request's first logical binding.
+#[cfg(feature = "upstream-binding")]
+fn published_first_binding(filter: &dyn crate::filter::HttpFilter, ctx: &HttpFilterContext<'_>) -> bool {
+    filter.binds_upstream() && !ctx.bound_upstream_frozen() && ctx.bound_cluster().is_some()
 }
 
 // -----------------------------------------------------------------------------

@@ -911,8 +911,7 @@ mod tests {
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
         let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
-        let subrequest_client =
-            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = crate::pipelines::resolve_pipelines(
             &config,
             &registry,
@@ -987,8 +986,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_client =
-            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -1020,9 +1018,7 @@ mod tests {
             ),
             registry,
             shutdown: shutdown.clone(),
-            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
-                praxis_core::subrequest::SubRequestConnector::new(8, None),
-            ),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
             log_level: None,
             pipeline_composition: PipelineComposition::default(),
         });
@@ -1043,8 +1039,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_client =
-            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -1077,9 +1072,7 @@ mod tests {
             ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
-                praxis_core::subrequest::SubRequestConnector::new(8, None),
-            ),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
             log_level: None,
             pipeline_composition: PipelineComposition::default(),
         });
@@ -1108,8 +1101,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_client =
-            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -1142,9 +1134,7 @@ mod tests {
             ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
-                praxis_core::subrequest::SubRequestConnector::new(8, None),
-            ),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
             log_level: None,
             pipeline_composition: PipelineComposition::default(),
         });
@@ -1204,8 +1194,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_client =
-            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -1237,9 +1226,7 @@ mod tests {
             ),
             registry,
             shutdown: shutdown.clone(),
-            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
-                praxis_core::subrequest::SubRequestConnector::new(8, None),
-            ),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
             log_level: None,
             pipeline_composition: PipelineComposition::default(),
         });
@@ -1280,8 +1267,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_client =
-            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -1314,9 +1300,7 @@ mod tests {
             ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
-                praxis_core::subrequest::SubRequestConnector::new(8, None),
-            ),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
             log_level: None,
             pipeline_composition: PipelineComposition::default(),
         });
@@ -1358,8 +1342,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_client =
-            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -1393,9 +1376,7 @@ mod tests {
             ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
-                praxis_core::subrequest::SubRequestConnector::new(8, None),
-            ),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
             log_level: None,
             pipeline_composition: PipelineComposition::default(),
         });
@@ -1437,8 +1418,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_client =
-            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -1471,9 +1451,7 @@ mod tests {
             ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
-                praxis_core::subrequest::SubRequestConnector::new(8, None),
-            ),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
             log_level: None,
             pipeline_composition: PipelineComposition::default(),
         });
@@ -1608,8 +1586,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_client =
-            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
@@ -1642,9 +1619,7 @@ mod tests {
             ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
-                praxis_core::subrequest::SubRequestConnector::new(8, None),
-            ),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
             log_level: None,
             pipeline_composition: PipelineComposition::default(),
         });

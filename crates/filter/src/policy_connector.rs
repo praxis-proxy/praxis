@@ -105,7 +105,7 @@ mod storage {
             let holder = ConnectorHolder::default();
             assert!(holder.get().is_none(), "an empty holder holds nothing");
 
-            let first = SubRequestConnector::new(8, None);
+            let first = crate::test_support::connector(8, None);
             holder.set(&first);
             assert!(
                 std::ptr::eq(holder.get().expect("registered").connector(), first.connector()),
@@ -116,7 +116,7 @@ mod storage {
         #[test]
         fn storing_the_held_connector_again_keeps_the_same_pool() {
             let holder = ConnectorHolder::default();
-            let held = SubRequestConnector::new(8, None);
+            let held = crate::test_support::connector(8, None);
             holder.set(&held);
             holder.set(&held);
             assert!(std::ptr::eq(
@@ -128,8 +128,8 @@ mod storage {
         #[test]
         fn a_second_runtimes_connector_replaces_the_first() {
             let holder = ConnectorHolder::default();
-            let first = SubRequestConnector::new(8, None);
-            let second = SubRequestConnector::new(1, None);
+            let first = crate::test_support::connector(8, None);
+            let second = crate::test_support::connector(1, None);
 
             holder.set(&first);
             holder.set(&second);
@@ -154,9 +154,7 @@ mod tests {
     #[cfg(not(feature = "policy-engine"))]
     #[test]
     fn registering_without_the_policy_engine_is_accepted_and_stores_nothing() {
-        use praxis_core::subrequest::SubRequestConnector;
-
-        super::set_policy_subrequest_connector(&SubRequestConnector::new(8, None));
-        super::set_policy_subrequest_connector(&SubRequestConnector::new(1, None));
+        super::set_policy_subrequest_connector(&crate::test_support::connector(8, None));
+        super::set_policy_subrequest_connector(&crate::test_support::connector(1, None));
     }
 }

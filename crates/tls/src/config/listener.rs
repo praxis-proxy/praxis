@@ -1021,7 +1021,7 @@ certificates:
         for (suite, expected_name) in expected {
             let rustls_suite = suite.to_rustls();
             assert_eq!(
-                format!("{:?}", rustls_suite.suite()),
+                format!("{rustls_suite:?}"),
                 expected_name,
                 "{suite:?} should map to {expected_name}"
             );
