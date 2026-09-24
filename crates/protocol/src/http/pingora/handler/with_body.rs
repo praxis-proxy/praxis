@@ -29,7 +29,7 @@ use tracing::{Instrument as _, debug};
 use super::{
     compression::{adjust_compression, configure_compression},
     connected_to_upstream, fail_to_proxy,
-    health_util::record_passive_health,
+    health_util::{ended_by_client, record_passive_health},
     hop_by_hop::RemoveHeader as _,
     logging_util::{logging_cleanup, maybe_emit_fallback_access_log},
     metrics_util::emit_request_metrics,
@@ -508,6 +508,7 @@ impl ProxyHttp for PingoraHttpHandler {
             emit_request_metrics(session, ctx);
             record_passive_health(&pipeline, e, ctx);
             release_retry_state(ctx);
+            ctx.ended_by_client = ended_by_client(e, ctx.upstream_response_status);
             logging_cleanup(&pipeline, ctx).await;
             maybe_emit_fallback_access_log(&pipeline, written_status, ctx);
         }

@@ -65,12 +65,20 @@ pub(super) fn record_passive_health(
     // is not always tagged Upstream, and missing one is worse here than an
     // occasional false positive).
     let is_downstream_error = error.is_some_and(|e| matches!(e.esource(), pingora_core::ErrorSource::Downstream));
-    if is_downstream_error && ctx.upstream_response_status.is_none() {
+    if ended_by_client(error, ctx.upstream_response_status) {
         return;
     }
     let is_failure =
         ctx.upstream_response_status.is_some_and(|s| s >= 500) || (error.is_some() && !is_downstream_error);
     apply_passive_threshold(health, idx, cluster_name, is_failure);
+}
+
+/// Whether the request ended on the client side before the upstream answered:
+/// a downstream-sourced error with no upstream response status. Such a
+/// request says nothing about the endpoint, so neither passive health nor the
+/// circuit breaker may count it.
+pub(super) fn ended_by_client(error: Option<&pingora_core::Error>, upstream_status: Option<u16>) -> bool {
+    upstream_status.is_none() && error.is_some_and(|e| matches!(e.esource(), pingora_core::ErrorSource::Downstream))
 }
 
 /// Apply passive health threshold for a single endpoint observation.
@@ -124,4 +132,39 @@ fn emit_passive_health_transition(
         healthy,
         total,
     );
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use pingora_core::{Error, ErrorType};
+
+    use super::ended_by_client;
+
+    #[test]
+    fn a_client_abort_before_any_upstream_response_ended_by_client() {
+        let error = Error::new_down(ErrorType::ConnectionClosed);
+        assert!(
+            ended_by_client(Some(&error), None),
+            "a downstream error with no upstream status must not be charged to the endpoint"
+        );
+    }
+
+    #[test]
+    fn upstream_errors_and_answered_requests_are_not_client_endings() {
+        let upstream = Error::new_up(ErrorType::ConnectionClosed);
+        let downstream = Error::new_down(ErrorType::ConnectionClosed);
+        assert!(
+            !ended_by_client(Some(&upstream), None),
+            "an upstream error is the endpoint's"
+        );
+        assert!(
+            !ended_by_client(Some(&downstream), Some(502)),
+            "once the upstream answered, its status is the signal"
+        );
+        assert!(!ended_by_client(None, None), "no error is not a client ending");
+    }
 }

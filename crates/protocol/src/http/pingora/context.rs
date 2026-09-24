@@ -374,6 +374,12 @@ pub struct PingoraRequestCtx {
     /// health, circuit breaker) can tell a genuine connect/read failure from a
     /// request that never reached the cluster. Reset per request.
     pub upstream_contacted: bool,
+
+    /// Set in the logging phase when the client went away before the
+    /// upstream answered, so the cleanup response pass does not report the
+    /// upstream as reached and a circuit breaker releases instead of
+    /// recording a failure.
+    pub ended_by_client: bool,
 }
 
 /// Build an [`HttpFilterContext`] from a `PingoraRequestCtx`.
@@ -428,7 +434,7 @@ macro_rules! filter_context {
             response_body_mode: $ctx.response_body_mode,
             response_header: $response_header,
             response_headers_modified: false,
-            upstream_reached: $ctx.upstream_contacted,
+            upstream_reached: $ctx.upstream_contacted && !$ctx.ended_by_client,
             rewritten_path: $ctx.rewritten_path.take(),
             selected_endpoint_index: $ctx.selected_endpoint_index,
             attempted_endpoints: std::mem::take(&mut $ctx.attempted_endpoints),
@@ -642,6 +648,7 @@ impl Default for PingoraRequestCtx {
             upstream: None,
             upstream_for_retry: None,
             upstream_contacted: false,
+            ended_by_client: false,
         }
     }
 }
