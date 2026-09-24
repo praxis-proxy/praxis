@@ -600,10 +600,14 @@ flooding output from every module.
 ## Key-Value Stores
 
 In-memory key-value stores for runtime-updatable
-mappings. Stores are created dynamically by filters
-at runtime via `KvStoreRegistry::get_or_create` and
-managed through the admin API. No YAML configuration
-is required.
+mappings. A store is created in code through
+`KvStoreRegistry::get_or_create`; the admin API reads
+and updates entries in stores that already exist but
+does not create them. No built-in filter or
+configuration section creates a store yet, so in a
+standard deployment the registry is empty and the
+admin key-value endpoints answer 404 for every store
+name.
 
 Filters access stores by name through
 `HttpFilterContext` and `TcpFilterContext`.
