@@ -14,7 +14,6 @@
     clippy::min_ident_chars,
     clippy::unwrap_used,
     clippy::too_many_lines,
-    clippy::missing_assert_message,
     clippy::panic,
     clippy::unit_arg,
     clippy::map_with_unused_argument_over_ranges,
@@ -33,6 +32,14 @@ use std::{
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use praxis_core::circuit::{CircuitBreaker, CircuitBreakerConfig, CircuitCheck};
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// A recovery window that keeps a tripped breaker open however long criterion
+/// runs.
+const HOLD_OPEN_WINDOW: Duration = Duration::from_secs(86_400); // 24 hours
 
 // -----------------------------------------------------------------------------
 // Benchmarks
@@ -60,21 +67,22 @@ fn bench_acquire_closed(c: &mut Criterion) {
     c.bench_function("circuit_breaker/acquire_closed", |b| {
         b.iter(|| {
             let check = black_box(breaker.try_acquire());
-            assert!(matches!(check, CircuitCheck::Allowed(_)));
+            assert!(
+                matches!(check, CircuitCheck::Allowed(_)),
+                "a closed breaker must allow every request, or this measures the wrong path"
+            );
         });
     });
 }
 
 /// Benchmark token acquisition when the circuit is open (fast reject).
 fn bench_acquire_open(c: &mut Criterion) {
-    // A day-long window keeps the breaker open however long criterion runs.
     let breaker = CircuitBreaker::new(CircuitBreakerConfig {
         threshold: 1,
-        recovery_window: Duration::from_secs(86_400),
+        recovery_window: HOLD_OPEN_WINDOW,
         half_open_timeout: Duration::from_millis(5_000),
     });
 
-    // Trigger circuit open by recording a failure
     if let CircuitCheck::Allowed(token) = breaker.try_acquire() {
         breaker.record_failure(token);
     }
@@ -82,7 +90,10 @@ fn bench_acquire_open(c: &mut Criterion) {
     c.bench_function("circuit_breaker/acquire_open", |b| {
         b.iter(|| {
             let check = black_box(breaker.try_acquire());
-            assert!(matches!(check, CircuitCheck::Rejected));
+            assert!(
+                matches!(check, CircuitCheck::Rejected),
+                "a tripped breaker must stay open for the whole run, or this measures the wrong path"
+            );
         });
     });
 }
@@ -106,7 +117,10 @@ fn bench_acquire_half_open(c: &mut Criterion) {
             },
             |breaker| {
                 let check = black_box(breaker.try_acquire());
-                assert!(matches!(check, CircuitCheck::Allowed(_)));
+                assert!(
+                    matches!(check, CircuitCheck::Allowed(_)),
+                    "a tripped breaker past its recovery window must issue a probe token"
+                );
                 (breaker, check)
             },
             criterion::BatchSize::SmallInput,
@@ -242,11 +256,10 @@ fn bench_concurrent_open(b: &mut criterion::Bencher<'_>, thread_count: usize) {
     b.iter_custom(|iterations| {
         let breaker = Arc::new(CircuitBreaker::new(CircuitBreakerConfig {
             threshold: 1,
-            recovery_window: Duration::from_millis(1_000_000), // Very long window to keep it open
+            recovery_window: HOLD_OPEN_WINDOW,
             half_open_timeout: Duration::from_millis(5_000),
         }));
 
-        // Trigger circuit open
         if let CircuitCheck::Allowed(token) = breaker.try_acquire() {
             breaker.record_failure(token);
         }
