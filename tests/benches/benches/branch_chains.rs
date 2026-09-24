@@ -26,6 +26,17 @@ use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, Insecure
 use praxis_filter::{FilterEntry, FilterPipeline, FilterRegistry, FilterResultSet, Request};
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Static filter names, matching the `&'static str` keys of the real
+/// result-set map so the snapshot bench clones the same shape.
+const FILTER_NAMES: [&str; 10] = [
+    "filter_0", "filter_1", "filter_2", "filter_3", "filter_4", "filter_5", "filter_6", "filter_7", "filter_8",
+    "filter_9",
+];
+
+// -----------------------------------------------------------------------------
 // Benchmarks
 // -----------------------------------------------------------------------------
 
@@ -124,12 +135,12 @@ fn bench_result_set_snapshot(c: &mut Criterion) {
 
     for &(label, result_count) in &[("1", 1), ("5", 5), ("10", 10)] {
         let mut results = HashMap::new();
-        for i in 0..result_count {
+        for (i, name) in FILTER_NAMES.iter().copied().enumerate().take(result_count) {
             let mut result_set = FilterResultSet::new();
             result_set.set("status", "success").unwrap();
             result_set.set("latency", "100ms").unwrap();
             result_set.set("attempts", i.to_string()).unwrap();
-            results.insert(format!("filter_{i}"), result_set);
+            results.insert(name, result_set);
         }
 
         group.bench_with_input(BenchmarkId::from_parameter(label), &results, |b, results| {
