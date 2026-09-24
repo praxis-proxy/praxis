@@ -70,9 +70,9 @@ If all endpoints are unhealthy, the filter enters panic mode and routes to all e
 | `clusters[].retry_policy.backoff.max_interval_ms` | integer | yes | Maximum capped interval in milliseconds. |
 | `clusters[].retry_policy.configured` | bool | no | Whether this policy came from operator configuration rather than the built-in legacy default. Endpoint reselection on retry is enabled only for configured policies; the legacy default preserves the historical retry-same-endpoint semantics. |
 | `clusters[].retry_policy.retry_budget` | RetryBudgetConfig | no | Token-bucket retry budget. |
-| `clusters[].retry_policy.retry_budget.percent` | BudgetPercent | yes | Maximum retries as a percentage of active requests (0.0..=100.0). |
+| `clusters[].retry_policy.retry_budget.percent` | number | yes | Maximum retries as a percentage of active requests (0.0..=100.0). |
 | `clusters[].retry_policy.retry_budget.min_retries_per_second` | integer | no | Floor on tokens per second even at low traffic. |
-| `clusters[].retry_policy.retry_body_limit_bytes` | RetryBodyLimit | no | Max request body size eligible for replay (bytes). Defaults to 64 `KiB`. |
+| `clusters[].retry_policy.retry_body_limit_bytes` | integer | no | Max request body size eligible for replay (bytes). Defaults to 64 `KiB`. |
 | `clusters[].retry_policy.allow_non_idempotent` | bool | no | Allow retries for non-idempotent methods (POST/PATCH) when true. |
 
 ## Example

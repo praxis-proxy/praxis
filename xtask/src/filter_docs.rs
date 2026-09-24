@@ -908,7 +908,8 @@ fn append_rendered_fields(
         if !field.flatten {
             out.push(FieldInfo {
                 name: path.clone(),
-                type_str: render_field_type(field, &items.enums),
+                type_str: scalar_try_from_type(&field.ty, items)
+                    .unwrap_or_else(|| render_field_type(field, &items.enums)),
                 doc: field.doc.clone(),
                 required: required_kind(field),
             });
@@ -1458,6 +1459,24 @@ fn render_type(ty: &syn::Type, enums: &BTreeMap<String, EnumInfo>) -> String {
 /// Render a field type, accounting for custom serde scalar deserializers.
 fn render_field_type(field: &RawField, enums: &BTreeMap<String, EnumInfo>) -> String {
     custom_deserializer_type(field).map_or_else(|| render_type(&field.ty, enums), ToOwned::to_owned)
+}
+
+/// Render a `serde(try_from = "<scalar>")` newtype (e.g. a range-checked
+/// `u8`), optionally wrapped in `Option`, as the scalar's YAML type instead
+/// of its Rust name.
+fn scalar_try_from_type(ty: &syn::Type, items: &ModuleItems) -> Option<String> {
+    let syn::Type::Path(tp) = ty else {
+        return None;
+    };
+    let segment = tp.path.segments.last()?;
+    if segment.ident == "Option" {
+        return extract_angle_bracket_arg(segment).and_then(|inner| scalar_try_from_type(&inner, items));
+    }
+    let raw = items.try_from_aliases.get(&segment.ident.to_string())?;
+    let raw_ty: syn::Type = syn::parse_str(raw).ok()?;
+    nested_type_name(&raw_ty)
+        .is_none()
+        .then(|| render_type(&raw_ty, &items.enums))
 }
 
 /// Return the YAML-facing type for known custom deserializers.

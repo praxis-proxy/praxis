@@ -307,6 +307,42 @@ fn deserialize_with_redirect_status_renders_yaml_values() {
 }
 
 #[test]
+fn scalar_try_from_newtypes_render_scalar_type() {
+    let source = r#"
+            #[derive(Debug, Deserialize)]
+            #[serde(try_from = "u8")]
+            struct PrefixLen(u8);
+
+            #[derive(Debug, Deserialize)]
+            #[serde(try_from = "RouteRaw")]
+            struct Route { path: String }
+
+            #[derive(Debug, Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct MyConfig {
+                /// Constrained scalar.
+                #[serde(default)]
+                prefix_len: PrefixLen,
+                /// Optional constrained scalar.
+                max_len: Option<PrefixLen>,
+                /// Struct-backed newtype.
+                route: Route,
+            }
+        "#;
+    let file: syn::File = syn::parse_str(source).unwrap();
+    let mut items = ModuleItems::new();
+    parse_file_items(&file, &mut items);
+    let filter = build_filter(&items, "test", Some("MyConfig"));
+
+    let types: Vec<&str> = filter.fields.iter().map(|f| f.type_str.as_str()).collect();
+    assert_eq!(
+        types,
+        ["integer", "integer", "Route"],
+        "scalar try_from newtypes (plain or optional) render as the scalar; struct-backed ones keep their name"
+    );
+}
+
+#[test]
 fn option_fields_render_optional() {
     let source = "
             #[derive(Debug, Deserialize)]
