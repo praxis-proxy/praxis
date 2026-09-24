@@ -36,8 +36,8 @@ pub(crate) struct Args {
     /// The praxis binary to assess; omit together with --deps-only.
     binary: Option<PathBuf>,
 
-    /// Report on the dependency graph only (seconds, no build); what
-    /// `make fips-deps` runs.
+    /// Report on the dependency graph and source guards only (seconds, no
+    /// build); what `make fips-deps` runs.
     #[arg(long)]
     deps_only: bool,
 
@@ -220,7 +220,7 @@ impl Report {
     }
 
     /// The whole report as text.
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         let mut text = self.lines.join("\n");
         text.push('\n');
         text
@@ -243,8 +243,8 @@ pub(crate) fn run(args: &Args) {
     graph::section(&mut report, &context);
     if !args.deps_only {
         binary::section(&mut report, args.binary.as_deref());
-        guards::section(&mut report, &context.root);
     }
+    guards::section(&mut report, &context.root);
     report.summary();
     let text = report.text();
     print!("{text}");

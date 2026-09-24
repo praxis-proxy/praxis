@@ -68,8 +68,17 @@ pub(crate) fn section(report: &mut Report, root: &Path) {
     report.section("Source guards");
     for guard in GUARDS {
         let hits = hits(root, guard);
-        if hits.is_empty() {
+        let missing = missing_paths(root, guard);
+        if hits.is_empty() && missing.is_empty() {
             report.ok(&format!("{}: none", guard.label));
+        } else if hits.is_empty() {
+            // The report image copies only the sources, so the build-file
+            // guard cannot see its files there; `make fips-deps` checks them.
+            report.warn(&format!(
+                "{}: not checked, {} not present here (make fips-deps checks them)",
+                guard.label,
+                missing.join(", ")
+            ));
         } else {
             report.fail(Finding {
                 title: guard.label.to_owned(),
@@ -85,6 +94,16 @@ pub(crate) fn section(report: &mut Report, root: &Path) {
              image",
         );
     }
+}
+
+/// The guard's paths that do not exist under `root`.
+fn missing_paths(root: &Path, guard: &Guard) -> Vec<&'static str> {
+    guard
+        .paths
+        .iter()
+        .copied()
+        .filter(|path| !root.join(path).exists())
+        .collect()
 }
 
 /// Up to [`MAX_HITS`] `path:line:text` hits for a guard.
@@ -223,6 +242,20 @@ mod tests {
         for skipped in ["README.md", "praxis", "key.asc", "script.sh"] {
             assert!(!scannable(Path::new(skipped)), "{skipped} is skipped");
         }
+    }
+
+    #[test]
+    fn a_guard_whose_files_are_absent_warns_instead_of_passing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir_all(dir.path().join("crates")).expect("mkdir");
+        let mut report = Report::default();
+        section(&mut report, dir.path());
+        let text = report.text();
+        assert!(
+            text.contains("WARN  static OpenSSL linking in shipped build files: not checked"),
+            "a guard with nothing to scan must not report ok:\n{text}"
+        );
+        assert!(!report.failed(), "a missing path is a warning, not a finding");
     }
 
     #[test]

@@ -285,7 +285,7 @@ container-run: | require-container-engine
 #                          signature-verified base images)
 #   make fips-check        build on UBI 9 and print the compliance report
 #   make fips-report       the same report against the local FIPS build
-#   make fips-deps         dependency graph only (seconds, no build; also
+#   make fips-deps         dependency graph and source guards (seconds, no build; also
 #                          runs under `make lint`, so a PR cannot reintroduce
 #                          a denied crate into the FIPS build)
 #   make fips-smoke        run the FIPS image once (validates its config)
