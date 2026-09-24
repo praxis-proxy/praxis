@@ -467,8 +467,11 @@ headers in body hooks.
 
 ## Conditional Execution
 
-Add `conditions` to any filter chain entry. Fields within a
-condition are ANDed; all conditions must pass.
+Add `conditions` to any HTTP filter chain entry. Fields within
+a condition are ANDed; all conditions must pass. TCP filters
+take no `conditions`, `response_conditions` or
+`branch_chains`; a config that sets them on a TCP filter is
+rejected.
 
 | Field               | Matches when                                    |
 | ------------------- | ----------------------------------------------- |

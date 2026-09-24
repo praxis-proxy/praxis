@@ -21,7 +21,7 @@ use praxis_core::{
     id::IdGenerator,
     time::SystemTimeSource,
 };
-use tracing::{debug, warn};
+use tracing::debug;
 
 #[cfg(feature = "upstream-binding")]
 use super::catalog::ClusterApplicationCatalog;
@@ -49,7 +49,7 @@ impl FilterPipeline {
         let mut filters = Vec::with_capacity(entries.len());
         for (filter_id, entry) in entries.iter_mut().enumerate() {
             let filter = registry.create(&entry.filter_type, &entry.config)?;
-            warn_tcp_unsupported_fields(&filter, entry);
+            reject_tcp_unsupported_fields(&filter, entry)?;
             let has_conditions = !entry.conditions.is_empty() || !entry.response_conditions.is_empty();
             debug!(
                 filter = filter.name(),
@@ -397,29 +397,28 @@ fn enable_upstream_binding(filters: &mut [PipelineFilter], catalog: &Arc<Cluster
 // Utility Functions
 // -----------------------------------------------------------------------------
 
-/// Warn when a TCP filter has conditions or branch chains configured.
-///
-/// TCP filters do not support conditions or branching; these fields
-/// are silently ignored at runtime. Logging at build time helps
-/// operators catch misconfigurations.
-fn warn_tcp_unsupported_fields(filter: &AnyFilter, entry: &FilterEntry) {
+/// Reject request conditions, response conditions or branch chains on a TCP
+/// filter: only HTTP filters evaluate them, so a TCP filter would run
+/// unconditionally and never branch.
+pub(super) fn reject_tcp_unsupported_fields(filter: &AnyFilter, entry: &FilterEntry) -> Result<(), FilterError> {
     if !matches!(filter, AnyFilter::Tcp(_)) {
-        return;
+        return Ok(());
     }
     if !entry.conditions.is_empty() || !entry.response_conditions.is_empty() {
-        warn!(
-            filter = filter.name(),
-            "TCP filter has conditions that will be ignored; \
-             conditions are only evaluated for HTTP filters"
-        );
+        return Err(format!(
+            "filter '{}': conditions are not supported on TCP filters; they apply to HTTP filters only",
+            filter.name()
+        )
+        .into());
     }
     if entry.branch_chains.is_some() {
-        warn!(
-            filter = filter.name(),
-            "TCP filter has branch_chains that will be ignored; \
-             branching is only supported for HTTP filters"
-        );
+        return Err(format!(
+            "filter '{}': branch_chains are not supported on TCP filters; they apply to HTTP filters only",
+            filter.name()
+        )
+        .into());
     }
+    Ok(())
 }
 
 /// Build the metadata-only cluster catalog for a binding-enabled pipeline from

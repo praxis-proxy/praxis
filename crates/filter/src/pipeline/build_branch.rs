@@ -235,6 +235,7 @@ fn build_filters(
         let filter = binding_ctx
             .registry()
             .create_with_binding(&entry.filter_type, &entry.config, binding_ctx)?;
+        super::build::reject_tcp_unsupported_fields(&filter, entry)?;
         let has_conditions = !entry.conditions.is_empty() || !entry.response_conditions.is_empty();
         debug!(
             filter = filter.name(),

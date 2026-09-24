@@ -1945,6 +1945,78 @@ fn allow_open_forwarded_headers_with_insecure_flag() {
 }
 
 #[test]
+fn build_rejects_conditions_on_a_tcp_filter() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![tcp_access_log_entry()];
+    entries[0].conditions = vec![when_path("/never")];
+    let err = FilterPipeline::build(&mut entries, &registry)
+        .err()
+        .expect("a TCP filter ignores conditions, so a config that sets them must not build");
+    assert!(
+        err.to_string().contains("conditions are not supported on TCP filters"),
+        "the error should say why the config is rejected: {err}"
+    );
+}
+
+#[test]
+fn build_with_chains_rejects_conditions_on_a_tcp_filter() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![tcp_access_log_entry()];
+    entries[0].conditions = vec![when_path("/never")];
+    let err = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .err()
+    .expect("the production build path must reject conditions on a TCP filter too");
+    assert!(
+        err.to_string().contains("conditions are not supported on TCP filters"),
+        "the error should say why the config is rejected: {err}"
+    );
+}
+
+#[test]
+fn build_with_chains_rejects_response_conditions_on_a_tcp_filter() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![tcp_access_log_entry()];
+    entries[0].response_conditions = vec![when_status(&[500])];
+    let err = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .err()
+    .expect("a TCP filter has no response phase, so response_conditions alone must not build");
+    assert!(
+        err.to_string().contains("conditions are not supported on TCP filters"),
+        "the error should say why the config is rejected: {err}"
+    );
+}
+
+#[test]
+fn build_with_chains_rejects_branch_chains_on_a_tcp_filter() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![tcp_access_log_entry()];
+    entries[0].branch_chains = Some(Vec::new());
+    let err = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .err()
+    .expect("a TCP filter never branches, so a config that sets branch_chains must not build");
+    assert!(
+        err.to_string()
+            .contains("branch_chains are not supported on TCP filters"),
+        "the error should say why the config is rejected: {err}"
+    );
+}
+
+#[test]
 fn errors_conditional_security_filter_in_branch_chain() {
     let registry = FilterRegistry::with_builtins();
     let mut entries = vec![host_entry_with_branch(
@@ -5315,6 +5387,19 @@ fn when_path(prefix: &str) -> praxis_core::config::Condition {
         bound_upstream: None,
         selected_upstream: None,
     })
+}
+
+/// A `tcp_access_log` filter entry with no conditions or branches.
+fn tcp_access_log_entry() -> FilterEntry {
+    FilterEntry {
+        branch_chains: None,
+        filter_type: "tcp_access_log".into(),
+        config: serde_yaml::Value::Null,
+        conditions: vec![],
+        response_conditions: vec![],
+        name: None,
+        failure_mode: FailureMode::default(),
+    }
 }
 
 /// Register a noop HTTP filter whose type name is `name`.
