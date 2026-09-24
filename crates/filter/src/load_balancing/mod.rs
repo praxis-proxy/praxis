@@ -29,12 +29,26 @@ const LCG_A: u64 = 6_364_136_223_846_793_005;
 /// Increment for the LCG RNG.
 const LCG_C: u64 = 1_442_695_040_888_963_407;
 
-/// Advance an atomic LCG state and return the new value.
+/// First multiplier of the `SplitMix64` output finalizer.
+const MIX_A: u64 = 0xBF58_476D_1CE4_E5B9;
+
+/// Second multiplier of the `SplitMix64` output finalizer.
+const MIX_B: u64 = 0x94D0_49BB_1331_11EB;
+
+/// Advance an atomic LCG state and return a random value.
+///
+/// A power-of-two LCG's low bits have short periods (the lowest bit
+/// alternates), and callers reduce with `%`, so the state is passed
+/// through a finalizer that spreads the high bits into the low ones.
 fn next_random(rng: &AtomicU64) -> u64 {
-    rng.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
-        Some(s.wrapping_mul(LCG_A).wrapping_add(LCG_C))
-    })
-    .unwrap_or(0)
+    let state = rng
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+            Some(s.wrapping_mul(LCG_A).wrapping_add(LCG_C))
+        })
+        .unwrap_or(0);
+    let mixed = (state ^ (state >> 30)).wrapping_mul(MIX_A);
+    let mixed = (mixed ^ (mixed >> 27)).wrapping_mul(MIX_B);
+    mixed ^ (mixed >> 31)
 }
 
 // -----------------------------------------------------------------------------

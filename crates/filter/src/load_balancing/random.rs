@@ -178,6 +178,20 @@ mod tests {
     }
 
     #[test]
+    fn two_equal_endpoints_do_not_strictly_alternate() {
+        let r = Random::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
+
+        let picks: Vec<Arc<str>> = std::iter::repeat_with(|| r.select(None, &[]).unwrap())
+            .take(8)
+            .collect();
+
+        assert!(
+            picks.windows(2).any(|pair| pair[0] == pair[1]),
+            "the raw LCG low bit alternates A,B,A,B; mixed output must repeat an endpoint within 8 draws: {picks:?}"
+        );
+    }
+
+    #[test]
     fn weighted_bias() {
         let r = Random::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 9)]);
 

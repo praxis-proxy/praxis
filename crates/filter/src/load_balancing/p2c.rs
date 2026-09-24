@@ -283,6 +283,25 @@ mod tests {
     }
 
     #[test]
+    fn samples_every_endpoint_pair() {
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1), ep("10.0.0.3:80", 1)]);
+        p2c.counter_for("10.0.0.1:80").store(1_000_000, Ordering::Relaxed);
+
+        let mut picked_2 = 0_u32;
+        for _ in 0..3000 {
+            let addr = p2c.select(None, &[]).unwrap();
+            if &*addr == "10.0.0.2:80" {
+                picked_2 += 1;
+            }
+            p2c.release(&addr);
+        }
+        assert!(
+            (1200..=1800).contains(&picked_2),
+            "with the first endpoint pinned busy, the other two should split evenly: picked_2={picked_2}"
+        );
+    }
+
+    #[test]
     fn weight_biases_sampling() {
         let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 9)]);
 
