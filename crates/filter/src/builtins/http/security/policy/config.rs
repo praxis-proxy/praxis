@@ -63,13 +63,34 @@ pub(crate) struct PolicyFilterConfig {
     #[serde(default = "default_max_buffer_bytes")]
     pub max_buffer_bytes: usize,
 
-    /// Permit private or loopback policy endpoints.
+    /// Permit every policy endpoint a private or loopback address.
     ///
     /// By default, private DNS answers are skipped and calls with no public
-    /// answer are rejected. Proxy upstreams use
-    /// `insecure_options.allow_private_endpoints` instead.
+    /// answer are rejected, so a private destination needs one of two opt-ins:
+    /// `trusted_private_endpoints` to relax a specific host to the RFC 1918 and
+    /// unique-local ranges, or this flag to relax every callout globally. Proxy
+    /// upstreams use `insecure_options.allow_private_endpoints` instead.
     #[serde(default)]
     pub allow_private_idp: bool,
+
+    /// Hosts the policy engine may reach at a private address.
+    ///
+    /// Narrower than `allow_private_idp`. Only a callout whose host matches an
+    /// entry reaches a non-public address, and only the RFC 1918 and
+    /// unique-local (`fc00::/7`) ranges an in-cluster endpoint resolves to. A
+    /// listed host still cannot reach loopback, link-local (including cloud
+    /// metadata), the unspecified address, or any other reserved range. Every
+    /// unlisted callout stays public-only. Matched on the URL host,
+    /// case-insensitive, port excluded. An IPv6 address is a bracketed literal
+    /// such as `[fc00::1]`.
+    ///
+    /// Shared address space (`100.64.0.0/10`) is deliberately not relaxable, so
+    /// a pinned endpoint on a cluster that assigns pod addresses there, such as
+    /// EKS with the VPC CNI secondary-CIDR pattern, is not reachable by a pin.
+    /// Relaxing that range would need a separate per-host opt-in, off by
+    /// default.
+    #[serde(default)]
+    pub trusted_private_endpoints: Vec<String>,
 
     /// Fail-closed policy gate for misconfigured chains. When `true`
     /// (default), `on_request_body` rejects any request that reaches
@@ -213,4 +234,73 @@ pub(crate) enum BodyAccessMode {
     /// the downstream client see them. Costs one JSON parse +
     /// serialize per mutated request or response.
     ReadWrite,
+}
+
+/// Reject a `trusted_private_endpoints` entry that is not a bare host.
+///
+/// Entries match a URL host with the port excluded, so an entry that carries a
+/// port, scheme, path, userinfo, wildcard, or whitespace can never match and
+/// most likely hides a misconfiguration that would silently fail to pin. A
+/// bracketed IPv6 literal (`[fc00::1]`) is the one form allowed a colon,
+/// matching the bracketed host the URI parser produces. The error names the
+/// field and the offending entry so an operator can find it.
+pub(crate) fn validate_trusted_private_endpoints(entries: &[String]) -> Result<(), String> {
+    for entry in entries {
+        let fault = if entry.is_empty() {
+            "is empty"
+        } else if entry.contains(char::is_whitespace) {
+            "contains whitespace"
+        } else if entry.contains('/') {
+            "contains '/'"
+        } else if entry.contains('@') {
+            "contains '@'"
+        } else if entry.contains('*') {
+            "contains '*'"
+        } else if entry.contains(':') && !(entry.starts_with('[') && entry.ends_with(']')) {
+            "contains an unbracketed ':' (use [ipv6] for a literal, and no port)"
+        } else {
+            continue;
+        };
+        return Err(format!("policy: trusted_private_endpoints entry {entry:?} {fault}"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "tests")]
+mod tests {
+    use super::validate_trusted_private_endpoints;
+
+    #[test]
+    fn a_bare_host_or_bracketed_ipv6_is_accepted() {
+        let ok = ["maas-api.svc".to_owned(), "10.0.0.1".to_owned(), "[fc00::1]".to_owned()];
+        assert!(
+            validate_trusted_private_endpoints(&ok).is_ok(),
+            "bare hosts and a bracketed IPv6 are valid"
+        );
+    }
+
+    #[test]
+    fn a_malformed_entry_is_rejected_naming_the_field_and_the_entry() {
+        // A port, an unbracketed IPv6, a bracketed IPv6 with a port, a scheme,
+        // a path, userinfo, a wildcard, whitespace, and an empty entry.
+        for bad in [
+            "host:8080",
+            "::1",
+            "[fc00::1]:80",
+            "http://x",
+            "a/b",
+            "u@h",
+            "wild*",
+            "has space",
+            "",
+        ] {
+            let err = validate_trusted_private_endpoints(&[bad.to_owned()]).expect_err("must reject");
+            assert!(
+                err.contains("trusted_private_endpoints"),
+                "error names the field: {err}"
+            );
+            assert!(err.contains(bad), "error names the offending entry: {err}");
+        }
+    }
 }

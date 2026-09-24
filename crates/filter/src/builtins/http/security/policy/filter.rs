@@ -38,7 +38,7 @@ use super::{
     common_message_format::{
         entity_for_protocol_method, entity_for_protocol_method_post, llm_entity_post, llm_entity_pre,
     },
-    config::{BodyAccessMode, PolicyFilterConfig},
+    config::{BodyAccessMode, PolicyFilterConfig, validate_trusted_private_endpoints},
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
@@ -137,8 +137,9 @@ enum GatedIdentity {
 /// made by response-body hooks use their own pool on the dispatch runtime,
 /// with the same connection limit but no circuit breaker. TLS
 /// uses the platform trust store; cluster private CAs and client
-/// certificates do not apply. Private destinations require
-/// `allow_private_idp`.
+/// certificates do not apply. A private destination requires
+/// `trusted_private_endpoints` for a specific host, or `allow_private_idp`
+/// to relax every callout.
 ///
 /// An endpoint URL may name an IP address over `http`, but not over
 /// `https`: an IP carries no SNI, and Pingora peers skip certificate
@@ -253,6 +254,10 @@ impl PolicyFilter {
             .into());
         }
 
+        // Reject a malformed pinned-endpoint entry at startup rather than let it
+        // silently never match at request time.
+        validate_trusted_private_endpoints(&cfg.trusted_private_endpoints)?;
+
         let yaml = std::fs::read_to_string(&cfg.config_path).map_err(|e| -> FilterError {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
         })?;
@@ -261,7 +266,7 @@ impl PolicyFilter {
         ppe::install_builtins(&mgr);
 
         // The lazy connection pool must not bind to the temporary init runtime.
-        if !Self::install_http_transport(&mgr, cfg.allow_private_idp) {
+        if !Self::install_http_transport(&mgr, cfg.allow_private_idp, &cfg.trusted_private_endpoints) {
             // Set-once, and this manager was just constructed, so a refusal
             // means the engine changed under us rather than a double install.
             tracing::warn!(
@@ -678,14 +683,34 @@ impl PolicyFilter {
     }
 
     /// Install the proxy-backed transport with the configured destination policy.
-    fn install_http_transport(mgr: &Arc<PolicyEngine>, allow_private: bool) -> bool {
+    fn install_http_transport(
+        mgr: &Arc<PolicyEngine>,
+        allow_private: bool,
+        trusted_private_endpoints: &[String],
+    ) -> bool {
         if allow_private {
             tracing::info!(
                 target: "policy.filter",
                 "policy: allowing the engine to reach private and loopback IdP addresses"
             );
         }
-        mgr.set_http_transport(Arc::new(super::transport::PolicyHttpTransport::new(allow_private)))
+        let allowlist: Arc<std::collections::HashSet<String>> = Arc::new(
+            trusted_private_endpoints
+                .iter()
+                .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+                .collect(),
+        );
+        if !allowlist.is_empty() {
+            tracing::info!(
+                target: "policy.filter",
+                count = allowlist.len(),
+                "policy: permitting private addresses for pinned policy endpoints"
+            );
+        }
+        mgr.set_http_transport(Arc::new(super::transport::PolicyHttpTransport::new(
+            allow_private,
+            allowlist,
+        )))
     }
 
     /// Build the public string-valued identity projection from a validated payload.

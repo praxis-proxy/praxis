@@ -816,6 +816,7 @@ fn build_filter(config_path: String) -> PolicyFilter {
     let cfg = PolicyFilterConfig {
         config_path,
         allow_private_idp: false,
+        trusted_private_endpoints: vec![],
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1049,6 +1050,7 @@ fn rejects_zero_max_buffer_bytes() {
     let cfg = PolicyFilterConfig {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
+        trusted_private_endpoints: vec![],
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1067,6 +1069,7 @@ fn rejects_oversized_max_buffer_bytes() {
     let cfg = PolicyFilterConfig {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
+        trusted_private_endpoints: vec![],
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1825,6 +1828,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
     let cfg = PolicyFilterConfig {
         config_path: path,
         allow_private_idp: false,
+        trusted_private_endpoints: vec![],
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: false,
         init_timeout_secs: 30,
@@ -2668,6 +2672,7 @@ async fn response_phase_without_request_identity_fails_closed() {
     let cfg = PolicyFilterConfig {
         config_path: path,
         allow_private_idp: false,
+        trusted_private_endpoints: vec![],
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -2962,6 +2967,7 @@ fn try_build_filter_allowing_private(
     PolicyFilter::new(PolicyFilterConfig {
         config_path,
         allow_private_idp,
+        trusted_private_endpoints: vec![],
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -3591,6 +3597,7 @@ routes:
     let cfg = PolicyFilterConfig {
         config_path: cfg_path.to_str().expect("utf8 path").to_owned(),
         allow_private_idp: false,
+        trusted_private_endpoints: vec![],
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -3957,6 +3964,7 @@ fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) ->
     PolicyFilter::new(PolicyFilterConfig {
         config_path,
         allow_private_idp: false,
+        trusted_private_endpoints: vec![],
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -4324,6 +4332,7 @@ fn the_lower_ceiling_binds_when_both_apply() {
     let filter = PolicyFilter::new(PolicyFilterConfig {
         config_path: path,
         allow_private_idp: false,
+        trusted_private_endpoints: vec![],
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -4354,6 +4363,7 @@ fn rejects_an_out_of_range_inference_ceiling() {
         let err = PolicyFilter::new(PolicyFilterConfig {
             config_path: path,
             allow_private_idp: false,
+            trusted_private_endpoints: vec![],
             body_access: super::config::BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -4423,6 +4433,7 @@ fn build_read_write_filter(config_path: String) -> PolicyFilter {
     PolicyFilter::new(PolicyFilterConfig {
         config_path,
         allow_private_idp: false,
+        trusted_private_endpoints: vec![],
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,

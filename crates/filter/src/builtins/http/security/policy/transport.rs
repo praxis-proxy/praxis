@@ -13,6 +13,7 @@
 //! the call. See [`worth_another_address`].
 
 use std::{
+    collections::HashSet,
     net::SocketAddr,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -57,21 +58,34 @@ pub(super) struct PolicyHttpTransport {
 
     /// Whether private and loopback destinations are permitted.
     allow_private: bool,
+
+    /// Hosts permitted an RFC 1918 or unique-local address even when
+    /// `allow_private` is false. A per-target exception, so one pinned
+    /// in-cluster endpoint can be reached without opening the whole policy
+    /// callout pool. Loopback, link-local (cloud metadata), and the unspecified
+    /// address stay refused even for a listed host. Lowercased at construction
+    /// for a case-insensitive match.
+    private_allowlist: Arc<HashSet<String>>,
 }
 
 impl PolicyHttpTransport {
     /// Build a transport that refuses, or permits, non-public destinations.
-    pub(super) fn new(allow_private: bool) -> Self {
-        Self::with_connector(shared_policy_connector(), allow_private)
+    pub(super) fn new(allow_private: bool, private_allowlist: Arc<HashSet<String>>) -> Self {
+        Self::with_connector(shared_policy_connector(), allow_private, private_allowlist)
     }
 
     /// Build a transport over `registered`, or over a private pool without one.
-    pub(super) fn with_connector(registered: Option<SubRequestConnector>, allow_private: bool) -> Self {
+    pub(super) fn with_connector(
+        registered: Option<SubRequestConnector>,
+        allow_private: bool,
+        private_allowlist: Arc<HashSet<String>>,
+    ) -> Self {
         Self {
             registered,
             client: OnceLock::new(),
             dispatch_client: OnceLock::new(),
             allow_private,
+            private_allowlist,
         }
     }
 
@@ -189,17 +203,21 @@ impl PolicyHttpTransport {
 fn usable_addresses(
     addresses: &[SocketAddr],
     allow_private: bool,
+    private_allowlist: &HashSet<String>,
     host: &str,
 ) -> Result<Vec<SocketAddr>, HttpTransportError> {
+    // The coarse escape hatch permits every destination.
     if allow_private {
         return Ok(addresses.to_vec());
     }
+
+    let pinned = host_is_allowlisted(private_allowlist, host);
 
     let mut denied = None;
     let usable: Vec<SocketAddr> = addresses
         .iter()
         .copied()
-        .filter(|address| match private_address_reason(&address.ip()) {
+        .filter(|address| match denial_reason(address, pinned) {
             None => true,
             Some(reason) => {
                 denied = Some(reason);
@@ -222,6 +240,45 @@ fn usable_addresses(
     Ok(usable)
 }
 
+/// The rule that denies `address`, or `None` when it may be dialled. A pinned
+/// host relaxes only the private ranges [`pin_may_relax`] allows.
+fn denial_reason(address: &SocketAddr, pinned: bool) -> Option<&'static str> {
+    let reason = private_address_reason(&address.ip())?;
+    if pinned && pin_may_relax(reason) {
+        None
+    } else {
+        Some(reason)
+    }
+}
+
+/// The only private ranges a pinned host may reach: RFC 1918 (v4) and unique
+/// local (v6, `fc00::/7`), the ranges an in-cluster endpoint resolves to.
+///
+/// This lists what a pin may reach rather than what it may not, so it fails
+/// closed: every other reason [`private_address_reason`] gives, and any reason
+/// it gains later, stays denied for a pin too. That matters for the ranges that
+/// must never be pinned past, above all link-local (cloud metadata), and also
+/// loopback, unspecified, shared address space (100.64.0.0/10), multicast,
+/// broadcast, and reserved. Matching a reason prefix couples to ppe-core's
+/// wording: a reword of an allowed reason only narrows this and fails closed
+/// (the pin stops relaxing). The residual is a future ppe-core reason that also
+/// begins "private address" or "unique local address" for some new range, which
+/// the pinned dependency version bounds and a test locks against today's set.
+///
+/// The reason is judged on the resolved address, which [`private_address_reason`]
+/// has already reduced to its embedded IPv4 for a mapped, NAT64, or
+/// IPv4-compatible form, so a metadata address in any of those encodings arrives
+/// here as link-local and is refused.
+fn pin_may_relax(reason: &str) -> bool {
+    reason.starts_with("private address") || reason.starts_with("unique local address")
+}
+
+/// Whether a pinned exception permits `host` a non-public address. An empty
+/// allowlist allocates nothing. A trailing dot is stripped to match.
+fn host_is_allowlisted(allowlist: &HashSet<String>, host: &str) -> bool {
+    !allowlist.is_empty() && allowlist.contains(host.trim_end_matches('.').to_ascii_lowercase().as_str())
+}
+
 /// Whether a failure justifies trying the destination's next address.
 ///
 /// Admission exhaustion applies to every address, and a request that may have
@@ -240,7 +297,7 @@ impl HttpTransport for PolicyHttpTransport {
     async fn execute(&self, req: HttpRequest) -> Result<HttpResponse, HttpTransportError> {
         let target = Target::parse(&req.url)?;
         let (addresses, remaining) = self.resolve_within(&target, req.timeout).await?;
-        let usable = usable_addresses(&addresses, self.allow_private, &target.host_header)?;
+        let usable = usable_addresses(&addresses, self.allow_private, &self.private_allowlist, &target.host)?;
         self.dispatch(&target, &req, &usable, remaining).await
     }
 }
@@ -304,6 +361,9 @@ struct Target {
     /// The `Host` header value: the authority exactly as the URL wrote it.
     host_header: String,
 
+    /// The bare host, port excluded, matched against the private-endpoint allowlist.
+    host: String,
+
     /// Path and query, or `/` when the URL carried neither.
     uri: http::Uri,
 
@@ -346,6 +406,7 @@ impl Target {
             },
             dial_authority,
             host_header: authority.as_str().to_owned(),
+            host: host.to_owned(),
             uri: request_uri(&uri),
             tls,
         })
