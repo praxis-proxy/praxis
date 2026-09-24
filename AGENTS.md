@@ -255,7 +255,7 @@ by sending an `x-praxis-guard-model` header directly.
   or rejoin request-phase pipelines based on filter
   results (`on_result`). See
   `examples/configs/pipeline/branch-chains.yaml`.
-  Branch sub-chains only run `on_request`;
+  Branch sub-chains run `on_request` and `on_response`;
   `on_request_body` and `on_response_body` are not
   executed for filters inside branch chains.
   Body-transforming filters must be in the main

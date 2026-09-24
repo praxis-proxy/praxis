@@ -31,7 +31,7 @@ use praxis_core::config::FailureMode;
 use tracing::{debug, trace, warn};
 
 use super::{
-    branch::{BranchOutcome, RejoinTarget, ResolvedBranch},
+    branch::{BranchOutcome, RejoinTarget, ResolvedBranch, record_executed_branch_filter},
     check_failure_mode,
     filter::PipelineFilter,
 };
@@ -184,15 +184,21 @@ fn check_reentrance_limit(branch: &ResolvedBranch, ctx: &mut HttpFilterContext<'
 }
 
 /// Execute a branch's filter list.
+///
+/// Each filter whose `on_request` ran (including one that rejected or
+/// answered) is marked in the context's [`executed_branch_filters`] so the
+/// response phase runs its `on_response`; a filter skipped by conditions, or
+/// whose error propagated under `failure_mode: closed`, is not.
+///
+/// [`executed_branch_filters`]: HttpFilterContext::executed_branch_filters
 async fn execute_branch_filters(
     filters: &[PipelineFilter],
     ctx: &mut HttpFilterContext<'_>,
 ) -> Result<FilterAction, FilterError> {
     ensure_branch_trace_context(filters, ctx);
     for pf in filters {
-        let http_filter = match &pf.filter {
-            AnyFilter::Http(f) => f.as_ref(),
-            AnyFilter::Tcp(_) => continue,
+        let AnyFilter::Http(http_filter) = &pf.filter else {
+            continue;
         };
         if !pf.conditions.is_empty()
             && !should_execute_bound_selected(
@@ -207,7 +213,9 @@ async fn execute_branch_filters(
         ctx.current_filter_id = Some(pf.filter_id);
         let result = http_filter.on_request(ctx).await;
         ctx.current_filter_id = None;
-        if let Some(action) = branch_request_outcome(result, http_filter.name(), pf.failure_mode)? {
+        let stop = branch_request_outcome(result, http_filter.name(), pf.failure_mode)?;
+        record_executed_branch_filter(&mut ctx.executed_branch_filters, pf.filter_id);
+        if let Some(action) = stop {
             return Ok(action);
         }
         if let Some(action) = dispatch_nested_outcome(&pf.branches, ctx).await? {
@@ -331,7 +339,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        Rejection, StreamingTerminalResponse, filter::HttpFilter, pipeline::branch::ResolvedBranchCondition,
+        Rejection, StreamingTerminalResponse,
+        filter::HttpFilter,
+        pipeline::branch::{ResolvedBranchCondition, branch_filter_executed},
         results::FilterResultSet,
     };
 
@@ -1065,6 +1075,78 @@ mod tests {
         assert!(
             matches!(outcome, BranchOutcome::Continue),
             "nested SkipTo should be discarded and outer should continue"
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_records_filters_whose_on_request_ran() {
+        let gated = named_pf(
+            "gated",
+            vec![praxis_core::config::Condition::When(
+                praxis_core::config::ConditionMatch {
+                    grpc: None,
+                    path: None,
+                    path_prefix: Some("/api".to_owned()),
+                    methods: None,
+                    headers: None,
+                    bound_upstream: None,
+                    selected_upstream: None,
+                },
+            )],
+        );
+        let ran = named_pf("ran", vec![]);
+        let rejecting = reject_pf(403);
+        let unreached = named_pf("unreached", vec![]);
+        let ids = [gated.filter_id, ran.filter_id, rejecting.filter_id, unreached.filter_id];
+        let branches = vec![make_branch(
+            "record",
+            None,
+            RejoinTarget::Next,
+            None,
+            vec![gated, ran, rejecting, unreached],
+        )];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        drop(evaluate_branches(&branches, &mut ctx).await.unwrap());
+
+        assert_eq!(
+            ids.map(|id| branch_filter_executed(&ctx.executed_branch_filters, id)),
+            [false, true, true, false],
+            "only filters whose on_request ran (including the rejecting one) are recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_does_not_record_a_closed_failure() {
+        let failing = error_pf(FailureMode::Closed);
+        let id = failing.filter_id;
+        let branches = vec![make_branch("fail", None, RejoinTarget::Next, None, vec![failing])];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let result = evaluate_branches(&branches, &mut ctx).await;
+
+        assert!(
+            matches!(&result, Err(e) if e.to_string().contains("branch error")),
+            "failure_mode=closed should propagate the error"
+        );
+        assert!(
+            !branch_filter_executed(&ctx.executed_branch_filters, id),
+            "a filter whose error propagated must not be paired with on_response"
+        );
+    }
+
+    #[tokio::test]
+    async fn branch_free_evaluation_records_nothing() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        drop(evaluate_branches(&[], &mut ctx).await.unwrap());
+
+        assert!(
+            ctx.executed_branch_filters.is_empty(),
+            "a request that runs no branch filter must leave the record empty"
         );
     }
 

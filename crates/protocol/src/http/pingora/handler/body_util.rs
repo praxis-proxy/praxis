@@ -141,6 +141,8 @@ pub(super) struct BodyFilterOutput {
     pub(super) filter_metadata: HashMap<String, String>,
     /// Typed per-filter state keyed by stable filter invocation ID.
     pub(super) filter_state: HashMap<usize, Box<dyn std::any::Any + Send + Sync>>,
+    /// Branch filters that ran `on_request`, indexed by filter id.
+    pub(super) executed_branch_filters: Vec<bool>,
     /// Per-filter execution tracking indices.
     pub(super) executed_filter_indices: Vec<bool>,
     /// Per-filter body-done tracking indices.
@@ -159,6 +161,7 @@ impl BodyFilterOutput {
             extensions: std::mem::take(&mut fctx.extensions),
             filter_metadata: std::mem::take(&mut fctx.filter_metadata),
             filter_state: std::mem::take(&mut fctx.filter_state),
+            executed_branch_filters: std::mem::take(&mut fctx.executed_branch_filters),
             executed_filter_indices: std::mem::take(&mut fctx.executed_filter_indices),
             body_done_indices: std::mem::take(&mut fctx.body_done_indices),
             attempted_endpoints: std::mem::take(&mut fctx.attempted_endpoints),
@@ -172,6 +175,7 @@ impl BodyFilterOutput {
         ctx.extensions = self.extensions;
         ctx.filter_metadata = self.filter_metadata;
         ctx.filter_state = self.filter_state;
+        ctx.cached_executed_branch_filters = self.executed_branch_filters;
         ctx.cached_executed_filter_indices = self.executed_filter_indices;
         ctx.cached_body_done_indices = self.body_done_indices;
         ctx.attempted_endpoints = self.attempted_endpoints;

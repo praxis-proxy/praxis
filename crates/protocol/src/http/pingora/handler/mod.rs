@@ -932,6 +932,7 @@ mod tests {
             attempted_endpoints: Vec::new(),
             filter_metadata: HashMap::from([("key".to_owned(), "val".to_owned())]),
             filter_state,
+            executed_branch_filters: vec![false, true, true],
             executed_filter_indices: vec![true, false],
             body_done_indices: vec![false, true],
         };
@@ -947,6 +948,7 @@ mod tests {
             ctx.filter_state.get(&0).and_then(|v| v.downcast_ref::<i32>()),
             Some(&99)
         );
+        assert_eq!(ctx.cached_executed_branch_filters, vec![false, true, true]);
         assert_eq!(ctx.cached_executed_filter_indices, vec![true, false]);
         assert_eq!(ctx.cached_body_done_indices, vec![false, true]);
     }

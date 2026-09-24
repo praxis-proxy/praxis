@@ -80,6 +80,7 @@ impl FilteredStreamingBody {
                 current_filter_id: None,
                 downstream_tls: cont.downstream_tls,
                 extensions: std::mem::take(&mut cont.extensions),
+                executed_branch_filters: Vec::new(),
                 executed_filter_indices: std::mem::take(&mut cont.executed_filter_indices),
                 extra_request_headers: Vec::new(),
                 filter_metadata: std::mem::take(&mut cont.filter_metadata),

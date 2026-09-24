@@ -54,6 +54,7 @@ mod body_filter_failures;
 mod body_pipeline;
 #[cfg(feature = "bound-upstream-request-body")]
 mod bound_upstream_body;
+mod branch_chains;
 mod compression;
 mod conditions;
 mod cors;

@@ -17,6 +17,10 @@
 //! advances, `SkipTo` jumps forward, `ReEnter` loops back,
 //! `Terminal` stops, and `Reject` aborts with an error response.
 //!
+//! [`record_executed_branch_filter`] marks the branch filters that ran
+//! `on_request` in the request context, so the response phase can pair
+//! their `on_response`.
+//!
 //! [`build_branch`]: super::build_branch
 //! [`BranchChainConfig`]: praxis_core::config::BranchChainConfig
 //! [`BranchCondition`]: praxis_core::config::BranchCondition
@@ -120,4 +124,66 @@ pub(crate) enum BranchOutcome {
 
     /// A terminal branch completed; stop parent.
     Terminal,
+}
+
+// -----------------------------------------------------------------------------
+// Executed Branch Filters
+// -----------------------------------------------------------------------------
+
+/// Whether the branch filter `filter_id` is marked in `executed`, the
+/// request context's [`executed_branch_filters`] record.
+///
+/// [`executed_branch_filters`]: crate::HttpFilterContext::executed_branch_filters
+pub(crate) fn branch_filter_executed(executed: &[bool], filter_id: usize) -> bool {
+    executed.get(filter_id) == Some(&true)
+}
+
+/// Mark the branch filter `filter_id` in `executed`, the request context's
+/// [`executed_branch_filters`] record, as having run `on_request`.
+///
+/// The record is indexed by the pipeline's dense `filter_id`s and grows only
+/// as far as the highest id marked, so a request that runs no branch filter
+/// leaves it empty and marking the same filter again (re-entrance) is a no-op.
+///
+/// [`executed_branch_filters`]: crate::HttpFilterContext::executed_branch_filters
+pub(crate) fn record_executed_branch_filter(executed: &mut Vec<bool>, filter_id: usize) {
+    if executed.len() <= filter_id {
+        executed.resize(filter_id.saturating_add(1), false);
+    }
+    if let Some(ran) = executed.get_mut(filter_id) {
+        *ran = true;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_record_contains_nothing() {
+        assert!(
+            !branch_filter_executed(&[], 0),
+            "an empty record means no branch filter ran"
+        );
+    }
+
+    #[test]
+    fn record_marks_only_recorded_filters() {
+        let mut executed = Vec::new();
+
+        record_executed_branch_filter(&mut executed, 7);
+        record_executed_branch_filter(&mut executed, 3);
+        record_executed_branch_filter(&mut executed, 7);
+
+        assert_eq!(
+            [3, 5, 7, 8].map(|id| branch_filter_executed(&executed, id)),
+            [true, false, true, false],
+            "only recorded filters match, including past the highest recorded id"
+        );
+        assert_eq!(executed.len(), 8, "recording again must not grow the record");
+    }
 }

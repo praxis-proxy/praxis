@@ -65,6 +65,7 @@ pub(super) async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut Pingora
         let extensions = filter_ctx.extensions;
         let metadata = filter_ctx.filter_metadata;
         let state = filter_ctx.filter_state;
+        let branch_idx = filter_ctx.executed_branch_filters;
         let exec_idx = filter_ctx.executed_filter_indices;
         let body_idx = filter_ctx.body_done_indices;
         // The context macro takes cluster/upstream out of ctx; restore them
@@ -75,6 +76,7 @@ pub(super) async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut Pingora
         ctx.extensions = extensions;
         ctx.filter_metadata = metadata;
         ctx.filter_state = state;
+        ctx.cached_executed_branch_filters = branch_idx;
         ctx.cached_executed_filter_indices = exec_idx;
         ctx.cached_body_done_indices = body_idx;
         ctx.cluster = cluster;

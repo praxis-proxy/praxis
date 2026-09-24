@@ -28,6 +28,7 @@ pub(super) fn execute(
     let metadata = std::mem::take(&mut filter_ctx.filter_metadata);
     let structured = std::mem::take(&mut filter_ctx.structured_metadata);
     let state = std::mem::take(&mut filter_ctx.filter_state);
+    let executed_branches = std::mem::take(&mut filter_ctx.executed_branch_filters);
     let executed = std::mem::take(&mut filter_ctx.executed_filter_indices);
     let body_done = std::mem::take(&mut filter_ctx.body_done_indices);
     drop(filter_ctx);
@@ -35,6 +36,7 @@ pub(super) fn execute(
     ctx.filter_metadata = metadata;
     ctx.structured_metadata = structured;
     ctx.filter_state = state;
+    ctx.cached_executed_branch_filters = executed_branches;
     ctx.cached_executed_filter_indices = executed;
     ctx.cached_body_done_indices = body_done;
 

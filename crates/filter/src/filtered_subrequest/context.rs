@@ -63,6 +63,7 @@ pub(super) fn build_sub_filter_context<'a>(
         current_filter_id: None,
         downstream_tls: runtime.downstream_tls,
         extensions: crate::extensions::RequestExtensions::default(),
+        executed_branch_filters: Vec::new(),
         executed_filter_indices: Vec::new(),
         extra_request_headers: Vec::new(),
         filter_metadata: HashMap::new(),

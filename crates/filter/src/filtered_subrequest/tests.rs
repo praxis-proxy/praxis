@@ -3845,3 +3845,192 @@ fn test_callout_executor() -> crate::FilteredSubrequestExecutor {
     let downstream = crate::SubrequestRuntime::new(None, false, None, std::time::Instant::now());
     crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, std::time::Duration::from_secs(5))
 }
+
+// -----------------------------------------------------------------------------
+// Nested Pipeline Branch Record
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn callout_pipeline_leaves_the_parent_branch_record_alone() {
+    use std::sync::Arc;
+
+    let mut registry = crate::FilterRegistry::with_builtins();
+    let nested = Arc::new(build_branching_pipeline(
+        &registry,
+        r#"
+- filter: headers
+  request_add:
+    - name: X-Nested-Host
+      value: host
+  branch_chains:
+    - name: nested_branch
+      chains:
+        - name: nested_chain
+          filters:
+            - filter: headers
+              conditions:
+                - when:
+                    path_prefix: /never
+              response_add:
+                - name: X-Nested-Skipped
+                  value: "1"
+            - filter: headers
+              response_add:
+                - name: X-Nested-Ran
+                  value: "1"
+- filter: static_response
+  status: 200
+"#,
+    ));
+    let executor = Arc::new(buffered_executor(1_048_576));
+    let nested_responses: Arc<std::sync::Mutex<Vec<HeaderMap>>> = Arc::default();
+    let recorded = Arc::clone(&nested_responses);
+    registry
+        .register(
+            "test_branch_callout",
+            crate::FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(BranchCalloutFilter {
+                    executor: Arc::clone(&executor),
+                    pipeline: Arc::clone(&nested),
+                    responses: Arc::clone(&recorded),
+                }))
+            })),
+        )
+        .unwrap();
+    let parent = build_branching_pipeline(
+        &registry,
+        r#"
+- filter: headers
+  request_add:
+    - name: X-Parent-Host
+      value: host
+  branch_chains:
+    - name: parent_branch
+      chains:
+        - name: parent_chain
+          filters:
+            - filter: headers
+              response_add:
+                - name: X-Parent-Ran
+                  value: "1"
+            - filter: headers
+              conditions:
+                - when:
+                    path_prefix: /never
+              response_add:
+                - name: X-Parent-Skipped
+                  value: "1"
+- filter: test_branch_callout
+"#,
+    );
+    let request = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut response = crate::Response {
+        status: http::StatusCode::OK,
+        headers: HeaderMap::new(),
+    };
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    let action = parent.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, crate::FilterAction::Continue),
+        "the callout completes and the parent pipeline continues"
+    );
+    ctx.response_header = Some(&mut response);
+
+    drop(parent.execute_http_response(&mut ctx).await.unwrap());
+    drop(ctx);
+
+    assert_eq!(
+        response.headers.get_all("x-parent-ran").iter().count(),
+        1,
+        "the parent's branch filter must run on_response exactly once after the callout"
+    );
+    assert!(
+        !response.headers.contains_key("x-parent-skipped"),
+        "a nested branch filter with the same filter id must not pair a parent branch filter that never ran"
+    );
+    assert!(
+        !response.headers.contains_key("x-nested-ran"),
+        "nested branch filters must not run in the parent's response phase"
+    );
+    let nested_headers = nested_responses.lock().unwrap().clone();
+    assert_eq!(nested_headers.len(), 1, "the callout ran the nested pipeline once");
+    assert!(
+        nested_headers
+            .first()
+            .is_some_and(|headers| headers.contains_key("x-nested-ran")),
+        "the nested pipeline pairs its own branch filter in its own response phase"
+    );
+    assert!(
+        nested_headers
+            .first()
+            .is_some_and(|headers| !headers.contains_key("x-nested-skipped")),
+        "a nested branch filter skipped by its conditions runs no on_response"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities: nested branch record
+// -----------------------------------------------------------------------------
+
+// Build a pipeline through the chain-aware builder, so its branch chains
+// resolve and its filter ids start at zero the way a bound or step pipeline's
+// do.
+fn build_branching_pipeline(registry: &crate::FilterRegistry, yaml: &str) -> crate::FilterPipeline {
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(yaml).unwrap();
+    crate::FilterPipeline::build_with_chains(
+        &mut entries,
+        registry,
+        &std::collections::HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap()
+}
+
+// Runs a nested pipeline through the callout executor the way the iterative
+// request router runs a step: the parent's extensions travel into the nested
+// run and come back afterwards. Records each nested response's headers.
+struct BranchCalloutFilter {
+    executor: std::sync::Arc<crate::FilteredSubrequestExecutor>,
+    pipeline: std::sync::Arc<crate::FilterPipeline>,
+    responses: std::sync::Arc<std::sync::Mutex<Vec<HeaderMap>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for BranchCalloutFilter {
+    fn name(&self) -> &'static str {
+        "test_branch_callout"
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        let request = crate::SubRequest {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers: HeaderMap::new(),
+            body: bytes::Bytes::new(),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let input = super::FilteredSubrequestInput::callout(
+            &self.pipeline,
+            &request,
+            deadline,
+            std::mem::take(&mut ctx.extensions),
+        );
+        match Box::pin(self.executor.execute(input)).await {
+            Ok(super::OpenedSubrequest { continuation, kind }) => {
+                if let super::OpenedResponse::Complete(outcome) = kind {
+                    self.responses.lock().unwrap().push(outcome.response.headers);
+                }
+                ctx.extensions = continuation.into_parent_extensions();
+                Ok(crate::FilterAction::Continue)
+            },
+            Err(error) => {
+                let (error, extensions) = error.into_parts();
+                ctx.extensions = extensions;
+                Err(error)
+            },
+        }
+    }
+}

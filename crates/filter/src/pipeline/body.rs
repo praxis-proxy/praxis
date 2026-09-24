@@ -170,7 +170,7 @@ pub(super) fn accumulate_caps(caps: &mut BodyCapabilities, filters: &[PipelineFi
 
 /// Recursive worker for [`accumulate_caps`].
 ///
-/// Branch sub-chains only run `on_request`: body hooks never execute for
+/// Branch sub-chains run only header hooks: body hooks never execute for
 /// filters inside branches, so their body access declarations must not
 /// enable pipeline-wide buffering (`in_branch` skips body accumulation).
 /// Request-context needs still accumulate because `on_request` runs.
@@ -602,7 +602,7 @@ mod tests {
         let caps = compute_body_capabilities(&[parent]);
         assert!(
             !caps.needs_request_body,
-            "branch filters only run on_request; their body access must not enable buffering"
+            "branch filters run no body hooks; their body access must not enable buffering"
         );
         assert!(
             !caps.any_request_body_writer,

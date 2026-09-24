@@ -127,6 +127,7 @@ async fn run_response_pipeline(
         extensions,
         filter_metadata,
         filter_state,
+        executed_branch_filters,
         executed_indices,
         body_done,
         attempted_endpoints,
@@ -147,6 +148,7 @@ async fn run_response_pipeline(
             fctx.extensions,
             fctx.filter_metadata,
             fctx.filter_state,
+            fctx.executed_branch_filters,
             fctx.executed_filter_indices,
             fctx.body_done_indices,
             fctx.attempted_endpoints,
@@ -158,6 +160,7 @@ async fn run_response_pipeline(
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
+    ctx.cached_executed_branch_filters = executed_branch_filters;
     ctx.cached_executed_filter_indices = executed_indices;
     ctx.cached_body_done_indices = body_done;
     ctx.attempted_endpoints = attempted_endpoints;

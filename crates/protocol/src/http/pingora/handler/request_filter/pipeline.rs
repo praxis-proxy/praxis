@@ -285,6 +285,7 @@ async fn run_pipeline(
         extensions,
         filter_metadata,
         filter_state,
+        executed_branch_filters,
         executed_indices,
         body_done,
         // Pre-read mutations were consumed by endpoint_selector during
@@ -393,6 +394,7 @@ async fn run_pipeline(
             filter_ctx.extensions,
             filter_ctx.filter_metadata,
             filter_ctx.filter_state,
+            filter_ctx.executed_branch_filters,
             filter_ctx.executed_filter_indices,
             filter_ctx.body_done_indices,
             filter_ctx.pre_read_mutations,
@@ -417,6 +419,7 @@ async fn run_pipeline(
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
+    ctx.cached_executed_branch_filters = executed_branch_filters;
     ctx.cached_executed_filter_indices = executed_indices;
     ctx.cached_body_done_indices = body_done;
 

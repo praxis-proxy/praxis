@@ -893,7 +893,7 @@ fn check_bound_upstream_body_mode(filters: &[PipelineFilter], errors: &mut Vec<S
 ///
 /// The bound-upstream request-body phase, like the request-, response-, and
 /// selected-upstream body phases, runs only top-level filters: branch
-/// sub-chains run `on_request` only, so a filter declaring
+/// sub-chains run header hooks only, so a filter declaring
 /// [`bound_upstream_request_body_access`] inside a branch would silently enable
 /// buffering for a hook that never runs. Move such a filter to the main
 /// pipeline path or gate it with filter conditions.
@@ -937,8 +937,8 @@ fn collect_branch_bound_upstream_body_errors(branch_name: &str, filters: &[Pipel
         {
             errors.push(format!(
                 "filter '{name}' in branch '{branch_name}' declares bound-upstream request \
-                 body access, but branch filters only run on_request and body hooks never \
-                 execute; move it to the main pipeline or gate it with filter conditions",
+                 body access, but body hooks never execute for branch filters; \
+                 move it to the main pipeline or gate it with filter conditions",
                 name = filter.name(),
             ));
         }

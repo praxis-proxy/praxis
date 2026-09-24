@@ -19,7 +19,7 @@ use praxis_core::config::{BranchChainConfig, ChainRef, FailureMode, SkipPipeline
 use super::{
     FilterPipeline,
     body::compute_body_capabilities,
-    branch::{RejoinTarget, ResolvedBranch},
+    branch::{RejoinTarget, ResolvedBranch, ResolvedBranchCondition},
     filter::PipelineFilter,
 };
 use crate::{
@@ -8111,4 +8111,605 @@ fn conditions_match_selected_unconditional_filter_always_matches() {
         pipeline.filter_request_conditions_match("access_log", &ctx),
         "an unconditional filter matches even with no selection, like the selection-unaware helper"
     );
+}
+
+// -----------------------------------------------------------------------------
+// Branch Response Unwinding Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn branch_filters_unwind_in_reverse_before_their_host() {
+    let log = HookLog::default();
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "br",
+        RejoinTarget::Next,
+        vec![
+            scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue),
+            scripted_pf(101, "B2", &log, Scripted::Continue, Scripted::Continue),
+        ],
+    )];
+    let tail = scripted_pf(1, "C", &log, Scripted::Continue, Scripted::Continue);
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host, tail]);
+
+    let recorded = run_request_then_response(&pipeline, &log, "/").await;
+
+    assert_eq!(
+        recorded,
+        vec!["C", "B2", "B1", "A"],
+        "branch filters must unwind in reverse, right before their host"
+    );
+}
+
+#[tokio::test]
+async fn sibling_branches_unwind_in_reverse_branch_order() {
+    let log = HookLog::default();
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![
+        unwind_branch(
+            "first",
+            RejoinTarget::Next,
+            vec![scripted_pf(100, "X", &log, Scripted::Continue, Scripted::Continue)],
+        ),
+        unwind_branch(
+            "second",
+            RejoinTarget::Next,
+            vec![scripted_pf(101, "Y", &log, Scripted::Continue, Scripted::Continue)],
+        ),
+    ];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+
+    let recorded = run_request_then_response(&pipeline, &log, "/").await;
+
+    assert_eq!(
+        recorded,
+        vec!["Y", "X", "A"],
+        "the later sibling branch ran last, so it must unwind first"
+    );
+}
+
+#[tokio::test]
+async fn nested_branch_filters_unwind_before_the_filter_hosting_them() {
+    let log = HookLog::default();
+    let mut outer = scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue);
+    outer.branches = vec![unwind_branch(
+        "inner",
+        RejoinTarget::Next,
+        vec![
+            scripted_pf(200, "N1", &log, Scripted::Continue, Scripted::Continue),
+            scripted_pf(201, "N2", &log, Scripted::Continue, Scripted::Continue),
+        ],
+    )];
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "outer",
+        RejoinTarget::Next,
+        vec![
+            outer,
+            scripted_pf(101, "B2", &log, Scripted::Continue, Scripted::Continue),
+        ],
+    )];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+
+    let recorded = run_request_then_response(&pipeline, &log, "/").await;
+
+    assert_eq!(
+        recorded,
+        vec!["B2", "N2", "N1", "B1", "A"],
+        "a nested branch must unwind right before the branch filter hosting it"
+    );
+}
+
+#[tokio::test]
+async fn nested_rejection_unwinds_only_the_filters_that_ran() {
+    let log = HookLog::default();
+    let mut outer = scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue);
+    outer.branches = vec![unwind_branch(
+        "inner",
+        RejoinTarget::Terminal,
+        vec![scripted_pf(200, "N1", &log, Scripted::Reject, Scripted::Continue)],
+    )];
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "outer",
+        RejoinTarget::Next,
+        vec![
+            outer,
+            scripted_pf(101, "B2", &log, Scripted::Continue, Scripted::Continue),
+        ],
+    )];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+
+    assert_eq!(
+        run_request_then_response(&pipeline, &log, "/").await,
+        vec!["N1", "B1", "A"],
+        "a nested rejection stops the outer branch, so B2 never ran"
+    );
+}
+
+#[tokio::test]
+async fn branch_filter_skipped_by_conditions_does_not_run_on_response() {
+    let log = HookLog::default();
+    let mut gated = scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue);
+    gated.conditions = vec![when_path("/api")];
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "br",
+        RejoinTarget::Next,
+        vec![
+            gated,
+            scripted_pf(101, "B2", &log, Scripted::Continue, Scripted::Continue),
+        ],
+    )];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+
+    assert_eq!(
+        run_request_then_response(&pipeline, &log, "/other").await,
+        vec!["B2", "A"],
+        "a branch filter skipped by its conditions must not run on_response"
+    );
+    assert_eq!(
+        run_request_then_response(&pipeline, &log, "/api").await,
+        vec!["B2", "B1", "A"],
+        "a branch filter whose conditions match must run on_response"
+    );
+}
+
+#[tokio::test]
+async fn unfired_conditional_branch_does_not_run_on_response() {
+    let log = HookLog::default();
+    let mut branch = unwind_branch(
+        "gated",
+        RejoinTarget::Next,
+        vec![scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue)],
+    );
+    branch.condition = Some(ResolvedBranchCondition {
+        filter_name: Arc::from("A"),
+        key: Arc::from("status"),
+        value: Arc::from("hit"),
+    });
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![branch];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+
+    assert_eq!(
+        run_request_then_response(&pipeline, &log, "/").await,
+        vec!["A"],
+        "filters of a branch that never fired must not run on_response"
+    );
+}
+
+#[tokio::test]
+async fn branch_filter_response_conditions_gate_its_on_response() {
+    let log = HookLog::default();
+    let mut gated = scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue);
+    gated.response_conditions = vec![when_status(&[500])];
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch("br", RejoinTarget::Next, vec![gated])];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut resp = crate::context::Response {
+        status: StatusCode::OK,
+        headers: HeaderMap::new(),
+    };
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    ctx.response_header = Some(&mut resp);
+
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        log.take(),
+        vec!["A"],
+        "a branch filter whose response conditions do not match must be skipped"
+    );
+}
+
+#[tokio::test]
+async fn branch_filter_on_response_error_is_swallowed_when_fail_open() {
+    let log = HookLog::default();
+    let mut failing = scripted_pf(101, "B2", &log, Scripted::Continue, Scripted::Error);
+    failing.failure_mode = FailureMode::Open;
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "br",
+        RejoinTarget::Next,
+        vec![
+            scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue),
+            failing,
+        ],
+    )];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    let action = pipeline.execute_http_response(&mut ctx).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "failure_mode: open must swallow a branch filter's on_response error"
+    );
+    assert_eq!(
+        log.take(),
+        vec!["B2", "B1", "A"],
+        "the unwind must continue past a swallowed error"
+    );
+}
+
+#[tokio::test]
+async fn branch_filter_on_response_error_propagates_when_fail_closed() {
+    let log = HookLog::default();
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "br",
+        RejoinTarget::Next,
+        vec![
+            scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue),
+            scripted_pf(101, "B2", &log, Scripted::Continue, Scripted::Error),
+        ],
+    )];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    let result = pipeline.execute_http_response(&mut ctx).await;
+
+    assert!(
+        matches!(&result, Err(e) if e.to_string().contains("scripted error")),
+        "the default closed failure mode must propagate a branch filter's on_response error"
+    );
+    assert_eq!(log.take(), vec!["B2"], "the unwind must stop at a propagated error");
+}
+
+#[tokio::test]
+async fn branch_filter_on_response_rejection_stops_the_response_phase() {
+    let log = HookLog::default();
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "br",
+        RejoinTarget::Next,
+        vec![
+            scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue),
+            scripted_pf(101, "B2", &log, Scripted::Continue, Scripted::Reject),
+        ],
+    )];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    let action = pipeline.execute_http_response(&mut ctx).await.unwrap();
+
+    assert!(
+        matches!(&action, FilterAction::Reject(r) if r.status == 418),
+        "a branch filter's on_response rejection must reach the caller"
+    );
+    assert_eq!(log.take(), vec!["B2"], "no hook may run after the rejection");
+}
+
+#[tokio::test]
+async fn rejecting_branch_filter_runs_on_response_but_unreached_ones_do_not() {
+    let log = HookLog::default();
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "br",
+        RejoinTarget::Next,
+        vec![
+            scripted_pf(100, "B1", &log, Scripted::Reject, Scripted::Continue),
+            scripted_pf(101, "B2", &log, Scripted::Continue, Scripted::Continue),
+        ],
+    )];
+    let tail = scripted_pf(1, "C", &log, Scripted::Continue, Scripted::Continue);
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host, tail]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "the branch filter should reject"
+    );
+
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    assert_eq!(
+        log.take(),
+        vec!["B1", "A"],
+        "the rejecting branch filter runs on_response; B2 and C never ran"
+    );
+}
+
+#[tokio::test]
+async fn branch_filter_request_error_pairs_on_response_only_when_fail_open() {
+    let log = HookLog::default();
+    let mut open = scripted_pf(100, "open", &log, Scripted::Error, Scripted::Continue);
+    open.failure_mode = FailureMode::Open;
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "br",
+        RejoinTarget::Next,
+        vec![
+            open,
+            scripted_pf(101, "closed", &log, Scripted::Error, Scripted::Continue),
+        ],
+    )];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let result = pipeline.execute_http_request(&mut ctx).await;
+    assert!(
+        matches!(&result, Err(e) if e.to_string().contains("scripted error")),
+        "the closed branch filter's error must propagate"
+    );
+
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    assert_eq!(
+        log.take(),
+        vec!["open", "A"],
+        "a swallowed error counts as executed; a propagated one does not"
+    );
+}
+
+#[tokio::test]
+async fn terminal_branch_unwinds_its_filters_but_not_unreached_ones() {
+    let log = HookLog::default();
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "stop",
+        RejoinTarget::Terminal,
+        vec![scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue)],
+    )];
+    let tail = scripted_pf(1, "C", &log, Scripted::Continue, Scripted::Continue);
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host, tail]);
+
+    assert_eq!(
+        run_request_then_response(&pipeline, &log, "/").await,
+        vec!["B1", "A"],
+        "a terminal branch unwinds its own filters; C was never reached"
+    );
+}
+
+#[tokio::test]
+async fn skip_to_branch_unwinds_its_filters_and_skips_bypassed_ones() {
+    let log = HookLog::default();
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "skip",
+        RejoinTarget::SkipTo(2),
+        vec![scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue)],
+    )];
+    let bypassed = scripted_pf(1, "skipped", &log, Scripted::Continue, Scripted::Continue);
+    let tail = scripted_pf(2, "C", &log, Scripted::Continue, Scripted::Continue);
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host, bypassed, tail]);
+
+    assert_eq!(
+        run_request_then_response(&pipeline, &log, "/").await,
+        vec!["C", "B1", "A"],
+        "SkipTo keeps the branch filters paired and drops the bypassed filter"
+    );
+}
+
+#[tokio::test]
+async fn reentered_branch_filter_runs_on_response_once() {
+    let log = HookLog::default();
+    let mut branch = unwind_branch(
+        "loop",
+        RejoinTarget::ReEnter(0),
+        vec![scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue)],
+    );
+    branch.max_iterations = Some(2);
+    let mut host = scripted_pf(1, "H", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![branch];
+    let head = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![head, host]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        ctx.branch_iterations.get("loop"),
+        Some(&3),
+        "the branch should fire twice and fall through on the third pass"
+    );
+
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        log.take(),
+        vec!["B1", "H", "A"],
+        "a branch filter re-entered twice must still run on_response once"
+    );
+}
+
+#[tokio::test]
+async fn request_phase_rerun_forgets_earlier_branch_filters() {
+    let log = HookLog::default();
+    let mut gated = scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue);
+    gated.conditions = vec![when_path("/api")];
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch("br", RejoinTarget::Next, vec![gated])];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    let api = crate::test_utils::make_request(Method::GET, "/api");
+    let other = crate::test_utils::make_request(Method::GET, "/other");
+    let mut ctx = crate::test_utils::make_filter_context(&api);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    ctx.request = &other;
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        log.take(),
+        vec!["A"],
+        "a rerun request phase must not pair filters only an earlier run executed"
+    );
+}
+
+#[tokio::test]
+async fn branch_filters_skip_on_response_without_a_request_phase() {
+    let log = HookLog::default();
+    let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
+    host.branches = vec![unwind_branch(
+        "br",
+        RejoinTarget::Next,
+        vec![scripted_pf(100, "B1", &log, Scripted::Continue, Scripted::Continue)],
+    )];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        log.take(),
+        vec!["A"],
+        "a branch filter whose on_request never ran must not run on_response"
+    );
+}
+
+#[tokio::test]
+async fn branch_filter_state_reaches_its_on_response() {
+    let obs: Arc<std::sync::Mutex<Vec<(u64, &'static str)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut host = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(StatefulFilter {
+            id: 1,
+            observations: Arc::clone(&obs),
+        })),
+        vec![],
+        vec![],
+    );
+    host.branches = vec![unwind_branch(
+        "br",
+        RejoinTarget::Next,
+        vec![PipelineFilter::new(
+            100,
+            AnyFilter::Http(Box::new(StatefulFilter {
+                id: 2,
+                observations: Arc::clone(&obs),
+            })),
+            vec![],
+            vec![],
+        )],
+    )];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![host]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        obs.lock().unwrap().clone(),
+        vec![
+            (1, "on_request"),
+            (2, "on_request"),
+            (2, "on_response"),
+            (1, "on_response")
+        ],
+        "the branch filter's on_response must see its own per-request state"
+    );
+}
+
+/// Shared log of `on_response` calls, in call order.
+#[derive(Clone, Default)]
+struct HookLog(Arc<std::sync::Mutex<Vec<&'static str>>>);
+
+impl HookLog {
+    /// Drain the recorded labels.
+    fn take(&self) -> Vec<&'static str> {
+        std::mem::take(&mut *self.0.lock().unwrap())
+    }
+}
+
+/// How a [`ScriptedFilter`] hook returns.
+#[derive(Clone, Copy)]
+enum Scripted {
+    /// Return `Continue`.
+    Continue,
+
+    /// Return an error.
+    Error,
+
+    /// Reject with a 418.
+    Reject,
+}
+
+impl Scripted {
+    /// The hook result this script produces.
+    fn action(self) -> Result<FilterAction, FilterError> {
+        match self {
+            Self::Continue => Ok(FilterAction::Continue),
+            Self::Error => Err("scripted error".into()),
+            Self::Reject => Ok(FilterAction::Reject(crate::Rejection::status(418))),
+        }
+    }
+}
+
+/// Logs its label from `on_response` and returns each hook's scripted outcome.
+struct ScriptedFilter {
+    label: &'static str,
+    log: HookLog,
+    request: Scripted,
+    response: Scripted,
+}
+
+#[async_trait]
+impl HttpFilter for ScriptedFilter {
+    fn name(&self) -> &'static str {
+        self.label
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.request.action()
+    }
+
+    async fn on_response(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.log.0.lock().unwrap().push(self.label);
+        self.response.action()
+    }
+}
+
+/// A [`ScriptedFilter`] pipeline entry with the given `filter_id`.
+fn scripted_pf(
+    filter_id: usize,
+    label: &'static str,
+    log: &HookLog,
+    request: Scripted,
+    response: Scripted,
+) -> PipelineFilter {
+    PipelineFilter::new(
+        filter_id,
+        AnyFilter::Http(Box::new(ScriptedFilter {
+            label,
+            log: log.clone(),
+            request,
+            response,
+        })),
+        vec![],
+        vec![],
+    )
+}
+
+/// An unconditional branch over `filters` rejoining at `rejoin`.
+fn unwind_branch(name: &str, rejoin: RejoinTarget, filters: Vec<PipelineFilter>) -> ResolvedBranch {
+    ResolvedBranch {
+        condition: None,
+        filters,
+        max_iterations: None,
+        name: Arc::from(name),
+        rejoin,
+    }
+}
+
+/// Run the request phase for `path`, then the response phase, returning
+/// the `on_response` log.
+async fn run_request_then_response(pipeline: &FilterPipeline, log: &HookLog, path: &str) -> Vec<&'static str> {
+    let req = crate::test_utils::make_request(Method::GET, path);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await);
+    drop(log.take());
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+    log.take()
 }

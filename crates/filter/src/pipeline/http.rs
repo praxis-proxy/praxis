@@ -15,12 +15,15 @@
 //! [`BodyAccess`]: crate::body::BodyAccess
 //! [`http_utils`]: super::http_utils
 
+use std::pin::Pin;
+
 use bytes::Bytes;
 use tracing::{debug, trace, warn};
 
 use super::{
     FilterPipeline,
-    branch::BranchOutcome,
+    branch::{BranchOutcome, ResolvedBranch, branch_filter_executed},
+    filter::PipelineFilter,
     http_utils::{
         BodyFilterOutcome, HeaderFilterOutcome, accumulate_body_bytes, as_request_body_filter, as_response_body_filter,
         released_or_continue, run_request_body_filter, run_request_filter, run_response_body_filter,
@@ -68,6 +71,7 @@ impl FilterPipeline {
         }
         ctx.executed_filter_indices.clear();
         ctx.executed_filter_indices.resize(self.filters.len(), false);
+        ctx.executed_branch_filters.clear();
         ctx.body_done_indices.clear();
         ctx.body_done_indices.resize(self.filters.len(), false);
         let mut idx = 0;
@@ -167,14 +171,15 @@ impl FilterPipeline {
     /// Run all HTTP response filters in reverse order.
     ///
     /// Skips filters that did not execute during the request
-    /// phase (tracked by [`executed_filter_indices`]).
+    /// phase (tracked by [`executed_filter_indices`]). Branch filters
+    /// that ran `on_request` unwind in reverse just before their host
+    /// filter.
     ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails.
     ///
     /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
-    #[expect(clippy::too_many_lines, reason = "streaming terminal variant adds one match arm")]
     pub async fn execute_http_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         // Reset body-done tracking at the request -> response boundary. The
         // request-body and response-body loops share body_done_indices, so a
@@ -192,27 +197,105 @@ impl FilterPipeline {
                 );
                 continue;
             }
-            let http_filter = match &pf.filter {
-                AnyFilter::Http(f) => f.as_ref(),
-                AnyFilter::Tcp(_) => continue,
-            };
-            if skip_by_response_conditions(http_filter, &pf.response_conditions, ctx) {
-                continue;
+            // Any future precomputed list of response-hook filters must keep
+            // every top-level host whose branch subtree holds a filter with a
+            // real on_response, or this unwind silently disappears.
+            if !pf.branches.is_empty()
+                && let Some(rejection) = self.unwind_branches(&pf.branches, ctx).await?
+            {
+                return Ok(FilterAction::Reject(rejection));
             }
-            ctx.current_filter_id = Some(pf.filter_id);
-            let outcome =
-                run_response_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
-            ctx.current_filter_id = None;
-            match outcome? {
-                HeaderFilterOutcome::Continue
-                | HeaderFilterOutcome::TerminalResponse(_)
-                | HeaderFilterOutcome::StreamingTerminalResponse(_) => {},
-                HeaderFilterOutcome::Rejected(rejection) => {
-                    return Ok(FilterAction::Reject(rejection));
-                },
+            if let Some(rejection) = self.run_response_hook(pf, ctx).await? {
+                return Ok(FilterAction::Reject(rejection));
             }
         }
         Ok(FilterAction::Continue)
+    }
+
+    /// Run `on_response` for the filters of `branches` that ran `on_request`.
+    ///
+    /// Walks the branches, and each branch's filters, in reverse so the
+    /// unwind mirrors request order; a filter's nested branches unwind
+    /// just before the filter itself. Re-entrance does not repeat the
+    /// hook: each branch filter runs `on_response` at most once per
+    /// request, at its pipeline position, like a top-level filter.
+    ///
+    /// Returns the first rejection a hook produced, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if a branch filter fails with a closed
+    /// `failure_mode`.
+    async fn unwind_branches(
+        &self,
+        branches: &[ResolvedBranch],
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<Option<Rejection>, FilterError> {
+        for pf in branches.iter().rev().flat_map(|branch| branch.filters.iter().rev()) {
+            if !branch_filter_executed(&ctx.executed_branch_filters, pf.filter_id) {
+                trace!(
+                    filter = pf.filter.name(),
+                    "skipped branch on_response (not executed in request phase)"
+                );
+                continue;
+            }
+            if !pf.branches.is_empty()
+                && let Some(rejection) = self.unwind_branches_boxed(&pf.branches, ctx).await?
+            {
+                return Ok(Some(rejection));
+            }
+            if let Some(rejection) = self.run_response_hook(pf, ctx).await? {
+                return Ok(Some(rejection));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Boxed entry point breaking the async recursion cycle for nested
+    /// branches (branches within branches).
+    fn unwind_branches_boxed<'a>(
+        &'a self,
+        branches: &'a [ResolvedBranch],
+        ctx: &'a mut HttpFilterContext<'_>,
+    ) -> UnwindFuture<'a> {
+        Box::pin(self.unwind_branches(branches, ctx))
+    }
+
+    /// Run one filter's `on_response`, honouring its response conditions
+    /// and `failure_mode`.
+    ///
+    /// Returns the rejection the hook produced, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the filter fails with a closed
+    /// `failure_mode`.
+    async fn run_response_hook(
+        &self,
+        pf: &PipelineFilter,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<Option<Rejection>, FilterError> {
+        let AnyFilter::Http(http_filter) = &pf.filter else {
+            return Ok(None);
+        };
+        if skip_by_response_conditions(http_filter.as_ref(), &pf.response_conditions, ctx) {
+            return Ok(None);
+        }
+        ctx.current_filter_id = Some(pf.filter_id);
+        let outcome = run_response_filter(
+            http_filter.as_ref(),
+            ctx,
+            pf.failure_mode,
+            self.record_filter_duration_metrics,
+        )
+        .await;
+        ctx.current_filter_id = None;
+        match outcome? {
+            HeaderFilterOutcome::Continue
+            | HeaderFilterOutcome::TerminalResponse(_)
+            | HeaderFilterOutcome::StreamingTerminalResponse(_) => Ok(None),
+            HeaderFilterOutcome::Rejected(rejection) => Ok(Some(rejection)),
+        }
     }
 
     /// Run all HTTP request body filters in order.
@@ -630,6 +713,13 @@ impl FilterPipeline {
         Ok(None)
     }
 }
+
+// -----------------------------------------------------------------------------
+// Branch Unwinding
+// -----------------------------------------------------------------------------
+
+/// Future returned by [`FilterPipeline::unwind_branches_boxed`].
+type UnwindFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<Rejection>, FilterError>> + Send + 'a>>;
 
 // -----------------------------------------------------------------------------
 // Binding Utilities

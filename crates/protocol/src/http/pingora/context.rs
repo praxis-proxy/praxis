@@ -57,6 +57,12 @@ pub struct PingoraRequestCtx {
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
     pub cached_body_done_indices: Vec<bool>,
 
+    /// Cached branch-filter execution record. Same lifecycle as
+    /// [`cached_body_done_indices`].
+    ///
+    /// [`cached_body_done_indices`]: Self::cached_body_done_indices
+    pub cached_executed_branch_filters: Vec<bool>,
+
     /// Cached per-filter execution indices. Same lifecycle as
     /// [`cached_body_done_indices`].
     ///
@@ -395,6 +401,7 @@ macro_rules! filter_context {
             metrics_route: $ctx.metrics_route.clone(),
             peer_identity: $ctx.peer_identity.clone(),
             extensions: std::mem::take(&mut $ctx.extensions),
+            executed_branch_filters: std::mem::take(&mut $ctx.cached_executed_branch_filters),
             executed_filter_indices: std::mem::take(&mut $ctx.cached_executed_filter_indices),
             extra_request_headers: Vec::new(),
             request_headers_to_remove: Vec::new(),
@@ -575,6 +582,7 @@ impl Default for PingoraRequestCtx {
             _connection_permit: None,
             _global_connection_permit: None,
             cached_body_done_indices: Vec::new(),
+            cached_executed_branch_filters: Vec::new(),
             cached_executed_filter_indices: Vec::new(),
             client_addr: None,
             client_http_version: None,

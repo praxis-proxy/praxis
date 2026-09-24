@@ -322,6 +322,14 @@ pub struct HttpFilterContext<'a> {
     /// [`TypeId`]: std::any::TypeId
     pub extensions: RequestExtensions,
 
+    /// Branch filters whose `on_request` ran during the request
+    /// phase, indexed by `filter_id`. The response phase runs
+    /// `on_response` only for the branch filters marked here, the
+    /// way [`executed_filter_indices`] gates top-level filters.
+    ///
+    /// [`executed_filter_indices`]: Self::executed_filter_indices
+    pub executed_branch_filters: Vec<bool>,
+
     /// Tracks which pipeline filter indices actually executed
     /// during the request phase. The response phase skips
     /// filters that did not run (e.g. due to `SkipTo`).

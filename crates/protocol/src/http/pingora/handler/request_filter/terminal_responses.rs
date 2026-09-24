@@ -90,6 +90,7 @@ async fn prepare_terminal_response(
         filter_state,
         filter_results,
         structured_metadata,
+        executed_branch_filters,
         executed_indices,
         body_done,
     ) = {
@@ -107,6 +108,7 @@ async fn prepare_terminal_response(
             fctx.filter_state,
             fctx.filter_results,
             fctx.structured_metadata,
+            fctx.executed_branch_filters,
             fctx.executed_filter_indices,
             fctx.body_done_indices,
         )
@@ -118,6 +120,7 @@ async fn prepare_terminal_response(
     ctx.filter_state = filter_state;
     ctx.filter_results = filter_results;
     ctx.structured_metadata = structured_metadata;
+    ctx.cached_executed_branch_filters = executed_branch_filters;
     ctx.cached_executed_filter_indices = executed_indices;
     ctx.cached_body_done_indices = body_done;
     ctx.response_body_mode = clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
@@ -154,6 +157,7 @@ fn run_parent_terminal_body_filters(
         filter_state,
         filter_results,
         structured_metadata,
+        executed_branch_filters,
         executed_indices,
         body_done,
     ) = {
@@ -172,6 +176,7 @@ fn run_parent_terminal_body_filters(
             fctx.filter_state,
             fctx.filter_results,
             fctx.structured_metadata,
+            fctx.executed_branch_filters,
             fctx.executed_filter_indices,
             fctx.body_done_indices,
         )
@@ -184,6 +189,7 @@ fn run_parent_terminal_body_filters(
     ctx.filter_state = filter_state;
     ctx.filter_results = filter_results;
     ctx.structured_metadata = structured_metadata;
+    ctx.cached_executed_branch_filters = executed_branch_filters;
     ctx.cached_executed_filter_indices = executed_indices;
     ctx.cached_body_done_indices = body_done;
 

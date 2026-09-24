@@ -44,6 +44,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         metrics_route: None,
         peer_identity: None,
         extensions: praxis_filter::RequestExtensions::default(),
+        executed_branch_filters: Vec::new(),
         executed_filter_indices: Vec::new(),
         extra_request_headers: Vec::new(),
         request_headers_to_remove: Vec::new(),

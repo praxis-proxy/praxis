@@ -331,6 +331,31 @@ See `examples/configs/branching/cross-chain-flat.yaml`.
 | Branches per filter | 16 |
 | Total branches across config | 256 |
 
+**Response hooks** (`on_response`) run for every
+branch filter whose `on_request` ran, so filters such
+as `cors`, `headers` response operations, and
+`credential_injection` behave the same inside a
+branch as on the main path. They unwind in reverse,
+just like top-level filters: a branch's filters run
+`on_response` in reverse order immediately before
+their host filter's `on_response`, and a nested
+branch unwinds immediately before the branch filter
+that hosts it. A branch filter that rejected or
+answered the request still runs `on_response`; one
+skipped by its `conditions`, left unreached because
+the branch stopped early, or whose error propagated
+under `failure_mode: closed` does not.
+`response_conditions` and `failure_mode` apply
+exactly as at top level, and a rejection from a
+branch filter's `on_response` stops the response
+phase. Re-entrance
+(`max_iterations` loops) does not repeat the hook:
+each branch filter runs `on_response` at most once
+per request, however many passes ran its
+`on_request`. Filters that `rejoin` skips over, or
+that a `terminal` rejoin never reaches, do not run
+`on_response`.
+
 **Body hooks** (`on_request_body`, `on_response_body`)
 do **not** run for filters inside branch chains.
 Body-transforming filters must be in the main

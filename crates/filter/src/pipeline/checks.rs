@@ -568,11 +568,12 @@ fn branch_selects_cluster(filters: &[PipelineFilter]) -> bool {
 
 /// Body-access filters inside branch chains.
 ///
-/// Branch sub-chains only run `on_request`: `on_request_body` and
-/// `on_response_body` never execute for filters inside branches, yet
-/// their declared body access would silently enable pipeline-wide
-/// buffering for hooks that never run. Body-processing filters must be
-/// in the main pipeline path or gated with normal filter conditions.
+/// Branch sub-chains run only the header hooks (`on_request` and
+/// `on_response`): `on_request_body` and `on_response_body` never
+/// execute for filters inside branches, yet their declared body access
+/// would silently enable pipeline-wide buffering for hooks that never
+/// run. Body-processing filters must be in the main pipeline path or
+/// gated with normal filter conditions.
 pub(super) fn check_branch_body_filters(filters: &[PipelineFilter], errors: &mut Vec<String>) {
     for pf in filters {
         for branch in &pf.branches {
@@ -589,8 +590,8 @@ fn collect_branch_body_errors(branch_name: &str, filters: &[PipelineFilter], err
         {
             errors.push(format!(
                 "filter '{name}' in branch '{branch_name}' declares body \
-                 access, but branch filters only run on_request and body \
-                 hooks never execute; move it to the main pipeline or gate \
+                 access, but body hooks never execute for branch \
+                 filters; move it to the main pipeline or gate \
                  it with filter conditions",
                 name = filter.name(),
             ));
@@ -605,7 +606,7 @@ fn collect_branch_body_errors(branch_name: &str, filters: &[PipelineFilter], err
 ///
 /// The selected-upstream request-body phase, like the request- and
 /// response-body phases, only runs top-level filters: branch sub-chains
-/// run `on_request` only, so a filter declaring
+/// run header hooks only, so a filter declaring
 /// [`selected_upstream_request_body_access`] inside a branch would
 /// silently enable buffering for a hook that never runs. The existing
 /// [`check_branch_body_filters`] does not catch it (a filter can declare
@@ -635,8 +636,8 @@ fn collect_branch_selected_upstream_body_errors(
         {
             errors.push(format!(
                 "filter '{name}' in branch '{branch_name}' declares \
-                 selected-upstream request body access, but branch filters \
-                 only run on_request and body hooks never execute; move it \
+                 selected-upstream request body access, but body hooks \
+                 never execute for branch filters; move it \
                  to the main pipeline or gate it with filter conditions",
                 name = filter.name(),
             ));
