@@ -415,7 +415,7 @@ fn mixed_ipv4_and_ipv6_in_xff_from_trusted_proxy_preserved() {
 }
 
 #[test]
-fn trusted_proxy_proto_reflects_actual_scheme() {
+fn trusted_proxy_proto_is_preserved() {
     let _backend = start_header_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();
@@ -435,13 +435,39 @@ fn trusted_proxy_proto_reflects_actual_scheme() {
     let proto = body_header(&body, "x-forwarded-proto");
     let proto = proto.unwrap_or_default();
     assert_eq!(
-        proto, "http",
-        "X-Forwarded-Proto must reflect actual scheme (http), not forwarded value; got: {proto}"
+        proto, "https",
+        "a trusted proxy's X-Forwarded-Proto describes the client connection and must be kept; got: {proto}"
     );
 }
 
 #[test]
-fn trusted_proxy_host_reflects_actual_host_header() {
+fn untrusted_client_proto_reflects_actual_scheme() {
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
+    let proxy_port = free_port();
+    let yaml = fwd_yaml(proxy_port, backend_port, &["10.0.0.0/8"]);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         X-Forwarded-Proto: https\r\n\
+         Connection: close\r\n\r\n",
+    );
+    let body = parse_body(&raw);
+
+    let proto = body_header(&body, "x-forwarded-proto");
+    let proto = proto.unwrap_or_default();
+    assert_eq!(
+        proto, "http",
+        "an untrusted client must not set X-Forwarded-Proto; got: {proto}"
+    );
+}
+
+#[test]
+fn trusted_proxy_host_is_preserved() {
     let _backend = start_header_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();
@@ -461,8 +487,34 @@ fn trusted_proxy_host_reflects_actual_host_header() {
     let host = body_header(&body, "x-forwarded-host");
     let host = host.unwrap_or_default();
     assert_eq!(
+        host, "original-host.com",
+        "a trusted proxy's X-Forwarded-Host names the client's host and must be kept; got: {host}"
+    );
+}
+
+#[test]
+fn untrusted_client_host_reflects_actual_host_header() {
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
+    let proxy_port = free_port();
+    let yaml = fwd_yaml(proxy_port, backend_port, &["10.0.0.0/8"]);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: proxy-host.com\r\n\
+         X-Forwarded-Host: original-host.com\r\n\
+         Connection: close\r\n\r\n",
+    );
+    let body = parse_body(&raw);
+
+    let host = body_header(&body, "x-forwarded-host");
+    let host = host.unwrap_or_default();
+    assert_eq!(
         host, "proxy-host.com",
-        "X-Forwarded-Host must reflect actual Host header; got: {host}"
+        "an untrusted client must not set X-Forwarded-Host; got: {host}"
     );
 }
 
