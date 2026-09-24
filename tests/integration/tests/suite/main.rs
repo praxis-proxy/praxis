@@ -61,7 +61,6 @@ mod credential_store_parity;
 mod csrf;
 mod downstream_read_timeout;
 mod error_response;
-mod errors_total;
 mod examples;
 mod failure_mode;
 mod filter_composition;

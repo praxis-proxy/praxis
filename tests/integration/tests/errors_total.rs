@@ -1,12 +1,69 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Integration tests for the unified proxy error counter.
+#![forbid(unsafe_code)]
 
-use std::time::Duration;
+//! Integration tests for the unified proxy error counter.
+//!
+//! `praxis_errors_total` is process-global and labelled only by `type`, so in
+//! the shared `suite` process another test's rejection could satisfy a
+//! "count went up" assertion. These tests run as their own binary, one at a
+//! time.
+
+#![allow(
+    clippy::allow_attributes_without_reason,
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::clone_on_ref_ptr,
+    clippy::cognitive_complexity,
+    clippy::default_trait_access,
+    clippy::disallowed_methods,
+    clippy::doc_markdown,
+    clippy::doc_nested_refdefs,
+    clippy::expect_used,
+    clippy::format_push_string,
+    clippy::indexing_slicing,
+    clippy::iter_over_hash_type,
+    clippy::items_after_statements,
+    clippy::len_zero,
+    clippy::manual_is_multiple_of,
+    clippy::manual_let_else,
+    clippy::map_unwrap_or,
+    clippy::map_with_unused_argument_over_ranges,
+    clippy::min_ident_chars,
+    clippy::needless_raw_string_hashes,
+    clippy::needless_raw_strings,
+    clippy::panic,
+    clippy::print_stderr,
+    clippy::redundant_closure_for_method_calls,
+    clippy::shadow_unrelated,
+    clippy::single_char_lifetime_names,
+    clippy::string_add,
+    clippy::struct_field_names,
+    clippy::tests_outside_test_module,
+    clippy::too_many_lines,
+    clippy::unwrap_used,
+    clippy::used_underscore_binding,
+    clippy::useless_format,
+    clippy::wildcard_enum_match_arm,
+    reason = "test code"
+)]
+
+use std::{sync::Mutex, time::Duration};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{free_port, http_get, http_post, start_backend_with_shutdown, start_proxy, wait_for_tcp};
+
+// -----------------------------------------------------------------------------
+// Statics
+// -----------------------------------------------------------------------------
+
+/// Held by every test: they read and bump the same counter series.
+static SERIAL: Mutex<()> = Mutex::new(());
 
 // -----------------------------------------------------------------------------
 // Utilities
@@ -23,13 +80,10 @@ fn error_count(body: &str, error_type: &str) -> Option<f64> {
 /// returning the scrape that observed the increase (or the last scrape once the
 /// deadline passes).
 ///
-/// `praxis_errors_total` carries only a `type` label, so the series is shared
-/// across every test in this binary and is often already present at a nonzero
-/// value before a given request runs. Waiting for the series to merely appear
-/// races the metric recording: the request's response can return before its
-/// increment lands, so an appearance check can read a stale total. Waiting for
-/// a strict increase above the caller's own `before` reading pins the
-/// observation to this request's increment.
+/// The series may already be nonzero from an earlier test, and the response
+/// can return before the request's increment lands, so wait for a strict
+/// increase above the caller's `before` reading rather than for the series to
+/// appear. Tests hold [`SERIAL`], so no other request can supply it.
 fn wait_for_error(admin: &str, error_type: &str, baseline: f64) -> String {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut last = String::new();
@@ -49,6 +103,7 @@ fn wait_for_error(admin: &str, error_type: &str, baseline: f64) -> String {
 
 #[test]
 fn errors_total_counts_filter_rejections() {
+    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let backend = start_backend_with_shutdown("errors-reject");
     let proxy_port = free_port();
     let admin_port = free_port();
@@ -99,6 +154,7 @@ insecure_options:
 
 #[test]
 fn errors_total_counts_unreachable_upstreams() {
+    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let proxy_port = free_port();
     let admin_port = free_port();
     let dead_port = free_port();
@@ -151,6 +207,7 @@ insecure_options:
 
 #[test]
 fn errors_total_absent_on_the_happy_path() {
+    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let backend = start_backend_with_shutdown("errors-none");
     let proxy_port = free_port();
     let admin_port = free_port();
@@ -197,6 +254,7 @@ insecure_options:
 
 #[test]
 fn errors_total_counts_request_body_rejections() {
+    let _serial = SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // A rejection raised in the request-body phase (here a body larger than
     // the configured limit) terminates the request just like a header-phase
     // reject and must be counted, not silently dropped.
