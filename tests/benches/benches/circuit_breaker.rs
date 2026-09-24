@@ -15,8 +15,7 @@
     clippy::unwrap_used,
     clippy::too_many_lines,
     clippy::missing_assert_message,
-    clippy::disallowed_methods,
-    clippy::drop_non_drop,
+    clippy::panic,
     clippy::unit_arg,
     clippy::map_with_unused_argument_over_ranges,
     reason = "benchmarks"
@@ -68,9 +67,10 @@ fn bench_acquire_closed(c: &mut Criterion) {
 
 /// Benchmark token acquisition when the circuit is open (fast reject).
 fn bench_acquire_open(c: &mut Criterion) {
+    // A day-long window keeps the breaker open however long criterion runs.
     let breaker = CircuitBreaker::new(CircuitBreakerConfig {
         threshold: 1,
-        recovery_window: Duration::from_millis(10_000),
+        recovery_window: Duration::from_secs(86_400),
         half_open_timeout: Duration::from_millis(5_000),
     });
 
@@ -87,26 +87,30 @@ fn bench_acquire_open(c: &mut Criterion) {
     });
 }
 
-/// Benchmark token acquisition when the circuit is half-open (probe token).
+/// Benchmark the open-to-half-open transition that issues a probe token.
 fn bench_acquire_half_open(c: &mut Criterion) {
-    let breaker = CircuitBreaker::new(CircuitBreakerConfig {
-        threshold: 1,
-        recovery_window: Duration::from_millis(0), // Immediate recovery for benchmark
-        half_open_timeout: Duration::from_millis(5_000),
-    });
-
-    // Trigger circuit open then wait for recovery window
-    if let CircuitCheck::Allowed(token) = breaker.try_acquire() {
-        breaker.record_failure(token);
-    }
-    thread::sleep(Duration::from_millis(10));
-
     c.bench_function("circuit_breaker/acquire_half_open", |b| {
-        b.iter(|| {
-            let check = black_box(breaker.try_acquire());
-            // Half-open allows one probe, then rejects
-            drop(check);
-        });
+        // A fresh tripped breaker per iteration: once a probe is out, later
+        // acquisitions are rejected until the probe resolves.
+        b.iter_batched(
+            || {
+                let breaker = CircuitBreaker::new(CircuitBreakerConfig {
+                    threshold: 1,
+                    recovery_window: Duration::ZERO,
+                    half_open_timeout: Duration::from_millis(5_000),
+                });
+                if let CircuitCheck::Allowed(token) = breaker.try_acquire() {
+                    breaker.record_failure(token);
+                }
+                breaker
+            },
+            |breaker| {
+                let check = black_box(breaker.try_acquire());
+                assert!(matches!(check, CircuitCheck::Allowed(_)));
+                (breaker, check)
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
 }
 
@@ -119,30 +123,38 @@ fn bench_record_success(c: &mut Criterion) {
     });
 
     c.bench_function("circuit_breaker/record_success", |b| {
-        b.iter(|| {
-            if let CircuitCheck::Allowed(token) = breaker.try_acquire() {
+        b.iter_batched(
+            || breaker.try_acquire(),
+            |check| {
+                let CircuitCheck::Allowed(token) = check else {
+                    panic!("a closed breaker must issue a token");
+                };
                 black_box(breaker.record_success(token));
-            }
-        });
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
 }
 
 /// Benchmark recording a failed request.
 fn bench_record_failure(c: &mut Criterion) {
     c.bench_function("circuit_breaker/record_failure", |b| {
-        // Create a new breaker per iteration to avoid state accumulation
+        // A new breaker per iteration keeps failures from tripping it.
         b.iter_batched(
             || {
-                CircuitBreaker::new(CircuitBreakerConfig {
+                let breaker = CircuitBreaker::new(CircuitBreakerConfig {
                     threshold: 100,
                     recovery_window: Duration::from_millis(10_000),
                     half_open_timeout: Duration::from_millis(5_000),
-                })
+                });
+                let CircuitCheck::Allowed(token) = breaker.try_acquire() else {
+                    panic!("a closed breaker must issue a token");
+                };
+                (breaker, token)
             },
-            |breaker| {
-                if let CircuitCheck::Allowed(token) = breaker.try_acquire() {
-                    black_box(breaker.record_failure(token));
-                }
+            |(breaker, token)| {
+                black_box(breaker.record_failure(token));
+                breaker
             },
             criterion::BatchSize::SmallInput,
         );
