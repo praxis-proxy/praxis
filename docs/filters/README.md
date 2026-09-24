@@ -528,9 +528,13 @@ described above: it is gated at the binding barrier.
 
 ### Selected-Upstream Conditions
 
-`selected_upstream` matches on the application metadata that
-the load balancer publishes when it selects an upstream. It
-has two optional sub-fields; when both are set they are ANDed:
+`selected_upstream` matches the application metadata
+(`http.application_protocol`, `http.application_provider`) of
+the routed cluster (the cluster the router selected). The
+load balancer publishes it when it selects an upstream, and
+also when an earlier filter such as `endpoint_selector` has
+already set the endpoint. It has two optional sub-fields;
+when both are set they are ANDed:
 
 | Sub-field              | Matches when                              |
 | ---------------------- | ----------------------------------------- |
@@ -547,25 +551,23 @@ has two optional sub-fields; when both are set they are ANDed:
   # ...path_rewrite config...
 ```
 
-This metadata is typed and framework-owned: it is read from
-the selection published by the load balancer, never from a
-request header or writable filter metadata. If no upstream
-has been selected yet, or the requested field is absent, the
-predicate **fails closed** — an unset value never satisfies a
-configured `when`, and never trips an `unless`.
+The metadata comes only from the load balancer's selection,
+never from a request header or filter-writable metadata. If
+no upstream has been selected yet, or the cluster does not
+set the field, the predicate fails closed: an unset value
+never satisfies a `when` and never trips an `unless`.
 
-Because the metadata only exists after selection, a
-`selected_upstream` condition requires that an *unconditional*
-`load_balancer` is guaranteed to run earlier on every
-reachable path. Pipeline validation rejects the config
-otherwise (a conditional load balancer may not run, so it does
-not satisfy the guarantee). A load balancer nested in an
-unconditional branch, or one that hosts the branch containing
-the gated filter, does satisfy it.
+Pipeline validation therefore requires an *unconditional*
+`load_balancer` to run before the gated filter on every
+reachable path. A conditional load balancer may not run, so it
+does not count. A load balancer in an unconditional branch, or
+one that hosts the branch containing the gated filter, does.
 
-Selected-upstream predicates are evaluated once, during the
-normal request phase; they are not re-evaluated during body
-transformation.
+Selected-upstream predicates are resolved in the request
+phase. The pre-read body path runs before any selection
+exists, so validation rejects a request-body filter that
+combines a `selected_upstream` condition with the
+`StreamBuffer` body mode.
 
 ### Response Conditions
 

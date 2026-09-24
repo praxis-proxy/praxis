@@ -617,6 +617,38 @@ async fn on_request_publishes_selected_application_ordinary_path() {
 }
 
 #[tokio::test]
+async fn on_request_publishes_selected_application_for_preset_upstream() {
+    let lb = LoadBalancerFilter::new(&[cluster_with_application(
+        "llm",
+        &["127.0.0.1:8080"],
+        Some("openai_chat_completions"),
+        Some("vllm"),
+    )]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("llm"));
+    ctx.upstream = Some(praxis_core::connectivity::Upstream {
+        address: Arc::from("10.0.0.7:8000"),
+        authority: None,
+        connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+    });
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.upstream.as_ref().map(|upstream| upstream.address.as_ref()),
+        Some("10.0.0.7:8000"),
+        "a preset upstream (e.g. from endpoint_selector) must be kept"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        Some("vllm"),
+        "the routed cluster's metadata must be published even when the upstream was preset"
+    );
+}
+
+#[tokio::test]
 async fn on_request_publishes_selected_application_pinned_endpoint() {
     let lb = LoadBalancerFilter::new(&[cluster_with_application(
         "llm",

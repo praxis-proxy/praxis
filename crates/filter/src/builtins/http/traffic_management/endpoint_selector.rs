@@ -192,6 +192,10 @@ fn default_strip_header() -> bool {
 /// nothing and returns [`FilterAction::Continue`]. Empty values are
 /// rejected as an error.
 ///
+/// When an endpoint is preset, the load balancer publishes the routed
+/// cluster's application metadata for it; the preset address is assumed
+/// to belong to that cluster.
+///
 /// # YAML configuration
 ///
 /// ```yaml

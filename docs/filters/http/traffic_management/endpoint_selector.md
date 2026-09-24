@@ -11,6 +11,8 @@ Only values set by trusted pre-read mutations (e.g. from an external processing 
 
 The resolved value must be a single `host:port` authority. If no trusted value is found and `required` is false, the filter does nothing and returns [`FilterAction::Continue`]. Empty values are rejected as an error.
 
+When an endpoint is preset, the load balancer publishes the routed cluster's application metadata for it; the preset address is assumed to belong to that cluster.
+
 ## Configuration
 
 | Field | Type | Required | Description |

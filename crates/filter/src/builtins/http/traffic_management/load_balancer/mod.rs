@@ -316,6 +316,16 @@ impl HttpFilter for LoadBalancerFilter {
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if ctx.upstream.is_some() {
             debug!("upstream already set, skipping LB selection");
+            // A preset upstream (endpoint_selector) still serves the routed
+            // cluster, so `selected_upstream` conditions must see its metadata.
+            let application = ctx
+                .cluster
+                .as_deref()
+                .and_then(|name| self.clusters.get(name))
+                .map(|entry| (entry.application_protocol.clone(), entry.application_provider.clone()));
+            if let Some((protocol, provider)) = application {
+                ctx.publish_selected_application(protocol, provider);
+            }
             return Ok(FilterAction::Continue);
         }
 

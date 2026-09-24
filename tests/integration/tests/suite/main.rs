@@ -90,6 +90,7 @@ mod security;
 mod selected_upstream_body;
 #[cfg(feature = "iterative-request-router")]
 mod selected_upstream_body_subrequests;
+mod selected_upstream_preset_endpoint;
 mod sni_router;
 mod stats_admin;
 mod stream_buffer_adapter;
