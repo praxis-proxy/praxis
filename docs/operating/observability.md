@@ -250,7 +250,13 @@ between the two is proxy-generated responses.
 
 The `endpoint` label is the address as configured,
 not the resolved peer, so its cardinality is bounded
-by the config rather than by DNS.
+by the config rather than by DNS. Series are never
+removed, though, even across reloads: a deployment
+whose endpoints change over time (for example
+endpoints generated from pod IPs) keeps a set of
+series for every address it has ever configured, and
+`/metrics` grows with each one. Disable the `endpoint`
+dimension there (see [Metric Label Sets](#metric-label-sets)).
 
 ### TCP Connection Metrics
 
