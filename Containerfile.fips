@@ -91,7 +91,7 @@ ARG CARGO_ARGS
 # cached target goes first. Drop the clean once rust-toolset is 1.99 or newer.
 RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
     --mount=type=cache,id=praxis-fips-target,target=/src/target \
-    cargo clean --release -p praxis-proxy \
+    cargo clean --locked --release -p praxis-proxy \
     && RUSTC_BOOTSTRAP=1 CARGO_BUILD_SBOM=true \
        cargo auditable -Zsbom \
         --config 'env.RUSTC_BOOTSTRAP.value="-1"' \
