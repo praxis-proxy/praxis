@@ -6019,6 +6019,83 @@ fn trace_propagation_honors_trace_context_conditions() {
     assert!(!pipeline.enables_trace_propagation(&skipped));
 }
 
+#[tokio::test]
+async fn request_body_after_request_phase_does_not_start_trace_context() {
+    let cond = praxis_core::config::Condition::When(praxis_core::config::ConditionMatch {
+        grpc: None,
+        path: None,
+        path_prefix: Some("/api".to_owned()),
+        methods: None,
+        headers: None,
+        bound_upstream: None,
+        selected_upstream: None,
+    });
+    let pipeline = FilterPipeline::from_filters(vec![
+        super::test_filters::noop_filter_with_conditions("trace_context", vec![cond]),
+        PipelineFilter::new(
+            1,
+            AnyFilter::Http(Box::new(BodyInspectorFilter { chunks: Arc::default() })),
+            vec![],
+            vec![],
+        ),
+    ]);
+    let req = crate::test_utils::make_request(Method::POST, "/api/upload");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.executed_filter_indices = vec![false, true];
+
+    let mut body = Some(Bytes::from_static(b"chunk"));
+    let action = pipeline
+        .execute_http_request_body(&mut ctx, &mut body, true)
+        .await
+        .unwrap();
+
+    assert!(matches!(action, FilterAction::Continue), "the body filter continues");
+    assert!(
+        ctx.extensions.get::<crate::trace_context::TraceContext>().is_none(),
+        "the request phase skipped trace_context, so the body phase must not start the context"
+    );
+}
+
+#[tokio::test]
+async fn ambiguous_pre_read_header_does_not_fail_the_request() {
+    let cond = praxis_core::config::Condition::When(praxis_core::config::ConditionMatch {
+        grpc: None,
+        path: None,
+        path_prefix: None,
+        methods: None,
+        headers: Some(HashMap::from([("x-tenant".to_owned(), "a".to_owned())])),
+        bound_upstream: None,
+        selected_upstream: None,
+    });
+    let pipeline = FilterPipeline::from_filters(vec![
+        super::test_filters::noop_filter_with_conditions("trace_context", vec![cond]),
+        PipelineFilter::new(
+            1,
+            AnyFilter::Http(Box::new(BodyInspectorFilter { chunks: Arc::default() })),
+            vec![],
+            vec![],
+        ),
+    ]);
+    let req = crate::test_utils::make_request(Method::POST, "/upload");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extra_request_headers
+        .push((std::borrow::Cow::Borrowed("x-tenant"), "a".to_owned()));
+    ctx.extra_request_headers
+        .push((std::borrow::Cow::Borrowed("x-tenant"), "b".to_owned()));
+
+    let mut body = Some(Bytes::from_static(b"chunk"));
+    let action = pipeline.execute_http_request_body(&mut ctx, &mut body, true).await;
+
+    assert!(
+        matches!(action, Ok(FilterAction::Continue)),
+        "an ambiguous header must not fail a request over best-effort correlation"
+    );
+    assert!(
+        ctx.extensions.get::<crate::trace_context::TraceContext>().is_none(),
+        "an ambiguous header counts as no match"
+    );
+}
+
 #[test]
 fn trace_propagation_disabled_when_absent() {
     let pipeline = FilterPipeline::from_filters(vec![super::test_filters::noop_filter("rate_limit")]);

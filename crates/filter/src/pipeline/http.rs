@@ -16,7 +16,7 @@
 //! [`http_utils`]: super::http_utils
 
 use bytes::Bytes;
-use tracing::{trace, warn};
+use tracing::{debug, trace, warn};
 
 use super::{
     FilterPipeline,
@@ -239,7 +239,9 @@ impl FilterPipeline {
         // access is a per-filter constant, so non-body filters cost
         // nothing per chunk.
         for &idx in &self.request_body_filter_indices {
-            self.ensure_matching_trace_context(ctx)?;
+            if !request_phase_tracked {
+                self.ensure_matching_trace_context(ctx);
+            }
             let Some(pf) = self.filters.get(idx) else {
                 continue;
             };
@@ -279,20 +281,30 @@ impl FilterPipeline {
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }
         }
-        self.ensure_matching_trace_context(ctx)?;
+        if !request_phase_tracked {
+            self.ensure_matching_trace_context(ctx);
+        }
         Ok(released_or_continue(released))
     }
 
     /// Initialize correlation when a trace filter matches the evolving pre-read headers.
-    fn ensure_matching_trace_context(&self, ctx: &mut HttpFilterContext<'_>) -> Result<(), FilterError> {
-        if ctx.extensions.get::<TraceContext>().is_none()
-            && self
-                .enables_trace_propagation_from(ctx.request, &EffectiveHeaders(ctx))
-                .map_err(|error| FilterError::from(format!("trace_context: {error}")))?
-        {
-            ensure_trace_context(ctx);
+    ///
+    /// Only for a `StreamBuffer` pre-read, which runs before the request phase.
+    /// Once the request phase has run, it decided whether `trace_context` ran,
+    /// and re-matching against the rewritten request would start a context for
+    /// a request whose trace filter was skipped.
+    ///
+    /// A header the pre-read filters left ambiguous counts as no match: early
+    /// correlation is best-effort and must not fail the request.
+    fn ensure_matching_trace_context(&self, ctx: &mut HttpFilterContext<'_>) {
+        if ctx.extensions.get::<TraceContext>().is_some() {
+            return;
         }
-        Ok(())
+        match self.enables_trace_propagation_from(ctx.request, &EffectiveHeaders(ctx)) {
+            Ok(true) => ensure_trace_context(ctx),
+            Ok(false) => {},
+            Err(error) => debug!(%error, "trace_context: pre-read headers are ambiguous; not starting early"),
+        }
     }
 
     /// Run all selected-upstream request body filters in pipeline order.
