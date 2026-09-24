@@ -143,13 +143,17 @@ impl SessionStore {
     ///
     /// If at capacity and the key is new, evicts one entry according to policy.
     /// An update keeps the entry's original eviction-queue position
-    /// (creation order), so TTL-policy eviction age is preserved.
+    /// (creation order), so TTL-policy eviction age is preserved. A new key
+    /// also triggers the periodic expiry sweep: bindings whose keys are never
+    /// looked up again (a client per session id) would otherwise expire
+    /// unseen and hold the store at capacity.
     pub(super) fn put(&self, key: &str, endpoint: Arc<str>) {
         if let Some(mut existing) = self.map.get_mut(key) {
             existing.endpoint = endpoint;
             existing.last_accessed = Instant::now();
             return;
         }
+        self.maybe_sweep(Instant::now());
 
         // Evict until under the bound: a concurrent-put race can leave the
         // queue momentarily behind the map (insert done, enqueue pending), so
@@ -463,6 +467,20 @@ mod tests {
         thread::sleep(Duration::from_millis(5));
         store.sweep_expired();
         assert_eq!(store.len(), 0);
+    }
+
+    #[test]
+    fn inserting_a_new_key_sweeps_bindings_that_expired_unseen() {
+        let store = SessionStore::new(100, Duration::from_millis(1), EvictionPolicy::Lru);
+        store.put("a", "ep1".into());
+        store.put("b", "ep2".into());
+        thread::sleep(Duration::from_millis(5));
+        store.put("c", "ep3".into());
+        assert_eq!(
+            store.len(),
+            1,
+            "bindings nobody looks up again must be swept once they expire"
+        );
     }
 
     #[test]
