@@ -64,6 +64,16 @@ fn decimal_metadata_ip_rejected_in_endpoint() {
 }
 
 #[test]
+fn dotted_metadata_ip_rejected_in_endpoint() {
+    let yaml = cluster_yaml("169.254.169.254:80");
+    let err = Config::from_yaml(&yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("sensitive address"),
+        "169.254.169.254 metadata endpoint must be rejected: {err}"
+    );
+}
+
+#[test]
 fn ipv4_mapped_ipv6_loopback_rejected_in_endpoint() {
     let yaml = cluster_yaml("[::ffff:127.0.0.1]:80");
     let err = Config::from_yaml(&yaml).unwrap_err();

@@ -3615,6 +3615,7 @@ dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-test-utils",
+ "rustls",
  "yaml_serde",
 ]
 

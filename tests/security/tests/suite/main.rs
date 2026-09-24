@@ -46,6 +46,8 @@
     reason = "test code"
 )]
 
+mod compression_bomb;
+mod connection_lifecycle;
 mod cors;
 mod cors_validation;
 mod filter_leakage;
@@ -55,6 +57,11 @@ mod hop_by_hop;
 mod host_header;
 mod info_leakage;
 mod ip_acl;
+mod protocol_parsing;
+mod proxy_loops;
 mod request_smuggling;
+mod response_injection;
 mod ssrf_runtime;
 mod ssrf_validation;
+mod tls_attack;
+mod url_encoding;
