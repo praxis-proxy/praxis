@@ -13,15 +13,17 @@
 
 use std::{
     path::PathBuf,
+    pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
 use praxis_core::{
     PingoraServerRuntime,
-    config::{Config, ConfigFile, LogOutput, ProtocolKind},
+    config::{Config, ConfigFile, LogOutput, ProtocolKind, RuntimeConfig},
     health::{HealthRegistry, build_health_registry},
     logging::LogLevelState,
+    subrequest::SubRequestClient,
 };
 use praxis_filter::FilterRegistry;
 use praxis_protocol::{CertWatcherShutdowns, ListenerPipelines, Protocol as _, http::PingoraHttp, tcp::PingoraTcp};
@@ -446,7 +448,7 @@ struct ServerState {
     session_stores: Arc<praxis_filter::SessionStoreRegistry>,
 
     /// Shared sub-request client for iterative sub-requests.
-    subrequest_client: praxis_core::subrequest::SubRequestClient,
+    subrequest_client: SubRequestClient,
 
     /// Health check cancellation token.
     health_shutdown: Arc<Mutex<CancellationToken>>,
@@ -508,10 +510,7 @@ fn build_server_state(
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
     spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);
-
-    if config.runtime.subrequest_circuit_breaker.is_some() {
-        spawn_circuit_eviction_task(subrequest_client.clone());
-    }
+    spawn_housekeeping_tasks(&config.runtime, &subrequest_client);
 
     let state = ServerState {
         pipelines: Arc::new(pipelines),
@@ -678,8 +677,9 @@ fn register_admin_endpoints(
 ///
 /// Called before pipeline construction so limits gate the entire server lifecycle. Connection
 /// limits guard against resource exhaustion from too many concurrent clients; memory thresholds
-/// enable pressure monitoring and backpressure.
-fn init_runtime_limits(runtime: &praxis_core::config::RuntimeConfig) {
+/// enable pressure monitoring and backpressure. The memory monitor takes its first sample here;
+/// [`spawn_housekeeping_tasks`] keeps it current once the server state is built.
+fn init_runtime_limits(runtime: &RuntimeConfig) {
     if let Some(max) = runtime.max_connections {
         praxis_protocol::connections::init_global_limit(usize::try_from(max).unwrap_or(usize::MAX));
         info!(max_connections = max, "global connection limit enabled");
@@ -698,13 +698,16 @@ fn init_runtime_limits(runtime: &praxis_core::config::RuntimeConfig) {
 // Background Tasks
 // -----------------------------------------------------------------------------
 
+/// A periodic loop that runs for the life of the process.
+type HousekeepingLoop = Pin<Box<dyn Future<Output = ()> + Send>>;
+
 /// Spawn `fut` on a dedicated thread running its own current-thread
 /// tokio runtime.
 ///
 /// Server startup runs before [`PingoraServerRuntime::new`], so no
 /// reactor is registered on the calling thread and a bare
-/// `tokio::spawn` would panic; background loops get their own thread
-/// and runtime instead.
+/// `tokio::spawn` would panic; the health checks and the housekeeping
+/// loops get their own thread and runtime instead.
 fn spawn_on_dedicated_runtime<F>(runtime_name: &'static str, fut: F)
 where
     F: Future<Output = ()> + Send + 'static,
@@ -759,14 +762,58 @@ fn spawn_health_check_tasks(
     });
 }
 
-/// Spawn the sub-request circuit breaker idle-eviction loop.
+/// Run the periodic loops `runtime` asks for on one shared dedicated runtime.
 ///
-/// Runs every 5 minutes and evicts breakers that have been healthy and idle for 10 minutes,
-/// preventing the breaker map from growing unbounded when sub-request targets shift over time.
-/// Runs on its own runtime since no reactor is registered at startup time
-/// (see [`spawn_on_dedicated_runtime`]).
-fn spawn_circuit_eviction_task(client: praxis_core::subrequest::SubRequestClient) {
-    spawn_on_dedicated_runtime("circuit breaker eviction runtime", async move {
+/// Memory limits and the sub-request circuit breaker are startup-only
+/// settings, so their loops run for the life of the process and share one
+/// thread; nothing is spawned when the config asks for neither.
+fn spawn_housekeeping_tasks(runtime: &RuntimeConfig, client: &SubRequestClient) {
+    let loops = housekeeping_loops(runtime, client);
+    if loops.is_empty() {
+        return;
+    }
+
+    spawn_on_dedicated_runtime("housekeeping runtime", async move {
+        for task in loops {
+            tokio::spawn(task);
+        }
+        std::future::pending::<()>().await;
+    });
+}
+
+/// The periodic loops `runtime` asks for: the memory pressure sampler when
+/// `max_memory_bytes` is set, the circuit breaker eviction when
+/// `subrequest_circuit_breaker` is.
+fn housekeeping_loops(runtime: &RuntimeConfig, client: &SubRequestClient) -> Vec<HousekeepingLoop> {
+    let mut loops = Vec::new();
+    if runtime.max_memory_bytes.is_some() {
+        loops.push(memory_sampler_loop());
+    }
+    if runtime.subrequest_circuit_breaker.is_some() {
+        loops.push(circuit_eviction_loop(client.clone()));
+    }
+    loops
+}
+
+/// Keep the memory pressure sample current, so the per-request check reads
+/// an atomic instead of `/proc`.
+fn memory_sampler_loop() -> HousekeepingLoop {
+    Box::pin(async {
+        let mut interval = tokio::time::interval(praxis_core::memory::SAMPLE_INTERVAL);
+        interval.tick().await; // init took the first sample
+
+        loop {
+            interval.tick().await;
+            praxis_core::memory::refresh();
+        }
+    })
+}
+
+/// Evict sub-request circuit breakers that have been healthy and idle for
+/// [`CIRCUIT_IDLE_THRESHOLD`], once every [`CIRCUIT_EVICTION_INTERVAL`], so
+/// the breaker map does not grow without bound as sub-request targets shift.
+fn circuit_eviction_loop(client: SubRequestClient) -> HousekeepingLoop {
+    Box::pin(async move {
         let mut interval = tokio::time::interval(CIRCUIT_EVICTION_INTERVAL);
         interval.tick().await; // skip immediate first tick
 
@@ -777,7 +824,7 @@ fn spawn_circuit_eviction_task(client: praxis_core::subrequest::SubRequestClient
                 debug!(evicted, "circuit breaker: evicted idle entries");
             }
         }
-    });
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -1032,17 +1079,12 @@ mod tests {
 
     #[test]
     fn init_runtime_limits_no_limits_does_not_panic() {
-        let runtime = praxis_core::config::RuntimeConfig::default();
-        init_runtime_limits(&runtime);
+        init_runtime_limits(&RuntimeConfig::default());
     }
 
     #[test]
     fn init_runtime_limits_with_memory_does_not_panic() {
-        let runtime = praxis_core::config::RuntimeConfig {
-            max_memory_bytes: Some(1_073_741_824),
-            ..Default::default()
-        };
-        init_runtime_limits(&runtime);
+        init_runtime_limits(&memory_limited_runtime());
     }
 
     // -------------------------------------------------------------------------
@@ -1090,7 +1132,7 @@ mod tests {
 
     #[test]
     fn init_runtime_limits_with_max_connections_does_not_panic() {
-        let runtime = praxis_core::config::RuntimeConfig {
+        let runtime = RuntimeConfig {
             max_connections: Some(1024),
             ..Default::default()
         };
@@ -1168,10 +1210,29 @@ filter_chains:
     }
 
     #[test]
-    fn circuit_eviction_task_spawns_without_panicking() {
-        let connector = crate::test_support::connector(1);
-        let client = praxis_core::subrequest::SubRequestClient::new(connector);
-        spawn_circuit_eviction_task(client);
+    fn housekeeping_loops_follow_the_runtime_config() {
+        let client = SubRequestClient::new(crate::test_support::connector(1));
+        assert!(
+            housekeeping_loops(&RuntimeConfig::default(), &client).is_empty(),
+            "neither limit configured means no housekeeping loop"
+        );
+        assert_eq!(
+            housekeeping_loops(&memory_limited_runtime(), &client).len(),
+            1,
+            "a memory limit alone needs only the sampler"
+        );
+        assert_eq!(
+            housekeeping_loops(&fully_limited_runtime(), &client).len(),
+            2,
+            "a memory limit and a circuit breaker need the sampler and the eviction loop"
+        );
+    }
+
+    #[test]
+    fn housekeeping_tasks_spawn_without_panicking() {
+        let client = SubRequestClient::new(crate::test_support::connector(1));
+        spawn_housekeeping_tasks(&RuntimeConfig::default(), &client);
+        spawn_housekeeping_tasks(&fully_limited_runtime(), &client);
     }
 
     #[cfg(feature = "config-reload")]
@@ -1266,6 +1327,26 @@ filter_chains:
     /// Parsed [`minimal_yaml`] config.
     fn minimal_config(filter: &str) -> Config {
         Config::from_yaml(&minimal_yaml(filter)).expect("minimal config should parse")
+    }
+
+    /// Runtime config with a memory limit and nothing else.
+    fn memory_limited_runtime() -> RuntimeConfig {
+        RuntimeConfig {
+            max_memory_bytes: Some(1_073_741_824),
+            ..Default::default()
+        }
+    }
+
+    /// Runtime config with a memory limit and a sub-request circuit breaker.
+    fn fully_limited_runtime() -> RuntimeConfig {
+        RuntimeConfig {
+            subrequest_circuit_breaker: Some(praxis_core::config::runtime::SubRequestCircuitBreakerConfig {
+                consecutive_failures: 5,
+                recovery_window_secs: 30,
+                half_open_timeout_secs: 30,
+            }),
+            ..memory_limited_runtime()
+        }
     }
 
     /// Single-listener config whose `static_response` returns `status`.

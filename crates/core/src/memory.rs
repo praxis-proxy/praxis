@@ -5,8 +5,8 @@
 //!
 //! Tracks resident set size (RSS) via `/proc/self/status` on
 //! Linux and sheds load when a configured threshold is exceeded.
-//! Sampling is cached: at most one `/proc` read per
-//! `CHECK_INTERVAL_MS`.
+//! The global monitor is sampled by a background task; the
+//! per-request check reads only the cached sample.
 
 use std::sync::{
     OnceLock,
@@ -18,7 +18,14 @@ use std::sync::{
 // -----------------------------------------------------------------------------
 
 /// Minimum interval between `/proc/self/status` reads.
-const CHECK_INTERVAL_MS: u64 = 1000;
+const CHECK_INTERVAL_MS: u64 = 1000; // 1 s
+
+/// How often a background task should call [`refresh`].
+pub const SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(CHECK_INTERVAL_MS);
+
+/// Sample age after which [`is_exceeded`] samples on the calling thread,
+/// in case no background task is refreshing it.
+const FALLBACK_STALE_MS: u64 = 3000; // 3 s, three sample intervals
 
 // -----------------------------------------------------------------------------
 // Process-wide singleton
@@ -27,28 +34,43 @@ const CHECK_INTERVAL_MS: u64 = 1000;
 /// Global memory pressure monitor, initialized once at startup.
 static INSTANCE: OnceLock<MemoryPressure> = OnceLock::new();
 
-/// Initialize the global memory pressure monitor.
+/// Initialize the global memory pressure monitor and take a first sample.
 ///
-/// Called once during server startup. Subsequent calls are no-ops.
+/// Called once during server startup. Subsequent calls are no-ops. The
+/// caller should keep the sample current by calling [`refresh`] every
+/// [`SAMPLE_INTERVAL`] from a background task, so [`is_exceeded`] does not
+/// read `/proc` on the request path.
 ///
 /// ```
 /// praxis_core::memory::init(1_073_741_824); // 1 GiB threshold
+/// praxis_core::memory::refresh();
 /// ```
 pub fn init(threshold: usize) {
-    INSTANCE.get_or_init(|| MemoryPressure::new(threshold));
+    INSTANCE.get_or_init(|| MemoryPressure::new(threshold)).refresh();
 }
 
-/// Check whether current RSS exceeds the configured threshold.
+/// Sample RSS now for the global monitor. A no-op before [`init`].
+pub fn refresh() {
+    if let Some(monitor) = INSTANCE.get() {
+        monitor.refresh();
+    }
+}
+
+/// Whether the latest RSS sample exceeds the configured threshold.
 ///
-/// Returns `false` when no monitor has been initialized (memory
-/// pressure monitoring is disabled).
+/// Reads the cached sample, and samples on the calling thread only if no
+/// [`refresh`] has run for a few intervals. Returns `false` when no monitor
+/// has been initialized (memory pressure monitoring is disabled).
 ///
 /// ```
 /// // No init → never exceeded
 /// assert!(!praxis_core::memory::is_exceeded());
 /// ```
 pub fn is_exceeded() -> bool {
-    INSTANCE.get().is_some_and(MemoryPressure::is_exceeded)
+    INSTANCE.get().is_some_and(|monitor| {
+        monitor.refresh_if_older_than(FALLBACK_STALE_MS);
+        monitor.exceeds_last_sample()
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -99,14 +121,32 @@ impl MemoryPressure {
     /// is older than `CHECK_INTERVAL_MS`.
     pub fn is_exceeded(&self) -> bool {
         self.maybe_refresh();
+        self.exceeds_last_sample()
+    }
+
+    /// Whether the cached RSS sample exceeds the threshold, without sampling.
+    fn exceeds_last_sample(&self) -> bool {
         self.cached_rss.load(Ordering::Relaxed) > self.threshold
+    }
+
+    /// Sample RSS now, regardless of the cached sample's age.
+    fn refresh(&self) {
+        self.last_check_ms.store(epoch_ms(), Ordering::Relaxed);
+        if let Some(rss) = sample_rss() {
+            self.cached_rss.store(rss, Ordering::Relaxed);
+        }
     }
 
     /// Refresh the cached RSS if stale.
     fn maybe_refresh(&self) {
+        self.refresh_if_older_than(CHECK_INTERVAL_MS);
+    }
+
+    /// Refresh the cached RSS if it is at least `max_age_ms` old.
+    fn refresh_if_older_than(&self, max_age_ms: u64) {
         let now = epoch_ms();
         let last = self.last_check_ms.load(Ordering::Relaxed);
-        if !is_sample_stale(last, now) {
+        if !is_sample_stale(last, now, max_age_ms) {
             return;
         }
         if self
@@ -129,14 +169,14 @@ impl MemoryPressure {
 /// Whether a cached RSS sample taken at `last_ms` is stale relative to
 /// `now_ms` and must be refreshed.
 ///
-/// True once `CHECK_INTERVAL_MS` has elapsed, and also when the clock moved
+/// True once `max_age_ms` has elapsed, and also when the clock moved
 /// backward (`now_ms < last_ms`). The interval is measured on the wall clock
 /// (`epoch_ms`), so an NTP correction, manual clock set, or VM restore that
 /// steps time backward would otherwise freeze RSS sampling (and the
 /// load-shedding verdict) until the clock climbed back past
-/// `last_ms + CHECK_INTERVAL_MS`.
-fn is_sample_stale(last_ms: u64, now_ms: u64) -> bool {
-    now_ms < last_ms || now_ms.saturating_sub(last_ms) >= CHECK_INTERVAL_MS
+/// `last_ms + max_age_ms`.
+fn is_sample_stale(last_ms: u64, now_ms: u64, max_age_ms: u64) -> bool {
+    now_ms < last_ms || now_ms.saturating_sub(last_ms) >= max_age_ms
 }
 
 /// Current epoch time in milliseconds.
@@ -217,6 +257,32 @@ mod tests {
         assert!(mp.is_exceeded(), "1-byte threshold should always be exceeded");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cached_check_reads_only_the_last_sample() {
+        let mp = MemoryPressure::new(1);
+        assert!(
+            !mp.exceeds_last_sample(),
+            "before any sample the cached RSS is zero, so the request-path check must not read /proc"
+        );
+        mp.refresh();
+        assert!(
+            mp.exceeds_last_sample(),
+            "after a refresh the cached RSS is above a 1-byte threshold"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_stale_sample_heals_without_a_background_refresh() {
+        let mp = MemoryPressure::new(1);
+        mp.refresh_if_older_than(FALLBACK_STALE_MS);
+        assert!(
+            mp.exceeds_last_sample(),
+            "a never-sampled monitor is stale, so the fallback must sample it"
+        );
+    }
+
     #[test]
     fn is_exceeded_without_init_returns_false() {
         assert!(
@@ -228,15 +294,15 @@ mod tests {
     #[test]
     fn sample_staleness_handles_forward_and_backward_clock() {
         assert!(
-            !is_sample_stale(1_000, 1_000 + CHECK_INTERVAL_MS - 1),
+            !is_sample_stale(1_000, 1_000 + CHECK_INTERVAL_MS - 1, CHECK_INTERVAL_MS),
             "fresh within the interval is not stale"
         );
         assert!(
-            is_sample_stale(1_000, 1_000 + CHECK_INTERVAL_MS),
+            is_sample_stale(1_000, 1_000 + CHECK_INTERVAL_MS, CHECK_INTERVAL_MS),
             "elapsed interval is stale"
         );
         assert!(
-            is_sample_stale(1_000, 500),
+            is_sample_stale(1_000, 500, CHECK_INTERVAL_MS),
             "backward clock step is stale, so sampling resumes instead of freezing"
         );
     }
