@@ -14,9 +14,11 @@
 
 use std::{path::Path, process::Command};
 
-/// The kernel's FIPS flag, as the binary itself reads it.
+/// Whether both FIPS signals the binary checks are present: the kernel flag
+/// and an OpenSSL provider that reports FIPS-approved algorithms.
 fn host_is_fips() -> bool {
-    std::fs::read_to_string("/proc/sys/crypto/fips_enabled").is_ok_and(|contents| contents.trim() == "1")
+    praxis_tls::provider::install();
+    praxis_tls::provider::status().unmet().is_empty()
 }
 
 /// Run `praxis --validate` on the container default config with the given
