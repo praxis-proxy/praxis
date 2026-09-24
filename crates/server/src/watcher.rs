@@ -55,8 +55,8 @@ pub(crate) struct WatcherParams {
     /// Health check shutdown token, swapped on each reload.
     pub(crate) health_shutdown: Arc<Mutex<CancellationToken>>,
 
-    /// Hash of the config file content at server startup, used to
-    /// detect changes that occurred before the watcher was ready.
+    /// [`composite_hash`] of the text `initial_config` was parsed from, used
+    /// to detect changes that occurred before the watcher was ready.
     pub(crate) initial_content_hash: u64,
 
     /// Initial config for diffing against reloaded versions.
@@ -977,6 +977,43 @@ mod tests {
     }
 
     #[test]
+    fn startup_precheck_applies_an_edit_made_after_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("praxis.yaml");
+        std::fs::write(&config_path, VALID_YAML).unwrap();
+        let file = praxis_core::config::ConfigFile::read(&config_path).unwrap();
+        let config = Config::from_config_file(&file).unwrap();
+        std::fs::write(&config_path, VALID_YAML_CHANGED).unwrap();
+
+        let baseline = composite_hash(&file.content, &[]);
+        let (ok, hash, swapped) = run_precheck(&config_path, config, baseline);
+
+        assert!(ok, "the edited config is valid and must reload");
+        assert!(swapped, "an edit made after load must be applied by the pre-check");
+        assert_eq!(
+            hash,
+            composite_hash(VALID_YAML_CHANGED, &[]),
+            "the applied edit becomes the new baseline"
+        );
+    }
+
+    #[test]
+    fn startup_precheck_is_a_noop_when_the_file_is_unchanged_since_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("praxis.yaml");
+        std::fs::write(&config_path, VALID_YAML).unwrap();
+        let file = praxis_core::config::ConfigFile::read(&config_path).unwrap();
+        let config = Config::from_config_file(&file).unwrap();
+
+        let baseline = composite_hash(&file.content, &[]);
+        let (ok, hash, swapped) = run_precheck(&config_path, config, baseline);
+
+        assert!(ok, "unchanged content is not a failure");
+        assert!(!swapped, "unchanged content must not rebuild pipelines");
+        assert_eq!(hash, baseline, "the baseline must stay as loaded");
+    }
+
+    #[test]
     fn watcher_exits_on_cancellation() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("praxis.yaml");
@@ -1669,6 +1706,54 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Run the startup pre-check once for `config`, loaded from `config_path`,
+    /// with `baseline` as the initial hash.
+    ///
+    /// Returns whether it succeeded, the hash it left, and whether it swapped
+    /// in a new pipeline.
+    fn run_precheck(config_path: &std::path::Path, mut config: Config, baseline: u64) -> (bool, u64, bool) {
+        let registry = FilterRegistry::with_builtins();
+        let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+        let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
+        let pipelines = crate::pipelines::resolve_pipelines(
+            &config,
+            &registry,
+            &Arc::new(std::collections::HashMap::new()),
+            &kv_stores,
+            &session_stores,
+            &subrequest_client,
+        )
+        .unwrap();
+        let started_with = Arc::as_ptr(&pipelines.get("web").unwrap().load());
+        let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        );
+
+        let mut hash = baseline;
+        let ok = handle_reload(
+            config_path,
+            &[],
+            &mut config,
+            &mut hash,
+            &registry,
+            &pipelines,
+            &listener_meta,
+            &cluster_meta,
+            &Arc::new(Mutex::new(CancellationToken::new())),
+            &kv_stores,
+            &session_stores,
+            &subrequest_client,
+            None,
+            &PipelineComposition::default(),
+        );
+        let swapped = Arc::as_ptr(&pipelines.get("web").unwrap().load()) != started_with;
+        (ok, hash, swapped)
     }
 
     /// Serializes tests that mutate the process working directory.

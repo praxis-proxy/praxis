@@ -35,7 +35,7 @@ mod validate;
 
 pub use admin::AdminConfig;
 pub use body_limits::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, DEFAULT_MAX_BODY_BYTES};
-pub use bootstrap::{DEFAULT_CONFIG, load_config};
+pub use bootstrap::{ConfigFile, DEFAULT_CONFIG, load_config};
 pub use branch_chain::{BranchChainConfig, BranchCondition};
 pub use chain_ref::ChainRef;
 pub use cluster::{
@@ -197,8 +197,57 @@ impl Config {
     ///
     /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
     pub fn from_file(path: &Path) -> Result<Self, crate::errors::ProxyError> {
-        let content = read_config_file(path)?;
-        Self::from_yaml(&content)
+        Self::from_config_file(&ConfigFile::read(path)?)
+    }
+
+    /// Parse and validate the text of an already-read [`ConfigFile`].
+    ///
+    /// Reading and parsing are separate so the caller can keep the file
+    /// (path plus the exact text) for the hot-reload watcher's baseline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProxyError::Config`] if the content is invalid.
+    ///
+    /// ```
+    /// use praxis_core::config::{Config, ConfigFile, DEFAULT_CONFIG};
+    ///
+    /// let file = ConfigFile {
+    ///     path: "praxis.yaml".into(),
+    ///     content: DEFAULT_CONFIG.to_owned(),
+    /// };
+    /// let cfg = Config::from_config_file(&file).unwrap();
+    /// assert!(!cfg.listeners.is_empty());
+    /// ```
+    ///
+    /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
+    pub fn from_config_file(file: &ConfigFile) -> Result<Self, crate::errors::ProxyError> {
+        Self::from_yaml(&file.content)
+    }
+
+    /// Parse `file` when there is one, or `fallback_yaml` when there is none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProxyError::Config`] if the chosen source is invalid.
+    ///
+    /// ```
+    /// use praxis_core::config::{Config, DEFAULT_CONFIG};
+    ///
+    /// let cfg = Config::from_config_file_or(None, DEFAULT_CONFIG).unwrap();
+    /// assert!(!cfg.listeners.is_empty());
+    /// ```
+    ///
+    /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
+    pub fn from_config_file_or(
+        file: Option<&ConfigFile>,
+        fallback_yaml: &str,
+    ) -> Result<Self, crate::errors::ProxyError> {
+        let Some(file) = file else {
+            tracing::info!("no config file found, using built-in default");
+            return Self::from_yaml(fallback_yaml);
+        };
+        Self::from_config_file(file)
     }
 
     /// Resolve configuration file. Fall back to `praxis.yaml` in the working directory, then `fallback_yaml`.
@@ -228,7 +277,9 @@ impl Config {
     ///
     /// Callers that also need the path (to watch it for reloads) resolve it
     /// once and pass it here, so the loaded config and the watched file
-    /// cannot disagree.
+    /// cannot disagree. Callers that also need the text that was parsed, for
+    /// the watcher's baseline, use [`ConfigFile::read`] and
+    /// [`Config::from_config_file_or`] directly instead.
     ///
     /// # Errors
     ///
@@ -243,12 +294,8 @@ impl Config {
     ///
     /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
     pub fn load_from(path: Option<&Path>, fallback_yaml: &str) -> Result<Self, crate::errors::ProxyError> {
-        if let Some(path) = path {
-            Self::from_file(path)
-        } else {
-            tracing::info!("no config file found, using built-in default");
-            Self::from_yaml(fallback_yaml)
-        }
+        let file = path.map(ConfigFile::read).transpose()?;
+        Self::from_config_file_or(file.as_ref(), fallback_yaml)
     }
 }
 

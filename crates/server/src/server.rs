@@ -19,14 +19,14 @@ use std::{
 
 use praxis_core::{
     PingoraServerRuntime,
-    config::{Config, LogOutput, ProtocolKind},
+    config::{Config, ConfigFile, LogOutput, ProtocolKind},
     health::{HealthRegistry, build_health_registry},
     logging::LogLevelState,
 };
 use praxis_filter::FilterRegistry;
 use praxis_protocol::{CertWatcherShutdowns, ListenerPipelines, Protocol as _, http::PingoraHttp, tcp::PingoraTcp};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 pub use crate::startup_checks::check_root_privilege;
 #[cfg(test)]
@@ -195,10 +195,10 @@ pub type StartupError = Box<dyn std::error::Error + Send + Sync>;
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn try_run_server(
     config: Config,
-    config_path: Option<PathBuf>,
+    config_file: Option<ConfigFile>,
     log_level: Option<Arc<LogLevelState>>,
 ) -> Result<(), StartupError> {
-    try_run_server_with_composition(config, ServerComposition::standard(), config_path, log_level)
+    try_run_server_with_composition(config, ServerComposition::standard(), config_file, log_level)
 }
 
 /// Build filter pipelines from the given registry, register protocols and run the server.
@@ -219,13 +219,13 @@ pub fn try_run_server(
 pub fn try_run_server_with_registry(
     config: Config,
     registry: FilterRegistry,
-    config_path: Option<PathBuf>,
+    config_file: Option<ConfigFile>,
     log_level: Option<Arc<LogLevelState>>,
 ) -> Result<(), StartupError> {
     try_run_server_with_composition(
         config,
         ServerComposition::with_registry(registry),
-        config_path,
+        config_file,
         log_level,
     )
 }
@@ -244,6 +244,12 @@ pub fn try_run_server_with_registry(
 /// Assumes tracing is already initialized. Blocks until the server shuts
 /// down, then returns so the caller's tracing guard can flush buffered logs
 /// and spans.
+///
+/// `config_file` is the file `config` was parsed from, as read by
+/// [`ConfigFile::read`]; the watcher watches its path and baselines its
+/// change detection on the text it carries, so an edit that lands while the
+/// server is still starting is applied by the first watcher pass. Pass
+/// `None` to run without hot reload.
 ///
 /// Config validation warns about active `insecure_options` while the config
 /// is loaded, which is before the configured subscriber can exist: load it
@@ -266,7 +272,7 @@ pub fn try_run_server_with_registry(
 pub fn try_run_server_with_composition(
     config: Config,
     composition: ServerComposition,
-    config_path: Option<PathBuf>,
+    config_file: Option<ConfigFile>,
     log_level: Option<Arc<LogLevelState>>,
 ) -> Result<(), StartupError> {
     run_startup_checks(&config)?;
@@ -305,11 +311,11 @@ pub fn try_run_server_with_composition(
     );
 
     #[cfg(feature = "config-reload")]
-    let _watcher = spawn_watcher(config_path, config, registry, state);
+    let _watcher = spawn_watcher(config_file, config, registry, state);
     // Without the config-reload feature there is no file watcher; consume the
     // now-unused startup values so the server still runs, just without reload.
     #[cfg(not(feature = "config-reload"))]
-    drop((config_path, config, registry, state));
+    drop((config_file, config, registry, state));
 
     info!("starting server");
     server.run_until_shutdown();
@@ -328,15 +334,20 @@ pub fn try_run_server_with_composition(
 /// tracing guard held by the caller does not flush. Prefer [`try_run_server`]
 /// and return its result from `main` so buffered logs and spans are flushed.
 ///
+/// `config_path` is read here, after `config` was parsed from it, to seed the
+/// reload watcher's baseline; an edit that lands in between is adopted as the
+/// baseline without being applied. Callers that want that window closed read
+/// the file once with [`ConfigFile::read`] and pass it to the `try_` variant.
+///
 /// Config is owned for the server's lifetime (never returns).
 pub fn run_server(config: Config, config_path: Option<PathBuf>, log_level: Option<Arc<LogLevelState>>) -> ! {
-    exit_with(try_run_server(config, config_path, log_level))
+    exit_with(try_run_server(config, config_path.map(read_for_watch), log_level))
 }
 
 /// [`try_run_server_with_registry`] for callers that never expect control back.
 ///
-/// Exits the process as [`run_server`] does; prefer the `try_` variant so the
-/// caller's tracing guard flushes.
+/// Exits the process and reads `config_path` late as [`run_server`] does;
+/// prefer the `try_` variant so the caller's tracing guard flushes.
 ///
 /// Config is owned for the server's lifetime (never returns).
 pub fn run_server_with_registry(
@@ -345,14 +356,19 @@ pub fn run_server_with_registry(
     config_path: Option<PathBuf>,
     log_level: Option<Arc<LogLevelState>>,
 ) -> ! {
-    exit_with(try_run_server_with_registry(config, registry, config_path, log_level))
+    exit_with(try_run_server_with_registry(
+        config,
+        registry,
+        config_path.map(read_for_watch),
+        log_level,
+    ))
 }
 
 /// [`try_run_server_with_composition`] for callers that never expect control
 /// back.
 ///
-/// Exits the process as [`run_server`] does; prefer the `try_` variant so the
-/// caller's tracing guard flushes.
+/// Exits the process and reads `config_path` late as [`run_server`] does;
+/// prefer the `try_` variant so the caller's tracing guard flushes.
 ///
 /// Config is owned for the server's lifetime (never returns).
 pub fn run_server_with_composition(
@@ -364,9 +380,29 @@ pub fn run_server_with_composition(
     exit_with(try_run_server_with_composition(
         config,
         composition,
-        config_path,
+        config_path.map(read_for_watch),
         log_level,
     ))
+}
+
+/// Read `path` for the watcher on behalf of the never-returning entry points,
+/// which only have the path.
+///
+/// A file that cannot be read now is still watched: an empty baseline makes
+/// the watcher's startup pre-check re-read and reload it, which is what the
+/// zero hash of a failed late read used to do.
+fn read_for_watch(path: PathBuf) -> ConfigFile {
+    ConfigFile::read(&path).unwrap_or_else(|err| {
+        warn!(
+            path = %path.display(),
+            error = %err,
+            "config file could not be re-read for the reload watcher; the first watcher pass will retry"
+        );
+        ConfigFile {
+            path,
+            content: String::new(),
+        }
+    })
 }
 
 /// Exit the process with the outcome of a `try_run_server*` call: `0` after a
@@ -538,12 +574,23 @@ fn register_protocols(
 /// protocol switch on a bound listener rejects the whole reload.
 #[cfg(feature = "config-reload")]
 fn spawn_watcher(
-    config_path: Option<PathBuf>,
+    config_file: Option<ConfigFile>,
     config: Config,
     registry: FilterRegistry,
     state: ServerState,
 ) -> Option<std::thread::JoinHandle<()>> {
-    let path = config_path?;
+    watcher_params(config_file, config, registry, state).map(crate::watcher::spawn_config_watcher)
+}
+
+/// Assemble the watcher's parameters, or `None` when there is no config file to watch.
+#[cfg(feature = "config-reload")]
+fn watcher_params(
+    config_file: Option<ConfigFile>,
+    config: Config,
+    registry: FilterRegistry,
+    state: ServerState,
+) -> Option<crate::watcher::WatcherParams> {
+    let ConfigFile { path, content } = config_file?;
     // Documents the configured filters read, asked of the pipelines that were just
     // built rather than reconstructed here: building a filter to interrogate it
     // would load its document and open network connections as a side effect.
@@ -552,10 +599,17 @@ fn spawn_watcher(
     // The startup hash must cover the same set the reload gate covers, or the first
     // event after startup would see a hash mismatch that is an artifact of the two
     // being computed differently.
-    let initial_content_hash = std::fs::read_to_string(&path).map_or(0, |contents| {
-        crate::watcher::composite_hash(&contents, &referenced_files)
-    });
-    let handle = crate::watcher::spawn_config_watcher(crate::watcher::WatcherParams {
+    //
+    // The main config is hashed from the text that was parsed, not re-read here:
+    // building pipelines can take a while (JWKS fetches and the like), and an edit
+    // landing meanwhile would otherwise become the baseline, so the watcher's
+    // startup pre-check would find nothing to reload while the old config runs.
+    // Referenced documents are still read here, because their set is only known
+    // once the pipelines exist and filters do not report the bytes they loaded.
+    // An edit to one between its filter loading it and this read is therefore
+    // missed until the next change to any watched file triggers a reload.
+    let initial_content_hash = crate::watcher::composite_hash(&content, &referenced_files);
+    Some(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
         initial_content_hash,
@@ -571,9 +625,7 @@ fn spawn_watcher(
         subrequest_client: state.subrequest_client,
         log_level: state.log_level,
         pipeline_composition: state.pipeline_composition,
-    });
-
-    Some(handle)
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -1122,6 +1174,74 @@ filter_chains:
         spawn_circuit_eviction_task(client);
     }
 
+    #[cfg(feature = "config-reload")]
+    #[test]
+    fn watcher_applies_an_edit_made_while_the_server_was_starting() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("praxis.yaml");
+        std::fs::write(&path, static_response_yaml(200)).unwrap();
+        let config_file = ConfigFile::read(&path).unwrap();
+        let config = Config::from_config_file(&config_file).unwrap();
+        std::fs::write(&path, static_response_yaml(201)).unwrap();
+
+        let (state, registry) = startup_state(&config);
+        let pipelines = Arc::clone(&state.pipelines);
+        let started_with = Arc::as_ptr(&pipelines.get("web").unwrap().load());
+        let params = watcher_params(Some(config_file), config, registry, state).expect("a config file must be watched");
+        assert_eq!(
+            params.initial_content_hash,
+            crate::watcher::composite_hash(&static_response_yaml(200), &[]),
+            "the baseline must be the text that was parsed, not the file as edited since"
+        );
+
+        let shutdown = params.shutdown.clone();
+        let handle = crate::watcher::spawn_config_watcher(params);
+        poll_until(|| Arc::as_ptr(&pipelines.get("web").unwrap().load()) != started_with);
+        shutdown.cancel();
+        handle.join().expect("watcher thread should exit cleanly");
+
+        assert_ne!(
+            Arc::as_ptr(&pipelines.get("web").unwrap().load()),
+            started_with,
+            "the startup pre-check must apply an edit made between load and watcher start"
+        );
+    }
+
+    #[cfg(feature = "config-reload")]
+    #[test]
+    fn watcher_is_not_started_for_the_built_in_default_config() {
+        let config = Config::from_config_file_or(None, praxis_core::config::DEFAULT_CONFIG).unwrap();
+        let (state, registry) = startup_state(&config);
+
+        assert!(
+            watcher_params(None, config, registry, state).is_none(),
+            "the built-in default has no file to watch"
+        );
+    }
+
+    #[test]
+    fn read_for_watch_returns_the_file_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("praxis.yaml");
+        std::fs::write(&path, "listeners: []\n").unwrap();
+
+        let file = read_for_watch(path.clone());
+        assert_eq!(file.path, path, "the watched path must be the one given");
+        assert_eq!(file.content, "listeners: []\n", "the baseline must be the file text");
+    }
+
+    #[test]
+    fn read_for_watch_keeps_watching_an_unreadable_file() {
+        let path = PathBuf::from("/nonexistent/praxis.yaml");
+
+        let file = read_for_watch(path.clone());
+        assert_eq!(file.path, path, "an unreadable file must still be watched");
+        assert!(
+            file.content.is_empty(),
+            "an empty baseline forces the first watcher pass to re-read the file"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -1146,6 +1266,46 @@ filter_chains:
     /// Parsed [`minimal_yaml`] config.
     fn minimal_config(filter: &str) -> Config {
         Config::from_yaml(&minimal_yaml(filter)).expect("minimal config should parse")
+    }
+
+    /// Single-listener config whose `static_response` returns `status`.
+    #[cfg(feature = "config-reload")]
+    fn static_response_yaml(status: u16) -> String {
+        format!(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: {status}
+"#
+        )
+    }
+
+    /// Poll `predicate` every 20 ms until it holds or 5 s elapse.
+    #[cfg(feature = "config-reload")]
+    #[expect(clippy::disallowed_methods, reason = "test thread polls a background watcher")]
+    fn poll_until(predicate: impl Fn() -> bool) {
+        for _ in 0..250 {
+            // 250 polls x 20 ms = 5 s
+            if predicate() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Build the server state for `config` as startup does.
+    #[cfg(feature = "config-reload")]
+    fn startup_state(config: &Config) -> (ServerState, FilterRegistry) {
+        praxis_tls::provider::install();
+        let health_registry = build_health_registry(&config.clusters);
+        build_server_state(config, ServerComposition::standard(), &health_registry, None)
+            .expect("server state should build")
     }
 
     #[cfg(unix)]

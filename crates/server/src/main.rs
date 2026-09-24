@@ -23,6 +23,7 @@ mod dump;
 use std::process::ExitCode;
 
 use clap::Parser;
+use praxis_core::config::{Config, ConfigFile};
 use tracing::info;
 
 // -----------------------------------------------------------------------------
@@ -78,14 +79,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Load from the resolved path rather than re-probing the filesystem, so
-    // the config that runs is the one the reload watcher will watch.
-    let config_path = praxis::resolve_config_path(explicit.as_deref());
-    // Validation warns before the configured subscriber can exist.
-    let config = praxis::with_bootstrap_logging(|| {
-        praxis_core::config::Config::load_from(config_path.as_deref(), praxis_core::config::DEFAULT_CONFIG)
-    })
-    .unwrap_or_else(|error| praxis::fatal(&error));
+    let (config, config_file) = load_serving_config(explicit.as_deref());
     let tracing_guard = praxis::init_tracing(&config).unwrap_or_else(|error| praxis::fatal(&error));
     let log_level = Some(tracing_guard.log_level_state());
     let log_output = config.runtime.logging.output;
@@ -93,8 +87,27 @@ fn main() -> ExitCode {
 
     let _tracing_guard = tracing_guard;
     // Returning instead of exiting drops the guard, flushing queued logs and spans.
-    praxis::try_run_server(config, config_path, log_level)
+    praxis::try_run_server(config, config_file, log_level)
         .map_or_else(|error| praxis::report_fatal(&error, log_output), |()| ExitCode::SUCCESS)
+}
+
+/// Resolve the config path, read it once and parse that text, so the config
+/// that runs, the file the reload watcher watches, and the baseline it
+/// compares against are all the same bytes. Exits on failure: tracing is not
+/// up yet, so there is nothing to flush.
+fn load_serving_config(explicit: Option<&str>) -> (Config, Option<ConfigFile>) {
+    let config_path = praxis::resolve_config_path(explicit);
+    let config_file = config_path
+        .as_deref()
+        .map(ConfigFile::read)
+        .transpose()
+        .unwrap_or_else(|error| praxis::fatal(&error));
+    // Validation warns before the configured subscriber can exist.
+    let config = praxis::with_bootstrap_logging(|| {
+        Config::from_config_file_or(config_file.as_ref(), praxis_core::config::DEFAULT_CONFIG)
+    })
+    .unwrap_or_else(|error| praxis::fatal(&error));
+    (config, config_file)
 }
 
 // -----------------------------------------------------------------------------
