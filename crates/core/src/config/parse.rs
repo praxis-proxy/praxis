@@ -155,37 +155,84 @@ fn check_yaml_size(raw: &str) -> Result<(), ProxyError> {
 /// an alias. An alias node is a `*` at a value/node boundary followed
 /// by an anchor-name character.
 ///
+/// A quoted scalar may continue onto the next line, but a line that
+/// merely looks like it opens one may be block-scalar text. So each
+/// line is scanned from every quote state the previous line could have
+/// left open, and any reading that finds an alias rejects the input.
+/// A reading is never retired early: libyaml continues a flow quoted
+/// scalar at any indentation. The cost is that an unbalanced quote in
+/// block-scalar text can make a later `*name` inside a string look like
+/// an alias, which rejects that config rather than admitting a bomb.
+///
+/// `?` is treated as a node boundary in block context too, where
+/// libyaml only reads it as a key indicator when a blank follows, so a
+/// plain scalar such as `url: http://h/?*x` is rejected as well: a
+/// fail-closed false positive.
+///
 /// # Errors
 ///
 /// Returns [`ProxyError::Config`] when an alias node is present.
 ///
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
 fn reject_yaml_aliases(raw: &str) -> Result<(), ProxyError> {
-    match raw.lines().position(line_contains_alias) {
-        Some(idx) => Err(ProxyError::Config(format!(
-            "YAML alias nodes (`*anchor`) are not supported (line {}); \
-             they enable alias-expansion denial-of-service and are not used by any Praxis config",
-            idx.saturating_add(1)
-        ))),
-        None => Ok(()),
+    let mut open_quotes: Vec<u8> = Vec::new();
+    for (idx, numbered_line) in raw.split('\n').enumerate() {
+        for line in numbered_line.split(is_yaml_line_break) {
+            let mut still_open = Vec::new();
+            for start in std::iter::once(None).chain(open_quotes.iter().copied().map(Some)) {
+                match scan_line(line, start) {
+                    LineScan::Alias => {
+                        return Err(ProxyError::Config(format!(
+                            "YAML alias nodes (`*anchor`) are not supported (line {}); \
+                             they enable alias-expansion denial-of-service and are not used by any Praxis config",
+                            idx.saturating_add(1)
+                        )));
+                    },
+                    LineScan::Clean {
+                        open_quote: Some(quote),
+                    } if !still_open.contains(&quote) => still_open.push(quote),
+                    LineScan::Clean { .. } => {},
+                }
+            }
+            open_quotes = still_open;
+        }
     }
+    Ok(())
 }
 
-/// Whether a single line contains an alias node outside strings/comments.
+/// Whether `ch` ends a line for libyaml, which also breaks on CR, NEL,
+/// LS, and PS; `\n` is split on first so line numbers stay accurate.
+fn is_yaml_line_break(ch: char) -> bool {
+    matches!(ch, '\r' | '\u{85}' | '\u{2028}' | '\u{2029}')
+}
+
+/// Result of scanning one line from a given starting quote state.
+enum LineScan {
+    /// An alias node appears outside strings and comments.
+    Alias,
+
+    /// No alias; `open_quote` is the quote still open at the end of the line.
+    Clean {
+        /// Quote character left open, if any.
+        open_quote: Option<u8>,
+    },
+}
+
+/// Scan one line for an alias node, starting inside `start_quote` when
+/// the previous line may have left a quoted scalar open.
 ///
-/// Single-line scan only: an alias node is always single-line, and a
-/// false positive from a `*` inside a multi-line block scalar would only
-/// reject an unusual config, never admit a bomb.
-fn line_contains_alias(line: &str) -> bool {
-    let (mut at_boundary, mut prev_ws) = (true, true);
-    let mut quote: Option<u8> = None;
+/// A false positive from a `*` inside a block scalar only rejects an
+/// unusual config, never admits a bomb.
+fn scan_line(line: &str, start_quote: Option<u8>) -> LineScan {
+    let (mut at_boundary, mut prev_ws) = (start_quote.is_none(), true);
+    let mut quote = start_quote;
     let (mut prev_star, mut escaped) = (false, false);
     for &byte in line.as_bytes() {
         // An alias node is `*` at a node boundary followed by an
         // anchor-name character; check the char after a boundary `*`.
         // libyaml accepts `-` anywhere in an anchor name, including first.
         if prev_star && (byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-') {
-            return true;
+            return LineScan::Alias;
         }
         prev_star = false;
         if let Some(quote_char) = quote {
@@ -197,17 +244,17 @@ fn line_contains_alias(line: &str) -> bool {
             match byte {
                 // A comment only starts after whitespace (or line start);
                 // a mid-scalar `#` (e.g. `a#b`) is scalar content.
-                b'#' if prev_ws => return false,
+                b'#' if prev_ws => return LineScan::Clean { open_quote: None },
                 // A quoted scalar only starts at a node boundary; a
                 // mid-scalar quote (e.g. `don't`) is scalar content.
                 b'\'' | b'"' if at_boundary => (quote, at_boundary) = (Some(byte), false),
                 b'*' if at_boundary => prev_star = true,
-                _ => at_boundary = matches!(byte, b' ' | b'\t' | b'[' | b'{' | b',' | b':' | b'-'),
+                _ => at_boundary = matches!(byte, b' ' | b'\t' | b'[' | b'{' | b',' | b':' | b'-' | b'?'),
             }
         }
         prev_ws = matches!(byte, b' ' | b'\t');
     }
-    false
+    LineScan::Clean { open_quote: quote }
 }
 
 // -----------------------------------------------------------------------------
@@ -313,6 +360,15 @@ mod tests {
     fn reject_alias_after_mid_scalar_apostrophe() {
         let err = reject_yaml_aliases("a: &a x\nb: [don't, *a]\n");
         assert!(err.is_err(), "alias after mid-scalar apostrophe should be rejected");
+    }
+
+    #[test]
+    fn reject_alias_after_unindented_flow_quote_continuation() {
+        let err = reject_yaml_aliases("x: &x 1\nk: ['a\n', *x]\n");
+        assert!(
+            err.is_err(),
+            "libyaml continues a flow quoted scalar at any indentation, so the alias after it must be caught"
+        );
     }
 
     #[test]
@@ -536,19 +592,94 @@ mod tests {
     }
 
     #[test]
-    fn line_contains_alias_handles_tabs() {
+    fn scan_line_handles_tabs() {
         assert!(
-            !line_contains_alias("key:\t*.txt"),
+            !matches!(scan_line("key:\t*.txt", None), LineScan::Alias),
             "tab before asterisk-glob should pass"
         );
-        assert!(line_contains_alias("\t*anchor"), "tab before alias should detect");
+        assert!(
+            matches!(scan_line("\t*anchor", None), LineScan::Alias),
+            "tab before alias should detect"
+        );
     }
 
     #[test]
-    fn line_contains_alias_escaped_backslash_then_asterisk() {
+    fn scan_line_escaped_backslash_then_asterisk() {
         assert!(
-            !line_contains_alias("path: \"\\\\*\""),
+            !matches!(scan_line("path: \"\\\\*\"", None), LineScan::Alias),
             "escaped backslash followed by asterisk inside quotes should pass"
+        );
+    }
+
+    #[test]
+    fn reject_alias_after_carriage_return_comment() {
+        let err = reject_yaml_aliases("# c\rb: &b [1,2]\ra: *b\r");
+        assert!(
+            err.is_err(),
+            "a bare CR ends a comment, so the alias after it must be rejected"
+        );
+    }
+
+    #[test]
+    fn reject_alias_after_unicode_line_breaks() {
+        for brk in ['\u{85}', '\u{2028}', '\u{2029}'] {
+            let raw = format!("# c{brk}b: &b [1,2]{brk}a: *b");
+            assert!(
+                reject_yaml_aliases(&raw).is_err(),
+                "U+{:04X} ends a comment, so the alias after it must be rejected",
+                u32::from(brk)
+            );
+        }
+    }
+
+    #[test]
+    fn reject_alias_after_multiline_double_quoted_scalar() {
+        let err = reject_yaml_aliases("b: &b [1,2]\na: [\"x\n #\", *b]\n");
+        assert!(
+            err.is_err(),
+            "a '#' inside a continued quoted scalar must not hide the alias"
+        );
+    }
+
+    #[test]
+    fn reject_alias_after_multiline_quote_with_apostrophe() {
+        let err = reject_yaml_aliases("b: &b [1,2]\na: [\"x\n 'y\", *b]\n");
+        assert!(
+            err.is_err(),
+            "an apostrophe inside a continued quoted scalar must not hide the alias"
+        );
+    }
+
+    #[test]
+    fn reject_alias_after_flow_key_indicator() {
+        let err = reject_yaml_aliases("a: &x [1]\nb: {?*x : 1}\n");
+        assert!(
+            err.is_err(),
+            "an alias right after a flow '?' key indicator must be rejected"
+        );
+    }
+
+    #[test]
+    fn reject_alias_after_block_scalar_opening_a_quote() {
+        let err = reject_yaml_aliases("note: |\n  'unbalanced\nb: &b [1]\na: *b\n");
+        assert!(
+            err.is_err(),
+            "a quote left open by block text must not hide a later alias"
+        );
+    }
+
+    #[test]
+    fn accept_quoted_scalar_spanning_lines() {
+        reject_yaml_aliases("a: \"one *x\n  two\"\nb: ok\n")
+            .expect("a '*' inside a multi-line quoted scalar is not an alias");
+    }
+
+    #[test]
+    fn crlf_line_numbers_count_newlines() {
+        let err = reject_yaml_aliases("listeners: []\r\nfoo: bar\r\nbomb: *a\r\n").unwrap_err();
+        assert!(
+            err.to_string().contains("line 3"),
+            "CRLF input should report line 3, got: {err}"
         );
     }
 
