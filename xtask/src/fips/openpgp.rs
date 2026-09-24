@@ -12,15 +12,26 @@ use openssl::hash::{MessageDigest, hash};
 const PUBLIC_KEY_PACKET: u8 = 6;
 
 /// Compute the v4 fingerprint (RFC 4880 section 12.2: SHA-1 over `0x99`, the
-/// two-octet packet length and the packet body) of the first public key
-/// packet in an ASCII-armored key block, as uppercase hex.
+/// two-octet packet length and the packet body) of the public key in an
+/// ASCII-armored key block, as uppercase hex.
+///
+/// The block must hold exactly one primary key: podman trusts every key in a
+/// `keyPath` file, so a second one would be trusted without being checked.
+/// Subkeys, user IDs and signatures that follow it belong to that key.
 pub(crate) fn v4_fingerprint(armored: &str) -> Result<String, String> {
     let bytes = dearmor(armored)?;
-    let (tag, body) = first_packet(&bytes)?;
+    let (tag, body, mut rest) = first_packet(&bytes)?;
     if tag != PUBLIC_KEY_PACKET {
         return Err(format!(
             "first packet is tag {tag}, expected a public key packet ({PUBLIC_KEY_PACKET})"
         ));
+    }
+    while !rest.is_empty() {
+        let (next_tag, _, next_rest) = first_packet(rest)?;
+        if next_tag == PUBLIC_KEY_PACKET {
+            return Err("the key block holds more than one primary key".to_owned());
+        }
+        rest = next_rest;
     }
     if body.first() != Some(&4) {
         return Err(format!("public key packet version {:?}, expected 4", body.first()));
@@ -59,8 +70,12 @@ fn dearmor(armored: &str) -> Result<Vec<u8>, String> {
         .map_err(|err| format!("armor payload is not base64: {err}"))
 }
 
-/// Split the first packet off an OpenPGP message: its tag and body.
-fn first_packet(bytes: &[u8]) -> Result<(u8, &[u8]), String> {
+/// An OpenPGP packet split off a message: its tag, its body, and the bytes
+/// after it.
+type Packet<'bytes> = (u8, &'bytes [u8], &'bytes [u8]);
+
+/// Split the first packet off an OpenPGP message.
+fn first_packet(bytes: &[u8]) -> Result<Packet<'_>, String> {
     let &first = bytes.first().ok_or("empty key block")?;
     if first & 0x80 == 0 {
         return Err("not an OpenPGP packet".to_owned());
@@ -70,10 +85,9 @@ fn first_packet(bytes: &[u8]) -> Result<(u8, &[u8]), String> {
     } else {
         new_format(first, bytes)?
     };
-    let body = bytes
-        .get(header_len..header_len + body_len)
-        .ok_or("packet body is truncated")?;
-    Ok((tag, body))
+    let end = header_len + body_len;
+    let body = bytes.get(header_len..end).ok_or("packet body is truncated")?;
+    Ok((tag, body, bytes.get(end..).unwrap_or_default()))
 }
 
 /// Old-format packet header (RFC 4880 section 4.2.1): the tag in bits 2-5
@@ -157,11 +171,19 @@ mod tests {
     }
 
     #[test]
+    fn a_second_primary_key_is_rejected() {
+        let key = [0x80 | (PUBLIC_KEY_PACKET << 2), 2, 4, 0x00];
+        let armored = armor(&[key, key].concat());
+        let err = v4_fingerprint(&armored).expect_err("podman would trust the unchecked second key");
+        assert!(err.contains("more than one primary key"), "the error says why: {err}");
+    }
+
+    #[test]
     fn new_format_lengths_are_decoded() {
         // Two-octet length: 192 + 1 = 193 bytes of body.
         let mut packet = vec![0xC0 | PUBLIC_KEY_PACKET, 192, 1];
         packet.extend(std::iter::repeat_n(0x42, 193));
-        let (tag, body) = first_packet(&packet).expect("a well-formed packet");
+        let (tag, body, _) = first_packet(&packet).expect("a well-formed packet");
         assert_eq!(tag, PUBLIC_KEY_PACKET, "tag comes from the low six bits");
         assert_eq!(body.len(), 193, "two-octet new-format length");
     }
