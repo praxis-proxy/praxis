@@ -10,8 +10,11 @@
 # or serial number. All configured fields on an entry
 # must match.
 #
+# ⚠️  EXPERIMENTAL: This example uses the `spiffe` experimental feature.
+# Not recommended for production use. Build with --features spiffe.
+#
 # Usage:
-#   cargo run -p praxis-proxy -- \
+#   cargo run -p praxis-proxy --features spiffe -- \
 #     -c examples/configs/security/peer-identity-trust.yaml
 
 listeners:
