@@ -3854,10 +3854,12 @@ fn test_callout_executor() -> crate::FilteredSubrequestExecutor {
 async fn callout_pipeline_leaves_the_parent_branch_record_alone() {
     use std::sync::Arc;
 
+    let (addr, _backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
     let mut registry = crate::FilterRegistry::with_builtins();
     let nested = Arc::new(build_branching_pipeline(
         &registry,
-        r#"
+        &format!(
+            r#"
 - filter: headers
   request_add:
     - name: X-Nested-Host
@@ -3878,9 +3880,17 @@ async fn callout_pipeline_leaves_the_parent_branch_record_alone() {
               response_add:
                 - name: X-Nested-Ran
                   value: "1"
-- filter: static_response
-  status: 200
-"#,
+- filter: router
+  routes:
+    - path_prefix: "/"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints:
+        - "{addr}"
+"#
+        ),
     ));
     let executor = Arc::new(buffered_executor(1_048_576));
     let nested_responses: Arc<std::sync::Mutex<Vec<HeaderMap>>> = Arc::default();
