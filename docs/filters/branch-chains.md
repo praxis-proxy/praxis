@@ -71,7 +71,13 @@ for the complete runnable config.
 Filters write key-value pairs to a
 `FilterResultSet`, keyed by the filter's **type
 name** (from `HttpFilter::name()`). Results are
-cleared after branch evaluation. For the full
+cleared after branch evaluation. Results a filter
+writes while the request body is buffered ahead of
+the request phase (for example `json_rpc`, or
+`guardrails` body rules) are held until that
+filter's turn in the pipeline, so its branches see
+them wherever it sits. Two instances of the same
+filter type share one result slot. For the full
 lifecycle and API, see
 [Pipeline Concepts: Filter Results](../architecture/pipeline-concepts.md#filter-results).
 

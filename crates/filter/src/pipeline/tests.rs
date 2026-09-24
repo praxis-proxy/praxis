@@ -8142,6 +8142,64 @@ async fn branch_filters_unwind_in_reverse_before_their_host() {
 }
 
 #[tokio::test]
+async fn a_pre_read_result_reaches_the_branches_of_a_later_promoter() {
+    let log = HookLog::default();
+    let mut branch = unwind_branch(
+        "flagged",
+        RejoinTarget::Next,
+        vec![scripted_pf(100, "B", &log, Scripted::Continue, Scripted::Continue)],
+    );
+    branch.condition = Some(ResolvedBranchCondition {
+        filter_name: Arc::from("P"),
+        key: Arc::from("verdict"),
+        value: Arc::from("flagged"),
+    });
+    let mut promoter = scripted_pf(1, "P", &log, Scripted::Continue, Scripted::Continue);
+    promoter.branches = vec![branch];
+    let pipeline = test_pipeline(
+        BodyCapabilities::default(),
+        vec![
+            scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue),
+            promoter,
+        ],
+    );
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut pre_read = crate::FilterResultSet::new();
+    pre_read.set("verdict", "flagged").unwrap();
+    ctx.filter_results.insert("P", pre_read);
+
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        log.take(),
+        vec!["A", "P", "B"],
+        "a result published during the pre-read must survive an earlier filter and fire its promoter's branch"
+    );
+}
+
+#[tokio::test]
+async fn a_pre_read_result_for_a_skipped_filter_is_dropped() {
+    let log = HookLog::default();
+    let pipeline = test_pipeline(
+        BodyCapabilities::default(),
+        vec![scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue)],
+    );
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut pre_read = crate::FilterResultSet::new();
+    pre_read.set("verdict", "flagged").unwrap();
+    ctx.filter_results.insert("absent", pre_read);
+
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    assert!(
+        ctx.filter_results.is_empty(),
+        "results for a filter that never ran must not leak past the request phase"
+    );
+}
+
+#[tokio::test]
 async fn sibling_branches_unwind_in_reverse_branch_order() {
     let log = HookLog::default();
     let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);

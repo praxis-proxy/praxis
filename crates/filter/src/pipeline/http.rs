@@ -74,6 +74,12 @@ impl FilterPipeline {
         ctx.executed_branch_filters.clear();
         ctx.body_done_indices.clear();
         ctx.body_done_indices.resize(self.filters.len(), false);
+        // Results present now were published during the StreamBuffer
+        // pre-read. Branch evaluation clears the set after every executed
+        // filter, so hold them aside and hand each back to its own filter
+        // just before it runs; otherwise only a promoter at index 0 could
+        // ever branch on its pre-read results.
+        let mut pre_read_results = std::mem::take(&mut ctx.filter_results);
         let mut idx = 0;
         while idx < self.filters.len() {
             let pf = &self.filters[idx];
@@ -97,6 +103,9 @@ impl FilterPipeline {
                 trace!(filter = http_filter.name(), "skipped by conditions");
                 idx += 1;
                 continue;
+            }
+            if let Some(results) = pre_read_results.remove(http_filter.name()) {
+                ctx.filter_results.insert(http_filter.name(), results);
             }
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome =
