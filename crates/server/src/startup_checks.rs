@@ -2,9 +2,23 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Startup security checks: root privilege enforcement, insecure option
-//! warnings, and TLS key permission validation.
+//! warnings, TLS key permission validation, and the FIPS capability check.
 
 use praxis_core::config::Config;
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Built-in filters whose dependencies do their own cryptography outside the
+/// system OpenSSL, so a binary that registers one cannot honor
+/// `PRAXIS_REQUIRE_FIPS`.
+///
+/// The same fact is encoded in two other places, which must agree with this
+/// list: `DENIED` in `xtask/src/fips/graph.rs` (the crates the FIPS report
+/// rejects) and the `Containerfile.fips` header (the features the FIPS
+/// build leaves out).
+const NON_FIPS_FILTERS: &[&str] = &["policy"];
 
 // -----------------------------------------------------------------------------
 // Insecure Options Warnings
@@ -314,6 +328,39 @@ pub(crate) fn warn_admin_configured_without_feature(config: &Config) {
              (/healthy, /ready, /metrics, /api/*) are disabled"
         );
     }
+}
+
+/// Why this binary cannot honor `PRAXIS_REQUIRE_FIPS`, if it cannot.
+///
+/// The provider and kernel checks cover rustls only. The `policy` filter's
+/// JWT verification runs on aws-lc-rs and its OAuth and Valkey plugins use
+/// the pure-Rust `hmac` and `sha2` crates, none of which is the system
+/// OpenSSL, so a binary that registers it is not FIPS-capable whatever the
+/// provider reports. Checked against the registry rather than the config so
+/// a hot reload cannot add the filter later.
+///
+/// ```
+/// let registry = praxis_filter::FilterRegistry::with_builtins();
+/// let blocked = praxis::fips_blocker(&registry).is_some();
+/// assert_eq!(blocked, registry.available_filters().contains(&"policy"));
+/// ```
+pub fn fips_blocker(registry: &praxis_filter::FilterRegistry) -> Option<String> {
+    let available = registry.available_filters();
+    let registered: Vec<String> = NON_FIPS_FILTERS
+        .iter()
+        .copied()
+        .filter(|name| available.contains(name))
+        .map(|name| format!("`{name}` filter"))
+        .collect();
+
+    (!registered.is_empty()).then(|| {
+        format!(
+            "{} is set but this binary registers the {}, whose dependencies do their own cryptography outside the \
+             system OpenSSL; run the FIPS build",
+            praxis_tls::provider::REQUIRE_FIPS_ENV,
+            registered.join(" and ")
+        )
+    })
 }
 
 /// Warn when a policy-free build nonetheless carries the `policy` filter.
@@ -769,6 +816,33 @@ insecure_options:
         assert!(
             warnings.iter().any(|w| w.contains("symlink")),
             "symlink log path should warn at validate: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn fips_is_blocked_by_a_registered_policy_filter() {
+        let mut registry = praxis_filter::FilterRegistry::with_builtins();
+        if !registry.available_filters().contains(&"policy") {
+            let factory = praxis_filter::FilterFactory::Http(Arc::new(|_| Err("unused".into())));
+            registry
+                .register("policy", factory)
+                .expect("policy is not registered yet");
+        }
+        let reason = super::fips_blocker(&registry).expect("the policy filter blocks FIPS");
+        assert!(
+            reason.contains("PRAXIS_REQUIRE_FIPS") && reason.contains("`policy` filter"),
+            "the refusal must name the variable and the filter: {reason}"
+        );
+    }
+
+    #[cfg(not(feature = "policy-engine"))]
+    #[test]
+    fn a_policy_free_registry_does_not_block_fips() {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        assert_eq!(
+            super::fips_blocker(&registry),
+            None,
+            "a policy-free build can run in FIPS mode"
         );
     }
 

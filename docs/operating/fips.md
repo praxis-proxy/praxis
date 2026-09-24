@@ -68,7 +68,11 @@ Set `PRAXIS_REQUIRE_FIPS=1` in production FIPS deployments. An empty value,
 turns it on. It is a check, not a switch. With it on, praxis refuses to start:
 
 - unless both signals above are present, and names each one that is missing;
-- when a listener's TLS configuration is not FIPS-approved by rustls.
+- when a listener's TLS configuration is not FIPS-approved by rustls;
+- when the binary registers the `policy` filter, as the standard build does:
+  the policy engine verifies JWTs with aws-lc-rs and its OAuth and Valkey
+  plugins hash with the RustCrypto `hmac` and `sha2` crates, none of which
+  is the system OpenSSL. Use the FIPS build.
 
 Upstream connections always require Extended Master Secret and use the same
 provider, so they are FIPS whenever the listeners are. Without the variable,

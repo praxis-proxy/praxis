@@ -8,9 +8,11 @@
 //! Runs the real binary as a subprocess because the check ends in
 //! `process::exit`. The expectation depends on the host: on a host that is not
 //! in FIPS mode the binary must refuse to start and say why; on a FIPS host it
-//! must start normally. Both branches are asserted, so the test is meaningful
-//! wherever it runs, and a control run without the variable proves the
-//! variable is what changes the outcome.
+//! must start normally, unless it carries the policy engine, whose
+//! dependencies do their own cryptography, in which case it must refuse and
+//! name the `policy` filter. Every branch is asserted, so the test is
+//! meaningful wherever it runs, and a control run without the variable proves
+//! the variable is what changes the outcome.
 
 use std::{path::Path, process::Command};
 
@@ -42,6 +44,27 @@ fn validate_with(env: &[(&str, &str)]) -> (bool, String) {
     )
 }
 
+/// On a FIPS host both signals are present, so validate succeeds unless the
+/// binary carries the policy engine, which is not FIPS-capable and must be
+/// refused by name.
+fn assert_fips_host_outcome(ok: bool, stderr: &str) {
+    if cfg!(feature = "policy-engine") {
+        assert!(
+            !ok,
+            "on a FIPS host a binary carrying the policy engine is not FIPS-capable and must refuse to start"
+        );
+        assert!(
+            stderr.contains("PRAXIS_REQUIRE_FIPS") && stderr.contains("`policy` filter"),
+            "the refusal must name the variable and the policy filter, got: {stderr}"
+        );
+    } else {
+        assert!(
+            ok,
+            "on a FIPS host the requirement is met and validate must succeed: {stderr}"
+        );
+    }
+}
+
 #[test]
 #[expect(
     clippy::tests_outside_test_module,
@@ -53,10 +76,7 @@ fn require_fips_fails_closed_unless_the_host_is_in_fips_mode() {
 
     let (ok, stderr) = validate_with(&[("PRAXIS_REQUIRE_FIPS", "1")]);
     if host_is_fips() {
-        assert!(
-            ok,
-            "on a FIPS host the requirement is met and validate must succeed: {stderr}"
-        );
+        assert_fips_host_outcome(ok, &stderr);
     } else {
         assert!(
             !ok,

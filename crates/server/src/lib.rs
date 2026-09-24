@@ -48,6 +48,7 @@ pub use server::{
     run_server_with_composition, run_server_with_registry, try_run_server, try_run_server_with_composition,
     try_run_server_with_registry,
 };
+pub use startup_checks::fips_blocker;
 #[cfg(feature = "admin-api")]
 pub use version::process_version_info;
 

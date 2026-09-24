@@ -43,7 +43,8 @@ use crate::{
     composition::{PipelineComposition, RegistryContext, ServerComposition},
     pipelines::resolve_pipelines_with_composition,
     startup_checks::{
-        enforce_root_check, warn_insecure_key_permissions, warn_insecure_log_file_permissions, warn_insecure_options,
+        enforce_root_check, fips_blocker, warn_insecure_key_permissions, warn_insecure_log_file_permissions,
+        warn_insecure_options,
     },
 };
 
@@ -507,6 +508,11 @@ fn build_server_state(
     let registry = registry_factory(&RegistryContext::new(&subrequest_client))?;
     #[cfg(not(feature = "policy-engine"))]
     warn_policy_filter_without_feature(&registry);
+    if praxis_tls::provider::required()
+        && let Some(reason) = fips_blocker(&registry)
+    {
+        return Err(reason.into());
+    }
 
     let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
     let pipelines = resolve_pipelines_with_composition(
