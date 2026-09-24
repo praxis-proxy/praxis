@@ -111,7 +111,8 @@ RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
 # offline. xtask is built without its default features, which keeps the
 # standard proxy build (and its non-FIPS dependencies) out of this image.
 # The exit status is kept so the image can be run to print the report and
-# fail accordingly.
+# fail accordingly. A run that wrote no report (a build or fetch failure)
+# fails the build instead, so the failure is not cached and replayed.
 FROM builder AS report
 
 ARG CARGO_FEATURES
@@ -119,10 +120,11 @@ ARG CARGO_ARGS
 
 RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
     --mount=type=cache,id=praxis-fips-target,target=/src/target \
-    { cargo run --quiet --locked -p xtask --no-default-features ${CARGO_ARGS} -- \
+    cargo run --quiet --locked -p xtask --no-default-features ${CARGO_ARGS} -- \
         fips report /fips/praxis --features "${CARGO_FEATURES}" --offline --out /fips/report.txt; \
-      echo $? > /fips/status; } \
-    ; true
+    status=$?; \
+    [ -f /fips/report.txt ] || exit "$status"; \
+    echo "$status" > /fips/status
 
 CMD ["sh", "-c", "cat /fips/report.txt; exit $(cat /fips/status)"]
 
