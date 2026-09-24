@@ -7,7 +7,7 @@ Injects `X-Forwarded-For`, `X-Forwarded-Proto`, and `X-Forwarded-Host` headers i
 
 ## Configuration Notes
 
-When the client IP is from a trusted proxy, existing `X-Forwarded-For` values are preserved and the client IP is appended. Otherwise, the header is overwritten with the client IP to prevent spoofing.
+When the client IP is from a trusted proxy, existing `X-Forwarded-For` values are preserved and the client IP is appended, and a non-empty `X-Forwarded-Proto` or `X-Forwarded-Host` the proxy set is kept, since it describes the original client connection. Otherwise, all three are overwritten to prevent spoofing.
 
 When `use_standard_header` is `true`, also injects the [RFC 7239] `Forwarded` header with `for`, `proto`, and `host` parameters.
 

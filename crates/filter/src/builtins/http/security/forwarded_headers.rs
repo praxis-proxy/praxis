@@ -46,8 +46,10 @@ struct ForwardedHeadersConfig {
 ///
 /// When the client IP is from a trusted proxy, existing
 /// `X-Forwarded-For` values are preserved and the client
-/// IP is appended. Otherwise, the header is overwritten
-/// with the client IP to prevent spoofing.
+/// IP is appended, and a non-empty `X-Forwarded-Proto` or
+/// `X-Forwarded-Host` the proxy set is kept, since it
+/// describes the original client connection. Otherwise,
+/// all three are overwritten to prevent spoofing.
 ///
 /// When `use_standard_header` is `true`, also injects the
 /// [RFC 7239] `Forwarded` header with `for`, `proto`, and
@@ -198,6 +200,13 @@ impl ForwardedHeadersFilter {
 // Forwarded Header Formatting
 // -----------------------------------------------------------------------------
 
+/// Whether `headers` carries a non-empty, readable `name`. A trusted proxy's
+/// value describes the original client connection, which this hop cannot
+/// see, so it is kept rather than replaced.
+fn carries_value(headers: &http::HeaderMap, name: &str) -> bool {
+    joined_field_lines(headers, name).is_some_and(|value| !value.trim().is_empty())
+}
+
 /// Comma-join every field-line of `name` in `headers`, per RFC 7230.
 ///
 /// Returns `None` when the header is absent or any field-line is
@@ -304,9 +313,13 @@ impl HttpFilter for ForwardedHeadersFilter {
         ctx.extra_request_headers.push((Cow::Borrowed("X-Forwarded-For"), xff));
 
         let proto = if ctx.downstream_tls { "https" } else { "http" };
-        tracing::debug!(proto, "setting X-Forwarded-Proto from connection state");
-        ctx.extra_request_headers
-            .push((Cow::Borrowed("X-Forwarded-Proto"), proto.into()));
+        if trusted && carries_value(&ctx.request.headers, "x-forwarded-proto") {
+            tracing::debug!("keeping X-Forwarded-Proto set by a trusted proxy");
+        } else {
+            tracing::debug!(proto, "setting X-Forwarded-Proto from connection state");
+            ctx.extra_request_headers
+                .push((Cow::Borrowed("X-Forwarded-Proto"), proto.into()));
+        }
 
         let host_value = ctx
             .request
@@ -322,7 +335,9 @@ impl HttpFilter for ForwardedHeadersFilter {
         // Push after the standard header so the owned Host copy is moved,
         // not cloned; each injected name is distinct, so the final request
         // headers are unaffected by push order.
-        if let Some(host) = host_value {
+        if trusted && carries_value(&ctx.request.headers, "x-forwarded-host") {
+            tracing::debug!("keeping X-Forwarded-Host set by a trusted proxy");
+        } else if let Some(host) = host_value {
             tracing::debug!(host = %host, "setting X-Forwarded-Host from Host header");
             ctx.extra_request_headers
                 .push((Cow::Borrowed("X-Forwarded-Host"), host));
@@ -389,6 +404,57 @@ mod tests {
             xff,
             Some("203.0.113.50"),
             "untrusted client XFF should overwrite spoofed value"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_keeps_its_forwarded_proto_and_host() {
+        let f = make_filter(&["10.0.0.0/8"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(
+            http::header::HeaderName::from_static("x-forwarded-proto"),
+            "https".parse().unwrap(),
+        );
+        req.headers.insert(
+            http::header::HeaderName::from_static("x-forwarded-host"),
+            "shop.example.com".parse().unwrap(),
+        );
+        req.headers
+            .insert(http::header::HOST, "praxis.internal:8080".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("10.1.2.3".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let injected: Vec<&str> = ctx.extra_request_headers.iter().map(|(k, _)| k.as_ref()).collect();
+        assert!(
+            !injected.contains(&"X-Forwarded-Proto") && !injected.contains(&"X-Forwarded-Host"),
+            "a trusted proxy's X-Forwarded-Proto and X-Forwarded-Host must pass through, injected {injected:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn untrusted_client_cannot_set_forwarded_proto() {
+        let f = make_filter(&["10.0.0.0/8"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(
+            http::header::HeaderName::from_static("x-forwarded-proto"),
+            "https".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let proto = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-Proto")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            proto,
+            Some("http"),
+            "an untrusted client's X-Forwarded-Proto must be replaced from the connection"
         );
     }
 
