@@ -127,6 +127,7 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
                 }
                 ctx.selected_endpoint_index = Some(reselected_endpoint_index(health, &addr));
                 let mut upstream = reselector.build_upstream(addr);
+                carry_forward_sni(&mut upstream, ctx.upstream_for_retry.as_ref());
                 apply_per_try_timeout(ctx, &mut upstream);
                 ctx.upstream_for_retry = Some(upstream);
             } else {
@@ -214,6 +215,21 @@ fn apply_grpc_deadline(deadline: praxis_core::grpc::GrpcDeadline, upstream: &mut
 /// The shorter of a configured timeout and the remaining deadline.
 fn shorter(configured: Option<std::time::Duration>, remaining: std::time::Duration) -> std::time::Duration {
     configured.map_or(remaining, |configured| configured.min(remaining))
+}
+
+/// Keep the SNI the previous attempt presented when a reselected endpoint's
+/// cluster TLS names none. The first selection fills a missing SNI from the
+/// request `Host`; without this the retry would derive one from the new
+/// endpoint address and an SNI-routed upstream would see a different name.
+fn carry_forward_sni(upstream: &mut Upstream, previous: Option<&Upstream>) {
+    let Some(sni) = previous.and_then(|p| p.tls.as_ref()).and_then(|t| t.sni()) else {
+        return;
+    };
+    if let Some(tls) = upstream.tls.as_mut()
+        && tls.sni().is_none()
+    {
+        tls.set_sni(Arc::<str>::from(sni));
+    }
 }
 
 /// Override connection/read timeouts with the policy's per-try timeout when set.
@@ -337,6 +353,37 @@ mod tests {
     use praxis_tls::{CachedClusterTls, ClusterTls};
 
     use super::*;
+
+    #[test]
+    fn reselected_upstream_keeps_the_previous_attempts_sni() {
+        let mut previous = tls_upstream("10.0.0.1:443", None);
+        if let Some(tls) = previous.tls.as_mut() {
+            tls.set_sni("api.example.com");
+        }
+        let mut reselected = tls_upstream("10.0.0.2:443", None);
+
+        carry_forward_sni(&mut reselected, Some(&previous));
+
+        assert_eq!(
+            reselected.tls.as_ref().and_then(|t| t.sni()),
+            Some("api.example.com"),
+            "a retry must present the same SNI as the first attempt"
+        );
+    }
+
+    #[test]
+    fn reselected_upstream_keeps_an_explicit_cluster_sni() {
+        let previous = tls_upstream("10.0.0.1:443", Some("from-host.example.com"));
+        let mut reselected = tls_upstream("10.0.0.2:443", Some("configured.example.com"));
+
+        carry_forward_sni(&mut reselected, Some(&previous));
+
+        assert_eq!(
+            reselected.tls.as_ref().and_then(|t| t.sni()),
+            Some("configured.example.com"),
+            "an SNI set in the cluster config must win over the carried one"
+        );
+    }
 
     #[tokio::test]
     async fn valid_address_builds_peer() {
@@ -820,6 +867,19 @@ mod tests {
             cert_path,
             key_path,
             _temp_dir: temp_dir,
+        }
+    }
+
+    fn tls_upstream(address: &str, sni: Option<&str>) -> Upstream {
+        let tls = ClusterTls {
+            sni: sni.map(str::to_owned),
+            ..ClusterTls::default()
+        };
+        Upstream {
+            address: Arc::from(address),
+            authority: None,
+            connection: Arc::new(ConnectionOptions::default()),
+            tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         }
     }
 }
