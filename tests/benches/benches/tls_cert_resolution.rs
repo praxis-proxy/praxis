@@ -9,7 +9,12 @@
 //! matching, and default certificate fallback paths with varying
 //! certificate pool sizes.
 
-#![expect(clippy::min_ident_chars, clippy::unwrap_used, reason = "benchmarks")]
+#![expect(
+    clippy::min_ident_chars,
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    reason = "benchmarks"
+)]
 
 use std::hint::black_box;
 
@@ -70,13 +75,19 @@ fn bench_wildcard_lookup(c: &mut Criterion) {
         );
     }
 
-    // Wildcard miss path (multi-level subdomain should not match single-level wildcard)
     let resolver = build_resolver_with_wildcards(100);
+    assert!(
+        resolver.lookup(Some("a.b.domain-50.com")).is_none(),
+        "a single-level wildcard must not match a multi-level subdomain"
+    );
     group.bench_function("miss_multi_level", |b| {
         b.iter(|| black_box(resolver.lookup(black_box(Some("a.b.domain-50.com"))).is_none()));
     });
 
-    // Wildcard miss path (bare domain should not match wildcard)
+    assert!(
+        resolver.lookup(Some("domain-50.com")).is_none(),
+        "a wildcard must not match its bare domain"
+    );
     group.bench_function("miss_bare_domain", |b| {
         b.iter(|| black_box(resolver.lookup(black_box(Some("domain-50.com"))).is_none()));
     });
@@ -88,14 +99,16 @@ fn bench_wildcard_lookup(c: &mut Criterion) {
 fn bench_fallback_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("cert_resolve/fallback");
 
-    // Miss with default (returns default cert)
     let resolver = build_resolver_with_default(100);
     group.bench_function("default_hit", |b| {
         b.iter(|| black_box(resolver.lookup(black_box(Some("unknown.example.com"))).unwrap()));
     });
 
-    // Miss without default (returns None)
     let resolver_no_default = build_resolver_with_exact_hostnames(100);
+    assert!(
+        resolver_no_default.lookup(Some("unknown.example.com")).is_none(),
+        "an unknown name must resolve to nothing when there is no default certificate"
+    );
     group.bench_function("no_default_miss", |b| {
         b.iter(|| {
             black_box(
@@ -106,13 +119,15 @@ fn bench_fallback_lookup(c: &mut Criterion) {
         });
     });
 
-    // No SNI with default (returns default cert)
     group.bench_function("no_sni_default", |b| {
         b.iter(|| black_box(resolver.lookup(black_box(None)).unwrap()));
     });
 
-    // No SNI without default (returns None)
     let resolver_no_sni_no_default = build_resolver_with_exact_hostnames(100);
+    assert!(
+        resolver_no_sni_no_default.lookup(None).is_none(),
+        "a hello without SNI must resolve to nothing when there is no default certificate"
+    );
     group.bench_function("no_sni_no_default", |b| {
         b.iter(|| black_box(resolver_no_sni_no_default.lookup(black_box(None)).is_none()));
     });
@@ -126,17 +141,14 @@ fn bench_case_insensitive_lookup(c: &mut Criterion) {
 
     let resolver = build_resolver_with_exact_hostnames(100);
 
-    // Lowercase SNI (common case, no copy)
     group.bench_function("lowercase", |b| {
         b.iter(|| black_box(resolver.lookup(black_box(Some("host-50.example.com"))).unwrap()));
     });
 
-    // Mixed-case SNI (requires to_ascii_lowercase, triggers copy)
     group.bench_function("mixed_case", |b| {
         b.iter(|| black_box(resolver.lookup(black_box(Some("Host-50.Example.COM"))).unwrap()));
     });
 
-    // Uppercase SNI (requires to_ascii_lowercase, triggers copy)
     group.bench_function("uppercase", |b| {
         b.iter(|| black_box(resolver.lookup(black_box(Some("HOST-50.EXAMPLE.COM"))).unwrap()));
     });
