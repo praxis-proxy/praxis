@@ -91,17 +91,22 @@ pub fn check_root_privilege(allow_root: bool, euid: u32) -> Option<String> {
 }
 
 /// Enforce the root privilege check on Unix, using the real effective UID.
+///
+/// # Errors
+///
+/// Returns the refusal message from [`check_root_privilege`].
 #[cfg(unix)]
-pub(crate) fn enforce_root_check(config: &Config) {
+pub(crate) fn enforce_root_check(config: &Config) -> Result<(), String> {
     let euid = nix::unistd::geteuid().as_raw();
-    if let Some(msg) = check_root_privilege(config.insecure_options.allow_root, euid) {
-        crate::fatal(&msg);
-    }
+    check_root_privilege(config.insecure_options.allow_root, euid).map_or(Ok(()), Err)
 }
 
 /// No-op on non-Unix platforms.
 #[cfg(not(unix))]
-pub(crate) fn enforce_root_check(_config: &Config) {}
+#[expect(clippy::unnecessary_wraps, reason = "matches the Unix signature")]
+pub(crate) fn enforce_root_check(_config: &Config) -> Result<(), String> {
+    Ok(())
+}
 
 // -----------------------------------------------------------------------------
 // TLS Key Permission Checks
@@ -463,6 +468,24 @@ mod tests {
                 warnings[0]
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_root_check_refuses_root_without_override() {
+        let euid = nix::unistd::geteuid().as_raw();
+        let mut config = Config::from_yaml(praxis_core::config::DEFAULT_CONFIG).expect("default config should parse");
+        let result = super::enforce_root_check(&config);
+        assert_eq!(
+            result.is_err(),
+            euid == 0,
+            "only root without allow_root is refused: {result:?}"
+        );
+        config.insecure_options.allow_root = true;
+        assert!(
+            super::enforce_root_check(&config).is_ok(),
+            "allow_root should permit any UID"
+        );
     }
 
     #[cfg(unix)]

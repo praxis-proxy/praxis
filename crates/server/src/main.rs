@@ -20,6 +20,8 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 mod commands;
 mod dump;
 
+use std::process::ExitCode;
+
 use clap::Parser;
 use tracing::info;
 
@@ -50,9 +52,9 @@ struct Cli {
 
 /// Entry point.
 #[expect(clippy::print_stderr, reason = "fatal error output")]
-fn main() {
+fn main() -> ExitCode {
     // Before anything that might build a TLS config. `--validate` and `--dump`
-    // return without reaching `run_server`, and both construct a sub-request
+    // return without reaching `try_run_server`, and both construct a sub-request
     // connector, so installing only on the serving path would leave those two
     // subcommands panicking inside rustls.
     praxis::install_crypto_provider();
@@ -63,17 +65,17 @@ fn main() {
     if cli.validate {
         if let Err(error) = commands::load_and_validate_for_cli(explicit.as_deref()) {
             eprintln!("invalid configuration: {error}");
-            std::process::exit(1);
+            return ExitCode::FAILURE;
         }
-        return;
+        return ExitCode::SUCCESS;
     }
 
     if cli.dump {
         if let Err(error) = commands::run_dump(explicit.as_deref()) {
             eprintln!("dump failed: {error}");
-            std::process::exit(1);
+            return ExitCode::FAILURE;
         }
-        return;
+        return ExitCode::SUCCESS;
     }
 
     // Load from the resolved path rather than re-probing the filesystem, so
@@ -86,10 +88,13 @@ fn main() {
     .unwrap_or_else(|error| praxis::fatal(&error));
     let tracing_guard = praxis::init_tracing(&config).unwrap_or_else(|error| praxis::fatal(&error));
     let log_level = Some(tracing_guard.log_level_state());
+    let log_output = config.runtime.logging.output;
     info!(version = env!("PRAXIS_VERSION"), "starting server");
 
     let _tracing_guard = tracing_guard;
-    praxis::run_server(config, config_path, log_level)
+    // Returning instead of exiting drops the guard, flushing queued logs and spans.
+    praxis::try_run_server(config, config_path, log_level)
+        .map_or_else(|error| praxis::report_fatal(&error, log_output), |()| ExitCode::SUCCESS)
 }
 
 // -----------------------------------------------------------------------------

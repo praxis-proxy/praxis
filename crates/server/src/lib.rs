@@ -18,8 +18,9 @@
 //!   crates are discovered at build time via `[package.metadata.praxis-filters]`.
 //! - Pipeline resolution: named chains are concatenated into per-listener [`FilterPipeline`]s at startup
 //!   ([`resolve_pipelines`]).
-//! - Running the server ([`run_server`], [`run_server_with_registry`]) and the file-watching hot-reload path that
-//!   rebuilds and atomically swaps pipelines when the config file changes.
+//! - Running the server ([`try_run_server`], [`try_run_server_with_registry`], or the never-returning [`run_server`]
+//!   and [`run_server_with_registry`]) and the file-watching hot-reload path that rebuilds and atomically swaps
+//!   pipelines when the config file changes.
 //!
 //! [`FilterPipeline`]: praxis_filter::FilterPipeline
 
@@ -43,8 +44,9 @@ pub use praxis_core::{
 };
 pub use praxis_filter::{PipelineExtension, RequestExtensions};
 pub use server::{
-    check_root_privilege, fatal, install_crypto_provider, resolve_config_path, run_server, run_server_with_composition,
-    run_server_with_registry,
+    StartupError, check_root_privilege, fatal, install_crypto_provider, report_fatal, resolve_config_path, run_server,
+    run_server_with_composition, run_server_with_registry, try_run_server, try_run_server_with_composition,
+    try_run_server_with_registry,
 };
 #[cfg(feature = "admin-api")]
 pub use version::process_version_info;

@@ -4,10 +4,12 @@
 //! Server bootstrap: protocol registration and startup.
 //!
 //! This module owns the server lifecycle from initial config load through protocol
-//! registration to the blocking `server.run()` call. Entry points expose progressively
-//! more control: [`run_server`] uses built-in filters, [`run_server_with_registry`]
-//! lets you inject custom filters, and [`run_server_with_composition`] exposes the full
-//! composition API for downstream pipeline extensions and validators.
+//! registration to the blocking run call. Entry points expose progressively more
+//! control: [`try_run_server`] uses built-in filters, [`try_run_server_with_registry`]
+//! lets you inject custom filters, and [`try_run_server_with_composition`] exposes the
+//! full composition API for downstream pipeline extensions and validators. Each returns
+//! once the server has shut down so the caller's tracing guard can flush; the
+//! `run_server*` counterparts exit the process instead.
 
 use std::{
     path::PathBuf,
@@ -17,7 +19,7 @@ use std::{
 
 use praxis_core::{
     PingoraServerRuntime,
-    config::{Config, ProtocolKind},
+    config::{Config, LogOutput, ProtocolKind},
     health::{HealthRegistry, build_health_registry},
     logging::LogLevelState,
 };
@@ -72,10 +74,15 @@ const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
 /// the provider *is* the compliance boundary, so starting without the
 /// intended one is worse than not starting.
 pub fn install_crypto_provider() {
+    try_install_crypto_provider().unwrap_or_else(|err| fatal(&err));
+}
+
+/// [`install_crypto_provider`], returning the refusal instead of exiting.
+fn try_install_crypto_provider() -> Result<(), String> {
     praxis_tls::provider::install();
 
     if !praxis_tls::provider::installed() {
-        fatal(&format!(
+        return Err(format!(
             "failed to install the {} crypto provider; refusing to start",
             praxis_tls::provider::name()
         ));
@@ -93,13 +100,14 @@ pub fn install_crypto_provider() {
     if praxis_tls::provider::required() {
         let unmet = status.unmet();
         if !unmet.is_empty() {
-            fatal(&format!(
+            return Err(format!(
                 "{} is set but FIPS mode is not in effect: {}",
                 praxis_tls::provider::REQUIRE_FIPS_ENV,
                 unmet.join("; ")
             ));
         }
     }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -109,9 +117,9 @@ pub fn install_crypto_provider() {
 /// Everything that must happen before any listener or connector exists: the
 /// crypto provider install first, then the root, insecure-option and
 /// file-permission checks.
-fn run_startup_checks(config: &Config) {
-    install_crypto_provider();
-    run_startup_security_checks(config);
+fn run_startup_checks(config: &Config) -> Result<(), StartupError> {
+    try_install_crypto_provider()?;
+    run_startup_security_checks(config)
 }
 
 /// Root, insecure-option, and file-permission checks before the server starts.
@@ -122,16 +130,17 @@ fn run_startup_checks(config: &Config) {
 /// startup as well as on every reload.
 ///
 /// [`init_tracing`]: praxis_core::logging::init_tracing
-fn run_startup_security_checks(config: &Config) {
+fn run_startup_security_checks(config: &Config) -> Result<(), StartupError> {
     #[cfg(feature = "experimental")]
     warn_experimental_features();
     #[cfg(not(feature = "admin-api"))]
     warn_admin_configured_without_feature(config);
-    enforce_root_check(config);
+    enforce_root_check(config)?;
     warn_insecure_options(config);
     init_runtime_limits(&config.runtime);
     warn_insecure_key_permissions(config);
     warn_insecure_log_file_permissions(config);
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -161,11 +170,15 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 // Server
 // -----------------------------------------------------------------------------
 
+/// Error that stops the server from starting.
+pub type StartupError = Box<dyn std::error::Error + Send + Sync>;
+
 /// Standard server entry point with built-in filters only.
 ///
 /// This convenience wrapper builds pipelines from the built-in filter registry and runs the
-/// server. Use [`run_server_with_registry`] when you need custom filters beyond the built-ins,
-/// or [`run_server_with_composition`] when you need downstream pipeline extensions or validators.
+/// server. Use [`try_run_server_with_registry`] when you need custom filters beyond the
+/// built-ins, or [`try_run_server_with_composition`] when you need downstream pipeline
+/// extensions or validators.
 ///
 /// # Security: Root Check
 ///
@@ -173,31 +186,43 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 /// `insecure_options.allow_root: true` in the configuration to override. Prefer
 /// `CAP_NET_BIND_SERVICE` or a reverse proxy for low-port binding.
 ///
-/// Config is owned for the server's lifetime (never returns).
+/// Config is owned for the server's lifetime.
+///
+/// # Errors
+///
+/// See [`try_run_server_with_composition`].
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
-pub fn run_server(config: Config, config_path: Option<PathBuf>, log_level: Option<Arc<LogLevelState>>) -> ! {
-    run_server_with_composition(config, ServerComposition::standard(), config_path, log_level)
+pub fn try_run_server(
+    config: Config,
+    config_path: Option<PathBuf>,
+    log_level: Option<Arc<LogLevelState>>,
+) -> Result<(), StartupError> {
+    try_run_server_with_composition(config, ServerComposition::standard(), config_path, log_level)
 }
 
 /// Build filter pipelines from the given registry, register protocols and run the server.
 ///
 /// Use this variant when you need custom filters beyond the built-ins (e.g. via [`register_filters!`]).
 ///
-/// Assumes tracing is already initialized. Blocks until the process is terminated; never returns.
+/// Assumes tracing is already initialized. Blocks until the server shuts down.
 ///
-/// Config is owned for the server's lifetime (never returns).
+/// Config is owned for the server's lifetime.
+///
+/// # Errors
+///
+/// See [`try_run_server_with_composition`].
 ///
 /// [`register_filters!`]: praxis_filter::register_filters
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
-pub fn run_server_with_registry(
+pub fn try_run_server_with_registry(
     config: Config,
     registry: FilterRegistry,
     config_path: Option<PathBuf>,
     log_level: Option<Arc<LogLevelState>>,
-) -> ! {
-    run_server_with_composition(
+) -> Result<(), StartupError> {
+    try_run_server_with_composition(
         config,
         ServerComposition::with_registry(registry),
         config_path,
@@ -209,15 +234,16 @@ pub fn run_server_with_registry(
 /// run the server.
 ///
 /// This is the composition-aware entry point that owns the full server
-/// lifecycle; [`run_server`] and [`run_server_with_registry`] are thin
+/// lifecycle; [`try_run_server`] and [`try_run_server_with_registry`] are thin
 /// convenience wrappers over it. The composition describes how the downstream
 /// filter registry is built, which pipeline extensions are attached to each
 /// per-listener pipeline, and which read-only validators gate pipeline
 /// construction. The same composition is carried into the hot-reload watcher so
 /// downstream extensions and validators are re-applied on every reload.
 ///
-/// Assumes tracing is already initialized. Blocks until the process is
-/// terminated; never returns.
+/// Assumes tracing is already initialized. Blocks until the server shuts
+/// down, then returns so the caller's tracing guard can flush buffered logs
+/// and spans.
 ///
 /// Config validation warns about active `insecure_options` while the config
 /// is loaded, which is before the configured subscriber can exist: load it
@@ -225,18 +251,25 @@ pub fn run_server_with_registry(
 /// startup checks here repeat them under the configured subscriber so the
 /// log sink records them too.
 ///
-/// Config is owned for the server's lifetime (never returns).
+/// Config is owned for the server's lifetime.
+///
+/// # Errors
+///
+/// Returns an error, before any listener is served, if a startup check
+/// fails (crypto provider, root privilege), the filter registry or pipelines
+/// cannot be built, or a protocol cannot be registered.
 ///
 /// [`with_bootstrap_logging`]: praxis_core::logging::with_bootstrap_logging
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
-pub fn run_server_with_composition(
+#[expect(clippy::too_many_lines, reason = "startup sequence with feature-gated steps")]
+pub fn try_run_server_with_composition(
     config: Config,
     composition: ServerComposition,
     config_path: Option<PathBuf>,
     log_level: Option<Arc<LogLevelState>>,
-) -> ! {
-    run_startup_checks(&config);
+) -> Result<(), StartupError> {
+    run_startup_checks(&config)?;
 
     #[cfg(feature = "admin-api")]
     let stats_started_at = std::time::Instant::now();
@@ -256,11 +289,11 @@ pub fn run_server_with_composition(
         .map(|_| praxis_protocol::http::pingora::health::install_prometheus_admin_recorder());
 
     let health_registry = build_health_registry(&config.clusters);
-    let (state, registry) = build_server_state(&config, composition, &health_registry, log_level);
+    let (state, registry) = build_server_state(&config, composition, &health_registry, log_level)?;
 
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
-    let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines);
+    let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines)?;
     #[cfg(feature = "admin-api")]
     register_admin_endpoints(
         &mut server,
@@ -279,7 +312,71 @@ pub fn run_server_with_composition(
     drop((config_path, config, registry, state));
 
     info!("starting server");
-    server.run()
+    server.run_until_shutdown();
+    info!("server stopped");
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Never-Returning Entry Points
+// -----------------------------------------------------------------------------
+
+/// [`try_run_server`] for callers that never expect control back.
+///
+/// Exits the process with `0` after a graceful shutdown and, via [`fatal`],
+/// with `1` on a startup failure, so the caller's destructors never run and a
+/// tracing guard held by the caller does not flush. Prefer [`try_run_server`]
+/// and return its result from `main` so buffered logs and spans are flushed.
+///
+/// Config is owned for the server's lifetime (never returns).
+pub fn run_server(config: Config, config_path: Option<PathBuf>, log_level: Option<Arc<LogLevelState>>) -> ! {
+    exit_with(try_run_server(config, config_path, log_level))
+}
+
+/// [`try_run_server_with_registry`] for callers that never expect control back.
+///
+/// Exits the process as [`run_server`] does; prefer the `try_` variant so the
+/// caller's tracing guard flushes.
+///
+/// Config is owned for the server's lifetime (never returns).
+pub fn run_server_with_registry(
+    config: Config,
+    registry: FilterRegistry,
+    config_path: Option<PathBuf>,
+    log_level: Option<Arc<LogLevelState>>,
+) -> ! {
+    exit_with(try_run_server_with_registry(config, registry, config_path, log_level))
+}
+
+/// [`try_run_server_with_composition`] for callers that never expect control
+/// back.
+///
+/// Exits the process as [`run_server`] does; prefer the `try_` variant so the
+/// caller's tracing guard flushes.
+///
+/// Config is owned for the server's lifetime (never returns).
+pub fn run_server_with_composition(
+    config: Config,
+    composition: ServerComposition,
+    config_path: Option<PathBuf>,
+    log_level: Option<Arc<LogLevelState>>,
+) -> ! {
+    exit_with(try_run_server_with_composition(
+        config,
+        composition,
+        config_path,
+        log_level,
+    ))
+}
+
+/// Exit the process with the outcome of a `try_run_server*` call: `0` after a
+/// graceful shutdown, `1` through [`fatal`] on a startup failure.
+#[expect(clippy::exit, reason = "the never-returning entry points exit here by contract")]
+fn exit_with(outcome: Result<(), StartupError>) -> ! {
+    match outcome {
+        Ok(()) => std::process::exit(0),
+        Err(err) => fatal(&err),
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -340,7 +437,7 @@ fn build_server_state(
     composition: ServerComposition,
     health_registry: &HealthRegistry,
     log_level: Option<Arc<LogLevelState>>,
-) -> (ServerState, FilterRegistry) {
+) -> Result<(ServerState, FilterRegistry), StartupError> {
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
 
@@ -351,7 +448,7 @@ fn build_server_state(
     // Build the downstream registry once, from immutable server context, then
     // reuse it across reloads. The factory is synchronous and side-effect-free.
     let (registry_factory, pipeline_composition) = composition.into_parts();
-    let registry = registry_factory(&RegistryContext::new(&subrequest_client)).unwrap_or_else(|err| fatal(&err));
+    let registry = registry_factory(&RegistryContext::new(&subrequest_client))?;
     #[cfg(not(feature = "policy-engine"))]
     warn_policy_filter_without_feature(&registry);
 
@@ -364,8 +461,7 @@ fn build_server_state(
         &session_stores,
         &subrequest_client,
         &pipeline_composition,
-    )
-    .unwrap_or_else(|err| fatal(&err));
+    )?;
 
     let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
         praxis_protocol::http::pingora::health::listener_meta_from_config(config),
@@ -393,7 +489,7 @@ fn build_server_state(
         pipeline_composition,
     };
 
-    (state, registry)
+    Ok((state, registry))
 }
 
 // -----------------------------------------------------------------------------
@@ -409,7 +505,7 @@ fn register_protocols(
     server: &mut PingoraServerRuntime,
     config: &Config,
     pipelines: &ListenerPipelines,
-) -> CertWatcherShutdowns {
+) -> Result<CertWatcherShutdowns, praxis_core::errors::ProxyError> {
     let mut all_shutdowns = Vec::new();
 
     if config
@@ -417,9 +513,7 @@ fn register_protocols(
         .iter()
         .any(|listener| listener.protocol == ProtocolKind::Http)
     {
-        let shutdowns = Box::new(PingoraHttp)
-            .register(server, config, pipelines)
-            .unwrap_or_else(|err| fatal(&err));
+        let shutdowns = Box::new(PingoraHttp).register(server, config, pipelines)?;
         all_shutdowns.extend(shutdowns);
     }
 
@@ -428,13 +522,11 @@ fn register_protocols(
         .iter()
         .any(|listener| listener.protocol == ProtocolKind::Tcp)
     {
-        let shutdowns = Box::new(PingoraTcp)
-            .register(server, config, pipelines)
-            .unwrap_or_else(|err| fatal(&err));
+        let shutdowns = Box::new(PingoraTcp).register(server, config, pipelines)?;
         all_shutdowns.extend(shutdowns);
     }
 
-    CertWatcherShutdowns::new(all_shutdowns)
+    Ok(CertWatcherShutdowns::new(all_shutdowns))
 }
 
 /// Spawn the config file watcher for hot reload if a config path is available.
@@ -641,6 +733,11 @@ fn spawn_circuit_eviction_task(client: praxis_core::subrequest::SubRequestClient
 // -----------------------------------------------------------------------------
 
 /// Print a fatal error to stderr and exit the process.
+///
+/// For failures before tracing is initialized, and for the never-returning
+/// `run_server*` entry points that keep exit-on-failure as their contract:
+/// exiting here skips the tracing guard's flush. Failures on the `try_` path
+/// return to `main`, which reports them with [`report_fatal`].
 #[expect(
     clippy::print_stderr,
     clippy::exit,
@@ -649,6 +746,30 @@ fn spawn_circuit_eviction_task(client: praxis_core::subrequest::SubRequestClient
 pub fn fatal(err: &dyn std::fmt::Display) -> ! {
     eprintln!("fatal: {err}");
     std::process::exit(1)
+}
+
+/// Report a fatal error through tracing, returning the exit code for `main`
+/// to return.
+///
+/// Unlike [`fatal`] this does not exit, so the caller's tracing guard still
+/// drops and flushes the logged error. Only reachable once tracing is
+/// initialized, so the error line already reaches the configured sink; it is
+/// echoed to stderr as well only when that sink is a file, which the operator
+/// cannot see from the terminal that started the process.
+///
+/// ```
+/// use praxis_core::config::LogOutput;
+///
+/// let code = praxis::report_fatal(&"listener bind failed", LogOutput::Stderr);
+/// assert_eq!(code, std::process::ExitCode::FAILURE);
+/// ```
+#[expect(clippy::print_stderr, reason = "fatal error output")]
+pub fn report_fatal(err: &dyn std::fmt::Display, log_output: LogOutput) -> std::process::ExitCode {
+    tracing::error!(error = %err, "fatal error; exiting");
+    if log_output == LogOutput::File {
+        eprintln!("fatal: {err}");
+    }
+    std::process::ExitCode::FAILURE
 }
 
 // -----------------------------------------------------------------------------
@@ -665,6 +786,8 @@ pub fn fatal(err: &dyn std::fmt::Display) -> ! {
     reason = "tests"
 )]
 mod tests {
+    use tracing_subscriber::Layer as _;
+
     use super::*;
 
     #[test]
@@ -739,6 +862,116 @@ mod tests {
     #[test]
     fn insecure_warn_active_does_not_panic() {
         insecure_warn(true, "test_option: active warning");
+    }
+
+    // -------------------------------------------------------------------------
+    // Startup errors
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn crypto_provider_installs_without_fips_requirement() {
+        let result = try_install_crypto_provider();
+        assert!(
+            result.is_ok() || praxis_tls::provider::required(),
+            "install should succeed unless FIPS is required: {result:?}"
+        );
+    }
+
+    #[test]
+    fn build_server_state_returns_registry_factory_error() {
+        praxis_tls::provider::install();
+        let config = minimal_config("static_response");
+        let composition = ServerComposition::with_registry_factory(|_| Err("registry unavailable".into()));
+        let err = build_server_state(&config, composition, &build_health_registry(&config.clusters), None)
+            .err()
+            .expect("a failing registry factory should be returned, not exit");
+        assert!(
+            err.to_string().contains("registry unavailable"),
+            "factory error should propagate: {err}"
+        );
+    }
+
+    #[test]
+    fn build_server_state_returns_pipeline_error() {
+        praxis_tls::provider::install();
+        let config = minimal_config("no_such_filter");
+        let err = build_server_state(
+            &config,
+            ServerComposition::standard(),
+            &build_health_registry(&config.clusters),
+            None,
+        )
+        .err()
+        .expect("an unknown filter should be returned, not exit");
+        assert!(
+            err.to_string().contains("no_such_filter"),
+            "pipeline error should name the filter: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn register_protocols_returns_tls_error() {
+        praxis_tls::provider::install();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let key_path = dir.path().join("key.pem");
+        let cert_path = dir.path().join("cert.pem");
+        std::fs::write(&key_path, "fake-key").expect("write key");
+        std::fs::write(&cert_path, "fake-cert").expect("write cert");
+        let config = config_with_tls(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
+        let (state, _registry) = build_server_state(
+            &config,
+            ServerComposition::standard(),
+            &build_health_registry(&config.clusters),
+            None,
+        )
+        .expect("pipelines should build");
+        let mut server = PingoraServerRuntime::new(&config);
+        let err = register_protocols(&mut server, &config, &state.pipelines)
+            .err()
+            .expect("an unloadable certificate should be returned, not exit");
+        assert!(
+            err.to_string().contains("TLS"),
+            "registration error should come from TLS setup: {err}"
+        );
+    }
+
+    #[test]
+    fn try_run_server_returns_startup_error_instead_of_exiting() {
+        let config = Config::from_yaml(&format!(
+            "{}insecure_options:\n  allow_root: true\n",
+            minimal_yaml("static_response")
+        ))
+        .expect("config should parse");
+        let composition = ServerComposition::with_registry_factory(|_| Err("registry unavailable".into()));
+        let err = try_run_server_with_composition(config, composition, None, None)
+            .expect_err("startup failure should return to the caller");
+        assert!(
+            err.to_string().contains("registry unavailable") || praxis_tls::provider::required(),
+            "startup error should propagate unless FIPS is required and unmet: {err}"
+        );
+    }
+
+    #[test]
+    fn report_fatal_logs_through_tracing_and_fails() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let errors = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&errors);
+        let layer = tracing_subscriber::filter::filter_fn(|metadata| *metadata.level() == tracing::Level::ERROR);
+        let subscriber = tracing_subscriber::registry().with(CountLayer(counter).with_filter(layer));
+        let code =
+            tracing::subscriber::with_default(subscriber, || report_fatal(&"listener bind failed", LogOutput::Stderr));
+        assert_eq!(
+            code,
+            std::process::ExitCode::FAILURE,
+            "fatal report should fail the process"
+        );
+        assert_eq!(
+            errors.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "fatal error should be logged through tracing once"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -892,6 +1125,28 @@ filter_chains:
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Layer counting the events it sees.
+    struct CountLayer(Arc<std::sync::atomic::AtomicUsize>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountLayer {
+        fn on_event(&self, _event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// Single-listener config YAML whose only filter is `filter`.
+    fn minimal_yaml(filter: &str) -> String {
+        format!(
+            "listeners:\n  - name: web\n    address: \"127.0.0.1:8080\"\n    filter_chains: [main]\n\
+             filter_chains:\n  - name: main\n    filters:\n      - filter: {filter}\n        status: 200\n"
+        )
+    }
+
+    /// Parsed [`minimal_yaml`] config.
+    fn minimal_config(filter: &str) -> Config {
+        Config::from_yaml(&minimal_yaml(filter)).expect("minimal config should parse")
+    }
 
     #[cfg(unix)]
     fn config_with_tls(cert_path: &str, key_path: &str) -> Config {

@@ -644,6 +644,12 @@ shutdown:
 shutdown_timeout_secs: 60    # default: 30
 ```
 
+Once the drain completes, Praxis flushes queued log lines
+and exports pending OTLP spans, then exits `0`. A startup
+failure after logging is initialized (a listener that
+cannot be registered, a filter that cannot be built) is
+logged the same way, flushed, and exits `1`.
+
 ## Default Configuration
 
 When no configuration file is provided, Praxis starts with

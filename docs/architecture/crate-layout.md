@@ -299,7 +299,9 @@ sequenceDiagram
         S->>S: per listener: bind + PingoraTcpProxy(pipeline)
     end
 
-    M->>S: server.run() (blocks forever)
+    M->>S: server.run_until_shutdown() (blocks until shutdown)
+    S-->>M: returns after graceful shutdown
+    M->>M: drop TracingGuard (flush logs, export spans)
 ```
 
 Configuration resolves through three phases. First,
