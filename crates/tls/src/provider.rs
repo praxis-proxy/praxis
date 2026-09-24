@@ -34,9 +34,19 @@
 //!
 //! [`CryptoProvider`]: rustls::crypto::CryptoProvider
 
-use std::sync::Arc;
+use std::sync::{
+    Arc, Once,
+    atomic::{AtomicBool, Ordering},
+};
 
 use rustls::crypto::CryptoProvider;
+
+/// Set once [`install`] has made this module's provider the process default.
+static INSTALLED_HERE: AtomicBool = AtomicBool::new(false);
+
+/// Runs the install attempt once, so a concurrent caller waits for the
+/// winner to record [`INSTALLED_HERE`] instead of reading it early.
+static INSTALL: Once = Once::new();
 
 /// Name of the provider compiled into this build.
 ///
@@ -63,18 +73,30 @@ fn build() -> CryptoProvider {
 /// first caller wins, so this must be called before anything builds a
 /// `ServerConfig` or `ClientConfig`.
 ///
-/// Installing is not the same as verifying. Use [`installed`] to assert that a
-/// provider is present, and fail startup when it is not.
+/// Installing is not the same as verifying. Use [`any_installed`] to assert
+/// that a provider is present and fail startup when it is not, and
+/// [`installed`] to tell whether it is this one.
 ///
 /// ```
 /// praxis_tls::provider::install();
 /// assert!(praxis_tls::provider::installed());
 /// ```
 pub fn install() -> bool {
-    build().install_default().is_ok()
+    let mut installed = false;
+    INSTALL.call_once(|| {
+        installed = build().install_default().is_ok();
+        if installed {
+            INSTALLED_HERE.store(true, Ordering::Release);
+        }
+    });
+    installed
 }
 
-/// Whether a process-wide provider has been installed.
+/// Whether the compiled-in provider is the process-wide default.
+///
+/// False when nothing is installed, and also when an embedder installed a
+/// different provider first, since that one would then serve every
+/// connection.
 ///
 /// ```
 /// praxis_tls::provider::install();
@@ -82,6 +104,17 @@ pub fn install() -> bool {
 /// ```
 #[must_use]
 pub fn installed() -> bool {
+    CryptoProvider::get_default().is_some() && INSTALLED_HERE.load(Ordering::Acquire)
+}
+
+/// Whether any process-wide provider is installed, compiled-in or not.
+///
+/// ```
+/// praxis_tls::provider::install();
+/// assert!(praxis_tls::provider::any_installed());
+/// ```
+#[must_use]
+pub fn any_installed() -> bool {
     CryptoProvider::get_default().is_some()
 }
 
@@ -96,11 +129,12 @@ pub fn installed() -> bool {
 pub struct Status {
     /// Name of the compiled-in provider.
     pub name: &'static str,
-    /// Whether a process-wide provider is installed.
+    /// Whether the compiled-in provider is the process-wide default; see
+    /// [`installed`].
     pub installed: bool,
     /// Whether the installed provider reports every cipher suite, key exchange
     /// and signature algorithm as FIPS approved (rustls' `CryptoProvider::fips`).
-    /// `false` when no provider is installed.
+    /// `false` when the compiled-in provider is not installed.
     pub provider_fips: bool,
     /// Whether the kernel is in FIPS mode, from `/proc/sys/crypto/fips_enabled`.
     /// `None` where that file does not exist (a non-Linux host, or a container
@@ -146,7 +180,7 @@ impl Status {
     pub fn unmet(&self) -> Vec<&'static str> {
         let mut reasons = Vec::new();
         if !self.installed {
-            reasons.push("no crypto provider is installed");
+            reasons.push("the OpenSSL provider is not the installed crypto provider");
         } else if !self.provider_fips {
             reasons
                 .push("the OpenSSL provider does not report FIPS-approved algorithms (is the fips provider active?)");
@@ -172,11 +206,11 @@ impl Status {
 /// ```
 #[must_use]
 pub fn status() -> Status {
-    let provider = CryptoProvider::get_default();
+    let installed = installed();
     Status {
         name: name(),
-        installed: provider.is_some(),
-        provider_fips: provider.is_some_and(|provider| provider.fips()),
+        installed,
+        provider_fips: installed && CryptoProvider::get_default().is_some_and(|provider| provider.fips()),
         kernel_fips: std::fs::read_to_string(KERNEL_FIPS_FLAG)
             .ok()
             .and_then(|contents| kernel_fips_from(&contents)),
@@ -326,7 +360,7 @@ mod tests {
         assert!(
             reasons
                 .first()
-                .is_some_and(|reason| reason.contains("no crypto provider"))
+                .is_some_and(|reason| reason.contains("not the installed crypto provider"))
         );
         assert!(reasons.get(1).is_some_and(|reason| reason.contains("cannot be read")));
     }

@@ -72,9 +72,10 @@ const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
 /// Fails the process if no provider ends up installed. There is no fallback:
 /// rustls' implicit one is compiled out by the Pingora fork's
 /// `custom-provider` feature, and quietly substituting a provider nobody
-/// selected is precisely the failure this guards against. For a FIPS build
-/// the provider *is* the compliance boundary, so starting without the
-/// intended one is worse than not starting.
+/// selected is precisely the failure this guards against. A provider an
+/// embedder installed first is only warned about, unless FIPS is required:
+/// for a FIPS build the provider *is* the compliance boundary, so starting
+/// without the intended one is worse than not starting.
 pub fn install_crypto_provider() {
     try_install_crypto_provider().unwrap_or_else(|err| fatal(&err));
 }
@@ -82,13 +83,7 @@ pub fn install_crypto_provider() {
 /// [`install_crypto_provider`], returning the refusal instead of exiting.
 fn try_install_crypto_provider() -> Result<(), String> {
     praxis_tls::provider::install();
-
-    if !praxis_tls::provider::installed() {
-        return Err(format!(
-            "failed to install the {} crypto provider; refusing to start",
-            praxis_tls::provider::name()
-        ));
-    }
+    check_provider_installed()?;
 
     let status = praxis_tls::provider::status();
     info!(
@@ -108,6 +103,29 @@ fn try_install_crypto_provider() -> Result<(), String> {
                 unmet.join("; ")
             ));
         }
+    }
+    Ok(())
+}
+
+/// Refuse when no provider is installed; warn when a provider other than the
+/// compiled-in one serves TLS.
+fn check_provider_installed() -> Result<(), String> {
+    // No fallback: rustls' implicit provider is compiled out, so with none
+    // installed every TLS config would fail to build.
+    if !praxis_tls::provider::any_installed() {
+        return Err(format!(
+            "failed to install the {} crypto provider; refusing to start",
+            praxis_tls::provider::name()
+        ));
+    }
+
+    // An embedder may install its own provider first. That is its choice
+    // unless FIPS is required, where `Status::unmet` refuses to start.
+    if !praxis_tls::provider::installed() {
+        warn!(
+            expected = praxis_tls::provider::name(),
+            "another crypto provider was installed first and will serve every TLS connection"
+        );
     }
     Ok(())
 }
