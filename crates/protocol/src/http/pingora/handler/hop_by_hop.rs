@@ -171,10 +171,8 @@ pub(crate) fn strip_connection_tokens<R: RemoveHeader>(
     static_list: &[&str],
 ) {
     for val in values {
-        let Ok(s) = val.to_str() else { continue };
-        for token in s.split(',') {
-            let trimmed = token.trim();
-            if trimmed.is_empty() || static_list.iter().any(|h| trimmed.eq_ignore_ascii_case(h)) {
+        for trimmed in praxis_core::reserved_headers::connection_tokens(val) {
+            if static_list.iter().any(|h| trimmed.eq_ignore_ascii_case(h)) {
                 continue;
             }
             if praxis_core::reserved_headers::is_connection_token_protected(trimmed) {
@@ -199,9 +197,8 @@ pub(crate) fn strip_hop_by_hop_header_map(headers: &mut HeaderMap, static_list: 
     for name in static_list {
         headers.remove(*name);
     }
-    for value in connection_values {
-        let Ok(value) = value.to_str() else { continue };
-        for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+    for value in &connection_values {
+        for token in praxis_core::reserved_headers::connection_tokens(value) {
             if !static_list.iter().any(|name| token.eq_ignore_ascii_case(name))
                 && !praxis_core::reserved_headers::is_connection_token_protected(token)
             {
@@ -539,6 +536,33 @@ mod tests {
                 "{protected} must not be strippable via a Connection token"
             );
         }
+    }
+
+    #[test]
+    fn connection_token_survives_obs_text_sibling() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_bytes(b"x-backend-internal, \x80").unwrap(),
+        );
+        let mut recorder = Recorder {
+            removed: Vec::new(),
+            headers: headers.clone(),
+        };
+        let values = snapshot_connection_values(&headers);
+        strip_connection_tokens(&mut recorder, &values, REQUEST_HOP_BY_HOP);
+        assert_eq!(
+            recorder.removed,
+            ["x-backend-internal"],
+            "a non-UTF-8 sibling token must not keep a nominated header"
+        );
+
+        headers.insert("x-backend-internal", http::HeaderValue::from_static("secret"));
+        strip_hop_by_hop_header_map(&mut headers, RESPONSE_HOP_BY_HOP);
+        assert!(
+            !headers.contains_key("x-backend-internal"),
+            "terminal responses must strip the nominated header too"
+        );
     }
 
     // -------------------------------------------------------------------------

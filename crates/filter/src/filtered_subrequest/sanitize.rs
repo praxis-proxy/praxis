@@ -147,9 +147,8 @@ fn strip_hop_by_hop_headers(headers: &mut HeaderMap, static_headers: &[&str]) {
     for name in static_headers {
         headers.remove(*name);
     }
-    for value in connection_values {
-        let Ok(value) = value.to_str() else { continue };
-        for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+    for value in &connection_values {
+        for token in praxis_core::reserved_headers::connection_tokens(value) {
             // A client-supplied Connection token must not delete headers the
             // proxy owns (x-forwarded-*, Forwarded, x-praxis-*) or that are
             // essential to routing/framing (Host, Content-Length); otherwise a

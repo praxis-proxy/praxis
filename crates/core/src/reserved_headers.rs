@@ -119,6 +119,30 @@ pub fn is_connection_token_protected(name: &str) -> bool {
         || is_reserved(name)
 }
 
+/// Header names nominated by one `Connection` field value.
+///
+/// Tokenizes the raw bytes rather than `to_str()`, so one obs-text byte in
+/// a value cannot hide every other nomination in it; a token that is not
+/// UTF-8 cannot name a header and is skipped on its own.
+///
+/// ```
+/// use http::HeaderValue;
+/// use praxis_core::reserved_headers::connection_tokens;
+///
+/// let value = HeaderValue::from_bytes(b"x-a, \xff ,, x-b").unwrap();
+/// assert_eq!(
+///     connection_tokens(&value).collect::<Vec<_>>(),
+///     ["x-a", "x-b"]
+/// );
+/// ```
+pub fn connection_tokens(value: &http::HeaderValue) -> impl Iterator<Item = &str> {
+    value
+        .as_bytes()
+        .split(|&byte| byte == b',')
+        .filter_map(|token| std::str::from_utf8(token.trim_ascii()).ok())
+        .filter(|token| !token.is_empty())
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------

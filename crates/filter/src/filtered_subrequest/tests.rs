@@ -108,6 +108,25 @@ fn classify_circuit_open_returns_503() {
 }
 
 // -----------------------------------------------------------------------------
+// sanitize_subrequest_headers
+// -----------------------------------------------------------------------------
+
+#[test]
+fn connection_token_survives_obs_text_sibling() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::CONNECTION,
+        http::HeaderValue::from_bytes(b"x-custom, \xff").unwrap(),
+    );
+    headers.insert("x-custom", "value".parse().unwrap());
+    super::sanitize::sanitize_subrequest_headers(&mut headers);
+    assert!(
+        !headers.contains_key("x-custom"),
+        "a non-UTF-8 sibling token must not keep a nominated header"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // strip_reserved_headers
 // -----------------------------------------------------------------------------
 
