@@ -27,20 +27,12 @@ pub(crate) const REQUEST_HOP_BY_HOP: &[&str] = praxis_core::reserved_headers::HO
 
 /// [RFC 9110] hop-by-hop headers for upstream responses.
 ///
-/// The shared [`REQUEST_HOP_BY_HOP`] set minus `proxy-authorization`, which is
-/// a request-only credential header. A test keeps this in sync with the
-/// canonical set so the two cannot drift.
+/// The canonical response set ([`REQUEST_HOP_BY_HOP`] minus
+/// `proxy-authorization`, a request-only credential header), defined once in
+/// `praxis-core` so the sub-request and protocol paths cannot drift.
 ///
 /// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
-pub(crate) const RESPONSE_HOP_BY_HOP: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-];
+pub(crate) const RESPONSE_HOP_BY_HOP: &[&str] = praxis_core::reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS;
 
 // -----------------------------------------------------------------------------
 // WebSocket Upgrade Detection
@@ -319,16 +311,11 @@ mod tests {
     }
 
     #[test]
-    fn response_hop_by_hop_is_request_set_minus_proxy_authorization() {
-        let expected: Vec<&str> = REQUEST_HOP_BY_HOP
-            .iter()
-            .copied()
-            .filter(|header| *header != "proxy-authorization")
-            .collect();
+    fn response_hop_by_hop_matches_canonical_core_set() {
         assert_eq!(
             RESPONSE_HOP_BY_HOP,
-            expected.as_slice(),
-            "response hop-by-hop list must be the request set minus proxy-authorization"
+            praxis_core::reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS,
+            "response hop-by-hop list must be the canonical core set"
         );
     }
 

@@ -8,31 +8,9 @@
 //! into transition-visible responses.
 
 use http::HeaderMap;
+use praxis_core::reserved_headers::{HOP_BY_HOP_HEADERS, RESPONSE_HOP_BY_HOP_HEADERS};
 
 use crate::{FilterError, HttpFilterContext, SubResponse, actions::Rejection};
-
-/// Headers that apply only to one HTTP connection and must not cross it.
-const REQUEST_HOP_BY_HOP: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-];
-
-/// Response-side hop-by-hop headers.
-const RESPONSE_HOP_BY_HOP: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-];
 
 /// Strip all reserved internal headers from sub-request headers
 /// so the core executor re-injects depth via
@@ -107,7 +85,7 @@ pub(super) fn strip_request_framing_headers(headers: &mut HeaderMap) {
 
 /// Apply the same forwarding boundary as the normal upstream path.
 pub(super) fn sanitize_subrequest_headers(headers: &mut HeaderMap) {
-    strip_hop_by_hop_headers(headers, REQUEST_HOP_BY_HOP);
+    strip_hop_by_hop_headers(headers, HOP_BY_HOP_HEADERS);
     strip_reserved_headers(headers);
     strip_request_framing_headers(headers);
 }
@@ -137,7 +115,7 @@ pub(super) fn set_authority_host(headers: &mut HeaderMap, authority: &str) -> Re
 
 /// Remove connection-scoped and proxy-internal response metadata.
 pub(super) fn sanitize_subresponse_headers(headers: &mut HeaderMap) {
-    strip_hop_by_hop_headers(headers, RESPONSE_HOP_BY_HOP);
+    strip_hop_by_hop_headers(headers, RESPONSE_HOP_BY_HOP_HEADERS);
     strip_reserved_headers(headers);
 }
 

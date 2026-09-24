@@ -14,18 +14,11 @@ use crate::FilterError;
 /// [RFC 9110] hop-by-hop headers that must not be injected into responses.
 ///
 /// Re-injecting these into downstream responses can cause HTTP desync
-/// or smuggling through downstream proxies.
+/// or smuggling through downstream proxies. The canonical set lives in
+/// `praxis-core` so this blocklist cannot drift from what the proxy strips.
 ///
 /// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
-const RESPONSE_HOP_BY_HOP: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-];
+const RESPONSE_HOP_BY_HOP: &[&str] = praxis_core::reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS;
 
 // -----------------------------------------------------------------------------
 // Header Manipulation

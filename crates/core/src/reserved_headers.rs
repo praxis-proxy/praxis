@@ -41,10 +41,10 @@ pub const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-", "x-ext-protocol-", 
 /// [RFC 9110] hop-by-hop headers: connection-specific headers that apply to a
 /// single transport hop and must not be forwarded across a proxy boundary.
 ///
-/// This is the canonical set shared by sub-request stripping in `praxis-core`
-/// and the protocol request handlers in `praxis-protocol`, so the two cannot
-/// drift. Response stripping uses this set minus `proxy-authorization`, which
-/// is a request-only credential header.
+/// This is the canonical request set shared by sub-request stripping in
+/// `praxis-core`, filtered sub-requests in `praxis-filter` and the protocol
+/// request handlers in `praxis-protocol`, so the copies cannot drift. Response
+/// stripping uses [`RESPONSE_HOP_BY_HOP_HEADERS`].
 ///
 /// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 pub const HOP_BY_HOP_HEADERS: &[&str] = &[
@@ -52,6 +52,24 @@ pub const HOP_BY_HOP_HEADERS: &[&str] = &[
     "keep-alive",
     "proxy-authenticate",
     "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// [RFC 9110] hop-by-hop headers for responses: [`HOP_BY_HOP_HEADERS`] minus
+/// `proxy-authorization`, which is a request-only credential header.
+///
+/// Response stripping and response-header injection checks in
+/// `praxis-protocol` and `praxis-filter` read this set, and a test pins it to
+/// the request set, so the copies cannot drift.
+///
+/// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
+pub const RESPONSE_HOP_BY_HOP_HEADERS: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
     "te",
     "trailer",
     "transfer-encoding",
@@ -151,7 +169,21 @@ pub fn connection_tokens(value: &http::HeaderValue) -> impl Iterator<Item = &str
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
-    use super::{is_connection_token_protected, is_reserved};
+    use super::{HOP_BY_HOP_HEADERS, RESPONSE_HOP_BY_HOP_HEADERS, is_connection_token_protected, is_reserved};
+
+    #[test]
+    fn response_hop_by_hop_is_request_set_minus_proxy_authorization() {
+        let expected: Vec<&str> = HOP_BY_HOP_HEADERS
+            .iter()
+            .copied()
+            .filter(|header| *header != "proxy-authorization")
+            .collect();
+        assert_eq!(
+            RESPONSE_HOP_BY_HOP_HEADERS,
+            expected.as_slice(),
+            "response hop-by-hop list must be the request set minus proxy-authorization"
+        );
+    }
 
     #[test]
     fn x_praxis_prefix_is_reserved() {
