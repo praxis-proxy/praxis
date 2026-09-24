@@ -681,7 +681,7 @@ fn bucket_key_leaves_ipv4_and_mapped_ipv4_unmasked() {
 
 #[test]
 fn per_ip_same_ipv6_64_shares_bucket() {
-    let filter = make_filter("per_ip", 10.0, 1);
+    let filter = make_ipv6_filter(64, 1);
     let first: IpAddr = "2001:db8:1:2::1".parse().unwrap();
     let rotated: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff".parse().unwrap();
 
@@ -698,7 +698,7 @@ fn per_ip_same_ipv6_64_shares_bucket() {
 
 #[test]
 fn per_ip_different_ipv6_64s_are_isolated() {
-    let filter = make_filter("per_ip", 10.0, 1);
+    let filter = make_ipv6_filter(64, 1);
     assert!(
         filter.try_acquire_for(Some("2001:db8:1:2::1".parse().unwrap())).is_ok(),
         "first /64 should pass"
@@ -724,7 +724,10 @@ fn per_ip_ipv6_128_keys_full_address() {
 
 #[test]
 fn per_ip_ipv6_rotation_does_not_grow_map() {
-    let filter = make_filter("per_ip", 0.001, 1);
+    let filter = RateLimitFilter {
+        state: RateLimitState::PerIp(PerIpState::new(Ipv6PrefixLen::try_from(64_u8).unwrap())),
+        ..make_filter("per_ip", 0.001, 1)
+    };
     let passed = (0..1_000_u128)
         .map(|host| std::net::Ipv6Addr::from_bits(0x2001_0DB8_0001_0002_0000_0000_0000_0000 | host))
         .filter(|addr| filter.try_acquire_for(Some(IpAddr::V6(*addr))).is_ok())

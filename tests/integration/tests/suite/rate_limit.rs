@@ -237,9 +237,9 @@ fn rate_limit_per_ip_ipv6_prefix_len() {
 
     let backend_port = start_backend_v6("ok");
     let proxy_port = free_port_v6();
-    let yaml = rate_limit_yaml(proxy_port, backend_port, "per_ip", 1.0, 2)
+    let yaml = rate_limit_yaml(proxy_port, backend_port, "per_ip", 1.0, 3)
         .replace("127.0.0.1:", "[::1]:")
-        .replace("        burst: 2\n", "        burst: 2\n        ipv6_prefix_len: 64\n");
+        .replace("        burst: 3\n", "        burst: 3\n        ipv6_prefix_len: 64\n");
     assert!(
         yaml.contains("ipv6_prefix_len: 64"),
         "test config should set ipv6_prefix_len"
