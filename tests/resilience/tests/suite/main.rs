@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Resilience, fault-tolerance, and throughput test suite for Praxis.
 
 #![allow(

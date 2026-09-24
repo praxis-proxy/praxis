@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Shared workload and fixtures for `json_body` benchmarks.
 //!
 //! Fixtures mimic an OpenAI-style chat completion request body: `model`,

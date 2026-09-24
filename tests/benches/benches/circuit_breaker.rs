@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Criterion benchmarks for circuit breaker state machine operations.
 //!
 //! Covers token acquisition in different states (closed/open/half-open),

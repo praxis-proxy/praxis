@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! `PRAXIS_REQUIRE_FIPS` must fail closed.
 //!
 //! Runs the real binary as a subprocess because the check ends in

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Structural regression tests for checked-in policy documents.
 //!
 //! Fingerprints cover dispatch mode, plugin identity, and route count. Policy

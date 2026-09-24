@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
+#![forbid(unsafe_code)]
 #![allow(
     clippy::arithmetic_side_effects,
     clippy::as_conversions,

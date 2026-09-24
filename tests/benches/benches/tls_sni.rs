@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Criterion benchmarks for TLS SNI parsing and certificate resolution.
 //!
 //! Covers `ClientHello` SNI extraction (varying sizes, SNI positions,

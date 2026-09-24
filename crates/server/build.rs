@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Build script for the Praxis server.
 //!
 //! Discovers external filter crates via `cargo metadata` and generates

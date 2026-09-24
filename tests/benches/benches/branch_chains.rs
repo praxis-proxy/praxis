@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Criterion benchmarks for branch chain evaluation and execution.
 //!
 //! Covers branch condition matching, result set operations, filter

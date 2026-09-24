@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Build-level guarantees about the policy engine.
 //!
 //! This is a dedicated per-crate test binary, not an inline `#[cfg(test)]`

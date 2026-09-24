@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Integration tests for the `/api/log-level` admin API (#798).
 //!
 //! This test installs a process-global tracing subscriber (via

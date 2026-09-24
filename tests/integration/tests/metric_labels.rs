@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Integration tests for configurable metric label sets (#1033).
 //!
 //! The selected label dimensions are installed once into a process-global

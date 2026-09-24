@@ -165,8 +165,11 @@ for what Praxis enforces vs what Pingora handles.
 Security is enforced at the lint level. See lints in
 [Cargo.toml] for the full set.
 
-- `#![forbid(unsafe_code)]` in all crate roots (no
-  exceptions; unsafe belongs upstream)
+- `#![forbid(unsafe_code)]` in every crate root except
+  `praxis-proxy-filter`, which keeps the workspace
+  `deny` so its SIMD JSON scanner (`json_ops::simd_scan`)
+  can opt in with `#[expect(unsafe_code)]`. Other unsafe
+  code belongs upstream.
 - Clippy runs with `-D warnings` (zero tolerance)
 - Errors via `thiserror`
 - Logging via `tracing`

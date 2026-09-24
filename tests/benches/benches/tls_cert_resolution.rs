@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![forbid(unsafe_code)]
+
 //! Criterion benchmarks for TLS certificate resolution by SNI hostname.
 //!
 //! Covers exact hostname lookup, wildcard matching, case-insensitive
