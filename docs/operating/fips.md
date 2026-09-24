@@ -68,10 +68,11 @@ installed rustls crypto provider provider=openssl provider_fips=true kernel_fips
 - `kernel_fips`: `/proc/sys/crypto/fips_enabled`; `None` where the file does
   not exist (a container without `/proc`, a non-Linux host).
 
-Set `PRAXIS_REQUIRE_FIPS=1` (also `true`, `yes`, `on`) in production FIPS
-deployments. It is a check, never a switch: praxis then refuses to start
-unless both signals are present, naming each one that is missing, and
-refuses any listener TLS configuration that rustls does not consider
+Set `PRAXIS_REQUIRE_FIPS=1` in production FIPS deployments. Only an empty
+value, `0`, `false`, `no` or `off` leave it off; any other value, a typo
+included, turns it on. It is a check, never a switch: praxis then refuses
+to start unless both signals are present, naming each one that is missing,
+and refuses any listener TLS configuration that rustls does not consider
 FIPS-approved. Upstream connections always require Extended Master Secret
 and share the same provider, so they are FIPS whenever the listeners are.
 Without the variable praxis starts either way and only logs the status.

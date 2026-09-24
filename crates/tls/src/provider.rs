@@ -113,8 +113,10 @@ const KERNEL_FIPS_FLAG: &str = "/proc/sys/crypto/fips_enabled";
 
 /// Environment variable that makes FIPS mode a hard requirement.
 ///
-/// Set it to `1`, `true`, `yes` or `on` (case-insensitive) and praxis refuses
-/// to start unless [`Status::unmet`] is empty. It is a check, never a switch:
+/// Set it and praxis refuses to start unless [`Status::unmet`] is empty. Only
+/// an empty value, `0`, `false`, `no` or `off` (case-insensitive) leave it
+/// off; any other value, a typo included, requires FIPS, so a mistake fails
+/// closed. It is a check, never a switch:
 /// FIPS mode itself comes from the host (on Red Hat Enterprise Linux, the
 /// kernel flag activates the validated OpenSSL provider and the system crypto
 /// policy), and praxis never enables a provider on its own.
@@ -123,12 +125,18 @@ pub const REQUIRE_FIPS_ENV: &str = "PRAXIS_REQUIRE_FIPS";
 /// Whether this deployment requires FIPS mode; see [`REQUIRE_FIPS_ENV`].
 #[must_use]
 pub fn required() -> bool {
-    std::env::var(REQUIRE_FIPS_ENV).is_ok_and(|value| is_truthy(&value))
+    std::env::var_os(REQUIRE_FIPS_ENV).is_some_and(|value| !is_negative(&value))
 }
 
-/// The affirmative spellings [`REQUIRE_FIPS_ENV`] accepts.
-fn is_truthy(value: &str) -> bool {
-    matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+/// The spellings that leave [`REQUIRE_FIPS_ENV`] off; a value that is not
+/// UTF-8 is not one of them.
+fn is_negative(value: &std::ffi::OsStr) -> bool {
+    value.to_str().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
+    })
 }
 
 impl Status {
@@ -248,12 +256,18 @@ mod tests {
     }
 
     #[test]
-    fn required_accepts_the_usual_spellings() {
-        for value in ["1", "true", "TRUE", "yes", "on", " On "] {
-            assert!(is_truthy(value), "{value:?} should require FIPS");
+    fn required_fails_closed_on_unrecognized_values() {
+        for value in ["", "0", "false", "FALSE", "no", " Off "] {
+            assert!(
+                is_negative(std::ffi::OsStr::new(value)),
+                "{value:?} should not require FIPS"
+            );
         }
-        for value in ["", "0", "false", "no", "off", "maybe"] {
-            assert!(!is_truthy(value), "{value:?} should not require FIPS");
+        for value in ["1", "true", "yes", "on", "enabled", "y", "maybe"] {
+            assert!(
+                !is_negative(std::ffi::OsStr::new(value)),
+                "{value:?} should require FIPS"
+            );
         }
     }
 
