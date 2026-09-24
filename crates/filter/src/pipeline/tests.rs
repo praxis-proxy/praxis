@@ -8170,10 +8170,11 @@ async fn a_pre_read_result_reaches_the_branches_of_a_later_promoter() {
     ctx.filter_results.insert("P", pre_read);
 
     drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
 
     assert_eq!(
         log.take(),
-        vec!["A", "P", "B"],
+        vec!["B", "P", "A"],
         "a result published during the pre-read must survive an earlier filter and fire its promoter's branch"
     );
 }
