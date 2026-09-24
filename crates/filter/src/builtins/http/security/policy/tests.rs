@@ -2785,14 +2785,43 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
 }
 
 // -----------------------------------------------------------------------------
-// spawn_blocking offload
+// Request-phase hook dispatch on the worker runtime
 // -----------------------------------------------------------------------------
 
-/// Concurrent CMF dispatches must not block the async runtime. With the
-/// evaluation offloaded to `spawn_blocking`, multiple requests can
-/// proceed in parallel without starving the worker threads. This test
-/// fires four concurrent policy evaluations on a two-thread runtime;
-/// all must complete without deadlocking or failing.
+#[tokio::test(flavor = "current_thread")]
+async fn a_body_phase_hook_completes_on_a_current_thread_runtime() {
+    let (_dir, path) = write_cel_policy_config();
+    let filter = build_filter(path);
+
+    let allow = dispatch_echo_as(&filter, "alice").await;
+    assert!(
+        matches!(allow, FilterAction::BodyDone),
+        "the body-phase hook must complete on the single thread a `work_stealing: false` worker \
+         has; expected BodyDone for alice, got {allow:?}",
+    );
+
+    let deny = dispatch_echo_as(&filter, "eve").await;
+    assert!(
+        matches!(deny, FilterAction::Reject(_)),
+        "the CEL verdict must reach the filter on a current-thread runtime; expected Reject for \
+         eve, got {deny:?}",
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_l7_authz_hook_completes_on_a_current_thread_runtime() {
+    let (_dir, path) = write_l7_global_config();
+    let filter = build_filter(path);
+    let token = mint_jwt(&standard_claims("alice"));
+
+    let action = l7_action(&filter, "/", &token).await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the `http.request` hook must complete on a current-thread runtime and admit a GET; got \
+         {action:?}",
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_cmf_dispatch_completes_without_blocking() {
     use std::sync::Arc;

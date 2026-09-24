@@ -878,17 +878,11 @@ impl PolicyFilter {
         let payload = MessagePayload {
             message: request_message(parsed),
         };
-        let mgr = Arc::clone(&self.mgr);
-        let handle = tokio::runtime::Handle::current();
-        let fw = trace_correlation(ctx);
-        let cmf_result = tokio::task::spawn_blocking(move || {
-            handle.block_on(super::transport::with_trace_correlation(fw, async {
-                let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
-                r
-            }))
-        })
-        .await
-        .map_err(|e| -> FilterError { format!("policy: inference request-phase hook task failed: {e}").into() })?;
+        let (cmf_result, _bg) = super::transport::with_trace_correlation(
+            trace_correlation(ctx),
+            self.mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None),
+        )
+        .await;
 
         if !cmf_result.continue_processing {
             tracing::debug!(target: "policy.filter", model = %model, "inference deny");
@@ -1174,25 +1168,18 @@ impl PolicyFilter {
         let mut extensions = Self::extensions_from_identity(&headers, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL);
         Self::attach_http_attributes(ctx, &mut extensions, headers);
 
-        // Policy evaluation (APL predicates, Cedar/CEL PDP queries, PII
-        // scanning) can be CPU-intensive for complex rule sets or large
-        // input data. Offload to the blocking thread pool so the async
-        // runtime stays responsive to other concurrent requests.
-        // Generic HTTP handlers read request data from extensions, not a body payload.
-        let payload = HttpPayload;
-        let mgr = Arc::clone(&self.mgr);
-        let handle = tokio::runtime::Handle::current();
-        let fw = trace_correlation(ctx);
-        let result = tokio::task::spawn_blocking(move || {
-            handle.block_on(super::transport::with_trace_correlation(fw, async {
-                let (r, _bg) = mgr
-                    .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, payload, extensions, None)
-                    .await;
-                r
-            }))
-        })
-        .await
-        .map_err(|e| -> FilterError { format!("policy: HTTP request-phase hook task failed: {e}").into() })?;
+        // Awaited on the worker runtime on purpose. The engine runs every
+        // handler in a task it spawns onto the current runtime, so the
+        // evaluation lands on the workers however it is invoked; a
+        // blocking-pool hop would only park a pool thread on the join handle.
+        // Generic HTTP handlers read request data from extensions, not a body
+        // payload.
+        let (result, _bg) = super::transport::with_trace_correlation(
+            trace_correlation(ctx),
+            self.mgr
+                .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, extensions, None),
+        )
+        .await;
 
         if !result.continue_processing {
             tracing::debug!(target: "policy.filter", "http authz deny (on_request)");
@@ -1270,23 +1257,19 @@ impl PolicyFilter {
         }
     }
 
-    /// Dispatch the response hook off the async runtime, as the request half does.
+    /// Await the response hook on the worker runtime, as the request half does.
     async fn dispatch_response_hook(
         &self,
         hook: &'static str,
         extensions: Extensions,
         fw: praxis_core::subrequest::FrameworkHeaders,
-    ) -> Result<ppe::praxis_policy_core::executor::PipelineResult, FilterError> {
-        let mgr = Arc::clone(&self.mgr);
-        let handle = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || {
-            handle.block_on(super::transport::with_trace_correlation(fw, async {
-                let (r, _bg) = mgr.invoke_named::<HttpHook>(hook, HttpPayload, extensions, None).await;
-                r
-            }))
-        })
-        .await
-        .map_err(|e| -> FilterError { format!("policy: HTTP response-phase hook task failed: {e}").into() })
+    ) -> ppe::praxis_policy_core::executor::PipelineResult {
+        let (result, _bg) = super::transport::with_trace_correlation(
+            fw,
+            self.mgr.invoke_named::<HttpHook>(hook, HttpPayload, extensions, None),
+        )
+        .await;
+        result
     }
 
     /// Put the rendered response contract on the response the client receives.
@@ -1719,24 +1702,19 @@ impl HttpFilter for PolicyFilter {
         // the APL visitor at config-load time) drives policy
         // evaluation; if no APL route matches, the hook is a no-op.
         //
-        // Policy evaluation (APL predicates, Cedar/CEL PDP queries, PII
-        // scanning) can be CPU-intensive for complex rule sets or large
-        // input data. Offload to the blocking thread pool so the async
-        // runtime stays responsive to other concurrent requests.
+        // Awaited on the worker runtime on purpose. The engine runs every
+        // handler in a task it spawns onto the current runtime, so the
+        // evaluation lands on the workers however it is invoked; a
+        // blocking-pool hop would only park a pool thread on the join handle
+        // and, under load, queue requests behind the pool's thread cap.
         let payload = MessagePayload {
             message: Message::with_content(Role::User, content),
         };
-        let mgr = Arc::clone(&self.mgr);
-        let handle = tokio::runtime::Handle::current();
-        let fw = trace_correlation(ctx);
-        let cmf_result = tokio::task::spawn_blocking(move || {
-            handle.block_on(super::transport::with_trace_correlation(fw, async {
-                let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
-                r
-            }))
-        })
-        .await
-        .map_err(|e| -> FilterError { format!("policy: CMF request-phase hook task failed: {e}").into() })?;
+        let (cmf_result, _bg) = super::transport::with_trace_correlation(
+            trace_correlation(ctx),
+            self.mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None),
+        )
+        .await;
 
         if !cmf_result.continue_processing {
             let request_id = parsed.id_value();
@@ -1830,7 +1808,7 @@ impl HttpFilter for PolicyFilter {
 
         let result = self
             .dispatch_response_hook(hook, extensions, trace_correlation(ctx))
-            .await?;
+            .await;
         if !result.continue_processing {
             tracing::warn!(
                 target: "policy.filter",
