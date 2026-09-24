@@ -100,13 +100,21 @@ pub enum DnsHostnameError {
 ///
 /// [RFC 1035 §2.3.1]: https://datatracker.ietf.org/doc/html/rfc1035#section-2.3.1
 pub fn validate_dns_label(label: &str) -> Result<(), DnsLabelError> {
+    validate_label(label, false)
+}
+
+/// Validate one label, letting `_` through when `allow_underscore` is set.
+fn validate_label(label: &str, allow_underscore: bool) -> Result<(), DnsLabelError> {
     if label.is_empty() {
         return Err(DnsLabelError::EmptyLabel);
     }
     if label.len() > MAX_LABEL_LEN {
         return Err(DnsLabelError::LabelTooLong);
     }
-    if !label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
+    if !label
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || (allow_underscore && byte == b'_'))
+    {
         return Err(DnsLabelError::InvalidCharacter);
     }
     if label.starts_with('-') || label.ends_with('-') {
@@ -128,6 +136,36 @@ pub fn validate_dns_hostname(hostname: &str) -> Result<(), DnsHostnameError> {
     }
     for label in hostname.split('.') {
         validate_dns_label(label)?;
+    }
+    Ok(())
+}
+
+/// Validate a hostname the system resolver can look up.
+///
+/// Like [`validate_dns_hostname`], but also accepts `_` in labels (Docker
+/// Compose service names, `/etc/hosts` entries), which RFC 1035 forbids but
+/// the resolver accepts, and one trailing dot (`backend.example.com.`), the
+/// fully qualified form looked up without search domains.
+///
+/// ```
+/// use praxis_tls::dns::validate_resolvable_hostname;
+///
+/// assert!(validate_resolvable_hostname("my_backend").is_ok());
+/// assert!(validate_resolvable_hostname("backend.example.com.").is_ok());
+/// assert!(validate_resolvable_hostname("bad host").is_err());
+/// ```
+///
+/// # Errors
+///
+/// Returns [`DnsHostnameError`] when the hostname exceeds 253 bytes or any
+/// label fails validation.
+pub fn validate_resolvable_hostname(hostname: &str) -> Result<(), DnsHostnameError> {
+    let name = hostname.strip_suffix('.').unwrap_or(hostname);
+    if name.len() > MAX_HOSTNAME_LEN {
+        return Err(DnsHostnameError::HostnameTooLong);
+    }
+    for label in name.split('.') {
+        validate_label(label, true)?;
     }
     Ok(())
 }

@@ -79,8 +79,7 @@ fn validate_endpoint_address(addr: &str, cluster_name: &str) -> Result<(), Proxy
 }
 
 /// Reject a host part that can never resolve: unbalanced IPv6 brackets,
-/// an empty host, a bracketed non-IPv6 literal, or a hostname outside
-/// RFC 1035 syntax.
+/// an empty host, a bracketed non-IPv6 literal, or a malformed hostname.
 fn validate_endpoint_host(host: &str, addr: &str, cluster_name: &str) -> Result<(), ProxyError> {
     // An unbalanced bracket (`[::1:80`, `::1]:80`) is neither an IPv6
     // literal nor a resolvable hostname, so it can only fail at connect.
@@ -109,13 +108,11 @@ fn validate_endpoint_host(host: &str, addr: &str, cluster_name: &str) -> Result<
             "cluster '{cluster_name}': endpoint '{addr}' is not an IPv6 address (expected '[addr]:port')"
         )));
     }
-    // Same rule `endpoint_selector` applies to its `host:port` values: a
-    // name outside RFC 1035 syntax (`bad host`, `my_backend`) cannot be
-    // resolved, so it can only fail at connect. A single trailing dot
-    // (`backend.example.com.`) is the fully-qualified form the resolver
-    // looks up without search domains, not an empty label.
-    let name = host.strip_suffix('.').unwrap_or(host);
-    praxis_tls::dns::validate_dns_hostname(name).map_err(|err| {
+    // A name outside hostname syntax (`bad host`, `back$end`) cannot be
+    // resolved, so it can only fail at connect. Operator-written endpoints
+    // may use what the system resolver accepts; `endpoint_selector` keeps the
+    // strict RFC 1035 rule for destinations taken from a request header.
+    praxis_tls::dns::validate_resolvable_hostname(host).map_err(|err| {
         ProxyError::Config(format!(
             "cluster '{cluster_name}': endpoint '{addr}' is not a valid hostname ({err})"
         ))
@@ -373,7 +370,7 @@ mod tests {
 
     #[test]
     fn reject_endpoint_host_with_invalid_characters() {
-        for addr in ["bad host:80", "my_backend:80", "back$end:80", "-bad.example.com:80"] {
+        for addr in ["bad host:80", "back$end:80", "-bad.example.com:80"] {
             let clusters = vec![Cluster::with_defaults("web", vec![addr.into()])];
             let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
             assert!(
@@ -418,6 +415,13 @@ mod tests {
     fn accept_hostname_endpoint() {
         let clusters = vec![Cluster::with_defaults("web", vec!["api.example.com:443".into()])];
         validate_clusters(&clusters, &InsecureOptions::default()).expect("hostname:port should be accepted");
+    }
+
+    #[test]
+    fn accept_underscore_hostname_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["my_backend:80".into()])];
+        validate_clusters(&clusters, &InsecureOptions::default())
+            .expect("underscore names resolve through Docker DNS and /etc/hosts and should be accepted");
     }
 
     #[test]
