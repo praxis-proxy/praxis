@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "The builds of Red Hat's OpenSSL FIPS provider module, by the version string the module reports",
+    "(`openssl list -providers`, and the same string inside fips.so). `cargo xtask fips host-check`",
+    "compares the module a host and an image carry against this list. A version on an active",
+    "certificate is validated; one in validation is recorded as such and only fails the check under",
+    "--require-certified; one not listed at all is unknown and treated the same way.",
+    "Sources are linked per entry; re-verify them when a UBI pin or a RHEL release changes."
+  ],
+  "modules": [
+    {
+      "version": "3.0.7-395c1a240fbfffd8",
+      "name": "Red Hat Enterprise Linux 9 - OpenSSL FIPS Provider",
+      "status": "active",
+      "cmvp_number": "4857",
+      "standard": "FIPS 140-3",
+      "sunset": "2029-10-28",
+      "packages": [
+        "openssl-3.0.7-18.el9_2",
+        "openssl-fips-provider-3.0.7-2.el9",
+        "openssl-fips-provider-3.0.7-6.el9"
+      ],
+      "note": "Validated 2024-10-29, updated 2025-11-28. Tested on RHEL 9 on Intel Xeon Silver 4216, IBM POWER10 and IBM z16 (physical). Shipped by UBI 9.2 through 9.6.",
+      "source": "https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/4857"
+    },
+    {
+      "version": "3.0.7-cda111b5812c30d4",
+      "name": "Red Hat Enterprise Linux 9 - OpenSSL FIPS Provider",
+      "status": "in-process",
+      "packages": [
+        "openssl-fips-provider-3.0.7-11.el9_8"
+      ],
+      "note": "Rebuilt 2026-06-03 to fix CVE-2026-31790 (RHSA-2026:28832); the build UBI 9.8 ships. On 2026-09-24 NIST's Modules In Process list showed 'Red Hat Enterprise Linux 9 - OpenSSL FIPS Provider' at Comment Resolution (2026-09-03); the list does not say which build that entry covers, so this version is not on any certificate yet.",
+      "source": "https://csrc.nist.gov/projects/cryptographic-module-validation-program/modules-in-process/modules-in-process-list"
+    }
+  ]
+}

@@ -2,7 +2,9 @@
 # Configuration
 # -------------------------------------------------------------------
 
-VERSION          ?= $(shell perl -ne 'print $$1 if /^version\s*=\s*"(.+)"/' Cargo.toml)
+# sed rather than perl: every host these targets run on has sed, and the UBI
+# toolchain image and a minimal RHEL runner have no perl.
+VERSION          ?= $(shell sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' Cargo.toml | head -n 1)
 IMAGE            ?= praxis
 CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
 NIGHTLY_VERSION  := $(shell grep -m1 'rust-toolchain@' .github/actions/install-nightly-rust/action.yml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')
@@ -532,6 +534,63 @@ fips-scanner: | require-go
 	git -C $(CHECK_PAYLOAD_DIR) fetch --quiet --depth 1 $(CHECK_PAYLOAD_REPO) $(CHECK_PAYLOAD_REV)
 	git -C $(CHECK_PAYLOAD_DIR) checkout --quiet FETCH_HEAD
 	cd $(CHECK_PAYLOAD_DIR) && CGO_ENABLED=0 go build -o check-payload .
+
+# --- On a FIPS host: the runtime proof ------------------------------------
+#
+# The targets below run on a RHEL 9 host in FIPS mode, from a checkout, with
+# the FIPS image in podman's store (built here, loaded from an archive, or
+# pulled and tagged). See docs/operating/fips.md, "Verifying a deployment".
+
+.PHONY: fips-host-check fips-runtime-probe fips-image-save fips-image-load fips-image-tag fips-version
+
+# The FIPS-host attestation: kernel flag, boot parameter, crypto policy and
+# the module the host's OpenSSL loads, then the same questions of the FIPS
+# image (the crypto policy podman propagates into it, and the build of
+# fips.so it carries, looked up in xtask/assets/fips/certified-modules.json).
+# Exit 1 on any unmet requirement; a module build still in validation is a
+# warning unless FIPS_HOST_CHECK_ARGS adds --require-certified. Writes the
+# attestation to target/fips/ for CI to keep.
+FIPS_HOST_CHECK_ARGS    ?=
+fips-host-check: | require-podman
+	@mkdir -p $(FIPS_TARGET_DIR)
+	$(XTASK_FIPS) fips host-check --image $(FIPS_IMAGE_REF) \
+		--out $(FIPS_TARGET_DIR)/host-attestation.txt \
+		--json $(FIPS_TARGET_DIR)/host-attestation.json $(FIPS_HOST_CHECK_ARGS)
+
+# Run the FIPS image on this FIPS host under PRAXIS_REQUIRE_FIPS=1 and drive
+# the listener probes of the integration suite against it from the toolchain
+# image; keeps the container's log in target/fips/.
+fips-runtime-probe: | require-podman
+	@mkdir -p $(FIPS_TARGET_DIR)
+	$(XTASK_FIPS) fips runtime-probe $(FIPS_IMAGE_REF) \
+		--toolchain-image $(FIPS_TOOLCHAIN_IMAGE) --log $(FIPS_TARGET_DIR)/runtime-probe.log
+
+# Hand the built image to another machine as an archive (the FIPS runner
+# tests the exact image the hosted job built and scanned, not a rebuild).
+FIPS_IMAGE_ARCHIVE      ?= $(FIPS_TARGET_DIR)/praxis-fips-image.tar
+fips-image-save: | require-podman
+	@mkdir -p $(dir $(FIPS_IMAGE_ARCHIVE))
+	podman save --output $(FIPS_IMAGE_ARCHIVE) $(FIPS_IMAGE_REF)
+	podman image inspect --format '{{.Id}}' $(FIPS_IMAGE_REF) > $(FIPS_IMAGE_ARCHIVE).id
+
+# Load an archive `fips-image-save` wrote and check its id is the one that
+# was saved.
+fips-image-load: | require-podman
+	podman load --input $(FIPS_IMAGE_ARCHIVE)
+	@loaded=$$(podman image inspect --format '{{.Id}}' $(FIPS_IMAGE_REF)); \
+	saved=$$(cat $(FIPS_IMAGE_ARCHIVE).id); \
+	[ "$$loaded" = "$$saved" ] || { echo "loaded image $$loaded is not the saved image $$saved"; exit 1; }; \
+	echo "loaded $(FIPS_IMAGE_REF) $$loaded"
+
+# Name an image podman already has (a published digest that was pulled, say)
+# the way the FIPS targets expect it.
+fips-image-tag: | require-podman
+	@[ -n "$(FIPS_IMAGE_SOURCE)" ] || { echo "set FIPS_IMAGE_SOURCE to the reference to tag as $(FIPS_IMAGE_REF)"; exit 1; }
+	podman tag $(FIPS_IMAGE_SOURCE) $(FIPS_IMAGE_REF)
+
+# The version the FIPS image is tagged with, for scripts that need it.
+fips-version:
+	@echo $(VERSION)
 
 # -------------------------------------------------------------------
 # Test
