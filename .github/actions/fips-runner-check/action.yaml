@@ -1,0 +1,25 @@
+name: FIPS runner check
+description: >-
+  Fail early, and say why, when the self-hosted FIPS runner lacks a tool the
+  FIPS host jobs need. Runs before anything on the runner is used, so a
+  missing package is reported as such rather than as a failed make.
+
+# The prerequisites are documented in docs/developing/fips.md, "The runner
+# job": git, make, podman, gnupg2, gcc, gcc-c++, cmake and openssl-devel.
+
+runs:
+  using: composite
+  steps:
+    - name: Check the runner
+      shell: bash
+      run: |
+        missing=""
+        for tool in git make podman gpg gcc g++ cmake; do
+          command -v "$tool" >/dev/null || missing="$missing $tool"
+        done
+        [ -f /usr/include/openssl/ssl.h ] || missing="$missing openssl-devel"
+        if [ -n "$missing" ]; then
+          echo "::error::missing on the FIPS runner:$missing (see docs/developing/fips.md, The runner job)"
+          exit 1
+        fi
+        echo "fips_enabled=$(cat /proc/sys/crypto/fips_enabled 2>/dev/null || echo unreadable)"

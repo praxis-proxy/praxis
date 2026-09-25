@@ -1,0 +1,71 @@
+name: FIPS host checks
+description: >-
+  The runtime proof of the FIPS build, on a RHEL 9 host in FIPS mode: attest
+  the host and the FIPS image's module build, run the whole test suite as the
+  FIPS build inside the UBI 9 toolchain image, and probe the running image
+  from outside. Expects the image under test at localhost/praxis:<version>-fips
+  (make fips-image-load, or make fips-image-tag for a pulled digest).
+
+# ------------------------------------------------------------------------------
+# Runner prerequisites (docs/developing/fips.md): a RHEL 9 host in FIPS mode
+# with git, make, podman, gnupg2, gcc, gcc-c++, cmake and openssl-devel
+# installed, checked up front by .github/actions/fips-runner-check; the Rust
+# toolchain is set up here. The host-side commands (make fips-host-check, the
+# probe orchestration) are `cargo xtask fips` and compile on the host; the
+# test suites compile and run inside the toolchain image.
+# ------------------------------------------------------------------------------
+
+inputs:
+  run-suites:
+    description: >-
+      Run the test suites as the FIPS build inside the toolchain image
+      (make test-fips-host). The attestation and the probe run either way.
+    default: "true"
+  require-certified:
+    description: >-
+      Fail the attestation unless the module build the host and the image
+      carry is on an active CMVP certificate; otherwise a build in
+      validation is a warning.
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+      # xtask (make fips-host-check, make fips-runtime-probe) compiles on the
+      # host; the suites do not.
+    - name: Set up Rust
+      uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+      with:
+        cache-suffix: fips-host
+        cache-target: "false"
+
+    - name: Attest the host and the image's module build
+      shell: bash
+      env:
+        FIPS_HOST_CHECK_ARGS: ${{ inputs.require-certified == 'true' && '--require-certified' || '' }}
+      run: make fips-host-check
+
+    - name: Build the toolchain image (Red Hat's toolchain and OpenSSL)
+      shell: bash
+      run: make fips-toolchain
+
+    - name: Run the test suites as the FIPS build on this host
+      if: inputs.run-suites == 'true'
+      shell: bash
+      run: make test-fips-host
+
+    - name: Run the image under PRAXIS_REQUIRE_FIPS=1 and probe its listener
+      shell: bash
+      run: make fips-runtime-probe
+
+    - name: Keep the attestation and the probe log
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: fips-host-attestation-${{ github.job }}
+        path: |
+          target/fips/host-attestation.txt
+          target/fips/host-attestation.json
+          target/fips/runtime-probe.log
+        if-no-files-found: warn
+        retention-days: 90

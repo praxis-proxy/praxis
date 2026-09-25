@@ -421,7 +421,7 @@ test-fips:
 		-p praxis-proxy-core -p praxis-proxy-tls \
 		--features $(FIPS_FEATURES_QUALIFIED) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
 
-.PHONY: test-integration-fips test-conformance-fips test-fips-host fips-toolchain
+.PHONY: test-integration-fips test-conformance-fips test-fips-host fips-toolchain fips-host-facts
 
 # The integration suites against the FIPS build. The proxy they start in
 # process is built without default features, and the tests that spawn the
@@ -465,8 +465,35 @@ test-fips-host: fips-toolchain
 		-v praxis-fips-host-target:/target \
 		-e PRAXIS_FIPS_HOST=1 -e PRAXIS_REQUIRE_FIPS=1 -e CARGO_TERM_COLOR=always \
 		$(FIPS_TOOLCHAIN_IMAGE) \
-		make test-fips test-integration-fips test-conformance-fips \
+		make fips-host-facts test-fips test-integration-fips test-conformance-fips \
 			FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version $(if $(V),V=$(V))
+
+# What the process the suites run as actually sees, printed into the log next
+# to the results: the user, the kernel flag and boot parameter, the crypto
+# policy, the OpenSSL packages, the providers OpenSSL loads, whether MD5 is
+# refused, and the two variables that drive the FIPS tests. These are
+# properties of the container, so one process proving them proves them for
+# every test binary in the run. With PRAXIS_FIPS_HOST declared it fails here,
+# before anything compiles, unless the kernel flag, the active fips provider
+# and the MD5 refusal all agree.
+fips-host-facts:
+	@echo "== FIPS host facts, as seen by the process the suites run as"
+	@echo "user: $$(id -u):$$(id -g)"
+	@echo "kernel fips_enabled: $$(cat /proc/sys/crypto/fips_enabled 2>/dev/null || echo unreadable)"
+	@echo "kernel cmdline fips=1: $$(tr ' ' '\n' < /proc/cmdline | grep -qx 'fips=1' && echo yes || echo no)"
+	@echo "crypto policy: $$(grep -v '^#' /etc/crypto-policies/config 2>/dev/null | grep -m1 . || echo none)"
+	@echo "packages: $$(rpm -q openssl-libs openssl-fips-provider-so 2>/dev/null | tr '\n' ' ')"
+	@echo "openssl: $$(openssl version 2>/dev/null || echo 'no openssl command')"
+	@openssl list -providers 2>/dev/null | sed 's/^/  /'
+	@echo "md5: $$(echo x | openssl dgst -md5 >/dev/null 2>&1 && echo works || echo refused)"
+	@echo "PRAXIS_FIPS_HOST=$${PRAXIS_FIPS_HOST:-} PRAXIS_REQUIRE_FIPS=$${PRAXIS_REQUIRE_FIPS:-}"
+	@case "$$(echo "$${PRAXIS_FIPS_HOST:-}" | tr A-Z a-z)" in \
+	''|0|false|no|off) echo "verdict: PRAXIS_FIPS_HOST not declared; the FIPS tests take whichever branch the provider dictates" ;; \
+	*) [ "$$(cat /proc/sys/crypto/fips_enabled 2>/dev/null)" = 1 ] || { echo "verdict: PRAXIS_FIPS_HOST is set but the kernel is not in FIPS mode"; exit 1; }; \
+	   openssl list -providers 2>/dev/null | grep -qx '  fips' || { echo "verdict: PRAXIS_FIPS_HOST is set but the fips provider is not active"; exit 1; }; \
+	   echo x | openssl dgst -md5 >/dev/null 2>&1 && { echo "verdict: PRAXIS_FIPS_HOST is set but MD5 works"; exit 1; }; \
+	   echo "verdict: FIPS mode confirmed for this container; every test below runs in it" ;; \
+	esac
 
 # podman finds Red Hat's detached image signatures through its registries.d
 # (containers-registries.d(5)). Fedora and RHEL ship the entry; Debian and

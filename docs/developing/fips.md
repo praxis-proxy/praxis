@@ -19,7 +19,116 @@ targets never compile the standard proxy build; the report stage of
 | `cargo xtask fips report [--deps-only] [--features LIST] [--offline] [--out FILE] [BINARY]` | `fips-deps`, `fips-report`, `fips-check` | The compliance report (below). Exits 1 while findings remain. |
 | `cargo xtask fips verify-image [--pinned-in CONTAINERFILE] REFERENCE` | `fips-verify-image`, run first by `container-fips` and `fips-check` | Refuses a base image that is not digest-pinned, not from `registry.access.redhat.com`, or not signed by Red Hat's release key; with `--pinned-in`, also one the Containerfile does not pin by that digest. |
 | `cargo xtask fips signature-store [--install]` | `fips-signature-store` | Checks that podman's `registries.d` names Red Hat's signature store, without which every Red Hat image looks unsigned. `--install` adds the bundled entry for the current user where the podman packaging ships none (Debian, Ubuntu, GitHub's runners). CI runs it before `fips-verify-image`. |
-| `check-payload scan image ...` | `fips-scanner`, `fips-scan` | Red Hat's own scanner at a pinned revision, run on the FIPS image with warnings fatal. This is the actual gate. |
+| `check-payload scan image ...` | `fips-scanner`, `fips-scan` | Red Hat's own scanner at a pinned revision, run on the FIPS image with warnings fatal. This is the actual gate for what is in the image. |
+| `cargo xtask fips host-check [--image IMAGE] [--require-certified] [--out FILE] [--json FILE]` | `fips-host-check` | On a FIPS host: attest the kernel flag, `fips=1`, the crypto policy, `fips-mode-setup --check` and the module the host's OpenSSL loads; with `--image`, the crypto policy podman propagated into the container and the build of `fips.so` the image carries, looked up in `certified-modules.json`. Exit 1 on any unmet requirement. |
+| `cargo xtask fips runtime-probe IMAGE [--toolchain-image IMAGE] [--host-cargo] [--log FILE]` | `fips-runtime-probe` | On a FIPS host: start the image under `PRAXIS_REQUIRE_FIPS=1` with a TLS listener, run the listener probes of the integration suite against it (inside the toolchain image, or with the host's cargo), and check the startup status line. |
+
+## The FIPS host run
+
+The hosted checks prove what is in the image. What the image does in FIPS
+mode can only be proven on a RHEL 9 host in FIPS mode, and the pieces below
+exist so that proof is a Make target, not a manual session.
+
+**The suites as the FIPS build.** `make test-integration-fips` runs the
+schema, security, integration and resilience suites (and
+`test-conformance-fips` the conformance suite) with `--no-default-features`,
+so the proxy each suite starts in process is built exactly as the FIPS binary
+is: the workspace declares the binary crate without its defaults, and every
+test crate opts into `policy-engine` through its own default feature. The
+tests that spawn the binary get the FIPS build through `PRAXIS_BIN`
+(`make build-fips` produces it first) rather than the standard binary the
+harness would otherwise build. `cargo tree -e normal,dev --no-default-features
+-p praxis-tests-integration -i aws-lc-rs` prints nothing for that graph; only
+`ring` remains, for rcgen's test certificates.
+
+**Both branches, always.** The FIPS behavior tests
+(`crates/tls/tests/fips_mode.rs`, `tests/integration/tests/suite/fips.rs`)
+key their expectations on what the installed provider reports
+(`praxis_tls::provider::status().provider_fips`) and assert both branches:
+on a host whose OpenSSL is in approved mode they prove the refusals, anywhere
+else they prove the same offers are accepted. So they run, and mean
+something, on every developer machine and in the hosted CI too.
+`PRAXIS_FIPS_HOST=1` declares the host to be in FIPS mode: the harness then
+fails closed the first time it installs the provider on a host that is not
+(both signals, provider and kernel flag), and every behavior test insists on
+its approved-mode branch. A green run on the FIPS runner therefore cannot
+have happened on OpenSSL's default provider.
+
+**Inside the toolchain image.** `make test-fips-host` builds the `toolchain`
+stage of `Containerfile.fips` (Red Hat's `rust-toolset` and OpenSSL, no
+sources) and runs `test-fips`, `test-integration-fips` and
+`test-conformance-fips` inside it against the bind-mounted checkout, with
+`PRAXIS_FIPS_HOST=1` and `PRAXIS_REQUIRE_FIPS=1`. The OpenSSL and the module
+under test are then the image's, the same packages the FIPS image is built
+with; the kernel flag and the FIPS crypto policy are the host's, which podman
+passes into the container. The container runs as the invoking user
+(rootless podman's `--userns=keep-id`), since praxis refuses to start as root
+and the tests that boot the real server would fail for that reason alone.
+The cargo home and the target directory live in named volumes
+(`praxis-fips-host-cargo`, mounted with `:U` so it belongs to that user, and
+`praxis-fips-host-target`) so the second run is incremental. The run opens
+with `make fips-host-facts`, which prints what the process the suites run as
+actually sees (the kernel flag, the crypto policy, the providers OpenSSL
+loads, whether MD5 is refused) into the log next to the results, and fails
+right there when `PRAXIS_FIPS_HOST` is declared on a container that is not
+in FIPS mode.
+
+**The raw TLS probes.** `tests/utils/src/tls_probe.rs` builds `ClientHello`
+records that offer exactly what a test names (ChaCha20 only, X25519 only,
+TLS 1.2 without Extended Master Secret) and reads the listener's first record
+back: a `ServerHello` means accepted, an alert means refused. A rogue server
+does the reverse for the upstream client: it records what praxis offered and
+answers with a chosen `ServerHello` or alert, then watches for the client's
+alert. No cryptography is involved, which is the point: the probes work
+against any listener, including the shipped image, on any host.
+
+**The fixtures.** `tests/integration/fixtures/fips/` holds a short RSA key
+and a SHA-1-signed certificate, with the commands that made them in its
+`README.md`.
+
+## Simulating approved mode
+
+A host that is not in FIPS mode can still exercise the approved-mode branch
+of every behavior test, against Red Hat's real module, by activating the
+FIPS provider for the test processes alone with the bundled configuration
+(`xtask/assets/fips/fips-provider.cnf`). Inside the toolchain image:
+
+```console
+make fips-toolchain
+podman run --rm --userns=keep-id --security-opt label=disable -v "$PWD":/src -w /src \
+    -v praxis-fips-host-cargo:/cargo:U -v praxis-fips-host-target:/target \
+    -e OPENSSL_CONF=/src/xtask/assets/fips/fips-provider.cnf \
+    praxis-fips-toolchain make test-fips test-integration-fips test-conformance-fips \
+        FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version
+```
+
+The provider reports approved algorithms only, so the tests prove the
+refusals; the kernel flag still reads `0`, so the `PRAXIS_REQUIRE_FIPS` test
+proves the refusal to start instead of the serving path, and
+`PRAXIS_FIPS_HOST` must stay unset (it would fail closed, correctly). Test
+infrastructure only: the application never activates a provider itself.
+
+## The runner job
+
+The `fips-host` job of the `FIPS` workflow runs on the self-hosted runner
+labeled `fips` and `rhel`: a RHEL 9 host in FIPS mode with `git`, `make`,
+`podman`, `gnupg2`, `gcc`, `gcc-c++`, `cmake` and `openssl-devel` installed
+(the host-side commands are `cargo xtask fips` and compile there, and
+`verify-image` checks Red Hat's signatures through gpg; the suites compile
+inside the toolchain image). The runner's group must grant this public
+repository access, which GitHub does not do by default. Its steps are the composite action
+`.github/actions/fips-host`, so the release workflow can run the same checks
+against a pushed image.
+
+It tests the exact image the hosted `ubi-image` job built and scanned: that
+job saves the image as an artifact with its id (`make fips-image-save`), and
+the runner loads it and checks the id against the one the hosted job
+recorded (`make fips-image-load`). A self-hosted runner must never run a
+fork's code, so on pull requests the job runs only for branches of this
+repository; it runs on every push to main, nightly, and on dispatch. The
+release workflow's `fips-host` job pulls the pushed `-fips` image by digest,
+attests and probes it (without repeating the suites), and the draft release
+waits for it.
 
 ## What the report checks
 
@@ -50,6 +159,7 @@ From `xtask/assets/fips/`:
 | `redhat-release-key-2.asc` | Red Hat, Inc. (release key 2), the GPG key Red Hat signs its container images with. See provenance below. |
 | `registry.access.redhat.com.yaml` | The `registries.d` entry that tells podman where Red Hat's signature store is. podman reads one `registries.d`: `~/.config/containers/registries.d` when it exists, else `/etc/containers/registries.d`. `verify-image` checks that this directory names the store, and `signature-store --install` writes the file into the user's directory when it does not. Fedora and RHEL ship the same entry in containers-common; Debian and Ubuntu ship no `registries.d` at all. |
 | `fips-provider.cnf` | An `OPENSSL_CONF` that activates the RHEL FIPS provider for one process, so the report can probe FIPS behavior on hosts that are not in FIPS mode. Test infrastructure only; the application never enables FIPS itself. |
+| `certified-modules.json` | The builds of Red Hat's FIPS provider module, by the version string the module reports, with their standing at NIST: on an active certificate, in validation, or historical, each with the packages that carry it and the source that was checked. `host-check` looks the loaded build up here. Re-verify the sources whenever a UBI pin or a RHEL release changes, and add new builds as Red Hat ships them. |
 
 ### Provenance of the signing key
 

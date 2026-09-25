@@ -4,17 +4,27 @@ name: FIPS
 # Workflow Settings
 # ------------------------------------------------------------------------------
 #
-# The FIPS build on UBI 9, checked the way Red Hat checks it: first the
-# compliance report (a reason and a pointer for every finding), then Red Hat's
-# own scanner, openshift/check-payload at its Rust-support revision, against
-# the runtime image with warnings fatal. Runs on every pull request and push
-# to main so a change that breaks FIPS compliance never reaches a release.
+# Two jobs. `ubi-image` is the static proof, on GitHub's runners: the FIPS
+# build on UBI 9, checked the way Red Hat checks it, first the compliance
+# report (a reason and a pointer for every finding), then Red Hat's own
+# scanner, openshift/check-payload at its Rust-support revision, against the
+# runtime image with warnings fatal. It runs on every pull request and push to
+# main so a change that breaks FIPS compliance never reaches a release.
+#
+# `fips-host` is the runtime proof, on the self-hosted runner that is a RHEL 9
+# host in FIPS mode (labels `fips` and `rhel`): the image `ubi-image` built and
+# scanned, handed over as an artifact and checked by id, is attested, the
+# whole test suite runs as the FIPS build inside the UBI 9 toolchain image on
+# that host, and the image is run under PRAXIS_REQUIRE_FIPS=1 and probed from
+# outside. A self-hosted runner must never run a fork's code, so on pull
+# requests it runs only for same-repository branches; it also runs on every
+# push to main, nightly, and on dispatch.
 #
 # Everything runs through the Makefile targets developers use locally (see
 # docs/developing/fips.md), with podman: Red Hat's image signatures can only
 # be verified with podman, and the scanner reads podman's image store.
 # Ubuntu's podman packaging ships no registries.d entry for Red Hat's
-# registry, so the job first tells podman where the signatures live
+# registry, so the hosted job first tells podman where the signatures live
 # (make fips-signature-store), as a developer on Debian or Ubuntu would.
 
 on:
@@ -22,6 +32,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Nightly runtime proof; clear of the other nightly schedules.
+    - cron: "41 3 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -40,6 +53,8 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    outputs:
+      image-id: ${{ steps.save.outputs.image-id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -93,3 +108,70 @@ jobs:
 
       - name: Scan the image with check-payload (warnings fatal)
         run: make fips-scan
+
+      # The runner job tests this exact image, not a rebuild: hand it over as
+      # an archive, with its id recorded here so the other job can check it.
+      - name: Save the image for the FIPS runner
+        id: save
+        run: |
+          make fips-image-save
+          echo "image-id=$(cat target/fips/praxis-fips-image.tar.id)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fips-image
+          path: |
+            target/fips/praxis-fips-image.tar
+            target/fips/praxis-fips-image.tar.id
+          if-no-files-found: error
+          retention-days: 3
+
+  # ----------------------------------------------------------------------------
+  # FIPS host: the runtime proof, on the RHEL 9 runner in FIPS mode
+  # ----------------------------------------------------------------------------
+
+  fips-host:
+    needs: ubi-image
+    # Never a fork's code on the self-hosted runner: pull requests only from
+    # this repository's own branches.
+    if: >-
+      needs.ubi-image.result == 'success'
+      && (github.event_name != 'pull_request'
+          || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, fips, rhel]
+    # One runner: queue behind any other run rather than share it.
+    concurrency:
+      group: fips-host-runner
+      cancel-in-progress: false
+    # Building the suites in the toolchain image from a cold cache dominates.
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/fips-runner-check
+
+      - name: Fetch the image the hosted job built and scanned
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: fips-image
+          path: target/fips
+
+      - name: Load it and check it is that image
+        env:
+          EXPECTED_ID: ${{ needs.ubi-image.outputs.image-id }}
+        run: |
+          make fips-image-load
+          [ "$(cat target/fips/praxis-fips-image.tar.id)" = "$EXPECTED_ID" ] \
+            || { echo "::error::the archive's image id does not match the one the hosted job recorded"; exit 1; }
+
+      - uses: ./.github/actions/fips-host
+        with:
+          run-suites: "true"
+
+      - name: Remove the loaded image
+        if: always()
+        run: podman rmi --force "localhost/praxis:$(make -s fips-version)-fips" || true

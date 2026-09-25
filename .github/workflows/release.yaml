@@ -275,6 +275,9 @@ jobs:
 
   container:
     needs: [validate, test, lint, audit, coverage, publish-dry-run]
+    outputs:
+      # The pushed -fips image, for the FIPS runner to prove before the draft.
+      fips-digest: ${{ steps.push-fips.outputs.digest }}
     if: >-
       github.event_name == 'push'
       && !cancelled()
@@ -383,6 +386,7 @@ jobs:
             type=sha
 
       - name: Build and push the FIPS container
+        id: push-fips
         if: steps.guard.outputs.skip != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
@@ -396,6 +400,55 @@ jobs:
           cache-to: type=gha,mode=min,scope=fips
 
   # ----------------------------------------------------------------------------
+  # Phase 1 (tag push): the runtime proof of the pushed -fips image
+  #
+  # On the RHEL 9 runner in FIPS mode (see .github/workflows/fips.yaml): pull
+  # the -fips image the container job just pushed, by digest, attest the host
+  # and the module build the image carries, run it under PRAXIS_REQUIRE_FIPS=1
+  # and probe its listener. The draft release waits for it, so a -fips image
+  # that does not prove out on a FIPS host is never released. The test suites
+  # are not repeated here; they ran for this commit on its way to main.
+  # ----------------------------------------------------------------------------
+
+  fips-host:
+    needs: [validate, container]
+    if: >-
+      github.event_name == 'push'
+      && !cancelled()
+      && needs.validate.result == 'success'
+      && needs.container.result == 'success'
+      && needs.container.outputs.fips-digest != ''
+    runs-on: [self-hosted, fips, rhel]
+    concurrency:
+      group: fips-host-runner
+      cancel-in-progress: false
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.ref_name }}
+
+      - uses: ./.github/actions/fips-runner-check
+
+      - name: Pull the pushed FIPS image by digest and name it for the checks
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}@${{ needs.container.outputs.fips-digest }}
+        run: |
+          podman pull "$IMAGE"
+          make fips-image-tag FIPS_IMAGE_SOURCE="$IMAGE"
+
+      - uses: ./.github/actions/fips-host
+        with:
+          run-suites: "false"
+
+      - name: Remove the pulled image
+        if: always()
+        run: podman rmi --force "localhost/praxis:$(make -s fips-version)-fips" || true
+
+  # ----------------------------------------------------------------------------
   # Phase 1 (tag push): cut the draft release
   #
   # The draft is marked as a pre-release only when the tag carries a pre-release
@@ -407,13 +460,14 @@ jobs:
   # ----------------------------------------------------------------------------
 
   draft-release:
-    needs: [validate, test, lint, audit, coverage, publish-dry-run, container]
+    needs: [validate, test, lint, audit, coverage, publish-dry-run, container, fips-host]
     if: >-
       github.event_name == 'push'
       && !cancelled()
       && needs.validate.result == 'success'
       && needs.publish-dry-run.result == 'success'
       && needs.container.result == 'success'
+      && (needs.fips-host.result == 'success' || needs.fips-host.result == 'skipped')
       && (needs.test.result == 'success' || needs.test.result == 'skipped')
       && (needs.lint.result == 'success' || needs.lint.result == 'skipped')
       && (needs.audit.result == 'success' || needs.audit.result == 'skipped')

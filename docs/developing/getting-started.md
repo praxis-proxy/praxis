@@ -114,6 +114,16 @@ make build-fips      # same, debug profile, without the crate manifest
 make container-fips  # FIPS runtime image on UBI 9, tagged praxis:<version>-fips
 make lint-fips       # clippy and rustfmt for the FIPS feature set (CI runs it)
 make test-fips       # unit tests for the FIPS feature set (CI runs it)
+make test-integration-fips  # the integration suites against the FIPS feature set
+make test-fips-host  # the whole suite as the FIPS build, inside the UBI 9 toolchain image, on a FIPS host
+```
+
+On a RHEL 9 host in FIPS mode, two more targets give the runtime proof the
+hosted checks cannot ([FIPS 140-3](../operating/fips.md#verifying-a-deployment)):
+
+```console
+make fips-host-check     # attest the host and the image's module build (target/fips/host-attestation.*)
+make fips-runtime-probe  # run the FIPS image under PRAXIS_REQUIRE_FIPS=1 and probe its listener
 ```
 
 `fips-deps`, `fips-report` and `fips-check` check a build against the rules

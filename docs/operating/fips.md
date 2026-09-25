@@ -37,17 +37,35 @@ OpenSSL bindings, which hand every primitive to the system library.
 
 ## Host prerequisites
 
-- A RHEL 9 host in FIPS mode, enabled at install time or with
-  `fips-mode-setup --enable` and a reboot. `cat /proc/sys/crypto/fips_enabled`
-  prints `1` and `openssl list -providers` lists `fips`. RHEL 9 is the
-  validated operating environment. The module that runs in the container is
-  UBI's own `openssl-fips-provider-so`; the host contributes the kernel flag.
+The module's Security Policy (section 11.2, "Crypto Officer guidance") sets
+the terms; a deployment that does not meet them is not running the validated
+module, whatever the image contains.
+
+- A RHEL 9 host in FIPS mode. The Security Policy accepts both ways of
+  getting there: `fips=1` on the kernel command line at installation, or
+  `fips-mode-setup --enable` and a reboot afterwards. Red Hat's own guidance
+  prefers installation time, since only then are all of the system's keys
+  generated under FIPS mode. Either way `fips-mode-setup --check` must say
+  `FIPS mode is enabled.`, `cat /proc/sys/crypto/fips_enabled` prints `1`,
+  and the kernel command line carries `fips=1`.
+- The system-wide crypto policy left at `FIPS`, with no restrictions added.
+- `openssl list -providers` on the host lists the `fips` provider as active,
+  with the version string the certificate names (`3.0.7-395c1a240fbfffd8`
+  for certificate #4857). The Security Policy is explicit that the
+  cryptographic boundary is that provider alone: a different build of the
+  module, or any other provider, is not the validated module.
 - A container runtime that passes the host's FIPS mode into the container,
-  as podman and CRI-O on RHEL do. The `-fips` image then needs no flag,
-  environment variable or config: its OpenSSL reads the kernel flag and
-  activates the validated provider itself. On a host that is not in FIPS
-  mode the same image runs with OpenSSL's default provider, and the startup
-  log says so.
+  as podman and CRI-O on RHEL do: they bind-mount the FIPS crypto policy
+  the image ships over the container's own, and the kernel flag is visible
+  through `/proc`. The `-fips` image then needs no flag, environment
+  variable or config: its OpenSSL reads the kernel flag and activates the
+  validated provider itself. On a host that is not in FIPS mode the same
+  image runs with OpenSSL's default provider, and the startup log says so.
+
+The module that runs inside the container is the image's own
+`openssl-fips-provider-so`, not the host's, so the same version requirement
+applies to the image; see [what is validated](#what-is-validated-and-what-is-not)
+for where the current image stands.
 
 ## Startup checks
 
@@ -109,6 +127,14 @@ fatal: PRAXIS_REQUIRE_FIPS is set but FIPS mode is not in effect: the OpenSSL pr
 
 ## Verifying a deployment
 
+Two kinds of check, and both matter. The static checks prove what is in the
+image and run anywhere; the runtime checks prove what the image does in FIPS
+mode and need a FIPS host. CI runs both: the static checks on every pull
+request, the runtime checks on a RHEL 9 runner in FIPS mode for every push
+to main, nightly, for every pull request from a branch of this repository, and
+against the pushed `-fips` image before a release is drafted (the `FIPS`
+workflow and the release workflow's `fips-host` job).
+
 On a developer machine (no FIPS host needed):
 
 ```console
@@ -117,9 +143,45 @@ make fips-check    # build on UBI 9 with Red Hat's toolchain, print the complian
 make container-fips
 make fips-scanner  # build Red Hat's scanner (check-payload) at its pinned revision; needs Go
 make fips-scan     # run it against the image, warnings fatal; needs oc
+make test-integration-fips  # the test suites against the FIPS feature set, on this host's OpenSSL
 ```
 
-On the FIPS host:
+On the FIPS host, from a checkout, with the image in podman's store:
+
+```console
+make fips-host-check     # attest the host and the image's module build: target/fips/host-attestation.{txt,json}
+make fips-toolchain      # Red Hat's toolchain image, once
+make test-fips-host      # the whole test suite as the FIPS build, inside that image, PRAXIS_FIPS_HOST=1
+make fips-runtime-probe  # run the image under PRAXIS_REQUIRE_FIPS=1, probe its listener, check its startup line
+```
+
+What each proves:
+
+- `fips-host-check` states the facts the Security Policy requires and fails
+  on any that is missing: the kernel flag, `fips=1` on the command line, the
+  `FIPS` crypto policy, `fips-mode-setup --check`, the provider the host's
+  OpenSSL loads and its version. For the image it checks that podman
+  propagated the FIPS policy into the container and reads the build of
+  `fips.so` the image carries, then says whether that build is on a
+  certificate, in validation, or unknown. It writes the attestation to keep
+  with the run. A build in validation is a warning; `--require-certified`
+  (`FIPS_HOST_CHECK_ARGS`) makes it a failure.
+- `test-fips-host` runs every test suite with the proxy built exactly as the
+  FIPS binary is, inside the UBI 9 toolchain image, so the OpenSSL and the
+  module under test are the image's and the FIPS mode is the host's. The
+  harness refuses to run unless the process really is in FIPS mode, and
+  every FIPS behavior test takes its approved-mode branch: the listener
+  negotiates only AES-GCM and the NIST curves and refuses ChaCha20-only and
+  X25519-only clients, the upstream client offers only approved algorithms
+  and refuses a TLS 1.2 peer without Extended Master Secret, a listener with
+  a short RSA key cannot serve, a ChaCha20-only listener cannot start, MD5 is
+  refused in process, and the binary serves under `PRAXIS_REQUIRE_FIPS=1`
+  with the status line reporting both signals.
+- `fips-runtime-probe` does the listener part of that against the shipped
+  image itself, started under `PRAXIS_REQUIRE_FIPS=1`, and checks its
+  startup line. This is the check against the bits that ship.
+
+The manual equivalent, for one-off evidence:
 
 ```console
 cat /proc/sys/crypto/fips_enabled                        # 1
@@ -137,6 +199,39 @@ Only a FIPS host can prove the kernel flag, the passing `PRAXIS_REQUIRE_FIPS`
 path, RHEL's boot-time module integrity self-tests, and behavior under the
 host-wide `FIPS` crypto policy. The local checks activate the provider, not
 the policy.
+
+## What is validated, and what is not
+
+FIPS 140-3 validates cryptographic modules, not applications. The accurate
+claim for praxis is this: the FIPS build performs all of its cryptography
+through the Red Hat Enterprise Linux 9 OpenSSL FIPS Provider, a FIPS 140-3
+validated module (CMVP certificate #4857), when run on a RHEL 9 host in FIPS
+mode as described above. The checks on this page are the evidence for it.
+Three things the checks cannot supply belong in any claim:
+
+- **The module build.** Certificate #4857 names module version
+  `3.0.7-395c1a240fbfffd8`, the build RHEL 9.2 through 9.6 and their UBI
+  images ship. The UBI 9.8 images the build currently pins ship
+  `openssl-fips-provider-so-3.0.7-11.el9_8`,
+  a June 2026 rebuild for CVE-2026-31790 whose module version is
+  `3.0.7-cda111b5812c30d4`. NIST's Modules In Process list shows a Red Hat
+  submission for this module under review; until it is on a certificate, the
+  image carries a module in validation, not the validated one. `fips-host-check`
+  says so on every run (`xtask/assets/fips/certified-modules.json` is the
+  list it consults), and the release gate can be made to fail on it with
+  `--require-certified` once that is the policy.
+- **The operating environment.** The certificate's tested environments are
+  RHEL 9 on specific physical Intel, POWER and z machines. A virtual machine
+  or another processor is covered by the CMVP's porting rules for software
+  modules, not by testing; say "on RHEL 9 in FIPS mode", not "on a tested
+  platform".
+- **The architecture.** rustls runs the TLS protocol and calls the module for
+  every primitive: hashes, HMAC, HKDF and the TLS 1.2 PRF, key exchange,
+  signatures, AEAD and random bytes. The key schedule is composed from those
+  calls outside the module boundary, as it is for every TLS stack that uses
+  the provider. Whether that composition is acceptable is a question for the
+  party the claim is made to (Red Hat for a Red Hat product, an assessor
+  otherwise), and should be settled with them in writing.
 
 ## Scope and exemptions
 
