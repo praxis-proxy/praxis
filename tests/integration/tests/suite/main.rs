@@ -66,6 +66,7 @@ mod examples;
 mod failure_mode;
 mod filter_composition;
 mod filter_metadata;
+mod fips;
 mod grpc_access_log;
 mod guardrails;
 mod health_check;

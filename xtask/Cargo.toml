@@ -24,6 +24,9 @@ dev = [
     "dep:nix",
     "dep:plotters",
     "dep:praxis",
+    # The standard build, policy engine included: `cargo xtask debug` runs the
+    # example configs, some of which use the `policy` filter.
+    "praxis/default",
     "dep:praxis-core",
     "dep:praxis-proxy-benchmarks",
     "dep:quote",

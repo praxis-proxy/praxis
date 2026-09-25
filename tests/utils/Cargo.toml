@@ -12,7 +12,12 @@ workspace = true
 
 [dependencies]
 arc-swap = { workspace = true }
-praxis = { workspace = true }
+# The same two features as praxis-protocol below, and nothing else: the
+# workspace declares the binary crate without its defaults so the policy engine
+# is a choice each test crate makes (its `policy-engine` feature), not a
+# side effect of depending on the harness. `--no-default-features` on a test
+# crate therefore builds the proxy exactly as the FIPS build does.
+praxis = { workspace = true, features = ["config-reload", "admin-api"] }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 # The shared harness exercises the admin/health endpoints and cert hot-reload;
@@ -22,6 +27,8 @@ praxis-protocol = { workspace = true, features = ["admin-api", "config-reload"] 
 praxis-tls = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
+# Well-formed EC key shares for the raw TLS probes (tls_probe.rs).
+openssl = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 serde_yaml = { workspace = true }

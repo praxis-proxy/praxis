@@ -23,7 +23,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use praxis_core::config::Config;
 use praxis_test_utils::{
     example_config_path, free_port, http_send, parse_status, patch_yaml, start_backend_with_shutdown, start_proxy,
@@ -48,12 +47,7 @@ fn mint_fixture_jwt(subject: &str) -> String {
         "iat": now,
         "exp": now + 300,
     });
-    encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(FIXTURE_SECRET.as_bytes()),
-    )
-    .expect("sign fixture JWT")
+    super::jwt::hs256(&claims, None, FIXTURE_SECRET.as_bytes())
 }
 
 /// Load the policy-http example, rewrite the operator `config_path` to

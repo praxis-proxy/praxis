@@ -7,6 +7,11 @@ license.workspace = true
 readme = "../../README.md"
 publish = false
 
+[features]
+# Matches the binary's default; see tests/integration/Cargo.toml.
+default = ["policy-engine"]
+policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine"]
+
 [lints]
 workspace = true
 

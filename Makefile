@@ -309,9 +309,22 @@ FIPS_FEATURES           := config-reload,admin-api
 # The same list qualified for a multi-package cargo invocation.
 _COMMA                  := ,
 FIPS_FEATURES_QUALIFIED := $(subst $(_COMMA),$(_COMMA)praxis-proxy/,praxis-proxy/$(FIPS_FEATURES))
-FIPS_TARGET_DIR         := target/fips
+FIPS_TARGET_DIR         ?= target/fips
 FIPS_BIN                ?= $(FIPS_TARGET_DIR)/release/praxis
-FIPS_CARGO_ARGS         := -p praxis-proxy --no-default-features --features $(FIPS_FEATURES) --target-dir $(FIPS_TARGET_DIR)
+# Extra cargo arguments for every FIPS build and test invocation. Empty by
+# default; `test-fips-host` passes --ignore-rust-version, as Containerfile.fips
+# does, because Red Hat's toolchain may trail the workspace's rust-version.
+FIPS_CARGO_EXTRA        ?=
+FIPS_CARGO_ARGS         := -p praxis-proxy --no-default-features --features $(FIPS_FEATURES) --target-dir $(FIPS_TARGET_DIR) $(FIPS_CARGO_EXTRA)
+# The test suites, resolved as the FIPS build resolves the proxy: no default
+# features anywhere, so the policy engine and the experimental filters stay
+# out and the proxy each suite starts in-process is the FIPS binary's feature
+# set (tests/utils names config-reload and admin-api itself). Conformance
+# runs separately because it needs h2spec on PATH.
+FIPS_TEST_SUITES        := -p praxis-tests-schema -p praxis-tests-security \
+	-p praxis-tests-integration -p praxis-tests-resilience
+# The toolchain stage of Containerfile.fips, built by `fips-toolchain`.
+FIPS_TOOLCHAIN_IMAGE    ?= praxis-fips-toolchain
 # Red Hat's scanner reads the crate list that `cargo auditable` embeds in the
 # binary (the .dep-v0 section); without it a binary is graded inconclusive.
 # `make release-fips` embeds it when cargo-auditable is installed (`cargo
@@ -398,13 +411,60 @@ lint-fips:
 
 # Unit tests of the crates that make up the FIPS binary, resolved exactly as
 # the FIPS build resolves them: no default features anywhere, only
-# FIPS_FEATURES on the binary. The integration suites run the standard build
-# through the test harness and are covered by `make test-integration`.
+# FIPS_FEATURES on the binary. The integration suites against the same
+# feature set are `test-integration-fips` and `test-conformance-fips`.
 test-fips:
 	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
 		-p praxis-proxy -p praxis-proxy-protocol -p praxis-proxy-filter \
 		-p praxis-proxy-core -p praxis-proxy-tls \
-		--features $(FIPS_FEATURES_QUALIFIED) $(_NOCAPTURE)
+		--features $(FIPS_FEATURES_QUALIFIED) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
+
+.PHONY: test-integration-fips test-conformance-fips test-fips-host fips-toolchain
+
+# The integration suites against the FIPS build. The proxy they start in
+# process is built without default features, and the tests that spawn the
+# binary get the FIPS binary (`build-fips`, named through PRAXIS_BIN) rather
+# than the standard one the harness would otherwise build for them.
+#
+# On a host that is not in FIPS mode this proves the suites pass on the FIPS
+# feature set; every FIPS behavior test takes its non-FIPS branch. On a FIPS
+# host, run it through `test-fips-host`, which declares the host as such so
+# the same tests insist on their approved-mode branch instead.
+test-integration-fips: build-fips
+	PRAXIS_BIN=$(abspath $(FIPS_TARGET_DIR))/debug/praxis \
+	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
+		$(FIPS_TEST_SUITES) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
+
+test-conformance-fips: build-fips $(H2SPEC)
+	PATH="$(BINUTILS_PATH):$(PATH)" PRAXIS_BIN=$(abspath $(FIPS_TARGET_DIR))/debug/praxis \
+	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
+		-p praxis-tests-conformance $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
+
+# The whole test suite as the FIPS build, inside the toolchain image, on a
+# FIPS-enabled host: the runtime proof the hosted checks cannot give. The
+# checkout is bind-mounted, so the tests are the working tree's; the toolchain
+# and OpenSSL are the image's, the same packages the FIPS image is built
+# with; the kernel flag and the FIPS crypto policy are the host's, which
+# podman passes into the container. PRAXIS_FIPS_HOST makes the harness fail
+# closed unless the process really is in FIPS mode, and PRAXIS_REQUIRE_FIPS
+# makes every proxy the suites start enforce it. The cargo home and the
+# target directory live in named volumes so a second run is incremental.
+#
+# The container runs as the invoking user (rootless podman, keep-id): praxis
+# refuses to start as root, and the tests that boot the real server would
+# fail for that reason alone as container root.
+#
+# Needs rootless podman on a RHEL 9 host in FIPS mode (docs/operating/fips.md).
+# On any other host it fails at the first test, by design.
+test-fips-host: fips-toolchain
+	podman run --rm --userns=keep-id --security-opt label=disable \
+		-v $(CURDIR):/src -w /src \
+		-v praxis-fips-host-cargo:/cargo:U \
+		-v praxis-fips-host-target:/target \
+		-e PRAXIS_FIPS_HOST=1 -e PRAXIS_REQUIRE_FIPS=1 -e CARGO_TERM_COLOR=always \
+		$(FIPS_TOOLCHAIN_IMAGE) \
+		make test-fips test-integration-fips test-conformance-fips \
+			FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version $(if $(V),V=$(V))
 
 # podman finds Red Hat's detached image signatures through its registries.d
 # (containers-registries.d(5)). Fedora and RHEL ship the entry; Debian and
@@ -422,6 +482,12 @@ fips-verify-image: | require-podman
 container-fips: fips-verify-image
 	podman build -f Containerfile.fips --target runtime $(FIPS_BUILD_ARGS) \
 		-t $(IMAGE):$(VERSION)-fips .
+
+# Red Hat's toolchain and OpenSSL, no sources: the image `test-fips-host`
+# runs the suites in.
+fips-toolchain: fips-verify-image
+	podman build -f Containerfile.fips --target toolchain $(FIPS_BUILD_ARGS) \
+		-t $(FIPS_TOOLCHAIN_IMAGE) .
 
 container-fips-run: | require-podman
 	podman run --rm --network=host $(IMAGE):$(VERSION)-fips 2>&1

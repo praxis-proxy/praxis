@@ -4,10 +4,13 @@
 # FIPS build of praxis on Red Hat Universal Base Image 9
 # ------------------------------------------------------------------------------
 #
-# Three stages, all driven by the Makefile:
+# Four stages, all driven by the Makefile:
 #
-#   builder   builds the FIPS feature set of praxis with Red Hat's own Rust
-#             toolchain and OpenSSL (make container-fips, make fips-check)
+#   toolchain Red Hat's own Rust toolchain and OpenSSL on ubi9/ubi, no
+#             sources; also the image the test suites run in on a FIPS host,
+#             against a bind-mounted checkout (make test-fips-host)
+#   builder   builds the FIPS feature set of praxis in that toolchain
+#             (make container-fips, make fips-check)
 #   report    runs `cargo xtask fips report` on that binary and keeps the
 #             result (make fips-check)
 #   runtime   the shippable image on ubi9/ubi-minimal (make container-fips)
@@ -32,10 +35,10 @@ ARG CARGO_FEATURES="config-reload,admin-api"
 ARG CARGO_ARGS="--ignore-rust-version"
 
 # ------------------------------------------------------------------------------
-# Stage 1: build with Red Hat's toolchain
+# Stage 1: Red Hat's toolchain
 # ------------------------------------------------------------------------------
 
-FROM registry.access.redhat.com/ubi9/ubi@${UBI9_DIGEST} AS builder
+FROM registry.access.redhat.com/ubi9/ubi@${UBI9_DIGEST} AS toolchain
 
 # Everything comes from Red Hat's UBI repositories (GPG-checked by dnf):
 #   rust-toolset   Red Hat's rustc and cargo
@@ -63,6 +66,12 @@ RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
     cargo install cargo-auditable --version "${CARGO_AUDITABLE_VERSION}" --locked
 
 WORKDIR /src
+
+# ------------------------------------------------------------------------------
+# Stage 2: build the FIPS feature set
+# ------------------------------------------------------------------------------
+
+FROM toolchain AS builder
 
 # The whole workspace, so the build resolves the committed lockfile as is
 # (--locked) and the report stage can run `cargo xtask fips`.
@@ -102,7 +111,7 @@ RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
     && cp target/release/praxis /fips/praxis
 
 # ------------------------------------------------------------------------------
-# Stage 2: compliance report
+# Stage 3: compliance report
 # ------------------------------------------------------------------------------
 
 # Only built when this stage is the target (make fips-check), so publishing
@@ -129,7 +138,7 @@ RUN --mount=type=cache,id=praxis-fips-registry,target=/cargo/registry \
 CMD ["sh", "-c", "cat /fips/report.txt; exit $(cat /fips/status)"]
 
 # ------------------------------------------------------------------------------
-# Stage 3: runtime
+# Stage 4: runtime
 # ------------------------------------------------------------------------------
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal@${UBI9_MINIMAL_DIGEST} AS runtime

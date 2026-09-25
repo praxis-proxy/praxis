@@ -41,9 +41,17 @@ use crate::net::wait::{DEFAULT_HTTP_TIMEOUT, poll_until_ready, ready_timeout};
 /// stopped being true when ring was removed from the fork, and it meant the
 /// integration suite had been running on a provider nobody selected.
 ///
+/// When `PRAXIS_FIPS_HOST` declares the host to be in FIPS mode, this also
+/// fails closed unless the process is: see [`crate::fips`].
+///
+/// # Panics
+///
+/// Panics when `PRAXIS_FIPS_HOST` is set on a host that is not in FIPS mode.
+///
 /// [`CryptoProvider`]: rustls::crypto::CryptoProvider
 pub fn ensure_crypto_provider() {
     praxis_tls::provider::install();
+    crate::fips::assert_fips_host_if_declared();
 }
 
 /// Parse a PEM certificate chain and private key into rustls DER types.
@@ -691,7 +699,20 @@ async fn try_h2_get_inner(addr: &str, path: &str, client_config: &Arc<ClientConf
 ///
 /// Panics if TLS server setup or binding fails.
 pub fn start_tls_backend(certs: &TestCertificates, body: &str) -> u16 {
-    let acceptor = build_tls_acceptor(certs);
+    let cert_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
+    let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
+    start_tls_backend_from_pem(&cert_pem, &key_pem, body)
+}
+
+/// Start an HTTPS backend presenting the given PEM certificate chain and
+/// key, for tests that need a backend with a particular certificate (a
+/// fixture with a weak key or a legacy signature, say).
+///
+/// # Panics
+///
+/// Panics if TLS server setup or binding fails.
+pub fn start_tls_backend_from_pem(cert_pem: &[u8], key_pem: &[u8], body: &str) -> u16 {
+    let acceptor = build_tls_acceptor(cert_pem, key_pem);
     let body = body.to_owned();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind TLS backend");
@@ -708,15 +729,12 @@ pub fn start_tls_backend(certs: &TestCertificates, body: &str) -> u16 {
     port
 }
 
-/// Build a [`TlsAcceptor`] from test certificate files.
+/// Build a [`TlsAcceptor`] from a PEM certificate chain and key.
 ///
 /// [`TlsAcceptor`]: tokio_rustls::TlsAcceptor
-fn build_tls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
+fn build_tls_acceptor(certs_pem: &[u8], key_pem: &[u8]) -> tokio_rustls::TlsAcceptor {
     ensure_crypto_provider();
-    let certs_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
-    let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
-
-    let (certs, key) = parse_cert_chain_and_key(&certs_pem, &key_pem);
+    let (certs, key) = parse_cert_chain_and_key(certs_pem, key_pem);
 
     let server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()

@@ -72,7 +72,14 @@ parking_lot = "0.12.5"
 portable-atomic = "1.15.0"
 proptest = "1.11.0"
 quote = "1.0.47"
-praxis = { path = "crates/server", package = "praxis-proxy" }
+# default-features = false for the same reason as praxis-filter below: the
+# binary's default set includes `policy-engine`, and the test harness depends
+# on this crate, so leaving the defaults on made every test suite build the
+# policy engine (and its aws-lc-rs, sha2 and hmac) no matter which features the
+# suite asked for. Each dependant now names the features it needs; the test
+# crates keep `policy-engine` in their own defaults, so the standard test run is
+# unchanged, and `--no-default-features` gives the FIPS build's feature set.
+praxis = { path = "crates/server", package = "praxis-proxy", default-features = false }
 praxis-core = { version = "0.7.0", path = "crates/core", package = "praxis-proxy-core" }
 # default-features = false: the filter crate's own default (`policy-engine`)
 # must not leak in through this dependency edge, or a build that turns the
@@ -111,7 +118,11 @@ spiffe = { version = "0.16.1", default-features = false }
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 syn = { version = "3.0.6", features = ["full", "extra-traits", "visit"] }
 tempfile = "3.27.0"
-tokio-rustls = "0.26.5"
+# Test-only. Its default features turn on rustls' `aws_lc_rs`, which would put
+# a second provider into every test binary and let `ClientConfig::builder()`
+# pick it silently when nothing is installed; the Pingora fork depends on it
+# the same way.
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["logging", "tls12"] }
 tokio-tungstenite = "0.30.0"
 thiserror = "2.0.21"
 tikv-jemallocator = "0.7.0"

@@ -14,7 +14,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use praxis_core::config::Config;
 use praxis_test_utils::{
     example_config_path, free_port, http_send, parse_status, patch_yaml, start_backend_with_shutdown, start_proxy,
@@ -95,14 +94,7 @@ fn a_token_signed_by_an_unpublished_key_is_rejected() {
         "iat": now,
         "exp": now + 300,
     });
-    let mut header = Header::new(Algorithm::HS256);
-    header.kid = Some(KEY_ID.to_owned());
-    let token = encode(
-        &header,
-        &claims,
-        &EncodingKey::from_secret(b"a different secret entirely"),
-    )
-    .expect("sign with the wrong key");
+    let token = super::jwt::hs256(&claims, Some(KEY_ID), b"a different secret entirely");
 
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"echo","arguments":{}}}"#;
     let raw = http_send(
@@ -198,9 +190,7 @@ fn mint_jwks_signed_jwt(subject: &str) -> String {
         "iat": now,
         "exp": now + 300,
     });
-    let mut header = Header::new(Algorithm::HS256);
-    header.kid = Some(KEY_ID.to_owned());
-    encode(&header, &claims, &EncodingKey::from_secret(SECRET)).expect("sign JWKS-keyed JWT")
+    super::jwt::hs256(&claims, Some(KEY_ID), SECRET)
 }
 
 /// Write a policy that loads keys from `jwks`.

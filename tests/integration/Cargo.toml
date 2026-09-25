@@ -8,10 +8,12 @@ readme = "../../README.md"
 publish = false
 
 [features]
-# Matches the praxis-filter default so a single-test run exercises the
-# configuration the default build ships.
+# Matches the binary's default so a single-test run exercises the
+# configuration the standard build ships. `--no-default-features` builds the
+# proxy under test with the FIPS build's feature set instead
+# (`make test-integration-fips`).
 default = ["policy-engine"]
-policy-engine = ["praxis-filter/policy-engine"]
+policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter"]
 cloud-events-filter = ["praxis/cloud-events-filter"]
 upstream-binding = ["praxis/upstream-binding"]
@@ -33,9 +35,10 @@ bytes = { workspace = true }
 futures = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
-# Used only by the policy example test to mint HS256 JWTs for the
-# happy-path case (matches the filter crate's signing dependency).
-jsonwebtoken = { workspace = true }
+# The policy example tests mint HS256 JWTs through the system OpenSSL
+# (examples/jwt.rs) rather than jsonwebtoken, whose aws-lc-rs would otherwise
+# sit in the FIPS test build's graph.
+openssl = { workspace = true }
 # Used by TLS target tests and compression codec round-trip tests.
 pingora-core = { workspace = true }
 praxis = { workspace = true }
@@ -43,6 +46,7 @@ praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-protocol = { workspace = true }
 praxis-test-utils = { workspace = true }
+praxis-tls = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

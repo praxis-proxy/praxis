@@ -52,17 +52,35 @@ const RELOAD_SETTLE: Duration = Duration::from_millis(1000);
 /// `runtime.threads` explicitly keeps its own value.
 const TEST_WORKER_THREADS: usize = 2;
 
+/// Environment variable naming the `praxis` binary subprocess tests spawn.
+///
+/// The fallback below builds the standard binary, so a run against another
+/// feature set has to say which binary it means: `make test-integration-fips`
+/// points this at the FIPS build.
+pub const PRAXIS_BIN_ENV: &str = "PRAXIS_BIN";
+
 /// Path to the `praxis` binary for subprocess integration tests.
 ///
-/// Uses `CARGO_BIN_EXE_praxis` when set; otherwise resolves under
-/// `CARGO_TARGET_DIR` (including llvm-cov's alternate target dir) and
-/// builds the binary if it is not already present.
+/// Uses [`PRAXIS_BIN_ENV`] when set, then `CARGO_BIN_EXE_praxis`; otherwise
+/// resolves under `CARGO_TARGET_DIR` (including llvm-cov's alternate target
+/// dir) and builds the binary if it is not already present.
 ///
 /// # Panics
 ///
-/// Panics if `cargo build` for the `praxis` binary fails or the binary is
-/// still missing afterward.
+/// Panics if [`PRAXIS_BIN_ENV`] names a file that does not exist, or if
+/// `cargo build` for the `praxis` binary fails or the binary is still missing
+/// afterward.
 pub fn praxis_bin() -> PathBuf {
+    if let Some(explicit) = std::env::var_os(PRAXIS_BIN_ENV) {
+        let path = PathBuf::from(explicit);
+        assert!(
+            path.is_file(),
+            "{PRAXIS_BIN_ENV} names {} but there is no such file",
+            path.display()
+        );
+        return path;
+    }
+
     let path = resolve_praxis_bin_path();
     if path.exists() {
         return path;

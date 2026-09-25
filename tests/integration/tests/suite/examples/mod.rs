@@ -50,6 +50,8 @@ mod iterative_request_router_origin_failover;
 #[cfg(feature = "iterative-request-router")]
 mod iterative_request_router_sequence;
 mod json_rpc;
+#[cfg(feature = "policy-engine")]
+mod jwt;
 mod least_connections;
 mod logging;
 mod maglev;

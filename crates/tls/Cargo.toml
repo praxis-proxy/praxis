@@ -42,6 +42,8 @@ x509-parser = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+# The FIPS-mode tests ask the system OpenSSL directly (tests/fips_mode.rs).
+openssl = { workspace = true }
 proptest = { workspace = true }
 rcgen = { workspace = true }
 serde_yaml = { workspace = true }
