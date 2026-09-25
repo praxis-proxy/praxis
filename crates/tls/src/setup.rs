@@ -738,14 +738,15 @@ mod tests {
         );
     }
 
+    // The ordering tests name AES-GCM suites only: the provider offers those in
+    // every mode, whereas ChaCha20-Poly1305 is absent in FIPS approved mode
+    // and would make the expected lengths depend on the host.
+
     #[test]
     fn maybe_filter_provider_preserves_configured_order() {
         ensure_crypto_provider();
         let provider = default_crypto_provider().expect("provider installed above");
-        let ids = [
-            CipherSuiteId::Tls13Chacha20Poly1305Sha256,
-            CipherSuiteId::Tls13Aes128GcmSha256,
-        ];
+        let ids = [CipherSuiteId::Tls13Aes256GcmSha384, CipherSuiteId::Tls13Aes128GcmSha256];
 
         let result = maybe_filter_provider(provider, Some(&ids)).expect("two-suite filter should succeed");
         assert_eq!(
@@ -755,7 +756,7 @@ mod tests {
         );
         assert_eq!(
             result.cipher_suites[0].suite(),
-            CipherSuiteId::Tls13Chacha20Poly1305Sha256.to_rustls(),
+            CipherSuiteId::Tls13Aes256GcmSha384.to_rustls(),
             "first suite should match the first configured cipher"
         );
         assert_eq!(
@@ -772,10 +773,10 @@ mod tests {
         let ids = [
             CipherSuiteId::Tls13Aes128GcmSha256,
             CipherSuiteId::Tls13Aes256GcmSha384,
-            CipherSuiteId::Tls13Chacha20Poly1305Sha256,
+            CipherSuiteId::Tls12EcdheEcdsaWithAes256GcmSha384,
         ];
         let reversed = [
-            CipherSuiteId::Tls13Chacha20Poly1305Sha256,
+            CipherSuiteId::Tls12EcdheEcdsaWithAes256GcmSha384,
             CipherSuiteId::Tls13Aes256GcmSha384,
             CipherSuiteId::Tls13Aes128GcmSha256,
         ];
