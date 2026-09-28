@@ -9,7 +9,7 @@ use tracing::warn;
 
 use crate::{
     config::{Cluster, HealthCheckType, InsecureOptions},
-    connectivity::normalize_mapped_ipv4,
+    connectivity::{classify_without_nat64, normalize_mapped_ipv4},
     errors::ProxyError,
 };
 
@@ -258,24 +258,25 @@ pub(super) fn extract_host(addr: &str) -> &str {
 
 /// Returns `true` for IP addresses that are SSRF-sensitive.
 ///
-/// Covers loopback, link-local, and the unspecified / "this host" ranges
-/// (`0.0.0.0/8` and IPv6 `::`) for both families. The unspecified ranges are
-/// included because a `connect()` to `0.0.0.0` (or any `0.x.x.x`) or `::` is
-/// routed to loopback on Linux/BSD, so they reach the same services the
-/// loopback check is meant to block. [RFC 1918] private ranges (10/8,
-/// 172.16/12, 192.168/16) are intentionally not flagged.
+/// Composes the same classification categories as [`classify_ip`] — loopback,
+/// link-local, and the unspecified / "this host" ranges (`0.0.0.0/8` and IPv6
+/// `::`) for both families. The unspecified ranges are included because a
+/// `connect()` to `0.0.0.0` (or any `0.x.x.x`) or `::` is routed to loopback on
+/// Linux/BSD, so they reach the same services the loopback check is meant to
+/// block. This is a context-specific policy: [RFC 1918] private ranges (10/8,
+/// 172.16/12, 192.168/16) are intentionally *not* flagged, so an operator can
+/// point a health check at an RFC 1918 backend without an override.
 ///
+/// Like [`is_private_ip`] — and unlike [`classify_ip`] — this does **not**
+/// unwrap NAT64 (`64:ff9b::/96`) wrappers, so `allow_private_endpoints` /
+/// `allow_private_health_checks` keep their historical semantics.
+///
+/// [`classify_ip`]: crate::connectivity::classify_ip
+/// [`is_private_ip`]: crate::connectivity::is_private_ip
 /// [RFC 1918]: https://datatracker.ietf.org/doc/html/rfc1918
 pub fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
-    match ip {
-        // `octets()[0] == 0` covers the whole 0.0.0.0/8 "this host" block,
-        // including the unspecified address 0.0.0.0.
-        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local() || v4.octets()[0] == 0,
-        IpAddr::V6(v6) => {
-            let segs = v6.segments();
-            v6.is_loopback() || v6.is_unspecified() || (segs[0] & 0xFFC0) == 0xFE80
-        },
-    }
+    let class = classify_without_nat64(ip);
+    class.is_loopback() || class.is_link_local() || class.is_this_host() || class.is_unspecified()
 }
 
 /// Returns `true` for hostnames that commonly resolve to
@@ -846,6 +847,22 @@ clusters:
         assert!(
             !super::is_ssrf_sensitive(&"8.8.8.8".parse().unwrap()),
             "public addresses should NOT be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_does_not_unwrap_nat64() {
+        assert!(
+            !super::is_ssrf_sensitive(&"64:ff9b::127.0.0.1".parse().unwrap()),
+            "NAT64 wrappers are not unwrapped, preserving allow_private_* semantics"
+        );
+        assert!(
+            !super::is_ssrf_sensitive(&"64:ff9b::169.254.169.254".parse().unwrap()),
+            "NAT64-wrapped metadata endpoint is not flagged by the endpoint guard"
+        );
+        assert!(
+            !super::is_ssrf_sensitive(&"64:ff9b::8.8.8.8".parse().unwrap()),
+            "NAT64-wrapped public address is not flagged"
         );
     }
 
