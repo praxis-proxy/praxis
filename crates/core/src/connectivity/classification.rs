@@ -700,46 +700,99 @@ mod tests {
     }
 
     #[test]
-    fn special_use_v6_block_boundaries() {
-        // (first address, last address, block) — both edges of every block.
-        for (first, last, cidr) in [
-            ("2001::", "2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff", "2001::/23"),
-            ("2001:db8::", "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff", "2001:db8::/32"),
-            ("2002::", "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "2002::/16"),
-            ("3fff::", "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff", "3fff::/20"),
-            ("5f00::", "5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "5f00::/16"),
-            ("64:ff9b:1::", "64:ff9b:1:ffff:ffff:ffff:ffff:ffff", "64:ff9b:1::/48"),
-            ("100::", "100::ffff:ffff:ffff:ffff", "100::/64"),
-            ("100:0:0:1::", "100:0:0:1:ffff:ffff:ffff:ffff", "100:0:0:1::/64"),
-        ] {
-            for addr in [first, last] {
-                let c = classify(addr);
-                assert!(c.is_special_use(), "{addr} is special-use ({cidr})");
-                assert!(c.is_non_public(), "{addr} is non-public ({cidr})");
+    fn special_use_v4_table_boundaries() {
+        // The first and last address of every V4_SPECIAL_USE block, generated
+        // straight from the table, must be special-use (hence non-public). This
+        // covers both edges of each entry — e.g. 192.88.99.0 and .255 — and any
+        // future block automatically.
+        for block in V4_SPECIAL_USE {
+            let (first, last) = v4_block_bounds(block);
+            for bits in [first, last] {
+                let addr = Ipv4Addr::from(bits);
+                let c = classify_v4(bits);
+                assert!(c.is_special_use(), "{addr} is special-use (/{})", block.prefix);
+                assert!(c.is_non_public(), "{addr} is non-public (/{})", block.prefix);
             }
         }
     }
 
     #[test]
-    fn special_use_v6_adjacency_is_public() {
-        // One address just below the first and just above the last of each block.
-        for (addr, name) in [
-            ("2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "just below 2001::/23"),
-            ("2001:200::1", "just above 2001::/23"),
-            ("2001:db7:ffff:ffff:ffff:ffff:ffff:ffff", "just below 2001:db8::/32"),
-            ("2001:db9::1", "just above 2001:db8::/32"),
-            ("2001:ffff::1", "just below 2002::/16"),
-            ("2003::1", "just above 2002::/16"),
-            ("3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "just below 3fff::/20"),
-            ("3fff:1000::1", "just above 3fff::/20"),
-            ("5eff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", "just below 5f00::/16"),
-            ("5f01::1", "just above 5f00::/16"),
-            ("64:ff9b:2::1", "just above 64:ff9b:1::/48"),
-            ("100:0:0:2::1", "just above 100:0:0:1::/64"),
-        ] {
-            let c = classify(addr);
-            assert!(!c.is_special_use(), "{addr} is not special-use ({name})");
-            assert!(!c.is_non_public(), "{addr} is globally reachable ({name})");
+    fn special_use_v6_table_boundaries() {
+        // The same first/last edge coverage, generated from V6_SPECIAL_USE.
+        for block in V6_SPECIAL_USE {
+            let (first, last) = v6_block_bounds(block);
+            for bits in [first, last] {
+                let addr = Ipv6Addr::from(bits);
+                let c = classify_v6(bits);
+                assert!(c.is_special_use(), "{addr} is special-use (/{})", block.prefix);
+                assert!(c.is_non_public(), "{addr} is non-public (/{})", block.prefix);
+            }
+        }
+    }
+
+    #[test]
+    fn special_use_v4_table_adjacency() {
+        // The address just below the first and just above the last of each
+        // block must not be special-use, unless an adjacent block in the same
+        // table owns it. Overflow at the ends of the address space is skipped.
+        for (i, block) in V4_SPECIAL_USE.iter().enumerate() {
+            let (first, last) = v4_block_bounds(block);
+            for bits in [first.checked_sub(1), last.checked_add(1)].into_iter().flatten() {
+                let addr = Ipv4Addr::from(bits);
+                if V4_SPECIAL_USE
+                    .iter()
+                    .enumerate()
+                    .any(|(j, b)| j != i && b.contains(addr))
+                {
+                    continue;
+                }
+                assert!(
+                    !classify_v4(bits).is_special_use(),
+                    "{addr} borders /{} but is public",
+                    block.prefix
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn special_use_v6_table_adjacency() {
+        // As above, generated from V6_SPECIAL_USE. Neighbors owned by an
+        // adjacent block (e.g. 100::/64 meets 100:0:0:1::/64) or by the
+        // deprecated site-local range are skipped.
+        for (i, block) in V6_SPECIAL_USE.iter().enumerate() {
+            let (first, last) = v6_block_bounds(block);
+            for bits in [first.checked_sub(1), last.checked_add(1)].into_iter().flatten() {
+                let addr = Ipv6Addr::from(bits);
+                let owned = V6_SPECIAL_USE
+                    .iter()
+                    .enumerate()
+                    .any(|(j, b)| j != i && b.contains(addr));
+                if owned || is_site_local_v6(addr) {
+                    continue;
+                }
+                assert!(
+                    !classify_v6(bits).is_special_use(),
+                    "{addr} borders /{} but is public",
+                    block.prefix
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn globally_reachable_exceptions_are_public() {
+        // Every carved-out exception, taken directly from the exception tables,
+        // must be neither special-use nor non-public.
+        for &addr in V4_GLOBALLY_REACHABLE_EXCEPTIONS {
+            let c = classify_ip(&IpAddr::V4(addr));
+            assert!(!c.is_special_use(), "{addr} is a globally reachable exception");
+            assert!(!c.is_non_public(), "{addr} is globally reachable");
+        }
+        for block in V6_GLOBALLY_REACHABLE_EXCEPTIONS {
+            let c = classify_ip(&IpAddr::V6(block.net));
+            assert!(!c.is_special_use(), "{} is a globally reachable exception", block.net);
+            assert!(!c.is_non_public(), "{} is globally reachable", block.net);
         }
     }
 
@@ -892,6 +945,38 @@ mod tests {
     /// Parse an IP literal and classify it via [`classify_ip`].
     fn classify(s: &str) -> IpClassification {
         classify_ip(&s.parse().unwrap())
+    }
+
+    /// Classify a raw IPv4 bit pattern via [`classify_ip`].
+    fn classify_v4(bits: u32) -> IpClassification {
+        classify_ip(&IpAddr::V4(Ipv4Addr::from(bits)))
+    }
+
+    /// Classify a raw IPv6 bit pattern via [`classify_ip`].
+    fn classify_v6(bits: u128) -> IpClassification {
+        classify_ip(&IpAddr::V6(Ipv6Addr::from(bits)))
+    }
+
+    /// First and last address (as raw bits) of an IPv4 special-use block.
+    fn v4_block_bounds(block: &V4Block) -> (u32, u32) {
+        let mask = if block.prefix == 0 {
+            0
+        } else {
+            u32::MAX << 32_u8.saturating_sub(block.prefix)
+        };
+        let first = block.net.to_bits() & mask;
+        (first, first | !mask)
+    }
+
+    /// First and last address (as raw bits) of an IPv6 special-use block.
+    fn v6_block_bounds(block: &V6Block) -> (u128, u128) {
+        let mask = if block.prefix == 0 {
+            0
+        } else {
+            u128::MAX << 128_u8.saturating_sub(block.prefix)
+        };
+        let first = block.net.to_bits() & mask;
+        (first, first | !mask)
     }
 
     /// Assert that `addr` classifies to exactly `flags` (with [`NON_PUBLIC`]
