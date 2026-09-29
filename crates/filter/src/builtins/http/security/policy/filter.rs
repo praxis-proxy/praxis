@@ -126,6 +126,16 @@ enum GatedIdentity {
 /// `cmf.llm_output` for non-streaming inference responses. APL field
 /// mutators do not rewrite inference bodies.
 ///
+/// It gates the whole response phase, not just the rewriting. The
+/// post-invoke hook runs only once the response body is buffered, so under
+/// `read_only` a `post_invocation` rule that reads nothing but identity
+/// attributes is skipped along with the `result.<field>` pipelines. A policy
+/// that declares response-phase entity rules under `read_only` warns at load.
+///
+/// A route may declare the response half on its own. A route whose only
+/// declarations are `result.<field>` pipelines or `post_invocation` steps
+/// admits every request and is evaluated purely on the way back.
+///
 /// Response-body hooks run on a small dedicated runtime while the worker
 /// waits, for at most twice the engine's per-plugin timeout
 /// (`engine_settings.plugin_timeout`, so 60 seconds by default). A hook
