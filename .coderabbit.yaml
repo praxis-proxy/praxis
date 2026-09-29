@@ -96,11 +96,11 @@ reviews:
         connection pool safety, and HTTP/1.1 upgrade detection and forwarding.
         Praxis owns hop-by-hop header stripping (preserving upgrade headers),
         Host validation, X-Forwarded-* injection, retry logic, reserved-header
-        stripping in both directions, and filter pipeline execution. Flag a
-        change that reimplements something Pingora already provides, and flag
-        a change to a Praxis-owned invariant that lacks a conformance test in
-        tests/conformance/ or a security test in tests/security/. See
-        docs/operating/security-hardening.md and
+        rejection from clients and stripping in both directions, and filter
+        pipeline execution. Flag a change that reimplements something Pingora
+        already provides, and flag a change to a Praxis-owned invariant that
+        lacks a conformance test in tests/conformance/ or a security test in
+        tests/security/. See docs/operating/security-hardening.md and
         docs/architecture/http-correctness.md.
 
         A retry may replay a request only for an idempotent method or when the
@@ -114,12 +114,15 @@ reviews:
     - path: "crates/core/src/reserved_headers.rs"
       instructions: |
         The reserved prefixes (x-praxis-, x-ext-protocol-, x-ext-agent-) are
-        what makes promoted headers unspoofable: the proxy strips them from
-        every incoming request, so a client cannot forge the metadata that
-        json_body_field, guardrails, and the router act on. Narrowing the list,
-        adding a bypass, or letting a filter accept a reserved header from the
-        client is a security change and needs a test in tests/security/ in
-        addition to the unit tests here.
+        what makes promoted headers unspoofable: the request handler rejects a
+        client request carrying one with HTTP 400 before any filter runs
+        (reject_reserved_internal_headers under crates/protocol/src/http/), so
+        a client cannot forge the metadata that json_body_field, guardrails,
+        and the router act on. Narrowing the list, adding a bypass, or letting
+        a filter accept a reserved header from the client is a security change
+        and needs a test alongside the existing rejection tests in
+        tests/integration/tests/suite/security.rs, in addition to the unit
+        tests here.
 
     - path: "crates/core/src/config/**"
       instructions: |
