@@ -99,8 +99,12 @@ reviews:
         rejection from clients and stripping in both directions, and filter
         pipeline execution. Flag a change that reimplements something Pingora
         already provides, and flag a change to a Praxis-owned invariant that
-        lacks a conformance test in tests/conformance/ or a security test in
-        tests/security/. See docs/operating/security-hardening.md and
+        lacks an end-to-end test of it: a conformance test in
+        tests/conformance/, a security test in tests/security/, or an
+        integration test in tests/integration/ (the reserved-header rejection
+        tests live in tests/integration/tests/suite/security.rs and the retry
+        tests in tests/integration/tests/suite/retry.rs). See
+        docs/operating/security-hardening.md and
         docs/architecture/http-correctness.md.
 
         A retry may replay a request only for an idempotent method or when the
