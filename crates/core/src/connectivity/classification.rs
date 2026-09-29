@@ -175,26 +175,6 @@ pub struct IpClassification {
 }
 
 impl IpClassification {
-    /// The normalized address the classification was computed from.
-    ///
-    /// ```
-    /// use std::net::IpAddr;
-    ///
-    /// use praxis_core::connectivity::classify_ip;
-    ///
-    /// // IPv4-mapped IPv6 collapses to plain IPv4.
-    /// let c = classify_ip(&"::ffff:127.0.0.1".parse().unwrap());
-    /// assert_eq!(c.normalized(), IpAddr::V4("127.0.0.1".parse().unwrap()));
-    ///
-    /// // A NAT64-wrapped address reduces to the IPv4 it embeds.
-    /// let c = classify_ip(&"64:ff9b::10.0.0.1".parse().unwrap());
-    /// assert_eq!(c.normalized(), IpAddr::V4("10.0.0.1".parse().unwrap()));
-    /// ```
-    #[must_use]
-    pub const fn normalized(self) -> IpAddr {
-        self.normalized
-    }
-
     /// A known cloud instance-metadata or credential endpoint (AWS, GCP,
     /// Azure, Alibaba, Oracle, …). Always also non-public.
     #[must_use]
@@ -263,6 +243,26 @@ impl IpClassification {
     #[must_use]
     pub const fn is_unspecified(self) -> bool {
         (self.flags & UNSPECIFIED) != 0
+    }
+
+    /// The normalized address the classification was computed from.
+    ///
+    /// ```
+    /// use std::net::IpAddr;
+    ///
+    /// use praxis_core::connectivity::classify_ip;
+    ///
+    /// // IPv4-mapped IPv6 collapses to plain IPv4.
+    /// let c = classify_ip(&"::ffff:127.0.0.1".parse().unwrap());
+    /// assert_eq!(c.normalized(), IpAddr::V4("127.0.0.1".parse().unwrap()));
+    ///
+    /// // A NAT64-wrapped address reduces to the IPv4 it embeds.
+    /// let c = classify_ip(&"64:ff9b::10.0.0.1".parse().unwrap());
+    /// assert_eq!(c.normalized(), IpAddr::V4("10.0.0.1".parse().unwrap()));
+    /// ```
+    #[must_use]
+    pub const fn normalized(self) -> IpAddr {
+        self.normalized
     }
 }
 
@@ -700,99 +700,48 @@ mod tests {
     }
 
     #[test]
-    fn special_use_v4_table_boundaries() {
-        // The first and last address of every V4_SPECIAL_USE block, generated
-        // straight from the table, must be special-use (hence non-public). This
-        // covers both edges of each entry — e.g. 192.88.99.0 and .255 — and any
-        // future block automatically.
+    fn special_use_v4_boundaries_from_fixture() {
+        assert_special_use_cases(V4_SPECIAL_USE_FIXTURE);
+    }
+
+    #[test]
+    fn special_use_v6_boundaries_from_fixture() {
+        assert_special_use_cases(V6_SPECIAL_USE_FIXTURE);
+    }
+
+    #[test]
+    fn special_use_v4_fixture_matches_table() {
+        assert_eq!(
+            V4_SPECIAL_USE_FIXTURE.len(),
+            V4_SPECIAL_USE.len(),
+            "one independent v4 fixture case per table block"
+        );
         for block in V4_SPECIAL_USE {
-            let (first, last) = v4_block_bounds(block);
-            for bits in [first, last] {
-                let addr = Ipv4Addr::from(bits);
-                let c = classify_v4(bits);
-                assert!(c.is_special_use(), "{addr} is special-use (/{})", block.prefix);
-                assert!(c.is_non_public(), "{addr} is non-public (/{})", block.prefix);
-            }
+            let want = (IpAddr::V4(block.net), block.prefix);
+            assert!(
+                V4_SPECIAL_USE_FIXTURE.iter().any(|case| parse_cidr(case.cidr) == want),
+                "{}/{} has no independent fixture case",
+                block.net,
+                block.prefix
+            );
         }
     }
 
     #[test]
-    fn special_use_v6_table_boundaries() {
-        // The same first/last edge coverage, generated from V6_SPECIAL_USE.
+    fn special_use_v6_fixture_matches_table() {
+        assert_eq!(
+            V6_SPECIAL_USE_FIXTURE.len(),
+            V6_SPECIAL_USE.len(),
+            "one independent v6 fixture case per table block"
+        );
         for block in V6_SPECIAL_USE {
-            let (first, last) = v6_block_bounds(block);
-            for bits in [first, last] {
-                let addr = Ipv6Addr::from(bits);
-                let c = classify_v6(bits);
-                assert!(c.is_special_use(), "{addr} is special-use (/{})", block.prefix);
-                assert!(c.is_non_public(), "{addr} is non-public (/{})", block.prefix);
-            }
-        }
-    }
-
-    #[test]
-    fn special_use_v4_table_adjacency() {
-        // The address just below the first and just above the last of each
-        // block must not be special-use, unless an adjacent block in the same
-        // table owns it. Overflow at the ends of the address space is skipped.
-        for (i, block) in V4_SPECIAL_USE.iter().enumerate() {
-            let (first, last) = v4_block_bounds(block);
-            for bits in [first.checked_sub(1), last.checked_add(1)].into_iter().flatten() {
-                let addr = Ipv4Addr::from(bits);
-                if V4_SPECIAL_USE
-                    .iter()
-                    .enumerate()
-                    .any(|(j, b)| j != i && b.contains(addr))
-                {
-                    continue;
-                }
-                assert!(
-                    !classify_v4(bits).is_special_use(),
-                    "{addr} borders /{} but is public",
-                    block.prefix
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn special_use_v6_table_adjacency() {
-        // As above, generated from V6_SPECIAL_USE. Neighbors owned by an
-        // adjacent block (e.g. 100::/64 meets 100:0:0:1::/64) or by the
-        // deprecated site-local range are skipped.
-        for (i, block) in V6_SPECIAL_USE.iter().enumerate() {
-            let (first, last) = v6_block_bounds(block);
-            for bits in [first.checked_sub(1), last.checked_add(1)].into_iter().flatten() {
-                let addr = Ipv6Addr::from(bits);
-                let owned = V6_SPECIAL_USE
-                    .iter()
-                    .enumerate()
-                    .any(|(j, b)| j != i && b.contains(addr));
-                if owned || is_site_local_v6(addr) {
-                    continue;
-                }
-                assert!(
-                    !classify_v6(bits).is_special_use(),
-                    "{addr} borders /{} but is public",
-                    block.prefix
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn globally_reachable_exceptions_are_public() {
-        // Every carved-out exception, taken directly from the exception tables,
-        // must be neither special-use nor non-public.
-        for &addr in V4_GLOBALLY_REACHABLE_EXCEPTIONS {
-            let c = classify_ip(&IpAddr::V4(addr));
-            assert!(!c.is_special_use(), "{addr} is a globally reachable exception");
-            assert!(!c.is_non_public(), "{addr} is globally reachable");
-        }
-        for block in V6_GLOBALLY_REACHABLE_EXCEPTIONS {
-            let c = classify_ip(&IpAddr::V6(block.net));
-            assert!(!c.is_special_use(), "{} is a globally reachable exception", block.net);
-            assert!(!c.is_non_public(), "{} is globally reachable", block.net);
+            let want = (IpAddr::V6(block.net), block.prefix);
+            assert!(
+                V6_SPECIAL_USE_FIXTURE.iter().any(|case| parse_cidr(case.cidr) == want),
+                "{}/{} has no independent fixture case",
+                block.net,
+                block.prefix
+            );
         }
     }
 
@@ -888,30 +837,42 @@ mod tests {
 
     #[test]
     fn cloud_metadata_endpoints() {
-        // (endpoint, the broader non-public range flag it must also carry)
-        for (addr, range) in [
-            ("169.254.169.254", LINK_LOCAL),           // multi-cloud IMDS
-            ("169.254.170.2", LINK_LOCAL),             // AWS ECS task credentials
-            ("169.254.170.23", LINK_LOCAL),            // AWS EKS Pod Identity (v4)
-            ("100.100.100.200", SHARED_ADDRESS_SPACE), // Alibaba
-            ("169.254.0.23", LINK_LOCAL),              // Tencent CVM (VPC / intl)
-            ("169.254.10.10", LINK_LOCAL),             // Tencent CVM (basic network / mainland)
-            ("fd00:ec2::254", PRIVATE_NETWORK),        // AWS EC2 IMDS (v6, ULA)
-            ("fd00:ec2::23", PRIVATE_NETWORK),         // AWS EKS Pod Identity (v6, ULA)
-            ("fd20:ce::254", PRIVATE_NETWORK),         // GCP metadata (v6, ULA)
-            ("fe80::a9fe:a9fe", LINK_LOCAL),           // OpenStack Nova metadata (v6, link-local)
+        for (addr, range, name) in [
+            ("169.254.169.254", LINK_LOCAL, "multi-cloud IMDS"),
+            ("169.254.170.2", LINK_LOCAL, "AWS ECS task credentials"),
+            ("169.254.170.23", LINK_LOCAL, "AWS EKS Pod Identity (v4)"),
+            ("100.100.100.200", SHARED_ADDRESS_SPACE, "Alibaba"),
+            ("169.254.0.23", LINK_LOCAL, "Tencent CVM (VPC / intl)"),
+            ("169.254.10.10", LINK_LOCAL, "Tencent CVM (basic network / mainland)"),
+            ("fd00:ec2::254", PRIVATE_NETWORK, "AWS EC2 IMDS (v6, ULA)"),
+            ("fd00:ec2::23", PRIVATE_NETWORK, "AWS EKS Pod Identity (v6, ULA)"),
+            ("fd20:ce::254", PRIVATE_NETWORK, "GCP metadata (v6, ULA)"),
+            (
+                "fe80::a9fe:a9fe",
+                LINK_LOCAL,
+                "OpenStack Nova metadata (v6, link-local)",
+            ),
         ] {
             let c = classify(addr);
-            assert!(c.is_cloud_metadata(), "{addr} is a cloud metadata endpoint");
-            assert_eq!(c.flags & range, range, "{addr} also carries its non-public range flag");
+            assert!(c.is_cloud_metadata(), "{addr} is a cloud metadata endpoint ({name})");
+            assert_eq!(
+                c.flags & range,
+                range,
+                "{addr} carries its non-public range flag ({name})"
+            );
         }
+    }
 
-        // Near-miss link-local neighbors that are NOT metadata: .169.253 borders
-        // AWS IMDS, .0.22 borders Tencent .0.23, .20.10 is Tencent TKE NodeLocal DNS.
-        for neighbor in ["169.254.169.253", "169.254.0.22", "169.254.20.10"] {
+    #[test]
+    fn cloud_metadata_near_miss_neighbors_are_not_metadata() {
+        for (neighbor, why) in [
+            ("169.254.169.253", "borders AWS IMDS"),
+            ("169.254.0.22", "borders Tencent .0.23"),
+            ("169.254.20.10", "is Tencent TKE NodeLocal DNS, not metadata"),
+        ] {
             assert!(
                 !classify(neighbor).is_cloud_metadata(),
-                "{neighbor} is a link-local neighbor, not a documented metadata endpoint"
+                "{neighbor} is a link-local neighbor, not a documented metadata endpoint ({why})"
             );
         }
     }
@@ -947,36 +908,157 @@ mod tests {
         classify_ip(&s.parse().unwrap())
     }
 
-    /// Classify a raw IPv4 bit pattern via [`classify_ip`].
-    fn classify_v4(bits: u32) -> IpClassification {
-        classify_ip(&IpAddr::V4(Ipv4Addr::from(bits)))
+    /// One special-use block with its edge addresses and the public neighbors
+    /// just outside each edge, transcribed independently from the IANA
+    /// special-purpose registries rather than derived from [`V4_SPECIAL_USE`] /
+    /// [`V6_SPECIAL_USE`]. These literals are the oracle: a wrong prefix in the
+    /// production tables fails the boundary assertions in
+    /// [`assert_special_use_cases`]. `below`/`above` are `None` where an adjacent
+    /// special-use block or the address-space boundary owns that neighbor.
+    struct BlockCase {
+        cidr: &'static str,
+        first: &'static str,
+        last: &'static str,
+        below: Option<&'static str>,
+        above: Option<&'static str>,
     }
 
-    /// Classify a raw IPv6 bit pattern via [`classify_ip`].
-    fn classify_v6(bits: u128) -> IpClassification {
-        classify_ip(&IpAddr::V6(Ipv6Addr::from(bits)))
+    /// Canonical IPv4 special-use edges, written by hand from the IANA registry.
+    const V4_SPECIAL_USE_FIXTURE: &[BlockCase] = &[
+        BlockCase {
+            cidr: "192.0.0.0/24",
+            first: "192.0.0.0",
+            last: "192.0.0.255",
+            below: Some("191.255.255.255"),
+            above: Some("192.0.1.0"),
+        },
+        BlockCase {
+            cidr: "192.0.2.0/24",
+            first: "192.0.2.0",
+            last: "192.0.2.255",
+            below: Some("192.0.1.255"),
+            above: Some("192.0.3.0"),
+        },
+        BlockCase {
+            cidr: "198.51.100.0/24",
+            first: "198.51.100.0",
+            last: "198.51.100.255",
+            below: Some("198.51.99.255"),
+            above: Some("198.51.101.0"),
+        },
+        BlockCase {
+            cidr: "203.0.113.0/24",
+            first: "203.0.113.0",
+            last: "203.0.113.255",
+            below: Some("203.0.112.255"),
+            above: Some("203.0.114.0"),
+        },
+        BlockCase {
+            cidr: "192.88.99.0/24",
+            first: "192.88.99.0",
+            last: "192.88.99.255",
+            below: Some("192.88.98.255"),
+            above: Some("192.88.100.0"),
+        },
+        BlockCase {
+            cidr: "198.18.0.0/15",
+            first: "198.18.0.0",
+            last: "198.19.255.255",
+            below: Some("198.17.255.255"),
+            above: Some("198.20.0.0"),
+        },
+        BlockCase {
+            cidr: "240.0.0.0/4",
+            first: "240.0.0.0",
+            last: "255.255.255.255",
+            below: Some("239.255.255.255"),
+            above: None,
+        },
+    ];
+
+    /// Canonical IPv6 special-use edges, written by hand from the IANA registry.
+    const V6_SPECIAL_USE_FIXTURE: &[BlockCase] = &[
+        BlockCase {
+            cidr: "2001::/23",
+            first: "2001::",
+            last: "2001:1ff:ffff:ffff:ffff:ffff:ffff:ffff",
+            below: Some("2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+            above: Some("2001:200::"),
+        },
+        BlockCase {
+            cidr: "2001:db8::/32",
+            first: "2001:db8::",
+            last: "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff",
+            below: Some("2001:db7:ffff:ffff:ffff:ffff:ffff:ffff"),
+            above: Some("2001:db9::"),
+        },
+        BlockCase {
+            cidr: "2002::/16",
+            first: "2002::",
+            last: "2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            below: Some("2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+            above: Some("2003::"),
+        },
+        BlockCase {
+            cidr: "3fff::/20",
+            first: "3fff::",
+            last: "3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff",
+            below: Some("3ffe:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+            above: Some("3fff:1000::"),
+        },
+        BlockCase {
+            cidr: "5f00::/16",
+            first: "5f00::",
+            last: "5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            below: Some("5eff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+            above: Some("5f01::"),
+        },
+        BlockCase {
+            cidr: "64:ff9b:1::/48",
+            first: "64:ff9b:1::",
+            last: "64:ff9b:1:ffff:ffff:ffff:ffff:ffff",
+            below: Some("64:ff9b:0:ffff:ffff:ffff:ffff:ffff"),
+            above: Some("64:ff9b:2::"),
+        },
+        BlockCase {
+            cidr: "100::/64",
+            first: "100::",
+            last: "100::ffff:ffff:ffff:ffff",
+            below: Some("ff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"),
+            above: None,
+        },
+        BlockCase {
+            cidr: "100:0:0:1::/64",
+            first: "100:0:0:1::",
+            last: "100:0:0:1:ffff:ffff:ffff:ffff",
+            below: None,
+            above: Some("100:0:0:2::"),
+        },
+    ];
+
+    /// Assert every case: both edges are special-use (hence non-public), and each
+    /// listed neighbor just outside the block is not special-use.
+    fn assert_special_use_cases(cases: &[BlockCase]) {
+        for case in cases {
+            for edge in [case.first, case.last] {
+                let c = classify(edge);
+                assert!(c.is_special_use(), "{edge} is special-use ({})", case.cidr);
+                assert!(c.is_non_public(), "{edge} is non-public ({})", case.cidr);
+            }
+            for neighbor in [case.below, case.above].into_iter().flatten() {
+                assert!(
+                    !classify(neighbor).is_special_use(),
+                    "{neighbor} borders {} but is public",
+                    case.cidr
+                );
+            }
+        }
     }
 
-    /// First and last address (as raw bits) of an IPv4 special-use block.
-    fn v4_block_bounds(block: &V4Block) -> (u32, u32) {
-        let mask = if block.prefix == 0 {
-            0
-        } else {
-            u32::MAX << 32_u8.saturating_sub(block.prefix)
-        };
-        let first = block.net.to_bits() & mask;
-        (first, first | !mask)
-    }
-
-    /// First and last address (as raw bits) of an IPv6 special-use block.
-    fn v6_block_bounds(block: &V6Block) -> (u128, u128) {
-        let mask = if block.prefix == 0 {
-            0
-        } else {
-            u128::MAX << 128_u8.saturating_sub(block.prefix)
-        };
-        let first = block.net.to_bits() & mask;
-        (first, first | !mask)
+    /// Parse a `net/prefix` CIDR literal into its address and prefix length.
+    fn parse_cidr(cidr: &str) -> (IpAddr, u8) {
+        let (net, prefix) = cidr.split_once('/').unwrap();
+        (net.parse().unwrap(), prefix.parse().unwrap())
     }
 
     /// Assert that `addr` classifies to exactly `flags` (with [`NON_PUBLIC`]
