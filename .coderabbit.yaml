@@ -209,8 +209,11 @@ reviews:
         the read it is meant to await.
 
         Conformance tests carry a doc comment and a separator citing the RFC
-        number and section; other tests carry no comments at all, per the Test
-        Conventions in docs/developing/conventions.md.
+        number and section. Other tests carry no comments on or inside the
+        test function and no per-test separators; a single full-width
+        separator where tests begin, and "test utilities" doc comments on
+        test helpers, are expected. See the Test Conventions in
+        docs/developing/conventions.md.
 
     - path: "Containerfile.fips"
       instructions: |
