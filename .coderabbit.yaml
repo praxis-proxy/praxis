@@ -28,6 +28,14 @@
 inheritance: true
 
 reviews:
+  auto_review:
+    # Review feedback lands as fixup commits stacked on the PR branch
+    # (squash-merge flattens them), so a PR can accumulate many reviewed
+    # commits. Pause automatic review only after 20 of them, matching
+    # praxis-proxy/ai. This replaces the organization-wide value; the
+    # org's other auto_review settings deep-merge intact.
+    auto_pause_after_reviewed_commits: 20
+
   # Generated trees. The per-filter pages and the reference table are
   # produced by `cargo xtask generate-filter-docs` from the filter
   # sources, and `cargo xtask lint-filter-docs` in `make lint` fails on
