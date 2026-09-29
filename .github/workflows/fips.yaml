@@ -154,6 +154,32 @@ jobs:
 
       - uses: ./.github/actions/fips-runner-check
 
+      # The self-hosted RHEL runner is persistent, so podman state from earlier
+      # runs piles up on the same disk as the checkout, the fetched image
+      # tarball and the build-cache volumes, and a cold suite build can run it
+      # to zero mid-build (No space left on device; dnf in fips-toolchain short
+      # by hundreds of MB). Reclaim in two passes, BEFORE the image is fetched
+      # and loaded so nothing here touches the image this run proves:
+      #   1. podman system prune -a removes every stale image and the build
+      #      cache. A prune without -a is near-useless here (that space is in
+      #      tagged images from prior runs, not dangling layers).
+      #   2. The volumes, not the images, dominate this disk. podman volume
+      #      prune removes only volumes no container references, so a cache in
+      #      use is left alone; the praxis-fips-host-cargo / -target caches idle
+      #      between runs may be dropped and rebuilt within the 180-minute
+      #      budget. Correctness over cache warmth: without this the disk stays
+      #      full and the toolchain build fails outright.
+      # df -h and podman system df -v either side make a future exhaustion, and
+      # which volumes hold the space, visible in the log.
+      - name: Reclaim disk before loading the image (prune stale images + unused volumes)
+        run: |
+          df -h "$GITHUB_WORKSPACE" || df -h || true
+          podman system df -v || podman system df || true
+          podman system prune -a --force || true
+          podman volume prune --force || true
+          podman system df || true
+          df -h "$GITHUB_WORKSPACE" || df -h || true
+
       - name: Fetch the image the hosted job built and scanned
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
