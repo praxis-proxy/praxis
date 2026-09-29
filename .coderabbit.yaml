@@ -1,0 +1,264 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit review configuration for this repository. Tracked here so
+# the review behavior is reviewed like any other change to the project.
+#
+# The review policy and the conventions shared across the organization
+# live in praxis-proxy/coderabbit, which CodeRabbit applies to every
+# repository in the organization. `inheritance: true` merges that
+# configuration with this one; without it, this file would replace it
+# entirely. Only guidance specific to this repository's layout belongs
+# here.
+#
+# Inherited from praxis-proxy/coderabbit: the review profile, the policy
+# that CodeRabbit never approves, gates, or authors code, tool
+# de-duplication against CI, the knowledge base, and the **/*, **/*.rs,
+# **/Cargo.toml, and .github/workflows/** instructions.
+#
+# Merge behavior: a scalar defined here wins, objects deep-merge, and
+# path_instructions entries are deduplicated by path. An entry here with
+# the same path as an organization-wide entry replaces it rather than
+# adding to it, which is why this file defines none of the four
+# inherited paths.
+#
+# CodeRabbit supplements human review; it does not replace it. Every
+# contributor remains responsible for the code they submit, per the Code
+# Responsibility section of docs/developing/conventions.md.
+
+inheritance: true
+
+reviews:
+  # Generated trees. The per-filter pages and the reference table are
+  # produced by `cargo xtask generate-filter-docs` from the filter
+  # sources, and `cargo xtask lint-filter-docs` in `make lint` fails on
+  # drift, so the sources are what to review. proptest-regressions files
+  # are counterexamples proptest found, committed as-is. Cargo.lock,
+  # target/, and assets/ are already excluded organization-wide.
+  path_filters:
+    - "!docs/filters/http/**"
+    - "!docs/filters/tcp/**"
+    - "!docs/filters/reference.md"
+    - "!**/proptest-regressions/**"
+
+  path_instructions:
+    - path: "crates/filter/src/builtins/**"
+      instructions: |
+        Built-in filters live under
+        crates/filter/src/builtins/<protocol>/<category>/ (HTTP: observability,
+        payload_processing, security, traffic_management, transformation; TCP:
+        observability, traffic_management). A new filter
+        implements HttpFilter or TcpFilter with a from_config factory, is
+        registered in crates/filter/src/registry.rs, and ships with unit tests
+        and doctests, an example config under the matching
+        examples/configs/<category>/, and a functional test under
+        tests/integration/tests/suite/examples/, per
+        docs/developing/adding-filters.md. Its documentation page is generated
+        by `cargo xtask generate-filter-docs`, never written by hand.
+
+        Filters follow classify -> route -> branch: classifier filters promote
+        facts to reserved x-praxis-* headers (json_body_field is the usual way),
+        the router matches those headers to select a cluster, and branch chains
+        split the pipeline on filter results. Flag a filter that re-derives a
+        fact another filter already promoted, or that adds a new routing or
+        capability mechanism where a condition, a router match, or a branch
+        chain would do. The policy filter reading the model out of the buffered
+        body is the one documented exception, specific to inference traffic,
+        not a pattern to copy.
+
+        Filters must not set ctx.rewritten_path; URL and path translation goes
+        through path_rewrite or url_rewrite. A body-transforming filter must sit
+        in the main pipeline path or be gated with ordinary filter conditions,
+        because branch sub-chains run on_request and on_response only.
+
+    - path: "crates/filter/src/pipeline/**"
+      instructions: |
+        The pipeline engine runs on every request. Regexes, path matchers,
+        lowercased header names, and route tables are compiled when the
+        pipeline is built (build.rs), never per request; flag per-request
+        allocation or compilation that belongs at build time.
+
+        Filters stay ignorant of branching: they write to FilterResultSet and
+        the executor reads it to evaluate branch conditions. A filter that
+        reads branch state directly is a layering violation. Branch sub-chains
+        run on_request and on_response only and rejoin at next, at terminal, at
+        a named filter, or by re-entrance under an iteration limit; a change to
+        branch resolution or execution must keep cycles, branch-into-branch,
+        and rejoining past a terminal filter handled. See "Pipeline and
+        Branch-Chain Semantics" in docs/developing/review-criteria.md.
+
+        Routing (the router filter choosing a cluster at request time) and
+        pipelining (the operator composing chains at config time) are distinct
+        concepts. Do not let a change or its documentation conflate them.
+
+    - path: "crates/protocol/src/**"
+      instructions: |
+        Pingora owns request smuggling prevention, HTTP/2 backpressure,
+        connection pool safety, and HTTP/1.1 upgrade detection and forwarding.
+        Praxis owns hop-by-hop header stripping (preserving upgrade headers),
+        Host validation, X-Forwarded-* injection, retry logic, reserved-header
+        stripping in both directions, and filter pipeline execution. Flag a
+        change that reimplements something Pingora already provides, and flag
+        a change to a Praxis-owned invariant that lacks a conformance test in
+        tests/conformance/ or a security test in tests/security/. See
+        docs/operating/security-hardening.md and
+        docs/architecture/http-correctness.md.
+
+        A retry may replay a request only for an idempotent method or when the
+        upstream provably processed nothing: a stale pooled connection
+        (Pingora's ReusedOnly) is replayable for any method, a truncated replay
+        buffer never is.
+
+        Protocol adapters must not set ctx.rewritten_path; that belongs to the
+        path_rewrite and url_rewrite filters.
+
+    - path: "crates/core/src/reserved_headers.rs"
+      instructions: |
+        The reserved prefixes (x-praxis-, x-ext-protocol-, x-ext-agent-) are
+        what makes promoted headers unspoofable: the proxy strips them from
+        every incoming request, so a client cannot forge the metadata that
+        json_body_field, guardrails, and the router act on. Narrowing the list,
+        adding a bypass, or letting a filter accept a reserved header from the
+        client is a security change and needs a test in tests/security/ in
+        addition to the unit tests here.
+
+    - path: "crates/core/src/config/**"
+      instructions: |
+        Config types are deserialized with serde, so a parsing change is a
+        schema change. Cross-field invariants live in
+        crates/core/src/config/validate/, and a validation error must name the
+        offending key path and say what would be valid. A new or changed field
+        needs tests in tests/schema/, must keep every example under
+        examples/configs/ resolving (every_example_resolves_its_pipelines in
+        the integration suite), and is documented in
+        docs/operating/configuration.md.
+
+        Reload is not uniform: filter pipelines, filter configuration, and
+        routing rules swap at runtime; listener addresses and ports, protocol,
+        TLS on or off, and worker count do not. A new field must be classified
+        by the reload diff (crates/server/src/reload_diagnostics.rs) so a
+        non-reloadable change is warned about rather than silently ignored.
+        See "Dynamic Configuration Reload" in docs/operating/configuration.md.
+
+    - path: "crates/server/src/**"
+      instructions: |
+        The binary entrypoint (main.rs) is excluded from the 96% coverage
+        floor, so keep it to wiring; logic belongs in a library crate where it
+        is tested and counted. Reload must be atomic: a request observes
+        exactly one pipeline generation end to end, a config that fails
+        validation or a certificate that fails to load leaves the old state
+        fully intact, and health-check tasks, key-value stores, and metrics
+        from the previous generation are cancelled or carried over
+        deliberately, never leaked or double-running. See "Hot Reload and
+        Concurrency Lifecycle" in docs/developing/review-criteria.md.
+
+    - path: "Cargo.toml"
+      instructions: |
+        The container build does not copy the workspace wholesale: the
+        Containerfile lists each crates/ member in four places (manifest COPY,
+        stub mkdir, stub lib.rs, and source COPY) so dependency builds cache.
+        A new workspace member under crates/ must be added there in the same
+        change. make lint and make test pass without it; only the container
+        workflow fails.
+
+    - path: "crates/*/Cargo.toml"
+      instructions: |
+        Every Cargo feature appears in the feature summary table of
+        docs/operating/build-features.md; a new, renamed, or re-defaulted
+        feature updates that table in the same change. An experimental feature
+        is off by default and enables the experimental marker feature so the
+        startup warning fires. make lint also builds the proxy, filter, and
+        core crates with --no-default-features, so a new optional dependency
+        or feature-gated module must compile in both configurations.
+
+    - path: "examples/configs/**"
+      instructions: |
+        Every example starts with the header comment the README generator
+        parses: a title line, a blank comment line, a description whose first
+        sentence becomes the table entry, and a Usage block. examples/README.md
+        is regenerated with `cargo xtask sync-example-readme --fix`, never
+        edited by hand. The example belongs in the category whose README
+        (examples/configs/<category>/README.md) describes its scope.
+
+        A new or renamed example needs a functional test under
+        tests/integration/tests/suite/examples/ that loads the real file
+        through praxis_test_utils::load_example_config and exercises the
+        feature end to end with every configured variant; parsing alone is not
+        enough. `cargo xtask lint-example-tests` enforces the pairing, so an
+        addition to its SKIP allowlist in xtask/src/lint_example_tests.rs is a
+        missing test, not a resolution.
+
+    - path: "tests/**"
+      instructions: |
+        These crates are the cross-crate suites: schema (config parsing and
+        example validation), integration (end-to-end filter and proxy
+        behavior), conformance (RFC conformance and h2spec), security (request
+        smuggling and header injection), resilience (load and recovery), and
+        benches (Criterion microbenchmarks). Tests use the shared harness in
+        tests/utils (free_port, start_backend, start_proxy_with_registry,
+        load_example_config) rather than ad hoc listeners, fixed ports, or
+        re-declared configs.
+
+        The integration suite is one test binary, so its tests share process
+        state such as the global metrics recorder. A metric assertion must use
+        a label set unique to its test or poll until the value changes, not
+        until the series merely appears: an exact-value assertion on a shared
+        series is a flake, and a wait that only checks for the series races
+        the read it is meant to await.
+
+        Conformance tests carry a doc comment and a separator citing the RFC
+        number and section; other tests carry no comments at all, per the Test
+        Conventions in docs/developing/conventions.md.
+
+    - path: "Containerfile.fips"
+      instructions: |
+        The UBI base image digests are pinned here as defaults and in the
+        Makefile (FIPS_UBI9_DIGEST and FIPS_UBI9_MINIMAL_DIGEST), and
+        make fips-verify-image fails while the two disagree. A digest change
+        updates both, and the PR should show that
+        `cargo xtask fips verify-image` passed against the new digest, per
+        "Updating the pinned base images" in docs/developing/fips.md. The
+        application never enables the FIPS provider itself; the image and the
+        binary must not do so either.
+
+    - path: "xtask/**"
+      instructions: |
+        Developer tooling is a cargo xtask subcommand wrapped by a Makefile
+        target. The subcommands make lint runs (lint-deps,
+        lint-example-tests, sync-example-readme, lint-filter-docs) are gates:
+        a change that relaxes one or grows an allowlist needs the same
+        justification as disabling a lint.
+
+        The FIPS data under xtask/assets/fips/ carries provenance: the Red Hat
+        signing key's fingerprint is recomputed on every run, and
+        certified-modules.json records each provider build's NIST standing
+        with the source that was checked. A change to either must say where
+        the new value was verified, per "Data compiled into xtask" in
+        docs/developing/fips.md.
+
+    - path: "**/*.sh"
+      instructions: |
+        The only shell script in the repository is .hooks/pre-commit.
+        Developer tooling is written as cargo xtask subcommands wrapped by
+        Makefile targets. Flag a new script and ask for an xtask subcommand
+        instead.
+
+    - path: "**/*.md"
+      instructions: |
+        Markdown prose wraps at 80 columns, code lines and fenced blocks at
+        120, every fenced block declares a language (console, rust, yaml,
+        toml), and links are reference-style; see the Formatting section of
+        docs/developing/conventions.md. Neither make lint nor CI runs
+        markdownlint or a link checker here, so review for these and for
+        broken relative links.
+
+    - path: "AGENTS.md"
+      instructions: |
+        AGENTS.md and .claude/CLAUDE.md are one document kept as two
+        byte-identical files, and nothing enforces that. A change to one must
+        appear in the other in the same commit.
+
+    - path: ".claude/CLAUDE.md"
+      instructions: |
+        AGENTS.md and .claude/CLAUDE.md are one document kept as two
+        byte-identical files, and nothing enforces that. A change to one must
+        appear in the other in the same commit.
