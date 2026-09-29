@@ -262,12 +262,11 @@ reviews:
 
     - path: "**/*.md"
       instructions: |
-        Markdown prose wraps at 80 columns, code lines and fenced blocks at
-        120, every fenced block declares a language (console, rust, yaml,
-        toml), and links are reference-style; see the Formatting section of
-        docs/developing/conventions.md. Neither make lint nor CI runs
-        markdownlint or a link checker here, so review for these and for
-        broken relative links.
+        Markdown prose wraps at 80 columns, code lines and fenced blocks at 120,
+        and every fenced block declares a language (console, rust, yaml, toml);
+        see the Formatting section of docs/developing/conventions.md. Neither
+        make lint nor CI runs markdownlint or a link checker here, so review for
+        these and for broken relative links.
 
     - path: "AGENTS.md"
       instructions: |
