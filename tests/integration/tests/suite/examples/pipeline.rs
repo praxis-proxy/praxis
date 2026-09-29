@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_header, start_backend_with_shutdown, start_header_echo_backend, start_proxy,
-    wait_for_tcp,
+    free_port, http_get, http_send, parse_body, parse_header, parse_status, start_backend_with_shutdown,
+    start_header_echo_backend, start_proxy, wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
@@ -88,6 +88,72 @@ fn failure_mode() {
     let (status, body) = http_get(proxy.addr(), "/", None);
     assert_eq!(status, 200, "failure mode should return 200");
     assert_eq!(body, "ok", "response should come from backend");
+}
+
+#[test]
+fn inherited_conditions_gate_request_body_and_response_hooks() {
+    let backend = start_header_echo_backend();
+    let proxy_port = free_port();
+    let config = super::load_example_config(
+        "pipeline/inherited-conditions.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let api_post = http_send(
+        proxy.addr(),
+        "POST /api/chat HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+         Content-Length: 17\r\nConnection: close\r\n\r\n{\"model\":\"gpt-4\"}",
+    );
+    assert_eq!(parse_status(&api_post), 200, "/api/ POST should proxy to the backend");
+    assert!(
+        parse_body(&api_post).to_ascii_lowercase().contains("x-model: gpt-4"),
+        "the inherited condition lets json_body_field promote the model on an /api/ POST, got: {}",
+        parse_body(&api_post)
+    );
+    assert_eq!(
+        parse_header(&api_post, "X-Enriched").as_deref(),
+        Some("true"),
+        "the inherited condition lets the response filter tag /api/ responses"
+    );
+
+    let api_get = http_send(
+        proxy.addr(),
+        "GET /api/chat HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&api_get), 200, "/api/ GET should proxy to the backend");
+    assert!(
+        !parse_body(&api_get).to_ascii_lowercase().contains("x-model"),
+        "json_body_field's local POST condition ANDs with the inherited one, so a GET skips promotion, got: {}",
+        parse_body(&api_get)
+    );
+    assert_eq!(
+        parse_header(&api_get, "X-Enriched").as_deref(),
+        Some("true"),
+        "the response filter inherits only the path condition, so a /api/ GET is still tagged"
+    );
+
+    let other_post = http_send(
+        proxy.addr(),
+        "POST /health HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+         Content-Length: 17\r\nConnection: close\r\n\r\n{\"model\":\"gpt-4\"}",
+    );
+    assert_eq!(
+        parse_status(&other_post),
+        200,
+        "/health POST should proxy to the backend"
+    );
+    assert_eq!(
+        parse_header(&other_post, "X-Enriched"),
+        None,
+        "the inherited condition gates the response filter off outside /api/"
+    );
+    assert!(
+        !parse_body(&other_post).to_ascii_lowercase().contains("x-model"),
+        "the inherited condition gates json_body_field off outside /api/, got: {}",
+        parse_body(&other_post)
+    );
 }
 
 #[test]

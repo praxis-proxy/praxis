@@ -1,0 +1,77 @@
+# Inherited Chain Conditions
+#
+# A named filter chain declares one `conditions:` block that every filter in the
+# chain inherits. The condition is written once at the chain level instead of
+# being repeated on each filter, and it composes with any filter-local
+# conditions using AND semantics: the chain condition is evaluated first, then
+# the filter's own conditions (effective = chain AND filter).
+#
+# A request-phase condition gates both a filter's request and response hooks, so
+# the inherited condition scopes the whole chain — request-body promotion and
+# response tagging alike — to matching traffic.
+#
+# Here the `api-enrichment` chain applies only to `/api/` requests:
+#   - `json_body_field` promotes the JSON body's `model` field to an `X-Model`
+#     request header (a request-body hook), but only for POST requests: its
+#     effective condition is `path_prefix: /api/` AND `methods: [POST]`.
+#   - `headers` tags every `/api/` response with `X-Enriched` (a response hook),
+#     inheriting the chain condition alone.
+# Requests outside `/api/` skip the whole chain: no `X-Model`, no `X-Enriched`.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/inherited-conditions.yaml
+#   curl -i -X POST http://localhost:8080/api/chat -d '{"model":"gpt-4"}'  # X-Model forwarded, X-Enriched on response
+#   curl -i      -X GET  http://localhost:8080/api/chat                    # only X-Enriched (POST-only body promotion skipped)
+#   curl -i -X POST http://localhost:8080/health -d '{"model":"gpt-4"}'    # neither header (outside /api/)
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - routing
+      - api-enrichment
+      - upstream
+
+filter_chains:
+  # Route every request to the single backend.
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+  # Every filter in this chain inherits the chain-level condition. The condition
+  # is declared once and ANDed with each filter's own conditions.
+  - name: api-enrichment
+    conditions:
+      - when:
+          path_prefix: "/api/"
+    filters:
+      # Effective condition: path_prefix /api/ AND methods POST. Promotes the
+      # body's `model` field to a request header the backend can read.
+      - filter: json_body_field
+        field: model
+        header: X-Model
+        conditions:
+          - when:
+              methods: ["POST"]
+
+      # Effective condition: path_prefix /api/ (inherited, no local condition).
+      # Tags the response so clients can tell enriched traffic apart.
+      - filter: headers
+        response_set:
+          - name: "X-Enriched"
+            value: "true"
+
+  # Declare the backend the router binds.
+  - name: upstream
+    filters:
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

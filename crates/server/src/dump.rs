@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use praxis_core::config::{ChainRef, Config, FailureMode, FilterEntry};
+use praxis_core::config::{ChainRef, Condition, Config, FailureMode, FilterEntry, ResponseCondition};
 use serde::Serialize;
 
 // -----------------------------------------------------------------------------
@@ -119,10 +119,17 @@ pub(crate) fn build_dump(
     config: &Config,
     config_source: &str,
 ) -> Result<EffectiveConfigDump, Box<dyn std::error::Error + Send + Sync>> {
-    let chains: HashMap<&str, &[_]> = config
+    // Resolve against expanded entries so the dump reflects the effective
+    // filters that run, with chain-level conditions inherited on both the
+    // listener path and named branch/outbound references.
+    let expanded_by_name: HashMap<&str, Vec<FilterEntry>> = config
         .filter_chains
         .iter()
-        .map(|chain| (chain.name.as_str(), chain.filters.as_slice()))
+        .map(|chain| (chain.name.as_str(), chain.expanded_entries()))
+        .collect();
+    let chains: HashMap<&str, &[FilterEntry]> = expanded_by_name
+        .iter()
+        .map(|(name, entries)| (*name, entries.as_slice()))
         .collect();
 
     Ok(EffectiveConfigDump {
@@ -137,6 +144,7 @@ pub(crate) fn build_dump(
 fn redact_secrets(config: &Config) -> Config {
     let mut redacted = config.clone();
     for chain in &mut redacted.filter_chains {
+        redact_condition_headers(&mut chain.conditions);
         for entry in &mut chain.filters {
             redact_filter_entry(entry);
         }
@@ -149,8 +157,11 @@ fn redact_secrets(config: &Config) -> Config {
 ///
 /// Credential injection filters receive targeted redaction of `value` and
 /// `env_var` fields; all filter types are subject to the field-name redaction
-/// in `redact_sensitive_keys`.
+/// in `redact_sensitive_keys`. Credential-bearing header *matcher* values in
+/// the entry's request and response conditions are redacted as well.
 fn redact_filter_entry(entry: &mut FilterEntry) {
+    redact_condition_headers(&mut entry.conditions);
+    redact_response_condition_headers(&mut entry.response_conditions);
     if entry.filter_type == "credential_injection" {
         redact_credential_values(&mut entry.config);
     }
@@ -200,11 +211,14 @@ fn redact_credential_values(config: &mut serde_yaml::Value) {
 /// Recursively redact known sensitive field names in any filter config.
 ///
 /// Redaction is name-based and best-effort: it covers the field names in
-/// [`SENSITIVE_FIELD_NAMES`] and the `value` of a `{name, value}` pair whose
+/// [`SENSITIVE_FIELD_NAMES`], the `value` of a `{name, value}` pair whose
 /// `name` is a credential-bearing header (see [`CREDENTIAL_HEADER_NAMES`],
 /// which catches the `headers` filter's `request_set`/`response_set`
-/// entries). It cannot know about every custom secret field, so dump output
-/// should still be reviewed before sharing.
+/// entries), and credential-bearing entries of a `headers:` matcher map
+/// (condition and route matchers, including those nested in a filter's opaque
+/// config such as `iterative_request_router` steps). It cannot know about
+/// every custom secret field, so dump output should still be reviewed before
+/// sharing.
 fn redact_sensitive_keys(value: &mut serde_yaml::Value) {
     let Some(mapping) = value.as_mapping_mut() else {
         return;
@@ -222,6 +236,16 @@ fn redact_sensitive_keys(value: &mut serde_yaml::Value) {
     // carry a bearer token or API key as a plain `value` field, which is not
     // otherwise covered by the field-name list above.
     redact_credential_header_value(mapping, &redacted);
+    // Redact credential-bearing entries of a `headers:` matcher map. Condition
+    // and route matchers nested inside a filter's opaque config (e.g.
+    // `iterative_request_router` step filters) are not reached by the typed
+    // condition walk, so they are covered here.
+    redact_credential_header_map(mapping, &redacted);
+    // Redact the injected secret of a `credential_injection` cluster entry.
+    // The top-level filter is handled by `redact_credential_values`, but the
+    // same filter nested in a step's opaque config (e.g. an
+    // `iterative_request_router` step) is only reached by this walk.
+    redact_credential_injection_value(mapping, &redacted);
     for (_, val) in mapping.iter_mut() {
         match val {
             serde_yaml::Value::Mapping(_) => redact_sensitive_keys(val),
@@ -253,13 +277,101 @@ fn redact_credential_header_value(mapping: &mut serde_yaml::Mapping, redacted: &
     let is_credential_header = mapping
         .get("name")
         .and_then(serde_yaml::Value::as_str)
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|name| {
-            CREDENTIAL_HEADER_NAMES.contains(&name.as_str())
-                || SENSITIVE_HEADER_SUBSTRINGS.iter().any(|frag| name.contains(frag))
-        });
+        .is_some_and(is_credential_header_name);
     if is_credential_header && mapping.contains_key("value") {
         mapping.insert(serde_yaml::Value::String("value".to_owned()), redacted.clone());
+    }
+}
+
+/// Redact the values of credential-bearing entries in a `headers:` matcher map.
+///
+/// Condition matchers (`when`/`unless`) and router route matchers gate on exact
+/// header values via a `{ header-name: value }` map. When such a matcher is
+/// nested inside a filter's opaque config — e.g. `iterative_request_router`
+/// step filters, whose conditions serialize into the parent filter's config
+/// blob — the typed [`redact_condition_headers`] pass cannot see it, so this
+/// YAML-level walk redacts it instead.
+fn redact_credential_header_map(mapping: &mut serde_yaml::Mapping, redacted: &serde_yaml::Value) {
+    let Some(headers) = mapping.get_mut("headers").and_then(serde_yaml::Value::as_mapping_mut) else {
+        return;
+    };
+    for (name, val) in headers.iter_mut() {
+        if name.as_str().is_some_and(is_credential_header_name) {
+            *val = redacted.clone();
+        }
+    }
+}
+
+/// Redact the injected secret of a `credential_injection` cluster entry.
+///
+/// A cluster entry names a target `header` and the secret to inject as it,
+/// carried in either a literal `value` or an `env_var` reference. This shape
+/// (`header` present alongside `value`/`env_var`) is unique to credential
+/// injection — the `headers` filter uses `{name, value}` and the maglev load
+/// balancer's `header` has no such sibling — so redacting those siblings here
+/// covers the filter wherever it is nested (e.g. an `iterative_request_router`
+/// step's opaque config), which [`redact_credential_values`] does not reach.
+fn redact_credential_injection_value(mapping: &mut serde_yaml::Mapping, redacted: &serde_yaml::Value) {
+    if !mapping.contains_key("header") {
+        return;
+    }
+    for field in ["value", "env_var"] {
+        if mapping.contains_key(field) {
+            mapping.insert(serde_yaml::Value::String((*field).to_owned()), redacted.clone());
+        }
+    }
+}
+
+/// Whether a header name carries a credential and its value must be redacted
+/// (compared case-insensitively). A name qualifies when it exactly matches a
+/// well-known credential header (e.g. `cookie`, which contains no telltale
+/// substring) or contains a sensitive substring (`token`, `key`, `auth`, …).
+fn is_credential_header_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    CREDENTIAL_HEADER_NAMES.contains(&name.as_str())
+        || SENSITIVE_HEADER_SUBSTRINGS.iter().any(|frag| name.contains(frag))
+}
+
+/// Redact credential-bearing header *matcher* values in a list of request
+/// conditions.
+///
+/// A condition can gate a filter on an exact header value (e.g. a `when` clause
+/// matching `authorization: "Bearer <token>"`), which would otherwise appear
+/// verbatim in the dump. Chain-level conditions are inherited by every filter
+/// expanded from the chain, so a single leak there exposes a shared secret.
+fn redact_condition_headers(conditions: &mut [Condition]) {
+    for condition in conditions {
+        let (Condition::When(matcher) | Condition::Unless(matcher)) = condition;
+        redact_header_matcher(matcher.headers.as_mut());
+    }
+}
+
+/// Redact credential-bearing header matcher values in a list of response
+/// conditions (see [`redact_condition_headers`]).
+fn redact_response_condition_headers(conditions: &mut [ResponseCondition]) {
+    for condition in conditions {
+        let (ResponseCondition::When(matcher) | ResponseCondition::Unless(matcher)) = condition;
+        redact_header_matcher(matcher.headers.as_mut());
+    }
+}
+
+/// Replace the value of every credential-bearing key in a header matcher map.
+fn redact_header_matcher(headers: Option<&mut HashMap<String, String>>) {
+    let Some(headers) = headers else {
+        return;
+    };
+    // Select keys functionally first (a `for` loop over the map trips
+    // `iter_over_hash_type`, and `for_each` trips `needless_for_each`), then
+    // rewrite each credential-bearing value over the ordered key list.
+    let credential_keys: Vec<String> = headers
+        .keys()
+        .filter(|name| is_credential_header_name(name))
+        .cloned()
+        .collect();
+    for key in credential_keys {
+        if let Some(value) = headers.get_mut(&key) {
+            "[REDACTED]".clone_into(value);
+        }
     }
 }
 
@@ -566,6 +678,106 @@ filter_chains:
         assert_eq!(dump.resolved_listeners[0].filters[0].name.as_deref(), Some("routing"));
     }
 
+    const CONDITION_HEADER_MATCHER_YAML: &str = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    conditions:
+      - when:
+          headers:
+            authorization: "Bearer chain-secret-token"
+            x-tenant: "acme"
+    filters:
+      - filter: request_id
+        conditions:
+          - unless:
+              headers:
+                x-api-key: "filter-secret-key"
+        response_conditions:
+          - when:
+              headers:
+                x-auth-token: "response-secret-token"
+"#;
+
+    const ROUTE_HEADER_MATCHER_YAML: &str = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            headers:
+              authorization: "Bearer route-secret-token"
+              x-tenant: "acme"
+            cluster: backend
+"#;
+
+    #[cfg(feature = "iterative-request-router")]
+    const IRR_STEP_CONDITION_YAML: &str = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: iterative_request_router
+        initial_step: model-call
+        steps:
+          - name: model-call
+            filters:
+              - filter: request_id
+                conditions:
+                  - when:
+                      headers:
+                        authorization: "Bearer IRR_REVIEW_SENTINEL"
+                        x-tenant: "acme"
+            on_result:
+              - default: true
+"#;
+
+    #[cfg(feature = "iterative-request-router")]
+    const IRR_STEP_CREDENTIAL_INJECTION_YAML: &str = r#"
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [sequence]
+filter_chains:
+  - name: sequence
+    filters:
+      - filter: iterative_request_router
+        initial_step: step-a
+        steps:
+          - name: step-a
+            filters:
+              - filter: credential_injection
+                clusters:
+                  - name: service-a
+                    header: Authorization
+                    value: "IRR_NESTED_SECRET_abc123"
+                    header_prefix: "Bearer "
+              - filter: router
+                routes:
+                  - path_prefix: "/"
+                    cluster: service-a
+              - filter: load_balancer
+                clusters:
+                  - name: service-a
+                    endpoints: ["127.0.0.1:3000"]
+            on_result:
+              - default: true
+                done: true
+insecure_options:
+  allow_private_endpoints: true
+"#;
+
     const CREDENTIAL_INJECTION_YAML: &str = r#"
 listeners:
   - name: web
@@ -638,6 +850,77 @@ filter_chains:
         assert!(
             yaml.contains("trace-123"),
             "a non-credential header value must remain visible: {yaml}"
+        );
+    }
+
+    #[test]
+    fn condition_header_matcher_credentials_redacted_in_dump() {
+        let config = Config::from_yaml(CONDITION_HEADER_MATCHER_YAML).unwrap();
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let yaml = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            !yaml.contains("chain-secret-token"),
+            "a credential in a chain-level condition header matcher must be redacted: {yaml}"
+        );
+        assert!(
+            !yaml.contains("filter-secret-key"),
+            "a credential in a filter-level request condition matcher must be redacted: {yaml}"
+        );
+        assert!(
+            !yaml.contains("response-secret-token"),
+            "a credential in a response condition matcher must be redacted: {yaml}"
+        );
+        assert!(
+            yaml.contains("acme"),
+            "a non-credential condition header matcher value must remain visible: {yaml}"
+        );
+    }
+
+    #[test]
+    fn route_header_matcher_credentials_redacted_in_dump() {
+        let config = Config::from_yaml(ROUTE_HEADER_MATCHER_YAML).unwrap();
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let yaml = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            !yaml.contains("route-secret-token"),
+            "a credential in a router route header matcher must be redacted: {yaml}"
+        );
+        assert!(
+            yaml.contains("acme"),
+            "a non-credential route header matcher value must remain visible: {yaml}"
+        );
+    }
+
+    #[cfg(feature = "iterative-request-router")]
+    #[test]
+    fn iterative_router_step_condition_credentials_redacted_in_dump() {
+        let config = Config::from_yaml(IRR_STEP_CONDITION_YAML).unwrap();
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let yaml = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            !yaml.contains("IRR_REVIEW_SENTINEL"),
+            "a credential in an iterative_request_router step condition matcher must be redacted: {yaml}"
+        );
+        assert!(
+            yaml.contains("acme"),
+            "a non-credential step condition header matcher value must remain visible: {yaml}"
+        );
+    }
+
+    #[cfg(feature = "iterative-request-router")]
+    #[test]
+    fn iterative_router_step_credential_injection_redacted_in_dump() {
+        let config = Config::from_yaml(IRR_STEP_CREDENTIAL_INJECTION_YAML).unwrap();
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let yaml = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            !yaml.contains("IRR_NESTED_SECRET_abc123"),
+            "a credential_injection value nested in an iterative_request_router step must be redacted: {yaml}"
+        );
+        assert!(yaml.contains("[REDACTED]"), "redaction marker must appear: {yaml}");
+        assert!(
+            yaml.contains("header_prefix"),
+            "non-sensitive fields must remain: {yaml}"
         );
     }
 

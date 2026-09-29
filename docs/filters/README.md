@@ -143,6 +143,7 @@ pattern. A few highlights:
 [composed-chains.yaml]: ../../examples/configs/pipeline/composed-chains.yaml
 [conditional-filters.yaml]: ../../examples/configs/pipeline/conditional-filters.yaml
 [production-gateway.yaml]: ../../examples/configs/operations/production-gateway.yaml
+[inherited-conditions.yaml]: ../../examples/configs/pipeline/inherited-conditions.yaml
 
 ## Filter Chains (Pipelining)
 
@@ -177,6 +178,54 @@ For conditional branching within pipelines, see
 [Branch Chains](branch-chains.md). For the full mental
 model of how chains become pipelines, see
 [Pipeline Concepts](../architecture/pipeline-concepts.md).
+
+### Inherited Chain Conditions
+
+A chain can declare a `conditions:` block that every filter
+in the chain inherits, so a shared gate is written once at
+the chain level instead of being repeated on each filter:
+
+```yaml
+filter_chains:
+  - name: api-enrichment
+    conditions:
+      - when:
+          path_prefix: "/api/"
+    filters:
+      - filter: json_body_field
+        field: model
+        header: X-Model
+        conditions:
+          - when:
+              methods: ["POST"]
+      - filter: headers
+        response_set:
+          - name: "X-Enriched"
+            value: "true"
+```
+
+Chain conditions are **prepended** to each filter's own
+conditions and compose with them using AND semantics: the
+chain condition is evaluated first, then the filter's local
+conditions (effective = chain AND filter). Above,
+`json_body_field` runs only when the path matches `/api/`
+**and** the method is `POST`, while `headers` runs on any
+`/api/` request. A request-phase condition gates both a
+filter's request and response hooks, so the inherited
+condition scopes the whole chain — request-body promotion
+and response tagging alike — to matching traffic.
+
+Chain-level conditions get the same well-formedness and
+metadata validation as per-filter conditions and behave
+identically to conditions repeated on each filter, so
+existing configs are unaffected. Inheritance applies wherever
+a named chain is expanded: chains referenced from a listener's
+`filter_chains`, and named references from branch chains and
+outbound bindings. Only request-phase conditions are inherited;
+a branch child still runs its request and response header hooks
+(`on_request`, `on_response`) but not its body hooks
+(`on_request_body`, `on_response_body`), exactly as before. See
+[inherited-conditions.yaml].
 
 ### Protocol-Specific Filters
 
