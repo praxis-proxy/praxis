@@ -19,7 +19,8 @@ use ppe::praxis_policy_core::{
         CmfHook, Message, MessagePayload, Role,
         constants::{
             ENTITY_HTTP, ENTITY_LLM, ENTITY_NAME_GLOBAL, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT,
-            HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_PRE_INVOKE,
+            HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH,
+            HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
         },
     },
     engine::PolicyEngine,
@@ -350,9 +351,18 @@ impl PolicyFilter {
         // needs no operator-set mode. `has_hooks_for` reports whether a hook
         // was wired by the policy (registered handler or route annotation).
         let http_global = mgr.has_hooks_for(HOOK_HTTP_REQUEST);
-        let mcp_routes = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
+        // The engine installs a route's pre and post halves independently, so a
+        // route whose only declarations are `result.<field>` pipelines or
+        // `post_invocation` steps registers the post hook and no pre hook. Both
+        // halves count toward `mcp_routes`: the response phase dispatches off
+        // `entity_routes`, so a post-only policy needs it true.
+        let mcp_pre = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_PROMPT_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_RESOURCE_PRE_FETCH);
+        let mcp_post = mgr.has_hooks_for(HOOK_CMF_TOOL_POST_INVOKE)
+            || mgr.has_hooks_for(HOOK_CMF_PROMPT_POST_INVOKE)
+            || mgr.has_hooks_for(HOOK_CMF_RESOURCE_POST_FETCH);
+        let mcp_routes = mcp_pre || mcp_post;
         let llm_post = mgr.has_hooks_for(HOOK_CMF_LLM_OUTPUT);
         // A post-only route still needs request state for response dispatch.
         let llm_routes = mgr.has_hooks_for(HOOK_CMF_LLM_INPUT) || llm_post;
@@ -399,6 +409,9 @@ impl PolicyFilter {
             Self::warn_on_inference_gaps(&policy_config, http_global, &cfg, llm_post);
         }
         Self::warn_on_inert_inference_defaults(&policy_config, llm_routes);
+        if mcp_post {
+            Self::warn_on_entity_response_gaps(&cfg);
+        }
 
         // Reject controls that cannot reach the writable response-header phase.
         let unreachable = unreachable_response_levels(&policy_config);
@@ -508,6 +521,25 @@ impl PolicyFilter {
              Deny `custom.llm.stream` in the request phase for the models this policy must \
              enforce on the way back.",
         );
+    }
+
+    /// Report MCP entity response rules that cannot run under the configured
+    /// body access.
+    ///
+    /// The post hook is dispatched only once the response body is buffered,
+    /// which `read_only` does not do. A `result.<field>` pipeline reads as a
+    /// mutation an operator expects to take effect, so its silent omission is
+    /// worth a warning rather than a debug line.
+    fn warn_on_entity_response_gaps(cfg: &PolicyFilterConfig) {
+        if !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy declares response-phase entity rules (`result.<field>` or \
+                 `post_invocation`) but `body_access` is `read_only`, which does not buffer the \
+                 response: those rules will never run. Set `body_access: read_write` to enable \
+                 them.",
+            );
+        }
     }
 
     /// Warn when inference defaults have no route to apply them.

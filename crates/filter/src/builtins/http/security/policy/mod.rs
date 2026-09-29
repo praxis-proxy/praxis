@@ -122,6 +122,15 @@
 //!   backend returns unsolicited is still stripped for a caller without the permission. A post-phase deny replaces the
 //!   response body with a JSON-RPC error envelope fitted to the committed Content-Length.
 //!
+//! The whole response phase needs `body_access: read_write`, not just the rewriting half: the post-invoke hook runs
+//! only once the response body is buffered, so a `post_invocation` rule that reads nothing but identity attributes is
+//! skipped under `read_only` along with the `result.<field>` pipelines. A policy declaring response-phase entity rules
+//! under `read_only` warns at load.
+//!
+//! A route may declare the response half alone. The engine installs a route's pre and post handlers independently, so
+//! a route whose only declarations are `result.<field>` pipelines or `post_invocation` steps admits every request and
+//! is evaluated purely on the way back.
+//!
 //! # Decisions and denials
 //!
 //! | Outcome | Wire shape |
