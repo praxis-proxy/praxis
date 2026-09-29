@@ -213,12 +213,14 @@ reviews:
         load_example_config) rather than ad hoc listeners, fixed ports, or
         re-declared configs.
 
-        The integration suite is one test binary, so its tests share process
-        state such as the global metrics recorder. A metric assertion must use
-        a label set unique to its test or poll until the value changes, not
-        until the series merely appears: an exact-value assertion on a shared
-        series is a flake, and a wait that only checks for the series races
-        the read it is meant to await.
+        Most integration tests run in one binary
+        (tests/integration/tests/suite/), so they share process state such as
+        the global metrics recorder. An assertion on a metric's value must use a
+        label set unique to its test or poll until the value changes, not until
+        the series merely appears: an exact-value assertion on a shared series
+        is a flake, and a wait that only checks for the series races the read it
+        is meant to await. A test that checks only which series or labels exist
+        may wait for the series to appear.
 
         Conformance tests carry a doc comment and a separator citing the RFC
         number and section. Other tests carry no comments on or inside the
