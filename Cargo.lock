@@ -3589,6 +3589,7 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
  "praxis-test-utils",
+ "serde_json",
  "tokio",
  "yaml_serde",
 ]

@@ -123,6 +123,30 @@ pub fn start_slow_backend(body: &str, delay: Duration) -> u16 {
     })
 }
 
+/// Start a backend that answers every request on a connection with `body`
+/// after `delay`, keeping the connection open for reuse until the client
+/// closes it.
+#[expect(clippy::disallowed_methods, reason = "blocking thread, not async")]
+pub fn start_keepalive_backend(body: &str, delay: Duration) -> BackendGuard {
+    let body = body.to_owned();
+    spawn_tcp_server_with_shutdown(move |mut stream| {
+        loop {
+            let request = read_until_headers_complete(&mut stream);
+            if !request.contains("\r\n\r\n") {
+                return;
+            }
+            std::thread::sleep(delay);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+                body.len()
+            );
+            if stream.write_all(response.as_bytes()).is_err() {
+                return;
+            }
+        }
+    })
+}
+
 /// Start a backend that returns different responses on each call.
 ///
 /// Each entry in `responses` is `(status, body)`. After all entries

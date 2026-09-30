@@ -67,8 +67,6 @@ mod examples;
 mod failure_mode;
 #[cfg(target_os = "linux")]
 mod fd_limits;
-#[cfg(target_os = "linux")]
-mod fd_pressure;
 mod filter_composition;
 mod filter_metadata;
 mod fips;

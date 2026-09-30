@@ -122,6 +122,39 @@ pub fn open_requests(addr: &str, path: &str, count: usize) -> Vec<TcpStream> {
     .collect()
 }
 
+/// Open `count` keep-alive connections to `addr`, complete one `GET path` on
+/// each, and return them still open and idle.
+///
+/// # Panics
+///
+/// Panics if a connection cannot be opened or its request fails.
+pub fn idle_keepalive_connections(addr: &str, path: &str, count: usize) -> Vec<TcpStream> {
+    std::iter::repeat_with(|| {
+        let mut conn = None;
+        let status = send(addr, path, true, &mut conn).expect("keep-alive request");
+        assert_eq!(status, 200, "warm-up request on an idle keep-alive connection");
+        conn.expect("the proxy kept the connection alive").into_inner()
+    })
+    .take(count)
+    .collect()
+}
+
+/// Whether the peer has closed `stream`, without blocking.
+///
+/// # Panics
+///
+/// Panics if the socket mode cannot be changed.
+pub fn is_closed_by_peer(stream: &TcpStream) -> bool {
+    stream.set_nonblocking(true).expect("nonblocking");
+    let mut probe = [0_u8; 1];
+    let closed = match stream.peek(&mut probe) {
+        Ok(read) => read == 0,
+        Err(err) => err.kind() != std::io::ErrorKind::WouldBlock,
+    };
+    stream.set_nonblocking(false).expect("blocking");
+    closed
+}
+
 /// Read each of `streams` to its end, returning the raw response text and
 /// whether the peer closed the connection (rather than the read timing out).
 pub fn read_raw_responses(streams: Vec<TcpStream>) -> Vec<(String, bool)> {

@@ -35,6 +35,7 @@ const EMFILE_TEXTS: [&str; 2] = ["Too many open files", "No file descriptors ava
     ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
 )]
 fn a_burst_near_the_limit_is_shed_with_503_not_failed() {
+    let _serial = crate::serial();
     let backend = start_slow_backend("slow", Duration::from_millis(500));
     let (port, admin) = (free_port(), free_port());
     let mut proxy = PraxisProcess::spawn(&http_config(port, admin, backend, "max_open_files: 256"), &addr(port));
@@ -72,6 +73,7 @@ fn a_burst_near_the_limit_is_shed_with_503_not_failed() {
     ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
 )]
 fn shed_responses_carry_retry_after_and_close() {
+    let _serial = crate::serial();
     let backend = start_slow_backend("slow", Duration::from_millis(500));
     let (port, admin) = (free_port(), free_port());
     let proxy = PraxisProcess::spawn(&http_config(port, admin, backend, "max_open_files: 256"), &addr(port));
@@ -105,6 +107,7 @@ fn shed_responses_carry_retry_after_and_close() {
     ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
 )]
 fn disabling_shedding_lets_requests_fail_at_the_limit() {
+    let _serial = crate::serial();
     let backend = start_slow_backend("slow", Duration::from_millis(500));
     let (port, admin) = (free_port(), free_port());
     let _proxy = PraxisProcess::spawn(
@@ -137,6 +140,7 @@ fn disabling_shedding_lets_requests_fail_at_the_limit() {
     ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
 )]
 fn tcp_listener_closes_new_connections_near_the_limit() {
+    let _serial = crate::serial();
     let echo = start_tcp_echo_backend();
     let (port, admin) = (free_port(), free_port());
     let mut proxy = PraxisProcess::spawn(&tcp_config(port, admin, echo), &addr(port));
@@ -170,6 +174,7 @@ fn tcp_listener_closes_new_connections_near_the_limit() {
     ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
 )]
 fn descriptor_usage_is_exported() {
+    let _serial = crate::serial();
     let backend = start_slow_backend("ok", Duration::ZERO);
     let (port, admin) = (free_port(), free_port());
     let proxy = PraxisProcess::spawn(&http_config(port, admin, backend, "max_open_files: 512"), &addr(port));
