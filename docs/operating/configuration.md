@@ -549,8 +549,8 @@ runtime:
   warning that it has no effect.
 - `upstream_keepalive_pool_size`: maximum number of idle
   upstream connections kept per thread. `Option<usize>`,
-  defaults to `Some(64)`. Set to `null` to disable
-  keepalive pooling.
+  defaults to `Some(64)`. Set to `null` to use Pingora's
+  default of 128 per thread.
 - `max_connections`: process-wide maximum concurrent
   connections across all listeners. When set, new
   connections beyond this limit are rejected.
@@ -571,6 +571,7 @@ runtime:
   above the hard limit is clamped with a warning.
   Startup logs the limit in effect and warns when it is
   below 4096, or below what `max_connections` implies.
+  See [Capacity Planning](capacity-planning.md).
 - `shed_on_fd_pressure`: reject new requests with `503
   Service Unavailable` (and close new TCP connections)
   when open file descriptors near the process limit,

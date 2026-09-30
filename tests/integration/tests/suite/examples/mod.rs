@@ -27,6 +27,8 @@ mod csrf;
 mod default_config;
 mod endpoint_selector;
 mod errors_total;
+#[cfg(target_os = "linux")]
+mod file_descriptor_limits;
 mod grpc_access_log;
 mod grpc_condition;
 mod grpc_detection;

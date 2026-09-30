@@ -78,6 +78,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | ------ | ------------- |
 | [admin-interface.yaml](configs/operations/admin-interface.yaml) | Exposes an admin endpoint for operational health checks, readiness probes, and Prometheus metrics |
 | [container-default.yaml](configs/operations/container-default.yaml) | Default config for containerized deployments |
+| [file-descriptor-limits.yaml](configs/operations/file-descriptor-limits.yaml) | Size and protect the proxy's open file descriptor budget: pin the process limit, shed requests with 503 before descriptors run out, and close idle keep-alive clients and pooled upstream connections so they cannot pin descriptors |
 | [hot-reload.yaml](configs/operations/hot-reload.yaml) | Filter pipelines are swapped atomically at runtime when the config file changes |
 | [log-overrides.yaml](configs/operations/log-overrides.yaml) | Use `runtime.log_overrides` to raise or lower log verbosity for specific modules without flooding output from every subsystem |
 | [max-connections.yaml](configs/operations/max-connections.yaml) | HTTP listeners return 503 with Retry-After: 1. TCP listeners close the socket immediately |

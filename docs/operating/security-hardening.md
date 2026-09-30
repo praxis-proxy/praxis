@@ -180,6 +180,13 @@ relying on the bind address.
   to a process RSS ceiling. When exceeded, the proxy
   rejects new requests with 503 to prevent OOM. See
   [configuration.md](configuration.md) for details.
+- **File descriptors**: Praxis raises its open file
+  limit at startup and sheds requests with 503 before
+  descriptors run out. Set
+  `downstream_keepalive_timeout_ms` on listeners so idle
+  clients cannot pin descriptors, and see
+  [capacity-planning.md](capacity-planning.md) for
+  sizing the limit and raising the hard limit.
 - **Payload size**: Set `body_limits.max_request_bytes`
   and `body_limits.max_response_bytes` to bound
   buffered payload sizes. Requests exceeding the

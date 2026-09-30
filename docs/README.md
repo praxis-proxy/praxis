@@ -28,6 +28,8 @@ and security. AI Gateway docs live in
   routing
 - [Security Hardening](operating/security-hardening.md):
   production deployment guidance
+- [Capacity Planning](operating/capacity-planning.md):
+  file descriptor budget, limits, and load shedding
 - [Build Features](operating/build-features.md):
   compile-time feature flags and when to toggle them
 - [FIPS 140-3](operating/fips.md):
