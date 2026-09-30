@@ -72,6 +72,8 @@ mod pipeline;
 #[cfg(feature = "policy-engine")]
 mod policy;
 #[cfg(feature = "policy-engine")]
+mod policy_api_key;
+#[cfg(feature = "policy-engine")]
 mod policy_assertions;
 #[cfg(feature = "policy-engine")]
 mod policy_http;

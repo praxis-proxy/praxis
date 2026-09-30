@@ -1,0 +1,34 @@
+# Policy fixture for the `security/policy-api-key.yaml` example integration
+# test. The test rewrites the example's `config_path` to a copy of this file,
+# with the directory path below pointed at `api-keys.yaml` beside it.
+#
+# Shape: one `identity/api-key` resolver backed by a file directory, and a
+# `global` policy that admits any authenticated caller.
+
+engine_settings:
+  dispatch: policy
+
+plugins:
+  - name: api-keys
+    kind: identity/api-key
+    hooks: [identity.resolve]
+    on_error: fail
+    config:
+      credential:
+        kind: header
+        name: Authorization
+      prefix: "Bearer sk-test-"
+      provider:
+        kind: file
+        path: /etc/praxis/api-keys.yaml
+        index: sha256
+      record_map:
+        subject:
+          id: user
+
+global:
+  authentication:
+    - api-keys
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"

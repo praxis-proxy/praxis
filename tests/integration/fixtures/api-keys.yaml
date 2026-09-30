@@ -1,0 +1,6 @@
+# Key directory for `api-key-policy.yaml`. Each record is indexed by the
+# `sha256:` digest of the key as presented after the `Bearer` scheme, so the
+# key `sk-test-alice` resolves to subject `alice`.
+keys:
+  - hash: "sha256:4d692786b022a5d5a48381dcaf1e5e346366feb5579a1d699de2991d153b05f9"
+    user: alice

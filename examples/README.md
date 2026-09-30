@@ -157,6 +157,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests that match header or body inspection rules |
 | [ip-acl.yaml](configs/security/ip-acl.yaml) | Allow or deny requests by source IP/CIDR |
 | [peer-identity-trust.yaml](configs/security/peer-identity-trust.yaml) | Validates downstream mTLS peer identity against a set of trusted peers |
+| [policy-api-key.yaml](configs/security/policy-api-key.yaml) | Authenticates generic HTTP traffic with API keys using the Praxis Policy Engine |
 | [policy-assertions.yaml](configs/security/policy-assertions.yaml) | Projects policy-derived identity into request headers and removes credentials that should not reach the upstream |
 | [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the Praxis Policy Engine |
 | [policy-llm.yaml](configs/security/policy-llm.yaml) | Authorizes body-addressed inference requests against `llm:` policy routes |
