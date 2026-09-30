@@ -89,7 +89,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Stage 2: Runtime
 # ------------------------------------------------------------------------------
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 LABEL org.opencontainers.image.source="https://github.com/praxis-proxy/praxis" \
     org.opencontainers.image.description="Praxis proxy server" \
