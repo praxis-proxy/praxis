@@ -20,7 +20,7 @@
 use std::{
     sync::{
         OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -219,6 +219,9 @@ pub struct FdPressure {
     /// Admitted requests still waiting on their upstream connection.
     pending: AtomicU64,
 
+    /// Whether a sample is being taken, so samples never overlap.
+    sampling: AtomicBool,
+
     /// Whether requests are ever shed.
     shed: bool,
 
@@ -237,12 +240,14 @@ impl FdPressure {
             last_check_ms: AtomicU64::new(0),
             limit,
             pending: AtomicU64::new(0),
+            sampling: AtomicBool::new(false),
             shed,
             threshold,
         }
     }
 
-    /// Sample descriptor usage now, regardless of the cached sample's age.
+    /// Sample descriptor usage now, regardless of the cached sample's age,
+    /// unless a sample is already being taken.
     pub fn refresh(&self) {
         self.last_check_ms.store(elapsed_ms(), Ordering::Relaxed);
         self.store_sample();
@@ -297,7 +302,7 @@ impl FdPressure {
         self.pending
             .load(Ordering::Relaxed)
             .saturating_mul(PENDING_COST)
-            .saturating_add(self.connected.load(Ordering::Relaxed))
+            .saturating_add(self.connected.load(Ordering::Acquire))
             .saturating_add(self.cached_open.load(Ordering::Relaxed))
     }
 
@@ -326,13 +331,31 @@ impl FdPressure {
         }
     }
 
-    /// Count open descriptors into the cache; connections opened before the
-    /// count are now part of it.
+    /// Count open descriptors into the cache.
     fn store_sample(&self) {
-        if let Some(open) = count_open_fds() {
-            self.connected.store(0, Ordering::Relaxed);
-            self.cached_open.store(open, Ordering::Relaxed);
+        self.store_sample_with(count_open_fds);
+    }
+
+    /// Publish the result of `count` as the new sample and drop only the
+    /// connection charges recorded before it began. A connection that opens
+    /// while `count` runs may be missing from it, so its charge stays until
+    /// the next sample. Skipped while another sample is being taken.
+    fn store_sample_with<C: FnOnce() -> Option<u64>>(&self, count: C) {
+        if self.sampling.swap(true, Ordering::Acquire) {
+            return;
         }
+        let absorbed = self.connected.load(Ordering::Relaxed);
+        if let Some(open) = count() {
+            self.cached_open.store(open, Ordering::Relaxed);
+            // Release after publishing `open`: `predicted` never sees the
+            // charges dropped without the sample that absorbed them.
+            _ = self
+                .connected
+                .fetch_update(Ordering::Release, Ordering::Relaxed, |charged| {
+                    Some(charged.saturating_sub(absorbed))
+                });
+        }
+        self.sampling.store(false, Ordering::Release);
     }
 }
 
@@ -519,6 +542,108 @@ mod tests {
     }
 
     #[test]
+    fn a_connection_opened_mid_count_keeps_its_charge() {
+        let pressure = unsampled(1_048_576);
+        pressure.connected.store(4, Ordering::Relaxed);
+        pressure.store_sample_with(|| {
+            pressure.connected.fetch_add(CONNECT_COST, Ordering::Relaxed);
+            Some(100)
+        });
+        assert_eq!(pressure.usage().open, 100, "the new count is published");
+        assert_eq!(
+            pressure.predicted(),
+            102,
+            "a connection that opens during the count may be missing from it, so its charge must survive"
+        );
+    }
+
+    #[test]
+    fn samples_never_overlap() {
+        let pressure = unsampled(1_048_576);
+        pressure.connected.store(4, Ordering::Relaxed);
+        let nested_counted = AtomicBool::new(false);
+        pressure.store_sample_with(|| {
+            pressure.store_sample_with(|| {
+                nested_counted.store(true, Ordering::Relaxed);
+                Some(1)
+            });
+            Some(100)
+        });
+        assert!(
+            !nested_counted.load(Ordering::Relaxed),
+            "a sample must not start while another is counting"
+        );
+        assert_eq!(
+            pressure.predicted(),
+            100,
+            "the one sample drops exactly the charges it absorbed"
+        );
+        assert!(
+            !pressure.sampling.load(Ordering::Relaxed),
+            "the sampling flag is released afterwards"
+        );
+    }
+
+    #[test]
+    fn dropping_charges_saturates_instead_of_wrapping() {
+        let pressure = unsampled(1_048_576);
+        pressure.connected.store(4, Ordering::Relaxed);
+        pressure.store_sample_with(|| {
+            pressure.connected.store(1, Ordering::Relaxed);
+            Some(100)
+        });
+        assert_eq!(
+            pressure.connected.load(Ordering::Relaxed),
+            0,
+            "charges must bottom out at zero; a wrap would shed every request"
+        );
+    }
+
+    #[test]
+    fn concurrent_samples_and_connections_never_wrap_the_charges() {
+        let pressure = FdPressure::new(u64::MAX, true);
+        let start = std::sync::Barrier::new(8);
+        let peak = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    start.wait();
+                    for _ in 0..5_000 {
+                        pressure.store_sample_with(|| {
+                            std::thread::yield_now();
+                            Some(100)
+                        });
+                        pressure.settle_new_connection();
+                        peak.fetch_max(pressure.connected.load(Ordering::Relaxed), Ordering::Relaxed);
+                    }
+                });
+            }
+        });
+        let peak = peak.load(Ordering::Relaxed);
+        assert!(
+            peak <= 8 * 5_000 * CONNECT_COST,
+            "overlapping samples must never drive the charges below zero, even briefly: peaked at {peak}"
+        );
+        assert!(
+            !pressure.sampling.load(Ordering::Relaxed),
+            "the sampling flag is released once every sampler is done"
+        );
+    }
+
+    #[test]
+    fn a_failed_count_keeps_every_charge() {
+        let pressure = unsampled(1_048_576);
+        pressure.cached_open.store(50, Ordering::Relaxed);
+        pressure.connected.store(6, Ordering::Relaxed);
+        pressure.store_sample_with(|| None);
+        assert_eq!(pressure.predicted(), 56, "nothing is absorbed when the count fails");
+        assert!(
+            !pressure.sampling.load(Ordering::Relaxed),
+            "the sampling flag is released after a failed count"
+        );
+    }
+
+    #[test]
     fn a_reused_connection_releases_the_claim() {
         let pressure = unsampled(1_048_576);
         pressure.cached_open.store(100, Ordering::Relaxed);
@@ -691,6 +816,14 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    impl FdPressure {
+        /// Record one new upstream connection as an admission settling would.
+        fn settle_new_connection(&self) {
+            self.pending.fetch_add(1, Ordering::Relaxed);
+            self.settle(true);
+        }
+    }
 
     /// A shedding monitor that never samples, so tests drive the cached count.
     fn unsampled(limit: u64) -> FdPressure {
