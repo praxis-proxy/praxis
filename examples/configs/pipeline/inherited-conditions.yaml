@@ -21,7 +21,7 @@
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/pipeline/inherited-conditions.yaml
 #   curl -i -X POST http://localhost:8080/api/chat -d '{"model":"gpt-4"}'  # X-Model forwarded, X-Enriched on response
-#   curl -i      -X GET  http://localhost:8080/api/chat                    # only X-Enriched (POST-only body promotion skipped)
+#   curl -i -X PUT http://localhost:8080/api/chat -d '{"model":"gpt-4"}'   # only X-Enriched (POST-only body promotion skipped)
 #   curl -i -X POST http://localhost:8080/health -d '{"model":"gpt-4"}'    # neither header (outside /api/)
 
 listeners:

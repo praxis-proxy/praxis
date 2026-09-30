@@ -5,15 +5,15 @@
 
 use std::collections::HashMap;
 
-use praxis_core::config::{ChainRef, Condition, Config, FailureMode, FilterEntry, ResponseCondition};
+use praxis_core::config::{
+    ChainRef, Config, FailureMode, FilterEntry, is_credential_header_name, redact_condition_headers,
+    redact_response_condition_headers,
+};
 use serde::Serialize;
 
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
-
-/// Substrings that mark a header name as credential-bearing (case-insensitive).
-const SENSITIVE_HEADER_SUBSTRINGS: &[&str] = &["token", "secret", "key", "auth", "password", "credential"];
 
 /// Field names that should be redacted in config dumps.
 const SENSITIVE_FIELD_NAMES: &[&str] = &[
@@ -31,18 +31,6 @@ const SENSITIVE_FIELD_NAMES: &[&str] = &[
     "secret",
     "signing_key",
     "token",
-];
-
-/// Header names whose injected `value` carries a credential and must be
-/// redacted (compared case-insensitively).
-const CREDENTIAL_HEADER_NAMES: &[&str] = &[
-    "authorization",
-    "cookie",
-    "proxy-authorization",
-    "set-cookie",
-    "x-amz-security-token",
-    "x-api-key",
-    "x-auth-token",
 ];
 
 // -----------------------------------------------------------------------------
@@ -119,17 +107,10 @@ pub(crate) fn build_dump(
     config: &Config,
     config_source: &str,
 ) -> Result<EffectiveConfigDump, Box<dyn std::error::Error + Send + Sync>> {
-    // Resolve against expanded entries so the dump reflects the effective
-    // filters that run, with chain-level conditions inherited on both the
-    // listener path and named branch/outbound references.
-    let expanded_by_name: HashMap<&str, Vec<FilterEntry>> = config
+    let chains: HashMap<&str, &[FilterEntry]> = config
         .filter_chains
         .iter()
-        .map(|chain| (chain.name.as_str(), chain.expanded_entries()))
-        .collect();
-    let chains: HashMap<&str, &[FilterEntry]> = expanded_by_name
-        .iter()
-        .map(|(name, entries)| (*name, entries.as_slice()))
+        .map(|chain| (chain.name.as_str(), chain.filters.as_slice()))
         .collect();
 
     Ok(EffectiveConfigDump {
@@ -212,7 +193,7 @@ fn redact_credential_values(config: &mut serde_yaml::Value) {
 ///
 /// Redaction is name-based and best-effort: it covers the field names in
 /// [`SENSITIVE_FIELD_NAMES`], the `value` of a `{name, value}` pair whose
-/// `name` is a credential-bearing header (see [`CREDENTIAL_HEADER_NAMES`],
+/// `name` is a credential-bearing header (see [`is_credential_header_name`],
 /// which catches the `headers` filter's `request_set`/`response_set`
 /// entries), and credential-bearing entries of a `headers:` matcher map
 /// (condition and route matchers, including those nested in a filter's opaque
@@ -318,59 +299,6 @@ fn redact_credential_injection_value(mapping: &mut serde_yaml::Mapping, redacted
     for field in ["value", "env_var"] {
         if mapping.contains_key(field) {
             mapping.insert(serde_yaml::Value::String((*field).to_owned()), redacted.clone());
-        }
-    }
-}
-
-/// Whether a header name carries a credential and its value must be redacted
-/// (compared case-insensitively). A name qualifies when it exactly matches a
-/// well-known credential header (e.g. `cookie`, which contains no telltale
-/// substring) or contains a sensitive substring (`token`, `key`, `auth`, …).
-fn is_credential_header_name(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    CREDENTIAL_HEADER_NAMES.contains(&name.as_str())
-        || SENSITIVE_HEADER_SUBSTRINGS.iter().any(|frag| name.contains(frag))
-}
-
-/// Redact credential-bearing header *matcher* values in a list of request
-/// conditions.
-///
-/// A condition can gate a filter on an exact header value (e.g. a `when` clause
-/// matching `authorization: "Bearer <token>"`), which would otherwise appear
-/// verbatim in the dump. Chain-level conditions are inherited by every filter
-/// expanded from the chain, so a single leak there exposes a shared secret.
-fn redact_condition_headers(conditions: &mut [Condition]) {
-    for condition in conditions {
-        let (Condition::When(matcher) | Condition::Unless(matcher)) = condition;
-        redact_header_matcher(matcher.headers.as_mut());
-    }
-}
-
-/// Redact credential-bearing header matcher values in a list of response
-/// conditions (see [`redact_condition_headers`]).
-fn redact_response_condition_headers(conditions: &mut [ResponseCondition]) {
-    for condition in conditions {
-        let (ResponseCondition::When(matcher) | ResponseCondition::Unless(matcher)) = condition;
-        redact_header_matcher(matcher.headers.as_mut());
-    }
-}
-
-/// Replace the value of every credential-bearing key in a header matcher map.
-fn redact_header_matcher(headers: Option<&mut HashMap<String, String>>) {
-    let Some(headers) = headers else {
-        return;
-    };
-    // Select keys functionally first (a `for` loop over the map trips
-    // `iter_over_hash_type`, and `for_each` trips `needless_for_each`), then
-    // rewrite each credential-bearing value over the ordered key list.
-    let credential_keys: Vec<String> = headers
-        .keys()
-        .filter(|name| is_credential_header_name(name))
-        .cloned()
-        .collect();
-    for key in credential_keys {
-        if let Some(value) = headers.get_mut(&key) {
-            "[REDACTED]".clone_into(value);
         }
     }
 }

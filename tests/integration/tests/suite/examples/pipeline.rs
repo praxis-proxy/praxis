@@ -118,20 +118,21 @@ fn inherited_conditions_gate_request_body_and_response_hooks() {
         "the inherited condition lets the response filter tag /api/ responses"
     );
 
-    let api_get = http_send(
+    let api_put = http_send(
         proxy.addr(),
-        "GET /api/chat HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        "PUT /api/chat HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+         Content-Length: 17\r\nConnection: close\r\n\r\n{\"model\":\"gpt-4\"}",
     );
-    assert_eq!(parse_status(&api_get), 200, "/api/ GET should proxy to the backend");
+    assert_eq!(parse_status(&api_put), 200, "/api/ PUT should proxy to the backend");
     assert!(
-        !parse_body(&api_get).to_ascii_lowercase().contains("x-model"),
-        "json_body_field's local POST condition ANDs with the inherited one, so a GET skips promotion, got: {}",
-        parse_body(&api_get)
+        !parse_body(&api_put).to_ascii_lowercase().contains("x-model"),
+        "json_body_field's local POST condition ANDs with the inherited one, so a PUT skips promotion, got: {}",
+        parse_body(&api_put)
     );
     assert_eq!(
-        parse_header(&api_get, "X-Enriched").as_deref(),
+        parse_header(&api_put, "X-Enriched").as_deref(),
         Some("true"),
-        "the response filter inherits only the path condition, so a /api/ GET is still tagged"
+        "the response filter inherits only the path condition, so a /api/ PUT is still tagged"
     );
 
     let other_post = http_send(
