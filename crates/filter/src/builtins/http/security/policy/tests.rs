@@ -1635,6 +1635,93 @@ async fn api_key_missing_key_is_rejected() {
     assert_eq!(subject, None, "no identity is published on a rejection");
 }
 
+/// Write a pure-L7 JWT policy whose one authorization rule is `rule`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture, the YAML literal is the bulk; splitting it would obscure the shape under test"
+)]
+fn write_l7_rule_config(rule: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - {rule}
+  pdp:
+    - kind: cel
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Dispatch one GET as `alice` holding `roles` through a policy whose one rule is `rule`.
+async fn dispatch_with_roles(rule: &str, roles: &[&str]) -> FilterAction {
+    let (_dir, path) = write_l7_rule_config(rule);
+    let filter = build_filter(path);
+    let mut claims = standard_claims("alice");
+    claims["roles"] = json!(roles);
+    let token = mint_jwt(&claims);
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    filter.on_request(&mut ctx).await.expect("filter ran")
+}
+
+/// A dotted role gets no `role.<name>` alias, so the DSL form denies and
+/// membership must be tested against `subject.roles`.
+#[tokio::test(flavor = "multi_thread")]
+async fn dotted_role_matches_only_by_membership() {
+    let action = dispatch_with_roles(r#""require(role.admin.readonly)""#, &["admin.readonly"]).await;
+    assert!(
+        matches!(&action, FilterAction::Reject(_)),
+        "a dotted role must not satisfy require(role.<name>); got {action:?}"
+    );
+
+    let action = dispatch_with_roles(
+        r#"cel: { expr: "'admin.readonly' in subject.roles" }"#,
+        &["admin.readonly"],
+    )
+    .await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a dotted role must match by membership; got {action:?}"
+    );
+}
+
+/// `role.admin` must not match a subject holding only `admin.readonly`.
+#[tokio::test(flavor = "multi_thread")]
+async fn dotted_role_does_not_satisfy_its_prefix() {
+    let action = dispatch_with_roles(r#""require(role.admin)""#, &["admin.readonly"]).await;
+    assert!(
+        matches!(&action, FilterAction::Reject(_)),
+        "admin.readonly must not grant role.admin; got {action:?}"
+    );
+}
+
 /// Entity-aware policies resolve identity in the body phase. That producer
 /// path must publish the extension before later body filters execute.
 #[tokio::test(flavor = "multi_thread")]
