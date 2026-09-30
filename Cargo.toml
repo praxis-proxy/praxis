@@ -67,7 +67,7 @@ pingora-proxy = { version = "0.10.0", package = "quixotic-plecostomus-proxy", fe
 percent-encoding = "2.3.2"
 rand = "0.10.3"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
-ppe = { version = "0.4.0", package = "praxis-policy", features = ["jwt", "api-key", "oauth", "elicitation-ciba", "cedar", "cel", "opa", "valkey"] }
+ppe = { version = "0.4.0", package = "praxis-policy", features = ["builtins"] }
 parking_lot = "0.12.5"
 portable-atomic = "1.15.0"
 proptest = "1.11.0"

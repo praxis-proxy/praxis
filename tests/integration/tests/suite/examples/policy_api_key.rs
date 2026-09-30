@@ -5,8 +5,8 @@
 //! (`examples/configs/security/policy-api-key.yaml`).
 //!
 //! Drives the `policy` filter end to end with `identity/api-key` as its only
-//! identity resolver. A known key reaches the backend, while an unknown key and
-//! a missing key are both rejected at the identity gate with HTTP 401.
+//! identity resolver. A known key reaches the backend, while an unknown key, a
+//! credential without the key prefix, and a missing key are rejected with HTTP 401.
 
 use std::collections::HashMap;
 
@@ -66,10 +66,29 @@ fn policy_api_key_known_key_passes_through() {
 fn policy_api_key_unknown_key_is_rejected() {
     let raw = send(Some("Bearer sk-test-mallory"));
     assert_eq!(parse_status(&raw), 401, "an unknown key should be rejected");
+    assert!(raw.contains("X-Policy-Violation: auth.key_unknown"), "got: {raw}");
+}
+
+#[test]
+fn policy_api_key_unrecognized_credential_is_rejected() {
+    let raw = send(Some("Bearer unrelated-test-credential"));
+    assert_eq!(
+        parse_status(&raw),
+        401,
+        "a credential without the key prefix should be rejected"
+    );
+    assert!(
+        raw.contains("X-Policy-Violation: auth.unrecognized_credential"),
+        "got: {raw}"
+    );
 }
 
 #[test]
 fn policy_api_key_missing_key_is_rejected() {
     let raw = send(None);
     assert_eq!(parse_status(&raw), 401, "a request with no key should be rejected");
+    assert!(
+        raw.contains("X-Policy-Violation: auth.missing_credential"),
+        "got: {raw}"
+    );
 }
