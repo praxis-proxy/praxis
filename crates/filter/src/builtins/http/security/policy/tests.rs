@@ -1719,6 +1719,108 @@ async fn dotted_role_does_not_satisfy_its_prefix() {
     );
 }
 
+/// Write a pure-L7 JWT policy decided by `data.authz.allow` over `modules`,
+/// each an inline Rego module.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture, the YAML literal is the bulk; splitting it would obscure the shape under test"
+)]
+fn write_opa_config(modules: &[&str]) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let modules = modules
+        .iter()
+        .map(|m| {
+            format!(
+                "        - |\n{}",
+                m.lines().map(|l| format!("          {l}\n")).collect::<String>()
+            )
+        })
+        .collect::<String>();
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - opa: {{ query: "data.authz.allow" }}
+  pdp:
+    - kind: opa
+      modules:
+{modules}"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Dispatch one GET as `subject` through an OPA policy over `modules`.
+async fn dispatch_opa_as(modules: &[&str], subject: &str) -> FilterAction {
+    let (_dir, path) = write_opa_config(modules);
+    let filter = build_filter(path);
+    let token = mint_jwt(&standard_claims(subject));
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    filter.on_request(&mut ctx).await.expect("filter ran")
+}
+
+/// A partial set built from several rule bodies unions every body.
+#[tokio::test(flavor = "multi_thread")]
+async fn opa_multi_body_partial_rule_unions_bodies() {
+    let module = r#"package authz
+default allow := false
+permitted contains "alice" if input.subject.id == "alice"
+permitted contains "bob" if input.subject.id == "bob"
+allow if input.subject.id in permitted"#;
+    for (subject, allowed) in [("alice", true), ("bob", true), ("carol", false)] {
+        let action = dispatch_opa_as(&[module], subject).await;
+        assert_eq!(
+            matches!(action, FilterAction::Continue),
+            allowed,
+            "{subject}: got {action:?}"
+        );
+    }
+}
+
+/// A function called through an aliased import resolves to the imported package.
+#[tokio::test(flavor = "multi_thread")]
+async fn opa_aliased_import_function_resolves() {
+    let lib = r#"package lib
+is_admin(id) if id == "alice""#;
+    let authz = "package authz
+import data.lib as l
+default allow := false
+allow if l.is_admin(input.subject.id)";
+    for (subject, allowed) in [("alice", true), ("bob", false)] {
+        let action = dispatch_opa_as(&[lib, authz], subject).await;
+        assert_eq!(
+            matches!(action, FilterAction::Continue),
+            allowed,
+            "{subject}: got {action:?}"
+        );
+    }
+}
+
 /// Entity-aware policies resolve identity in the body phase. That producer
 /// path must publish the extension before later body filters execute.
 #[tokio::test(flavor = "multi_thread")]
