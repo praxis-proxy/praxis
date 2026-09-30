@@ -58,22 +58,18 @@ fn send(authorization: Option<&str>) -> String {
 #[test]
 fn policy_api_key_known_key_passes_through() {
     let raw = send(Some(&format!("Bearer {KNOWN_KEY}")));
-    assert_eq!(parse_status(&raw), 200, "a known key should reach the backend;\n{raw}");
-    assert!(raw.contains("ok"), "backend body should reach the client;\n{raw}");
+    assert_eq!(parse_status(&raw), 200, "a known key should reach the backend");
+    assert!(raw.contains("ok"), "backend body should reach the client");
 }
 
 #[test]
 fn policy_api_key_unknown_key_is_rejected() {
     let raw = send(Some("Bearer sk-test-mallory"));
-    assert_eq!(parse_status(&raw), 401, "an unknown key should be rejected;\n{raw}");
+    assert_eq!(parse_status(&raw), 401, "an unknown key should be rejected");
 }
 
 #[test]
 fn policy_api_key_missing_key_is_rejected() {
     let raw = send(None);
-    assert_eq!(
-        parse_status(&raw),
-        401,
-        "a request with no key should be rejected;\n{raw}"
-    );
+    assert_eq!(parse_status(&raw), 401, "a request with no key should be rejected");
 }

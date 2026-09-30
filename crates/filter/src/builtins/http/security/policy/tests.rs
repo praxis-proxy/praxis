@@ -1587,8 +1587,10 @@ async fn pure_l7_allow_publishes_authenticated_identity() {
 }
 
 /// Run one pure-L7 request through the `identity/api-key` policy, with
-/// `authorization` as the `Authorization` header when present.
-async fn dispatch_api_key(authorization: Option<&str>) -> (FilterAction, Option<String>) {
+/// `authorization` as the `Authorization` header when present. Returns the
+/// reject status (`None` on Continue) and the published subject, so no
+/// key-derived value reaches an assertion message.
+async fn dispatch_api_key(authorization: Option<&str>) -> (Option<u16>, Option<String>) {
     let (_dir, path) = write_api_key_config();
     let filter = build_filter(path);
     let mut req = make_request(Method::GET, "/");
@@ -1597,41 +1599,36 @@ async fn dispatch_api_key(authorization: Option<&str>) -> (FilterAction, Option<
             .insert("Authorization", HeaderValue::from_str(value).expect("header value"));
     }
     let mut ctx = make_filter_context(&req);
-    let action = filter.on_request(&mut ctx).await.expect("filter ran");
+    let status = match filter.on_request(&mut ctx).await.expect("filter ran") {
+        FilterAction::Continue => None,
+        FilterAction::Reject(rej) => Some(rej.status),
+        _ => panic!("api-key dispatch must Continue or Reject"),
+    };
     let subject = ctx
         .extensions
         .get::<AuthenticatedIdentity>()
         .map(|id| id.subject_id().to_owned());
-    (action, subject)
+    (status, subject)
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn api_key_known_key_resolves_identity() {
-    let (action, subject) = dispatch_api_key(Some(&format!("Bearer {TEST_API_KEY}"))).await;
-    assert!(
-        matches!(action, FilterAction::Continue),
-        "expected Continue; got {action:?}"
-    );
+    let (status, subject) = dispatch_api_key(Some(&format!("Bearer {TEST_API_KEY}"))).await;
+    assert_eq!(status, None, "a known key must Continue");
     assert_eq!(subject.as_deref(), Some("alice"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn api_key_unknown_key_is_rejected() {
-    let (action, subject) = dispatch_api_key(Some("Bearer sk-test-mallory")).await;
-    assert!(
-        matches!(&action, FilterAction::Reject(rej) if rej.status == 401),
-        "an unknown key must be rejected 401; got {action:?}"
-    );
+    let (status, subject) = dispatch_api_key(Some("Bearer sk-test-mallory")).await;
+    assert_eq!(status, Some(401), "an unknown key must be rejected 401");
     assert_eq!(subject, None, "no identity is published on a rejection");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn api_key_missing_key_is_rejected() {
-    let (action, subject) = dispatch_api_key(None).await;
-    assert!(
-        matches!(&action, FilterAction::Reject(rej) if rej.status == 401),
-        "a request with no key must be rejected 401; got {action:?}"
-    );
+    let (status, subject) = dispatch_api_key(None).await;
+    assert_eq!(status, Some(401), "a request with no key must be rejected 401");
     assert_eq!(subject, None, "no identity is published on a rejection");
 }
 
