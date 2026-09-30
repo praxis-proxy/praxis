@@ -136,6 +136,18 @@ enum GatedIdentity {
 /// declarations are `result.<field>` pipelines or `post_invocation` steps
 /// admits every request and is evaluated purely on the way back.
 ///
+/// Only `tool:` routes are dispatched on the response phase. The response
+/// payload is projected for `tools/call` alone, so a `prompt:` or `resource:`
+/// route's `result.<field>` and `post_invocation` rules never run, under either
+/// body access. A policy declaring them warns at load. Put the control on
+/// `pre_invocation`, which is dispatched for all three entity types.
+///
+/// An `http:` route does not reach classified MCP traffic. That traffic is
+/// evaluated against its entity route, so an `http:` route's `authorization:`
+/// and `authentication:` apply only to unclassified requests. Cross-cutting
+/// rules belong in the `global` block, which is layered into every entity
+/// route. A policy combining the two warns at load.
+///
 /// Response-body hooks run on a small dedicated runtime while the worker
 /// waits, for at most twice the engine's per-plugin timeout
 /// (`engine_settings.plugin_timeout`, so 60 seconds by default). A hook
@@ -369,9 +381,16 @@ impl PolicyFilter {
         let mcp_pre = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_PROMPT_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_RESOURCE_PRE_FETCH);
-        let mcp_post = mgr.has_hooks_for(HOOK_CMF_TOOL_POST_INVOKE)
-            || mgr.has_hooks_for(HOOK_CMF_PROMPT_POST_INVOKE)
-            || mgr.has_hooks_for(HOOK_CMF_RESOURCE_POST_FETCH);
+        // Split by entity because only the tool half is dispatched. The
+        // response phase builds its payload with
+        // `build_response_content_for_method`, which projects `tools/call` and
+        // nothing else, so a prompt or resource post hook is registered,
+        // reached, and then skipped on empty content. The two get different
+        // advice below.
+        let mcp_post_tool = mgr.has_hooks_for(HOOK_CMF_TOOL_POST_INVOKE);
+        let mcp_post_undispatched =
+            mgr.has_hooks_for(HOOK_CMF_PROMPT_POST_INVOKE) || mgr.has_hooks_for(HOOK_CMF_RESOURCE_POST_FETCH);
+        let mcp_post = mcp_post_tool || mcp_post_undispatched;
         let mcp_routes = mcp_pre || mcp_post;
         let llm_post = mgr.has_hooks_for(HOOK_CMF_LLM_OUTPUT);
         // A post-only route still needs request state for response dispatch.
@@ -419,9 +438,8 @@ impl PolicyFilter {
             Self::warn_on_inference_gaps(&policy_config, http_global, &cfg, llm_post);
         }
         Self::warn_on_inert_inference_defaults(&policy_config, llm_routes);
-        if mcp_post {
-            Self::warn_on_entity_response_gaps(&cfg);
-        }
+        Self::warn_on_entity_response_gaps(&cfg, mcp_post_tool, mcp_post_undispatched);
+        let _http_beside_entity = Self::warn_on_http_route_beside_entity_routes(&policy_config, mcp_routes);
 
         // Reject controls that cannot reach the writable response-header phase.
         let unreachable = unreachable_response_levels(&policy_config);
@@ -533,23 +551,74 @@ impl PolicyFilter {
         );
     }
 
-    /// Report MCP entity response rules that cannot run under the configured
-    /// body access.
+    /// Report MCP entity response rules that cannot run.
     ///
-    /// The post hook is dispatched only once the response body is buffered,
-    /// which `read_only` does not do. A `result.<field>` pipeline reads as a
-    /// mutation an operator expects to take effect, so its silent omission is
-    /// worth a warning rather than a debug line.
-    fn warn_on_entity_response_gaps(cfg: &PolicyFilterConfig) {
-        if !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
+    /// Two separate causes, and only one has a remedy.
+    ///
+    /// A tool response rule needs `body_access: read_write`, because the post
+    /// hook is dispatched only once the response body is buffered, which
+    /// `read_only` does not do. Setting `read_write` enables it. This covers
+    /// attribute-only `post_invocation` rules as well as `result.<field>`
+    /// pipelines: neither reads the body, and both are skipped with it.
+    ///
+    /// A prompt or resource response rule is not dispatched under either body
+    /// access, so `read_write` is not the fix and must not be offered as one.
+    fn warn_on_entity_response_gaps(cfg: &PolicyFilterConfig, post_tool: bool, post_undispatched: bool) {
+        if post_tool && !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
             tracing::warn!(
                 target: "policy.filter",
-                "policy declares response-phase entity rules (`result.<field>` or \
+                "policy declares response-phase `tool:` rules (`result.<field>` or \
                  `post_invocation`) but `body_access` is `read_only`, which does not buffer the \
                  response: those rules will never run. Set `body_access: read_write` to enable \
                  them.",
             );
         }
+        if post_undispatched {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy declares response-phase `prompt:` or `resource:` rules \
+                 (`result.<field>` or `post_invocation`): those rules never run. The response \
+                 payload is projected for `tools/call` only, so the hook is registered and then \
+                 skipped. `body_access: read_write` does not change this. Move the control to the \
+                 request phase (`pre_invocation`), which is dispatched for all three entity types.",
+            );
+        }
+    }
+
+    /// Report an `http:` route that cannot reach classified MCP traffic.
+    ///
+    /// Classified traffic resolves to its entity route, and an `http:` route is
+    /// a different route, so its `authorization:` and `authentication:` never
+    /// apply to a tool, prompt, or resource call. The `global` block is layered
+    /// into every entity route and does apply, which is the remedy.
+    ///
+    /// Warned on the presence of an `http:` route rather than on it carrying
+    /// authorization: `RouteEntry` does not surface APL steps, which the
+    /// visitor consumes from the raw document, and a route-scoped
+    /// `authentication:` list is skipped for the same reason.
+    /// Returns how many `http:` routes the warning covered, so a test can
+    /// assert the decision without racing `tracing`'s process-wide level hint.
+    pub(super) fn warn_on_http_route_beside_entity_routes(
+        policy_config: &ppe::praxis_policy_core::config::PolicyConfig,
+        mcp_routes: bool,
+    ) -> usize {
+        if !mcp_routes {
+            return 0;
+        }
+        let http_routes = policy_config.routes.iter().filter(|route| route.http.is_some()).count();
+        if http_routes == 0 {
+            return 0;
+        }
+        tracing::warn!(
+            target: "policy.filter",
+            http_routes,
+            "policy declares `http:` route(s) AND MCP entity routes: a classified MCP request is \
+             evaluated against its entity route, so the `http:` route's `authorization:` and \
+             `authentication:` do NOT apply to tool, prompt, or resource calls. Move \
+             cross-cutting rules into the `global` block, which is layered into every entity \
+             route, or front non-MCP traffic with a separate listener/filter.",
+        );
+        http_routes
     }
 
     /// Warn when inference defaults have no route to apply them.

@@ -5315,3 +5315,224 @@ async fn a_result_pipeline_alone_redacts_the_response() {
          value on the way back. got {served}",
     );
 }
+
+// -----------------------------------------------------------------------------
+// Load-time warnings
+// -----------------------------------------------------------------------------
+
+/// Serializes the capture tests against each other.
+///
+/// `with_default` is thread-local, but `tracing` keeps one process-wide
+/// max-level hint derived from the installed subscribers. A second capture
+/// running in parallel lowers that hint when its subscriber drops, and events
+/// on this thread are then filtered before they reach the sink. Holding this
+/// for the duration of the capture keeps one installed at a time.
+static WARNING_CAPTURE: Mutex<()> = Mutex::new(());
+
+/// Capture `tracing` warnings emitted on this thread while `f` runs.
+///
+/// `PolicyFilter::new` emits its load-time warnings on the calling thread,
+/// after the init thread it spawns has been joined, so a thread-local
+/// subscriber sees them.
+fn capture_warnings(f: impl FnOnce()) -> String {
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("sink lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let _serialized = WARNING_CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let sink = Sink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = sink.0.lock().expect("sink lock").clone();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[test]
+fn a_read_only_tool_response_policy_warns_that_the_rules_will_not_run() {
+    let (_dir, path) = write_tool_post_only_config();
+    let logs = capture_warnings(|| drop(build_filter(path)));
+    assert!(
+        logs.contains("response-phase `tool:` rules") && logs.contains("body_access: read_write"),
+        "a `read_only` filter must name the remedy for tool response rules; got {logs}",
+    );
+}
+
+#[test]
+fn a_read_write_tool_response_policy_does_not_warn() {
+    let (_dir, path) = write_tool_post_only_config();
+    let logs = capture_warnings(|| drop(build_read_write_filter(path)));
+    assert!(
+        !logs.contains("response-phase `tool:` rules"),
+        "`read_write` is the configuration the warning asks for; it must not fire. got {logs}",
+    );
+}
+
+#[test]
+fn a_prompt_response_policy_warns_that_read_write_is_not_the_fix() {
+    let (_dir, path) = write_prompt_post_only_config();
+    let logs = capture_warnings(|| drop(build_read_write_filter(path)));
+    assert!(
+        logs.contains("those rules never run") && logs.contains("does not change this"),
+        "a prompt response rule is undispatched under both body accesses, so the warning must \
+         not offer `read_write` as the remedy; got {logs}",
+    );
+}
+
+/// An `http:` route that only `bob` satisfies, beside a post-only `tool:`
+/// route. Classified `tools/call` traffic resolves to the tool route, so the
+/// `http:` route never authorizes it.
+fn write_http_route_beside_tool_route_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - http:
+      path_prefix: /mcp
+    authorization:
+      pre_invocation:
+        - "require(subject.id == 'bob')"
+  - tool: echo
+    result:
+      ssn: "str | mask(2)"
+"#,
+    )
+}
+
+#[test]
+fn an_http_route_beside_entity_routes_warns() {
+    let (_dir, path) = write_http_route_beside_tool_route_config();
+    let yaml = std::fs::read_to_string(&path).expect("read policy");
+    let policy_config = ppe::praxis_policy_core::config::parse_config(&yaml).expect("parse policy");
+
+    assert_eq!(
+        PolicyFilter::warn_on_http_route_beside_entity_routes(&policy_config, /* mcp_routes= */ true),
+        1,
+        "an `http:` route beside entity routes is a silent bypass and has to be reported",
+    );
+    assert_eq!(
+        PolicyFilter::warn_on_http_route_beside_entity_routes(&policy_config, /* mcp_routes= */ false),
+        0,
+        "with no entity routes the `http:` route is the only thing evaluating, so there is \
+         nothing to report",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_http_route_does_not_authorize_classified_mcp_traffic() {
+    let (_dir, path) = write_http_route_beside_tool_route_config();
+    let filter = build_read_write_filter(path);
+
+    let mut req = make_request(Method::POST, "/mcp");
+    let token = mint_jwt(&standard_claims("alice"));
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(request_body), true)
+        .await
+        .expect("request phase ran");
+
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "alice fails the `http:` route's rule and is admitted anyway: classified traffic is \
+         evaluated against the tool route. Pinning the current behaviour, which the load-time \
+         warning reports; got {action:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_global_block_does_authorize_classified_mcp_traffic() {
+    let (_dir, path) = write_entity_config_with_global_authz(
+        r#"routes:
+  - tool: echo
+    result:
+      ssn: "str | mask(2)"
+"#,
+    );
+    let filter = build_read_write_filter(path);
+
+    let mut req = make_request(Method::POST, "/mcp");
+    let token = mint_jwt(&standard_claims("alice"));
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(request_body), true)
+        .await
+        .expect("request phase ran");
+
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "the `global` block is layered into every entity route, so it is the remedy the \
+         `http:`-route warning points at; got {action:?}",
+    );
+}
+
+/// Preamble variant that puts the rule in the `global` authorization block
+/// rather than on an `http:` route.
+fn write_entity_config_with_global_authz(routes: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(subject.id == 'bob')"
+{routes}"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}

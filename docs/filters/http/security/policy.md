@@ -23,6 +23,10 @@ It gates the whole response phase, not just the rewriting. The post-invoke hook 
 
 A route may declare the response half on its own. A route whose only declarations are `result.<field>` pipelines or `post_invocation` steps admits every request and is evaluated purely on the way back.
 
+Only `tool:` routes are dispatched on the response phase. The response payload is projected for `tools/call` alone, so a `prompt:` or `resource:` route's `result.<field>` and `post_invocation` rules never run, under either body access. A policy declaring them warns at load. Put the control on `pre_invocation`, which is dispatched for all three entity types.
+
+An `http:` route does not reach classified MCP traffic. That traffic is evaluated against its entity route, so an `http:` route's `authorization:` and `authentication:` apply only to unclassified requests. Cross-cutting rules belong in the `global` block, which is layered into every entity route. A policy combining the two warns at load.
+
 Response-body hooks run on a small dedicated runtime while the worker waits, for at most twice the engine's per-plugin timeout (`engine_settings.plugin_timeout`, so 60 seconds by default). A hook that does not finish in time is aborted and the response fails under the filter's `failure_mode`: `closed` truncates the response, `open` passes the body through unfiltered.
 
 Outbound policy calls share the proxy's sub-request limits and circuit breaker, use HTTP/1.1, and keep a separate 1 MiB response ceiling. Calls made by response-body hooks use their own pool on the dispatch runtime, with the same connection limit but no circuit breaker. TLS uses the platform trust store; cluster private CAs and client certificates do not apply. A private destination requires `trusted_private_endpoints` for a specific host, or `allow_private_idp` to relax every callout.
