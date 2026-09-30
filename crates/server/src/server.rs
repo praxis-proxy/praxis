@@ -159,6 +159,7 @@ fn run_startup_security_checks(config: &Config) -> Result<(), StartupError> {
     enforce_root_check(config)?;
     warn_insecure_options(config);
     init_runtime_limits(&config.runtime);
+    crate::fd_limit::apply(config);
     warn_insecure_key_permissions(config);
     warn_insecure_log_file_permissions(config);
     Ok(())

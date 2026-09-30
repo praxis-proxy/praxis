@@ -64,6 +64,8 @@ mod downstream_read_timeout;
 mod error_response;
 mod examples;
 mod failure_mode;
+#[cfg(target_os = "linux")]
+mod fd_limits;
 mod filter_composition;
 mod filter_metadata;
 mod fips;

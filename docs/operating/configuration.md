@@ -101,7 +101,7 @@ rather than silently adopted as the baseline.
 - Startup-only `runtime` settings (`threads`,
   `work_stealing`, `global_queue_interval`,
   `max_connections`, `max_memory_bytes`,
-  `subrequest_pool_size`,
+  `max_open_files`, `subrequest_pool_size`,
   `subrequest_max_connections`,
   `subrequest_circuit_breaker`, `upstream_ca_file`,
   `upstream_keepalive_pool_size`)
@@ -532,6 +532,16 @@ runtime:
   memory and rejects new requests with `503 Service
   Unavailable` when usage exceeds the threshold.
   `Option<usize>`, defaults to `None` (disabled).
+- `max_open_files`: soft limit on open file descriptors
+  (`RLIMIT_NOFILE`) the process sets for itself at
+  startup. Every connection, pooled connection, and DNS
+  lookup holds one. `Option<u64>` (128 to 2^30), defaults
+  to `None`, which raises the soft limit to the hard
+  limit; that needs no privileges and lifts the 1024
+  soft limit containers commonly start with. A value
+  above the hard limit is clamped with a warning.
+  Startup logs the limit in effect and warns when it is
+  below 4096, or below what `max_connections` implies.
 - `subrequest_circuit_breaker`: per-peer circuit breaker
   for the shared sub-request connector used by
   `iterative_request_router`. When configured, the
@@ -558,6 +568,7 @@ runtime:
   upstream_keepalive_pool_size: 64
   max_connections: 10000         # process-wide limit
   max_memory_bytes: 1073741824   # 1 GiB
+  max_open_files: 65536          # default: the hard limit
   subrequest_circuit_breaker:
     consecutive_failures: 5
     recovery_window_secs: 30

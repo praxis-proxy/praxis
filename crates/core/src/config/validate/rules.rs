@@ -46,6 +46,13 @@ const MIN_MEMORY_BYTES: usize = 1_048_576; // 1 MiB
 /// Maximum allowed `max_memory_bytes` (1 `TiB`).
 const MAX_MEMORY_BYTES: usize = 1_099_511_627_776; // 1 TiB
 
+/// Minimum allowed `max_open_files`: below this the proxy cannot hold its own
+/// listeners, runtimes, and log files, let alone traffic.
+const MIN_OPEN_FILES: u64 = 128;
+
+/// Maximum allowed `max_open_files`, far above any real descriptor table.
+const MAX_OPEN_FILES: u64 = 1_073_741_824; // 2^30
+
 /// Maximum allowed `shutdown_timeout_secs` (1 hour).
 const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 3_600;
 
@@ -108,6 +115,7 @@ impl Config {
         validate_runtime_max_connections(self.runtime.max_connections)?;
         validate_keepalive_pool_size(self.runtime.upstream_keepalive_pool_size)?;
         validate_max_memory_bytes(self.runtime.max_memory_bytes)?;
+        validate_max_open_files(self.runtime.max_open_files)?;
         validate_subrequest_max_connections(self.runtime.subrequest_max_connections)?;
         validate_subrequest_pool_size(self.runtime.subrequest_pool_size)?;
         validate_subrequest_circuit_breaker(self.runtime.subrequest_circuit_breaker.as_ref())?;
@@ -370,6 +378,19 @@ fn validate_max_memory_bytes(max_memory_bytes: Option<usize>) -> Result<(), Prox
         )));
     }
     Ok(())
+}
+
+/// Reject `runtime.max_open_files` outside the allowed range.
+fn validate_max_open_files(max_open_files: Option<u64>) -> Result<(), ProxyError> {
+    match max_open_files {
+        Some(count) if count < MIN_OPEN_FILES => Err(ProxyError::Config(format!(
+            "runtime.max_open_files ({count}) must be >= {MIN_OPEN_FILES}"
+        ))),
+        Some(count) if count > MAX_OPEN_FILES => Err(ProxyError::Config(format!(
+            "runtime.max_open_files ({count}) exceeds maximum ({MAX_OPEN_FILES})"
+        ))),
+        Some(_) | None => Ok(()),
+    }
 }
 
 /// Reject `runtime.subrequest_max_connections` of zero or above the
@@ -1350,6 +1371,41 @@ filter_chains:
     }
 
     #[test]
+    fn reject_max_open_files_below_minimum() {
+        let err = Config::from_yaml(&runtime_yaml("max_open_files: 127")).unwrap_err();
+        assert!(
+            err.to_string().contains("max_open_files (127) must be >= 128"),
+            "should reject max_open_files below 128: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_max_open_files_above_maximum() {
+        let err = Config::from_yaml(&runtime_yaml("max_open_files: 1073741825")).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum (1073741824)"),
+            "should reject max_open_files above 2^30: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_max_open_files_at_bounds() {
+        for bound in [128_u64, 1_073_741_824] {
+            let config = Config::from_yaml(&runtime_yaml(&format!("max_open_files: {bound}"))).unwrap();
+            assert_eq!(config.runtime.max_open_files, Some(bound), "bound {bound} is allowed");
+        }
+    }
+
+    #[test]
+    fn reject_max_open_files_negative() {
+        let err = Config::from_yaml(&runtime_yaml("max_open_files: -1")).unwrap_err();
+        assert!(
+            err.to_string().contains("max_open_files"),
+            "a negative descriptor limit must fail to parse: {err}"
+        );
+    }
+
+    #[test]
     fn reject_global_queue_interval_zero() {
         let yaml = r#"
 listeners:
@@ -1610,6 +1666,25 @@ filter_chains:
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Minimal valid config with `runtime_line` under `runtime:`.
+    fn runtime_yaml(runtime_line: &str) -> String {
+        format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  {runtime_line}
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#
+        )
+    }
 
     /// Run `run` and return the `flag` field of every WARN event it emits.
     fn capture_warned_flags(run: impl FnOnce()) -> Vec<String> {

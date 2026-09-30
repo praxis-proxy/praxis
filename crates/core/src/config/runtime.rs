@@ -183,6 +183,27 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub max_memory_bytes: Option<usize>,
 
+    /// Soft limit on open file descriptors (`RLIMIT_NOFILE`) the
+    /// process sets for itself at startup.
+    ///
+    /// Every client connection, upstream connection, sub-request, and
+    /// DNS lookup holds a descriptor, so this caps how much concurrent
+    /// traffic the proxy can carry. `None` (the default) raises the
+    /// soft limit to the hard limit the platform allows, which needs
+    /// no privileges. A value above the hard limit is clamped to it.
+    ///
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let cfg: RuntimeConfig = serde_yaml::from_str("max_open_files: 65536").unwrap();
+    /// assert_eq!(cfg.max_open_files, Some(65_536));
+    ///
+    /// let cfg = RuntimeConfig::default();
+    /// assert!(cfg.max_open_files.is_none());
+    /// ```
+    #[serde(default)]
+    pub max_open_files: Option<u64>,
+
     /// Per-peer circuit breaker for the shared sub-request connector.
     ///
     /// When configured, the connector tracks consecutive failures
@@ -298,6 +319,7 @@ impl Default for RuntimeConfig {
         Self {
             max_connections: None,
             max_memory_bytes: None,
+            max_open_files: None,
             subrequest_circuit_breaker: None,
             subrequest_max_connections: None,
             subrequest_pool_size: default_subrequest_pool_size(),

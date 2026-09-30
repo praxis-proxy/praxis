@@ -251,6 +251,7 @@ fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
             global_queue_interval,
             max_connections,
             max_memory_bytes,
+            max_open_files,
             subrequest_pool_size,
             threads,
             upstream_ca_file,
@@ -561,6 +562,19 @@ mod tests {
         assert!(
             warnings[0].contains("requires restart"),
             "warning should say a restart is required: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn runtime_max_open_files_change_warns() {
+        let old = config_with_runtime("");
+        let new = config_with_runtime("runtime:\n  max_open_files: 4096\n");
+        let warnings = capture_warnings(|| detect_startup_only_runtime_changes(&old, &new));
+        assert_eq!(warnings.len(), 1, "changed max_open_files should produce one warning");
+        assert!(
+            warnings[0].contains("requires restart"),
+            "the descriptor limit is set once at startup: {:?}",
             warnings[0]
         );
     }
