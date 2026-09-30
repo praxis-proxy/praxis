@@ -50,6 +50,30 @@ pub struct Listener {
     #[serde(default)]
     pub cluster: Option<String>,
 
+    /// How long an idle HTTP/1.x keep-alive client connection may wait
+    /// for its next request, in milliseconds, before it is closed.
+    ///
+    /// Only applies to `protocol: http` listeners. Without it, idle
+    /// keep-alive connections stay open until the client closes them,
+    /// each holding a file descriptor. Applied in whole seconds, rounded
+    /// up. HTTP/2 connections are not affected.
+    ///
+    /// ```
+    /// use praxis_core::config::Listener;
+    ///
+    /// let listener: Listener = serde_yaml::from_str(
+    ///     r#"
+    /// name: web
+    /// address: "0.0.0.0:8080"
+    /// downstream_keepalive_timeout_ms: 30000
+    /// "#,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(listener.downstream_keepalive_timeout_ms, Some(30_000));
+    /// ```
+    #[serde(default)]
+    pub downstream_keepalive_timeout_ms: Option<u64>,
+
     /// Downstream read timeout in milliseconds for HTTP listeners.
     ///
     /// Only applies to `protocol: http` listeners.
@@ -371,6 +395,16 @@ downstream_read_timeout_ms: 5000
             listener.downstream_read_timeout_ms,
             Some(5000),
             "downstream read timeout should be 5000"
+        );
+    }
+
+    #[test]
+    fn downstream_keepalive_timeout_defaults_to_none() {
+        let yaml = "name: test\naddress: \"0.0.0.0:8080\"";
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            listener.downstream_keepalive_timeout_ms.is_none(),
+            "idle keep-alive connections are left open unless configured"
         );
     }
 

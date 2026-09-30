@@ -93,6 +93,9 @@ rather than silently adopted as the baseline.
 
 - `runtime.logging` destination or buffering
 - Listener add, remove, or address rebind
+- Listener `max_connections`,
+  `downstream_read_timeout_ms`, and
+  `downstream_keepalive_timeout_ms`
 - Compression module addition
 - TLS enable/disable, and any change inside a
   listener's `tls` block (certificate *file contents*
@@ -322,6 +325,31 @@ listeners:
 Pingora applies its own 60s default for initial request
 header reads on fresh connections. This setting controls
 body read timeouts within an active request.
+
+### Downstream Keep-Alive Timeout
+
+Optional `downstream_keepalive_timeout_ms` closes an idle
+HTTP/1.x keep-alive client connection once it has waited
+that long for its next request. Without it, idle
+keep-alive connections stay open until the client closes
+them, and each one holds a file descriptor, so a fleet of
+idle or half-dead clients can exhaust the process limit.
+
+```yaml
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    downstream_keepalive_timeout_ms: 60000   # 60 seconds
+    filter_chains: [main]
+```
+
+The timeout is applied in whole seconds, rounded up
+(1 to 3600000 ms), and replaces any `Keep-Alive:
+timeout` hint a client sends. It never turns keep-alive
+on: `Connection: close` and HTTP/1.0 clients without
+`Connection: keep-alive` are still closed after their
+response. HTTP/2 connections are not affected. Like the
+other listener settings, a change needs a restart.
 
 ### Max Connections
 

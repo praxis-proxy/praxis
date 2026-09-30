@@ -533,6 +533,7 @@ filter_chains:
             .map(|i| Listener {
                 address: format!("127.0.0.1:{}", 10_000 + i),
                 cluster: None,
+                downstream_keepalive_timeout_ms: None,
                 downstream_read_timeout_ms: None,
                 filter_chains: vec![],
                 max_connections: None,
