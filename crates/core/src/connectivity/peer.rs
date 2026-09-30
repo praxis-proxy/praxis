@@ -12,7 +12,7 @@
 use std::{
     net::{IpAddr, SocketAddr},
     sync::{Arc, OnceLock},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use dashmap::DashMap;
@@ -33,6 +33,20 @@ const NEGATIVE_DNS_TTL_SECS: u64 = 5;
 
 /// Maximum cached DNS entries before oldest-entry eviction.
 const MAX_DNS_ENTRIES: usize = 1_024;
+
+/// How long a positive answer may be served past its TTL while re-resolution
+/// keeps failing for lack of a local resource.
+const MAX_STALE_SECS: u64 = 300; // 5 min
+
+/// Re-resolution backoff after a local resource failure, so a stale answer is
+/// served from cache instead of retried by every request.
+const LOCAL_FAILURE_RETRY_SECS: u64 = 1;
+
+/// `EMFILE`: per-process descriptor table full.
+const EMFILE: i32 = 24;
+
+/// `ENFILE`: system-wide descriptor table full.
+const ENFILE: i32 = 23;
 
 /// Address resolution failure.
 #[derive(Debug, thiserror::Error)]
@@ -82,24 +96,66 @@ pub enum AddressResolutionError {
     },
 }
 
+impl AddressResolutionError {
+    /// Whether resolution failed because this process ran out of descriptors
+    /// or memory, rather than because DNS answered with an error.
+    ///
+    /// Such a failure says nothing about the hostname, so it must not be
+    /// cached as one.
+    ///
+    /// ```
+    /// use praxis_core::connectivity::peer::AddressResolutionError;
+    ///
+    /// let exhausted = AddressResolutionError::Resolve {
+    ///     address: "upstream.internal:80".to_owned(),
+    ///     source: std::io::Error::from_raw_os_error(24),
+    /// };
+    /// assert!(exhausted.is_local_resource_exhaustion());
+    ///
+    /// let nxdomain = AddressResolutionError::Empty("upstream.internal:80".to_owned());
+    /// assert!(!nxdomain.is_local_resource_exhaustion());
+    /// ```
+    pub fn is_local_resource_exhaustion(&self) -> bool {
+        match self {
+            Self::Resolve { source, .. } => {
+                matches!(source.raw_os_error(), Some(EMFILE | ENFILE))
+                    || source.kind() == std::io::ErrorKind::OutOfMemory
+            },
+            Self::Task { .. } | Self::Empty(_) | Self::RecentFailure { .. } | Self::PrivateAddress { .. } => false,
+        }
+    }
+}
+
 /// Cached DNS resolution: the complete raw address set (portless, resolver
 /// order), or the failure message when the last resolution failed.
 struct DnsCacheEntry {
     /// Outcome of the last resolution.
     outcome: Result<Arc<[IpAddr]>, String>,
-    /// Cache insertion time.
+    /// When a resolver last produced `outcome`.
     resolved_at: Instant,
+    /// Until when `outcome` is served without re-resolving.
+    fresh_until: Instant,
 }
 
 impl DnsCacheEntry {
-    /// Whether this entry is still valid at its outcome-specific TTL.
-    fn is_fresh(&self) -> bool {
-        let ttl = if self.outcome.is_ok() {
+    /// Entry for a resolver outcome, fresh for its outcome-specific TTL.
+    fn new(outcome: Result<Arc<[IpAddr]>, String>) -> Self {
+        let ttl = if outcome.is_ok() {
             DNS_TTL_SECS
         } else {
             NEGATIVE_DNS_TTL_SECS
         };
-        self.resolved_at.elapsed().as_secs() < ttl
+        let resolved_at = Instant::now();
+        Self {
+            outcome,
+            resolved_at,
+            fresh_until: later(resolved_at, ttl),
+        }
+    }
+
+    /// Whether this entry may be served without re-resolving.
+    fn is_fresh(&self) -> bool {
+        Instant::now() < self.fresh_until
     }
 }
 
@@ -375,6 +431,24 @@ async fn owner_resolve<L: BlockingLookup>(
         }
     });
 
+    // Running out of descriptors or memory is this process's problem, not the
+    // hostname's: never cache it as a negative answer, and keep serving the last
+    // good answer so a local shortage cannot black out a healthy upstream.
+    let outcome = match outcome {
+        Err(err) if err.is_local_resource_exhaustion() => {
+            let payload = if let Some(stale) = serve_stale(&host) {
+                tracing::warn!(%host, error = %err, "local resource exhaustion during DNS; serving last good answer");
+                Ok(stale)
+            } else {
+                tracing::debug!(%host, error = %err, "local resource exhaustion during DNS; not cached");
+                Err(Arc::new(err))
+            };
+            drop(tx.send(Some(payload)));
+            return;
+        },
+        other => other,
+    };
+
     // Cache-write happens-before entry-removal: the guard fires at return, after
     // this write, so a caller that finds the slot empty finds the cache filled.
     insert_cached(
@@ -476,13 +550,26 @@ fn insert_cached(host: &str, outcome: Result<Arc<[IpAddr]>, String>) {
             cache.remove(&oldest);
         }
     }
-    cache.insert(
-        key,
-        DnsCacheEntry {
-            outcome,
-            resolved_at: Instant::now(),
-        },
-    );
+    cache.insert(key, DnsCacheEntry::new(outcome));
+}
+
+/// The last positive answer for `host`, if one was resolved within
+/// [`MAX_STALE_SECS`], re-armed for a short backoff so the next requests take
+/// it from cache instead of retrying the failing resolver.
+fn serve_stale(host: &str) -> Option<Arc<[IpAddr]>> {
+    let mut entry = dns_cache().get_mut(&cache_key(host))?;
+    let ips = entry.outcome.as_ref().ok().map(Arc::clone)?;
+    if entry.resolved_at.elapsed().as_secs() >= MAX_STALE_SECS {
+        return None;
+    }
+    entry.fresh_until = later(Instant::now(), LOCAL_FAILURE_RETRY_SECS);
+    drop(entry);
+    Some(ips)
+}
+
+/// `secs` after `from`, saturating at `from` on the (unreachable) overflow.
+fn later(from: Instant, secs: u64) -> Instant {
+    from.checked_add(Duration::from_secs(secs)).unwrap_or(from)
 }
 
 /// Return a non-expired cached outcome (positive or negative) for `host`.
@@ -997,6 +1084,194 @@ mod tests {
             .expect_err("a bare host with no port must be rejected");
     }
 
+    #[test]
+    fn local_resource_exhaustion_is_classified() {
+        for code in [EMFILE, ENFILE] {
+            assert!(
+                os_resolve_error("h", code).is_local_resource_exhaustion(),
+                "errno {code} is a local descriptor shortage"
+            );
+        }
+        let oom = AddressResolutionError::Resolve {
+            address: "h".to_owned(),
+            source: std::io::Error::from(std::io::ErrorKind::OutOfMemory),
+        };
+        assert!(oom.is_local_resource_exhaustion(), "out of memory is a local shortage");
+    }
+
+    #[test]
+    fn dns_and_policy_failures_are_not_local_resource_exhaustion() {
+        let not_local = [
+            os_resolve_error("h", 2),
+            AddressResolutionError::Resolve {
+                address: "h".to_owned(),
+                source: std::io::Error::other("failed to lookup address information: Name does not resolve"),
+            },
+            AddressResolutionError::Empty("h".to_owned()),
+            AddressResolutionError::RecentFailure {
+                address: "h".to_owned(),
+                message: "Too many open files (os error 24)".to_owned(),
+            },
+            AddressResolutionError::Task {
+                address: "h".to_owned(),
+                message: "cancelled".to_owned(),
+            },
+            AddressResolutionError::PrivateAddress {
+                address: "h".to_owned(),
+                ip: "10.0.0.1".parse().unwrap(),
+            },
+        ];
+        for err in not_local {
+            assert!(
+                !err.is_local_resource_exhaustion(),
+                "{err} is not a local resource shortage"
+            );
+        }
+    }
+
+    #[test]
+    fn readdress_preserves_local_resource_classification() {
+        let err = readdress(os_resolve_error("host", EMFILE), "host:8080");
+        assert!(
+            err.is_local_resource_exhaustion(),
+            "re-addressing must keep the errno, got {err}"
+        );
+        assert!(
+            err.to_string().contains("host:8080"),
+            "error must name the caller address: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_exhaustion_is_not_negatively_cached() {
+        let host = "emfile-nocache.praxis-sf-test.invalid";
+        let failing = ControlledLookup::new(Behavior::FailOs(EMFILE));
+        failing.release.notify_one();
+        let err = resolve_host_cached_with(host, &failing)
+            .await
+            .expect_err("with nothing cached the local failure must surface");
+        assert!(
+            err.is_local_resource_exhaustion(),
+            "caller must see the local failure, got {err}"
+        );
+        assert!(
+            lookup_cached(host).is_none(),
+            "a local shortage must not be cached as a negative answer"
+        );
+
+        let healthy = ControlledLookup::new(Behavior::Ok(vec!["4.4.4.4".parse().unwrap()]));
+        healthy.release.notify_one();
+        let ips = resolve_host_cached_with(host, &healthy)
+            .await
+            .expect("resolution must recover as soon as descriptors free up");
+        assert_eq!(ips, vec!["4.4.4.4".parse::<IpAddr>().unwrap()], "recovered answer");
+        assert_eq!(
+            healthy.calls.load(Ordering::SeqCst),
+            1,
+            "recovery must re-resolve at once rather than wait out a negative TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_exhaustion_serves_the_last_good_answer() {
+        let host = "emfile-stale.praxis-sf-test.invalid";
+        let stale_age = Duration::from_secs(DNS_TTL_SECS + 1);
+        insert_aged(host, "5.6.7.8", stale_age);
+        assert!(
+            lookup_cached(host).is_none(),
+            "precondition: the positive answer has expired"
+        );
+
+        let failing = ControlledLookup::new(Behavior::FailOs(EMFILE));
+        failing.release.notify_one();
+        let ips = resolve_host_cached_with(host, &failing)
+            .await
+            .expect("the last good answer must be served during a local shortage");
+        assert_eq!(ips, vec!["5.6.7.8".parse::<IpAddr>().unwrap()], "stale answer");
+        assert!(
+            dns_cache().get(&cache_key(host)).unwrap().resolved_at.elapsed() >= stale_age,
+            "serving stale must not pretend the answer was re-resolved"
+        );
+
+        let untouched = ControlledLookup::new(Behavior::FailOs(EMFILE));
+        let again = resolve_host_cached_with(host, &untouched)
+            .await
+            .expect("the retry backoff must serve the stale answer from cache");
+        assert_eq!(again, ips, "same stale answer within the backoff");
+        assert_eq!(
+            untouched.calls.load(Ordering::SeqCst),
+            0,
+            "requests inside the retry backoff must not hit the failing resolver"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_exhaustion_does_not_serve_answers_past_max_stale() {
+        let host = "emfile-too-old.praxis-sf-test.invalid";
+        insert_aged(host, "5.6.7.8", Duration::from_secs(MAX_STALE_SECS + 1));
+
+        let failing = ControlledLookup::new(Behavior::FailOs(ENFILE));
+        failing.release.notify_one();
+        let err = resolve_host_cached_with(host, &failing)
+            .await
+            .expect_err("an answer older than the stale limit must not be served");
+        assert!(
+            err.is_local_resource_exhaustion(),
+            "caller must see the local failure, got {err}"
+        );
+        assert!(
+            lookup_cached(host).is_none(),
+            "nothing may be re-armed or negatively cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_failure_still_replaces_a_stale_answer() {
+        let host = "servfail-stale.praxis-sf-test.invalid";
+        insert_aged(host, "5.6.7.8", Duration::from_secs(DNS_TTL_SECS + 1));
+
+        let failing = ControlledLookup::new(Behavior::Fail);
+        failing.release.notify_one();
+        let err = resolve_host_cached_with(host, &failing)
+            .await
+            .expect_err("a DNS failure must surface");
+        assert!(
+            !err.is_local_resource_exhaustion(),
+            "precondition: not a local shortage"
+        );
+        assert!(
+            matches!(
+                lookup_cached(host),
+                Some(Err(AddressResolutionError::RecentFailure { .. }))
+            ),
+            "a DNS failure must still be negatively cached"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_callers_share_the_stale_answer_during_exhaustion() {
+        let host = "emfile-coalesce.praxis-sf-test.invalid";
+        insert_aged(host, "8.8.4.4", Duration::from_secs(DNS_TTL_SECS + 1));
+        let lookup = ControlledLookup::new(Behavior::FailOs(EMFILE));
+        let tasks: Vec<_> = std::iter::repeat_with(|| {
+            let l = lookup.clone();
+            tokio::spawn(async move { resolve_host_cached_with(host, &l).await })
+        })
+        .take(6)
+        .collect();
+        await_lookup_started(&lookup.calls).await;
+        lookup.release.notify_waiters();
+        for t in tasks {
+            let ips = t.await.unwrap().expect("every waiter gets the stale answer");
+            assert_eq!(ips, vec!["8.8.4.4".parse::<IpAddr>().unwrap()], "stale answer fan-out");
+        }
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1, "exactly one blocking lookup");
+        assert!(
+            !dns_inflight().contains_key(&cache_key(host)),
+            "inflight entry removed after serving stale"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -1011,6 +1286,7 @@ mod tests {
         Ok(Vec<IpAddr>),
         Empty,
         Fail,
+        FailOs(i32),
         Panic,
     }
 
@@ -1044,10 +1320,32 @@ mod tests {
                     address: host,
                     source: std::io::Error::from_raw_os_error(111),
                 }),
+                Behavior::FailOs(code) => Err(os_resolve_error(&host, code)),
                 #[expect(clippy::panic, reason = "test double intentionally panics to verify cleanup guard")]
                 Behavior::Panic => panic!("controlled lookup panic for {host}"),
             }
         }
+    }
+
+    fn os_resolve_error(host: &str, code: i32) -> AddressResolutionError {
+        AddressResolutionError::Resolve {
+            address: host.to_owned(),
+            source: std::io::Error::from_raw_os_error(code),
+        }
+    }
+
+    fn insert_aged(host: &str, ip: &str, age: Duration) {
+        let resolved_at = Instant::now()
+            .checked_sub(age)
+            .expect("the monotonic clock must be older than the test offset");
+        dns_cache().insert(
+            cache_key(host),
+            DnsCacheEntry {
+                outcome: Ok(Arc::from([ip.parse::<IpAddr>().unwrap()].as_slice())),
+                resolved_at,
+                fresh_until: later(resolved_at, DNS_TTL_SECS),
+            },
+        );
     }
 
     // Poll until the lookup has been entered (calls > 0), yielding cooperatively.
