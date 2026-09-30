@@ -25,6 +25,7 @@
 pub mod example_config;
 pub mod filters;
 pub mod fips;
+pub mod load;
 pub mod net;
 pub mod process;
 pub mod proxy;
@@ -32,6 +33,7 @@ pub mod tls_probe;
 
 pub use example_config::{allow_loopback_endpoints, example_config_path, load_example_config, patch_yaml};
 pub use fips::{FIPS_HOST_ENV, approved_mode, assert_fips_host_if_declared, expect_approved_mode, fips_host};
+pub use load::{LoadReport, collect_responses, concurrent_gets, open_requests, read_raw_responses};
 pub use net::*;
 #[cfg(target_os = "linux")]
 pub use process::own_open_file_limits;

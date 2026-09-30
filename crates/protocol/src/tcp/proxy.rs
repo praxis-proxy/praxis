@@ -298,6 +298,14 @@ impl ServerApp for PingoraTcpProxy {
                 return None;
             }
 
+            let Some(mut fd_admission) = praxis_core::fd::try_admit() else {
+                warn!(remote = %remote_addr, "file descriptor limit nearly exhausted, closing TCP connection");
+                crate::http::pingora::metrics::record_overload_reject(
+                    crate::http::pingora::metrics::OVERLOAD_REASON_FILE_DESCRIPTORS,
+                );
+                return None;
+            };
+
             let (exceeded, _global_permit) = crate::connections::try_acquire_global();
             if exceeded {
                 warn!(remote = %remote_addr, "global max connections reached, closing TCP connection");
@@ -365,6 +373,7 @@ impl ServerApp for PingoraTcpProxy {
             let cluster_label = self.metrics_cluster_label();
             let mut upstream =
                 if let Some(stream) = connect_upstream(&upstream_addr, self.allow_private_upstreams).await {
+                    fd_admission.connected(true);
                     crate::http::pingora::metrics::record_upstream_connect_duration(
                         cluster_label,
                         upstream_connect_start.elapsed().as_secs_f64(),

@@ -101,7 +101,8 @@ rather than silently adopted as the baseline.
 - Startup-only `runtime` settings (`threads`,
   `work_stealing`, `global_queue_interval`,
   `max_connections`, `max_memory_bytes`,
-  `max_open_files`, `subrequest_pool_size`,
+  `max_open_files`, `shed_on_fd_pressure`,
+  `subrequest_pool_size`,
   `subrequest_max_connections`,
   `subrequest_circuit_breaker`, `upstream_ca_file`,
   `upstream_keepalive_pool_size`)
@@ -542,6 +543,14 @@ runtime:
   above the hard limit is clamped with a warning.
   Startup logs the limit in effect and warns when it is
   below 4096, or below what `max_connections` implies.
+- `shed_on_fd_pressure`: reject new requests with `503
+  Service Unavailable` (and close new TCP connections)
+  when open file descriptors near the process limit,
+  keeping a reserve of 5% or 64 descriptors, whichever
+  is larger, for health probes, DNS, and logs. Counted
+  as `praxis_overload_rejects_total{reason=
+  "file_descriptors"}`. `bool`, defaults to `true`; set
+  `false` to let requests run into the limit instead.
 - `subrequest_circuit_breaker`: per-peer circuit breaker
   for the shared sub-request connector used by
   `iterative_request_router`. When configured, the

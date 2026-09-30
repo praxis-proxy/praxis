@@ -194,6 +194,12 @@ impl ProxyHttp for PingoraHttpHandler {
             return reject_503(session, "5", "memory pressure exceeded").await;
         }
 
+        let Some(fd_admission) = praxis_core::fd::try_admit() else {
+            metrics::record_overload_reject(metrics::OVERLOAD_REASON_FILE_DESCRIPTORS);
+            return reject_503(session, "1", "file descriptor limit nearly exhausted").await;
+        };
+        ctx.fd_admission = Some(fd_admission);
+
         let (exceeded, permit) = crate::connections::try_acquire_global();
         ctx._global_connection_permit = permit;
         if exceeded {
@@ -482,6 +488,9 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
+        if let Some(fd_admission) = ctx.fd_admission.as_mut() {
+            fd_admission.connected(!reused);
+        }
         let span = ctx.request_span.clone();
         let _entered = span.enter();
         let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);
