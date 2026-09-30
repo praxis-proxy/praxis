@@ -609,18 +609,23 @@ mod tests {
     #[test]
     fn opening_files_raises_the_sample() {
         let pressure = FdPressure::new(u64::MAX, true);
-        pressure.refresh();
-        let before = pressure.usage().open;
-        let files: Vec<std::fs::File> = std::iter::repeat_with(|| tempfile::tempfile().unwrap())
-            .take(32)
-            .collect();
-        pressure.refresh();
-        let during = pressure.usage().open;
-        drop(files);
+        let exact = std::iter::repeat_with(|| {
+            pressure.refresh();
+            let before = pressure.usage().open;
+            let files: Vec<std::fs::File> = std::iter::repeat_with(|| tempfile::tempfile().unwrap())
+                .take(32)
+                .collect();
+            pressure.refresh();
+            let during = pressure.usage().open;
+            drop(files);
+            pressure.refresh();
+            before == pressure.usage().open && during == before.saturating_add(32)
+        })
+        .take(1_000)
+        .any(|exact| exact);
         assert!(
-            during >= before.saturating_add(28),
-            "32 new files must show in the sample (before {before}, during {during}); \
-             parallel tests may close a few descriptors meanwhile"
+            exact,
+            "in a window where no other test opens or closes a descriptor, 32 new files must add exactly 32"
         );
     }
 
