@@ -19,29 +19,11 @@ Policies with `llm:` routes authorize the top-level request `model` through `cmf
 
 `body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also enables `cmf.llm_output` for non-streaming inference responses. APL field mutators do not rewrite inference bodies.
 
-It gates the whole response phase, not just body rewriting. Under `read_only`,
-`post_invocation` rules that read only identity attributes are skipped along
-with `result.<field>` pipelines. A policy declaring response-phase entity rules
-under `read_only` warns at load.
+`body_access: read_write` also enables response-phase `tool:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these rules are skipped and a warning is emitted. A response-only route adds no request-phase route rule; identity checks and `global` policy still apply.
 
-A route may declare only `result.<field>` pipelines or `post_invocation` steps.
-That adds no request-phase route rule; identity checks and `global` policy still
-apply.
+`prompt:` and `resource:` response rules do not currently run under either body access mode. Use `pre_invocation` for those controls.
 
-Only `tool:` routes are dispatched on the response phase. A `prompt:` or
-`resource:` route's `result.<field>` and `post_invocation` rules never run under
-either body access mode. A policy declaring them warns at load. Use
-`pre_invocation` for those controls.
-
-An `http:` route cannot carry `authorization:` alongside MCP entity routes;
-the policy is refused at load. Classified traffic uses its entity route, so
-those `http:` steps would not run. Put shared authorization in the `global`
-block, which applies to every entity route. Serve non-MCP traffic through a
-separate listener or filter.
-
-A route-scoped `authentication:` list remains supported. The early identity
-gate matches an `http:` route by path before classification, so its
-authentication steps still reach classified traffic.
+Policies with MCP entity routes cannot declare `authorization:` on an `http:` route. Use `global` for shared authorization; route-scoped `authentication:` remains supported.
 
 Response-body hooks run on a small dedicated runtime while the worker waits, for at most twice the engine's per-plugin timeout (`engine_settings.plugin_timeout`, so 60 seconds by default). A hook that does not finish in time is aborted and the response fails under the filter's `failure_mode`: `closed` truncates the response, `open` passes the body through unfiltered.
 
