@@ -317,6 +317,7 @@ fn per_ip_eviction_skips_when_below_threshold() {
         header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
         header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
+        shadow: false,
     };
     filter.maybe_evict(&state, 999_999_999_999);
 
@@ -459,6 +460,7 @@ fn hard_cap_rejects_new_ips() {
         header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
         header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
+        shadow: false,
     };
 
     let novel_ip: IpAddr = "192.168.1.1".parse().unwrap();
@@ -494,6 +496,7 @@ fn hard_cap_allows_known_ips() {
         header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
         header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
+        shadow: false,
     };
 
     let result = filter.try_acquire_for(Some(known_ip));
@@ -782,6 +785,135 @@ fn global_mode_ignores_ipv6_prefix_len() {
     );
 }
 
+#[test]
+fn shadow_defaults_to_false() {
+    let cfg: RateLimitConfig = serde_yaml::from_str("mode: global\nrate: 1\nburst: 1").unwrap();
+    assert!(!cfg.shadow, "omitted shadow should enforce the limit");
+}
+
+#[test]
+fn from_config_parses_shadow() {
+    for (value, expected) in [("true", true), ("false", false)] {
+        let cfg: RateLimitConfig =
+            serde_yaml::from_str(&format!("mode: global\nrate: 1\nburst: 1\nshadow: {value}")).unwrap();
+        assert_eq!(cfg.shadow, expected, "shadow: {value} should parse as {expected}");
+    }
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: per_ip\nrate: 1\nburst: 1\nshadow: true").unwrap();
+    assert!(
+        RateLimitFilter::from_config(&yaml).is_ok(),
+        "shadow: true should build a filter"
+    );
+}
+
+#[test]
+fn from_config_rejects_non_bool_shadow() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 1\nburst: 1\nshadow: observe").unwrap();
+    assert!(RateLimitFilter::from_config(&yaml).is_err(), "shadow must be a boolean");
+}
+
+#[tokio::test]
+async fn shadow_allows_over_burst_and_debits_bucket() {
+    let filter = make_shadow_filter("global", 1.0, 2);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let client: IpAddr = "10.0.0.1".parse().unwrap();
+
+    for i in 0..3 {
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some(client);
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "shadow request {i} should continue even past the burst"
+        );
+    }
+
+    assert!(
+        filter.current_remaining(Some(client)) < 1.0,
+        "shadow should debit the bucket exactly as enforcement would"
+    );
+
+    let mut resp = crate::test_utils::make_response();
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.client_addr = Some(client);
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    assert_eq!(
+        resp.headers.get("x-ratelimit-remaining").unwrap(),
+        "0",
+        "shadow response should report the drained bucket"
+    );
+}
+
+#[tokio::test]
+async fn shadow_per_ip_allows_without_client_addr() {
+    let filter = make_shadow_filter("per_ip", 10.0, 10);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "shadow should never reject, even without a client address"
+    );
+}
+
+#[tokio::test]
+async fn shadow_hard_cap_reports_no_remaining_tokens() {
+    let filter = make_hard_cap_shadow_filter(10.0, 20);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.current_filter_id = Some(0);
+    ctx.client_addr = Some("192.168.1.1".parse().unwrap());
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "shadow must allow the untracked IP"
+    );
+
+    let mut resp = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    assert_eq!(
+        resp.headers.get("x-ratelimit-remaining").unwrap(),
+        "0",
+        "the hard-cap shadow response must not advertise a full bucket"
+    );
+    assert_eq!(
+        resp.headers.get("x-ratelimit-limit").unwrap(),
+        "20",
+        "the configured limit should still be reported"
+    );
+}
+
+#[tokio::test]
+async fn limited_counter_distinguishes_shadow_from_enforced() {
+    crate::test_utils::install_metrics_recorder();
+    let shadow_before = limited_total(true);
+    let enforced_before = limited_total(false);
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    for filter in [make_shadow_filter("global", 1.0, 1), make_filter("global", 1.0, 1)] {
+        for _ in 0..2 {
+            let mut ctx = crate::test_utils::make_filter_context(&req);
+            ctx.client_addr = Some("10.0.0.1".parse().unwrap());
+            drop(filter.on_request(&mut ctx).await.unwrap());
+        }
+    }
+
+    // Other tests in this process increment the same series concurrently,
+    // so assert growth rather than an exact count.
+    assert!(
+        limited_total(true) > shadow_before,
+        "a shadowed over-limit request should count under shadow=\"true\""
+    );
+    assert!(
+        limited_total(false) > enforced_before,
+        "a rejected request should count under shadow=\"false\""
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -818,6 +950,7 @@ fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
         header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
         header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
+        shadow: false,
     }
 }
 
@@ -847,5 +980,35 @@ fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
         header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
         header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
+        shadow: false,
     }
+}
+
+/// Build a [`RateLimitFilter`] that observes its limit without rejecting.
+fn make_shadow_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
+    RateLimitFilter {
+        shadow: true,
+        ..make_filter(mode, rate, burst)
+    }
+}
+
+/// Build a shadow filter whose per-IP bucket map is at its hard cap.
+fn make_hard_cap_shadow_filter(rate: f64, burst: u32) -> RateLimitFilter {
+    let state = PerIpState::from_buckets(
+        populate_stale_map(HARD_CAP_PER_IP_ENTRIES, rate, f64::from(burst)),
+        Ipv6PrefixLen::default(),
+    );
+    RateLimitFilter {
+        state: RateLimitState::PerIp(state),
+        ..make_shadow_filter("per_ip", rate, burst)
+    }
+}
+
+/// Current value of `praxis_rate_limit_limited_total` for one `shadow` label.
+fn limited_total(shadow: bool) -> u64 {
+    let series = format!("praxis_rate_limit_limited_total{{shadow=\"{shadow}\"}} ");
+    crate::test_utils::render_metrics()
+        .lines()
+        .find_map(|line| line.strip_prefix(series.as_str()))
+        .map_or(0, |value| value.trim().parse().unwrap())
 }

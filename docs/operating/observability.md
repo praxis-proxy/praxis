@@ -257,6 +257,24 @@ limit less 5%, or less 64 on small limits). The admin
 `/api/stats` view reports the same numbers under
 `file_descriptors`.
 
+### Rate Limit Metrics
+
+#### `praxis_rate_limit_limited_total` (counter)
+
+Requests that exceeded a `rate_limit` filter's
+bucket, summed over every `rate_limit` entry in the
+process.
+
+| Label | Values |
+| -------- | --------------- |
+| `shadow` | `true`, `false` |
+
+`shadow="false"` counts requests rejected with
+`429`. `shadow="true"` counts requests that a
+`shadow: true` limit would have rejected but let
+through: the number to watch when tuning a new
+limit before enforcing it.
+
 ### Upstream Metrics
 
 #### `praxis_upstream_requests_total` (counter)

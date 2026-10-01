@@ -13,6 +13,24 @@ use super::{
 };
 use crate::builtins::http::traffic_management::token_bucket::TokenBucket;
 
+/// Why a request could not acquire a token.
+pub(super) enum AcquisitionFailure {
+    /// The client's bucket has fewer than one token.
+    EmptyBucket(f64),
+    /// No bucket can be used for this client.
+    Untracked,
+}
+
+impl AcquisitionFailure {
+    /// Remaining tokens to report on an enforced rejection.
+    pub(super) fn remaining(&self) -> f64 {
+        match self {
+            Self::EmptyBucket(remaining) => *remaining,
+            Self::Untracked => 0.0,
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Token Acquisition
 // -----------------------------------------------------------------------------
@@ -134,7 +152,7 @@ impl RateLimitFilter {
     /// Try to acquire a token for the given request context.
     ///
     /// Per-IP buckets are keyed by [`PerIpState::bucket_key`].
-    pub(super) fn try_acquire_for(&self, client_addr: Option<IpAddr>) -> Result<f64, f64> {
+    pub(super) fn try_acquire_for(&self, client_addr: Option<IpAddr>) -> Result<f64, AcquisitionFailure> {
         let now = self.now_nanos();
         match &self.state {
             RateLimitState::Global(bucket) => Self::acquire_from_bucket(bucket, self.rate, self.burst, now),
@@ -146,10 +164,15 @@ impl RateLimitFilter {
     ///
     /// Rejects unknown IPs when the map exceeds [`HARD_CAP_PER_IP_ENTRIES`]
     /// to prevent unbounded memory growth via address rotation.
-    fn acquire_per_ip(&self, state: &PerIpState, client_addr: Option<IpAddr>, now: u64) -> Result<f64, f64> {
+    fn acquire_per_ip(
+        &self,
+        state: &PerIpState,
+        client_addr: Option<IpAddr>,
+        now: u64,
+    ) -> Result<f64, AcquisitionFailure> {
         let Some(ip) = client_addr.map(|addr| state.bucket_key(addr)) else {
             tracing::info!("rate_limit: rejecting request with no client address");
-            return Err(0.0);
+            return Err(AcquisitionFailure::Untracked);
         };
         self.maybe_evict(state, now);
 
@@ -165,7 +188,7 @@ impl RateLimitFilter {
                 hard_cap = HARD_CAP_PER_IP_ENTRIES,
                 "rate_limit: per-IP map hard cap reached, rejecting new IP"
             );
-            return Err(0.0);
+            return Err(AcquisitionFailure::Untracked);
         }
 
         // Insert through the entry API so a genuinely new address can be
@@ -182,10 +205,10 @@ impl RateLimitFilter {
     }
 
     /// Try to acquire one token from a single bucket.
-    fn acquire_from_bucket(bucket: &TokenBucket, rate: f64, burst: f64, now: u64) -> Result<f64, f64> {
+    fn acquire_from_bucket(bucket: &TokenBucket, rate: f64, burst: f64, now: u64) -> Result<f64, AcquisitionFailure> {
         match bucket.try_acquire(rate, burst, now) {
             Some(remaining) => Ok(remaining),
-            None => Err(bucket.current_tokens(rate, burst, now)),
+            None => Err(AcquisitionFailure::EmptyBucket(bucket.current_tokens(rate, burst, now))),
         }
     }
 
