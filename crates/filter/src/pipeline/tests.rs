@@ -510,6 +510,46 @@ async fn unmatched_conditional_router_publishes_no_binding_or_route_metrics() {
     );
 }
 
+#[tokio::test]
+async fn router_matches_header_set_by_earlier_headers_filter() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: headers
+  conditions:
+    - when: {methods: ["POST"]}
+  request_set: [{name: x-praxis-traffic, value: write}]
+- filter: router
+  routes:
+    - path_prefix: "/"
+      headers: {x-praxis-traffic: write}
+      cluster: primary
+    - path_prefix: "/"
+      cluster: replica
+"#,
+    )
+    .unwrap();
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    let write = crate::test_utils::make_request(Method::POST, "/orders");
+    let mut write_ctx = crate::test_utils::make_filter_context(&write);
+    let read = crate::test_utils::make_request(Method::GET, "/orders");
+    let mut read_ctx = crate::test_utils::make_filter_context(&read);
+
+    drop(pipeline.execute_http_request(&mut write_ctx).await.unwrap());
+    drop(pipeline.execute_http_request(&mut read_ctx).await.unwrap());
+
+    assert_eq!(
+        write_ctx.cluster.as_deref(),
+        Some("primary"),
+        "the router should match the header the headers filter set earlier in the chain"
+    );
+    assert_eq!(
+        read_ctx.cluster.as_deref(),
+        Some("replica"),
+        "a request the headers filter skipped should fall through to the plain route"
+    );
+}
+
 #[test]
 fn build_stops_on_first_error() {
     let registry = FilterRegistry::with_builtins();

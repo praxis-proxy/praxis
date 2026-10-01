@@ -32,8 +32,6 @@ mod tests;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use http::HeaderMap;
-#[cfg(feature = "router-json-aliases")]
 use http::header::HeaderName;
 use praxis_core::config::{PathMatch, Route};
 #[cfg(feature = "upstream-binding")]
@@ -46,7 +44,7 @@ use self::config::{
 };
 use self::{
     config::{RouterConfig, RouterRouteConfig},
-    matching::{route_matches_request, should_stop_early, update_best_match},
+    matching::{PendingRouteHeaders, RouteHeaderSource, route_matches_request, should_stop_early, update_best_match},
 };
 #[cfg(feature = "upstream-binding")]
 use crate::pipeline::catalog::ClusterApplicationCatalog;
@@ -72,6 +70,13 @@ use crate::{
 ///
 /// Longest prefix wins. Routes without `host` match any host. Header
 /// restrictions use AND semantics with case-sensitive matching.
+///
+/// Header restrictions see the request as earlier filters in the pipeline
+/// left it: a header they set or added matches by its new value, and one
+/// they removed no longer matches, so a classifier can promote a fact to an
+/// `x-praxis-*` header and route on it. A routed header that earlier filters
+/// gave two different values fails the request instead of routing on a
+/// guess. `host` is always read from the request as received.
 ///
 /// # YAML configuration
 ///
@@ -107,6 +112,10 @@ pub struct RouterFilter {
     /// router publish the logical binding.
     #[cfg(feature = "upstream-binding")]
     binding_catalog: Option<Arc<ClusterApplicationCatalog>>,
+
+    /// Distinct header names the routes' `headers` predicates match on,
+    /// resolved against pending header mutations once per request.
+    header_names: Vec<HeaderName>,
 
     /// Enable multi-level subdomain matching for wildcard hosts.
     multi_level_subdomain_matching: bool,
@@ -203,6 +212,7 @@ impl RouterFilter {
         Self {
             #[cfg(feature = "upstream-binding")]
             binding_catalog: None,
+            header_names: route_header_names(&resolved),
             multi_level_subdomain_matching: false,
             routes: resolved,
         }
@@ -261,7 +271,12 @@ impl RouterFilter {
     ///
     /// When multiple routes share the same prefix length, the route with
     /// more constraints (host presence + header count) wins.
-    fn match_route(&self, path: &str, host: Option<&str>, req_headers: &HeaderMap) -> Option<&ResolvedRoute> {
+    fn match_route<S: RouteHeaderSource>(
+        &self,
+        path: &str,
+        host: Option<&str>,
+        req_headers: &S,
+    ) -> Option<&ResolvedRoute> {
         let mut best: Option<(matching::Specificity, &ResolvedRoute)> = None;
 
         for resolved in &self.routes {
@@ -476,6 +491,22 @@ fn resolve_routes(routes: Vec<RouterRouteConfig>) -> Vec<ResolvedRoute> {
         .collect()
 }
 
+/// Distinct header names any route's `headers` predicate matches on.
+///
+/// A name that does not parse is left out: it can never match a real header,
+/// so it has no pending state worth resolving.
+fn route_header_names(routes: &[ResolvedRoute]) -> Vec<HeaderName> {
+    let mut names: Vec<HeaderName> = routes
+        .iter()
+        .filter_map(|resolved| resolved.route.headers.as_ref())
+        .flat_map(|headers| headers.keys())
+        .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+        .collect();
+    names.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+    names.dedup();
+    names
+}
+
 /// Exact → bare path; Prefix → `path*`.
 ///
 /// Labels are interned to `&'static str` so they can be shared across
@@ -553,8 +584,10 @@ impl HttpFilter for RouterFilter {
             .and_then(|v| v.to_str().ok())
             .or_else(|| ctx.request.uri.authority().map(http::uri::Authority::as_str));
 
+        let headers = PendingRouteHeaders::resolve(&self.header_names, ctx)?;
+
         trace!(path = %path, host = host.unwrap_or(""), "matching route");
-        let Some(resolved) = self.match_route(path, host, &ctx.request.headers) else {
+        let Some(resolved) = self.match_route(path, host, &headers) else {
             debug!(path = %path, "no route matched");
             return Ok(FilterAction::Reject(Rejection::status(404)));
         };

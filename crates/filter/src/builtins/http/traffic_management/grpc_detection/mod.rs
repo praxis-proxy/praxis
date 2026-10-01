@@ -33,7 +33,7 @@ use crate::{
 /// Writes `grpc.kind` to filter metadata and `kind` to the
 /// `grpc_detection` filter results. Split a pipeline on the variant
 /// with a branch chain (`on_result` with `filter: grpc_detection`,
-/// `key: kind`); the `router` matches client request headers and reads
+/// `key: kind`); the `router` matches request headers and reads
 /// neither filter results nor metadata, so it cannot route on this
 /// filter's output. To gate a filter on gRPC without a branch chain,
 /// use the `grpc:` request condition, which reads the `content-type`
