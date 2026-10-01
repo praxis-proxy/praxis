@@ -272,12 +272,11 @@ reviews:
 
     - path: "AGENTS.md"
       instructions: |
-        AGENTS.md and .claude/CLAUDE.md are one document kept as two
-        byte-identical files, and nothing enforces that. A change to one must
-        appear in the other in the same commit.
+        .claude/CLAUDE.md is a symlink to AGENTS.md, so every agent reads this
+        one file. Check that commands, paths, and rules it states still match
+        the Makefile, Cargo.toml, and docs/developing/conventions.md.
 
     - path: ".claude/CLAUDE.md"
       instructions: |
-        AGENTS.md and .claude/CLAUDE.md are one document kept as two
-        byte-identical files, and nothing enforces that. A change to one must
-        appear in the other in the same commit.
+        This must stay a symlink to ../AGENTS.md. Flag any change that turns it
+        into a regular file or points it elsewhere; edits belong in AGENTS.md.

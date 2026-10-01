@@ -7,7 +7,7 @@ authors.workspace = true
 description = "Development task runner for Praxis"
 license.workspace = true
 repository.workspace = true
-readme = "../README.md"
+readme.workspace = true
 publish = false
 
 [lints]

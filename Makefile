@@ -7,7 +7,9 @@
 VERSION          ?= $(shell sed -n 's/^version[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' Cargo.toml | head -n 1)
 IMAGE            ?= praxis
 CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
-NIGHTLY_VERSION  := $(shell grep -m1 'rust-toolchain@' .github/actions/install-nightly-rust/action.yml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')
+# The dated nightly that rustfmt runs on. CI's lint job pins the same date in
+# the conventions repo's setup-rust-lint action; bump the two together.
+NIGHTLY_VERSION  := nightly-2026-03-28
 V                ?=
 
 UNAME_S := $(shell uname -s | tr A-Z a-z)
@@ -17,7 +19,8 @@ UNAME_M := $(shell uname -m)
 # All
 # -------------------------------------------------------------------
 
-all: build
+##@ Build
+all: build ## workspace build (alias for build)
 
 # -------------------------------------------------------------------
 # Prerequisites
@@ -29,7 +32,7 @@ RUST_TARGETS := all build release check \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
-	bench build-benches \
+	bench build-benches check-features \
 	lint fmt doc audit coverage coverage-check \
 	build-fips release-fips check-fips lint-fips test-fips fips-deps fips-report \
 	run-echo run-debug
@@ -56,11 +59,10 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
 	bench build-benches \
-	lint lint-extra generate-filter-docs fmt doc audit semver publish-dry-run publish \
+	lint lint-containers lint-extra generate-filter-docs fmt doc audit semver publish-dry-run publish \
 	mutants \
 	coverage coverage-check \
-	fuzz fuzz-build \
-	require-container-engine require-podman require-oc \
+	require-container-engine require-podman require-go require-oc \
 	container container-run \
 	test-container test-container-run \
 	build-fips release-fips check-fips lint-fips test-fips \
@@ -99,10 +101,6 @@ check-prereqs-extra:
 	done
 
 check-prereqs-nightly-toolchain: check-prereqs
-	@test -n "$(NIGHTLY_VERSION)" || { \
-		echo "Could not determine NIGHTLY_VERSION from .github/actions/install-nightly-rust/action.yml" >&2; \
-		exit 1; \
-	}
 	@cargo +$(NIGHTLY_VERSION) --version >/dev/null 2>&1 || { \
 		echo "Rust $(NIGHTLY_VERSION) is not installed — run \"rustup toolchain install $(NIGHTLY_VERSION)\" (see docs/developing/getting-started.md)" >&2; \
 		exit 1; \
@@ -121,17 +119,19 @@ $(NIGHTLY_FMT_TARGETS): check-prereqs-nightly
 # Build
 # -------------------------------------------------------------------
 
-build:
+build: ## workspace build, benches included
 	cargo build --workspace
 	cargo build --workspace --benches
 
-build-dev:
+build-dev: ## workspace build with the dev feature set
 	cargo build --workspace --features dev
 
-release:
-	cargo build --workspace --release
+# The shipped binary only: the release profile is fat LTO with one codegen
+# unit, which is slow, and nothing else in the workspace needs it.
+release: ## release build of the praxis binary
+	cargo build --release -p praxis-proxy
 
-check:
+check: ## cargo check of the default and lean feature sets
 	cargo check --workspace
 	cargo check -p praxis-proxy --no-default-features
 	cargo check -p praxis-proxy --no-default-features --features config-reload,admin-api
@@ -143,7 +143,7 @@ check:
 # --no-default-features); this builds each flag on its own, so an inter-feature
 # dependency (a feature that only compiles when another is also enabled) is
 # caught on every PR rather than only in the all-on or all-off build.
-check-features:
+check-features: ## check each optional feature on its own
 	@for f in policy-engine config-reload admin-api otel basic-auth-filter \
 	          cloud-events-filter upstream-binding iterative-request-router \
 	          router-json-aliases bound-upstream-request-body chain-binding spiffe; do \
@@ -151,7 +151,7 @@ check-features:
 		cargo check -p praxis-proxy --no-default-features --features "$$f" --all-targets || exit 1; \
 	done
 
-clean:
+clean: ## cargo clean
 	cargo clean
 
 # -------------------------------------------------------------------
@@ -241,9 +241,10 @@ else
   FORTIO_DEP := $(FORTIO)
 endif
 
-tools: $(H2SPEC) $(VEGETA) $(FORTIO_DEP)
+##@ External tools
+tools: $(H2SPEC) $(VEGETA) $(FORTIO_DEP) ## download h2spec, vegeta and fortio into BINUTILS_DIR
 
-clean-tools:
+clean-tools: ## remove the downloaded tools
 	rm -rf $(BINUTILS_DIR)
 
 # -------------------------------------------------------------------
@@ -255,10 +256,15 @@ ifndef CONTAINER_ENGINE
 	$(error No container engine found — install podman or docker)
 endif
 
-container: | require-container-engine
-	$(CONTAINER_ENGINE) build -t $(IMAGE):$(VERSION) -f Containerfile .
+# podman builds OCI images by default, and the OCI format has no HEALTHCHECK
+# (podman drops it with a warning); the docker format keeps it.
+CONTAINER_BUILD_FLAGS := $(if $(findstring podman,$(notdir $(CONTAINER_ENGINE))),--format docker)
 
-container-run: | require-container-engine
+##@ Container
+container: | require-container-engine ## build the container image
+	$(CONTAINER_ENGINE) build $(CONTAINER_BUILD_FLAGS) -t $(IMAGE):$(VERSION) -f Containerfile .
+
+container-run: | require-container-engine ## run the container image (host network)
 	$(CONTAINER_ENGINE) run --rm --network=host $(IMAGE):$(VERSION) 2>&1
 
 # -------------------------------------------------------------------
@@ -390,16 +396,17 @@ require-go:
 require-oc:
 	@command -v oc >/dev/null || { echo "oc (the OpenShift CLI) is required: check-payload refuses to scan without it on PATH"; exit 1; }
 
+##@ FIPS (policy engine off; see FIPS_FEATURES)
 # The debug build is the edit-compile loop; only the release build carries
 # the manifest.
-build-fips:
+build-fips: ## FIPS build, debug profile, into target/fips
 	cargo build $(FIPS_CARGO_ARGS)
 
 # cargo before 1.99 does not relink a binary when only the SBOM setting
 # changed (rust-lang/cargo#15695, fixed by #17216), so the old binary goes
 # first; everything else stays cached. Drop the clean once the toolchains in
 # use (here and the UBI rust-toolset) are 1.99 or newer.
-release-fips:
+release-fips: ## FIPS build, release profile, with the embedded crate manifest
 ifeq ($(CARGO_AUDITABLE),cargo auditable)
 	cargo clean --release -p praxis-proxy --target-dir $(FIPS_TARGET_DIR)
 	$(FIPS_SBOM_ENV) cargo auditable $(FIPS_SBOM_ARGS) build --release $(FIPS_CARGO_ARGS)
@@ -408,12 +415,12 @@ else
 	cargo build --release $(FIPS_CARGO_ARGS)
 endif
 
-check-fips:
+check-fips: ## cargo check of the FIPS build
 	cargo check $(FIPS_CARGO_ARGS)
 
 # Clippy over every target of the FIPS build, plus the rustfmt check (which
 # is feature-independent but belongs in "is the FIPS version clean").
-lint-fips:
+lint-fips: ## clippy (all targets) + rustfmt for the FIPS feature set
 	cargo clippy $(FIPS_CARGO_ARGS) --all-targets -- -D warnings
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
 
@@ -421,7 +428,7 @@ lint-fips:
 # the FIPS build resolves them: no default features anywhere, only
 # FIPS_FEATURES on the binary. The integration suites against the same
 # feature set are `test-integration-fips` and `test-conformance-fips`.
-test-fips:
+test-fips: ## unit tests resolved as the FIPS build
 	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
 		-p praxis-proxy -p praxis-proxy-protocol -p praxis-proxy-filter \
 		-p praxis-proxy-core -p praxis-proxy-tls \
@@ -438,12 +445,12 @@ test-fips:
 # feature set; every FIPS behavior test takes its non-FIPS branch. On a FIPS
 # host, run it through `test-fips-host`, which declares the host as such so
 # the same tests insist on their approved-mode branch instead.
-test-integration-fips: build-fips
+test-integration-fips: build-fips ## integration suites against the FIPS build
 	PRAXIS_BIN=$(abspath $(FIPS_TARGET_DIR))/debug/praxis \
 	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
 		$(FIPS_TEST_SUITES) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
 
-test-conformance-fips: build-fips $(H2SPEC)
+test-conformance-fips: build-fips $(H2SPEC) ## conformance suite against the FIPS build
 	PATH="$(BINUTILS_PATH):$(PATH)" PRAXIS_BIN=$(abspath $(FIPS_TARGET_DIR))/debug/praxis \
 	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
 		-p praxis-tests-conformance $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
@@ -464,7 +471,7 @@ test-conformance-fips: build-fips $(H2SPEC)
 #
 # Needs rootless podman on a RHEL 9 host in FIPS mode (docs/operating/fips.md).
 # On any other host it fails at the first test, by design.
-test-fips-host: fips-toolchain
+test-fips-host: fips-toolchain ## every suite as the FIPS build, on a FIPS host (podman)
 	podman run --rm --userns=keep-id --security-opt label=disable \
 		-v $(CURDIR):/src -w /src \
 		-v praxis-fips-host-cargo:/cargo:U \
@@ -483,7 +490,7 @@ test-fips-host: fips-toolchain
 # every test binary in the run. With PRAXIS_FIPS_HOST declared it fails here,
 # before anything compiles, unless the kernel flag, the active fips provider
 # and the MD5 refusal all agree.
-fips-host-facts:
+fips-host-facts: ## print the FIPS state the test process sees
 	@echo "== FIPS host facts, as seen by the process the suites run as"
 	@echo "user: $$(id -u):$$(id -g)"
 	@echo "kernel fips_enabled: $$(cat /proc/sys/crypto/fips_enabled 2>/dev/null || echo unreadable)"
@@ -508,47 +515,47 @@ fips-host-facts:
 # every Red Hat image looks unsigned. This installs the bundled entry for the
 # current user when the registries.d podman reads names none, and does
 # nothing otherwise. CI runs it before fips-verify-image.
-fips-signature-store:
+fips-signature-store: ## point podman at Red Hat's signature store (once, Debian/Ubuntu)
 	$(XTASK_FIPS) fips signature-store --install
 
-fips-verify-image: | require-podman
+fips-verify-image: | require-podman ## verify the pinned UBI 9 base images (digest + signature)
 	$(XTASK_FIPS) fips verify-image --pinned-in Containerfile.fips $(FIPS_UBI9_IMAGE)
 	$(XTASK_FIPS) fips verify-image --pinned-in Containerfile.fips $(FIPS_UBI9_MINIMAL_IMAGE)
 
-container-fips: fips-verify-image
+container-fips: fips-verify-image ## FIPS runtime image on UBI 9
 	podman build -f Containerfile.fips --target runtime $(FIPS_BUILD_ARGS) \
 		-t $(IMAGE):$(VERSION)-fips .
 
 # Red Hat's toolchain and OpenSSL, no sources: the image `test-fips-host`
 # runs the suites in.
-fips-toolchain: fips-verify-image
+fips-toolchain: fips-verify-image ## UBI 9 toolchain image that test-fips-host runs in
 	podman build -f Containerfile.fips --target toolchain $(FIPS_BUILD_ARGS) \
 		-t $(FIPS_TOOLCHAIN_IMAGE) .
 
-container-fips-run: | require-podman
+container-fips-run: | require-podman ## run the FIPS image (host network)
 	podman run --rm --network=host $(IMAGE):$(VERSION)-fips 2>&1
 
 # The binary starts on ubi-minimal, loads the system OpenSSL and accepts the
 # shipped config; a cheap proof that the image runs before the scan.
-fips-smoke: | require-podman
+fips-smoke: | require-podman ## run the FIPS image once to validate its config
 	podman run --rm --entrypoint praxis $(IMAGE):$(VERSION)-fips \
 		--validate -c /etc/praxis/config.yaml
 
-fips-check: fips-check-ubi
+fips-check: fips-check-ubi ## build on UBI 9 and print the compliance report
 
-fips-check-ubi: fips-verify-image
+fips-check-ubi: fips-verify-image ## same as fips-check
 	podman build -f Containerfile.fips --target report $(FIPS_BUILD_ARGS) \
 		-t $(FIPS_CHECK_IMAGE) .
 	podman run --rm $(FIPS_CHECK_IMAGE)
 
-fips-report:
+fips-report: ## compliance report against the local FIPS build (FIPS_BIN)
 	$(XTASK_FIPS) fips report --features $(FIPS_FEATURES) $(FIPS_BIN)
 
 # The graph check is `cargo xtask fips report` (cargo tree scoped to the
 # binary and its feature set) rather than cargo-deny: cargo-deny resolves features
 # workspace-wide, and the test crates always enable the policy engine on
 # the binary, so it cannot see the FIPS build's real graph.
-fips-deps:
+fips-deps: ## FIPS dependency graph check (seconds, no build)
 	@grep -qx 'ARG CARGO_FEATURES="$(FIPS_FEATURES)"' Containerfile.fips || { \
 		echo "Containerfile.fips CARGO_FEATURES default differs from FIPS_FEATURES ($(FIPS_FEATURES))"; exit 1; }
 	$(XTASK_FIPS) fips report --deps-only --features $(FIPS_FEATURES)
@@ -556,13 +563,13 @@ fips-deps:
 # --fail-on-warnings makes an inconclusive verdict (for example a binary
 # without a crate manifest) fail, as Red Hat's gated scans do. Needs a Linux
 # podman (rootless or root), not a podman machine.
-fips-scan: | require-podman require-oc
+fips-scan: | require-podman require-oc ## Red Hat's scanner (check-payload) on the FIPS image
 	@[ -x "$(CHECK_PAYLOAD)" ] || { echo "check-payload not found at $(CHECK_PAYLOAD): run 'make fips-scanner' (needs go) or set CHECK_PAYLOAD"; exit 1; }
 	$(PODMAN_UNSHARE) $(CHECK_PAYLOAD) scan image \
 		--spec containers-storage:$(FIPS_IMAGE_REF) --fail-on-warnings
 
 # Built as upstream builds it (CGO_ENABLED=0, vendored modules).
-fips-scanner: | require-go
+fips-scanner: | require-go ## build check-payload at the pinned revision (needs go)
 	@mkdir -p $(CHECK_PAYLOAD_DIR)
 	@[ -d $(CHECK_PAYLOAD_DIR)/.git ] || git -C $(CHECK_PAYLOAD_DIR) init --quiet
 	git -C $(CHECK_PAYLOAD_DIR) fetch --quiet --depth 1 $(CHECK_PAYLOAD_REPO) $(CHECK_PAYLOAD_REV)
@@ -585,7 +592,7 @@ fips-scanner: | require-go
 # warning unless FIPS_HOST_CHECK_ARGS adds --require-certified. Writes the
 # attestation to target/fips/ for CI to keep.
 FIPS_HOST_CHECK_ARGS    ?=
-fips-host-check: | require-podman
+fips-host-check: | require-podman ## attest the FIPS host and the FIPS image
 	@mkdir -p $(FIPS_TARGET_DIR)
 	$(XTASK_FIPS) fips host-check --image $(FIPS_IMAGE_REF) \
 		--out $(FIPS_TARGET_DIR)/host-attestation.txt \
@@ -594,7 +601,7 @@ fips-host-check: | require-podman
 # Run the FIPS image on this FIPS host under PRAXIS_REQUIRE_FIPS=1 and drive
 # the listener probes of the integration suite against it from the toolchain
 # image; keeps the container's log in target/fips/.
-fips-runtime-probe: | require-podman
+fips-runtime-probe: | require-podman ## probe the FIPS image's listeners on a FIPS host
 	@mkdir -p $(FIPS_TARGET_DIR)
 	$(XTASK_FIPS) fips runtime-probe $(FIPS_IMAGE_REF) \
 		--toolchain-image $(FIPS_TOOLCHAIN_IMAGE) --log $(FIPS_TARGET_DIR)/runtime-probe.log
@@ -602,14 +609,14 @@ fips-runtime-probe: | require-podman
 # Hand the built image to another machine as an archive (the FIPS runner
 # tests the exact image the hosted job built and scanned, not a rebuild).
 FIPS_IMAGE_ARCHIVE      ?= $(FIPS_TARGET_DIR)/praxis-fips-image.tar
-fips-image-save: | require-podman
+fips-image-save: | require-podman ## save the FIPS image to FIPS_IMAGE_ARCHIVE
 	@mkdir -p $(dir $(FIPS_IMAGE_ARCHIVE))
 	podman save --output $(FIPS_IMAGE_ARCHIVE) $(FIPS_IMAGE_REF)
 	podman image inspect --format '{{.Id}}' $(FIPS_IMAGE_REF) > $(FIPS_IMAGE_ARCHIVE).id
 
 # Load an archive `fips-image-save` wrote and check its id is the one that
 # was saved.
-fips-image-load: | require-podman
+fips-image-load: | require-podman ## load a saved FIPS image and check its id
 	podman load --input $(FIPS_IMAGE_ARCHIVE)
 	@loaded=$$(podman image inspect --format '{{.Id}}' $(FIPS_IMAGE_REF)); \
 	saved=$$(cat $(FIPS_IMAGE_ARCHIVE).id); \
@@ -618,18 +625,19 @@ fips-image-load: | require-podman
 
 # Name an image podman already has (a published digest that was pulled, say)
 # the way the FIPS targets expect it.
-fips-image-tag: | require-podman
+fips-image-tag: | require-podman ## tag FIPS_IMAGE_SOURCE as the FIPS image
 	@[ -n "$(FIPS_IMAGE_SOURCE)" ] || { echo "set FIPS_IMAGE_SOURCE to the reference to tag as $(FIPS_IMAGE_REF)"; exit 1; }
 	podman tag $(FIPS_IMAGE_SOURCE) $(FIPS_IMAGE_REF)
 
 # The version the FIPS image is tagged with, for scripts that need it.
-fips-version:
+fips-version: ## print the version the FIPS image is tagged with
 	@echo $(VERSION)
 
 # -------------------------------------------------------------------
 # Test
 # -------------------------------------------------------------------
 
+##@ Test
 # Tests are split into three groups, each a single cargo invocation with all
 # features enabled and its own CI job:
 #   test              unit tests, i.e. everything outside tests/ (the product
@@ -637,13 +645,13 @@ fips-version:
 #   test-integration  the heavier suites under tests/ (schema, security,
 #                     resilience, integration)
 #   test-conformance  RFC conformance (needs the h2spec binary)
-test: test-unit
+test: test-unit ## unit tests (alias for test-unit)
 
 # Everything outside tests/, one pass, every feature on, then the filter and
 # core crates in their lean configs: --all-features compiles out the tests that
 # only exist without `policy-engine` or `upstream-binding`, so nothing else
 # ever runs them.
-test-unit:
+test-unit: ## everything outside tests/, all features, plus lean runs
 	cargo test --workspace --all-features \
 		--exclude praxis-tests-schema \
 		--exclude praxis-tests-security \
@@ -656,12 +664,14 @@ test-unit:
 	cargo test -p praxis-proxy-filter --no-default-features $(_NOCAPTURE)
 	cargo test -p praxis-proxy-core --no-default-features $(_NOCAPTURE)
 
-test-schema:
-	cargo test -p praxis-tests-schema $(_NOCAPTURE)
+# The single-suite targets use the same --all-features as test-integration,
+# so running one suite runs the same tests it would there.
+test-schema: ## config parsing + example validation suite
+	cargo test --all-features -p praxis-tests-schema $(_NOCAPTURE)
 
 # Everything under tests/ (schema, security, resilience, integration) in a
 # single pass, every feature on. Conformance is separate (test-conformance).
-test-integration:
+test-integration: ## schema, security, resilience and integration suites
 	cargo test --all-features \
 		-p praxis-tests-schema \
 		-p praxis-tests-security \
@@ -672,47 +682,53 @@ test-integration:
 # Compile the benchmark harness without running it, to catch bench
 # build breakage. Split out of test-integration so PR CI skips it;
 # main CI still runs it (see .github/workflows/integration.yaml).
-build-benches:
+build-benches: ## compile the benchmarks without running them
 	cargo build --benches --all-features -p praxis-tests-benches
 
-test-conformance: $(H2SPEC)
+test-conformance: $(H2SPEC) ## RFC conformance suite (fetches h2spec)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-conformance $(_NOCAPTURE)
 
-test-security: test-security-suite
+test-security: test-security-suite ## security suite (alias for test-security-suite)
 
-test-security-suite:
-	cargo test -p praxis-tests-security $(_NOCAPTURE)
+test-security-suite: ## security suite
+	cargo test --all-features -p praxis-tests-security $(_NOCAPTURE)
 
-test-resilience:
-	cargo test -p praxis-tests-resilience $(_NOCAPTURE)
+test-resilience: ## resilience suite
+	cargo test --all-features -p praxis-tests-resilience $(_NOCAPTURE)
 
-test-config-validation: test-schema
+test-config-validation: test-schema ## alias for test-schema
 
-test-config: test-schema
+test-config: test-schema ## alias for test-schema
 
 # -------------------------------------------------------------------
 # Test Container
 # -------------------------------------------------------------------
 
-test-container: | require-container-engine
+##@ Test container
+test-container: | require-container-engine ## build the test container image
 	$(CONTAINER_ENGINE) build -t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
 
-test-container-run: test-container
-	$(CONTAINER_ENGINE) run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
+# label=disable: on an SELinux host the container can't read the bind-mounted
+# checkout otherwise, and relabeling it (:z) would change the checkout itself.
+test-container-run: test-container ## run the test suites in the test container
+	$(CONTAINER_ENGINE) run --rm --security-opt label=disable \
+		-v $(CURDIR):/src -v praxis-test-cache:/cache \
 		$(IMAGE)-test:$(VERSION) 2>&1
 
 # -------------------------------------------------------------------
 # Bench
 # -------------------------------------------------------------------
 
-bench: $(VEGETA) $(FORTIO_DEP)
+##@ Bench
+bench: $(VEGETA) $(FORTIO_DEP) ## Criterion microbenchmarks
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo bench -p praxis-tests-benches
 
 # -------------------------------------------------------------------
 # Quality
 # -------------------------------------------------------------------
 
-lint:
+##@ Quality
+lint: ## clippy, fmt check, machete, xtask lints, FIPS deps, containers
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cargo clippy -p praxis-proxy --no-default-features --all-targets -- -D warnings
 	cargo clippy -p praxis-proxy --no-default-features --features config-reload,admin-api --all-targets -- -D warnings
@@ -725,29 +741,42 @@ lint:
 	cargo xtask sync-example-readme
 	cargo xtask lint-filter-docs
 	$(MAKE) --no-print-directory fips-deps
+	$(MAKE) --no-print-directory lint-containers
 
-lint-extra: check-prereqs-extra
+# The builder stages must compile against the Alpine release the runtime stage
+# ships. Dependabot bumps the runtime `alpine:X.Y` tag but cannot move the
+# `-alpineX.Y` suffix of a rust image tag, so this fails the Dependabot PR
+# until the builders follow, instead of shipping a mismatched image.
+lint-containers: ## builder and runtime Alpine releases match
+	@runtime=$$(sed -n 's/^FROM alpine:\([0-9.]*\).*/\1/p' Containerfile); \
+	for f in Containerfile Containerfile.test; do \
+		builder=$$(sed -n 's/^FROM rust:[^ ]*-alpine\([0-9.]*\).*/\1/p' $$f); \
+		[ -n "$$runtime" ] && [ "$$builder" = "$$runtime" ] || { \
+			echo "$$f builds on Alpine '$$builder' but the Containerfile runtime is Alpine '$$runtime'"; exit 1; }; \
+	done
+
+lint-extra: check-prereqs-extra ## typos + taplo + shellcheck + actionlint
 	typos
 	taplo fmt --check
 	shellcheck .hooks/pre-commit
 	actionlint
 
-generate-filter-docs:
+generate-filter-docs: ## regenerate the per-filter docs under docs/filters/
 	cargo xtask generate-filter-docs
 
-mutants:
+mutants: ## mutation testing (cargo-mutants)
 	cargo mutants --workspace
 
-semver:
+semver: ## cargo semver-checks
 	cargo semver-checks
 
-fmt:
+fmt: ## format with nightly rustfmt
 	cargo +$(NIGHTLY_VERSION) fmt --all
 
-doc:
+doc: ## rustdoc with -D warnings, private items included
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --all-features
 
-audit:
+audit: ## cargo audit + cargo deny
 	cargo audit
 	cargo deny check
 
@@ -759,7 +788,7 @@ audit:
 # already on crates.io, so verifying a dependent crate would build it against
 # the older published siblings and fail. --locked still catches a stale lock.
 PUBLISH_DRY_RUN_FLAGS ?=
-publish-dry-run:
+publish-dry-run: ## package check of the release crates
 	cargo publish --workspace --dry-run --locked $(PUBLISH_DRY_RUN_FLAGS)
 
 # Real crates.io publish, in dependency order. Requires a crates.io token
@@ -770,7 +799,7 @@ publish-dry-run:
 # crates that depend on it. A multi-crate publish is not transactional
 # (crates published before a failure stay live), so the skip is what makes
 # a partially-published or re-published release safe to run again.
-publish:
+publish: ## publish the release crates to crates.io
 	cargo run -q -p xtask --no-default-features -- publish
 
 # Coverage instrumentation slows server startup, so give the test-readiness
@@ -785,28 +814,26 @@ publish:
 # stop those tests running entirely, dropping the covered lib code with them, so
 # only genuinely non-contributing packages are excluded: benches (no #[test]
 # cases), conformance (needs the external h2spec binary), and xtask (dev tool).
-coverage:
-	PRAXIS_TEST_READY_TIMEOUT_MS=30000 cargo llvm-cov --workspace --html --output-dir target/coverage \
-		--exclude praxis-tests-benches \
-		--exclude praxis-tests-conformance \
-		--exclude xtask \
-		--ignore-filename-regex '(target/|tests/|crates/server/src/main\.rs)' \
-		--fail-under-lines 96
+COVERAGE_MIN  := 96
+LLVM_COV_ARGS := --workspace \
+	--exclude praxis-tests-benches \
+	--exclude praxis-tests-conformance \
+	--exclude xtask \
+	--ignore-filename-regex '(target/|tests/|crates/server/src/main\.rs)' \
+	--fail-under-lines $(COVERAGE_MIN)
 
-coverage-check:
-	PRAXIS_TEST_READY_TIMEOUT_MS=30000 cargo llvm-cov --workspace --json \
-		--exclude praxis-tests-benches \
-		--exclude praxis-tests-conformance \
-		--exclude xtask \
-		--ignore-filename-regex '(target/|tests/|crates/server/src/main\.rs)' \
-		--fail-under-lines 96 \
-		--output-path coverage.json
+coverage: ## HTML coverage report in target/coverage
+	PRAXIS_TEST_READY_TIMEOUT_MS=30000 cargo llvm-cov $(LLVM_COV_ARGS) --html --output-dir target/coverage
+
+coverage-check: ## fail if line coverage is under COVERAGE_MIN
+	PRAXIS_TEST_READY_TIMEOUT_MS=30000 cargo llvm-cov $(LLVM_COV_ARGS) --json --output-path target/coverage.json
 
 # -------------------------------------------------------------------
 # Dev Setup
 # -------------------------------------------------------------------
 
-setup-hooks:
+##@ Dev
+setup-hooks: ## install the git pre-commit hook (runs make lint)
 	ln -sf ../../.hooks/pre-commit .git/hooks/pre-commit
 	@echo "Git hooks installed."
 
@@ -814,87 +841,18 @@ setup-hooks:
 # Dev tools
 # -------------------------------------------------------------------
 
-run-echo:
+run-echo: ## start the echo test server (xtask)
 	cargo xtask echo
 
-run-debug:
+run-debug: ## start the proxy with dev settings (xtask)
 	cargo xtask debug
 
 # -------------------------------------------------------------------
 # Help
 # -------------------------------------------------------------------
 
-help:
-	@echo "Variables:"
-	@echo "  V=1                  show test output (--nocapture)"
-	@echo ""
-	@echo "Top-level:"
-	@echo "  all                  workspace build (alias for build)"
-	@echo ""
-	@echo "Build:"
-	@echo "  build                cargo build --workspace"
-	@echo "  release              cargo build --workspace --release"
-	@echo "  check                cargo check --workspace"
-	@echo "  clean                cargo clean"
-	@echo ""
-	@echo "Test:"
-	@echo "  test                 tests outside tests/ (single pass, all features)"
-	@echo "  test-unit            alias for test"
-	@echo "  test-schema   config validation + example tests"
-	@echo "  test-integration     all tests/ suites: schema, security, resilience, integration"
-	@echo "  test-conformance     conformance tests only (needs h2spec)"
-	@echo "  test-security        security test suite"
-	@echo "  test-security-suite  security tests only"
-	@echo "  test-resilience      resilience tests only"
-	@echo "  test-config-validation  alias for test-schema"
-	@echo "  test-config          alias for test-schema"
-	@echo ""
-	@echo "Bench:"
-	@echo "  bench                Criterion micro-benchmarks"
-	@echo ""
-	@echo "Quality:"
-	@echo "  lint                 clippy (default + optional features) + rustfmt check + filter docs"
-	@echo "  lint-extra           typos + taplo + shellcheck + actionlint"
-	@echo "  generate-filter-docs generate per-filter docs under docs/filters/"
-	@echo "  fmt                  format with nightly rustfmt"
-	@echo "  audit                cargo audit + cargo deny"
-	@echo "  semver               cargo semver-checks"
-	@echo "  mutants              mutation testing (cargo-mutants)"
-	@echo "  publish-dry-run      build-verify all release crates for crates.io"
-	@echo "  publish              publish release crates to crates.io"
-	@echo "  coverage             HTML coverage report"
-	@echo "  coverage-check       fail if line coverage < 96%%"
-	@echo ""
-	@echo "Container:"
-	@echo "  container            build container image"
-	@echo "  container-run        run container in foreground (host network)"
-	@echo "  test-container       build test container image"
-	@echo "  test-container-run   build and run test suite in container"
-	@echo ""
-	@echo "FIPS (feature set: $(FIPS_FEATURES); policy engine off):"
-	@echo "  build-fips           FIPS build, debug profile, into target/fips"
-	@echo "  release-fips         FIPS build, release profile, into target/fips, with the embedded crate manifest"
-	@echo "  check-fips           cargo check of the FIPS build"
-	@echo "  lint-fips            clippy (all targets) + rustfmt check for the FIPS feature set"
-	@echo "  test-fips            unit tests resolved as the FIPS build (no defaults, FIPS_FEATURES on the binary)"
-	@echo "  container-fips       FIPS runtime image on UBI 9 (Red Hat toolchain, signature-verified bases)"
-	@echo "  container-fips-run   run the FIPS image in foreground (host network)"
-	@echo "  fips-check           build on UBI 9 and print the compliance report (fails while findings remain)"
-	@echo "  fips-report          compliance report against the local FIPS build (FIPS_BIN=target/fips/release/praxis)"
-	@echo "  fips-smoke           run the FIPS image once to validate its config"
-	@echo "  fips-scan            run Red Hat's scanner (check-payload) on the FIPS image, warnings fatal"
-	@echo "  fips-scanner         build check-payload at the pinned revision into target/fips (needs go)"
-	@echo "  fips-deps            dependency graph vs Red Hat's crypto denylist (seconds, no build)"
-	@echo "  fips-verify-image    verify the pinned UBI 9 base images are Red Hat's (digest + signature)"
-	@echo "  fips-signature-store point podman at Red Hat's signature store (once, on Debian/Ubuntu hosts)"
-	@echo ""
-	@echo "Binutils (target/praxis-binutils/):"
-	@echo "  tools                download all external CLI tools"
-	@echo "  clean-tools          remove downloaded tools"
-	@echo ""
-	@echo "Dev Setup:"
-	@echo "  setup-hooks          install git pre-commit hook (fmt + lint)"
-	@echo ""
-	@echo "Dev tools:"
-	@echo "  run-echo             start echo server (xtask)"
-	@echo "  run-debug            start debug server (xtask)"
+help: ## list targets
+	@echo "Usage: make <target>   (V=1 shows test output)"
+	@awk 'BEGIN { FS = ":[^#]*## " } \
+		/^##@ / { printf "\n%s:\n", substr($$0, 5); next } \
+		/^[a-zA-Z0-9_-]+:[^=]*## / { printf "  %-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)

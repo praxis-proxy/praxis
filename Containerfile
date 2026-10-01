@@ -4,7 +4,11 @@
 # Stage 1: Build
 # ------------------------------------------------------------------------------
 
-FROM rust:1.96-alpine3.23 AS builder
+# The Alpine release here must match the runtime stage below, which is what
+# the binary's OpenSSL and musl are linked against. Dependabot bumps the
+# runtime `alpine:` tag but cannot move this tag's `-alpine` suffix, so
+# `make lint` (lint-containers) fails until this line follows.
+FROM rust:1.96-alpine3.24 AS builder
 
 # praxis performs all of its cryptography in the system OpenSSL and links it
 # dynamically, so the musl target must not produce a static executable (the
@@ -15,74 +19,26 @@ RUN apk add --no-cache musl-dev pkgconf cmake make g++ openssl-dev
 WORKDIR /src
 
 # ------------------------------------------------------------------------------
-# Cache Build
-# ------------------------------------------------------------------------------
-
-# Cache dependency builds: copy only manifests first, then
-# create stub source files so `cargo build` resolves and
-# compiles all dependencies without the real source code.
-# See: https://shaneutt.com/blog/rust-fast-small-docker-image-builds/
-
-COPY Cargo.toml Cargo.lock ./
-# NOTE: crate list must be kept in sync with crates/ directory structure.
-# When adding a new crate under crates/, add its Cargo.toml here AND in
-# the RUN mkdir + stub creation below, AND in the COPY src lines, AND in
-# the find command that touches source files.
-COPY crates/core/Cargo.toml crates/core/Cargo.toml
-COPY crates/filter/Cargo.toml crates/filter/Cargo.toml
-COPY crates/protocol/Cargo.toml crates/protocol/Cargo.toml
-COPY crates/tls/Cargo.toml crates/tls/Cargo.toml
-COPY crates/server/Cargo.toml crates/server/Cargo.toml
-
-# The server crate has a build.rs that discovers external filter
-# crates via cargo metadata for build-time auto-registration.
-COPY crates/server/build.rs crates/server/build.rs
-
-# Strip workspace members not needed for the praxis binary
-# so we don't need their Cargo.toml files.
-RUN sed -i '/xtask/d; /benchmarks/d; /tests\//d' Cargo.toml
-RUN mkdir -p crates/core/src \
-    crates/filter/src \
-    crates/protocol/src \
-    crates/tls/src \
-    crates/server/src \
-    && echo '//! stub' > crates/core/src/lib.rs \
-    && echo '//! stub' > crates/filter/src/lib.rs \
-    && echo '//! stub' > crates/protocol/src/lib.rs \
-    && echo '//! stub' > crates/tls/src/lib.rs \
-    && echo '//! stub' > crates/server/src/lib.rs \
-    && printf '//! stub\nfn main() {}\n' > crates/server/src/main.rs
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release -p praxis-proxy
-
-# ------------------------------------------------------------------------------
-# Cache Tricks
-# ------------------------------------------------------------------------------
-
-# Replace stubs with real source, then rebuild. Only the
-# project crates recompile; all dependencies are cached.
-COPY crates/core/src crates/core/src
-COPY crates/filter/src crates/filter/src
-COPY crates/protocol/src crates/protocol/src
-COPY crates/tls/src crates/tls/src
-COPY crates/server/src crates/server/src
-COPY examples examples
-
-# Touch the lib/main files so cargo sees them as newer than
-# the cached stub artifacts.
-RUN find crates/core/src crates/filter/src \
-    crates/protocol/src crates/tls/src crates/server/src \
-    -name '*.rs' -exec touch {} +
-
-# ------------------------------------------------------------------------------
 # Build
 # ------------------------------------------------------------------------------
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/src/target \
-    cargo build --release -p praxis-proxy \
+# The whole workspace, so cargo resolves the committed lockfile as is
+# (--locked) and a new crate needs no change here. Incremental rebuilds come
+# from the target cache mount rather than from a dependency-only layer.
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY tests tests
+COPY xtask xtask
+
+# The cache mounts carry explicit ids so they never share a target directory
+# with Containerfile.fips (see the note there). That cache also outlives any
+# one checkout: building from a tree whose files are older than the cached
+# artifacts would let cargo's mtime check reuse stale workspace crates, so the
+# workspace sources are touched first. Dependencies stay cached either way.
+RUN --mount=type=cache,id=praxis-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=praxis-target,target=/src/target,sharing=locked \
+    find crates -type f -exec touch {} + \
+    && cargo build --release --locked -p praxis-proxy \
     && cp target/release/praxis /usr/local/bin/praxis
 
 # ------------------------------------------------------------------------------
@@ -99,13 +55,16 @@ LABEL org.opencontainers.image.source="https://github.com/praxis-proxy/praxis" \
 #   ca-certificates: TLS certificate validation
 #   libcrypto3, libssl3: the system OpenSSL the binary links dynamically
 #   libgcc: the unwinder (libgcc_s) a dynamically linked musl binary needs
-#   wget: HEALTHCHECK probe (Alpine includes wget by default, but explicit for clarity)
+# The HEALTHCHECK uses busybox's wget, which the base image already has; the
+# `wget` package would add GNU wget and its libraries for nothing.
+#
+# /etc/praxis is created here, as root, so the COPY --chown below only hands
+# the config file to praxis and not the directory.
 RUN apk add --no-cache \
     ca-certificates \
     libcrypto3 \
     libssl3 \
     libgcc \
-    wget \
     && addgroup -S praxis \
     && adduser -S -G praxis -h /nonexistent -s /sbin/nologin praxis \
     && mkdir -p /etc/praxis

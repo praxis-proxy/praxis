@@ -9,8 +9,10 @@ contributor responsible for the change.
 
 ## Requirements
 
-- Rust stable 1.92+
-- Rust nightly (for `rustfmt`)
+- Rust stable, the version pinned in `rust-toolchain.toml` (the MSRV is
+  `rust-version` in `Cargo.toml`)
+- Rust nightly for `rustfmt`, the dated toolchain `make fmt` names
+  (`NIGHTLY_VERSION` in the Makefile)
 - CMake 3.31+
 - Docker 29.3.0+ or Podman (for container builds)
 
@@ -31,11 +33,16 @@ make setup-hooks    # install git pre-commit hook (fmt + lint)
 make build          # workspace build (includes benches)
 make test           # tests outside tests/ (single pass, all features)
 make fmt            # format with nightly rustfmt
-make lint           # clippy + nightly fmt check + xtask lint-deps
+make lint           # clippy (several feature sets) + nightly fmt check +
+                    # machete + xtask lints + FIPS dependency check
+make check-features # every optional feature compiles on its own (CI runs it)
 make doc            # rustdoc with -D warnings, including private items
 make audit          # cargo audit + cargo deny check
 make coverage-check # fail if line coverage < 96%
 make container      # container image build
+make lint-fips      # clippy + fmt for the FIPS feature set
+make test-fips      # unit tests for the FIPS feature set
+make help           # every target
 cargo run -p praxis-proxy # run the proxy
 ```
 
@@ -101,6 +108,23 @@ server -> protocol -> filter -> core -> tls
 - `tests/conformance`: RFC conformance (h2spec)
 - `tests/security`: request smuggling, header injection
 - `tests/resilience`: load, failure recovery
+- `tests/benches`: Criterion microbenchmarks (`make bench`)
+
+## Commits and Pull Requests
+
+CI rejects PRs that break these; the full rules are under "Pull Request
+Conventions" in `docs/developing/conventions.md`.
+
+- Conventional commit subjects: `type(scope): summary`, with type one of
+  `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `test`,
+  and the summary at most 72 characters.
+- Every commit is signed off (`git commit -s`) and cryptographically signed
+  (GPG or SSH), by the human responsible for it. No AI tool as author,
+  co-author, or signatory.
+- At most 500 added lines of production code per PR. Tests, docs,
+  examples, benchmarks, and `Cargo.toml`/`Cargo.lock` don't count. Split
+  bigger changes into a stack.
+- Every PR description says what the change does and why.
 
 ## Conventions
 
@@ -123,6 +147,26 @@ codebase. Praxis-specific coding conventions:
   constrained numerics; `#[serde(default)]`
   instead of `Option<T>` with `unwrap_or`.
   See `docs/developing/type-design.md`.
+
+### Lints
+
+The workspace lint set (`[workspace.lints]` in `Cargo.toml`, thresholds in
+`clippy.toml`) is strict, and `make lint` denies every warning. The ones that
+come up most:
+
+- No `as` casts (`as_conversions`): use `From`/`TryFrom`.
+- No indexing or string slicing: use `get()` and friends.
+- No `unwrap`, `expect`, or `panic!` in production code.
+- No unchecked arithmetic (`arithmetic_side_effects`): use `checked_*`,
+  `saturating_*`, or `wrapping_*`.
+- Functions stay under 30 lines (`too_many_lines`).
+- No single-character names, no `_` arms when matching an enum, and modules
+  as `foo.rs`, never `foo/mod.rs`.
+- Every item, private ones included, has a doc comment.
+
+When a lint really doesn't fit, use `#[expect(lint, reason = "...")]`;
+`#[allow]` and reasonless expects are themselves denied. Test suites relax
+the restriction lints once at their crate root.
 
 ## Test Requirements
 
@@ -174,11 +218,44 @@ scope and choose the best fit.
 3. Register in `crates/filter/src/registry.rs`
 4. Add unit tests and doctests
 5. Add example config in `examples/configs/<category>/`
-   (follow the header comment format below)
+   (follow the header comment format above)
 6. Add functional integration test in
    `tests/integration/tests/suite/examples/`
    (must exercise actual functionality end-to-end)
 7. Run `cargo xtask sync-example-readme --fix`
+
+## Adding a Crate
+
+1. Add it to `members` in the root `Cargo.toml`.
+2. Inherit the package fields (`version.workspace = true`, ...) and the lints
+   (`[lints] workspace = true`). Test-only crates set `publish = false`.
+3. Put `#![forbid(unsafe_code)]` at the crate root. The workspace default is
+   only `deny` so one module in the filter crate can opt in; a new crate
+   shouldn't need to.
+
+## Feature Flags
+
+New or nascent capabilities go behind a cargo feature that is off by
+default. In `crates/server/Cargo.toml`, an experimental feature also turns on
+the `experimental` marker feature (which drives the startup warning). Add
+every optional feature to the `check-features` list in the Makefile, so CI
+proves it compiles on its own.
+
+## FIPS Build
+
+Praxis ships a FIPS 140-3 build (`make build-fips`, `make container-fips`)
+that leaves out the policy engine and does all cryptography through the
+system OpenSSL. When adding or changing dependencies:
+
+- Don't bring a crate with its own cryptography (`ring`, `aws-lc-rs`,
+  `sha2`, `hmac`, and the like) into the proxy's graph. TLS goes through
+  rustls with the OpenSSL provider; anything else uses the `openssl` crate.
+- Keep crates like `rustls` on `default-features = false`, since their
+  defaults pull in `aws-lc-rs` or `ring`.
+- `make lint` runs `make fips-deps`, which fails when a denied crate reaches
+  the FIPS build's graph.
+
+See `docs/developing/fips.md` and `docs/operating/fips.md`.
 
 ## Adding a Protocol
 

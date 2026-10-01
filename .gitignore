@@ -8,10 +8,6 @@ target
 # Rustfmt backup files
 **/*.rs.bk
 
-# Python
-__pycache__/
-*.pyc
-
 # MSVC debugging symbols
 *.pdb
 
@@ -30,7 +26,7 @@ coverage.json
 # VIM
 *.swp
 
-# Dotdirs (allow .github/, .cargo/, and .hooks/)
+# Dotdirs (allow .github/, .cargo/, .hooks/, and .claude/CLAUDE.md)
 .*/
 !.cargo/
 !.github/
@@ -50,10 +46,9 @@ docs/**/
 !docs/filters/tcp/
 !docs/filters/tcp/*/
 !docs/operating/
-!docs/proposals/
 
-# Praxis config files
-praxis.yaml
+# A local praxis config at the repo root
+/praxis.yaml
 
 # Personal TODO lists
 TODO

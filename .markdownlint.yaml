@@ -13,7 +13,8 @@ MD040: true
 # MD034: no bare URLs
 MD034: true
 
-# MD024: repeated headings are fine across proposal sections
+# MD024: a heading may repeat under different parents (e.g. per-filter
+# "Configuration" sections), just not among siblings
 MD024:
   siblings_only: true
 
@@ -27,5 +28,5 @@ MD028: false
 # MD041: GitHub templates render inside a page and start at h2
 MD041: false
 
-# MD033: YAML frontmatter and tables sometimes need inline HTML in proposals
+# MD033: some docs need inline HTML (README badges/images, <br> in tables)
 MD033: false
