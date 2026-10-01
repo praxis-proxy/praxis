@@ -6,7 +6,7 @@
 
 use std::{
     io::{ErrorKind, Read as _, Write as _},
-    net::TcpStream,
+    net::{Shutdown, TcpStream},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -30,6 +30,14 @@ const DECLARED_BODY_LEN: usize = 1_000;
 /// Body bytes the truncating backend actually sends before it resets or
 /// stalls.
 const SENT_BODY_LEN: usize = 100;
+
+/// Request body cap for the write-timeout test, raised above the default
+/// so the upload is never rejected for its size.
+const UPLOAD_LIMIT: usize = 33_554_432; // 32 MiB
+
+/// Upload size for the write-timeout test: far more than the socket
+/// buffers between the proxy and a backend that never reads can hold.
+const UPLOAD_LEN: usize = 16_777_216; // 16 MiB
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -343,6 +351,92 @@ fn stalled_backend_body_hits_the_read_timeout() {
     assert_eq!(body, "healthy", "the next request should get the backend's full body");
 }
 
+#[test]
+fn backend_that_never_reads_hits_the_write_timeout() {
+    let live_port = start_backend("live");
+    let sink_port = start_non_reading_backend();
+    let proxy_port = free_port();
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+body_limits:
+  max_request_bytes: {UPLOAD_LIMIT}
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/upload"
+            cluster: sink
+          - path_prefix: "/"
+            cluster: live
+      - filter: load_balancer
+        clusters:
+          - name: sink
+            endpoints:
+              - "127.0.0.1:{sink_port}"
+            write_timeout_ms: 500
+            read_timeout_ms: 3000
+          - name: live
+            endpoints:
+              - "127.0.0.1:{live_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let mut stream = TcpStream::connect(proxy.addr()).expect("TCP connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("set read timeout");
+    let head = format!("POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: {UPLOAD_LEN}\r\n\r\n");
+    stream.write_all(head.as_bytes()).expect("write request head");
+    let mut writer = stream.try_clone().expect("clone client stream");
+    writer
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .expect("set write timeout");
+    let upload = std::thread::spawn(move || {
+        let chunk = [b'u'; 65_536]; // 64 KiB
+        for _ in 0..UPLOAD_LEN / chunk.len() {
+            if writer.write_all(&chunk).is_err() {
+                break;
+            }
+        }
+    });
+
+    let start = Instant::now();
+    let mut raw = Vec::new();
+    let read = stream.read_to_end(&mut raw);
+    let elapsed = start.elapsed();
+    drop(stream.shutdown(Shutdown::Both));
+    upload.join().expect("upload thread should not panic");
+    let response = String::from_utf8_lossy(&raw);
+
+    assert_eq!(
+        parse_status(&response),
+        504,
+        "an upstream that stops reading should trip write_timeout_ms and get a 504 (read {read:?} after \
+         {elapsed:?}): {response}"
+    );
+    assert!(
+        response.contains("Upstream write timed out"),
+        "the 504 should name the write timeout, not the read timeout that ends the wait for a response: {response}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(8),
+        "the stalled upload should end once the read side gives up too; took {elapsed:?}"
+    );
+
+    let (status, body) = http_get(proxy.addr(), "/", None);
+    assert_eq!(status, 200, "proxy should stay healthy after an upstream write timeout");
+    assert_eq!(body, "live", "the live cluster should serve its own response");
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -434,6 +528,21 @@ fn serve_overread(mut stream: TcpStream, reused: &AtomicUsize) {
             break;
         }
     }
+}
+
+/// Start a backend that accepts connections and never reads from them,
+/// so whatever the proxy sends piles up until the socket buffers fill.
+fn start_non_reading_backend() -> u16 {
+    let (listener, port) = praxis_test_utils::net::port::bind_unique_port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(15));
+                drop(stream);
+            });
+        }
+    });
+    port
 }
 
 /// Start a backend that answers `/reset` and `/stall` with a 200 that
