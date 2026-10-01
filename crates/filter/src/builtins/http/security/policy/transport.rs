@@ -392,7 +392,7 @@ impl Target {
         let host = authority.host();
         let dial_authority = format!("{host}:{}", checked_port(url, authority, tls)?);
 
-        if tls && peer_utils::is_ip_literal(host) {
+        if tls && peer_utils::is_ip_literal(host.strip_suffix('.').unwrap_or(host)) {
             return Err(invalid(format!(
                 "url '{url}' uses https with an IP literal, which carries no SNI for certificate verification"
             )));

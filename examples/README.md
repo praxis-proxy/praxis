@@ -78,6 +78,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | ------ | ------------- |
 | [admin-interface.yaml](configs/operations/admin-interface.yaml) | Exposes an admin endpoint for operational health checks, readiness probes, and Prometheus metrics |
 | [container-default.yaml](configs/operations/container-default.yaml) | Default config for containerized deployments |
+| [file-descriptor-limits.yaml](configs/operations/file-descriptor-limits.yaml) | Size and protect the proxy's open file descriptor budget: pin the process limit, shed requests with 503 before descriptors run out, and close idle keep-alive clients and pooled upstream connections so they cannot pin descriptors |
 | [hot-reload.yaml](configs/operations/hot-reload.yaml) | Filter pipelines are swapped atomically at runtime when the config file changes |
 | [log-overrides.yaml](configs/operations/log-overrides.yaml) | Use `runtime.log_overrides` to raise or lower log verbosity for specific modules without flooding output from every subsystem |
 | [max-connections.yaml](configs/operations/max-connections.yaml) | HTTP listeners return 503 with Retry-After: 1. TCP listeners close the socket immediately |
@@ -196,6 +197,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [sticky-sessions.yaml](configs/traffic-management/sticky-sessions.yaml) | Pins clients to a specific backend across requests |
 | [subset-lb.yaml](configs/traffic-management/subset-lb.yaml) | Filters endpoints by metadata labels and applies an inner strategy within the matching subset |
 | [timeout.yaml](configs/traffic-management/timeout.yaml) | Returns 504 if the upstream takes longer than timeout_ms to respond |
+| [trusted-private-endpoints.yaml](configs/traffic-management/trusted-private-endpoints.yaml) | Lets one hostname endpoint resolve into private space, such as a Kubernetes Service name resolving to its ClusterIP |
 | [weighted-load-balancing.yaml](configs/traffic-management/weighted-load-balancing.yaml) | Traffic split proportional to per-endpoint weights |
 | [zone-aware.yaml](configs/traffic-management/zone-aware.yaml) | Prefers same-zone endpoints to reduce cross-zone network costs and latency |
 

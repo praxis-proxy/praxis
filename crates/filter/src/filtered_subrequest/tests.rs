@@ -1252,7 +1252,11 @@ fn into_parent_extensions_restores_parent_upstream_scope() {
         headers: HeaderMap::new(),
         status: http::StatusCode::OK,
     };
-    let extensions = nested_upstream_extensions();
+    let mut extensions = nested_upstream_extensions();
+    extensions.insert(crate::context::StreamReadTimeoutCap::new(
+        std::time::Duration::from_secs(1),
+    ));
+    extensions.insert(crate::context::StreamDeadlineCap::new(std::time::Instant::now()));
 
     let continuation = super::continuation::FilteredSubrequestContinuation {
         pipeline,
@@ -1277,6 +1281,14 @@ fn into_parent_extensions_restores_parent_upstream_scope() {
 
     let extensions = continuation.into_parent_extensions();
     assert_parent_upstream_scope(&extensions);
+    assert!(
+        extensions.get::<crate::context::StreamReadTimeoutCap>().is_none(),
+        "the per-read timeout cap must not escape the completed sub-request"
+    );
+    assert!(
+        extensions.get::<crate::context::StreamDeadlineCap>().is_none(),
+        "the absolute stream deadline must not escape the completed sub-request"
+    );
 }
 
 #[cfg(feature = "upstream-binding")]
@@ -1295,7 +1307,11 @@ fn into_completion_restores_parent_upstream_scope() {
         headers: HeaderMap::new(),
         status: http::StatusCode::OK,
     };
-    let extensions = nested_upstream_extensions();
+    let mut extensions = nested_upstream_extensions();
+    extensions.insert(crate::context::StreamReadTimeoutCap::new(
+        std::time::Duration::from_secs(1),
+    ));
+    extensions.insert(crate::context::StreamDeadlineCap::new(std::time::Instant::now()));
 
     let continuation = super::continuation::FilteredSubrequestContinuation {
         pipeline,
@@ -1320,6 +1336,20 @@ fn into_completion_restores_parent_upstream_scope() {
 
     let completion = continuation.into_completion();
     assert_parent_upstream_scope(&completion.extensions);
+    assert!(
+        completion
+            .extensions
+            .get::<crate::context::StreamReadTimeoutCap>()
+            .is_none(),
+        "the per-read timeout cap must not escape completion"
+    );
+    assert!(
+        completion
+            .extensions
+            .get::<crate::context::StreamDeadlineCap>()
+            .is_none(),
+        "the absolute stream deadline must not escape completion"
+    );
 }
 
 #[cfg(feature = "upstream-binding")]

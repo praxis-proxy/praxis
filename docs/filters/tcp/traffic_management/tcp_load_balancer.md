@@ -58,6 +58,7 @@ If all endpoints are unhealthy, the filter enters panic mode and routes to all e
 | `clusters[].tls.sni` | string | no | SNI hostname. |
 | `clusters[].tls.verify` | bool | no | Verify upstream certificate. |
 | `clusters[].total_connection_timeout_ms` | integer | no | Total connection timeout in milliseconds (TCP + TLS). Bounds the combined TCP handshake and TLS negotiation. When exceeded, the connection attempt fails with a 502 response. Prefer this over [`connection_timeout_ms`] for TLS-enabled clusters where the handshake dominates latency. |
+| `clusters[].trusted_private_endpoints` | string[] | no | Endpoint hostnames allowed to resolve to RFC 1918 or IPv6 unique-local addresses. Loopback, link-local, and cloud metadata stay refused. Hostnames only, HTTP clusters only. |
 | `clusters[].write_timeout_ms` | integer | no | Per-write timeout in milliseconds. Applies to each individual write operation on an established upstream connection. A timeout fires a 502 response to the client. |
 | `clusters[].retry_policy` | RetryPolicy | no | Optional retry policy for this cluster. When unset, the proxy retains the legacy connect-failure retry behavior (3 attempts, idempotent methods, 64 `KiB` body). |
 | `clusters[].retry_policy.max_retries` | integer | no | Maximum number of retry attempts after the initial try. `None` means inherit from the merge parent / use the legacy default. |

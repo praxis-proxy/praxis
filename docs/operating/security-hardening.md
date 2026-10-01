@@ -35,10 +35,37 @@ ambiguous configuration:
   reserved addresses are refused at connection time on
   both the TCP and HTTP data planes, so a DNS record
   that rebinds after startup cannot steer traffic to
-  loopback, RFC 1918, or `169.254.169.254`. Set
-  `insecure_options.allow_private_upstreams` when
-  upstream DNS names legitimately resolve into private
-  space.
+  loopback, RFC 1918, or `169.254.169.254`. When an
+  HTTP cluster's endpoint hostname legitimately resolves
+  into private space, such as a Kubernetes Service name
+  resolving to its ClusterIP, list that host in the
+  inline `load_balancer` cluster's
+  `trusted_private_endpoints`. It relaxes only
+  the listed host, and only to RFC 1918 and IPv6
+  unique-local addresses, and skips the load-time
+  hostname check that refuses names such as
+  `*.cluster.local`. Proxied requests to loopback,
+  link-local, and cloud metadata stay refused at
+  connect time unless `allow_private_upstreams` is
+  set. Health probes do not run this connect-time
+  check. Listing a host trusts
+  whoever controls its DNS with those ranges. On
+  Kubernetes, edit rights on the Service or its
+  Endpoints are control of its DNS. Write the endpoint
+  address as a fully qualified name with a trailing dot,
+  such as `model.tenant.svc.cluster.local.:8000`, so
+  resolver search domains cannot substitute another name.
+  The list entry needs no dot, since matching ignores
+  it, and derived SNI drops it. Without the dot, the
+  owner of a namespace named `svc` can answer through
+  the search list. An ExternalName Service lets its
+  owner point the name at another host. TLS hostname
+  verification is what makes listing a tenant-owned
+  name safe: keep `verify` on, pin the CA, and let SNI
+  be the listed name. Add an egress NetworkPolicy to
+  bound what the proxy can reach.
+  Prefer this over `insecure_options.allow_private_upstreams`,
+  which lifts the check for every upstream.
 - Policy engine outbound calls (JWKS, token exchange,
   CIBA backchannel) share the proxy's sub-request
   connector. Private DNS answers (loopback, RFC 1918,
@@ -180,6 +207,13 @@ relying on the bind address.
   to a process RSS ceiling. When exceeded, the proxy
   rejects new requests with 503 to prevent OOM. See
   [configuration.md](configuration.md) for details.
+- **File descriptors**: Praxis raises its open file
+  limit at startup and sheds requests with 503 before
+  descriptors run out. Set
+  `downstream_keepalive_timeout_ms` on listeners so idle
+  clients cannot pin descriptors, and see
+  [capacity-planning.md](capacity-planning.md) for
+  sizing the limit and raising the hard limit.
 - **Payload size**: Set `body_limits.max_request_bytes`
   and `body_limits.max_response_bytes` to bound
   buffered payload sizes. Requests exceeding the

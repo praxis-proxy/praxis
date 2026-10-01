@@ -21,6 +21,7 @@ workspace = true
 # Off by default; experimental. The filter crate's `upstream-binding` turns it on.
 upstream-binding = []
 spiffe = ["praxis-tls/spiffe"]
+test-support = []
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",

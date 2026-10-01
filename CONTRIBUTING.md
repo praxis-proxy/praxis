@@ -45,3 +45,30 @@ See the [PR conventions] section for details and
 override labels.
 
 [PR conventions]: docs/developing/conventions.md#pull-request-conventions
+
+## Automated Review
+
+CodeRabbit runs automated review on pull requests. Its
+configuration is split in two, and both halves are
+reviewed like any other change to the project: the
+review policy and the conventions shared across the
+organization live in [praxis-proxy/coderabbit], and the
+guidance specific to this repository's layout lives in
+[.coderabbit.yaml], which inherits from it.
+
+CodeRabbit is advisory. It does not approve or block a
+PR, and it is configured not to author code: under the
+[code responsibility] policy the project does not accept
+code from a bot or tool, and your `Signed-off-by` asserts
+that you reviewed and understand every line you submit.
+
+Findings still deserve a reply. Fix them or explain why
+they do not apply, the same as any other review comment.
+A finding that contradicts a documented convention is a
+configuration bug: open an issue against whichever
+repository holds the relevant instructions so they can
+be corrected.
+
+[praxis-proxy/coderabbit]: https://github.com/praxis-proxy/coderabbit
+[.coderabbit.yaml]: .coderabbit.yaml
+[code responsibility]: docs/developing/conventions.md#code-responsibility

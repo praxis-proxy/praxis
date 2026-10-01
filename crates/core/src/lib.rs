@@ -32,6 +32,8 @@ pub mod config;
 pub mod connectivity;
 /// Error types shared across the workspace.
 pub mod errors;
+/// Process-wide file descriptor pressure monitoring.
+pub mod fd;
 /// Shared gRPC protocol utilities.
 pub mod grpc;
 /// Shared health state types for active health checking.

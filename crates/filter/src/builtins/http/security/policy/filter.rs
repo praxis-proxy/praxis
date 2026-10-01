@@ -39,7 +39,7 @@ use super::{
     common_message_format::{
         entity_for_protocol_method, entity_for_protocol_method_post, llm_entity_post, llm_entity_pre,
     },
-    config::{BodyAccessMode, PolicyFilterConfig, validate_trusted_private_endpoints},
+    config::{BodyAccessMode, PolicyFilterConfig},
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
@@ -285,7 +285,7 @@ impl PolicyFilter {
 
         // Reject a malformed pinned-endpoint entry at startup rather than let it
         // silently never match at request time.
-        validate_trusted_private_endpoints(&cfg.trusted_private_endpoints)?;
+        praxis_core::connectivity::validate_host_entries("policy", &cfg.trusted_private_endpoints)?;
 
         let yaml = std::fs::read_to_string(&cfg.config_path).map_err(|e| -> FilterError {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()

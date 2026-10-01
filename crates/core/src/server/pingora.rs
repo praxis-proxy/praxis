@@ -110,6 +110,23 @@ pub fn build_http_server(shutdown_timeout_secs: u64, runtime: &RuntimeOptions) -
     server
 }
 
+/// Number of worker threads Pingora runs for `configured`
+/// (`runtime.threads`): the CPUs available to the process when zero.
+///
+/// ```
+/// use praxis_core::server::pingora::resolve_thread_count;
+///
+/// assert_eq!(resolve_thread_count(4), 4);
+/// assert!(resolve_thread_count(0) >= 1);
+/// ```
+pub fn resolve_thread_count(configured: usize) -> usize {
+    if configured == 0 {
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+    } else {
+        configured
+    }
+}
+
 /// Build a [`ServerConf`] from runtime options.
 fn build_server_conf(shutdown_timeout_secs: u64, threads: usize, runtime: &RuntimeOptions) -> ServerConf {
     let mut conf = ServerConf {
@@ -150,19 +167,6 @@ fn warn_unsupported_global_queue_interval(runtime: &RuntimeOptions) {
             "global_queue_interval is set but has no effect: the async runtime is \
              managed by Pingora, which does not expose this setting; the value is ignored"
         );
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Utility Functions
-// -----------------------------------------------------------------------------
-
-/// Resolve the number of worker threads: auto-detect if zero.
-fn resolve_thread_count(configured: usize) -> usize {
-    if configured == 0 {
-        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-    } else {
-        configured
     }
 }
 

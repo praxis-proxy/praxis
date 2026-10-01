@@ -1,0 +1,41 @@
+# Trusted Private Endpoints
+#
+# Lets one hostname endpoint resolve into private space, such as a
+# Kubernetes Service name resolving to its ClusterIP.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/trusted-private-endpoints.yaml
+#
+#   curl http://localhost:8080/
+#
+# The listed host may resolve to RFC 1918 or IPv6 unique-local
+# addresses. Proxied requests to loopback, link-local, and cloud
+# metadata stay refused.
+# The trailing root dot skips the resolver search list, and the entry
+# matches with or without it.
+
+listeners:
+  - name: default
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "backend.models.svc.cluster.local.:3000"
+            trusted_private_endpoints:
+              - "backend.models.svc.cluster.local"
+            health_check:
+              type: tcp
+              interval_ms: 10000
+              timeout_ms: 3000
+              healthy_threshold: 1
+              unhealthy_threshold: 2

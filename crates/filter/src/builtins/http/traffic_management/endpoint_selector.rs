@@ -94,6 +94,8 @@ impl EndpointConnectionConfig {
             idle_timeout: self.idle_timeout_ms.map(std::time::Duration::from_millis),
             read_timeout: self.read_timeout_ms.map(std::time::Duration::from_millis),
             total_connection_timeout: self.total_connection_timeout_ms.map(std::time::Duration::from_millis),
+            // Request-derived endpoints are never trusted.
+            trusted_private_endpoints: Arc::default(),
             write_timeout: self.write_timeout_ms.map(std::time::Duration::from_millis),
         })
     }

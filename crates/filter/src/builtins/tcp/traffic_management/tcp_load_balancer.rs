@@ -116,6 +116,14 @@ impl TcpLoadBalancerFilter {
         if cfg.clusters.is_empty() {
             return Err("tcp_load_balancer: 'clusters' is empty; every connection would fail".into());
         }
+        // The TCP dial path does not apply it, so reject rather than ignore it.
+        if let Some(cluster) = cfg.clusters.iter().find(|c| !c.trusted_private_endpoints.is_empty()) {
+            return Err(format!(
+                "tcp_load_balancer: cluster '{}' sets trusted_private_endpoints, which applies to HTTP upstreams only",
+                cluster.name
+            )
+            .into());
+        }
         Ok(Box::new(Self::new(&cfg.clusters)))
     }
 
@@ -450,6 +458,26 @@ clusters:
         .unwrap();
         let filter = TcpLoadBalancerFilter::from_config(&yaml).unwrap();
         assert_eq!(filter.name(), "tcp_load_balancer", "filter name should match");
+    }
+
+    #[test]
+    fn from_config_rejects_trusted_private_endpoints() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+clusters:
+  - name: "db_pool"
+    endpoints: ["db.ns.svc:5432"]
+    trusted_private_endpoints: ["db.ns.svc"]
+"#,
+        )
+        .unwrap();
+        let Err(err) = TcpLoadBalancerFilter::from_config(&yaml) else {
+            panic!("a TCP cluster must not accept trusted_private_endpoints");
+        };
+        assert!(
+            err.to_string().contains("HTTP upstreams only"),
+            "error should say the field is HTTP-only: {err}"
+        );
     }
 
     #[test]

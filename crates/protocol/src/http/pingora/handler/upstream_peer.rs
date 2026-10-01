@@ -263,7 +263,7 @@ fn apply_per_try_timeout(ctx: &PingoraRequestCtx, upstream: &mut Upstream) {
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
 async fn build_peer(upstream: &Upstream, allow_private: bool) -> Result<Box<HttpPeer>> {
-    let addr: SocketAddr = resolve_address(&upstream.address, allow_private).await?;
+    let addr: SocketAddr = resolve_upstream(upstream, allow_private).await?;
 
     let tls_enabled = upstream.tls.is_some();
     let sni = upstream
@@ -311,21 +311,22 @@ async fn build_peer(upstream: &Upstream, allow_private: bool) -> Result<Box<Http
 /// connectivity issues in dual-stack environments.
 ///
 /// A resolved (as opposed to literal) address in a private or reserved
-/// range is rejected unless `allow_private` is set, which is the runtime
-/// half of the DNS-rebinding / SSRF control. The check runs per request,
+/// range is rejected unless `allow_private` is set or the host is trusted, the
+/// runtime half of the DNS-rebinding / SSRF control. The check runs per request,
 /// so a cached answer is re-validated rather than trusted for its TTL.
 ///
 /// [`SocketAddr`]: std::net::SocketAddr
 /// [`spawn_blocking`]: tokio::task::spawn_blocking
-async fn resolve_address(address: &str, allow_private: bool) -> Result<SocketAddr> {
-    peer_utils::resolve_address_checked(address, allow_private)
+async fn resolve_upstream(upstream: &Upstream, allow_private: bool) -> Result<SocketAddr> {
+    peer_utils::resolve_upstream_checked(upstream, allow_private)
         .await
         .map_err(|error| {
             // A refused private/reserved address is an upstream reachability
             // verdict, not a proxy fault, so it surfaces as 502 rather than
             // the 500 every other resolution failure maps to.
             let etype = match error {
-                peer_utils::AddressResolutionError::PrivateAddress { .. } => pingora_core::ErrorType::ConnectError,
+                peer_utils::AddressResolutionError::PrivateAddress { .. }
+                | peer_utils::AddressResolutionError::UntrustedRange { .. } => pingora_core::ErrorType::ConnectError,
                 _ => pingora_core::ErrorType::InternalError,
             };
             pingora_core::Error::explain(etype, error.to_string())
@@ -490,7 +491,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_address_parses_socket_addr() {
-        let addr = resolve_address("127.0.0.1:8080", false)
+        let addr = resolve_upstream(&make_upstream("127.0.0.1:8080"), false)
             .await
             .expect("socket addr should parse");
         assert_eq!(addr.port(), 8080, "port should match");
@@ -502,7 +503,7 @@ mod tests {
             eprintln!("skipping: localhost did not resolve in this environment");
             return;
         }
-        let addr = resolve_address("localhost:8080", true)
+        let addr = resolve_upstream(&make_upstream("localhost:8080"), true)
             .await
             .expect("localhost should resolve");
         assert_eq!(addr.port(), 8080, "port should match");
@@ -511,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_address_fails_for_no_port() {
         assert!(
-            resolve_address("127.0.0.1", false).await.is_err(),
+            resolve_upstream(&make_upstream("127.0.0.1"), false).await.is_err(),
             "address without port should return error"
         );
     }

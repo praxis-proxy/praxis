@@ -264,6 +264,12 @@ pub struct Cluster {
     #[serde(default)]
     pub total_connection_timeout_ms: Option<u64>,
 
+    /// Endpoint hostnames allowed to resolve to RFC 1918 or IPv6 unique-local
+    /// addresses. Loopback, link-local, and cloud metadata stay refused.
+    /// Hostnames only, HTTP clusters only.
+    #[serde(default)]
+    pub trusted_private_endpoints: Vec<String>,
+
     /// Per-write timeout in milliseconds.
     ///
     /// Applies to each individual write operation on an
@@ -324,6 +330,7 @@ impl Cluster {
             read_timeout_ms: None,
             tls: None,
             total_connection_timeout_ms: None,
+            trusted_private_endpoints: Vec::new(),
             write_timeout_ms: None,
             retry_policy: None,
         }

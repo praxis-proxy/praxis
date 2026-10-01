@@ -112,6 +112,7 @@ fn make_cluster(strategy: LoadBalancerStrategy, n: usize) -> Cluster {
         retry_policy: None,
         tls: None,
         total_connection_timeout_ms: None,
+        trusted_private_endpoints: Vec::new(),
         write_timeout_ms: None,
     }
 }

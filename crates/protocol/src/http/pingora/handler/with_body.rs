@@ -65,6 +65,7 @@ use crate::http::pingora::{context::PingoraRequestCtx, metrics};
 ///     Arc::new(ArcSwap::from_pointee(pipeline)),
 ///     None,
 ///     None,
+///     None,
 ///     ::metrics::SharedString::const_str("http"),
 /// );
 /// ```
@@ -90,6 +91,10 @@ pub struct PingoraHttpHandler {
     /// Per-listener connection semaphore for max connections.
     connection_semaphore: Option<Arc<Semaphore>>,
 
+    /// Per-listener idle keep-alive timeout for HTTP/1.x clients, in
+    /// seconds.
+    downstream_keepalive_timeout_secs: Option<u64>,
+
     /// Per-listener downstream read timeout.
     downstream_read_timeout: Option<Duration>,
 
@@ -105,6 +110,7 @@ impl PingoraHttpHandler {
     pub(super) fn new(
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
+        downstream_keepalive_timeout_secs: Option<u64>,
         connection_semaphore: Option<Arc<Semaphore>>,
         listener_name: ::metrics::SharedString,
     ) -> Self {
@@ -112,6 +118,7 @@ impl PingoraHttpHandler {
         Self {
             compression,
             connection_semaphore,
+            downstream_keepalive_timeout_secs,
             downstream_read_timeout,
             listener_name,
             pipeline,
@@ -194,6 +201,12 @@ impl ProxyHttp for PingoraHttpHandler {
             return reject_503(session, "5", "memory pressure exceeded").await;
         }
 
+        let Some(fd_admission) = praxis_core::fd::try_admit() else {
+            metrics::record_overload_reject(metrics::OVERLOAD_REASON_FILE_DESCRIPTORS);
+            return reject_503(session, "1", "file descriptor limit nearly exhausted").await;
+        };
+        ctx.fd_admission = Some(fd_admission);
+
         let (exceeded, permit) = crate::connections::try_acquire_global();
         ctx._global_connection_permit = permit;
         if exceeded {
@@ -218,6 +231,14 @@ impl ProxyHttp for PingoraHttpHandler {
                 "applying downstream read timeout"
             );
             session.set_read_timeout(Some(timeout));
+        }
+
+        // Bound a keep-alive the client and protocol already allow, never turn one
+        // on: an HTTP/1.0 client without `Connection: keep-alive` must still be closed.
+        if let Some(secs) = self.downstream_keepalive_timeout_secs
+            && session.get_keepalive().is_some()
+        {
+            session.set_keepalive(Some(secs));
         }
 
         // Pingora parses Accept-Encoding after this hook, before request_filter.
@@ -482,6 +503,9 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
+        if let Some(fd_admission) = ctx.fd_admission.as_mut() {
+            fd_admission.connected(!reused);
+        }
         let span = ctx.request_span.clone();
         let _entered = span.enter();
         let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);

@@ -787,3 +787,79 @@ clusters:
 "#;
     Config::from_yaml(yaml).unwrap();
 }
+
+#[test]
+fn trusted_private_endpoints_are_validated() {
+    let cases: &[(&str, &str, Option<&str>)] = &[
+        ("model.tenant.svc:8000", "model.tenant.svc", None),
+        ("model.tenant.svc:8000", "MODEL.tenant.svc", None),
+        (
+            "model.tenant.svc.cluster.local.:8000",
+            "model.tenant.svc.cluster.local",
+            None,
+        ),
+        ("model.tenant.svc:8000", "model.tenant.svc.", None),
+        (
+            "model.tenant.svc:8000",
+            "other.tenant.svc",
+            Some("matches no endpoint host"),
+        ),
+        (
+            "model.tenant.svc:8000",
+            "model.tenant.svc:8000",
+            Some("unbracketed ':'"),
+        ),
+        ("10.96.0.10:8000", "10.96.0.10", Some("is an IP address")),
+        ("[fd12::1]:8000", "[fd12::1]", Some("is an IP address")),
+        ("model.tenant.svc:8000", ".", Some("is not a hostname")),
+        ("model.tenant.svc:8000", "model.tenant.svc..", Some("is not a hostname")),
+        ("model.tenant.svc:8000", "*.tenant.svc", Some("contains '*'")),
+    ];
+    for (endpoint, entry, want) in cases {
+        let yaml = format!(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: models
+    endpoints: ["{endpoint}"]
+    trusted_private_endpoints: ["{entry}"]
+"#
+        );
+        let got = Config::from_yaml(&yaml);
+        match want {
+            None => got.map(drop).expect("a listed endpoint hostname is accepted"),
+            Some(fragment) => {
+                let err = got.expect_err("must be rejected").to_string();
+                assert!(err.contains(fragment), "{entry:?}: {err}");
+            },
+        }
+    }
+}
+
+#[test]
+fn inline_cluster_trusted_private_endpoints_are_validated() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: load_balancer
+        clusters:
+          - name: models
+            endpoints: ["model.tenant.svc:8000"]
+            trusted_private_endpoints: ["other.tenant.svc"]
+"#;
+    let err = Config::from_yaml(yaml).unwrap_err();
+    assert!(err.to_string().contains("matches no endpoint host"), "got: {err}");
+}

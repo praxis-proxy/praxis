@@ -5,7 +5,7 @@
 
 use std::{
     io::{Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::{IpAddr, TcpListener, TcpStream},
     time::Duration,
 };
 
@@ -14,7 +14,10 @@ use praxis_core::config::{
     InsecureOptions, Listener, MetricsConfig, ProtocolKind, RuntimeConfig, TelemetryConfig,
 };
 
-use super::specialized::{BackendGuard, read_until_headers_complete, spawn_tcp_server, spawn_tcp_server_with_shutdown};
+use super::specialized::{
+    BackendGuard, read_until_headers_complete, spawn_tcp_server, spawn_tcp_server_on_with_shutdown,
+    spawn_tcp_server_with_shutdown,
+};
 
 // -----------------------------------------------------------------------------
 // Backend
@@ -107,12 +110,26 @@ impl Backend {
     ///
     /// Panics if the server fails to bind.
     pub fn start_with_shutdown(self) -> BackendGuard {
+        spawn_tcp_server_with_shutdown(self.into_handler())
+    }
+
+    /// Like [`Backend::start_with_shutdown`], listening on `ip`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server fails to bind.
+    pub fn start_on_with_shutdown(self, ip: IpAddr) -> BackendGuard {
+        spawn_tcp_server_on_with_shutdown(ip, self.into_handler())
+    }
+
+    /// The connection handler serving this backend's response.
+    fn into_handler(self) -> impl Fn(TcpStream) + Send + Clone + 'static {
         let status = self.status;
         let reason = reason_phrase(status);
         let body = self.body;
         let headers = self.headers;
 
-        spawn_tcp_server_with_shutdown(move |mut stream| {
+        move |mut stream: TcpStream| {
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let _headers = read_until_headers_complete(&mut stream);
 
@@ -130,7 +147,7 @@ impl Backend {
             resp.push_str("\r\n");
             resp.push_str(&body);
             let _sent = stream.write_all(resp.as_bytes());
-        })
+        }
     }
 }
 
@@ -443,6 +460,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
         listeners: vec![Listener {
             address: address.to_owned(),
             cluster: None,
+            downstream_keepalive_timeout_ms: None,
             downstream_read_timeout_ms: None,
             filter_chains: vec!["backend".to_owned()],
             max_connections: None,

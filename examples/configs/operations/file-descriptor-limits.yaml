@@ -1,0 +1,51 @@
+# File Descriptor Limits
+#
+# Size and protect the proxy's open file descriptor budget: pin the process
+# limit, shed requests with 503 before descriptors run out, and close idle
+# keep-alive clients and pooled upstream connections so they cannot pin
+# descriptors. See docs/operating/capacity-planning.md.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/operations/file-descriptor-limits.yaml
+
+admin:
+  address: "127.0.0.1:9901"
+
+runtime:
+  # Soft RLIMIT_NOFILE set at startup, clamped to the hard limit. Leave it
+  # out to raise the soft limit all the way to the hard limit.
+  max_open_files: 65536
+
+  # Answer new requests with 503 and Retry-After once open descriptors reach
+  # the limit less a reserve of 5% (default: true).
+  shed_on_fd_pressure: true
+
+  # Each proxied request holds a client and an upstream descriptor, so keep
+  # concurrency well under half the limit.
+  max_connections: 30000
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    # Close HTTP/1.x keep-alive clients that stay idle for a minute.
+    downstream_keepalive_timeout_ms: 60000
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+            # Close pooled upstream connections idle for 30 seconds.
+            idle_timeout_ms: 30000
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

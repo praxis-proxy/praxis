@@ -181,8 +181,9 @@ request is admitted and decremented when it finishes.
 | `listener` | Listener name from config |
 
 Requests rejected by overload protection (memory
-pressure, global or per-listener connection limits)
-are never admitted and do not appear here. The
+pressure, file descriptor pressure, global or
+per-listener connection limits) are never admitted and
+do not appear here. The
 decrement is tied to the request context's lifetime,
 so it also fires when a client aborts mid-body or an
 HTTP/2 stream is reset.
@@ -227,6 +228,34 @@ here. Connect failures do appear under
 counter stands on its own as an error denominator
 rather than needing the connect-failure counter added
 in.
+
+### Overload and Process Metrics
+
+#### `praxis_overload_rejects_total` (counter)
+
+Requests (HTTP) and connections (TCP) rejected by
+overload protection before any filter runs. HTTP
+rejections answer `503` with `Retry-After`; TCP
+rejections close the connection.
+
+| Label | Values |
+| -------- | ---------------------------------------- |
+| `reason` | `memory`, `file_descriptors`, `global_connections`, `listener_connections` |
+
+`file_descriptors` counts requests shed because open
+descriptors neared the process limit (see
+`runtime.shed_on_fd_pressure`). A steady rate means
+the limit is too small for the traffic.
+
+#### `praxis_process_open_fds` / `praxis_process_max_fds` (gauges)
+
+File descriptors the process holds open, and its soft
+open file limit (`RLIMIT_NOFILE`). Sampled in the
+background on Linux; absent elsewhere. Alert well
+before the ratio reaches the shedding threshold (the
+limit less 5%, or less 64 on small limits). The admin
+`/api/stats` view reports the same numbers under
+`file_descriptors`.
 
 ### Upstream Metrics
 

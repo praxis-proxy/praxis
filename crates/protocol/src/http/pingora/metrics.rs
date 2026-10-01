@@ -48,6 +48,12 @@ const TCP_ACTIVE_CONNECTIONS: &str = "praxis_tcp_active_connections";
 /// Counter for connections rejected by overload protection.
 const OVERLOAD_REJECTS_TOTAL: &str = "praxis_overload_rejects_total";
 
+/// Gauge for file descriptors the process holds open.
+const PROCESS_OPEN_FDS: &str = "praxis_process_open_fds";
+
+/// Gauge for the process's open file descriptor limit.
+const PROCESS_MAX_FDS: &str = "praxis_process_max_fds";
+
 /// Counter for requests sent to upstream endpoints.
 const UPSTREAM_REQUESTS_TOTAL: &str = "praxis_upstream_requests_total";
 
@@ -108,6 +114,9 @@ pub(crate) const OVERLOAD_REASON_GLOBAL_CONNECTIONS: &str = "global_connections"
 
 /// Overload reject reason: per-listener connection limit.
 pub(crate) const OVERLOAD_REASON_LISTENER_CONNECTIONS: &str = "listener_connections";
+
+/// Overload reject reason: open file descriptors near the process limit.
+pub(crate) const OVERLOAD_REASON_FILE_DESCRIPTORS: &str = "file_descriptors";
 
 /// Retry result: connect eventually succeeded after at least one retry.
 pub(crate) const RETRY_RESULT_SUCCESS: &str = "success";
@@ -758,6 +767,19 @@ pub(crate) fn record_overload_reject(reason: &'static str) {
     counter!(OVERLOAD_REJECTS_TOTAL, "reason" => reason).increment(1);
 }
 
+/// Publish a file descriptor usage sample as the
+/// `praxis_process_open_fds` and `praxis_process_max_fds` gauges.
+pub fn set_process_fd_gauges(usage: praxis_core::fd::FdUsage) {
+    if !is_recorder_installed() {
+        return;
+    }
+    #[expect(clippy::cast_precision_loss, reason = "descriptor counts fit f64 exactly below 2^53")]
+    {
+        gauge!(PROCESS_OPEN_FDS).set(usage.open as f64);
+        gauge!(PROCESS_MAX_FDS).set(usage.limit as f64);
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Upstream Metrics
 // -----------------------------------------------------------------------------
@@ -1068,15 +1090,32 @@ mod tests {
         record_overload_reject(OVERLOAD_REASON_MEMORY);
         record_overload_reject(OVERLOAD_REASON_GLOBAL_CONNECTIONS);
         record_overload_reject(OVERLOAD_REASON_LISTENER_CONNECTIONS);
+        record_overload_reject(OVERLOAD_REASON_FILE_DESCRIPTORS);
         let body = render_prometheus().expect("recorder should render");
         for reason in [
             OVERLOAD_REASON_MEMORY,
             OVERLOAD_REASON_GLOBAL_CONNECTIONS,
             OVERLOAD_REASON_LISTENER_CONNECTIONS,
+            OVERLOAD_REASON_FILE_DESCRIPTORS,
         ] {
             let needle = format!("praxis_overload_rejects_total{{reason=\"{reason}\"}}");
             assert!(body.contains(&needle), "expected `{needle}` in scrape:\n{body}");
         }
+    }
+
+    #[test]
+    fn process_fd_gauges_appear_in_scrape() {
+        install_prometheus_recorder();
+        set_process_fd_gauges(praxis_core::fd::FdUsage { limit: 1_024, open: 37 });
+        let body = render_prometheus().expect("recorder should render");
+        assert!(
+            body.contains("praxis_process_open_fds 37"),
+            "open descriptors gauge expected in scrape:\n{body}"
+        );
+        assert!(
+            body.contains("praxis_process_max_fds 1024"),
+            "descriptor limit gauge expected in scrape:\n{body}"
+        );
     }
 
     #[test]

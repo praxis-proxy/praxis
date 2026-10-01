@@ -757,13 +757,14 @@ publish-dry-run:
 
 # Real crates.io publish, in dependency order. Requires a crates.io token
 # in CARGO_REGISTRY_TOKEN (set from the RUST_CRATES_PUBLISH_TOKEN secret in
-# CI). `cargo publish --workspace` publishes every publishable crate in
-# dependency order, waiting for each to land in the index before the crates
-# that depend on it. This is not transactional: if a later crate fails, the
-# crates already published stay live, so a failed run cannot simply be re-run
-# at the same version.
+# CI). xtask first skips any crate whose version is already on the index,
+# then runs `cargo publish --workspace` for the rest, which publishes in
+# dependency order, waiting for each crate to land in the index before the
+# crates that depend on it. A multi-crate publish is not transactional
+# (crates published before a failure stay live), so the skip is what makes
+# a partially-published or re-published release safe to run again.
 publish:
-	cargo publish --workspace --locked
+	cargo run -q -p xtask --no-default-features -- publish
 
 # Coverage instrumentation slows server startup, so give the test-readiness
 # helpers a generous deadline (see PRAXIS_TEST_READY_TIMEOUT_MS) to keep the

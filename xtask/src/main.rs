@@ -38,6 +38,7 @@ mod lint_deps;
 mod lint_example_tests;
 #[cfg(feature = "dev")]
 mod port;
+mod publish;
 mod sync_example_readme;
 
 use clap::{Parser, Subcommand};
@@ -84,6 +85,10 @@ enum Command {
     /// integration test.
     LintExampleTests(lint_example_tests::Args),
 
+    /// Publish the workspace's crates to crates.io, skipping
+    /// versions the index already has (safe to re-run).
+    Publish(publish::Args),
+
     /// Verify or regenerate the `examples/README.md` table
     /// from YAML config header comments.
     SyncExampleReadme(sync_example_readme::Args),
@@ -114,6 +119,7 @@ fn main() {
         Command::Fips(args) => fips::run(args),
         Command::LintDeps(args) => lint_deps::run(args),
         Command::LintExampleTests(args) => lint_example_tests::run(args),
+        Command::Publish(args) => publish::run(&args),
         Command::SyncExampleReadme(args) => sync_example_readme::run(&args),
         #[cfg(feature = "dev")]
         Command::GenerateFilterDocs(args) => filter_docs::generate(args),

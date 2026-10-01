@@ -201,7 +201,10 @@ pub struct InsecureOptions {
     /// substituted by a resolver, and are gated at config time by
     /// [`allow_private_endpoints`].
     ///
+    /// Prefer a cluster's [`trusted_private_endpoints`] to trust one hostname.
+    ///
     /// [`allow_private_endpoints`]: InsecureOptions::allow_private_endpoints
+    /// [`trusted_private_endpoints`]: crate::config::Cluster::trusted_private_endpoints
     pub allow_private_upstreams: bool,
 
     /// Allow admin endpoint on non-loopback addresses (`0.0.0.0`, LAN IPs, etc.).

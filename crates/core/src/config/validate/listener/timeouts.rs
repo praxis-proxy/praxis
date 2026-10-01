@@ -48,6 +48,10 @@ pub(super) fn validate_listener_timeouts(listener: &Listener) -> Result<(), Prox
     for (field, value) in [
         ("tcp_session_timeout_ms", listener.tcp_session_timeout_ms),
         ("downstream_read_timeout_ms", listener.downstream_read_timeout_ms),
+        (
+            "downstream_keepalive_timeout_ms",
+            listener.downstream_keepalive_timeout_ms,
+        ),
     ] {
         if let Some(millis) = value {
             if millis == 0 {
@@ -151,6 +155,37 @@ filter_chains:
       - filter: static_response
 "#;
         Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_zero_downstream_keepalive_timeout() {
+        let err = Config::from_yaml(&keepalive_yaml(0)).unwrap_err();
+        assert!(
+            err.to_string().contains("downstream_keepalive_timeout_ms must be > 0"),
+            "a zero keep-alive timeout would close every idle connection at once: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_downstream_keepalive_timeout_exceeding_maximum() {
+        let err = Config::from_yaml(&keepalive_yaml(3_600_001)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("downstream_keepalive_timeout_ms (3600001 ms) exceeds maximum"),
+            "keep-alive timeout above 1 hour must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_downstream_keepalive_timeout_within_bounds() {
+        for millis in [1_u64, 30_000, 3_600_000] {
+            let config = Config::from_yaml(&keepalive_yaml(millis)).unwrap();
+            assert_eq!(
+                config.listeners[0].downstream_keepalive_timeout_ms,
+                Some(millis),
+                "{millis} ms is a valid keep-alive timeout"
+            );
+        }
     }
 
     #[test]
@@ -273,5 +308,26 @@ listeners:
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("exceeds maximum"), "got: {err}");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// HTTP listener config with `downstream_keepalive_timeout_ms: millis`.
+    fn keepalive_yaml(millis: u64) -> String {
+        format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    downstream_keepalive_timeout_ms: {millis}
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+"#
+        )
     }
 }

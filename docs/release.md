@@ -81,8 +81,9 @@ Phase 2 runs when a maintainer publishes the draft:
 
 7. Re-validate the tag against `Cargo.toml`, then
    publish the workspace to crates.io in one
-   dependency-ordered run (`cargo publish --workspace
-   --locked`)
+   dependency-ordered run (`make publish`, which skips
+   crates the index already has at this version, so a
+   partial or repeated publish is safe to run again)
 8. For a stable (non pre-release) release, advance the
    moving `:<major>.<minor>` and `:latest` container
    tags, and their `-fips` counterparts

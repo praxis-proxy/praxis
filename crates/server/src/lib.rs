@@ -25,6 +25,7 @@
 //! [`FilterPipeline`]: praxis_filter::FilterPipeline
 
 mod composition;
+mod fd_limit;
 pub(crate) mod pipelines;
 #[cfg(feature = "config-reload")]
 pub(crate) mod reload;

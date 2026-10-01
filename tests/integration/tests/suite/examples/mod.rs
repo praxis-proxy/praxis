@@ -27,6 +27,8 @@ mod csrf;
 mod default_config;
 mod endpoint_selector;
 mod errors_total;
+#[cfg(target_os = "linux")]
+mod file_descriptor_limits;
 mod grpc_access_log;
 mod grpc_condition;
 mod grpc_detection;
@@ -103,6 +105,7 @@ mod trace_context;
 #[cfg(feature = "otel")]
 mod tracing_otlp;
 mod traffic_management_examples;
+mod trusted_private_endpoints;
 mod upstream_requests_total;
 mod url_rewriting;
 mod virtual_hosts;

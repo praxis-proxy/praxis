@@ -15,13 +15,13 @@ use crate::StreamTerminationCause;
 /// connection options (timeouts) from the upstream config. Derives
 /// SNI from the address hostname when not explicitly configured.
 ///
-/// Resolution goes through [`resolve_address_checked`], so a sub-request
+/// Resolution goes through [`resolve_upstream_checked`], so a sub-request
 /// upstream hostname that resolves into a private or reserved range is
 /// refused unless `allow_private` (`insecure_options.allow_private_upstreams`)
-/// is set.
+/// is set or the host is trusted.
 ///
 /// [`Upstream`]: praxis_core::connectivity::Upstream
-/// [`resolve_address_checked`]: praxis_core::connectivity::peer::resolve_address_checked
+/// [`resolve_upstream_checked`]: praxis_core::connectivity::peer::resolve_upstream_checked
 pub(super) async fn build_peer(
     upstream: &praxis_core::connectivity::Upstream,
     allow_private: bool,
@@ -29,7 +29,7 @@ pub(super) async fn build_peer(
     use praxis_core::connectivity::peer as peer_utils;
 
     let addr: &str = &upstream.address;
-    let socket_addr = peer_utils::resolve_address_checked(addr, allow_private).await?;
+    let socket_addr = peer_utils::resolve_upstream_checked(upstream, allow_private).await?;
     let tls_enabled = upstream.tls.is_some();
     let sni = upstream
         .tls

@@ -26,7 +26,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Shane Utt <shaneutt@linux.com>"]
@@ -53,13 +53,13 @@ http = "1.5.0"
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
-nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
+nix = { version = "0.31.3", default-features = false, features = ["process", "resource", "signal", "user"] }
 notify = "8.2.0"
 object = { version = "0.39.1", default-features = false, features = ["read_core", "elf", "std"] }
 opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
-opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["gen-tonic", "trace"] }
+opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
 pingora-core = { version = "0.10.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
 pingora-http = { version = "0.10.0", package = "quixotic-plecostomus-http" }
@@ -80,15 +80,15 @@ quote = "1.0.47"
 # crates keep `policy-engine` in their own defaults, so the standard test run is
 # unchanged, and `--no-default-features` gives the FIPS build's feature set.
 praxis = { path = "crates/server", package = "praxis-proxy", default-features = false }
-praxis-core = { version = "0.7.1", path = "crates/core", package = "praxis-proxy-core" }
+praxis-core = { version = "0.7.2", path = "crates/core", package = "praxis-proxy-core" }
 # default-features = false: the filter crate's own default (`policy-engine`)
 # must not leak in through this dependency edge, or a build that turns the
 # policy engine off at the binary (`--no-default-features`, the FIPS build)
 # would still link it. The `praxis-proxy` binary's default feature set forwards
 # `policy-engine` explicitly, so the standard build is unchanged.
-praxis-filter = { version = "0.7.1", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
-praxis-protocol = { version = "0.7.1", path = "crates/protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.7.1", path = "crates/tls", package = "praxis-proxy-tls" }
+praxis-filter = { version = "0.7.2", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
+praxis-protocol = { version = "0.7.2", path = "crates/protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.7.2", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 praxis-proxy-benchmarks = "0.2.2"
 # System OpenSSL bindings, the same crate the rustls provider below uses; never

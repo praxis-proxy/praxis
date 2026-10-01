@@ -184,7 +184,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust lint toolchain
-        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@747ec184a0e565c1948bb77ea58487839b78db55 # v0.1.0
 
       - name: Install cargo-machete
         # setup-rust-lint's rust-cache also restores ~/.cargo/bin, so the binary
@@ -216,7 +216,7 @@ jobs:
           persist-credentials: false
 
       - name: Supply chain audit
-        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@747ec184a0e565c1948bb77ea58487839b78db55 # v0.1.0
 
   # ----------------------------------------------------------------------------
   # Phase 1 (tag push): fallback coverage (skipped when already green)
@@ -239,7 +239,7 @@ jobs:
           persist-credentials: false
 
       - name: Coverage check
-        uses: praxis-proxy/conventions/.github/actions/coverage-check@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/coverage-check@747ec184a0e565c1948bb77ea58487839b78db55 # v0.1.0
 
   # ----------------------------------------------------------------------------
   # Phase 1 (tag push): verify crates package cleanly (publish dry run)

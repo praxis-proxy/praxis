@@ -93,6 +93,9 @@ rather than silently adopted as the baseline.
 
 - `runtime.logging` destination or buffering
 - Listener add, remove, or address rebind
+- Listener `max_connections`,
+  `downstream_read_timeout_ms`, and
+  `downstream_keepalive_timeout_ms`
 - Compression module addition
 - TLS enable/disable, and any change inside a
   listener's `tls` block (certificate *file contents*
@@ -101,6 +104,7 @@ rather than silently adopted as the baseline.
 - Startup-only `runtime` settings (`threads`,
   `work_stealing`, `global_queue_interval`,
   `max_connections`, `max_memory_bytes`,
+  `max_open_files`, `shed_on_fd_pressure`,
   `subrequest_pool_size`,
   `subrequest_max_connections`,
   `subrequest_circuit_breaker`, `upstream_ca_file`,
@@ -322,6 +326,31 @@ Pingora applies its own 60s default for initial request
 header reads on fresh connections. This setting controls
 body read timeouts within an active request.
 
+### Downstream Keep-Alive Timeout
+
+Optional `downstream_keepalive_timeout_ms` closes an idle
+HTTP/1.x keep-alive client connection once it has waited
+that long for its next request. Without it, idle
+keep-alive connections stay open until the client closes
+them, and each one holds a file descriptor, so a fleet of
+idle or half-dead clients can exhaust the process limit.
+
+```yaml
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    downstream_keepalive_timeout_ms: 60000   # 60 seconds
+    filter_chains: [main]
+```
+
+The timeout is applied in whole seconds, rounded up
+(1 to 3600000 ms), and replaces any `Keep-Alive:
+timeout` hint a client sends. It never turns keep-alive
+on: `Connection: close` and HTTP/1.0 clients without
+`Connection: keep-alive` are still closed after their
+response. HTTP/2 connections are not affected. Like the
+other listener settings, a change needs a restart.
+
 ### Max Connections
 
 Optional `max_connections` caps concurrent connections
@@ -520,8 +549,8 @@ runtime:
   warning that it has no effect.
 - `upstream_keepalive_pool_size`: maximum number of idle
   upstream connections kept per thread. `Option<usize>`,
-  defaults to `Some(64)`. Set to `null` to disable
-  keepalive pooling.
+  defaults to `Some(64)`. Set to `null` to use Pingora's
+  default of 128 per thread.
 - `max_connections`: process-wide maximum concurrent
   connections across all listeners. When set, new
   connections beyond this limit are rejected.
@@ -532,6 +561,25 @@ runtime:
   memory and rejects new requests with `503 Service
   Unavailable` when usage exceeds the threshold.
   `Option<usize>`, defaults to `None` (disabled).
+- `max_open_files`: soft limit on open file descriptors
+  (`RLIMIT_NOFILE`) the process sets for itself at
+  startup. Every connection, pooled connection, and DNS
+  lookup holds one. `Option<u64>` (128 to 2^30), defaults
+  to `None`, which raises the soft limit to the hard
+  limit; that needs no privileges and lifts the 1024
+  soft limit containers commonly start with. A value
+  above the hard limit is clamped with a warning.
+  Startup logs the limit in effect and warns when it is
+  below 4096, or below what `max_connections` implies.
+  See [Capacity Planning](capacity-planning.md).
+- `shed_on_fd_pressure`: reject new requests with `503
+  Service Unavailable` (and close new TCP connections)
+  when open file descriptors near the process limit,
+  keeping a reserve of 5% or 64 descriptors, whichever
+  is larger, for health probes, DNS, and logs. Counted
+  as `praxis_overload_rejects_total{reason=
+  "file_descriptors"}`. `bool`, defaults to `true`; set
+  `false` to let requests run into the limit instead.
 - `subrequest_circuit_breaker`: per-peer circuit breaker
   for the shared sub-request connector used by
   `iterative_request_router`. When configured, the
@@ -558,6 +606,7 @@ runtime:
   upstream_keepalive_pool_size: 64
   max_connections: 10000         # process-wide limit
   max_memory_bytes: 1073741824   # 1 GiB
+  max_open_files: 65536          # default: the hard limit
   subrequest_circuit_breaker:
     consecutive_failures: 5
     recovery_window_secs: 30
@@ -726,7 +775,8 @@ probe uses only a cluster's `endpoints` and its
 `health_check` block, and HTTP/TCP probes connect in
 plaintext, so a top-level cluster's data-path settings
 (`tls`, `retry_policy`, the timeout fields,
-`load_balancer_strategy`) have no effect at all. Configure
+`load_balancer_strategy`, `trusted_private_endpoints`)
+have no effect at all. Configure
 those on the inline load-balancer cluster instead.
 
 ## Failure Mode

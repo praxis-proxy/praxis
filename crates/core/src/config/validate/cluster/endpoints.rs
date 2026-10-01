@@ -7,7 +7,7 @@ use std::net::IpAddr;
 
 use super::{
     MAX_ENDPOINT_WEIGHT, MAX_ENDPOINTS,
-    health_check::{extract_host, is_ssrf_sensitive, is_ssrf_sensitive_hostname},
+    health_check::{extract_host, is_ssrf_sensitive, is_ssrf_sensitive_hostname, is_trusted_cluster_dns_name},
 };
 use crate::{
     config::{Cluster, InsecureOptions},
@@ -151,6 +151,9 @@ fn validate_endpoint_ssrf(cluster: &Cluster, insecure_options: &InsecureOptions)
     for ep in &cluster.endpoints {
         let addr_str = ep.address();
         let host = extract_host(addr_str);
+        if is_trusted_cluster_dns_name(cluster, host) {
+            continue;
+        }
         reject_ssrf_host(host, &cluster.name, addr_str)?;
     }
     Ok(())
@@ -230,6 +233,37 @@ mod tests {
         let clusters = vec![Cluster::with_defaults("web", vec!["localhost:80".into()])];
         let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
         assert!(err.to_string().contains("sensitive address"), "got: {err}");
+    }
+
+    #[test]
+    fn listed_hosts_skip_the_load_time_name_check() {
+        // (endpoint, listed entry, accepted)
+        let cases = [
+            (
+                "model.ns.svc.cluster.local:80",
+                Some("model.ns.svc.cluster.local"),
+                true,
+            ),
+            (
+                "model.ns.svc.cluster.local:80",
+                Some("MODEL.ns.svc.cluster.local."),
+                true,
+            ),
+            ("model.ns.svc.cluster.local:80", None, false),
+            ("localhost:80", Some("localhost"), false),
+            ("127.1:80", Some("127.1"), false),
+            (
+                "other.ns.svc.cluster.local:80",
+                Some("model.ns.svc.cluster.local"),
+                false,
+            ),
+        ];
+        for (endpoint, entry, accepted) in cases {
+            let mut cluster = Cluster::with_defaults("web", vec![endpoint.into()]);
+            cluster.trusted_private_endpoints = entry.map(str::to_owned).into_iter().collect();
+            let result = super::validate_endpoint_ssrf(&cluster, &InsecureOptions::default());
+            assert_eq!(result.is_ok(), accepted, "{endpoint} listed as {entry:?}: {result:?}");
+        }
     }
 
     #[test]

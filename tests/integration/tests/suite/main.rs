@@ -60,10 +60,13 @@ mod conditions;
 mod cors;
 mod credential_store_parity;
 mod csrf;
+mod downstream_keepalive;
 mod downstream_read_timeout;
 mod error_response;
 mod examples;
 mod failure_mode;
+#[cfg(target_os = "linux")]
+mod fd_limits;
 mod filter_composition;
 mod filter_metadata;
 mod fips;

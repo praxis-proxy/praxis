@@ -25,3 +25,6 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:18080"
+
+insecure_options:
+  allow_private_endpoints: true # benchmark proxies to a local backend
