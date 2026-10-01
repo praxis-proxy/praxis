@@ -5003,11 +5003,7 @@ async fn the_inference_response_half_does_not_claim_mcp_responses() {
 // Post-only entity routes
 // -----------------------------------------------------------------------------
 
-/// Write a policy whose routes block is `routes`, over the standard JWT
-/// identity preamble the other entity fixtures use.
-///
-/// The post-only fixtures below differ from each other only in that block, so
-/// the preamble lives here once rather than being repeated per shape.
+/// Write a policy with the standard JWT preamble and the supplied routes.
 fn write_entity_config_with_routes(routes: &str) -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
@@ -5038,12 +5034,7 @@ global:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a policy whose only `echo` tool declaration is a post-phase one.
-///
-/// `authorization.post_invocation` with no `pre_invocation` and no `args:`, so
-/// the engine installs the post handler and no pre handler. The filter has to
-/// derive `entity_routes` from that alone, or the response phase returns before
-/// dispatching the hook the engine did register.
+/// Write an `echo` tool route with only a `post_invocation` rule.
 fn write_tool_post_only_config() -> (TempDir, String) {
     write_entity_config_with_routes(
         r#"routes:
@@ -5055,9 +5046,7 @@ fn write_tool_post_only_config() -> (TempDir, String) {
     )
 }
 
-/// The same shape expressed as a `result:` field pipeline rather than a
-/// `post_invocation` step. Both are Post-phase declarations, so both have to
-/// open the response half on their own.
+/// Write an `echo` tool route with only a `result:` field pipeline.
 fn write_tool_result_pipeline_config() -> (TempDir, String) {
     write_entity_config_with_routes(
         r#"routes:
@@ -5068,10 +5057,7 @@ fn write_tool_result_pipeline_config() -> (TempDir, String) {
     )
 }
 
-/// A JSON-RPC tool result with room for a post-phase deny envelope to replace
-/// it. The deny is fitted to the committed Content-Length, so a short upstream
-/// body truncates the envelope rather than failing the test for the reason
-/// under test.
+/// A tool result long enough to hold a replacement deny envelope.
 const ROOMY_MCP_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok, and long enough that a replacement error envelope fits inside the committed content length without being trimmed"}]}}"#;
 
 #[test]
@@ -5115,9 +5101,6 @@ async fn a_post_only_tool_route_dispatches_its_hook() {
         "the route declares no request-phase rule, so the request half admits; got {action:?}",
     );
 
-    // A post-phase deny is fitted to the committed Content-Length, so the
-    // upstream body has to be at least as long as the error envelope that
-    // replaces it or the envelope is truncated to fit.
     let mut body = Some(bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()));
     drop(
         filter
@@ -5192,16 +5175,8 @@ async fn post_only_round_trip(path: String, method: &str, name: &str, request_bo
     body.expect("response body")
 }
 
-// The prompt and resource post hooks are registered and reachable, and they
-// still do not run. `dispatch_entity_response` builds the response content
-// with `build_response_content_for_method`, which returns an empty vec for any
-// method but `tools/call`, and bails on empty content before dispatching. So a
-// `post_invocation` predicate over identity attributes, which needs no payload
-// at all, is skipped along with the payload-addressing that policy#75 covers.
-//
-// These two pin that boundary: the gating below is fixed, the dispatch is not.
-// They fail when the content projection lands, which is the right moment to
-// turn them into the deny assertions their tool-route sibling makes.
+// Prompt and resource post hooks remain unsupported because response content
+// is currently projected only for `tools/call`.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_post_only_prompt_route_does_not_yet_dispatch() {
@@ -5320,20 +5295,10 @@ async fn a_result_pipeline_alone_redacts_the_response() {
 // Load-time warnings
 // -----------------------------------------------------------------------------
 
-/// Serializes the capture tests against each other.
-///
-/// `with_default` is thread-local, but `tracing` keeps one process-wide
-/// max-level hint derived from the installed subscribers. A second capture
-/// running in parallel lowers that hint when its subscriber drops, and events
-/// on this thread are then filtered before they reach the sink. Holding this
-/// for the duration of the capture keeps one installed at a time.
+/// Serialize capture tests because tracing's max-level hint is process-wide.
 static WARNING_CAPTURE: Mutex<()> = Mutex::new(());
 
-/// Capture `tracing` warnings emitted on this thread while `f` runs.
-///
-/// `PolicyFilter::new` emits its load-time warnings on the calling thread,
-/// after the init thread it spawns has been joined, so a thread-local
-/// subscriber sees them.
+/// Capture load-time warnings emitted on the calling thread while `f` runs.
 fn capture_warnings(f: impl FnOnce()) -> String {
     #[derive(Clone, Default)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
@@ -5440,9 +5405,6 @@ fn an_http_route_beside_entity_routes_is_refused_at_load() {
 
 #[test]
 fn an_unreadable_policy_document_is_refused_rather_than_admitted() {
-    // The check reads the raw document because `RouteEntry` does not surface
-    // APL steps. If that read fails it has learned nothing, so it must not
-    // report "no problem": that is how a bypass gets admitted by an error path.
     let refusal = PolicyFilter::http_route_beside_entity_routes("routes: [unclosed", /* mcp_routes= */ true)
         .expect("an unreadable document means the contract is unchecked, so refuse");
     assert!(
@@ -5462,11 +5424,6 @@ fn a_policy_with_no_routes_block_is_not_refused() {
 
 #[test]
 fn an_http_route_scoping_only_authentication_still_loads() {
-    // The early identity gate runs on the header phase, before classification,
-    // and matches an `http:` route by path. A route-scoped `authentication:`
-    // list therefore does reach classified traffic, unlike `authorization:`,
-    // so this shape must not be refused. `the_early_identity_gate_honors_an_
-    // http_route_authentication_list` is the behaviour this protects.
     let yaml = r#"routes:
   - tool: echo
     authorization:

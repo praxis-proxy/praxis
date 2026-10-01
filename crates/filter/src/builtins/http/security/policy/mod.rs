@@ -118,18 +118,13 @@
 //! - Request phase: after the body is buffered, the filter dispatches the pre-invoke CMF hook for the route's entity.
 //!   On allow, delegated tokens are attached upstream and (under `read_write`) mutated arguments are written back into
 //!   the body.
-//! - Response phase: the filter dispatches the post-invoke hook; `result.<field>` redactions run here, so a value the
-//!   backend returns unsolicited is still stripped for a caller without the permission. A post-phase deny replaces the
-//!   response body with a JSON-RPC error envelope fitted to the committed Content-Length.
+//! - Response phase: with `body_access: read_write`, the filter dispatches the post-invoke hook for `tool:` routes.
+//!   `result.<field>` redactions and post-phase denies run here. A deny replaces the body with a JSON-RPC error
+//!   envelope fitted to the committed Content-Length. `prompt:` and `resource:` response rules do not currently run.
 //!
-//! The whole response phase needs `body_access: read_write`, not just the rewriting half: the post-invoke hook runs
-//! only once the response body is buffered, so a `post_invocation` rule that reads nothing but identity attributes is
-//! skipped under `read_only` along with the `result.<field>` pipelines. A policy declaring response-phase entity rules
-//! under `read_only` warns at load.
-//!
-//! A route may declare the response half alone. The engine installs a route's pre and post handlers independently, so
-//! a route whose only declarations are `result.<field>` pipelines or `post_invocation` steps admits every request and
-//! is evaluated purely on the way back.
+//! `read_only` skips all tool response rules, including attribute-only
+//! `post_invocation` rules, and warns at load. A response-only route adds no
+//! request-phase route rule; identity checks and `global` policy still apply.
 //!
 //! # Decisions and denials
 //!

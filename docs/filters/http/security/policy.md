@@ -19,15 +19,29 @@ Policies with `llm:` routes authorize the top-level request `model` through `cmf
 
 `body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also enables `cmf.llm_output` for non-streaming inference responses. APL field mutators do not rewrite inference bodies.
 
-It gates the whole response phase, not just the rewriting. The post-invoke hook runs only once the response body is buffered, so under `read_only` a `post_invocation` rule that reads nothing but identity attributes is skipped along with the `result.<field>` pipelines. A policy that declares response-phase entity rules under `read_only` warns at load.
+It gates the whole response phase, not just body rewriting. Under `read_only`,
+`post_invocation` rules that read only identity attributes are skipped along
+with `result.<field>` pipelines. A policy declaring response-phase entity rules
+under `read_only` warns at load.
 
-A route may declare the response half on its own. A route whose only declarations are `result.<field>` pipelines or `post_invocation` steps admits every request and is evaluated purely on the way back.
+A route may declare only `result.<field>` pipelines or `post_invocation` steps.
+That adds no request-phase route rule; identity checks and `global` policy still
+apply.
 
-Only `tool:` routes are dispatched on the response phase. The response payload is projected for `tools/call` alone, so a `prompt:` or `resource:` route's `result.<field>` and `post_invocation` rules never run, under either body access. A policy declaring them warns at load. Put the control on `pre_invocation`, which is dispatched for all three entity types.
+Only `tool:` routes are dispatched on the response phase. A `prompt:` or
+`resource:` route's `result.<field>` and `post_invocation` rules never run under
+either body access mode. A policy declaring them warns at load. Use
+`pre_invocation` for those controls.
 
-An `http:` route cannot carry `authorization:` alongside MCP entity routes, and a policy that does is refused at load. Classified traffic is evaluated against its entity route, so those steps would never run for a tool, prompt, or resource call and the route would gate nothing. Cross-cutting rules belong in the `global` block, which is layered into every entity route; non-MCP traffic belongs behind a separate listener or filter.
+An `http:` route cannot carry `authorization:` alongside MCP entity routes;
+the policy is refused at load. Classified traffic uses its entity route, so
+those `http:` steps would not run. Put shared authorization in the `global`
+block, which applies to every entity route. Serve non-MCP traffic through a
+separate listener or filter.
 
-A route-scoped `authentication:` list is unaffected. The early identity gate runs on the header phase, before classification, and matches an `http:` route by path, so scoping authentication that way does reach classified traffic and keeps loading.
+A route-scoped `authentication:` list remains supported. The early identity
+gate matches an `http:` route by path before classification, so its
+authentication steps still reach classified traffic.
 
 Response-body hooks run on a small dedicated runtime while the worker waits, for at most twice the engine's per-plugin timeout (`engine_settings.plugin_timeout`, so 60 seconds by default). A hook that does not finish in time is aborted and the response fails under the filter's `failure_mode`: `closed` truncates the response, `open` passes the body through unfiltered.
 

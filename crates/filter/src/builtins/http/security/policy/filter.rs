@@ -126,33 +126,17 @@ enum GatedIdentity {
 /// `cmf.llm_output` for non-streaming inference responses. APL field
 /// mutators do not rewrite inference bodies.
 ///
-/// It gates the whole response phase, not just the rewriting. The
-/// post-invoke hook runs only once the response body is buffered, so under
-/// `read_only` a `post_invocation` rule that reads nothing but identity
-/// attributes is skipped along with the `result.<field>` pipelines. A policy
-/// that declares response-phase entity rules under `read_only` warns at load.
+/// `body_access: read_write` also enables response-phase `tool:` rules,
+/// including attribute-only `post_invocation` rules. Under `read_only`, these
+/// rules are skipped and a warning is emitted. A response-only route adds no
+/// request-phase route rule; identity checks and `global` policy still apply.
 ///
-/// A route may declare the response half on its own. A route whose only
-/// declarations are `result.<field>` pipelines or `post_invocation` steps
-/// admits every request and is evaluated purely on the way back.
+/// `prompt:` and `resource:` response rules do not currently run under either
+/// body access mode. Use `pre_invocation` for those controls.
 ///
-/// Only `tool:` routes are dispatched on the response phase. The response
-/// payload is projected for `tools/call` alone, so a `prompt:` or `resource:`
-/// route's `result.<field>` and `post_invocation` rules never run, under either
-/// body access. A policy declaring them warns at load. Put the control on
-/// `pre_invocation`, which is dispatched for all three entity types.
-///
-/// An `http:` route cannot carry `authorization:` alongside MCP entity routes,
-/// and a policy that does is refused at load. Classified traffic is evaluated
-/// against its entity route, so those steps would never run for a tool, prompt,
-/// or resource call and the route would gate nothing. Cross-cutting rules
-/// belong in the `global` block, which is layered into every entity route;
-/// non-MCP traffic belongs behind a separate listener or filter.
-///
-/// A route-scoped `authentication:` list is unaffected. The early identity gate
-/// runs on the header phase, before classification, and matches an `http:`
-/// route by path, so scoping authentication that way does reach classified
-/// traffic and keeps loading.
+/// Policies with MCP entity routes cannot declare `authorization:` on an
+/// `http:` route. Use `global` for shared authorization; route-scoped
+/// `authentication:` remains supported.
 ///
 /// Response-body hooks run on a small dedicated runtime while the worker
 /// waits, for at most twice the engine's per-plugin timeout
@@ -561,18 +545,7 @@ impl PolicyFilter {
         );
     }
 
-    /// Report MCP entity response rules that cannot run.
-    ///
-    /// Two separate causes, and only one has a remedy.
-    ///
-    /// A tool response rule needs `body_access: read_write`, because the post
-    /// hook is dispatched only once the response body is buffered, which
-    /// `read_only` does not do. Setting `read_write` enables it. This covers
-    /// attribute-only `post_invocation` rules as well as `result.<field>`
-    /// pipelines: neither reads the body, and both are skipped with it.
-    ///
-    /// A prompt or resource response rule is not dispatched under either body
-    /// access, so `read_write` is not the fix and must not be offered as one.
+    /// Warn when configured MCP entity response rules cannot run.
     fn warn_on_entity_response_gaps(cfg: &PolicyFilterConfig, post_tool: bool, post_undispatched: bool) {
         if post_tool && !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
             tracing::warn!(
@@ -595,38 +568,14 @@ impl PolicyFilter {
         }
     }
 
-    /// Refuse an `http:` route whose `authorization:` no classified request can
-    /// reach.
-    ///
-    /// Classified traffic resolves to its entity route, and an `http:` route is
-    /// a different route, so its `authorization:` steps never run for a tool,
-    /// prompt, or resource call. Loading the policy anyway leaves an operator
-    /// with a path-scoped rule over `/mcp` that gates nothing.
-    ///
-    /// Refused rather than warned, so a control that cannot fire is a startup
-    /// failure and not a silent one. Same treatment as an
-    /// `assertions.response:` block that no phase can apply.
-    ///
-    /// Scoped to `authorization:` deliberately. A route-scoped
-    /// `authentication:` list **is** honored, by the early identity gate on the
-    /// header phase, which runs before classification and matches on path. An
-    /// `http:` route that only scopes authentication is a supported shape and
-    /// must keep loading.
-    ///
-    /// Read from the raw document rather than `PolicyConfig`, because
-    /// `RouteEntry` does not surface APL steps: the visitor consumes
-    /// `authorization:` straight from the YAML, so the parsed form cannot tell
-    /// an authorizing `http:` route from an authenticating one.
-    ///
-    /// Returns the operator-facing message when the policy must be refused.
+    /// Return a load error for an `http:` authorization route alongside MCP
+    /// entity routes, or `None` when no such route exists.
     pub(super) fn http_route_beside_entity_routes(yaml: &str, mcp_routes: bool) -> Option<String> {
         if !mcp_routes {
             return None;
         }
-        // Fail closed. The engine parsed this same text a moment ago, so a
-        // failure here should be unreachable, and "should be unreachable" is
-        // how a check that prevents an authorization bypass ends up admitting
-        // one. Refuse instead of returning "nothing to report".
+        // RouteEntry omits authorization steps, so inspect the raw YAML and
+        // reject a parse failure rather than skip this check.
         let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(yaml) else {
             return Some(
                 "policy: praxis could not re-read the policy document to check the `http:` route \
@@ -635,9 +584,6 @@ impl PolicyFilter {
                     .to_owned(),
             );
         };
-        // An absent or non-sequence `routes:` is not a failure to check: there
-        // is no route to object to. The engine accepted the document, so the
-        // key is well-formed where it exists.
         let routes = doc.get("routes").and_then(serde_yaml::Value::as_sequence)?;
         let offenders = routes
             .iter()
