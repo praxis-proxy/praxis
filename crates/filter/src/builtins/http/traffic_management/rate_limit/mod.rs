@@ -205,6 +205,14 @@ impl PerIpState {
 ///
 /// State is all managed locally.
 ///
+/// `shadow: true` evaluates the limit without rejecting: over-limit
+/// requests are allowed through, counted in
+/// `praxis_rate_limit_limited_total{shadow="true"}` and logged as shadow
+/// decisions, while the response headers still report the bucket state.
+/// The bucket evolves exactly as under enforcement, so the count is the
+/// number of requests the limit would have rejected. Tune `rate` and
+/// `burst` against it, then remove the flag to enforce.
+///
 /// # YAML configuration
 ///
 /// ```yaml
@@ -213,6 +221,7 @@ impl PerIpState {
 /// rate: 100           # tokens per second
 /// burst: 200          # max bucket capacity
 /// ipv6_prefix_len: 64 # per_ip: group IPv6 clients by /64 (default 128)
+/// shadow: false       # true: observe only, never reject
 /// ```
 ///
 /// # Example
@@ -258,6 +267,9 @@ pub struct RateLimitFilter {
 
     /// Monotonic clock reference; all timestamps are offsets from this.
     pub(self) epoch: Instant,
+
+    /// Observe the limit without rejecting over-limit requests.
+    pub(self) shadow: bool,
 }
 
 #[expect(
@@ -325,6 +337,7 @@ impl RateLimitFilter {
             header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
             header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
             epoch: Instant::now(),
+            shadow: cfg.shadow,
         }))
     }
 }
@@ -339,6 +352,14 @@ impl HttpFilter for RateLimitFilter {
         match self.try_acquire_for(ctx.client_addr) {
             Ok(_remaining) => Ok(FilterAction::Continue),
             Err(remaining) => {
+                crate::metrics::record_rate_limit_limited(self.shadow);
+                if self.shadow {
+                    tracing::info!(
+                        client = ?ctx.client_addr,
+                        "rate_limit: would reject request (shadow)"
+                    );
+                    return Ok(FilterAction::Continue);
+                }
                 tracing::info!(
                     client = ?ctx.client_addr,
                     "rate_limit: rejecting request (429)"

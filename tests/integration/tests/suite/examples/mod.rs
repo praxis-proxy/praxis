@@ -84,6 +84,7 @@ mod process_logging;
 mod protocol_examples;
 mod protocols;
 mod random;
+mod rate_limit_shadow;
 mod redirect;
 mod retry_policy;
 mod ring_hash;

@@ -13,6 +13,8 @@ In `per_ip` mode, IPv6 clients are keyed by network prefix (`ipv6_prefix_len`, d
 
 State is all managed locally.
 
+`shadow: true` evaluates the limit without rejecting: over-limit requests are allowed through, counted in `praxis_rate_limit_limited_total{shadow="true"}` and logged as shadow decisions, while the response headers still report the bucket state. The bucket evolves exactly as under enforcement, so the count is the number of requests the limit would have rejected. Tune `rate` and `burst` against it, then remove the flag to enforce.
+
 ## Configuration
 
 | Field | Type | Required | Description |
@@ -21,6 +23,7 @@ State is all managed locally.
 | `rate` | number | yes | Tokens replenished per second. |
 | `burst` | integer | yes | Maximum bucket capacity. |
 | `ipv6_prefix_len` | integer | no | IPv6 network prefix length (1-128) that `per_ip` mode groups clients by. Defaults to 128, one bucket per address. Set 64 on internet-facing listeners, where one subscriber controls a whole /64 and can rotate addresses to evade the limit; keep 128 inside a cluster or LAN, where a node or segment shares one /64. IPv4 clients are keyed by full address. Ignored in `global` mode. |
+| `shadow` | bool | no | Evaluate the limit without rejecting. Over-limit requests are allowed through, counted in `praxis_rate_limit_limited_total` with `shadow="true"` and logged as shadow decisions, and the `X-RateLimit-*` response headers still report the bucket state. Deploy a new limit with `shadow: true`, tune `rate` and `burst` against the metric, then remove the flag to enforce. |
 
 ## Example
 
@@ -30,4 +33,5 @@ mode: per_ip        # "per_ip" or "global"
 rate: 100           # tokens per second
 burst: 200          # max bucket capacity
 ipv6_prefix_len: 64 # per_ip: group IPv6 clients by /64 (default 128)
+shadow: false       # true: observe only, never reject
 ```

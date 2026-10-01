@@ -1,0 +1,49 @@
+# Rate Limiting Shadow Mode
+#
+# Observe a rate limit before enforcing it. The limiter evaluates every
+# request and counts the ones it would have rejected, but lets them all
+# through, so a new limit can be tuned on live traffic without returning
+# a single 429.
+#
+# Responses still carry the X-RateLimit-* headers, so a drained bucket
+# shows up as "X-RateLimit-Remaining: 0" on a 200. Would-be rejections
+# are counted in praxis_rate_limit_limited_total{shadow="true"} on the
+# admin /metrics endpoint and logged as shadow decisions. Remove
+# `shadow: true` to start enforcing.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/rate-limiting-shadow.yaml
+#   for i in $(seq 1 10); do curl -si http://localhost:8080/ | grep -i x-ratelimit-remaining; done
+#   curl -s http://localhost:9901/metrics | grep rate_limit_limited
+
+admin:
+  address: "127.0.0.1:9901"
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - shadow-limited
+
+filter_chains:
+  - name: shadow-limited
+    filters:
+      - filter: rate_limit
+        mode: per_ip
+        rate: 1              # demo value; tune against the metric
+        burst: 2             # demo value; tune against the metric
+        shadow: true         # observe only: count would-be rejections, never 429
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

@@ -18,6 +18,9 @@ const CIRCUIT_BREAKER_OPEN: &str = "praxis_circuit_breaker_open";
 /// Counter for load-balancer panic-mode selections.
 const LB_PANIC_MODE_TOTAL: &str = "praxis_lb_panic_mode_total";
 
+/// Counter for requests that exceeded a `rate_limit` bucket.
+const RATE_LIMIT_LIMITED_TOTAL: &str = "praxis_rate_limit_limited_total";
+
 #[cfg(feature = "cloud-events-filter")]
 /// Counter for `CloudEvents` publication outcomes.
 const CLOUD_EVENTS_PUBLISH_TOTAL: &str = "praxis_cloud_events_publish_total";
@@ -94,6 +97,14 @@ pub(crate) fn set_circuit_breaker_state(cluster_name: SharedString, open: bool) 
 /// Increment the load-balancer panic-mode counter for a cluster.
 pub(crate) fn record_lb_panic_mode(cluster: SharedString) {
     counter!(LB_PANIC_MODE_TOTAL, "cluster" => cluster).increment(1);
+}
+
+/// Count one request that exceeded a rate limit.
+///
+/// `shadow` separates limits that let the request through
+/// (`shadow="true"`) from limits that rejected it with 429.
+pub(crate) fn record_rate_limit_limited(shadow: bool) {
+    counter!(RATE_LIMIT_LIMITED_TOTAL, "shadow" => if shadow { "true" } else { "false" }).increment(1);
 }
 
 #[cfg(feature = "cloud-events-filter")]
@@ -227,6 +238,23 @@ mod tests {
     fn stream_constants_have_expected_values() {
         assert_eq!(STREAM_HEADERS, "headers", "STREAM_HEADERS label value");
         assert_eq!(STREAM_BODY, "body", "STREAM_BODY label value");
+    }
+
+    #[test]
+    fn rate_limit_limited_counter_carries_shadow_label() {
+        crate::test_utils::install_metrics_recorder();
+
+        record_rate_limit_limited(true);
+        record_rate_limit_limited(false);
+
+        let rendered = crate::test_utils::render_metrics();
+        for label in ["true", "false"] {
+            let series = format!("praxis_rate_limit_limited_total{{shadow=\"{label}\"}}");
+            assert!(
+                rendered.contains(&series),
+                "expected series `{series}` in scrape:\n{rendered}"
+            );
+        }
     }
 
     #[test]

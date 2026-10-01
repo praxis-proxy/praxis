@@ -65,6 +65,15 @@ pub(super) struct RateLimitConfig {
     /// clients are keyed by full address. Ignored in `global` mode.
     #[serde(default)]
     pub ipv6_prefix_len: Ipv6PrefixLen,
+
+    /// Evaluate the limit without rejecting. Over-limit requests are
+    /// allowed through, counted in `praxis_rate_limit_limited_total`
+    /// with `shadow="true"` and logged as shadow decisions, and the
+    /// `X-RateLimit-*` response headers still report the bucket state.
+    /// Deploy a new limit with `shadow: true`, tune `rate` and `burst`
+    /// against the metric, then remove the flag to enforce.
+    #[serde(default)]
+    pub shadow: bool,
 }
 
 // -----------------------------------------------------------------------------

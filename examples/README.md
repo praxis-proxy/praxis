@@ -187,6 +187,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [path-based-routing.yaml](configs/traffic-management/path-based-routing.yaml) | Routes by URL path prefix |
 | [priority-lb.yaml](configs/traffic-management/priority-lb.yaml) | Defines primary and failover endpoint tiers |
 | [random.yaml](configs/traffic-management/random.yaml) | Selects an upstream endpoint at random, weighted by endpoint weight |
+| [rate-limiting-shadow.yaml](configs/traffic-management/rate-limiting-shadow.yaml) | Observe a rate limit before enforcing it |
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
 | [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Automatically retries failed upstream requests with exponential backoff and a token-bucket budget to prevent retry storms |
