@@ -87,6 +87,7 @@ mod pipelines_admin;
 mod process_logging;
 mod prometheus_metrics;
 mod rate_limit;
+mod response_framing;
 mod retry;
 mod route_templates;
 mod routing;

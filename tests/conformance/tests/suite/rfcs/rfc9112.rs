@@ -13,11 +13,68 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_body, parse_status, simple_proxy_yaml, start_backend,
-    start_header_echo_backend, start_proxy,
+    Backend, free_port, http_get, http_send, parse_body, parse_header as parse_response_header, parse_status,
+    simple_proxy_yaml, start_backend, start_header_echo_backend, start_proxy,
 };
 
 use super::test_utils::{start_417_backend, start_crlf_response_backend, start_request_line_echo_backend};
+
+/// [RFC 9112 Sections 6.3 and 9.3]: after a response filter removes a stale
+/// Content-Length, the HTTP/1.1 response needs self-defined framing to remain
+/// eligible for persistent connections.
+///
+/// [RFC 9112 Sections 6.3 and 9.3]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.3
+#[test]
+fn rfc9112_filtered_response_without_length_uses_chunked_framing() {
+    let backend = Backend::fixed("original").start_with_shutdown();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        response_remove: [Content-Length]
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{}"]
+insecure_options:
+  allow_private_endpoints: true
+"#,
+        backend.port()
+    ))
+    .expect("test configuration must parse");
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "filtered response should succeed: {raw}");
+    assert_eq!(
+        parse_response_header(&raw, "transfer-encoding").as_deref(),
+        Some("chunked"),
+        "filtered HTTP/1.1 response must be explicitly framed: {raw}"
+    );
+    assert!(
+        parse_response_header(&raw, "content-length").is_none(),
+        "stale length must stay removed: {raw}"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "original",
+        "chunked body must decode to the upstream payload"
+    );
+}
 
 // -----------------------------------------------------------------------------
 // RFC 9112 Section 6.1 - TE/CL Conflict
