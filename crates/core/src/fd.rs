@@ -226,8 +226,8 @@ pub struct FdPressure {
 
     /// Admitted requests still waiting on their upstream connection. Mutated
     /// only through read-modify-write ops at runtime (never a plain `store`) so
-    /// its release sequence stays unbroken and the acquire reads in
-    /// [`Accounting::predicted_with`] keep pairing with the release in
+    /// its release sequence stays unbroken and the acquire read in
+    /// [`Accounting::try_admit`] keeps pairing with the release in
     /// [`Accounting::settle`].
     pending: AtomicU64,
 
