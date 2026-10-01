@@ -158,25 +158,65 @@ jobs:
       # runs piles up on the same disk as the checkout, the fetched image
       # tarball and the build-cache volumes, and a cold suite build can run it
       # to zero mid-build (No space left on device; dnf in fips-toolchain short
-      # by hundreds of MB). Reclaim in two passes, BEFORE the image is fetched
+      # by hundreds of MB). Reclaim in three passes, BEFORE the image is fetched
       # and loaded so nothing here touches the image this run proves:
-      #   1. podman system prune -a removes every stale image and the build
+      #   1. Force-remove stale containers still bound to the dedicated FIPS
+      #      cache volumes. test-fips-host runs the toolchain container with
+      #      --rm, but a crashed or SIGKILLed run leaves it behind, still marked
+      #      running and still holding praxis-fips-host-{target,cargo}. A volume
+      #      a container still references is never pruned, so a single leftover
+      #      container defeats passes 2 and 3 entirely: the #1290 cleanup runs
+      #      but frees nothing and the disk stays full. The fips-host-runner
+      #      concurrency group (cancel-in-progress: false) serialises runs on
+      #      this one runner, so no other legitimate run can be holding these
+      #      volumes while we execute; any container bound to them now is a
+      #      leftover and safe to force-remove. Scoped to those two volumes by
+      #      name so nothing else on the runner is touched, and deliberately NOT
+      #      guarded with `|| true`: if a stale container cannot be removed the
+      #      volume stays pinned and the build hits the same wall, so fail
+      #      loudly instead of hiding it.
+      #   2. podman system prune -a removes every stale image and the build
       #      cache. A prune without -a is near-useless here (that space is in
       #      tagged images from prior runs, not dangling layers).
-      #   2. The volumes, not the images, dominate this disk. podman volume
+      #   3. The volumes, not the images, dominate this disk. podman volume
       #      prune removes only volumes no container references, so a cache in
       #      use is left alone; the praxis-fips-host-cargo / -target caches idle
-      #      between runs may be dropped and rebuilt within the 180-minute
-      #      budget. Correctness over cache warmth: without this the disk stays
-      #      full and the toolchain build fails outright.
-      # df -h and podman system df -v either side make a future exhaustion, and
-      # which volumes hold the space, visible in the log.
-      - name: Reclaim disk before loading the image (prune stale images + unused volumes)
+      #      between runs (or freed by pass 1) may be dropped and rebuilt within
+      #      the 180-minute budget. Correctness over cache warmth: without this
+      #      the disk stays full and the toolchain build fails outright.
+      # df -h and podman ps/system df either side make a future exhaustion, and
+      # which containers and volumes hold the space, visible in the log.
+      - name: Reclaim disk before loading the image (remove stale FIPS cache containers, then prune images + unused volumes)
         run: |
+          set -euo pipefail
+
+          echo "== Container and disk state before cleanup =="
           df -h "$GITHUB_WORKSPACE" || df -h || true
+          podman ps -a || true
           podman system df -v || podman system df || true
+
+          # Pass 1: force-remove leftover containers pinning the FIPS cache
+          # volumes. Safe because fips-host-runner serialises runs on this
+          # single runner (see the note above). No `|| true`: a failure here
+          # means the volume stays pinned, so let the step fail.
+          for volume in praxis-fips-host-target praxis-fips-host-cargo; do
+            stale="$(podman ps -aq --filter "volume=$volume")"
+            if [ -n "$stale" ]; then
+              echo "Force-removing stale container(s) pinning volume $volume:"
+              echo "$stale"
+              # Word-splitting is intended: $stale may hold several ids.
+              # shellcheck disable=SC2086
+              podman rm --force --time 0 $stale
+            fi
+          done
+
+          # Pass 2 + 3: the existing image and unused-volume prune, which can
+          # now reclaim any FIPS cache volume freed by pass 1.
           podman system prune -a --force || true
           podman volume prune --force || true
+
+          echo "== Container and disk state after cleanup =="
+          podman ps -a || true
           podman system df || true
           df -h "$GITHUB_WORKSPACE" || df -h || true
 
