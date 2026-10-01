@@ -327,6 +327,12 @@ FIPS_TEST_SUITES        := -p praxis-tests-schema -p praxis-tests-security \
 	-p praxis-tests-integration -p praxis-tests-resilience
 # The toolchain stage of Containerfile.fips, built by `fips-toolchain`.
 FIPS_TOOLCHAIN_IMAGE    ?= praxis-fips-toolchain
+# Multiplier for the resilience suite's throughput floors when the suites run
+# on the FIPS host (PRAXIS_TEST_THROUGHPUT_SCALE in tests/resilience). The
+# floors are sized for GitHub's hosted runners; the host runs everything as
+# the FIPS build inside the toolchain container and is there to prove FIPS
+# behavior, not throughput.
+FIPS_HOST_THROUGHPUT_SCALE ?= 0.5
 # Red Hat's scanner reads the crate list that `cargo auditable` embeds in the
 # binary (the .dep-v0 section); without it a binary is graded inconclusive.
 # `make release-fips` embeds it when cargo-auditable is installed (`cargo
@@ -464,6 +470,7 @@ test-fips-host: fips-toolchain
 		-v praxis-fips-host-cargo:/cargo:U \
 		-v praxis-fips-host-target:/target \
 		-e PRAXIS_FIPS_HOST=1 -e PRAXIS_REQUIRE_FIPS=1 -e CARGO_TERM_COLOR=always \
+		-e PRAXIS_TEST_THROUGHPUT_SCALE=$(FIPS_HOST_THROUGHPUT_SCALE) \
 		$(FIPS_TOOLCHAIN_IMAGE) \
 		make fips-host-facts test-fips test-integration-fips test-conformance-fips \
 			FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version $(if $(V),V=$(V))

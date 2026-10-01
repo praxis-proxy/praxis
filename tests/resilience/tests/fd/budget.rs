@@ -29,9 +29,6 @@ const MARGIN: usize = 32;
 /// Interval between descriptor samples while load runs.
 const SAMPLE_EVERY: Duration = Duration::from_millis(20);
 
-/// Log text of `EMFILE` under glibc and musl.
-const EMFILE_TEXTS: [&str; 2] = ["Too many open files", "No file descriptors available"];
-
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -254,7 +251,7 @@ fn issue_1288_the_container_default_limit_no_longer_caps_concurrency() {
         report.only(&[200]) && report.total() == 512,
         "512 in-flight requests need about 1060 descriptors and must all succeed: {report:?}"
     );
-    assert_no_emfile(&proxy.shut_down());
+    crate::assert_no_emfile(&proxy.shut_down());
 }
 
 #[test]
@@ -295,7 +292,7 @@ fn issue_1288_at_the_limit_requests_are_shed_not_failed() {
         proxy.eventually_serves(Duration::from_secs(5)),
         "the proxy must serve again once the load drains"
     );
-    assert_no_emfile(&proxy.shut_down());
+    crate::assert_no_emfile(&proxy.shut_down());
 }
 
 #[test]
@@ -338,7 +335,7 @@ fn issue_1288_reported_shape_runs_within_budget() {
         "descriptors must return to baseline once the clients leave: {settled}, baseline {}",
         proxy.baseline
     );
-    assert_no_emfile(&proxy.shut_down());
+    crate::assert_no_emfile(&proxy.shut_down());
 }
 
 // -----------------------------------------------------------------------------
@@ -504,14 +501,4 @@ fn wait_until<F: Fn() -> bool>(timeout: Duration, done: F) -> bool {
         std::thread::sleep(Duration::from_millis(50));
     }
     true
-}
-
-/// Assert no log line reports running out of descriptors.
-fn assert_no_emfile(logs: &str) {
-    for text in EMFILE_TEXTS {
-        assert!(
-            !logs.contains(text),
-            "the proxy must never hit EMFILE ({text}):\n{logs}"
-        );
-    }
 }

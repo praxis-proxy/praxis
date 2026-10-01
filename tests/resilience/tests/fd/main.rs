@@ -78,3 +78,48 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     RAISE_LIMIT.call_once(praxis_test_utils::raise_own_open_file_limit);
     SERIAL.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
+
+/// Log text of `EMFILE` under glibc and musl.
+const EMFILE_TEXTS: [&str; 2] = ["Too many open files", "No file descriptors available"];
+
+/// What pingora's accept loop logs when `accept()` itself fails.
+const ACCEPT_LOOP_FAILURE: &str = "Accept() failed";
+
+/// Assert no log line reports running out of descriptors, other than the
+/// accept loop.
+///
+/// Admission control runs per request, after pingora has already accepted the
+/// connection, so a burst of new connections can still fill the table before
+/// the first request is shed. Pingora logs that `accept()` failure and keeps
+/// serving. Until the accept loop itself backs off or sheds on `EMFILE`, that
+/// one line is tolerated; any other `EMFILE` (an upstream connect, a file
+/// open) still fails the test.
+fn assert_no_emfile(logs: &str) {
+    for line in logs.lines().filter(|line| !line.contains(ACCEPT_LOOP_FAILURE)) {
+        for text in EMFILE_TEXTS {
+            assert!(
+                !line.contains(text),
+                "the proxy must never hit EMFILE ({text}) outside the accept loop:\n{logs}"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_accept_loop_emfile_is_tolerated() {
+    assert_no_emfile(
+        "INFO praxis: starting server\n\
+         ERROR pingora_core::services::listening: Accept() failed  AcceptError context: \
+         Fail to accept() cause: Too many open files (os error 24)\n",
+    );
+}
+
+#[test]
+#[should_panic(expected = "outside the accept loop")]
+fn any_other_emfile_still_fails() {
+    assert_no_emfile(
+        "ERROR pingora_core::services::listening: Accept() failed  AcceptError context: \
+         Fail to accept() cause: Too many open files (os error 24)\n\
+         WARN praxis_protocol::http: connect to upstream failed: Too many open files (os error 24)\n",
+    );
+}

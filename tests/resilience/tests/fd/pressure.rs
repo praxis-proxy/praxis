@@ -19,13 +19,6 @@ use praxis_test_utils::{
 };
 
 // -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Log text of `EMFILE` under glibc and musl.
-const EMFILE_TEXTS: [&str; 2] = ["Too many open files", "No file descriptors available"];
-
-// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -69,7 +62,7 @@ fn a_burst_near_the_limit_is_shed_with_503_not_failed() {
         "the proxy must serve again once the burst drains"
     );
     let logs = shut_down(&mut proxy);
-    assert_no_emfile(&logs);
+    crate::assert_no_emfile(&logs);
 }
 
 #[test]
@@ -170,7 +163,7 @@ fn tcp_listener_closes_new_connections_near_the_limit() {
         "new sessions must be proxied once the held ones close"
     );
     let logs = shut_down(&mut proxy);
-    assert_no_emfile(&logs);
+    crate::assert_no_emfile(&logs);
 }
 
 #[test]
@@ -334,16 +327,6 @@ fn metric_value(body: &str, name: &str) -> Option<u64> {
 fn overload_rejects(admin: u16) -> u64 {
     let (_, body) = http_get(&addr(admin), "/metrics", None);
     metric_value(&body, "praxis_overload_rejects_total{reason=\"file_descriptors\"}").unwrap_or(0)
-}
-
-/// Assert no log line reports running out of descriptors.
-fn assert_no_emfile(logs: &str) {
-    for text in EMFILE_TEXTS {
-        assert!(
-            !logs.contains(text),
-            "the proxy must never hit EMFILE ({text}):\n{logs}"
-        );
-    }
 }
 
 /// Gracefully stop `proxy`, assert a clean exit, and return its logs.
