@@ -39,11 +39,12 @@ pub use bootstrap::{ConfigFile, DEFAULT_CONFIG, load_config};
 pub use branch_chain::{BranchChainConfig, BranchCondition};
 pub use chain_ref::ChainRef;
 pub use cluster::{
-    BackoffConfig, BudgetPercent, Cluster, ClusterHttpOptions, ConsistentHashOpts, DEFAULT_MAX_RETRIES,
-    DEFAULT_RETRY_BODY_LIMIT_BYTES, Endpoint, HashFunction, HealthCheckConfig, HealthCheckType, HttpStatusCode,
-    LoadBalancerStrategy, MAX_EFFECTIVE_RETRIES, MAX_RETRY_BODY_LIMIT_BYTES, MaglevOpts, ParameterisedStrategy,
-    PriorityOpts, RetriableCondition, RetryBodyLimit, RetryBudgetConfig, RetryPolicy, RingHashOpts, SimpleStrategy,
-    SubsetFallbackPolicy, SubsetOpts, UpstreamHttpVersion, ZoneAwareOpts,
+    AuthoritySource, BackoffConfig, BudgetPercent, Cluster, ClusterHttpOptions, ConsistentHashOpts,
+    DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BODY_LIMIT_BYTES, Endpoint, HashFunction, HealthCheckConfig, HealthCheckType,
+    HttpStatusCode, LoadBalancerStrategy, MAX_EFFECTIVE_RETRIES, MAX_RETRY_BODY_LIMIT_BYTES, MaglevOpts,
+    ParameterisedStrategy, PriorityOpts, RetriableCondition, RetryBodyLimit, RetryBudgetConfig, RetryPolicy,
+    RingHashOpts, SimpleStrategy, SubsetFallbackPolicy, SubsetOpts, UpstreamAuthority, UpstreamHttpVersion,
+    ZoneAwareOpts,
 };
 pub use condition::{
     ApplicationMatch, Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch, SelectedUpstreamMatch,

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use http::header::HeaderValue;
 use praxis_core::{
-    config::{CachedClusterTls, Cluster, RetryPolicy},
+    config::{CachedClusterTls, Cluster, RetryPolicy, UpstreamAuthority},
     connectivity::{ConnectionOptions, Upstream},
     retry::ClusterRetryState,
 };
@@ -205,7 +205,7 @@ fn build_cached_tls(cluster: &Cluster) -> Result<Option<CachedClusterTls>, Filte
 /// that programmatic callers of `LoadBalancerFilter::new` cannot
 /// accidentally forward the caller's original `Host` header.
 fn build_authority(cluster: &Cluster) -> Result<Option<HeaderValue>, FilterError> {
-    let Some(a) = cluster.http.authority.as_deref() else {
+    let Some(a) = cluster.http.authority.as_ref().and_then(UpstreamAuthority::literal) else {
         return Ok(None);
     };
     cluster.validate_authority().map_err(|e| e.to_string())?;
