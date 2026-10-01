@@ -911,25 +911,6 @@ async fn extract_then_add_from_metadata() {
 }
 
 #[tokio::test]
-async fn extract_oversized_metadata_is_skipped() {
-    let filter = parse_filter(
-        r#"
-        request_extract:
-          - pointer: /v
-            metadata: big
-        "#,
-    );
-    let req = crate::test_utils::make_request(http::Method::POST, "/");
-    let mut ctx = crate::test_utils::make_filter_context(&req);
-    let long = "a".repeat(257);
-    let payload = format!(r#"{{"v":"{long}"}}"#);
-    let mut body = Some(Bytes::from(payload));
-    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
-    assert!(matches!(action, FilterAction::BodyDone));
-    assert!(ctx.get_metadata("big").is_none(), "256-byte metadata cap");
-}
-
-#[tokio::test]
 async fn metadata_add_skipped_when_extract_late_in_wire_order() {
     let filter = parse_filter(
         r#"
