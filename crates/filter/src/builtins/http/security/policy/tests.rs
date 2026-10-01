@@ -245,6 +245,59 @@ global:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+/// API key the `identity/api-key` fixture resolves to subject `alice`.
+const TEST_API_KEY: &str = "sk-test-alice";
+
+/// `sha256:` digest of [`TEST_API_KEY`], the form the file directory indexes.
+const TEST_API_KEY_DIGEST: &str = "sha256:4d692786b022a5d5a48381dcaf1e5e346366feb5579a1d699de2991d153b05f9";
+
+/// Write a pure-L7 policy whose only identity resolver is `identity/api-key`,
+/// backed by a one-record file directory.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture, the YAML literal is the bulk; splitting it would obscure the shape under test"
+)]
+fn write_api_key_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let keys_path = dir.path().join("keys.yaml");
+    std::fs::write(
+        &keys_path,
+        format!("keys:\n  - hash: \"{TEST_API_KEY_DIGEST}\"\n    user: alice\n"),
+    )
+    .expect("write keys.yaml");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: api-keys
+    kind: identity/api-key
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      credential:
+        kind: header
+        name: Authorization
+      prefix: "Bearer sk-test-"
+      provider:
+        kind: file
+        path: "{keys}"
+        index: sha256
+      record_map:
+        subject:
+          id: user
+global:
+  authentication:
+    - api-keys
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+"#,
+        keys = keys_path.display()
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
 /// Write a policy document that declares BOTH a `global` HTTP policy (canonical
 /// `authentication:`/`authorization:` form, admitting only GET) AND an entity
 /// route (the `echo` tool). Derives the combined shape
@@ -1531,6 +1584,241 @@ async fn pure_l7_allow_publishes_authenticated_identity() {
             .map(AuthenticatedIdentity::subject_id),
         Some("alice"),
     );
+}
+
+/// Run one pure-L7 request through the `identity/api-key` policy, with
+/// `authorization` as the `Authorization` header when present. Returns the
+/// reject status (`None` on Continue) and the published subject, so no
+/// key-derived value reaches an assertion message.
+async fn dispatch_api_key(authorization: Option<&str>) -> (Option<u16>, Option<String>) {
+    let (_dir, path) = write_api_key_config();
+    let filter = build_filter(path);
+    let mut req = make_request(Method::GET, "/");
+    if let Some(value) = authorization {
+        req.headers
+            .insert("Authorization", HeaderValue::from_str(value).expect("header value"));
+    }
+    let mut ctx = make_filter_context(&req);
+    let status = match filter.on_request(&mut ctx).await.expect("filter ran") {
+        FilterAction::Continue => None,
+        FilterAction::Reject(rej) => Some(rej.status),
+        _ => panic!("api-key dispatch must Continue or Reject"),
+    };
+    let subject = ctx
+        .extensions
+        .get::<AuthenticatedIdentity>()
+        .map(|id| id.subject_id().to_owned());
+    (status, subject)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_key_known_key_resolves_identity() {
+    let (status, subject) = dispatch_api_key(Some(&format!("Bearer {TEST_API_KEY}"))).await;
+    assert_eq!(status, None, "a known key must Continue");
+    assert_eq!(subject.as_deref(), Some("alice"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_key_unknown_key_is_rejected() {
+    let (status, subject) = dispatch_api_key(Some("Bearer sk-test-mallory")).await;
+    assert_eq!(status, Some(401), "an unknown key must be rejected 401");
+    assert_eq!(subject, None, "no identity is published on a rejection");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_key_missing_key_is_rejected() {
+    let (status, subject) = dispatch_api_key(None).await;
+    assert_eq!(status, Some(401), "a request with no key must be rejected 401");
+    assert_eq!(subject, None, "no identity is published on a rejection");
+}
+
+/// Write a pure-L7 JWT policy whose one authorization rule is `rule`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture, the YAML literal is the bulk; splitting it would obscure the shape under test"
+)]
+fn write_l7_rule_config(rule: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - {rule}
+  pdp:
+    - kind: cel
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Dispatch one GET as `alice` holding `roles` through a policy whose one rule is `rule`.
+async fn dispatch_with_roles(rule: &str, roles: &[&str]) -> FilterAction {
+    let (_dir, path) = write_l7_rule_config(rule);
+    let filter = build_filter(path);
+    let mut claims = standard_claims("alice");
+    claims["roles"] = json!(roles);
+    let token = mint_jwt(&claims);
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    filter.on_request(&mut ctx).await.expect("filter ran")
+}
+
+/// A dotted role gets no `role.<name>` alias, so the DSL form denies and
+/// membership must be tested against `subject.roles`.
+#[tokio::test(flavor = "multi_thread")]
+async fn dotted_role_matches_only_by_membership() {
+    let action = dispatch_with_roles(r#""require(role.admin.readonly)""#, &["admin.readonly"]).await;
+    assert!(
+        matches!(&action, FilterAction::Reject(_)),
+        "a dotted role must not satisfy require(role.<name>); got {action:?}"
+    );
+
+    let action = dispatch_with_roles(
+        r#"cel: { expr: "'admin.readonly' in subject.roles" }"#,
+        &["admin.readonly"],
+    )
+    .await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a dotted role must match by membership; got {action:?}"
+    );
+}
+
+/// `role.admin` must not match a subject holding only `admin.readonly`.
+#[tokio::test(flavor = "multi_thread")]
+async fn dotted_role_does_not_satisfy_its_prefix() {
+    let action = dispatch_with_roles(r#""require(role.admin)""#, &["admin.readonly"]).await;
+    assert!(
+        matches!(&action, FilterAction::Reject(_)),
+        "admin.readonly must not grant role.admin; got {action:?}"
+    );
+}
+
+/// Write a pure-L7 JWT policy decided by `data.authz.allow` over `modules`,
+/// each an inline Rego module.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture, the YAML literal is the bulk; splitting it would obscure the shape under test"
+)]
+fn write_opa_config(modules: &[&str]) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let modules = modules
+        .iter()
+        .map(|m| {
+            format!(
+                "        - |\n{}",
+                m.lines().map(|l| format!("          {l}\n")).collect::<String>()
+            )
+        })
+        .collect::<String>();
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - opa: {{ query: "data.authz.allow" }}
+  pdp:
+    - kind: opa
+      modules:
+{modules}"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Dispatch one GET as `subject` through an OPA policy over `modules`.
+async fn dispatch_opa_as(modules: &[&str], subject: &str) -> FilterAction {
+    let (_dir, path) = write_opa_config(modules);
+    let filter = build_filter(path);
+    let token = mint_jwt(&standard_claims(subject));
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    filter.on_request(&mut ctx).await.expect("filter ran")
+}
+
+/// A partial set built from several rule bodies unions every body.
+#[tokio::test(flavor = "multi_thread")]
+async fn opa_multi_body_partial_rule_unions_bodies() {
+    let module = r#"package authz
+default allow := false
+permitted contains "alice" if input.subject.id == "alice"
+permitted contains "bob" if input.subject.id == "bob"
+allow if input.subject.id in permitted"#;
+    for (subject, allowed) in [("alice", true), ("bob", true), ("carol", false)] {
+        let action = dispatch_opa_as(&[module], subject).await;
+        assert_eq!(
+            matches!(action, FilterAction::Continue),
+            allowed,
+            "{subject}: got {action:?}"
+        );
+    }
+}
+
+/// A function called through an aliased import resolves to the imported package.
+#[tokio::test(flavor = "multi_thread")]
+async fn opa_aliased_import_function_resolves() {
+    let lib = r#"package lib
+is_admin(id) if id == "alice""#;
+    let authz = "package authz
+import data.lib as l
+default allow := false
+allow if l.is_admin(input.subject.id)";
+    for (subject, allowed) in [("alice", true), ("bob", false)] {
+        let action = dispatch_opa_as(&[lib, authz], subject).await;
+        assert_eq!(
+            matches!(action, FilterAction::Continue),
+            allowed,
+            "{subject}: got {action:?}"
+        );
+    }
 }
 
 /// Entity-aware policies resolve identity in the body phase. That producer

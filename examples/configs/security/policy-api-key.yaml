@@ -1,0 +1,39 @@
+# API key authentication
+#
+# Authenticates generic HTTP traffic with API keys using the Praxis Policy
+# Engine. The `policy` filter loads a policy whose only identity resolver is
+# `identity/api-key`: it reads `Authorization: Bearer <key>`, looks the key's
+# digest up in a file directory, and maps the record to the caller's identity.
+# A missing or unknown key is rejected with HTTP 401.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/security/policy-api-key.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # `config_path` points at the policy document, which declares the
+      # `identity/api-key` resolver and a `global` policy that requires an
+      # authenticated caller.
+      - filter: policy
+        config_path: /etc/praxis/api-key-policy.yaml
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
