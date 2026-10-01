@@ -400,26 +400,30 @@ insecure_options:
     let admin = format!("127.0.0.1:{admin_port}");
     wait_for_tcp(&admin);
 
+    let series = "praxis_rate_limit_limited_total{shadow=\"true\"} ";
+    let limited_total = || {
+        let (status, body) = http_get(&admin, "/metrics", None);
+        assert_eq!(status, 200, "/metrics should return 200");
+        body.lines()
+            .find_map(|line| line.strip_prefix(series))
+            .map_or(0, |value| value.trim().parse::<u64>().unwrap())
+    };
+    let before = limited_total();
+
     for i in 0..4 {
         let (status, _) = http_get(&proxy, "/", None);
         assert_eq!(status, 200, "shadow request {i} should be allowed");
     }
 
-    let series = "praxis_rate_limit_limited_total{shadow=\"true\"} ";
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    let mut limited = None;
-    while limited.is_none() && std::time::Instant::now() < deadline {
-        let (status, body) = http_get(&admin, "/metrics", None);
-        assert_eq!(status, 200, "/metrics should return 200");
-        limited = body
-            .lines()
-            .find_map(|line| line.strip_prefix(series))
-            .map(|value| value.trim().parse::<u64>().unwrap());
+    let mut after = limited_total();
+    while after < before + 3 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
+        after = limited_total();
     }
     assert!(
-        limited.is_some_and(|count| count >= 3),
-        "three of four requests exceeded a burst of one and should be counted as shadow limited, got {limited:?}"
+        after >= before + 3,
+        "three of four requests exceeded a burst of one and should be counted as shadow limited, before={before}, after={after}"
     );
 }
 
