@@ -37,3 +37,10 @@ updates:
       default-days: 7
     schedule:
       interval: "weekly"
+    groups:
+      # Dependabot sees codeql-action's init and analyze as separate
+      # dependencies, but analyze rejects a config written by a different
+      # init version, so a bump to only one of them always fails CodeQL.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
