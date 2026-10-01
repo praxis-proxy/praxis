@@ -24,7 +24,7 @@ use ppe::praxis_policy_core::{
     },
     engine::PolicyEngine,
     error::{PluginError, PluginViolation},
-    extensions::{LLMExtension, MetaExtension},
+    extensions::{LLMExtension, LlmRequestDocument, MetaExtension},
     hooks::Extensions,
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
@@ -119,6 +119,34 @@ enum GatedIdentity {
 /// through `cmf.llm_input`, without classifier metadata. Missing,
 /// unlisted, and ambiguous models fail closed by default.
 ///
+/// OPA, CEL, and Cedar steps on `llm:` routes also read the parsed request
+/// body as `llm.request` (`input.llm.request` in OPA, `context.llm.request`
+/// in Cedar), so a rule can inspect `tools`, `messages`, or `input`. Only a
+/// request attributed to a model carries it: a JSON body with a usable
+/// top-level `model`, no JSON-RPC envelope, and no `mcp.method` metadata.
+/// Other requests carry none. CEL and Cedar deny when a rule reads it, and
+/// so does an OPA boolean or object decision, but an OPA deny set needs its
+/// own guard. On allow the upstream receives the original bytes. A body
+/// over `llm.max_request_bytes` receives HTTP 413 before any authorization
+/// rule runs. Policy judges the body as it reaches this filter, so order
+/// body-rewriting filters before `policy`.
+/// For rule syntax, engine types, and absent-value behavior, see
+/// [Structured request input] in the policy engine docs.
+///
+/// A body that repeats a key within one JSON object, at any depth,
+/// receives HTTP 400 with violation code `llm.duplicate_key` before any
+/// authorization rule runs, since backends disagree on which copy wins.
+/// The response names neither the key nor any value. A body that is not
+/// valid JSON is not refused for being malformed: it carries no usable
+/// `model`, so it is handled like any other body without one.
+///
+/// The CMF prompt text that APL steps and scanners read is projected from
+/// `system`, Responses `instructions`, `messages[].content`, legacy
+/// `prompt`, and `input`. For
+/// Responses and embeddings `input`, only text counts: a string, string
+/// items, and `input_text`, `text`, or `output_text` parts of message
+/// items. Token-ID arrays, images, and tool outputs are skipped.
+///
 /// `body_access: read_write` enables the JSON-RPC re-serialization
 /// round-trip so APL field mutators (`redact()`, `assign()`) rewrite
 /// the upstream request body and the downstream response. It also enables
@@ -144,6 +172,8 @@ enum GatedIdentity {
 /// An endpoint URL may name an IP address over `http`, but not over
 /// `https`: an IP carries no SNI, and Pingora peers skip certificate
 /// verification entirely when SNI is empty. Use a hostname for `https`.
+///
+/// [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
 ///
 /// # YAML configuration
 ///
@@ -874,7 +904,7 @@ impl PolicyFilter {
     async fn dispatch_llm_request(
         &self,
         ctx: &mut HttpFilterContext<'_>,
-        parsed: &ParsedLlmRequest,
+        parsed: ParsedLlmRequest,
         model: String,
     ) -> Result<FilterAction, FilterError> {
         let (entity_type, hook_name) = llm_entity_pre();
@@ -900,15 +930,18 @@ impl PolicyFilter {
         Self::take_gated_identity(ctx);
         Self::publish_authenticated_identity(ctx, &identity);
 
+        // Read what the handler needs before the document moves into the extensions.
+        let payload = MessagePayload {
+            message: request_message(&parsed),
+        };
+        let streaming = parsed.is_streaming();
+
         let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &model);
         Self::attach_http_attributes(ctx, &mut extensions, headers);
         self.attach_llm_attributes(&mut extensions, parsed, &model);
         ctx.extensions.insert(ResolvedIdentity(identity));
         ctx.extensions.insert(InferenceRequest { model: model.clone() });
 
-        let payload = MessagePayload {
-            message: request_message(parsed),
-        };
         let (cmf_result, _bg) = self
             .mgr
             .invoke_named::<CmfHook>(hook_name, payload, extensions, None)
@@ -960,7 +993,7 @@ impl PolicyFilter {
 
         // Metadata exposes the model downstream without trusting a client header.
         ctx.set_metadata("llm.model", model.clone());
-        if parsed.is_streaming() {
+        if streaming {
             ctx.set_metadata("llm.stream", "true");
         }
 
@@ -981,8 +1014,8 @@ impl PolicyFilter {
         .is_some()
     }
 
-    /// Add inference attributes used by APL rules.
-    fn attach_llm_attributes(&self, ext: &mut Extensions, parsed: &ParsedLlmRequest, model: &str) {
+    /// Add inference attributes used by APL rules and the parsed body for PDPs.
+    fn attach_llm_attributes(&self, ext: &mut Extensions, parsed: ParsedLlmRequest, model: &str) {
         ext.llm = Some(Arc::new(LLMExtension {
             model_id: Some(model.to_owned()),
             provider: self.cfg.llm.provider.clone(),
@@ -990,6 +1023,7 @@ impl PolicyFilter {
         }));
 
         let promoted = parsed.promoted_params(&self.cfg.llm.promote_params);
+        ext.llm_request = Some(LlmRequestDocument::new(parsed.into_value()));
         if promoted.is_empty() {
             return;
         }
@@ -1432,6 +1466,16 @@ fn oversized_body_rejection() -> Rejection {
         .with_body(llm_error_envelope_bytes_within(Some(&violation), usize::MAX))
 }
 
+/// Build an HTTP 400 rejection for an inference request that repeats a
+/// JSON object key. The body names neither the key nor any value.
+fn duplicate_key_rejection() -> Rejection {
+    let violation = PluginViolation::new("llm.duplicate_key", "inference request body repeats a JSON object key");
+    Rejection::status(400)
+        .with_header(VIOLATION_HEADER, violation.code.clone())
+        .with_header("Content-Type", "application/json")
+        .with_body(llm_error_envelope_bytes_within(Some(&violation), usize::MAX))
+}
+
 /// Build an unmatched inference route violation.
 fn no_route_violation() -> PluginViolation {
     PluginViolation::new("llm.no_route", "no policy route permits this model")
@@ -1612,13 +1656,24 @@ impl HttpFilter for PolicyFilter {
                 return self.complete_gated_admission(ctx).await;
             }
 
-            // A JSON-RPC envelope belongs to the classifier, not inference.
-            let parsed = self
+            // A repeated key makes the body mean different things to
+            // different parsers, so no policy can judge it.
+            let Ok(parsed) = self
                 .llm_routes
-                .then(|| ParsedLlmRequest::parse(body.as_ref().unwrap_or(&EMPTY_BODY)));
+                .then(|| ParsedLlmRequest::parse(body.as_ref().unwrap_or(&EMPTY_BODY)))
+                .transpose()
+            else {
+                tracing::debug!(
+                    target: "policy.filter",
+                    "inference request body repeats a JSON object key; denying (fail-closed)",
+                );
+                return Ok(FilterAction::Reject(duplicate_key_rejection()));
+            };
+
+            // A JSON-RPC envelope belongs to the classifier, not inference.
             let carries_envelope = parsed.as_ref().is_some_and(ParsedLlmRequest::carries_json_rpc_envelope);
 
-            if let Some(parsed) = parsed.as_ref() {
+            if let Some(parsed) = parsed {
                 match (carries_envelope, parsed.model().map(str::to_owned)) {
                     (true, Some(_)) => {
                         tracing::warn!(
@@ -1667,7 +1722,7 @@ impl HttpFilter for PolicyFilter {
 
         // Refuse conflicting coordinates rather than choose the wrong policy.
         if self.llm_routes
-            && ParsedLlmRequest::parse(body.as_ref().unwrap_or(&EMPTY_BODY))
+            && ParsedLlmRequest::parse_last_wins(body.as_ref().unwrap_or(&EMPTY_BODY))
                 .model()
                 .is_some()
         {

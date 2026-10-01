@@ -79,6 +79,8 @@ mod policy_http;
 mod policy_jwks;
 #[cfg(feature = "policy-engine")]
 mod policy_llm;
+#[cfg(feature = "policy-engine")]
+mod policy_llm_request;
 mod priority_lb;
 mod process_logging;
 mod protocol_examples;

@@ -17,6 +17,12 @@ On the body phase, the filter consumes protocol classifier filter metadata (from
 
 Policies with `llm:` routes authorize the top-level request `model` through `cmf.llm_input`, without classifier metadata. Missing, unlisted, and ambiguous models fail closed by default.
 
+OPA, CEL, and Cedar steps on `llm:` routes also read the parsed request body as `llm.request` (`input.llm.request` in OPA, `context.llm.request` in Cedar), so a rule can inspect `tools`, `messages`, or `input`. Only a request attributed to a model carries it: a JSON body with a usable top-level `model`, no JSON-RPC envelope, and no `mcp.method` metadata. Other requests carry none. CEL and Cedar deny when a rule reads it, and so does an OPA boolean or object decision, but an OPA deny set needs its own guard. On allow the upstream receives the original bytes. A body over `llm.max_request_bytes` receives HTTP 413 before any authorization rule runs. Policy judges the body as it reaches this filter, so order body-rewriting filters before `policy`. For rule syntax, engine types, and absent-value behavior, see [Structured request input] in the policy engine docs.
+
+A body that repeats a key within one JSON object, at any depth, receives HTTP 400 with violation code `llm.duplicate_key` before any authorization rule runs, since backends disagree on which copy wins. The response names neither the key nor any value. A body that is not valid JSON is not refused for being malformed: it carries no usable `model`, so it is handled like any other body without one.
+
+The CMF prompt text that APL steps and scanners read is projected from `system`, Responses `instructions`, `messages[].content`, legacy `prompt`, and `input`. For Responses and embeddings `input`, only text counts: a string, string items, and `input_text`, `text`, or `output_text` parts of message items. Token-ID arrays, images, and tool outputs are skipped.
+
 `body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also enables `cmf.llm_output` for non-streaming inference responses. APL field mutators do not rewrite inference bodies.
 
 Response-body hooks run on a small dedicated runtime while the worker waits, for at most twice the engine's per-plugin timeout (`engine_settings.plugin_timeout`, so 60 seconds by default). A hook that does not finish in time is aborted and the response fails under the filter's `failure_mode`: `closed` truncates the response, `open` passes the body through unfiltered.
@@ -61,3 +67,5 @@ llm:
   require_route: true
   provider: openai
 ```
+
+[Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input

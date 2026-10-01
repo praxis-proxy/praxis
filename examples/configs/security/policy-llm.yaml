@@ -6,6 +6,9 @@
 #
 # Point `config_path` at an operator-supplied policy. The integration fixture
 # at `tests/integration/fixtures/llm-policy.yaml` provides a local example.
+# `tests/integration/fixtures/llm-request-policy.yaml` adds OPA and CEL
+# rules that read the parsed request body, such as its `tools`, as
+# `llm.request`.
 #
 # Requires building with the `policy-engine` feature, which is off
 # by default:

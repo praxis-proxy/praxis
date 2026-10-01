@@ -445,3 +445,7 @@ missing_crate_level_docs = "deny"
 private_doc_tests = "allow"
 
 
+# Temporary: build against the unreleased praxis-policy branch. Remove with
+# the allow-git entry in deny.toml once the release is on crates.io.
+[patch.crates-io]
+praxis-policy = { git = "https://github.com/araujof/praxis-policy", rev = "105dee44540427a125e06c0468fb7c74e8a9d226" }

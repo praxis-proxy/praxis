@@ -3,6 +3,8 @@
 
 //! Inference request and response parsing for CMF policy evaluation.
 
+use std::{cell::Cell, fmt};
+
 use bytes::Bytes;
 use ppe::praxis_policy_core::{
     cmf::{ContentPart, Message, Role},
@@ -16,6 +18,12 @@ use ppe::praxis_policy_core::{
 /// Maximum model identifier length accepted by filter metadata.
 const MAX_MODEL_BYTES: usize = 256;
 
+/// Top-level request fields with boolean semantics.
+const BOOLEAN_PARAMS: &[&str] = &["stream"];
+
+/// Content part types that carry prompt text in an `input` item.
+const INPUT_TEXT_TYPES: &[&str] = &["input_text", "text", "output_text"];
+
 // -----------------------------------------------------------------------------
 // Request side
 // -----------------------------------------------------------------------------
@@ -23,9 +31,37 @@ const MAX_MODEL_BYTES: usize = 256;
 /// A parsed inference request body.
 pub(super) struct ParsedLlmRequest(serde_json::Value);
 
+/// An inference request body that repeats a key within one JSON object.
+///
+/// Parsers disagree on which copy wins, so policy could judge a value the
+/// backend never acts on. The error carries neither the key nor a value.
+#[derive(Debug)]
+pub(super) struct DuplicateKey;
+
 impl ParsedLlmRequest {
-    /// Parse `body`; malformed or empty input yields a `Null` document.
-    pub(super) fn parse(body: &Bytes) -> Self {
+    /// Parse `body`, refusing a repeated object key at any depth.
+    ///
+    /// Valid JSON that repeats a key is an error. Input that is not valid
+    /// JSON, including empty input and nesting past `serde_json`'s recursion
+    /// limit, yields a `Null` document whether or not it also repeats a key.
+    /// Without duplicates the document equals what `serde_json::from_slice`
+    /// builds.
+    pub(super) fn parse(body: &Bytes) -> Result<Self, DuplicateKey> {
+        let duplicate = Cell::new(false);
+        let mut deserializer = serde_json::Deserializer::from_slice(body);
+        let parsed = serde::de::DeserializeSeed::deserialize(UniqueKeys { duplicate: &duplicate }, &mut deserializer)
+            .and_then(|value| deserializer.end().map(|()| value));
+        match parsed {
+            Ok(_) if duplicate.get() => Err(DuplicateKey),
+            Ok(value) => Ok(Self(value)),
+            Err(_) => Ok(Self(serde_json::Value::Null)),
+        }
+    }
+
+    /// Parse `body` with `serde_json`'s last-wins handling of repeated keys.
+    ///
+    /// Malformed or empty input yields a `Null` document.
+    pub(super) fn parse_last_wins(body: &Bytes) -> Self {
         Self(serde_json::from_slice(body).unwrap_or(serde_json::Value::Null))
     }
 
@@ -77,6 +113,11 @@ impl ParsedLlmRequest {
             push_text(&mut parts, system);
         }
 
+        // Responses carries its system prompt in `instructions`.
+        if let Some(instructions) = self.0.get("instructions") {
+            push_text(&mut parts, instructions);
+        }
+
         if let Some(messages) = self.0.get("messages").and_then(serde_json::Value::as_array) {
             for message in messages {
                 if let Some(content) = message.get("content") {
@@ -89,18 +130,19 @@ impl ParsedLlmRequest {
             push_text(&mut parts, prompt);
         }
 
+        // Responses and embeddings carry the prompt in `input`.
+        if let Some(input) = self.0.get("input") {
+            push_input_text(&mut parts, input);
+        }
+
         parts
     }
 
-    /// The parsed document, for a caller that needs the raw shape.
-    #[cfg(test)]
-    pub(super) fn as_value(&self) -> &serde_json::Value {
-        &self.0
+    /// Consume the request, yielding the parsed document.
+    pub(super) fn into_value(self) -> serde_json::Value {
+        self.0
     }
 }
-
-/// Top-level request fields with boolean semantics.
-const BOOLEAN_PARAMS: &[&str] = &["stream"];
 
 /// Whether a request field uses a commonly coerced true value.
 fn truthy(value: &serde_json::Value) -> bool {
@@ -147,9 +189,129 @@ fn push_text(parts: &mut Vec<ContentPart>, value: &serde_json::Value) {
     }
 }
 
+/// Append text from a Responses or embeddings `input`.
+///
+/// Token-ID arrays, non-message items and non-text parts are skipped.
+fn push_input_text(parts: &mut Vec<ContentPart>, input: &serde_json::Value) {
+    match input {
+        serde_json::Value::String(_) => push_text(parts, input),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                match item {
+                    serde_json::Value::String(_) => push_text(parts, item),
+                    serde_json::Value::Object(_) => push_input_item_text(parts, item),
+                    _ => {},
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
+/// Append text from one message item of an `input` array.
+fn push_input_item_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value) {
+    if item.get("type").is_some_and(|kind| kind.as_str() != Some("message")) {
+        return;
+    }
+    match item.get("content") {
+        Some(content @ serde_json::Value::String(_)) => push_text(parts, content),
+        Some(serde_json::Value::Array(content)) => {
+            for part in content {
+                let text_part = match part.get("type") {
+                    Some(kind) => kind.as_str().is_some_and(|kind| INPUT_TEXT_TYPES.contains(&kind)),
+                    None => true,
+                };
+                if let Some(text @ serde_json::Value::String(_)) = part.get("text").filter(|_| text_part) {
+                    push_text(parts, text);
+                }
+            }
+        },
+        _ => {},
+    }
+}
+
 /// The CMF payload message for an inference request.
 pub(super) fn request_message(parsed: &ParsedLlmRequest) -> Message {
     Message::with_content(Role::User, parsed.content())
+}
+
+// -----------------------------------------------------------------------------
+// Strict JSON parsing
+// -----------------------------------------------------------------------------
+
+/// Builds a [`serde_json::Value`] and records any repeated object key.
+///
+/// `serde_json` drives the parse, so its number handling and recursion limit
+/// apply unchanged. A repeated key is recorded rather than raised, so the
+/// parse still reaches any later syntax error and malformed input stays
+/// distinguishable from valid JSON with duplicates.
+#[derive(Clone, Copy)]
+struct UniqueKeys<'a> {
+    /// Set when an object repeats a key.
+    duplicate: &'a Cell<bool>,
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for UniqueKeys<'_> {
+    type Value = serde_json::Value;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for UniqueKeys<'_> {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Bool(v))
+    }
+
+    fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Number(v.into()))
+    }
+
+    fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Number(v.into()))
+    }
+
+    fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+        Ok(serde_json::Number::from_f64(v).map_or(serde_json::Value::Null, serde_json::Value::Number))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(v.to_owned()))
+    }
+
+    fn visit_string<E>(self, v: String) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(v))
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(item) = seq.next_element_seed(self)? {
+            items.push(item);
+        }
+        Ok(serde_json::Value::Array(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            let value = map.next_value_seed(self)?;
+            if object.insert(key, value).is_some() {
+                self.duplicate.set(true);
+            }
+        }
+        Ok(serde_json::Value::Object(object))
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -332,12 +494,121 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_model_keys_are_last_wins() {
+    fn duplicate_model_keys_are_rejected() {
+        assert!(
+            try_request(r#"{"model":"gpt-4o-mini","model":"gpt-4o"}"#).is_err(),
+            "backends disagree on which copy wins, so policy cannot know which model it judges",
+        );
+    }
+
+    #[test]
+    fn duplicate_top_level_tools_are_rejected() {
+        assert!(
+            try_request(
+                r#"{"model":"m","tools":[{"type":"function","function":{"name":"transfer_funds"}}],"tools":[]}"#
+            )
+            .is_err(),
+            "a second `tools` could hide the first from policy while the backend acts on it",
+        );
+    }
+
+    #[test]
+    fn a_duplicate_nested_key_is_rejected() {
+        assert!(
+            try_request(
+                r#"{"model":"m","tools":[{"type":"function","function":{"name":"lookup","name":"transfer_funds"}}]}"#
+            )
+            .is_err(),
+            "a repeated key deep inside `tools` is as ambiguous as one at the top",
+        );
+    }
+
+    #[test]
+    fn a_key_repeated_in_sibling_objects_is_not_a_duplicate() {
+        let parsed = request(r#"{"model":"m","tools":[{"name":"a"},{"name":"b"}],"name":"c"}"#);
+        assert_eq!(parsed.model(), Some("m"), "each object has its own key namespace");
+    }
+
+    #[test]
+    fn a_duplicate_is_found_after_escape_decoding() {
+        assert!(
+            try_request(r#"{"model":"m","mod\u0065l":"other"}"#).is_err(),
+            "an escaped spelling names the same key once decoded",
+        );
+    }
+
+    #[test]
+    fn malformed_json_is_not_reported_as_a_duplicate() {
+        for body in [
+            "not json",
+            "",
+            r#"{"model":"m""#,
+            r#"{"model":"m"} trailing"#,
+            r#"{"model":"m","model""#,
+            r#"{"model":"m","model":"n"} trailing"#,
+        ] {
+            let parsed = try_request(body);
+            assert!(parsed.is_ok(), "body {body} is malformed, not a duplicate");
+            assert!(
+                parsed.unwrap().into_value().is_null(),
+                "body {body} must yield a null document"
+            );
+        }
+    }
+
+    #[test]
+    fn a_body_without_duplicates_matches_serde_json() {
+        for body in [
+            r#"{"model":"m","temperature":0.7,"n":1,"seed":-42,"stop":null,"stream":true}"#,
+            r#"{"model":"m","big":18446744073709551615,"bigger":18446744073709551616,"neg":-9223372036854775808}"#,
+            r#"{"model":"m","exp":1e300,"tiny":5e-324,"frac":1.000000000000000000001}"#,
+            r#"{"model":"\u00e9\ud83d\ude00","messages":[{"content":"caf\u00e9 \"quoted\" \\ \n"}]}"#,
+            r#"{"z":1,"a":2,"m":{"y":[1,[2,{"x":null}]],"b":false}}"#,
+            r#"[1,"two",{"three":3}]"#,
+            r#""scalar""#,
+            "  {\"model\" : \"m\"}  ",
+        ] {
+            let strict = request(body).into_value();
+            let reference: serde_json::Value = serde_json::from_slice(body.as_bytes()).unwrap();
+            assert_eq!(strict, reference, "body {body} must parse as serde_json parses it");
+            assert_eq!(
+                serde_json::to_string(&strict).unwrap(),
+                serde_json::to_string(&reference).unwrap(),
+                "key order and number spelling must match too for body {body}",
+            );
+        }
+    }
+
+    #[test]
+    fn nesting_past_the_recursion_limit_stays_malformed() {
+        let depth = 129;
+        let body = format!(r#"{{"model":"m","deep":{}{}}}"#, "[".repeat(depth), "]".repeat(depth));
+        let parsed = try_request(&body);
+        assert!(parsed.is_ok(), "deep nesting is not a duplicate");
+        assert!(
+            parsed.unwrap().into_value().is_null(),
+            "serde_json's recursion limit still applies, so the body is malformed",
+        );
+
+        let depth = 100;
+        let body = format!(r#"{{"model":"m","deep":{}{}}}"#, "[".repeat(depth), "]".repeat(depth));
         assert_eq!(
-            request(r#"{"model":"gpt-4o-mini","model":"gpt-4o"}"#).model(),
-            Some("gpt-4o"),
-            "last-wins matches serde_json and typical backend parsers, so policy sees the \
-             value the backend will act on",
+            request(&body).model(),
+            Some("m"),
+            "nesting under the limit still parses"
+        );
+    }
+
+    #[test]
+    fn the_last_wins_parse_keeps_serde_json_semantics() {
+        assert_eq!(
+            ParsedLlmRequest::parse_last_wins(&Bytes::from_static(br#"{"model":"a","model":"b"}"#)).model(),
+            Some("b"),
+        );
+        assert!(
+            ParsedLlmRequest::parse_last_wins(&Bytes::from_static(b"not json"))
+                .into_value()
+                .is_null()
         );
     }
 
@@ -464,6 +735,17 @@ mod tests {
     }
 
     #[test]
+    fn builds_content_from_responses_instructions() {
+        let parsed =
+            request(r#"{"model":"gpt-4o","instructions":"be terse","input":[{"role":"user","content":"hello"}]}"#);
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["be terse", "hello"],
+            "Responses `instructions` is a system prompt, so a scanner must read it before `input`",
+        );
+    }
+
+    #[test]
     fn unknown_body_shape_yields_no_content_but_keeps_the_model() {
         let parsed = request(r#"{"model":"m","inputs":{"nested":"value"}}"#);
         assert!(parsed.content().is_empty());
@@ -471,11 +753,69 @@ mod tests {
     }
 
     #[test]
-    fn embeddings_request_has_a_model_and_no_prompt_text() {
+    fn embeddings_string_input_is_projected() {
         let parsed = request(r#"{"model":"text-embedding-3-small","input":"hello"}"#);
         assert_eq!(parsed.model(), Some("text-embedding-3-small"));
-        assert!(parsed.content().is_empty());
-        assert!(parsed.as_value().is_object());
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["hello"],
+            "a string `input` is prompt text a policy must be able to read",
+        );
+        assert!(parsed.into_value().is_object());
+    }
+
+    #[test]
+    fn builds_content_from_responses_input_text_parts() {
+        let parsed =
+            request(r#"{"model":"gpt-4o","input":[{"role":"user","content":[{"type":"input_text","text":"hi"}]}]}"#);
+        assert_eq!(texts(&parsed.content()), vec!["hi"]);
+    }
+
+    #[test]
+    fn token_id_input_projects_nothing() {
+        for body in [
+            r#"{"model":"m","input":[1,2,3]}"#,
+            r#"{"model":"m","input":[[1,2,3]]}"#,
+            r#"{"model":"m","input":[[1,2],[3]]}"#,
+        ] {
+            assert!(request(body).content().is_empty(), "token IDs are not text: {body}");
+        }
+    }
+
+    #[test]
+    fn non_text_input_parts_are_skipped() {
+        let parsed = request(
+            r#"{"model":"m","input":[{"role":"user","content":[
+                 {"type":"input_text","text":"describe"},
+                 {"type":"input_image","image_url":"http://x/y.png","text":"hidden"},
+                 {"type":"input_file","file_id":"f1"},
+                 {"type":"output_text","text":"earlier"}]}]}"#,
+        );
+        assert_eq!(texts(&parsed.content()), vec!["describe", "earlier"]);
+    }
+
+    #[test]
+    fn non_message_input_items_are_skipped() {
+        let parsed = request(
+            r#"{"model":"m","input":[
+                 {"type":"function_call","call_id":"c1","name":"f","arguments":"{\"q\":\"x\"}"},
+                 {"type":"function_call_output","call_id":"c1","output":"result"},
+                 {"type":"message","role":"user","content":"next"}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["next"],
+            "only message items carry prompt text",
+        );
+    }
+
+    #[test]
+    fn string_input_items_mix_with_message_items() {
+        let parsed = request(
+            r#"{"model":"m","input":["first",{"role":"user","content":"second"},
+                 {"role":"user","content":[{"text":"third"}]}]}"#,
+        );
+        assert_eq!(texts(&parsed.content()), vec!["first", "second", "third"]);
     }
 
     #[test]
@@ -625,6 +965,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn request(json: &str) -> ParsedLlmRequest {
+        try_request(json).unwrap()
+    }
+
+    fn try_request(json: &str) -> Result<ParsedLlmRequest, DuplicateKey> {
         ParsedLlmRequest::parse(&Bytes::from(json.to_owned()))
     }
 
