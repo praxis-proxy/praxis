@@ -5421,52 +5421,91 @@ fn write_http_route_beside_tool_route_config() -> (TempDir, String) {
 }
 
 #[test]
-fn an_http_route_beside_entity_routes_warns() {
+fn an_http_route_beside_entity_routes_is_refused_at_load() {
     let (_dir, path) = write_http_route_beside_tool_route_config();
     let yaml = std::fs::read_to_string(&path).expect("read policy");
-    let policy_config = ppe::praxis_policy_core::config::parse_config(&yaml).expect("parse policy");
 
-    assert_eq!(
-        PolicyFilter::warn_on_http_route_beside_entity_routes(&policy_config, /* mcp_routes= */ true),
-        1,
-        "an `http:` route beside entity routes is a silent bypass and has to be reported",
-    );
-    assert_eq!(
-        PolicyFilter::warn_on_http_route_beside_entity_routes(&policy_config, /* mcp_routes= */ false),
-        0,
-        "with no entity routes the `http:` route is the only thing evaluating, so there is \
-         nothing to report",
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_http_route_does_not_authorize_classified_mcp_traffic() {
-    let (_dir, path) = write_http_route_beside_tool_route_config();
-    let filter = build_read_write_filter(path);
-
-    let mut req = make_request(Method::POST, "/mcp");
-    let token = mint_jwt(&standard_claims("alice"));
-    req.headers.insert(
-        "Authorization",
-        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
-    );
-    let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
-    let request_body =
-        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
-    let action = filter
-        .on_request_body(&mut ctx, &mut Some(request_body), true)
-        .await
-        .expect("request phase ran");
-
+    let refusal = PolicyFilter::http_route_beside_entity_routes(&yaml, /* mcp_routes= */ true)
+        .expect("an authorizing `http:` route beside entity routes gates nothing");
     assert!(
-        matches!(action, FilterAction::BodyDone),
-        "alice fails the `http:` route's rule and is admitted anyway: classified traffic is \
-         evaluated against the tool route. Pinning the current behaviour, which the load-time \
-         warning reports; got {action:?}",
+        refusal.contains("`global` block"),
+        "the refusal has to name the remedy, or an operator has nowhere to go; got {refusal}",
+    );
+    assert_eq!(
+        PolicyFilter::http_route_beside_entity_routes(&yaml, /* mcp_routes= */ false),
+        None,
+        "with no entity routes the `http:` route is the only thing evaluating, so it is fine",
     );
 }
+
+#[test]
+fn an_unreadable_policy_document_is_refused_rather_than_admitted() {
+    // The check reads the raw document because `RouteEntry` does not surface
+    // APL steps. If that read fails it has learned nothing, so it must not
+    // report "no problem": that is how a bypass gets admitted by an error path.
+    let refusal = PolicyFilter::http_route_beside_entity_routes("routes: [unclosed", /* mcp_routes= */ true)
+        .expect("an unreadable document means the contract is unchecked, so refuse");
+    assert!(
+        refusal.contains("could not re-read"),
+        "the refusal has to say the check could not run, not invent a finding; got {refusal}",
+    );
+}
+
+#[test]
+fn a_policy_with_no_routes_block_is_not_refused() {
+    assert_eq!(
+        PolicyFilter::http_route_beside_entity_routes("global:\n  authentication: []\n", /* mcp_routes= */ true),
+        None,
+        "no `routes:` key means no route to object to, which is a real answer, not a failure",
+    );
+}
+
+#[test]
+fn an_http_route_scoping_only_authentication_still_loads() {
+    // The early identity gate runs on the header phase, before classification,
+    // and matches an `http:` route by path. A route-scoped `authentication:`
+    // list therefore does reach classified traffic, unlike `authorization:`,
+    // so this shape must not be refused. `the_early_identity_gate_honors_an_
+    // http_route_authentication_list` is the behaviour this protects.
+    let yaml = r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+  - http:
+      path_prefix: /mcp
+    authentication:
+      replace_inherited: true
+      steps:
+        - route-jwt
+"#;
+    assert_eq!(
+        PolicyFilter::http_route_beside_entity_routes(yaml, /* mcp_routes= */ true),
+        None,
+        "an `http:` route that only scopes authentication is a supported shape",
+    );
+}
+
+#[test]
+fn an_http_route_beside_entity_routes_fails_filter_construction() {
+    let (_dir, path) = write_http_route_beside_tool_route_config();
+    let cfg = PolicyFilterConfig {
+        config_path: path,
+        allow_private_idp: false,
+        trusted_private_endpoints: vec![],
+        body_access: super::config::BodyAccessMode::ReadWrite,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
+    };
+    let err = PolicyFilter::new(cfg).err().expect("construction must fail");
+    assert!(
+        format!("{err}").contains("declare `authorization:` alongside MCP entity routes"),
+        "the refusal has to reach the operator as a startup failure; got {err}",
+    );
+}
+
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_global_block_does_authorize_classified_mcp_traffic() {

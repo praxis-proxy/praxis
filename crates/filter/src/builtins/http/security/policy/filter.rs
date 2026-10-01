@@ -142,11 +142,17 @@ enum GatedIdentity {
 /// body access. A policy declaring them warns at load. Put the control on
 /// `pre_invocation`, which is dispatched for all three entity types.
 ///
-/// An `http:` route does not reach classified MCP traffic. That traffic is
-/// evaluated against its entity route, so an `http:` route's `authorization:`
-/// and `authentication:` apply only to unclassified requests. Cross-cutting
-/// rules belong in the `global` block, which is layered into every entity
-/// route. A policy combining the two warns at load.
+/// An `http:` route cannot carry `authorization:` alongside MCP entity routes,
+/// and a policy that does is refused at load. Classified traffic is evaluated
+/// against its entity route, so those steps would never run for a tool, prompt,
+/// or resource call and the route would gate nothing. Cross-cutting rules
+/// belong in the `global` block, which is layered into every entity route;
+/// non-MCP traffic belongs behind a separate listener or filter.
+///
+/// A route-scoped `authentication:` list is unaffected. The early identity gate
+/// runs on the header phase, before classification, and matches an `http:`
+/// route by path, so scoping authentication that way does reach classified
+/// traffic and keeps loading.
 ///
 /// Response-body hooks run on a small dedicated runtime while the worker
 /// waits, for at most twice the engine's per-plugin timeout
@@ -439,7 +445,11 @@ impl PolicyFilter {
         }
         Self::warn_on_inert_inference_defaults(&policy_config, llm_routes);
         Self::warn_on_entity_response_gaps(&cfg, mcp_post_tool, mcp_post_undispatched);
-        let _http_beside_entity = Self::warn_on_http_route_beside_entity_routes(&policy_config, mcp_routes);
+
+        // Reject an `http:` route that no classified request can reach.
+        if let Some(message) = Self::http_route_beside_entity_routes(&yaml, mcp_routes) {
+            return Err(message.into());
+        }
 
         // Reject controls that cannot reach the writable response-header phase.
         let unreachable = unreachable_response_levels(&policy_config);
@@ -585,40 +595,65 @@ impl PolicyFilter {
         }
     }
 
-    /// Report an `http:` route that cannot reach classified MCP traffic.
+    /// Refuse an `http:` route whose `authorization:` no classified request can
+    /// reach.
     ///
     /// Classified traffic resolves to its entity route, and an `http:` route is
-    /// a different route, so its `authorization:` and `authentication:` never
-    /// apply to a tool, prompt, or resource call. The `global` block is layered
-    /// into every entity route and does apply, which is the remedy.
+    /// a different route, so its `authorization:` steps never run for a tool,
+    /// prompt, or resource call. Loading the policy anyway leaves an operator
+    /// with a path-scoped rule over `/mcp` that gates nothing.
     ///
-    /// Warned on the presence of an `http:` route rather than on it carrying
-    /// authorization: `RouteEntry` does not surface APL steps, which the
-    /// visitor consumes from the raw document, and a route-scoped
-    /// `authentication:` list is skipped for the same reason.
-    /// Returns how many `http:` routes the warning covered, so a test can
-    /// assert the decision without racing `tracing`'s process-wide level hint.
-    pub(super) fn warn_on_http_route_beside_entity_routes(
-        policy_config: &ppe::praxis_policy_core::config::PolicyConfig,
-        mcp_routes: bool,
-    ) -> usize {
+    /// Refused rather than warned, so a control that cannot fire is a startup
+    /// failure and not a silent one. Same treatment as an
+    /// `assertions.response:` block that no phase can apply.
+    ///
+    /// Scoped to `authorization:` deliberately. A route-scoped
+    /// `authentication:` list **is** honored, by the early identity gate on the
+    /// header phase, which runs before classification and matches on path. An
+    /// `http:` route that only scopes authentication is a supported shape and
+    /// must keep loading.
+    ///
+    /// Read from the raw document rather than `PolicyConfig`, because
+    /// `RouteEntry` does not surface APL steps: the visitor consumes
+    /// `authorization:` straight from the YAML, so the parsed form cannot tell
+    /// an authorizing `http:` route from an authenticating one.
+    ///
+    /// Returns the operator-facing message when the policy must be refused.
+    pub(super) fn http_route_beside_entity_routes(yaml: &str, mcp_routes: bool) -> Option<String> {
         if !mcp_routes {
-            return 0;
+            return None;
         }
-        let http_routes = policy_config.routes.iter().filter(|route| route.http.is_some()).count();
-        if http_routes == 0 {
-            return 0;
+        // Fail closed. The engine parsed this same text a moment ago, so a
+        // failure here should be unreachable, and "should be unreachable" is
+        // how a check that prevents an authorization bypass ends up admitting
+        // one. Refuse instead of returning "nothing to report".
+        let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(yaml) else {
+            return Some(
+                "policy: praxis could not re-read the policy document to check the `http:` route \
+                 contract. Refusing to load, because an `http:` route whose `authorization:` \
+                 never runs cannot be ruled out."
+                    .to_owned(),
+            );
+        };
+        // An absent or non-sequence `routes:` is not a failure to check: there
+        // is no route to object to. The engine accepted the document, so the
+        // key is well-formed where it exists.
+        let routes = doc.get("routes").and_then(serde_yaml::Value::as_sequence)?;
+        let offenders = routes
+            .iter()
+            .filter(|route| route.get("http").is_some() && route.get("authorization").is_some())
+            .count();
+        if offenders == 0 {
+            return None;
         }
-        tracing::warn!(
-            target: "policy.filter",
-            http_routes,
-            "policy declares `http:` route(s) AND MCP entity routes: a classified MCP request is \
-             evaluated against its entity route, so the `http:` route's `authorization:` and \
-             `authentication:` do NOT apply to tool, prompt, or resource calls. Move \
-             cross-cutting rules into the `global` block, which is layered into every entity \
-             route, or front non-MCP traffic with a separate listener/filter.",
-        );
-        http_routes
+        Some(format!(
+            "policy: {offenders} `http:` route(s) declare `authorization:` alongside MCP entity \
+             routes. A classified MCP request is evaluated against its entity route, so those \
+             steps never run for a tool, prompt, or resource call and the route would gate \
+             nothing. Move cross-cutting rules into the `global` block, which is layered into \
+             every entity route, or front non-MCP traffic with a separate listener/filter. A \
+             route-scoped `authentication:` list is unaffected and may stay."
+        ))
     }
 
     /// Warn when inference defaults have no route to apply them.

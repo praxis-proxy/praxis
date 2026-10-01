@@ -25,7 +25,9 @@ A route may declare the response half on its own. A route whose only declaration
 
 Only `tool:` routes are dispatched on the response phase. The response payload is projected for `tools/call` alone, so a `prompt:` or `resource:` route's `result.<field>` and `post_invocation` rules never run, under either body access. A policy declaring them warns at load. Put the control on `pre_invocation`, which is dispatched for all three entity types.
 
-An `http:` route does not reach classified MCP traffic. That traffic is evaluated against its entity route, so an `http:` route's `authorization:` and `authentication:` apply only to unclassified requests. Cross-cutting rules belong in the `global` block, which is layered into every entity route. A policy combining the two warns at load.
+An `http:` route cannot carry `authorization:` alongside MCP entity routes, and a policy that does is refused at load. Classified traffic is evaluated against its entity route, so those steps would never run for a tool, prompt, or resource call and the route would gate nothing. Cross-cutting rules belong in the `global` block, which is layered into every entity route; non-MCP traffic belongs behind a separate listener or filter.
+
+A route-scoped `authentication:` list is unaffected. The early identity gate runs on the header phase, before classification, and matches an `http:` route by path, so scoping authentication that way does reach classified traffic and keeps loading.
 
 Response-body hooks run on a small dedicated runtime while the worker waits, for at most twice the engine's per-plugin timeout (`engine_settings.plugin_timeout`, so 60 seconds by default). A hook that does not finish in time is aborted and the response fails under the filter's `failure_mode`: `closed` truncates the response, `open` passes the body through unfiltered.
 
