@@ -644,7 +644,6 @@ pub fn wait_for_https(addr: &str, client_config: &Arc<ClientConfig>) {
 }
 
 /// Attempt an H2-over-TLS GET, returning `None` on any failure.
-#[expect(clippy::large_stack_frames, reason = "test utility with H2 handshake structs")]
 fn try_h2_get(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> Option<(u16, String)> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -652,7 +651,11 @@ fn try_h2_get(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> Opti
         .ok()?;
 
     rt.block_on(async {
-        let result = tokio::time::timeout(Duration::from_secs(2), try_h2_get_inner(addr, path, client_config)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            Box::pin(try_h2_get_inner(addr, path, client_config)),
+        )
+        .await;
         result.ok().flatten()
     })
 }

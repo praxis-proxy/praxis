@@ -157,16 +157,20 @@ fn backend_symbols(file: &object::File<'_>) -> BTreeMap<&'static str, usize> {
 /// Calls into libcrypto and libssl must be present: undefined dynamic symbols
 /// that the system library resolves.
 fn imports(report: &mut Report, file: &object::File<'_>) {
-    let count = file.imports().map_or(0, |imports| {
-        imports
-            .iter()
-            .filter(|import| {
-                OPENSSL_PREFIXES
-                    .iter()
-                    .any(|prefix| import.name().starts_with(prefix.as_bytes()))
-            })
-            .count()
-    });
+    let count = file
+        .imports()
+        .and_then(Iterator::collect::<object::Result<Vec<_>>>)
+        .map_or(0, |imports| {
+            imports
+                .iter()
+                .filter_map(|import| import.name().into_name())
+                .filter(|name| {
+                    OPENSSL_PREFIXES
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix.as_bytes()))
+                })
+                .count()
+        });
     if count > 0 {
         report.ok(&format!(
             "imports {count} OpenSSL functions from libcrypto/libssl (undefined symbols resolved by the system library)"

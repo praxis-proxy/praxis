@@ -56,10 +56,10 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "resource", "signal", "user"] }
 notify = "8.2.0"
-object = { version = "0.39.1", default-features = false, features = ["read_core", "elf", "std"] }
-opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
+opentelemetry = { version = "0.33.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
 opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
 pingora-core = { version = "0.10.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
@@ -123,7 +123,7 @@ tempfile = "3.27.0"
 # a second provider into every test binary and let `ClientConfig::builder()`
 # pick it silently when nothing is installed; the Pingora fork depends on it
 # the same way.
-tokio-rustls = { version = "0.26.5", default-features = false, features = ["logging", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["logging", "tls12"] }
 tokio-tungstenite = "0.30.0"
 thiserror = "2.0.21"
 tikv-jemallocator = "0.7.0"
@@ -134,7 +134,7 @@ tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
-tracing-opentelemetry = "0.33.0"
+tracing-opentelemetry = "0.34.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "registry"] }
 url = "2.5.8"
 zeroize = "1.9.0"
