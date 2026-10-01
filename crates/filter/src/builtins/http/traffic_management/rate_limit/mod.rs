@@ -32,7 +32,10 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
-use self::config::{Ipv6PrefixLen, RateLimitConfig};
+use self::{
+    config::{Ipv6PrefixLen, RateLimitConfig},
+    limiter::AcquisitionFailure,
+};
 use super::token_bucket::TokenBucket;
 use crate::{
     FilterAction, FilterError, Rejection,
@@ -89,6 +92,9 @@ enum RateLimitState {
     /// Independent bucket per source IPv4 address or IPv6 prefix.
     PerIp(PerIpState),
 }
+
+/// Marks a shadow decision made without a per-IP bucket.
+struct UntrackedShadowDecision;
 
 // -----------------------------------------------------------------------------
 // PerIpState
@@ -349,11 +355,17 @@ impl HttpFilter for RateLimitFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if self.shadow {
+            let _ = ctx.remove_filter_state::<UntrackedShadowDecision>();
+        }
         match self.try_acquire_for(ctx.client_addr) {
             Ok(_remaining) => Ok(FilterAction::Continue),
-            Err(remaining) => {
+            Err(failure) => {
                 crate::metrics::record_rate_limit_limited(self.shadow);
                 if self.shadow {
+                    if matches!(failure, AcquisitionFailure::Untracked) {
+                        ctx.insert_filter_state(UntrackedShadowDecision);
+                    }
                     tracing::info!(
                         client = ?ctx.client_addr,
                         "rate_limit: would reject request (shadow)"
@@ -364,7 +376,7 @@ impl HttpFilter for RateLimitFilter {
                     client = ?ctx.client_addr,
                     "rate_limit: rejecting request (429)"
                 );
-                let (headers, retry_secs) = self.rate_limit_headers(remaining, ctx.time_source);
+                let (headers, retry_secs) = self.rate_limit_headers(failure.remaining(), ctx.time_source);
 
                 let mut rejection = Rejection::status(429).with_header("Retry-After", format!("{retry_secs}"));
                 for (name, value) in headers {
@@ -376,7 +388,11 @@ impl HttpFilter for RateLimitFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let remaining = self.current_remaining(ctx.client_addr);
+        let remaining = if self.shadow && ctx.get_filter_state::<UntrackedShadowDecision>().is_some() {
+            0.0
+        } else {
+            self.current_remaining(ctx.client_addr)
+        };
         let (remaining_int, reset_unix, _retry_secs) = self.rate_limit_numbers(remaining, ctx.time_source);
 
         if let Some(ref mut resp) = ctx.response_header {

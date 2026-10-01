@@ -859,6 +859,35 @@ async fn shadow_per_ip_allows_without_client_addr() {
 }
 
 #[tokio::test]
+async fn shadow_hard_cap_reports_no_remaining_tokens() {
+    let filter = make_hard_cap_shadow_filter(10.0, 20);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.current_filter_id = Some(0);
+    ctx.client_addr = Some("192.168.1.1".parse().unwrap());
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "shadow must allow the untracked IP"
+    );
+
+    let mut resp = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    assert_eq!(
+        resp.headers.get("x-ratelimit-remaining").unwrap(),
+        "0",
+        "the hard-cap shadow response must not advertise a full bucket"
+    );
+    assert_eq!(
+        resp.headers.get("x-ratelimit-limit").unwrap(),
+        "20",
+        "the configured limit should still be reported"
+    );
+}
+
+#[tokio::test]
 async fn limited_counter_distinguishes_shadow_from_enforced() {
     crate::test_utils::install_metrics_recorder();
     let shadow_before = limited_total(true);
@@ -960,6 +989,18 @@ fn make_shadow_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
     RateLimitFilter {
         shadow: true,
         ..make_filter(mode, rate, burst)
+    }
+}
+
+/// Build a shadow filter whose per-IP bucket map is at its hard cap.
+fn make_hard_cap_shadow_filter(rate: f64, burst: u32) -> RateLimitFilter {
+    let state = PerIpState::from_buckets(
+        populate_stale_map(HARD_CAP_PER_IP_ENTRIES, rate, f64::from(burst)),
+        Ipv6PrefixLen::default(),
+    );
+    RateLimitFilter {
+        state: RateLimitState::PerIp(state),
+        ..make_shadow_filter("per_ip", rate, burst)
     }
 }
 
