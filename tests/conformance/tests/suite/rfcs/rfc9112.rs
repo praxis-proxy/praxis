@@ -17,7 +17,9 @@ use praxis_test_utils::{
     start_header_echo_backend, start_proxy,
 };
 
-use super::test_utils::{start_417_backend, start_crlf_response_backend, start_request_line_echo_backend};
+use super::test_utils::{
+    start_417_backend, start_crlf_response_backend, start_request_line_echo_backend, start_status_line_backend,
+};
 
 // -----------------------------------------------------------------------------
 // RFC 9112 Section 6.1 - TE/CL Conflict
@@ -548,4 +550,74 @@ fn rfc9112_options_asterisk_form_handled() {
     let status = parse_status(&raw);
 
     assert_eq!(status, 200, "OPTIONS * must be forwarded to upstream, got {status}");
+}
+
+// -----------------------------------------------------------------------------
+// RFC 9112 Section 4 - Malformed Upstream Status Line
+// -----------------------------------------------------------------------------
+
+/// [RFC 9112 Section 4]: a status line is `HTTP-version SP status-code
+/// SP [ reason-phrase ]` with a three-digit status code. An upstream
+/// status line that breaks that grammar is not a valid response, so the
+/// proxy must answer 502 ([RFC 9110 Section 15.6.3]) instead of
+/// forwarding it. A well-formed status line through the same backend is
+/// the control.
+///
+/// [RFC 9112 Section 4]: https://datatracker.ietf.org/doc/html/rfc9112#section-4
+/// [RFC 9110 Section 15.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-15.6.3
+#[test]
+fn rfc9112_malformed_upstream_status_line_returns_502() {
+    for (status_line, expected) in [
+        ("HTTP/1.1 200 OK", 200),
+        ("HTTP/1.1 OK", 502),
+        ("HTTP/1.1 2x0 OK", 502),
+        ("HTTP/1.1 2000 OK", 502),
+        ("HTTP/1.1200 OK", 502),
+    ] {
+        let backend_port = start_status_line_backend(status_line.as_bytes());
+        let proxy_port = free_port();
+        let yaml = simple_proxy_yaml(proxy_port, backend_port);
+        let config = Config::from_yaml(&yaml).unwrap();
+        let proxy = start_proxy(&config);
+
+        let (status, body) = http_get(proxy.addr(), "/", None);
+        assert_eq!(
+            status, expected,
+            "upstream status line {status_line:?} should produce {expected}: {body}"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
+// RFC 9112 Section 5 - Upstream Field Line Without a Colon
+// -----------------------------------------------------------------------------
+
+/// [RFC 9112 Section 5]: a field line is `field-name ":" OWS
+/// field-value OWS`. An upstream header line with no colon cannot be
+/// parsed as a field, so the response is invalid and the proxy must
+/// answer 502 ([RFC 9110 Section 15.6.3]) rather than drop or guess at
+/// the line. A well-formed header through the same backend is the
+/// control.
+///
+/// [RFC 9112 Section 5]: https://datatracker.ietf.org/doc/html/rfc9112#section-5
+/// [RFC 9110 Section 15.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-15.6.3
+#[test]
+fn rfc9112_upstream_header_without_colon_returns_502() {
+    for (header_line, expected) in [
+        ("X-Has-Colon: value", 200),
+        ("X-No-Colon value", 502),
+        ("X-No-Colon", 502),
+    ] {
+        let backend_port = start_crlf_response_backend(header_line.as_bytes());
+        let proxy_port = free_port();
+        let yaml = simple_proxy_yaml(proxy_port, backend_port);
+        let config = Config::from_yaml(&yaml).unwrap();
+        let proxy = start_proxy(&config);
+
+        let (status, body) = http_get(proxy.addr(), "/", None);
+        assert_eq!(
+            status, expected,
+            "upstream header line {header_line:?} should produce {expected}: {body}"
+        );
+    }
 }
