@@ -229,6 +229,28 @@ pub fn own_open_file_limits() -> (u64, u64) {
     open_file_limits_of("/proc/self/limits")
 }
 
+/// Raise this test process's soft open file limit to its hard limit, as the
+/// proxy does for itself.
+///
+/// Load helpers hold a client socket per request and the in-process backends
+/// a server socket per connection, so a few hundred concurrent requests need
+/// more than the 1024 soft limit containers and desktop sessions often start
+/// with. Without this the test process, not the proxy under test, runs out,
+/// and its backends quietly serve in waves instead of all at once.
+///
+/// # Panics
+///
+/// Panics if the limit cannot be read or raised.
+#[cfg(target_os = "linux")]
+pub fn raise_own_open_file_limit() {
+    use nix::sys::resource::{Resource, getrlimit, setrlimit};
+
+    let (soft, hard) = getrlimit(Resource::RLIMIT_NOFILE).expect("read the open file limit");
+    if soft < hard {
+        setrlimit(Resource::RLIMIT_NOFILE, hard, hard).expect("raise the soft open file limit to the hard limit");
+    }
+}
+
 /// Parse the `Max open files` row of a `/proc/<pid>/limits` file.
 #[cfg(target_os = "linux")]
 fn open_file_limits_of(path: &str) -> (u64, u64) {

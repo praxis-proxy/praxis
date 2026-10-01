@@ -3538,6 +3538,7 @@ dependencies = [
  "futures",
  "h2",
  "http",
+ "nix",
  "openssl",
  "praxis-proxy",
  "praxis-proxy-core",

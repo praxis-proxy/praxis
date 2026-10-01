@@ -334,6 +334,8 @@ that long for its next request. Without it, idle
 keep-alive connections stay open until the client closes
 them, and each one holds a file descriptor, so a fleet of
 idle or half-dead clients can exhaust the process limit.
+The timeout is applied in whole seconds, rounded up, and
+does not affect HTTP/2 connections or TCP listeners.
 
 ```yaml
 listeners:

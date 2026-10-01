@@ -38,9 +38,9 @@ pub use load::{
     read_raw_responses,
 };
 pub use net::*;
-#[cfg(target_os = "linux")]
-pub use process::own_open_file_limits;
 pub use process::{PraxisProcess, READY_TIMEOUT};
+#[cfg(target_os = "linux")]
+pub use process::{own_open_file_limits, raise_own_open_file_limit};
 pub use proxy::{
     PRAXIS_BIN_ENV, ProxyGuard, ReloadableProxyGuard, build_pipeline, custom_filter_yaml, praxis_bin, registry_with,
     simple_proxy_yaml, start_full_proxy, start_full_proxy_with_registry, start_proxy, start_proxy_with_registry,
