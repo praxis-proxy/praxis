@@ -23,6 +23,7 @@ Security filters protect against threats, enforce access control, and validate r
 - Use reserved headers (`x-praxis-*`) for metadata promoted from request bodies to prevent client spoofing
 - Enable `insecure_options.skip_pipeline_checks.conditional_security` when intentionally skipping security filters for some requests
 - Combine classifiers with routing and branching for defense-in-depth
+- Read upstream credentials from the environment (`credential_injection` with `env_var`) rather than committing them as `value:`; see [credential-injection-env-vars.yaml](credential-injection-env-vars.yaml)
 
 ## Related Documentation
 
