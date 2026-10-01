@@ -3409,6 +3409,7 @@ dependencies = [
  "dashmap",
  "h2",
  "http",
+ "loom",
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry 0.32.0",

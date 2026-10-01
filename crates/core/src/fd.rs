@@ -25,6 +25,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod accounting;
+
+use accounting::Accounting;
+
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
@@ -201,10 +205,14 @@ pub struct FdUsage {
 /// ```
 #[derive(Debug)]
 pub struct FdPressure {
-    /// Descriptors open at the most recent sample.
+    /// Descriptors open at the most recent sample. Admissions must load
+    /// `connected` with Acquire before reading this Relaxed value: the sampler
+    /// publishes a new count through its Release update to `connected`.
     cached_open: AtomicU64,
 
-    /// New upstream connections opened since the most recent sample.
+    /// New upstream connections opened since the most recent sample. Runtime
+    /// updates must remain read-modify-write operations so they extend the
+    /// sampler's release sequence for `cached_open`.
     connected: AtomicU64,
 
     /// Whether counting is cheap enough for admissions to re-sample.
@@ -216,7 +224,11 @@ pub struct FdPressure {
     /// Soft `RLIMIT_NOFILE`.
     limit: u64,
 
-    /// Admitted requests still waiting on their upstream connection.
+    /// Admitted requests still waiting on their upstream connection. Mutated
+    /// only through read-modify-write ops at runtime (never a plain `store`) so
+    /// its release sequence stays unbroken and the acquire reads in
+    /// [`Accounting::predicted_with`] keep pairing with the release in
+    /// [`Accounting::settle`].
     pending: AtomicU64,
 
     /// Whether a sample is being taken, so samples never overlap.
@@ -259,8 +271,8 @@ impl FdPressure {
         self.threshold
     }
 
-    /// Admit one new request, or return `None` when the predicted usage has
-    /// reached the threshold.
+    /// Admit one new request, or return `None` when admitting it would push
+    /// the predicted usage past the threshold.
     pub fn try_admit(&self) -> Option<Admission<'_>> {
         if !self.shed {
             return Some(Admission::untracked());
@@ -270,10 +282,9 @@ impl FdPressure {
         } else {
             FALLBACK_STALE_MS
         });
-        if self.predicted() >= self.threshold {
+        if !self.accounting().try_admit(self.threshold) {
             return None;
         }
-        self.pending.fetch_add(1, Ordering::Relaxed);
         Some(Admission { monitor: Some(self) })
     }
 
@@ -295,23 +306,14 @@ impl FdPressure {
         }
     }
 
-    /// The last sample, plus [`PENDING_COST`] for each admitted request
-    /// still waiting on its upstream, plus [`CONNECT_COST`] for each upstream
-    /// connection opened since the sample.
-    fn predicted(&self) -> u64 {
-        self.pending
-            .load(Ordering::Relaxed)
-            .saturating_mul(PENDING_COST)
-            .saturating_add(self.connected.load(Ordering::Acquire))
-            .saturating_add(self.cached_open.load(Ordering::Relaxed))
+    /// Borrow the atomic counters used for admission and settlement.
+    fn accounting(&self) -> Accounting<'_, AtomicU64> {
+        Accounting::new(&self.cached_open, &self.connected, &self.pending)
     }
 
     /// Release one pending claim, counting its connection when it opened one.
     fn settle(&self, new_socket: bool) {
-        self.pending.fetch_sub(1, Ordering::Relaxed);
-        if new_socket {
-            self.connected.fetch_add(CONNECT_COST, Ordering::Relaxed);
-        }
+        self.accounting().settle(new_socket);
     }
 
     /// Refresh the cached sample if it is at least `max_age_ms` old. Only one
@@ -344,17 +346,7 @@ impl FdPressure {
         if self.sampling.swap(true, Ordering::Acquire) {
             return;
         }
-        let absorbed = self.connected.load(Ordering::Relaxed);
-        if let Some(open) = count() {
-            self.cached_open.store(open, Ordering::Relaxed);
-            // Release after publishing `open`: `predicted` never sees the
-            // charges dropped without the sample that absorbed them.
-            _ = self
-                .connected
-                .fetch_update(Ordering::Release, Ordering::Relaxed, |charged| {
-                    Some(charged.saturating_sub(absorbed))
-                });
-        }
+        self.accounting().sample_with(count);
         self.sampling.store(false, Ordering::Release);
     }
 }
@@ -533,7 +525,7 @@ mod tests {
         admission.connected(true);
         drop(admission);
         assert_eq!(pressure.predicted(), 102, "an admission settles only once");
-        pressure.store_sample();
+        pressure.store_sample_with(|| Some(100));
         assert_eq!(
             pressure.connected.load(Ordering::Relaxed),
             0,
@@ -627,6 +619,105 @@ mod tests {
         assert!(
             !pressure.sampling.load(Ordering::Relaxed),
             "the sampling flag is released once every sampler is done"
+        );
+    }
+
+    #[test]
+    fn concurrent_admissions_cannot_overrun_a_single_slot() {
+        // Room for exactly one claim: 190 open plus the 2 a pending request
+        // costs reaches the 192 threshold, so a second admission would push
+        // past it.
+        let pressure = unsampled(256);
+        pressure.last_check_ms.store(u64::MAX, Ordering::Relaxed);
+        pressure.cached_open.store(190, Ordering::Relaxed);
+        let start = std::sync::Barrier::new(16);
+        let held: std::sync::Mutex<Vec<Admission<'_>>> = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                scope.spawn(|| {
+                    start.wait();
+                    if let Some(admission) = pressure.try_admit() {
+                        held.lock().unwrap().push(admission);
+                    }
+                });
+            }
+        });
+        let held = held.into_inner().unwrap();
+        assert_eq!(
+            held.len(),
+            1,
+            "only one of 16 racing admissions may claim the single free slot"
+        );
+        assert_eq!(
+            pressure.predicted(),
+            192,
+            "the one admitted claim reaches the threshold exactly, with none over-admitted"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the concurrent settle and admission loops share one budget and assertions"
+    )]
+    fn a_new_connection_never_frees_budget_during_the_transfer() {
+        // A new-socket settle adds the connection charge before releasing the
+        // pending claim. Concurrent readers must neither see freed budget nor
+        // admit another request while the monitor is exactly at its threshold.
+        const TRANSFERS: u64 = 200_000;
+        let pressure = unsampled(u64::MAX);
+        pressure.last_check_ms.store(u64::MAX, Ordering::Relaxed);
+        let floor = pressure.threshold();
+        pressure
+            .cached_open
+            .store(floor - TRANSFERS * PENDING_COST, Ordering::Relaxed);
+        pressure.pending.store(TRANSFERS, Ordering::Relaxed);
+        assert_eq!(pressure.predicted(), floor, "the pre-loaded claims fill the budget");
+        let min_seen = AtomicU64::new(u64::MAX);
+        let checks = AtomicU64::new(0);
+        let unexpected_admissions = AtomicU64::new(0);
+        let done = AtomicBool::new(false);
+        let start = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                start.wait();
+                for transfer in 0..TRANSFERS {
+                    pressure.settle(true);
+                    if transfer == TRANSFERS / 2 {
+                        // Require a reader check before the remaining transfers.
+                        let checked = checks.load(Ordering::Acquire);
+                        while checks.load(Ordering::Acquire) == checked {
+                            std::thread::yield_now();
+                        }
+                    }
+                }
+                done.store(true, Ordering::Relaxed);
+            });
+            for _ in 0..3 {
+                scope.spawn(|| {
+                    start.wait();
+                    loop {
+                        if let Some(admission) = pressure.try_admit() {
+                            unexpected_admissions.fetch_add(1, Ordering::Relaxed);
+                            drop(admission);
+                        }
+                        min_seen.fetch_min(pressure.predicted(), Ordering::Relaxed);
+                        checks.fetch_add(1, Ordering::Release);
+                        if done.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        assert!(
+            min_seen.load(Ordering::Relaxed) >= floor,
+            "a claim transfer must never dip predicted usage below the threshold"
+        );
+        assert_eq!(
+            unexpected_admissions.load(Ordering::Relaxed),
+            0,
+            "no racing admission may use a transiently freed claim"
         );
     }
 
@@ -816,6 +907,15 @@ mod tests {
     // -------------------------------------------------------------------------
 
     impl FdPressure {
+        /// Predicted usage against the currently reserved claim count.
+        ///
+        /// Acquire on `pending` pairs with the release in [`FdPressure::settle`]:
+        /// observing a settle's decremented claim also observes its connection
+        /// charge, so the predicted usage never dips during the transfer.
+        fn predicted(&self) -> u64 {
+            self.accounting().predicted_with(self.pending.load(Ordering::Acquire))
+        }
+
         /// Record one new upstream connection as an admission settling would.
         fn settle_new_connection(&self) {
             self.pending.fetch_add(1, Ordering::Relaxed);
