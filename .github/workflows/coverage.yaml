@@ -3,6 +3,8 @@ name: Coverage
 # ------------------------------------------------------------------------------
 # Workflow Settings
 # ------------------------------------------------------------------------------
+#
+# Shared from praxis-proxy/conventions (coverage.yaml).
 
 on:
   push:
@@ -11,26 +13,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-
 permissions: {}
 
 jobs:
-  # ----------------------------------------------------------------------------
-  # Code Coverage Gate
-  # ----------------------------------------------------------------------------
-
   coverage:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Check coverage
-        uses: praxis-proxy/conventions/.github/actions/coverage-check@747ec184a0e565c1948bb77ea58487839b78db55 # v0.1.0
+    uses: praxis-proxy/conventions/.github/workflows/coverage.yaml@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0

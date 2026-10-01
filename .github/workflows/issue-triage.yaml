@@ -3,78 +3,24 @@ name: Issue Triage
 # ------------------------------------------------------------------------------
 # Workflow Settings
 # ------------------------------------------------------------------------------
+#
+# Shared from praxis-proxy/conventions (issue-triage.yaml). Reviewers triage
+# here too, so core-reviewers counts as a maintainer team.
 
 on:
   issues:
-    types: [opened, milestoned, demilestoned]
+    types: [opened, assigned, milestoned]
 
 permissions: {}
 
 jobs:
-  # ----------------------------------------------------------------------------
-  # Triage Labels
-  # ----------------------------------------------------------------------------
-
   triage:
-    if: ${{ !github.event.issue.pull_request }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
     permissions:
       issues: write
-    steps:
-      - name: Generate token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
-          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
-
-      - name: Check current triage state
-        id: triage-state
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-          ISSUE: ${{ github.event.issue.number }}
-        run: |
-          if gh issue view "$ISSUE" --repo "$GH_REPO" --json labels \
-              --jq '.labels[].name' | grep -qx 'triage/accepted'; then
-            echo "accepted=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "accepted=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Add triage/needs-triage on new issue
-        if: >-
-          github.event.action == 'opened' && !github.event.issue.milestone
-          && steps.triage-state.outputs.accepted != 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-          ISSUE: ${{ github.event.issue.number }}
-        run: |
-          gh issue edit "$ISSUE" --repo "$GH_REPO" \
-            --add-label "triage/needs-triage"
-
-      - name: Accept triaged issue
-        if: github.event.action == 'milestoned'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-          ISSUE: ${{ github.event.issue.number }}
-        run: |
-          gh issue edit "$ISSUE" --repo "$GH_REPO" \
-            --remove-label "triage/needs-triage" \
-            --add-label "triage/accepted"
-
-      - name: Revert to needs-triage on demilestone
-        if: >-
-          github.event.action == 'demilestoned'
-          && steps.triage-state.outputs.accepted != 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_REPO: ${{ github.repository }}
-          ISSUE: ${{ github.event.issue.number }}
-        run: |
-          gh issue edit "$ISSUE" --repo "$GH_REPO" \
-            --remove-label "triage/accepted" \
-            --add-label "triage/needs-triage"
+    uses: praxis-proxy/conventions/.github/workflows/issue-triage.yaml@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+    with:
+      maintainer-teams: project-leadership,core-maintainers,core-reviewers
+      policy-doc: docs/developing/project-management.md#triage
+    secrets:
+      PRAXIS_BOT_APP_ID: ${{ secrets.PRAXIS_BOT_APP_ID }}
+      PRAXIS_BOT_APP_PRIVATE_KEY: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}

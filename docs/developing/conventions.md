@@ -642,9 +642,10 @@ type(scope): summary
 ### Pull Request Conventions
 
 Reviewability is enforced by CI
-(`.github/workflows/conventions.yaml`). A PR that is
-hard to review is a defect regardless of the quality of
-its code. The gates:
+(`.github/workflows/conventions.yaml`, which runs the
+shared PR gates from `praxis-proxy/conventions` with
+the limits below). A PR that is hard to review is a
+defect regardless of the quality of its code. The gates:
 
 - **Size**: at most 500 added lines of production code.
   `Cargo.toml`/`Cargo.lock`, tests, docs, examples, and
@@ -667,3 +668,9 @@ its code. The gates:
 - **Proposals**: proposal files must satisfy the
   frontmatter and lifecycle rules in
   [the enhancements repository](https://github.com/praxis-proxy/enhancements).
+
+Members of `project-leadership` and `core-maintainers`
+skip the size and description checks. For a one-off
+exception, a reviewer can add `skip/pr-conventions`
+(size, description, commit format, and authorship) or
+`skip/commit-signing` (signed commits) to the PR.

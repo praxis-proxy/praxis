@@ -152,7 +152,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
 
       - name: Install h2spec
         run: make target/praxis-binutils/h2spec
@@ -184,7 +184,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust lint toolchain
-        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@747ec184a0e565c1948bb77ea58487839b78db55 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
 
       - name: Install cargo-machete
         # setup-rust-lint's rust-cache also restores ~/.cargo/bin, so the binary
@@ -216,7 +216,7 @@ jobs:
           persist-credentials: false
 
       - name: Supply chain audit
-        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@747ec184a0e565c1948bb77ea58487839b78db55 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
 
   # ----------------------------------------------------------------------------
   # Phase 1 (tag push): fallback coverage (skipped when already green)
@@ -239,7 +239,7 @@ jobs:
           persist-credentials: false
 
       - name: Coverage check
-        uses: praxis-proxy/conventions/.github/actions/coverage-check@747ec184a0e565c1948bb77ea58487839b78db55 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/coverage-check@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
 
   # ----------------------------------------------------------------------------
   # Phase 1 (tag push): verify crates package cleanly (publish dry run)
@@ -258,7 +258,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
 
       - name: Publish dry run
         run: make publish-dry-run
@@ -322,7 +322,7 @@ jobs:
       # signed by Red Hat before anything is pushed; see docs/developing/fips.md.
       - name: Set up Rust (for the Red Hat image verification)
         if: steps.guard.outputs.skip != 'true'
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
         with:
           # The restored target/ would otherwise be swept into the build context.
           cache-target: "false"
@@ -539,7 +539,7 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
 
       # The release event fires for any published release, and Phase 1's
       # validate job only runs on the tag push. So skip non-version releases

@@ -398,7 +398,11 @@ Output: `target/criterion/flamegraph-{timestamp}.svg`
 
 ## CI
 
-GitHub Actions workflows run on this repository:
+GitHub Actions workflows run on this repository.
+`conventions.yaml`, `coverage.yaml`, `msrv.yaml`,
+`supply-chain.yaml`, `pull-request-conventions.yaml`,
+and a few others are short callers of shared workflows
+in `praxis-proxy/conventions`:
 
 - `tests.yaml`: unit lint and test on push/PR
 - `integration.yaml`: integration test suites on
