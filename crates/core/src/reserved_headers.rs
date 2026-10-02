@@ -32,6 +32,11 @@
 ///         .iter()
 ///         .any(|p| "x-custom-foo".starts_with(p))
 /// );
+/// assert!(
+///     !RESERVED_HEADER_PREFIXES
+///         .iter()
+///         .any(|p| "x-ext-tenant".starts_with(p))
+/// );
 /// ```
 // TODO(#186) Spike: consider additive operator-managed reserved prefixes
 // once the broader config model defines global vs listener/filter-chain

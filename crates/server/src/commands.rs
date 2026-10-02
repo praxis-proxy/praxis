@@ -57,17 +57,19 @@ pub(crate) fn load_and_validate_for_cli(
 /// - Instantiates filter factories from the registry
 /// - Resolves and expands filter chains
 /// - Applies ordering and body-limit checks to pipelines
+/// - Checks that grouped TCP listeners agree on chains and connection limits
 ///
 /// This catches semantic errors (undefined chains, invalid filter configs,
 /// incompatible filter ordering) that pure schema validation cannot detect.
-/// If this function succeeds, the configuration is safe to use for server
+/// It does not load TLS certificates or bind sockets, so missing or
+/// unreadable certificate files and address conflicts are only detected at
 /// startup.
 ///
 /// # Errors
 ///
 /// Returns an error if any validation step fails: invalid log configuration,
-/// unknown filter types, undefined chain references, or filter instantiation
-/// errors.
+/// unknown filter types, undefined chain references, filter instantiation
+/// errors, or inconsistent TCP listener groups.
 pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     praxis_core::logging::validate_log_overrides(config)?;
     praxis_core::logging::validate_logging(config)?;
@@ -89,6 +91,7 @@ pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn
         &session_stores,
         &subrequest_client,
     )?;
+    praxis_protocol::tcp::validate_tcp_groups(config)?;
     Ok(())
 }
 

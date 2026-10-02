@@ -22,7 +22,7 @@ pub const DEFAULT_MAX_RETRIES: u32 = 3;
 pub const MAX_EFFECTIVE_RETRIES: u32 = 15;
 
 /// Default body replay limit matching Pingora's fixed retry buffer (64 `KiB`).
-pub const DEFAULT_RETRY_BODY_LIMIT_BYTES: u64 = 65_536;
+pub const DEFAULT_RETRY_BODY_LIMIT_BYTES: u64 = 65_536; // 64 KiB
 
 /// Hard upper bound for the retry body buffer.
 ///
@@ -276,7 +276,8 @@ impl Default for BackoffConfig {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetryBudgetConfig {
-    /// Maximum retries as a percentage of active requests (0.0..=100.0).
+    /// Caps accumulated retry tokens (burst) at this percentage of in-flight requests (0.0..=100.0); the sustained
+    /// rate is `min_retries_per_second`.
     pub percent: BudgetPercent,
     /// Floor on tokens per second even at low traffic.
     #[serde(default = "default_min_retries_per_second")]

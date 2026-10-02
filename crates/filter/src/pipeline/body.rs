@@ -5,9 +5,11 @@
 //!
 //! Scans every filter's [`BodyAccess`] and [`BodyMode`] declarations to
 //! produce a single [`BodyCapabilities`] that the handler layer uses to
-//! decide whether to enable body filter hooks. Mode merging picks the
-//! most demanding mode (`StreamBuffer` > `SizeLimit` > `Stream`) and
-//! keeps the largest buffer limit so every filter gets enough data.
+//! decide whether to enable body filter hooks. Mode merging promotes the
+//! pipeline to `StreamBuffer` if any filter requests it, keeping the
+//! largest buffer limit so every filter gets enough data. A
+//! filter-declared `SizeLimit` is ignored by the merge; `SizeLimit` is
+//! reserved for the listener body ceiling applied by `apply_body_limits`.
 //!
 //! Called once at pipeline build time by [`FilterPipeline::from_filters`].
 //!
@@ -47,11 +49,12 @@ pub(super) fn merge_optional_limits(a: Option<usize>, b: Option<usize>) -> Optio
 
 /// Merge a filter's body mode into the current accumulated mode.
 ///
-/// Precedence: `StreamBuffer` > `SizeLimit` > `Stream`.
-/// When two `StreamBuffer` modes merge, the **largest** limit wins
-/// so that every filter gets enough buffer to do its job. The
-/// pipeline-level body ceiling is applied separately and acts as the
-/// hard safety cap.
+/// Only a filter's `StreamBuffer` changes the accumulated mode: it
+/// replaces `Stream` or `SizeLimit`, and when two `StreamBuffer` modes
+/// merge, the **largest** limit wins so that every filter gets enough
+/// buffer to do its job. A filter-declared `SizeLimit` (and `Stream`) is
+/// ignored here; `SizeLimit` is reserved for the listener body ceiling,
+/// which `apply_body_limits` applies separately as the hard safety cap.
 pub(crate) fn merge_body_mode(current: &mut BodyMode, filter_mode: BodyMode) {
     match filter_mode {
         BodyMode::StreamBuffer { max_bytes } => {

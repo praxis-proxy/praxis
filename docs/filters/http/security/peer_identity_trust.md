@@ -13,7 +13,7 @@ Requests without a verified peer identity are rejected with 403. Requests with a
 
 Each trusted peer entry specifies one or more match fields. All configured fields on an entry must match the peer identity for that entry to accept the request.
 
-SPIFFE identity is authorized earlier, at the mutual-TLS handshake (`RequireNamed` listener mode), so it is not a match field here. `cert_digest` and `serial_number` pin a specific certificate; `organization` is useful for bootstrap and controlled tests.
+SPIFFE identity is authorized earlier, at the mutual-TLS handshake (`RequireNamed` listener mode), so it is not a match field here. `cert_digest` and `serial_number` pin a specific certificate; `organization` is useful for bootstrap and controlled tests. Serial numbers are hex and compared case-insensitively, ignoring `:` separators and leading zeros. A serial number is only unique per issuing CA, so prefer `cert_digest` when the listener trusts more than one client CA; entries without `cert_digest` log a warning at load.
 
 ## Configuration
 
@@ -22,7 +22,7 @@ SPIFFE identity is authorized earlier, at the mutual-TLS handshake (`RequireName
 | `trusted_peers` | TrustedPeerConfig[] | yes | Trusted peer entries. |
 | `trusted_peers[].cert_digest` | string | no | Lowercase hex-encoded SHA-256 certificate digest. |
 | `trusted_peers[].organization` | string | no | X.509 subject organization (`O=` field). Weaker than certificate digest — useful for bootstrap and controlled test configurations where cert digests are not known ahead of time. |
-| `trusted_peers[].serial_number` | string | no | Certificate serial number. |
+| `trusted_peers[].serial_number` | string | no | Certificate serial number, hex-encoded as reported by the TLS stack. Compared after normalization: `:` separators and surrounding whitespace are removed, hex digits are lowercased, and leading zeros are dropped, so `00:2A`, `2a`, and `2A` are equivalent. |
 
 ## Example
 

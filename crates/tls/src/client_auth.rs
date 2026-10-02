@@ -74,7 +74,8 @@ pub(crate) fn build_client_verifier(
     trusted_spiffe_ids: &[String],
 ) -> Result<Arc<dyn ClientCertVerifier>, TlsError> {
     let root_store = load_ca_root_store(ca_path)?;
-    let mut builder = WebPkiClientVerifier::builder(Arc::new(root_store));
+    let mut builder =
+        WebPkiClientVerifier::builder_with_provider(Arc::new(root_store), crate::provider::installed_provider()?);
 
     if !crl_paths.is_empty() {
         let crls = load_crls(crl_paths)?;

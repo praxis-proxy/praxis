@@ -15,7 +15,7 @@
 //! [`BodyAccess`]: crate::body::BodyAccess
 //! [`http_utils`]: super::http_utils
 
-use std::pin::Pin;
+use std::{pin::Pin, sync::Arc};
 
 use bytes::Bytes;
 use tracing::{debug, trace, warn};
@@ -137,22 +137,25 @@ impl FilterPipeline {
                     return Ok(FilterAction::Reject(r));
                 }
             }
+            let upstream_before = ctx.upstream.as_ref().map(|upstream| Arc::clone(&upstream.address));
             match super::evaluate::evaluate_branches(&pf.branches, ctx).await? {
                 BranchOutcome::Continue => idx += 1,
                 BranchOutcome::Terminal => {
-                    if ctx.cluster.is_some() {
-                        // The branch set a cluster via `router` + `load_balancer`,
-                        // so upstream forwarding is intended. Stop the pipeline
-                        // and let the proxy forward to the selected cluster.
+                    if branch_selected_upstream(upstream_before.as_ref(), ctx) {
+                        // The branch itself selected an upstream (e.g. via
+                        // `load_balancer`), so upstream forwarding is intended.
+                        // Stop the pipeline and let the proxy forward to it.
                         return Ok(FilterAction::Continue);
                     }
                     // A `terminal`/`client` rejoin whose sub-chain produced no
-                    // response and selected no cluster. Fail closed with a 500
-                    // rather than proxying upstream with the remaining filters
-                    // (cors, csrf, auth, ...) skipped.
+                    // response and selected no upstream of its own. A cluster
+                    // or upstream chosen before the branch does not count.
+                    // Fail closed with a 500 rather than proxying upstream
+                    // with the remaining filters (cors, csrf, auth, ...)
+                    // skipped.
                     warn!(
                         filter = http_filter.name(),
-                        "terminal branch produced no response and selected no cluster; \
+                        "terminal branch produced no response and selected no upstream; \
                          stopping the pipeline with 500 instead of forwarding upstream"
                     );
                     return Ok(FilterAction::Reject(Rejection::status(500)));
@@ -729,6 +732,23 @@ impl FilterPipeline {
 
 /// Future returned by [`FilterPipeline::unwind_branches_boxed`].
 type UnwindFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<Rejection>, FilterError>> + Send + 'a>>;
+
+// -----------------------------------------------------------------------------
+// Branch Utilities
+// -----------------------------------------------------------------------------
+
+/// Whether a branch set `ctx.upstream` itself, given the address that was
+/// selected before it ran.
+///
+/// A terminal branch only forwards upstream when it did the selecting, so a
+/// cluster or upstream chosen earlier in the pipeline does not count. The
+/// address is compared by [`Arc`] identity, so a branch that re-selects an
+/// upstream over an earlier one still counts.
+fn branch_selected_upstream(before: Option<&Arc<str>>, ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.upstream
+        .as_ref()
+        .is_some_and(|upstream| before.is_none_or(|prior| !Arc::ptr_eq(prior, &upstream.address)))
+}
 
 // -----------------------------------------------------------------------------
 // Binding Utilities

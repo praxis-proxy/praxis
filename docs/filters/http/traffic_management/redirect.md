@@ -7,14 +7,14 @@ Returns a redirect response without contacting any upstream.
 
 ## Configuration Notes
 
-The `location` template supports `${path}`, `${query}`, `${host}`, and `${scheme}` substitution from the original request. `${query}` includes the leading `?` when a query string is present, and expands to nothing when absent. `${host}` is the `Host` header with port stripped. `${scheme}` is inferred from `X-Forwarded-Proto`, downstream TLS state, or the URI.
+The `location` template supports `${path}`, `${query}`, `${host}`, and `${scheme}` substitution from the original request. `${query}` includes the leading `?` when a query string is present, and expands to nothing when absent. `${host}` is the `Host` header (or the HTTP/2 `:authority` when `Host` is absent) with port stripped; if the template uses `${host}` and the host is missing, not in `allowed_hosts`, or not a safe hostname, the filter answers `400 Bad Request` instead of redirecting. `${scheme}` is inferred from `X-Forwarded-Proto`, downstream TLS state, or the URI.
 
 ## Configuration
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `allowed_hosts` | string[] | no | Optional allowlist of permitted hostnames for `${host}` substitution. Supports exact matches and wildcard prefixes (`*.example.com`). When set, host values not matching any entry leave `${host}` unexpanded and log a warning. When absent or empty, any syntactically valid host is accepted (character-level validation still applies). |
-| `location` | string | yes | Location URL template. Supports `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders. `${query}` expands to `?key=val` (with leading `?`) when a query string is present, or to an empty string when absent. `${host}` expands to the request `Host` header value (port stripped). `${scheme}` expands to the inferred scheme (`http` or `https`). Templates should use `${path}${query}` without a literal `?` separator. |
+| `allowed_hosts` | string[] | no | Optional allowlist of permitted hostnames for `${host}` substitution. Supports exact matches and wildcard prefixes (`*.example.com`). When set, a host not matching any entry makes a `${host}` template answer `400 Bad Request` (with a warning) instead of redirecting. When absent or empty, any syntactically valid host is accepted (character-level validation still applies). |
+| `location` | string | yes | Location URL template. Supports `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders. `${query}` expands to `?key=val` (with leading `?`) when a query string is present, or to an empty string when absent. `${host}` expands to the request `Host` header value, or the HTTP/2 `:authority` when `Host` is absent (port stripped); when no usable host is available the filter answers `400 Bad Request` rather than emit an unexpanded placeholder. `${scheme}` expands to the inferred scheme (`http` or `https`). Templates should use `${path}${query}` without a literal `?` separator. |
 | `status` | 301 \| 302 \| 307 \| 308 | no | HTTP redirect status code (301, 302, 307, or 308). |
 
 ## Example

@@ -251,13 +251,18 @@ impl RouterFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if route YAML is invalid or routes fail validation.
+    /// Returns [`FilterError`] if route YAML is invalid or routes fail
+    /// validation, including header keys that are not valid HTTP field
+    /// names and hosts with a port or a non-leading `*`.
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: RouterConfig = crate::parse_filter_config("router", config)?;
         if cfg.routes.is_empty() {
             return Err("router: 'routes' is empty; every request would fail with 404".into());
+        }
+        for r in &cfg.routes {
+            validate_route_match(&r.route)?;
         }
         #[cfg(feature = "router-json-aliases")]
         let router = Self::with_alias_options(cfg.routes, &cfg.json_alias_header, cfg.json_alias_max_body_bytes)?
@@ -469,6 +474,35 @@ fn validate_alias_options(routes: &[RouterRouteConfig], max_bytes: usize) -> Res
     Ok(())
 }
 
+/// Validate a route's host and header constraints.
+///
+/// Header keys must be valid HTTP field names, otherwise the route
+/// could never match. Hosts are compared after the request port is
+/// stripped, so a host with a port (including `[::1]:8080`) or a `*`
+/// anywhere but a leading `*.` would never match.
+///
+/// # Errors
+///
+/// Returns [`FilterError`] naming the offending host or header key.
+fn validate_route_match(route: &Route) -> Result<(), FilterError> {
+    if let Some(host) = &route.host {
+        let has_port = crate::builtins::http::traffic_management::strip_port(host) != host;
+        let bad_wildcard = host.strip_prefix("*.").unwrap_or(host).contains('*');
+        if has_port || bad_wildcard {
+            return Err(format!(
+                "router: route host '{host}' must be a hostname without a port; \
+                 '*' is only allowed as a leading '*.'"
+            )
+            .into());
+        }
+    }
+    for key in route.headers.iter().flat_map(std::collections::HashMap::keys) {
+        HeaderName::from_bytes(key.as_bytes())
+            .map_err(|e| format!("router: route header key '{key}' is not a valid header name: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Converts raw routes into resolved routes with pre-computed labels/suffixes.
 fn resolve_routes(routes: Vec<RouterRouteConfig>) -> Vec<ResolvedRoute> {
     routes
@@ -477,7 +511,7 @@ fn resolve_routes(routes: Vec<RouterRouteConfig>) -> Vec<ResolvedRoute> {
             let route = route_config.route;
             let metrics_label = path_match_metrics_label(&route.path_match);
             let wildcard_suffix = route.host.as_ref().and_then(|h| h.strip_prefix("*.")).map(|suffix| {
-                let lower = suffix.to_ascii_lowercase();
+                let lower = suffix.strip_suffix('.').unwrap_or(suffix).to_ascii_lowercase();
                 format!(".{lower}")
             });
             let retry_policy = route.retry_policy.clone().map(Arc::new);
@@ -493,8 +527,9 @@ fn resolve_routes(routes: Vec<RouterRouteConfig>) -> Vec<ResolvedRoute> {
 
 /// Distinct header names any route's `headers` predicate matches on.
 ///
-/// A name that does not parse is left out: it can never match a real header,
-/// so it has no pending state worth resolving.
+/// Config loading rejects names that do not parse ([`validate_route_match`]),
+/// but [`RouterFilter::new`] does not, so such a name is left out here: it can
+/// never match a real header, so it has no pending state worth resolving.
 fn route_header_names(routes: &[ResolvedRoute]) -> Vec<HeaderName> {
     let mut names: Vec<HeaderName> = routes
         .iter()

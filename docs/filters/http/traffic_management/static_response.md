@@ -14,10 +14,10 @@ Useful for health checks, status endpoints, or stub routes. Combine with conditi
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `body` | string | no | Optional response body string. |
-| `headers` | HeaderEntry[] | no | Response headers to include. |
+| `headers` | HeaderEntry[] | no | Response headers to include. Names and values must be valid HTTP field syntax. Framing and hop-by-hop headers (`content-length`, `transfer-encoding`, `connection`, `keep-alive`, `upgrade`, `te`, `trailer`) are rejected because the proxy owns response framing. |
 | `headers[].name` | string | yes | Header field name. |
 | `headers[].value` | string | yes | Header field value. |
-| `status` | integer | yes | HTTP status code to return. |
+| `status` | integer | yes | HTTP status code to return (200..=599; informational 1xx statuses cannot be a final response). |
 
 ## Example
 

@@ -88,8 +88,9 @@ pub struct ClusterHttpOptions {
     /// upstream instead of forwarding the downstream value. The
     /// downstream HTTP/2 `:authority` pseudo-header is never forwarded
     /// upstream; on an HTTP/2 upstream leg Pingora rebuilds
-    /// `:authority` from this `Host` value. TLS SNI remains
-    /// independent — configure `tls.sni` separately when needed.
+    /// `:authority` from this `Host` value. When `tls.sni` is unset,
+    /// the upstream TLS SNI defaults to this host (port stripped)
+    /// rather than the client `Host` header.
     ///
     /// Must be a valid HTTP authority: a hostname with an optional
     /// port, or a bracketed IPv6 address with an optional port. URI

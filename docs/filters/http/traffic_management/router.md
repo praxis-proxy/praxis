@@ -42,7 +42,7 @@ Header restrictions see the request as earlier filters in the pipeline left it: 
 | `routes[].retry_policy.backoff.max_interval_ms` | integer | yes | Maximum capped interval in milliseconds. |
 | `routes[].retry_policy.configured` | bool | no | Whether this policy came from operator configuration rather than the built-in legacy default. Endpoint reselection on retry is enabled only for configured policies; the legacy default preserves the historical retry-same-endpoint semantics. |
 | `routes[].retry_policy.retry_budget` | RetryBudgetConfig | no | Token-bucket retry budget. |
-| `routes[].retry_policy.retry_budget.percent` | number | yes | Maximum retries as a percentage of active requests (0.0..=100.0). |
+| `routes[].retry_policy.retry_budget.percent` | number | yes | Caps accumulated retry tokens (burst) at this percentage of in-flight requests (0.0..=100.0); the sustained rate is `min_retries_per_second`. |
 | `routes[].retry_policy.retry_budget.min_retries_per_second` | integer | no | Floor on tokens per second even at low traffic. |
 | `routes[].retry_policy.retry_body_limit_bytes` | integer | no | Max request body size eligible for replay (bytes). Defaults to 64 `KiB`. |
 | `routes[].retry_policy.allow_non_idempotent` | bool | no | Allow retries for non-idempotent methods (POST/PATCH) when true. |

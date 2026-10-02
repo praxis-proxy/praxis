@@ -390,6 +390,11 @@ fn strip_ansi(text: &str) -> String {
 // Listener
 // -----------------------------------------------------------------------------
 
+// The `listener_` prefix and the `fips::` module path are load-bearing:
+// `cargo xtask fips runtime-probe` selects these tests with the filter
+// `fips::listener_` and requires it to match exactly as many tests as its
+// `EXPECTED_PROBES` constant. Keep both in step when adding or renaming one.
+
 #[test]
 fn listener_negotiates_only_approved_algorithms_in_approved_mode() {
     let approved = expect_approved_mode();

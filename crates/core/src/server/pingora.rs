@@ -9,6 +9,13 @@ use tracing::info;
 use super::RuntimeOptions;
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Upper bound on the pre-drain grace period of a graceful shutdown.
+const SHUTDOWN_GRACE_CAP_SECS: u64 = 5; // 5 s pre-drain grace before runtime shutdown
+
+// -----------------------------------------------------------------------------
 // PingoraServerRuntime
 // -----------------------------------------------------------------------------
 
@@ -128,10 +135,19 @@ pub fn resolve_thread_count(configured: usize) -> usize {
 }
 
 /// Build a [`ServerConf`] from runtime options.
+///
+/// A graceful shutdown runs in two phases: Pingora first sleeps for
+/// the grace period while listeners stop accepting and in-flight
+/// requests finish, then bounds the runtime drain by the graceful
+/// shutdown timeout. The grace period
+/// is capped at [`SHUTDOWN_GRACE_CAP_SECS`] and the drain gets the
+/// remainder, so the two phases sum to `shutdown_timeout_secs`.
 fn build_server_conf(shutdown_timeout_secs: u64, threads: usize, runtime: &RuntimeOptions) -> ServerConf {
+    let grace = shutdown_timeout_secs.min(SHUTDOWN_GRACE_CAP_SECS);
+    let drain = shutdown_timeout_secs.saturating_sub(grace);
     let mut conf = ServerConf {
-        grace_period_seconds: Some(shutdown_timeout_secs),
-        graceful_shutdown_timeout_seconds: Some(shutdown_timeout_secs),
+        grace_period_seconds: Some(grace),
+        graceful_shutdown_timeout_seconds: Some(drain),
         threads,
         work_stealing: runtime.work_stealing,
         ..ServerConf::default()
@@ -189,8 +205,27 @@ mod tests {
         let server = build_http_server(30, &RuntimeOptions::default());
         assert_eq!(
             server.configuration.grace_period_seconds,
-            Some(30),
-            "grace period should match shutdown timeout"
+            Some(5),
+            "grace period should be capped at 5 s"
+        );
+        assert_eq!(
+            server.configuration.graceful_shutdown_timeout_seconds,
+            Some(25),
+            "drain should get the remainder of the shutdown timeout"
+        );
+    }
+
+    #[test]
+    fn build_server_conf_short_timeout_has_no_drain() {
+        let conf = build_server_conf(3, 1, &RuntimeOptions::default());
+        let grace = conf.grace_period_seconds.unwrap();
+        let drain = conf.graceful_shutdown_timeout_seconds.unwrap();
+        assert_eq!(grace, 3, "grace should take the whole short timeout");
+        assert_eq!(drain, 0, "drain should be zero for a short timeout");
+        assert_eq!(
+            grace.saturating_add(drain),
+            3,
+            "grace plus drain should equal shutdown_timeout_secs"
         );
     }
 

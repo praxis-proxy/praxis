@@ -89,6 +89,11 @@ impl RouteHeaderSource for PendingRouteHeaders<'_> {
 // -----------------------------------------------------------------------------
 
 /// Check whether a resolved route matches the request path, host, and headers.
+///
+/// The request host has its port and any trailing root dot
+/// (`a.example.com.`) stripped before matching, so a fully
+/// qualified host cannot bypass a host-constrained route. A route
+/// host written with a root dot is compared without it as well.
 pub(super) fn route_matches_request<S: RouteHeaderSource>(
     resolved: &ResolvedRoute,
     path: &str,
@@ -112,6 +117,7 @@ pub(super) fn route_matches_request<S: RouteHeaderSource>(
     let host_ok = match &route.host {
         Some(h) => host.is_some_and(|req_host| {
             let req_host = strip_port(req_host);
+            let req_host = req_host.strip_suffix('.').unwrap_or(req_host);
             host_matches(h, resolved.wildcard_suffix.as_deref(), req_host, multi_level_subdomain)
         }),
         None => true,
@@ -183,7 +189,7 @@ fn host_matches(pattern: &str, wildcard_suffix: Option<&str>, host: &str, multi_
         let subdomain = host.get(..host.len() - suffix.len()).unwrap_or_default();
         !subdomain.is_empty() && (multi_level || !subdomain.contains('.'))
     } else {
-        host.eq_ignore_ascii_case(pattern)
+        host.eq_ignore_ascii_case(pattern.strip_suffix('.').unwrap_or(pattern))
     }
 }
 

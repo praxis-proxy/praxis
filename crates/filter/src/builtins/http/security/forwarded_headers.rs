@@ -197,6 +197,43 @@ impl ForwardedHeadersFilter {
 }
 
 // -----------------------------------------------------------------------------
+// Unknown Client Handling
+// -----------------------------------------------------------------------------
+
+/// Handle a request whose client address is unknown (e.g. a non-inet peer).
+///
+/// The peer cannot be matched against the trusted proxies, so it is treated
+/// as untrusted. Client-supplied `X-Forwarded-For` and `Forwarded` are
+/// stripped, since there is no address to write in their place;
+/// `X-Forwarded-Proto` is set from the connection state and
+/// `X-Forwarded-Host` from `Host` (or stripped when `Host` is absent).
+fn neutralize_unknown_client(ctx: &mut HttpFilterContext<'_>) {
+    tracing::debug!("no client address; stripping client-supplied forwarding headers");
+    ctx.request_headers_to_remove
+        .push(http::header::HeaderName::from_static("x-forwarded-for"));
+    ctx.request_headers_to_remove
+        .push(http::header::HeaderName::from_static("forwarded"));
+
+    let proto = if ctx.downstream_tls { "https" } else { "http" };
+    ctx.extra_request_headers
+        .push((Cow::Borrowed("X-Forwarded-Proto"), proto.into()));
+
+    let host = ctx
+        .request
+        .headers
+        .get(http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .map(str::to_owned);
+    if let Some(host) = host {
+        ctx.extra_request_headers
+            .push((Cow::Borrowed("X-Forwarded-Host"), host));
+    } else {
+        ctx.request_headers_to_remove
+            .push(http::header::HeaderName::from_static("x-forwarded-host"));
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Forwarded Header Formatting
 // -----------------------------------------------------------------------------
 
@@ -284,6 +321,7 @@ impl HttpFilter for ForwardedHeadersFilter {
         use std::fmt::Write as _;
 
         let Some(client_ip) = ctx.client_addr else {
+            neutralize_unknown_client(ctx);
             return Ok(FilterAction::Continue);
         };
 
@@ -561,17 +599,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_client_addr_is_noop() {
-        let f = make_filter(&[]);
-        let req = crate::test_utils::make_request(http::Method::GET, "/");
+    async fn no_client_addr_strips_spoofed_forwarding() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let f = make_standard_filter(&["0.0.0.0/0"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert("x-forwarded-for", "198.51.100.7".parse()?);
+        req.headers.insert("forwarded", "for=198.51.100.7".parse()?);
+        req.headers.insert("x-forwarded-host", "spoofed.example".parse()?);
         let mut ctx = crate::test_utils::make_filter_context(&req);
 
-        drop(f.on_request(&mut ctx).await.unwrap());
+        drop(f.on_request(&mut ctx).await?);
 
+        let removed: Vec<&str> = ctx
+            .request_headers_to_remove
+            .iter()
+            .map(http::HeaderName::as_str)
+            .collect();
+        for name in ["x-forwarded-for", "forwarded", "x-forwarded-host"] {
+            assert!(
+                removed.contains(&name),
+                "client {name} must be stripped without a client address or Host"
+            );
+        }
+        let proto = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-Proto")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(proto, Some("http"), "XFP should come from connection state");
         assert!(
-            ctx.extra_request_headers.is_empty(),
-            "no headers should be added without client addr"
+            !ctx.extra_request_headers.iter().any(|(k, _)| k == "X-Forwarded-For"),
+            "no XFF value can be derived without a client address"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn no_client_addr_sets_xfh_from_host() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let f = make_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(http::header::HOST, "app.example".parse()?);
+        req.headers.insert("x-forwarded-host", "spoofed.example".parse()?);
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        drop(f.on_request(&mut ctx).await?);
+
+        let host = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-Host")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(host, Some("app.example"), "XFH should be derived from Host");
+        Ok(())
     }
 
     #[tokio::test]

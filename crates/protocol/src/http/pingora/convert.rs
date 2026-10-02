@@ -170,13 +170,15 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
 }
 
 /// Build a Pingora [`ResponseHeader`] from a [`Rejection`], falling back
-/// to 500 if the status code is invalid.
+/// to 500 if the status code is not a final status.
 ///
 /// The 500 fallback handles rejections with out-of-range status codes
-/// (for example, manually constructed `Rejection` with an invalid value).
-/// This ensures the proxy always sends a valid HTTP response even if a
-/// filter produced a malformed rejection.
+/// (for example, manually constructed `Rejection` with an invalid value)
+/// and informational `1xx` codes, which per [RFC 9110 Section 15.2] cannot
+/// complete a response. This ensures the proxy always sends a valid final
+/// HTTP response even if a filter produced a malformed rejection.
 ///
+/// [RFC 9110 Section 15.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-15.2
 /// [`ResponseHeader`]: pingora_http::ResponseHeader
 /// [`Rejection`]: praxis_filter::Rejection
 fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader {
@@ -186,7 +188,13 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
             .len()
             .saturating_add(rejection.header_map.as_ref().map_or(0, |headers| headers.len())),
     );
-    let mut header = match pingora_http::ResponseHeader::build(rejection.status, header_count) {
+    let status = if (200..=599).contains(&rejection.status) {
+        rejection.status
+    } else {
+        tracing::error!(status = rejection.status, "non-final rejection status; using 500");
+        500
+    };
+    let mut header = match pingora_http::ResponseHeader::build(status, header_count) {
         Ok(h) => h,
         Err(e) => {
             tracing::error!(status = rejection.status, error = %e, "invalid rejection status; using 500");
@@ -198,28 +206,44 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
     header
 }
 
-/// Append a rejection's filter-supplied headers, dropping reserved ones.
+/// Append a rejection's filter-supplied headers, dropping reserved and
+/// hop-by-hop ones.
 ///
 /// Reserved internal (x-praxis-* / x-ext-*) headers never reach the client:
 /// the upstream-response and terminal-response paths both strip them, and a
 /// rejection built from filter-supplied headers must hold the same invariant.
+/// Response hop-by-hop headers ([RFC 9110 Section 7.6.1]) are dropped too:
+/// framing and connection management belong to the proxy, so a filter-set
+/// `transfer-encoding` or `connection` cannot contradict the
+/// `content-length` and keep-alive state Praxis applies itself.
+///
+/// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
 fn append_rejection_headers(header: &mut pingora_http::ResponseHeader, rejection: &Rejection) {
     for (name, value) in &rejection.headers {
-        if praxis_core::reserved_headers::is_reserved(name) {
-            debug!(header = %name, "dropping reserved internal header from rejection response");
+        if is_dropped_rejection_header(name) {
+            debug!(header = %name, "dropping reserved or hop-by-hop header from rejection response");
             continue;
         }
         let _append = header.append_header(name.clone(), value.clone());
     }
     if let Some(headers) = &rejection.header_map {
         for (name, value) in headers.iter() {
-            if praxis_core::reserved_headers::is_reserved(name.as_str()) {
-                debug!(header = %name, "dropping reserved internal header from rejection response");
+            if is_dropped_rejection_header(name.as_str()) {
+                debug!(header = %name, "dropping reserved or hop-by-hop header from rejection response");
                 continue;
             }
             let _append = header.append_header(name.clone(), value.clone());
         }
     }
+}
+
+/// Whether a filter-supplied rejection header must be withheld from the
+/// client: reserved internal headers and response hop-by-hop headers.
+fn is_dropped_rejection_header(name: &str) -> bool {
+    praxis_core::reserved_headers::is_reserved(name)
+        || praxis_core::reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS
+            .iter()
+            .any(|hop| name.eq_ignore_ascii_case(hop))
 }
 
 // -----------------------------------------------------------------------------
@@ -389,5 +413,47 @@ mod tests {
         };
         let header = build_rejection_header(&rejection);
         assert_eq!(header.status.as_u16(), 500, "invalid status codes must map to 500");
+    }
+
+    #[test]
+    fn rejection_header_drops_hop_by_hop_headers() {
+        let rejection = Rejection::status(403)
+            .with_header("Transfer-Encoding", "chunked")
+            .with_header("connection", "close")
+            .with_header("content-type", "text/plain");
+
+        let header = build_rejection_header(&rejection);
+
+        assert!(
+            header.headers.get("transfer-encoding").is_none(),
+            "filter-supplied transfer-encoding must not reach the client"
+        );
+        assert!(
+            header.headers.get("connection").is_none(),
+            "filter-supplied connection must not reach the client"
+        );
+        assert_eq!(
+            header.headers.get("content-type").map(http::HeaderValue::as_bytes),
+            Some(b"text/plain".as_slice()),
+            "end-to-end rejection headers must be preserved"
+        );
+    }
+
+    #[test]
+    fn rejection_header_informational_status_becomes_500() {
+        let header = build_rejection_header(&Rejection::status(101));
+
+        assert_eq!(
+            header.status.as_u16(),
+            500,
+            "1xx rejection status must fall back to 500"
+        );
+    }
+
+    #[test]
+    fn rejection_header_final_status_unchanged() {
+        let header = build_rejection_header(&Rejection::status(204));
+
+        assert_eq!(header.status.as_u16(), 204, "final rejection status must be kept");
     }
 }

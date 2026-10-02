@@ -89,7 +89,7 @@ impl PathRewriteConfig {
             });
         }
 
-        unreachable!("count check guarantees at least one field is set")
+        Err("path_rewrite: exactly one of strip_prefix, add_prefix, or replace must be set".into())
     }
 }
 

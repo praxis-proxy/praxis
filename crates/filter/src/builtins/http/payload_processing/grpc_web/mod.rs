@@ -303,12 +303,18 @@ impl HttpFilter for GrpcWebFilter {
             .as_ref()
             .is_some_and(|response| response.headers.contains_key("grpc-status"));
 
+        if !status_in_headers && !upstream_is_grpc(ctx) {
+            drop(ctx.remove_filter_state::<GrpcWebState>());
+            return Ok(FilterAction::Continue);
+        }
+
         if let Some(content_type) = kind.web_content_type()
             && let Some(response) = ctx.response_header.as_mut()
         {
             let _prev = response
                 .headers
                 .insert(http::header::CONTENT_TYPE, http::HeaderValue::from_static(content_type));
+            let _len = response.headers.remove(http::header::CONTENT_LENGTH);
             ctx.response_headers_modified = true;
         }
 
@@ -425,4 +431,21 @@ fn synthesize_missing_status(trailers: &mut http::HeaderMap) {
         "grpc-message",
         http::HeaderValue::from_static("upstream ended the stream without a gRPC status"),
     );
+}
+
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+/// Returns `true` if the upstream response is native gRPC
+/// (`Content-Type: application/grpc...`).
+///
+/// Non-gRPC responses (such as an HTML error page from an intermediary)
+/// are passed through untranslated.
+fn upstream_is_grpc(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.response_header
+        .as_ref()
+        .and_then(|response| response.headers.get(http::header::CONTENT_TYPE))
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("application/grpc"))
 }

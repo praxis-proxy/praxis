@@ -177,6 +177,64 @@ fn from_config_empty_routes_rejected() {
 }
 
 #[test]
+fn from_config_rejects_invalid_header_key() -> Result<(), serde_yaml::Error> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("routes:\n  - path_prefix: /\n    headers:\n      \"bad key\": v\n    cluster: a\n")?;
+    assert!(
+        RouterFilter::from_config(&yaml).is_err(),
+        "header key with a space should be rejected"
+    );
+    Ok(())
+}
+
+#[test]
+fn from_config_rejects_host_with_port() -> Result<(), serde_yaml::Error> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("routes:\n  - path_prefix: /\n    host: \"a.com:8080\"\n    cluster: a\n")?;
+    assert!(
+        RouterFilter::from_config(&yaml).is_err(),
+        "route host with a port can never match and should be rejected"
+    );
+    Ok(())
+}
+
+#[test]
+fn from_config_rejects_bracketed_ipv6_host_with_port() -> Result<(), serde_yaml::Error> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("routes:\n  - path_prefix: /\n    host: \"[::1]:8080\"\n    cluster: a\n")?;
+    assert!(
+        RouterFilter::from_config(&yaml).is_err(),
+        "bracketed IPv6 route host with a port can never match and should be rejected"
+    );
+    Ok(())
+}
+
+#[test]
+fn from_config_rejects_inner_wildcard_host() -> Result<(), serde_yaml::Error> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("routes:\n  - path_prefix: /\n    host: \"a.*.com\"\n    cluster: a\n")?;
+    assert!(
+        RouterFilter::from_config(&yaml).is_err(),
+        "non-leading wildcard host should be rejected"
+    );
+    Ok(())
+}
+
+#[test]
+fn from_config_accepts_wildcard_and_ipv6_hosts() -> Result<(), crate::FilterError> {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "routes:\n  - path_prefix: /\n    host: \"*.example.com\"\n    cluster: a\n  - path_prefix: /v6\n    host: \"[::1]\"\n    cluster: b\n",
+    )?;
+    let filter = RouterFilter::from_config(&yaml)?;
+    assert_eq!(
+        filter.name(),
+        "router",
+        "leading wildcard and IPv6 hosts should be accepted"
+    );
+    Ok(())
+}
+
+#[test]
 fn from_config_rejects_route_retry_timeout_of_zero() {
     let yaml = serde_yaml::from_str::<serde_yaml::Value>(
         r#"
@@ -1469,6 +1527,60 @@ fn wildcard_host_matches_subdomain() {
 }
 
 #[test]
+fn host_with_root_dot_matches() -> Result<(), crate::FilterError> {
+    let router = make_router(vec![host_route("a.example.com", "exact")]);
+    let route = router
+        .match_route("/", Some("a.example.com."), &HeaderMap::new())
+        .ok_or("root-dot host should match")?;
+    assert_eq!(
+        &*route.route.cluster, "exact",
+        "a.example.com. should match host a.example.com"
+    );
+    Ok(())
+}
+
+#[test]
+fn host_with_root_dot_and_port_matches() -> Result<(), crate::FilterError> {
+    let router = make_router(vec![host_route("a.example.com", "exact")]);
+    let route = router
+        .match_route("/", Some("a.example.com.:8080"), &HeaderMap::new())
+        .ok_or("root-dot host with port should match")?;
+    assert_eq!(
+        &*route.route.cluster, "exact",
+        "a.example.com.:8080 should match host a.example.com"
+    );
+    Ok(())
+}
+
+#[test]
+fn root_dot_route_host_still_matches() -> Result<(), crate::FilterError> {
+    let router = make_router(vec![host_route("a.example.com.", "exact")]);
+    for req_host in ["a.example.com.", "a.example.com"] {
+        let route = router
+            .match_route("/", Some(req_host), &HeaderMap::new())
+            .ok_or("root-dot route host should match")?;
+        assert_eq!(
+            &*route.route.cluster, "exact",
+            "{req_host} should match route host a.example.com."
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn wildcard_host_with_root_dot_matches() -> Result<(), crate::FilterError> {
+    let router = make_router(vec![host_route("*.example.com", "wildcard")]);
+    let route = router
+        .match_route("/", Some("x.example.com."), &HeaderMap::new())
+        .ok_or("root-dot host should match wildcard")?;
+    assert_eq!(
+        &*route.route.cluster, "wildcard",
+        "x.example.com. should match *.example.com"
+    );
+    Ok(())
+}
+
+#[test]
 fn wildcard_host_does_not_match_bare_domain() {
     let router = make_router(vec![Route {
         path_match: PathMatch::Prefix {
@@ -2379,6 +2491,19 @@ fn json_alias_max_bytes_at_upper_bound_passes_bounds_check() {
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Build a catch-all prefix route constrained to `host`.
+fn host_route(host: &str, cluster: &str) -> Route {
+    Route {
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some(host.to_owned()),
+        headers: None,
+        cluster: cluster.into(),
+        retry_policy: None,
+    }
+}
 
 fn make_router(routes: Vec<Route>) -> RouterFilter {
     #[cfg_attr(

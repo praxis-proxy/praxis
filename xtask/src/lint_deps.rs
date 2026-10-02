@@ -6,6 +6,8 @@
 
 use clap::Parser;
 
+use crate::paths::workspace_root;
+
 // -----------------------------------------------------------------------------
 // CLI Arguments
 // -----------------------------------------------------------------------------
@@ -309,17 +311,6 @@ fn extract_table_version(s: &str) -> Option<String> {
     extract_quoted(after_eq.trim_start())
 }
 
-/// Locate the workspace root directory.
-///
-/// Uses `CARGO_MANIFEST_DIR` (set by cargo for the xtask crate) and
-/// navigates one level up to reach the workspace root.
-fn workspace_root() -> std::path::PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
-    std::path::Path::new(&manifest_dir)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .to_owned()
-}
 
 // -----------------------------------------------------------------------------
 // Tests

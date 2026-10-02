@@ -11,6 +11,8 @@ Wildcard subdomain patterns (e.g. `https://*.example.com`) are supported in `all
 
 `allow_credentials: true` is incompatible with wildcard origins, methods, or headers per the Fetch spec.
 
+For requests carrying an `Origin` header, the filter is authoritative: upstream `Access-Control-*` response headers are stripped and replaced by the filter's own headers (or omitted for disallowed origins).
+
 ## Configuration
 
 | Field | Type | Required | Description |
