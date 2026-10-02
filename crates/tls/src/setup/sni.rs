@@ -28,39 +28,11 @@ use crate::{CertKeyPair, SniMatcher, SniMatcherError, TlsError, WildcardMatch};
 /// subdomains (e.g. `app.example.com` matches but
 /// `a.b.example.com` does not).
 ///
-/// ```ignore
-/// let resolver = SniCertResolver { certs, default };
-/// // rustls calls resolver.resolve(client_hello) during handshake
-/// ```
-///
 /// [`CertifiedKey`]: rustls::sign::CertifiedKey
-#[cfg(not(feature = "bench-utils"))]
-pub(crate) struct SniCertResolver {
-    /// SNI-to-certificate matcher, using single-label wildcard semantics.
-    matcher: SniMatcher<Arc<CertifiedKey>>,
-
-    /// Fallback certificate when SNI does not match any entry.
-    default: Option<Arc<CertifiedKey>>,
-}
-
-/// Selects a TLS certificate based on the client's SNI hostname.
-///
-/// Maps each `server_names` entry to its [`CertifiedKey`]. Requests
-/// whose SNI matches a registered hostname get that certificate;
-/// all others receive the certificate marked `default: true`. If
-/// no entry is marked `default: true`, unmatched SNI is rejected.
-///
-/// Wildcard entries like `*.example.com` match single-level
-/// subdomains (e.g. `app.example.com` matches but
-/// `a.b.example.com` does not).
-///
-/// ```ignore
-/// let resolver = SniCertResolver { certs, default };
-/// // rustls calls resolver.resolve(client_hello) during handshake
-/// ```
-///
-/// [`CertifiedKey`]: rustls::sign::CertifiedKey
-#[cfg(feature = "bench-utils")]
+#[cfg_attr(
+    not(feature = "bench-utils"),
+    expect(unreachable_pub, reason = "private without bench-utils")
+)]
 pub struct SniCertResolver {
     /// SNI-to-certificate matcher, using single-label wildcard semantics.
     matcher: SniMatcher<Arc<CertifiedKey>>,
@@ -116,34 +88,17 @@ impl SniCertResolver {
 impl SniCertResolver {
     /// Look up a certificate by SNI hostname.
     ///
-    /// This is the core resolution logic used by the
-    /// [`ResolvesServerCert`] impl. Extracted so tests can call
-    /// it without constructing a [`ClientHello`].
+    /// Used by the [`ResolvesServerCert`] impl, tests, and benchmarks
+    /// without constructing a [`ClientHello`]. The method is externally
+    /// available when `bench-utils` exposes the module.
     ///
     /// [`ResolvesServerCert`]: rustls::server::ResolvesServerCert
     /// [`ClientHello`]: rustls::server::ClientHello
-    #[cfg(not(feature = "bench-utils"))]
-    fn lookup(&self, sni: Option<&str>) -> Option<Arc<CertifiedKey>> {
-        self.lookup_impl(sni)
-    }
-
-    /// Look up a certificate by SNI hostname.
-    ///
-    /// Public variant for benchmarks (enabled with bench-utils feature).
-    ///
-    /// [`ResolvesServerCert`]: rustls::server::ResolvesServerCert
-    /// [`ClientHello`]: rustls::server::ClientHello
-    #[cfg(feature = "bench-utils")]
+    #[cfg_attr(
+        not(feature = "bench-utils"),
+        expect(unreachable_pub, reason = "private without bench-utils")
+    )]
     pub fn lookup(&self, sni: Option<&str>) -> Option<Arc<CertifiedKey>> {
-        self.lookup_impl(sni)
-    }
-
-    /// Perform SNI lookup, falling back to the default certificate.
-    ///
-    /// Delegates exact and single-label wildcard matching to the shared
-    /// [`SniMatcher`]; returns the default certificate when no pattern matches
-    /// or SNI is absent.
-    fn lookup_impl(&self, sni: Option<&str>) -> Option<Arc<CertifiedKey>> {
         sni.and_then(|sni| self.matcher.lookup(sni))
             .or(self.default.as_ref())
             .map(Arc::clone)
@@ -169,31 +124,14 @@ impl ResolvesServerCert for SniCertResolver {
 /// # Errors
 ///
 /// Returns an error if certificate loading fails or if duplicate server names are registered.
-#[cfg(not(feature = "bench-utils"))]
-pub(super) fn build_sni_resolver(certificates: &[CertKeyPair]) -> Result<SniCertResolver, TlsError> {
-    build_sni_resolver_impl(certificates)
-}
-
-/// Build an [`SniCertResolver`] from a list of certificate entries.
-///
-/// Public variant for benchmarks (enabled with bench-utils feature).
-///
-/// # Errors
-///
-/// Returns an error if certificate loading fails or if duplicate server names are registered.
-#[cfg(feature = "bench-utils")]
-pub fn build_sni_resolver(certificates: &[CertKeyPair]) -> Result<SniCertResolver, TlsError> {
-    build_sni_resolver_impl(certificates)
-}
-
-/// Build the SNI resolver from certificate entries.
-///
 /// Loads each certificate, then hands the `(server_name, cert)` pairs to a
-/// single-label [`SniMatcher`] — loading and indexing are separate steps, so
-/// the matcher (and its tests) never touch the filesystem.
-///
-/// Shared implementation for both the public and private variants of `build_sni_resolver`.
-fn build_sni_resolver_impl(certificates: &[CertKeyPair]) -> Result<SniCertResolver, TlsError> {
+/// single-label [`SniMatcher`]. The function is externally available when
+/// `bench-utils` exposes the module.
+#[cfg_attr(
+    not(feature = "bench-utils"),
+    expect(unreachable_pub, reason = "private without bench-utils")
+)]
+pub fn build_sni_resolver(certificates: &[CertKeyPair]) -> Result<SniCertResolver, TlsError> {
     let mut entries: Vec<(String, Arc<CertifiedKey>)> = Vec::new();
     let mut default: Option<Arc<CertifiedKey>> = None;
 
