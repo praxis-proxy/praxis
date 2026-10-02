@@ -39,6 +39,9 @@ const UPLOAD_LIMIT: usize = 33_554_432; // 32 MiB
 /// buffers between the proxy and a backend that never reads can hold.
 const UPLOAD_LEN: usize = 16_777_216; // 16 MiB
 
+/// Size of each write the write-timeout test's uploader makes.
+const UPLOAD_CHUNK_LEN: usize = 65_536; // 64 KiB
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -401,7 +404,7 @@ insecure_options:
         .set_write_timeout(Some(Duration::from_secs(10)))
         .expect("set write timeout");
     let upload = std::thread::spawn(move || {
-        let chunk = [b'u'; 65_536]; // 64 KiB
+        let chunk = [b'u'; UPLOAD_CHUNK_LEN];
         for _ in 0..UPLOAD_LEN / chunk.len() {
             if writer.write_all(&chunk).is_err() {
                 break;
