@@ -45,7 +45,7 @@ If all endpoints are unhealthy, the filter enters panic mode and routes to all e
 | `clusters[].idle_timeout_ms` | integer | no | Idle connection timeout in milliseconds. Closes pooled upstream connections that have been idle longer than this duration. `None` uses Pingora's default. |
 | `clusters[].load_balancer_strategy` | `round_robin` \| `least_connections` \| `p2c` \| `random` \| `consistent_hash` \| `maglev` \| `ring_hash` \| `subset` \| `zone_aware` \| `priority` | no | Load-balancing algorithm for this cluster. Defaults to `round_robin`. |
 | `clusters[].max_connections` | integer | no | Maximum concurrent in-flight requests to this cluster. When set, excess requests receive 503. Prevents a single slow upstream from consuming all available capacity. |
-| `clusters[].read_timeout_ms` | integer | no | Per-read timeout in milliseconds. Applies to each individual read operation on an established upstream connection. A timeout fires a 502 response to the client. Use [`total_connection_timeout_ms`] to bound the entire exchange instead. |
+| `clusters[].read_timeout_ms` | integer | no | Per-read timeout in milliseconds. Applies to each individual read operation on an established upstream connection. For HTTP, a timeout before the response starts gets the client a 504; once the response is streaming, the client connection is closed with the body cut short. |
 | `clusters[].tls` | ClusterTls | no | TLS settings for upstream connections. Presence implies TLS is enabled. Omit for plaintext HTTP. |
 | `clusters[].tls.ca` | CaConfig | no | Custom CA. |
 | `clusters[].tls.ca.ca_path` | string | yes | Path to the PEM CA certificate file. |
@@ -57,9 +57,9 @@ If all endpoints are unhealthy, the filter enters panic mode and routes to all e
 | `clusters[].tls.client_cert.server_names` | string[] | no | SNI hostnames this certificate serves (listener only). |
 | `clusters[].tls.sni` | string | no | SNI hostname. |
 | `clusters[].tls.verify` | bool | no | Verify upstream certificate. |
-| `clusters[].total_connection_timeout_ms` | integer | no | Total connection timeout in milliseconds (TCP + TLS). Bounds the combined TCP handshake and TLS negotiation. When exceeded, the connection attempt fails with a 502 response. Prefer this over [`connection_timeout_ms`] for TLS-enabled clusters where the handshake dominates latency. |
+| `clusters[].total_connection_timeout_ms` | integer | no | Total connection timeout in milliseconds (TCP + TLS). Bounds the combined TCP handshake and TLS negotiation. When exceeded, the connection attempt fails; for HTTP, the client gets a 504 once any retries are used up. Prefer this over [`connection_timeout_ms`] for TLS-enabled clusters where the handshake dominates latency. |
 | `clusters[].trusted_private_endpoints` | string[] | no | Endpoint hostnames allowed to resolve to RFC 1918 or IPv6 unique-local addresses. Loopback, link-local, and cloud metadata stay refused. Hostnames only, HTTP clusters only. |
-| `clusters[].write_timeout_ms` | integer | no | Per-write timeout in milliseconds. Applies to each individual write operation on an established upstream connection. A timeout fires a 502 response to the client. |
+| `clusters[].write_timeout_ms` | integer | no | Per-write timeout in milliseconds. Applies to each individual write operation on an established upstream connection. For HTTP, a timed-out request body write stops the upload; the proxy then waits for whatever response the upstream sends and answers 504 if none arrives. Pair it with [`read_timeout_ms`] so that wait is bounded. |
 | `clusters[].retry_policy` | RetryPolicy | no | Optional retry policy for this cluster. When unset, the proxy retains the legacy connect-failure retry behavior (3 attempts, idempotent methods, 64 `KiB` body). |
 | `clusters[].retry_policy.max_retries` | integer | no | Maximum number of retry attempts after the initial try. `None` means inherit from the merge parent / use the legacy default. |
 | `clusters[].retry_policy.retriable_status_codes` | HttpStatusCode[] | no | Explicit HTTP status codes that are retriable. |
