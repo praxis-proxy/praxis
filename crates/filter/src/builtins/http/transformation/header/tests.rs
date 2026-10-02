@@ -559,6 +559,64 @@ async fn request_add_fresh_header_uses_extra_headers() {
 }
 
 #[tokio::test]
+async fn request_add_after_remove_does_not_resurrect_client_value() -> Result<(), Box<dyn std::error::Error>> {
+    let filter = make_header_filter(
+        r#"request_remove:
+  - x-user
+request_add:
+  - name: x-user
+    value: anon"#,
+    );
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("x-user", http::HeaderValue::from_static("admin"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.map_err(|e| e.to_string())?);
+    assert!(
+        !ctx.request_headers_to_set.iter().any(|(n, _)| n == "x-user"),
+        "removed header must not be re-set with the client value"
+    );
+    assert!(
+        ctx.request_headers_to_remove.iter().any(|n| n == "x-user"),
+        "client header should still be removed"
+    );
+    assert!(
+        ctx.extra_request_headers
+            .iter()
+            .any(|(n, v)| n == "x-user" && v == "anon"),
+        "added value should be appended after removal"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn request_add_joins_onto_request_set_value() -> Result<(), Box<dyn std::error::Error>> {
+    let filter = make_header_filter(
+        r#"request_set:
+  - name: x-a
+    value: proxy
+request_add:
+  - name: x-a
+    value: extra"#,
+    );
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("x-a", http::HeaderValue::from_static("client"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.map_err(|e| e.to_string())?);
+    let sets: Vec<&str> = ctx
+        .request_headers_to_set
+        .iter()
+        .filter(|(n, _)| n == "x-a")
+        .map(|(_, v)| v.to_str())
+        .collect::<Result<_, _>>()?;
+    assert_eq!(sets, vec!["proxy,extra"], "should queue exactly one combined set");
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "should not append a separate header"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn request_add_non_visible_ascii_existing_falls_back() {
     let filter = make_header_filter(
         r#"request_add:

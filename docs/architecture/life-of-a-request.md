@@ -112,7 +112,7 @@ For each filter:
 | `Continue` | Advance to next filter (`idx + 1`) |
 | `SkipTo(target)` | Jump forward to the target filter index |
 | `ReEnter(target)` | Loop back to the target index (re-entrance) |
-| `Terminal` | Stop the pipeline, proceed to upstream |
+| `Terminal` | Stop the pipeline; forward upstream only if the branch selected an upstream, otherwise 500 |
 | `Reject(status)` | Abort with an error response to the client |
 
 Filter results are cleared after branch evaluation

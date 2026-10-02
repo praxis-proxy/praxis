@@ -1135,6 +1135,118 @@ async fn non_utf8_origin_preflight_rejected_with_400() {
     }
 }
 
+#[tokio::test]
+async fn on_response_strips_upstream_acao_for_disallowed_origin() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+{
+    let f = make_filter(&["https://example.com"], &["GET"], &[], &[], false, false, false, false);
+
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("origin", "https://evil.com".parse()?);
+    let mut resp = crate::test_utils::make_response();
+    resp.headers.insert("access-control-allow-origin", "*".parse()?);
+    resp.headers.insert("access-control-allow-credentials", "true".parse()?);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let action = f.on_response(&mut ctx).await?;
+    assert!(ctx.response_headers_modified, "stripping should mark headers modified");
+    drop(ctx);
+    assert!(matches!(action, FilterAction::Continue), "on_response should continue");
+    assert!(
+        resp.headers.get("access-control-allow-origin").is_none(),
+        "upstream ACAO must not reach a disallowed origin"
+    );
+    assert!(
+        resp.headers.get("access-control-allow-credentials").is_none(),
+        "upstream ACAC must not reach a disallowed origin"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn on_response_strips_upstream_acac_when_credentials_disabled()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(&["https://example.com"], &["GET"], &[], &[], false, false, false, false);
+
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("origin", "https://example.com".parse()?);
+    let mut resp = crate::test_utils::make_response();
+    resp.headers.insert("access-control-allow-credentials", "true".parse()?);
+    resp.headers.insert("access-control-allow-origin", "*".parse()?);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.response_header = Some(&mut resp);
+
+    drop(f.on_response(&mut ctx).await?);
+    drop(ctx);
+    assert!(
+        resp.headers.get("access-control-allow-credentials").is_none(),
+        "upstream ACAC must be stripped when allow_credentials is false"
+    );
+    assert_eq!(
+        resp.headers.get_all("access-control-allow-origin").iter().count(),
+        1,
+        "only the filter's ACAO should remain"
+    );
+    assert_eq!(
+        resp.headers
+            .get("access-control-allow-origin")
+            .map(HeaderValue::as_bytes),
+        Some(b"https://example.com".as_slice()),
+        "filter ACAO should replace the upstream value"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn on_response_preserves_upstream_cors_without_origin() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(&["https://example.com"], &["GET"], &[], &[], false, false, false, false);
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut resp = crate::test_utils::make_response();
+    resp.headers.insert("access-control-allow-origin", "*".parse()?);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.response_header = Some(&mut resp);
+
+    drop(f.on_response(&mut ctx).await?);
+    drop(ctx);
+    assert_eq!(
+        resp.headers
+            .get("access-control-allow-origin")
+            .map(HeaderValue::as_bytes),
+        Some(b"*".as_slice()),
+        "non-CORS responses should keep upstream CORS headers"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn on_response_wildcard_rejects_userinfo_origin() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(
+        &["https://*.trusted.example"],
+        &["GET"],
+        &[],
+        &[],
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("origin", "https://evil@x.trusted.example".parse()?);
+    let mut resp = crate::test_utils::make_response();
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.response_header = Some(&mut resp);
+
+    drop(f.on_response(&mut ctx).await?);
+    drop(ctx);
+    assert!(
+        resp.headers.get("access-control-allow-origin").is_none(),
+        "origin with userinfo must not match a wildcard subdomain"
+    );
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

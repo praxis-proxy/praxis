@@ -2,12 +2,16 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Consistent-hash endpoint selection for session affinity.
+//!
+//! This is weighted modulo hashing: a key maps to slot
+//! `fnv1a(key) % Σweight`. Adding or removing an endpoint remaps most keys;
+//! use `ring_hash` or `maglev` for minimal disruption on endpoint changes.
 
 use std::sync::Arc;
 
 use praxis_core::health::ClusterHealthState;
 
-use super::{endpoint::WeightedEndpoint, hash::fnv1a};
+use super::{endpoint::WeightedEndpoint, hash::fnv1a, is_excluded};
 
 // -----------------------------------------------------------------------------
 // ConsistentHash
@@ -115,11 +119,6 @@ impl ConsistentHash {
         }
         None
     }
-}
-
-/// Returns `true` if `addr` appears in the exclusion list.
-fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
-    exclude.iter().any(|e| e.as_ref() == addr)
 }
 
 // -----------------------------------------------------------------------------

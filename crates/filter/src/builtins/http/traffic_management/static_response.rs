@@ -14,6 +14,22 @@ use crate::{
 };
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Headers whose values the proxy controls; configuring them would
+/// corrupt response framing or connection management.
+const FORBIDDEN_HEADERS: &[&str] = &[
+    "connection",
+    "content-length",
+    "keep-alive",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+// -----------------------------------------------------------------------------
 // StaticResponseConfig
 // -----------------------------------------------------------------------------
 
@@ -26,10 +42,16 @@ struct StaticResponseConfig {
     body: Option<String>,
 
     /// Response headers to include.
+    ///
+    /// Names and values must be valid HTTP field syntax. Framing and
+    /// hop-by-hop headers (`content-length`, `transfer-encoding`,
+    /// `connection`, `keep-alive`, `upgrade`, `te`, `trailer`) are
+    /// rejected because the proxy owns response framing.
     #[serde(default)]
     headers: Vec<HeaderEntry>,
 
-    /// HTTP status code to return.
+    /// HTTP status code to return (200..=599; informational 1xx
+    /// statuses cannot be a final response).
     status: u16,
 }
 
@@ -85,14 +107,19 @@ impl StaticResponseFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if the YAML config is malformed.
+    /// Returns [`FilterError`] if the YAML config is malformed, the
+    /// status is outside `200..=599`, or a header has an invalid name or
+    /// value or is a framing/hop-by-hop header.
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: StaticResponseConfig = parse_filter_config("static_response", config)?;
 
-        if !(100..=599).contains(&cfg.status) {
-            return Err(format!("static_response: status must be 100..=599, got {}", cfg.status).into());
+        if !(200..=599).contains(&cfg.status) {
+            return Err(format!("static_response: status must be 200..=599, got {}", cfg.status).into());
+        }
+        for header in &cfg.headers {
+            validate_header(header)?;
         }
 
         Ok(Box::new(Self {
@@ -119,6 +146,27 @@ impl HttpFilter for StaticResponseFilter {
         }
         Ok(FilterAction::Reject(rejection))
     }
+}
+
+// -----------------------------------------------------------------------------
+// Utility Functions
+// -----------------------------------------------------------------------------
+
+/// Validate one configured header's syntax and reject reserved names.
+///
+/// # Errors
+///
+/// Returns [`FilterError`] for an invalid header name or value, or a
+/// framing/hop-by-hop header listed in [`FORBIDDEN_HEADERS`].
+fn validate_header(header: &HeaderEntry) -> Result<(), FilterError> {
+    http::HeaderName::from_bytes(header.name.as_bytes())
+        .map_err(|e| format!("static_response: invalid header name '{}': {e}", header.name))?;
+    http::HeaderValue::from_str(&header.value)
+        .map_err(|e| format!("static_response: invalid value for header '{}': {e}", header.name))?;
+    if FORBIDDEN_HEADERS.iter().any(|f| header.name.eq_ignore_ascii_case(f)) {
+        return Err(format!("static_response: header '{}' is managed by the proxy", header.name).into());
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -198,6 +246,47 @@ body: '{"ok": true}'
         let above = serde_yaml::from_str::<serde_yaml::Value>("status: 600").unwrap();
         let err = StaticResponseFilter::from_config(&above);
         assert!(err.is_err(), "status 600 is above 599 and should be rejected");
+    }
+
+    #[test]
+    fn from_config_rejects_informational_status() -> Result<(), serde_yaml::Error> {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>("status: 101")?;
+        assert!(
+            StaticResponseFilter::from_config(&yaml).is_err(),
+            "1xx status should be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn from_config_rejects_invalid_header_name() -> Result<(), serde_yaml::Error> {
+        let yaml =
+            serde_yaml::from_str::<serde_yaml::Value>("status: 200\nheaders:\n  - name: \"bad name\"\n    value: x")?;
+        assert!(
+            StaticResponseFilter::from_config(&yaml).is_err(),
+            "header name with a space should be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn from_config_rejects_framing_header() -> Result<(), serde_yaml::Error> {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            "status: 200\nheaders:\n  - name: Transfer-Encoding\n    value: chunked",
+        )?;
+        assert!(
+            StaticResponseFilter::from_config(&yaml).is_err(),
+            "transfer-encoding should be rejected"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn from_config_accepts_custom_header() -> Result<(), FilterError> {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>("status: 200\nheaders:\n  - name: x-ok\n    value: ok")?;
+        let filter = StaticResponseFilter::from_config(&yaml)?;
+        assert_eq!(filter.name(), "static_response", "x-ok header should be accepted");
+        Ok(())
     }
 
     #[tokio::test]

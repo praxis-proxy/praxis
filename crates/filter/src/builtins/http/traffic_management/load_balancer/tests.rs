@@ -384,6 +384,34 @@ async fn sni_fallback_is_none_when_no_host_header() {
 }
 
 #[tokio::test]
+async fn sni_prefers_cluster_authority_over_host_header() -> Result<(), crate::FilterError> {
+    let cluster = Cluster {
+        tls: Some(praxis_core::config::ClusterTls::default()),
+        http: praxis_core::config::ClusterHttpOptions {
+            authority: Some("backend.internal:8443".into()),
+            ..praxis_core::config::ClusterHttpOptions::default()
+        },
+        ..Cluster::with_defaults("authority-sni", vec!["10.0.0.1:443".into()])
+    };
+    let lb = LoadBalancerFilter::new(&[cluster]);
+
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert("host", http::HeaderValue::from_static("attacker.example.com"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("authority-sni"));
+
+    drop(lb.on_request(&mut ctx).await?);
+    let upstream = ctx.upstream.ok_or("upstream should be set")?;
+    assert_eq!(
+        upstream.tls.as_ref().and_then(|t| t.sni()),
+        Some("backend.internal"),
+        "cluster authority should win over the client Host for SNI"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn explicit_sni_overrides_host_header() {
     let cluster = Cluster {
         tls: Some(praxis_core::config::ClusterTls {

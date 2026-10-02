@@ -54,7 +54,11 @@ pub(super) fn adjust_compression(
     if upstream_response.status.is_informational() {
         return;
     }
-    if compression.is_some_and(|cfg| cfg.should_compress(&upstream_response.headers)) {
+    // 206 bodies (including multipart/byteranges without a top-level
+    // Content-Range) describe byte ranges of the unencoded representation.
+    if upstream_response.status != http::StatusCode::PARTIAL_CONTENT
+        && compression.is_some_and(|cfg| cfg.should_compress(&upstream_response.headers))
+    {
         return;
     }
     if let Some(module) = session.downstream_modules_ctx.get_mut::<ResponseCompression>() {

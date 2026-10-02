@@ -511,7 +511,7 @@ mod tests {
         let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
         assert!(
             err.to_string().contains("no sni configured;"),
-            "a fixed authority leaves SNI to the downstream Host, so tls.sni is still required: {err}"
+            "validation does not count a fixed authority as a configured SNI, so tls.sni is still required: {err}"
         );
     }
 

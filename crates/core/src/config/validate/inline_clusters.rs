@@ -578,9 +578,14 @@ mod tests {
     }
 
     #[test]
-    fn http_listener_skipped_in_tcp_validation() {
-        let yaml = "listeners:\n  - name: http_listener\n    address: \"127.0.0.1:18080\"\n    protocol: http\n    cluster: should_be_ignored\n    filter_chains: [chain]\nfilter_chains:\n  - name: chain\n    filters:\n      - filter: load_balancer\n        clusters:\n          - name: web\n            endpoints: [\"192.0.2.1:80\"]\n";
-        Config::from_yaml(yaml).expect("HTTP listener with cluster field should be ignored in TCP validation");
+    fn http_listener_with_cluster_field_rejected() {
+        let yaml = "listeners:\n  - name: http_listener\n    address: \"127.0.0.1:18080\"\n    protocol: http\n    cluster: tcp_only\n    filter_chains: [chain]\nfilter_chains:\n  - name: chain\n    filters:\n      - filter: load_balancer\n        clusters:\n          - name: web\n            endpoints: [\"192.0.2.1:80\"]\n";
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("listener 'http_listener': 'cluster' only applies to protocol: tcp"),
+            "HTTP listener with a cluster field should be rejected: {err}"
+        );
     }
 
     #[test]

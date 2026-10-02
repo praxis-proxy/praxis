@@ -102,6 +102,10 @@ fn default_min_size() -> usize {
 /// Each algorithm can be individually enabled/disabled and assigned a
 /// compression level.
 ///
+/// `text/event-stream` responses are never compressed (encoders would hold
+/// events until the stream ends). Responses with `Cache-Control:
+/// no-transform` or a `Content-Range` header are also left unencoded.
+///
 /// # YAML configuration
 ///
 /// ```yaml

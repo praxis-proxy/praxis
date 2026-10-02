@@ -16,6 +16,16 @@ use crate::{
 /// endpoint count could allocate gigabytes.
 const MAX_RING_ENTRIES: u64 = 1_048_576; // 1 Mi entries ≈ 16 MiB
 
+/// Hard ceiling on weighted replicas (`Σ weight`) for a `maglev` cluster.
+///
+/// The Maglev lookup table has a fixed size (`TABLE_SIZE` in
+/// `praxis-filter`'s `load_balancing/maglev.rs`). Replicas beyond the table
+/// size get no slot at all and are never selected, and as the count
+/// approaches it each replica holds only one or two slots, so the weights
+/// stop meaning anything. Capping at half the table keeps every replica on
+/// at least two slots.
+const MAX_MAGLEV_REPLICAS: u64 = 32_768; // TABLE_SIZE (65_537) / 2
+
 /// Validate that parameterised strategy options are within sane bounds.
 pub(in crate::config::validate) fn validate_lb_strategy(cluster: &Cluster) -> Result<(), ProxyError> {
     let name = &cluster.name;
@@ -44,6 +54,27 @@ pub(in crate::config::validate) fn validate_lb_strategy(cluster: &Cluster) -> Re
                 )));
             }
         }
+        validate_maglev_replicas(cluster, param)?;
+    }
+    Ok(())
+}
+
+/// Reject a `maglev` cluster whose weighted replica count (`Σ weight`)
+/// exceeds [`MAX_MAGLEV_REPLICAS`]. Other strategies pass unchanged.
+fn validate_maglev_replicas(cluster: &Cluster, param: &ParameterisedStrategy) -> Result<(), ProxyError> {
+    let ParameterisedStrategy::Maglev(_) = param else {
+        return Ok(());
+    };
+    let entries = cluster
+        .endpoints
+        .iter()
+        .fold(0_u64, |acc, ep| acc.saturating_add(u64::from(ep.weight())));
+    if entries > MAX_MAGLEV_REPLICAS {
+        return Err(ProxyError::Config(format!(
+            "maglev cluster '{}' has {entries} weighted replicas \
+             (sum of endpoint weights); maximum is {MAX_MAGLEV_REPLICAS}",
+            cluster.name,
+        )));
     }
     Ok(())
 }
@@ -115,8 +146,8 @@ fn validate_parameterised(name: &str, param: &ParameterisedStrategy) -> Result<(
 mod tests {
     use super::validate_lb_strategy;
     use crate::config::{
-        Cluster, ConsistentHashOpts, HashFunction, LoadBalancerStrategy, ParameterisedStrategy, PriorityOpts,
-        RingHashOpts, SimpleStrategy, SubsetFallbackPolicy, SubsetOpts, ZoneAwareOpts,
+        Cluster, ConsistentHashOpts, HashFunction, LoadBalancerStrategy, MaglevOpts, ParameterisedStrategy,
+        PriorityOpts, RingHashOpts, SimpleStrategy, SubsetFallbackPolicy, SubsetOpts, ZoneAwareOpts,
     };
 
     #[test]
@@ -257,6 +288,31 @@ mod tests {
         ));
         cluster.endpoints = weighted_endpoints(1_024, 1_024);
         validate_lb_strategy(&cluster).expect("a ring of exactly MAX_RING_ENTRIES should be accepted");
+    }
+
+    #[test]
+    fn accept_maglev_replicas_at_max() -> Result<(), Box<dyn std::error::Error>> {
+        let mut cluster = cluster_with_strategy(LoadBalancerStrategy::Parameterised(ParameterisedStrategy::Maglev(
+            MaglevOpts { header: None },
+        )));
+        cluster.endpoints = weighted_endpoints(32, 1_024);
+        validate_lb_strategy(&cluster)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reject_maglev_replicas_above_max() {
+        let mut cluster = cluster_with_strategy(LoadBalancerStrategy::Parameterised(ParameterisedStrategy::Maglev(
+            MaglevOpts { header: None },
+        )));
+        let mut endpoints = weighted_endpoints(32, 1_024);
+        endpoints.extend(weighted_endpoints(1, 1));
+        cluster.endpoints = endpoints;
+        let result = validate_lb_strategy(&cluster);
+        assert!(
+            result.is_err_and(|err| err.to_string().contains("32769 weighted replicas")),
+            "a maglev cluster with 32_769 weighted replicas should be rejected"
+        );
     }
 
     #[test]

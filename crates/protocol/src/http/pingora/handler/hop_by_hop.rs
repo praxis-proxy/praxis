@@ -344,6 +344,23 @@ mod tests {
     }
 
     #[test]
+    fn strip_reserved_internal_header_map_cleans_response_trailers() {
+        let mut trailers = HeaderMap::new();
+        trailers.insert("x-praxis-foo", http::HeaderValue::from_static("leak"));
+        trailers.insert("x-ext-agent-x", http::HeaderValue::from_static("leak"));
+        trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+
+        strip_reserved_internal_header_map(&mut trailers);
+
+        assert_eq!(trailers.len(), 1, "only the non-reserved trailer must remain");
+        assert_eq!(
+            trailers.get("grpc-status").map(http::HeaderValue::as_bytes),
+            Some(b"0".as_slice()),
+            "grpc-status trailer must be preserved"
+        );
+    }
+
+    #[test]
     fn declares_chunked_framing_matches_plain_and_compound() {
         let mut plain = HeaderMap::new();
         plain.insert(

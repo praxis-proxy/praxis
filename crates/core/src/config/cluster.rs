@@ -95,9 +95,9 @@ pub struct ClusterHttpOptions {
     /// A plain string is a fixed authority sent on every request. It
     /// must be a valid HTTP authority: a hostname with an optional
     /// port, or a bracketed IPv6 address with an optional port. URI
-    /// schemes, paths, userinfo, and fragments are rejected. TLS SNI
-    /// stays independent of a fixed authority, so configure `tls.sni`
-    /// separately when needed.
+    /// schemes, paths, userinfo, and fragments are rejected. When
+    /// `tls.sni` is unset, the upstream TLS SNI defaults to this host
+    /// (port stripped) rather than the client `Host` header.
     ///
     /// `{ from: endpoint }` sends the address of the endpoint selected
     /// for each attempt instead, so one cluster can front endpoints

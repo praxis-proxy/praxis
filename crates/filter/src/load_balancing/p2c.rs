@@ -14,7 +14,7 @@ use std::{
 use praxis_core::health::ClusterHealthState;
 use smallvec::SmallVec;
 
-use super::endpoint::WeightedEndpoint;
+use super::{endpoint::WeightedEndpoint, is_excluded};
 
 // -----------------------------------------------------------------------------
 // PowerOfTwoChoices
@@ -206,15 +206,6 @@ impl PowerOfTwoChoices {
             .map(|(pos, _)| pos)
             .collect()
     }
-}
-
-// -----------------------------------------------------------------------------
-// Utilities
-// -----------------------------------------------------------------------------
-
-/// Returns `true` if `addr` appears in the exclusion list.
-fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
-    exclude.iter().any(|e| e.as_ref() == addr)
 }
 
 // -----------------------------------------------------------------------------

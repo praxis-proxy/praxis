@@ -563,7 +563,7 @@ async fn resolve_checked(
 
     let resolved = resolve_address(address).await?;
     let ip = resolved.ip();
-    if allow_private || !crate::connectivity::is_private_ip(&ip) {
+    if allow_private || !crate::connectivity::is_private_upstream_ip(&ip) {
         return Ok(resolved);
     }
     let listed =
@@ -1067,6 +1067,20 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn nat64_wrapped_private_answer_is_refused() {
+        let host = "nat64.p1306.invalid";
+        insert_cached(
+            host,
+            Ok(Arc::from(["64:ff9b::a00:1".parse::<IpAddr>().unwrap()].as_slice())),
+        );
+        let got = resolve_address_checked(&format!("{host}:8000"), false).await;
+        assert!(
+            matches!(got, Err(AddressResolutionError::PrivateAddress { .. })),
+            "a DNS64-synthesized private answer must be refused: {got:?}"
+        );
     }
 
     #[tokio::test]

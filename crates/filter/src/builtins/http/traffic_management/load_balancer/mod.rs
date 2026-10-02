@@ -20,7 +20,10 @@ mod strategy;
 )]
 mod tests;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::Ordering},
+};
 
 use async_trait::async_trait;
 use metrics::SharedString;
@@ -371,11 +374,15 @@ impl HttpFilter for LoadBalancerFilter {
             );
         }
 
-        if let Some(h) = health
-            && h.endpoints().iter().all(|ep| !ep.is_healthy())
-        {
-            warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
-            crate::metrics::record_lb_panic_mode(SharedString::from(Arc::clone(cluster)));
+        if let Some(h) = health {
+            if h.endpoints().iter().all(|ep| !ep.is_healthy()) {
+                if !entry.panic_mode_logged.swap(true, Ordering::Relaxed) {
+                    warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
+                }
+                crate::metrics::record_lb_panic_mode(SharedString::from(Arc::clone(cluster)));
+            } else if entry.panic_mode_logged.load(Ordering::Relaxed) {
+                entry.panic_mode_logged.store(false, Ordering::Relaxed);
+            }
         }
 
         let addr = entry.strategy.select(ctx, health, &[]).ok_or_else(|| -> FilterError {

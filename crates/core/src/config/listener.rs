@@ -46,7 +46,7 @@ pub struct Listener {
     ///
     /// When set, the TCP listener routes connections via a load
     /// balancer strategy across the named cluster's endpoints.
-    /// Mutually exclusive with `upstream`.
+    /// Mutually exclusive with `upstream`. Rejected on HTTP listeners.
     #[serde(default)]
     pub cluster: Option<String>,
 
@@ -115,15 +115,16 @@ pub struct Listener {
     /// When set, the session is bounded by a hard deadline: active
     /// connections are terminated after this duration regardless of
     /// whether data is in flight. Only applies to `protocol: tcp`
-    /// listeners. Defaults to 300,000 ms (5 minutes) for TCP
-    /// listeners when not set.
+    /// listeners; rejected on HTTP listeners. Defaults to 300,000 ms
+    /// (5 minutes) for TCP listeners when not set.
     #[serde(default)]
     pub tcp_session_timeout_ms: Option<u64>,
 
     /// Maximum total session duration in seconds for TCP listeners.
     ///
     /// When set, the entire TCP session is capped at this duration
-    /// regardless of activity. Only applies to `protocol: tcp` listeners.
+    /// regardless of activity. Only applies to `protocol: tcp` listeners;
+    /// rejected on HTTP listeners.
     #[serde(default)]
     pub tcp_max_duration_secs: Option<u64>,
 
@@ -134,7 +135,7 @@ pub struct Listener {
     /// Upstream address for TCP listeners (e.g. "10.0.0.1:5432").
     ///
     /// Required for `protocol: tcp` unless `cluster` is set or filter
-    /// chains provide routing. Ignored for HTTP listeners. Mutually
+    /// chains provide routing. Rejected on HTTP listeners. Mutually
     /// exclusive with `cluster`.
     #[serde(default)]
     pub upstream: Option<String>,

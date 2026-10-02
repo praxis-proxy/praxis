@@ -26,7 +26,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.2"
+version = "0.7.3"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Shane Utt <shaneutt@linux.com>"]
@@ -52,6 +52,7 @@ flate2 = { version = "1.1.10", default-features = false, features = ["zlib-ng"] 
 h2 = "0.4.19"
 http = "1.5.0"
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
+loom = "0.7.2"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "resource", "signal", "user"] }
@@ -81,15 +82,15 @@ quote = "1.0.47"
 # crates keep `policy-engine` in their own defaults, so the standard test run is
 # unchanged, and `--no-default-features` gives the FIPS build's feature set.
 praxis = { path = "crates/server", package = "praxis-proxy", default-features = false }
-praxis-core = { version = "0.7.2", path = "crates/core", package = "praxis-proxy-core" }
+praxis-core = { version = "0.7.3", path = "crates/core", package = "praxis-proxy-core" }
 # default-features = false: the filter crate's own default (`policy-engine`)
 # must not leak in through this dependency edge, or a build that turns the
 # policy engine off at the binary (`--no-default-features`, the FIPS build)
 # would still link it. The `praxis-proxy` binary's default feature set forwards
 # `policy-engine` explicitly, so the standard build is unchanged.
-praxis-filter = { version = "0.7.2", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
-praxis-protocol = { version = "0.7.2", path = "crates/protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.7.2", path = "crates/tls", package = "praxis-proxy-tls" }
+praxis-filter = { version = "0.7.3", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
+praxis-protocol = { version = "0.7.3", path = "crates/protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.7.3", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 praxis-proxy-benchmarks = "0.2.2"
 # System OpenSSL bindings, the same crate the rustls provider below uses; never

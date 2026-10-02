@@ -76,6 +76,7 @@ mod server_options;
 /// Span attribute recording for request tracing.
 mod span_util;
 
+#[cfg(any(test, feature = "test-support"))]
 pub use upstream_peer::{UpstreamRetryGateRelease, arm_upstream_retry_gate, lock_upstream_retry_gate_tests};
 pub use with_body::PingoraHttpHandler;
 

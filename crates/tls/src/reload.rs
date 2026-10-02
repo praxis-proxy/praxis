@@ -26,7 +26,7 @@ use rustls::{
     client::danger::HandshakeSignatureValid,
     pki_types::{CertificateDer, UnixTime},
     server::{
-        ClientHello, ResolvesServerCert,
+        ClientHello, ResolvesServerCert, ServerSessionMemoryCache, StoresServerSessions,
         danger::{ClientCertVerified, ClientCertVerifier},
     },
     sign::CertifiedKey,
@@ -141,6 +141,11 @@ pub struct VerifierState {
     /// through `&self`.
     pub(crate) mandatory: bool,
 
+    /// Session cache bound to this verifier generation; replaced on every
+    /// reload so a resumed session can never skip verification by a newer
+    /// verifier.
+    pub(crate) sessions: Arc<ServerSessionMemoryCache>,
+
     /// The active verifier built from the current CA and CRL files.
     pub(crate) verifier: Arc<dyn ClientCertVerifier>,
 }
@@ -153,7 +158,11 @@ impl VerifierState {
         let mandatory = matches!(mode, ClientCertMode::Require | ClientCertMode::RequireNamed);
         #[cfg(not(feature = "spiffe"))]
         let mandatory = mode == ClientCertMode::Require;
-        Self { mandatory, verifier }
+        Self {
+            mandatory,
+            sessions: ServerSessionMemoryCache::new(crate::setup::SESSION_CACHE_ENTRIES),
+            verifier,
+        }
     }
 }
 
@@ -172,6 +181,11 @@ impl VerifierState {
 ///
 /// - CRL changes never affect root hints.
 /// - CA changes update the verification logic; hints are advisory and stale hints do not weaken security.
+///
+/// After a CA *replacement*, however, the `CertificateRequest` keeps
+/// advertising the old CA names until restart. Clients that filter their
+/// certificates by CA name (browsers, Java) may then offer no certificate,
+/// so operators should rotate with a bundle holding both the old and new CA.
 ///
 /// ```ignore
 /// let verifier = ReloadableClientVerifier::new(
@@ -314,6 +328,46 @@ impl ClientCertVerifier for ReloadableClientVerifier {
 
     fn requires_raw_public_keys(&self) -> bool {
         self.inner.load().verifier.requires_raw_public_keys()
+    }
+}
+
+// -----------------------------------------------------------------------------
+// VerifierBoundSessions
+// -----------------------------------------------------------------------------
+
+/// Session store that delegates to the cache of the current verifier
+/// generation.
+///
+/// rustls copies the client certificate chain out of resumption data
+/// without calling the verifier again, so a session cached before a CRL or
+/// CA reload would let a revoked client resume indefinitely. Keeping the
+/// cache inside the swapped [`VerifierState`] means one atomic store both
+/// replaces the verifier and empties the cache.
+///
+/// [`VerifierState`]: VerifierState
+pub(crate) struct VerifierBoundSessions(pub(crate) Arc<ArcSwap<VerifierState>>);
+
+impl std::fmt::Debug for VerifierBoundSessions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifierBoundSessions").finish_non_exhaustive()
+    }
+}
+
+impl StoresServerSessions for VerifierBoundSessions {
+    fn put(&self, key: Vec<u8>, value: Vec<u8>) -> bool {
+        self.0.load().sessions.put(key, value)
+    }
+
+    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.0.load().sessions.get(key)
+    }
+
+    fn take(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.0.load().sessions.take(key)
+    }
+
+    fn can_cache(&self) -> bool {
+        true
     }
 }
 
@@ -634,5 +688,50 @@ mod tests {
             server_names: Vec::new(),
         };
         (certs, pair)
+    }
+
+    #[test]
+    fn verifier_reload_empties_bound_session_cache() -> Result<(), Box<dyn std::error::Error>> {
+        ensure_crypto_provider();
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().ok_or("ca path is not UTF-8")?;
+        let verifier = ReloadableClientVerifier::new(ca_path, ClientCertMode::Require, &[], &[])?;
+        let sessions = VerifierBoundSessions(verifier.arc());
+
+        assert!(
+            sessions.put(b"k".to_vec(), b"v".to_vec()),
+            "put should store the session"
+        );
+        assert_eq!(
+            sessions.get(b"k"),
+            Some(b"v".to_vec()),
+            "stored session should be retrievable before reload"
+        );
+
+        verifier.reload(ca_path, ClientCertMode::Require, &[], &[])?;
+        assert!(
+            sessions.get(b"k").is_none(),
+            "verifier reload should drop sessions cached under the old verifier"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_verifier_reload_keeps_bound_session_cache() -> Result<(), Box<dyn std::error::Error>> {
+        ensure_crypto_provider();
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().ok_or("ca path is not UTF-8")?;
+        let verifier = ReloadableClientVerifier::new(ca_path, ClientCertMode::Require, &[], &[])?;
+        let sessions = VerifierBoundSessions(verifier.arc());
+        sessions.put(b"k".to_vec(), b"v".to_vec());
+
+        let reloaded = verifier.reload("/nonexistent/ca.pem", ClientCertMode::Require, &[], &[]);
+        assert!(reloaded.is_err(), "reload with a missing CA should fail");
+        assert_eq!(
+            sessions.get(b"k"),
+            Some(b"v".to_vec()),
+            "failed reload should keep the current session cache"
+        );
+        Ok(())
     }
 }
