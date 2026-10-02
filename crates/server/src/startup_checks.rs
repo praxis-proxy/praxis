@@ -203,7 +203,7 @@ fn warn_client_cert_keys_in_value(chain: &str, value: &serde_yaml::Value) {
             if let Some(serde_yaml::Value::Mapping(client_cert)) = map.get("client_cert")
                 && let Some(serde_yaml::Value::String(key_path)) = client_cert.get("key_path")
             {
-                warn_if_key_world_readable("cluster", chain, key_path);
+                warn_if_key_world_readable("filter_chain", chain, key_path);
             }
             for (_, nested) in map {
                 warn_client_cert_keys_in_value(chain, nested);

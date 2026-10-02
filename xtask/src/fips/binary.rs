@@ -65,18 +65,47 @@ fn linkage(report: &mut Report, binary: &Path) {
         return;
     };
     let ldd = String::from_utf8_lossy(&output.stdout);
-    if ldd.lines().any(is_system_libcrypto) {
-        report.ok("dynamically links the system libcrypto.so.3");
-        report.info(&openssl_lines(&ldd));
-    } else if ldd.contains("libcrypto") {
-        report.fail(Finding {
+    match linkage_verdict(&ldd) {
+        Linkage::System => {
+            report.ok("dynamically links the system libcrypto.so.3");
+            report.info(&openssl_lines(&ldd));
+        },
+        Linkage::NonSystem(lines) => report.fail(Finding {
             title: "links a libcrypto that is not the system one".to_owned(),
             why: "only the OS-provided libcrypto.so.3 (the openssl-libs RPM) contains the validated module".to_owned(),
-            location: openssl_lines(&ldd),
+            location: lines,
             fix: "build against the system OpenSSL (OPENSSL_NO_VENDOR=1) and ship on UBI".to_owned(),
-        });
+        }),
+        Linkage::Missing => report.fail(missing_libcrypto()),
+    }
+}
+
+/// What ldd says about the libcrypto a binary links.
+#[derive(Debug, PartialEq, Eq)]
+enum Linkage {
+    /// Every libcrypto line resolves to the system library.
+    System,
+    /// Some libcrypto line resolves elsewhere; the offending lines, joined.
+    NonSystem(String),
+    /// No libcrypto line at all.
+    Missing,
+}
+
+/// Classify ldd output: every libcrypto line must be the system library.
+fn linkage_verdict(ldd: &str) -> Linkage {
+    let lines: Vec<&str> = ldd.lines().filter(|line| line.contains("libcrypto")).collect();
+    if lines.is_empty() {
+        return Linkage::Missing;
+    }
+    let offending: Vec<&str> = lines
+        .into_iter()
+        .filter(|line| !is_system_libcrypto(line))
+        .map(str::trim)
+        .collect();
+    if offending.is_empty() {
+        Linkage::System
     } else {
-        report.fail(missing_libcrypto());
+        Linkage::NonSystem(offending.join("; "))
     }
 }
 
@@ -427,5 +456,28 @@ mod tests {
         let mut report = Report::default();
         producer(&mut report, &file);
         assert!(!report.failed(), "a rustc-built binary carries the producer string");
+    }
+
+    #[test]
+    fn linkage_verdict_accepts_only_system_libcrypto() {
+        let ldd = "\tlibssl.so.3 => /lib64/libssl.so.3 (0x1)\n\tlibcrypto.so.3 => /lib64/libcrypto.so.3 (0x2)\n";
+        assert_eq!(linkage_verdict(ldd), Linkage::System, "the system library alone passes");
+    }
+
+    #[test]
+    fn linkage_verdict_rejects_an_additional_vendored_libcrypto() {
+        let ldd = "\tlibcrypto.so.3 => /lib64/libcrypto.so.3 (0x2)\n\tlibcrypto.so.3 => \
+                   /opt/vendored/libcrypto.so.3 (0x3)\n";
+        assert_eq!(
+            linkage_verdict(ldd),
+            Linkage::NonSystem("libcrypto.so.3 => /opt/vendored/libcrypto.so.3 (0x3)".to_owned()),
+            "a vendored libcrypto alongside the system one fails"
+        );
+    }
+
+    #[test]
+    fn linkage_verdict_reports_missing_libcrypto() {
+        let ldd = "\tlibc.so.6 => /lib64/libc.so.6 (0x1)\n";
+        assert_eq!(linkage_verdict(ldd), Linkage::Missing, "no libcrypto line is missing");
     }
 }

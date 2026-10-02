@@ -105,8 +105,9 @@ impl PriorityLevels {
         }
     }
 
-    /// A tier has capacity if its healthy endpoint ratio exceeds the
-    /// overprovisioning threshold: `healthy% >= 100 / overprovisioning_factor`.
+    /// A tier has capacity if its healthy endpoint percentage is at least
+    /// `10_000 / overprovisioning_factor` (e.g. at least 71.4% at factor
+    /// 140).
     fn tier_has_capacity(&self, tier: &PriorityTier, health: Option<&ClusterHealthState>) -> bool {
         let total_count = tier.addresses.len();
         if total_count == 0 {
@@ -119,7 +120,7 @@ impl PriorityLevels {
 
         let healthy_count = Self::tier_healthy_count(tier, health);
 
-        // healthy% >= 100/overprovisioning_factor
+        // healthy% >= 10_000/overprovisioning_factor
         // ⟺ healthy_count * overprovisioning_factor >= total_count * 100
         let factor = u64::from(self.overprovisioning_factor);
         (healthy_count as u64) * factor >= (total_count as u64) * 100

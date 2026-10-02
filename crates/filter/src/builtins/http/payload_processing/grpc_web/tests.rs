@@ -305,6 +305,66 @@ async fn a_text_response_body_is_base64_encoded() {
     );
 }
 
+#[tokio::test]
+async fn a_grpc_response_drops_upstream_content_length() -> Result<(), Box<dyn std::error::Error>> {
+    let req = grpc_web_request("application/grpc-web+proto");
+    let mut ctx = pipeline_context(&req);
+    let f = GrpcWebFilter::from_config(&serde_yaml::from_str("{}")?).map_err(|e| e.to_string())?;
+    drop(f.on_request(&mut ctx).await.map_err(|e| e.to_string())?);
+    let mut resp = crate::test_utils::make_response();
+    let _ct = resp
+        .headers
+        .insert(http::header::CONTENT_TYPE, "application/grpc".parse()?);
+    let _cl = resp.headers.insert(http::header::CONTENT_LENGTH, "7".parse()?);
+    ctx.response_header = Some(&mut resp);
+    drop(f.on_response(&mut ctx).await.map_err(|e| e.to_string())?);
+    drop(ctx);
+    assert!(
+        !resp.headers.contains_key(http::header::CONTENT_LENGTH),
+        "translated response must not keep the upstream Content-Length"
+    );
+    assert_eq!(
+        resp.headers
+            .get(http::header::CONTENT_TYPE)
+            .map(http::HeaderValue::as_bytes),
+        Some(b"application/grpc-web+proto".as_slice()),
+        "content type should be the gRPC-Web one"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_non_grpc_response_is_not_translated() -> Result<(), Box<dyn std::error::Error>> {
+    let req = grpc_web_request("application/grpc-web+proto");
+    let mut ctx = pipeline_context(&req);
+    let f = GrpcWebFilter::from_config(&serde_yaml::from_str("{}")?).map_err(|e| e.to_string())?;
+    drop(f.on_request(&mut ctx).await.map_err(|e| e.to_string())?);
+    let mut resp = crate::test_utils::make_response();
+    let _ct = resp.headers.insert(http::header::CONTENT_TYPE, "text/html".parse()?);
+    ctx.response_header = Some(&mut resp);
+    drop(f.on_response(&mut ctx).await.map_err(|e| e.to_string())?);
+    ctx.response_header = None;
+    let mut body = Some(Bytes::from_static(b"<h1>502</h1>"));
+    drop(
+        f.on_response_body(&mut ctx, &mut body, true)
+            .map_err(|e| e.to_string())?,
+    );
+    assert_eq!(
+        body.as_deref(),
+        Some(b"<h1>502</h1>".as_slice()),
+        "non-gRPC body should pass through without a trailer frame"
+    );
+    drop(ctx);
+    assert_eq!(
+        resp.headers
+            .get(http::header::CONTENT_TYPE)
+            .map(http::HeaderValue::as_bytes),
+        Some(b"text/html".as_slice()),
+        "non-gRPC content type should be unchanged"
+    );
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

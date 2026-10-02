@@ -818,6 +818,10 @@ fn resolve_authorization_token(
 fn authorization_header(token: &str) -> Result<HeaderValue, FilterError> {
     let value = Zeroizing::new(format!("Bearer {token}"));
     HeaderValue::from_str(&value)
+        .map(|mut header| {
+            header.set_sensitive(true);
+            header
+        })
         .map_err(|_error| "cloud_events: authorization token contains invalid header characters".into())
 }
 

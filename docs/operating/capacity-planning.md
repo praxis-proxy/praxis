@@ -80,7 +80,7 @@ the limit against `2 x connections + pools + 128`.
 | `runtime.upstream_keepalive_pool_size` | Idle upstream connections kept per worker thread (default 64; `null` means Pingora's 128) |
 | `runtime.subrequest_max_connections` | Cap concurrent sub-requests and callouts |
 | listener `downstream_keepalive_timeout_ms` | Close idle HTTP/1.x keep-alive clients |
-| listener `max_connections` | Cap concurrent requests per listener |
+| listener `max_connections` | Cap concurrent requests per listener (TCP listeners sharing upstream, cluster and timeouts share one cap) |
 | cluster `idle_timeout_ms` | Close pooled upstream connections left idle |
 
 Idle keep-alive clients are the budget item most often

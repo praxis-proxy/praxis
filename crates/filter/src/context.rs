@@ -42,10 +42,16 @@ use crate::{extensions::BoundUpstreamFrozen, pipeline::catalog::ClusterApplicati
 /// can still be overwritten past this limit.
 const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
 
+/// Maximum byte length of a `filter_metadata` key.
+const MAX_METADATA_KEY_LEN: usize = 64; // 64 B
+
+/// Maximum byte length of a `filter_metadata` value.
+const MAX_METADATA_VALUE_LEN: usize = 256; // 256 B
+
 /// Maximum entries allowed in the general `filter_metadata` map.
 ///
-/// Individual keys and values are already size-bounded (64 / 256
-/// bytes), but without an entry count cap a filter chain could
+/// Individual keys and values are already size-bounded
+/// ([`MAX_METADATA_KEY_LEN`] / [`MAX_METADATA_VALUE_LEN`] bytes), but without an entry count cap a filter chain could
 /// insert thousands of unique keys per request.
 const MAX_METADATA_ENTRIES: usize = 128;
 
@@ -1044,12 +1050,21 @@ impl HttpFilterContext<'_> {
     pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
         let key = key.into();
         let value = value.into();
-        if key.is_empty() || key.len() > 64 {
-            tracing::warn!(key_len = key.len(), "metadata key rejected (must be 1-64 bytes)");
+        if key.is_empty() || key.len() > MAX_METADATA_KEY_LEN {
+            tracing::warn!(
+                key_len = key.len(),
+                limit = MAX_METADATA_KEY_LEN,
+                "metadata key rejected (must be 1..=limit bytes)"
+            );
             return;
         }
-        if value.len() > 256 {
-            tracing::warn!(key = %key, value_len = value.len(), "metadata value rejected (max 256 bytes)");
+        if value.len() > MAX_METADATA_VALUE_LEN {
+            tracing::warn!(
+                key = %key,
+                value_len = value.len(),
+                limit = MAX_METADATA_VALUE_LEN,
+                "metadata value rejected (exceeds limit)"
+            );
             return;
         }
         if !self.filter_metadata.contains_key(&key) && self.filter_metadata.len() >= MAX_METADATA_ENTRIES {

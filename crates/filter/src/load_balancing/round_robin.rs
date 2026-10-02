@@ -10,7 +10,7 @@ use std::sync::{
 
 use praxis_core::health::ClusterHealthState;
 
-use super::endpoint::WeightedEndpoint;
+use super::{endpoint::WeightedEndpoint, is_excluded};
 
 // -----------------------------------------------------------------------------
 // RoundRobin
@@ -152,11 +152,6 @@ fn select_by_weight_excluding(endpoints: &[WeightedEndpoint], tick: usize, exclu
         }
     }
     None
-}
-
-/// Returns `true` if `addr` appears in the exclusion list.
-fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
-    exclude.iter().any(|e| e.as_ref() == addr)
 }
 
 // -----------------------------------------------------------------------------

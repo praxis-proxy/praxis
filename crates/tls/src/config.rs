@@ -28,12 +28,13 @@ pub(crate) fn has_parent_dir_component(path: &str) -> bool {
         .any(|component| matches!(component, Component::ParentDir))
 }
 
-/// Emit a warning if `path` is a symlink.
+/// Log at debug level if `path` is a symlink. Symlinked certificates are the
+/// normal layout for Kubernetes secrets and certbot, so this is not a warning.
 pub(crate) fn warn_if_symlink(field: &str, path: &str) {
     if let Ok(meta) = std::fs::symlink_metadata(path)
         && meta.file_type().is_symlink()
     {
-        tracing::warn!(field, path, "TLS path is a symlink; the resolved target will be used");
+        tracing::debug!(field, path, "TLS path is a symlink; the resolved target will be used");
     }
 }
 

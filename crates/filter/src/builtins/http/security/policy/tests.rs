@@ -5286,3 +5286,537 @@ async fn the_inference_response_half_does_not_claim_mcp_responses() {
          would produce; got {served:?}",
     );
 }
+
+// -----------------------------------------------------------------------------
+// Post-only entity routes
+// -----------------------------------------------------------------------------
+
+/// Write a policy with the standard JWT preamble and the supplied routes.
+fn write_entity_config_with_routes(routes: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+{routes}"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Write an `echo` tool route with only a `post_invocation` rule.
+fn write_tool_post_only_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      post_invocation:
+        - "authenticated: deny('results are withheld', 'result_withheld')"
+"#,
+    )
+}
+
+/// Write an `echo` tool route with only a `result:` field pipeline.
+fn write_tool_result_pipeline_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    result:
+      ssn: "str | mask(2)"
+"#,
+    )
+}
+
+/// A tool result long enough to hold a replacement deny envelope.
+const ROOMY_MCP_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok, and long enough that a replacement error envelope fits inside the committed content length without being trimmed"}]}}"#;
+
+#[test]
+fn a_post_only_tool_route_is_an_entity_route() {
+    let (_dir, path) = write_tool_post_only_config();
+    assert_eq!(
+        build_read_write_filter(path).derived_shape(),
+        (false, true),
+        "a route declaring only `post_invocation` registers the post hook alone; the response \
+         phase dispatches off `entity_routes`, so it has to be true or the hook never runs",
+    );
+}
+
+#[test]
+fn a_result_pipeline_alone_is_an_entity_route() {
+    let (_dir, path) = write_tool_result_pipeline_config();
+    assert_eq!(
+        build_read_write_filter(path).derived_shape(),
+        (false, true),
+        "a `result:` pipeline is a Post-phase declaration and opens the response half by itself",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_only_tool_route_dispatches_its_hook() {
+    let (_dir, path) = write_tool_post_only_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(request_body), true)
+        .await
+        .expect("request phase ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the route declares no request-phase rule, so the request half admits; got {action:?}",
+    );
+
+    let mut body = Some(bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()));
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+
+    let served = body.expect("response body");
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
+    assert_eq!(
+        parsed["error"]["data"]["violation"], "result_withheld",
+        "the post-phase deny must reach the wire; a body that still carries `result` means the \
+         hook never dispatched. got {served:?}",
+    );
+}
+
+/// Write a post-only `prompt:` route.
+fn write_prompt_post_only_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - prompt: summarize
+    authorization:
+      post_invocation:
+        - "authenticated: deny('prompts are withheld', 'prompt_withheld')"
+"#,
+    )
+}
+
+/// Write a post-only `resource:` route.
+fn write_resource_post_only_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - resource: "file:///data.csv"
+    authorization:
+      post_invocation:
+        - "authenticated: deny('resources are withheld', 'resource_withheld')"
+"#,
+    )
+}
+
+#[test]
+fn a_post_only_prompt_route_is_an_entity_route() {
+    let (_dir, path) = write_prompt_post_only_config();
+    assert_eq!(build_read_write_filter(path).derived_shape(), (false, true));
+}
+
+#[test]
+fn a_post_only_resource_route_is_an_entity_route() {
+    let (_dir, path) = write_resource_post_only_config();
+    assert_eq!(build_read_write_filter(path).derived_shape(), (false, true));
+}
+
+/// Run a post-only entity round trip and return the served response body.
+async fn post_only_round_trip(path: String, method: &str, name: &str, request_body: &'static [u8]) -> bytes::Bytes {
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", method);
+    ctx.set_metadata("mcp.name", name);
+    drop(
+        filter
+            .on_request_body(&mut ctx, &mut Some(bytes::Bytes::from_static(request_body)), true)
+            .await
+            .expect("request phase ran"),
+    );
+    let mut body = Some(bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()));
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+    body.expect("response body")
+}
+
+// Prompt and resource post hooks remain unsupported because response content
+// is currently projected only for `tools/call`.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_only_prompt_route_does_not_yet_dispatch() {
+    let (_dir, path) = write_prompt_post_only_config();
+    let served = post_only_round_trip(
+        path,
+        "prompts/get",
+        "summarize",
+        br#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"summarize"}}"#,
+    )
+    .await;
+    assert_eq!(
+        served,
+        bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()),
+        "a prompt response is passed through untouched because the post hook is never dispatched",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_only_resource_route_does_not_yet_dispatch() {
+    let (_dir, path) = write_resource_post_only_config();
+    let served = post_only_round_trip(
+        path,
+        "resources/read",
+        "file:///data.csv",
+        br#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///data.csv"}}"#,
+    )
+    .await;
+    assert_eq!(
+        served,
+        bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()),
+        "a resource response is passed through untouched because the post hook is never dispatched",
+    );
+}
+
+/// Write a route that declares both halves: a pre-phase rule only `bob`
+/// satisfies, and a post-phase deny.
+fn write_tool_both_phases_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "require(subject.id == 'bob')"
+      post_invocation:
+        - "authenticated: deny('results are withheld', 'result_withheld')"
+"#,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_route_declaring_both_phases_still_dispatches_the_pre_half() {
+    let (_dir, path) = write_tool_both_phases_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(request_body), true)
+        .await
+        .expect("request phase ran");
+
+    let FilterAction::Reject(rejection) = action else {
+        panic!("counting the post half toward `mcp_routes` must not cost the pre half; got {action:?}");
+    };
+    assert!(
+        String::from_utf8_lossy(&rejection.body.unwrap_or_default()).contains("-32001"),
+        "alice fails the pre-phase rule, so the request half denies before the response half matters",
+    );
+}
+
+/// The response body the `result:` pipeline addresses. `structuredContent` is
+/// taken verbatim as the value APL evaluates, so the pipeline's field is
+/// addressable without inferring it from a text block.
+const STRUCTURED_MCP_RESPONSE: &str =
+    r#"{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"ssn":"123-45-6789","note":"kept"}}}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_result_pipeline_alone_redacts_the_response() {
+    let (_dir, path) = write_tool_result_pipeline_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    drop(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request_body), true)
+            .await
+            .expect("request phase ran"),
+    );
+
+    let mut body = Some(bytes::Bytes::from_static(STRUCTURED_MCP_RESPONSE.as_bytes()));
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+
+    let served = String::from_utf8_lossy(&body.expect("response body")).into_owned();
+    assert!(
+        !served.contains("123-45-6789"),
+        "the `result:` pipeline is the only declaration on the route; it still has to mask the \
+         value on the way back. got {served}",
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Load-time warnings
+// -----------------------------------------------------------------------------
+
+/// Serialize capture tests because tracing's max-level hint is process-wide.
+static WARNING_CAPTURE: Mutex<()> = Mutex::new(());
+
+/// Capture load-time warnings emitted on the calling thread while `f` runs.
+fn capture_warnings(f: impl FnOnce()) -> String {
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("sink lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let _serialized = WARNING_CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let sink = Sink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = sink.0.lock().expect("sink lock").clone();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[test]
+fn a_read_only_tool_response_policy_warns_that_the_rules_will_not_run() {
+    let (_dir, path) = write_tool_post_only_config();
+    let logs = capture_warnings(|| drop(build_filter(path)));
+    assert!(
+        logs.contains("response-phase `tool:` rules") && logs.contains("body_access: read_write"),
+        "a `read_only` filter must name the remedy for tool response rules; got {logs}",
+    );
+}
+
+#[test]
+fn a_read_write_tool_response_policy_does_not_warn() {
+    let (_dir, path) = write_tool_post_only_config();
+    let logs = capture_warnings(|| drop(build_read_write_filter(path)));
+    assert!(
+        !logs.contains("response-phase `tool:` rules"),
+        "`read_write` is the configuration the warning asks for; it must not fire. got {logs}",
+    );
+}
+
+#[test]
+fn a_prompt_response_policy_warns_that_read_write_is_not_the_fix() {
+    let (_dir, path) = write_prompt_post_only_config();
+    let logs = capture_warnings(|| drop(build_read_write_filter(path)));
+    assert!(
+        logs.contains("those rules never run") && logs.contains("does not change this"),
+        "a prompt response rule is undispatched under both body accesses, so the warning must \
+         not offer `read_write` as the remedy; got {logs}",
+    );
+}
+
+/// An `http:` route that only `bob` satisfies, beside a post-only `tool:`
+/// route. Classified `tools/call` traffic resolves to the tool route, so the
+/// `http:` route never authorizes it.
+fn write_http_route_beside_tool_route_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - http:
+      path_prefix: /mcp
+    authorization:
+      pre_invocation:
+        - "require(subject.id == 'bob')"
+  - tool: echo
+    result:
+      ssn: "str | mask(2)"
+"#,
+    )
+}
+
+#[test]
+fn an_http_route_beside_entity_routes_is_refused_at_load() {
+    let (_dir, path) = write_http_route_beside_tool_route_config();
+    let yaml = std::fs::read_to_string(&path).expect("read policy");
+
+    let refusal = PolicyFilter::http_route_beside_entity_routes(&yaml, /* mcp_routes= */ true)
+        .expect("an authorizing `http:` route beside entity routes gates nothing");
+    assert!(
+        refusal.contains("`global` block"),
+        "the refusal has to name the remedy, or an operator has nowhere to go; got {refusal}",
+    );
+    assert_eq!(
+        PolicyFilter::http_route_beside_entity_routes(&yaml, /* mcp_routes= */ false),
+        None,
+        "with no entity routes the `http:` route is the only thing evaluating, so it is fine",
+    );
+}
+
+#[test]
+fn an_unreadable_policy_document_is_refused_rather_than_admitted() {
+    let refusal = PolicyFilter::http_route_beside_entity_routes("routes: [unclosed", /* mcp_routes= */ true)
+        .expect("an unreadable document means the contract is unchecked, so refuse");
+    assert!(
+        refusal.contains("could not re-read"),
+        "the refusal has to say the check could not run, not invent a finding; got {refusal}",
+    );
+}
+
+#[test]
+fn a_policy_with_no_routes_block_is_not_refused() {
+    assert_eq!(
+        PolicyFilter::http_route_beside_entity_routes("global:\n  authentication: []\n", /* mcp_routes= */ true),
+        None,
+        "no `routes:` key means no route to object to, which is a real answer, not a failure",
+    );
+}
+
+#[test]
+fn an_http_route_scoping_only_authentication_still_loads() {
+    let yaml = r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+  - http:
+      path_prefix: /mcp
+    authentication:
+      replace_inherited: true
+      steps:
+        - route-jwt
+"#;
+    assert_eq!(
+        PolicyFilter::http_route_beside_entity_routes(yaml, /* mcp_routes= */ true),
+        None,
+        "an `http:` route that only scopes authentication is a supported shape",
+    );
+}
+
+#[test]
+fn an_http_route_beside_entity_routes_fails_filter_construction() {
+    let (_dir, path) = write_http_route_beside_tool_route_config();
+    let cfg = PolicyFilterConfig {
+        config_path: path,
+        allow_private_idp: false,
+        trusted_private_endpoints: vec![],
+        body_access: super::config::BodyAccessMode::ReadWrite,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
+    };
+    let err = PolicyFilter::new(cfg).err().expect("construction must fail");
+    assert!(
+        format!("{err}").contains("declare `authorization:` alongside MCP entity routes"),
+        "the refusal has to reach the operator as a startup failure; got {err}",
+    );
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_global_block_does_authorize_classified_mcp_traffic() {
+    let (_dir, path) = write_entity_config_with_global_authz(
+        r#"routes:
+  - tool: echo
+    result:
+      ssn: "str | mask(2)"
+"#,
+    );
+    let filter = build_read_write_filter(path);
+
+    let mut req = make_request(Method::POST, "/mcp");
+    let token = mint_jwt(&standard_claims("alice"));
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(request_body), true)
+        .await
+        .expect("request phase ran");
+
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "the `global` block is layered into every entity route, so it is the remedy the \
+         `http:`-route warning points at; got {action:?}",
+    );
+}
+
+/// Preamble variant that puts the rule in the `global` authorization block
+/// rather than on an `http:` route.
+fn write_entity_config_with_global_authz(routes: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(subject.id == 'bob')"
+{routes}"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}

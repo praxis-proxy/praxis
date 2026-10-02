@@ -118,6 +118,27 @@ impl TestCertificates {
     ///
     /// Panics if certificate generation or file I/O fails.
     pub fn generate() -> Self {
+        Self::generate_with(|_server_params| {})
+    }
+
+    /// Like [`generate`], except the server certificate was only valid
+    /// during the year 2000, so verifying it fails on its dates alone.
+    ///
+    /// # Panics
+    ///
+    /// Panics if certificate generation or file I/O fails.
+    ///
+    /// [`generate`]: TestCertificates::generate
+    pub fn generate_expired() -> Self {
+        Self::generate_with(|server_params| {
+            server_params.not_before = rcgen::date_time_ymd(2000, 1, 1);
+            server_params.not_after = rcgen::date_time_ymd(2001, 1, 1);
+        })
+    }
+
+    /// Generate a CA and a `localhost` server certificate, letting
+    /// `customize` adjust the server certificate before it is signed.
+    fn generate_with<F: FnOnce(&mut CertificateParams)>(customize: F) -> Self {
         let (ca_key, ca_params, ca_cert) = generate_ca("Praxis Test CA");
         let issuer = Issuer::from_params(&ca_params, &ca_key);
 
@@ -127,6 +148,7 @@ impl TestCertificates {
         server_params
             .subject_alt_names
             .push(SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
+        customize(&mut server_params);
         let server_cert = server_params.signed_by(&server_key, &issuer).expect("server cert sign");
 
         let temp_dir = TempDir::new().expect("tempdir creation");

@@ -103,6 +103,13 @@ fn validate_health_check_timing(hc: &crate::config::HealthCheckConfig, cluster_n
             "cluster '{cluster_name}': health check interval_ms must be > 0"
         )));
     }
+    if hc.interval_ms > super::MAX_TIMEOUT_MS {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': health check interval_ms ({}) exceeds maximum ({} ms / 1 hour)",
+            hc.interval_ms,
+            super::MAX_TIMEOUT_MS
+        )));
+    }
     if hc.timeout_ms == 0 {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': health_check.timeout_ms must be greater than 0"
@@ -239,7 +246,8 @@ fn check_ssrf_host(host: &str, cluster_name: &str, addr_str: &str, allowed: bool
     }
     Err(ProxyError::Config(format!(
         "cluster '{cluster_name}': health check endpoint '{addr_str}' resolves to a \
-         sensitive address; set insecure_options.allow_private_health_checks: true to allow"
+         sensitive address; set insecure_options.allow_private_health_checks: true \
+         (and allow_private_endpoints: true for the data plane) to allow"
     )))
 }
 
@@ -274,23 +282,34 @@ pub(super) fn extract_host(addr: &str) -> &str {
 /// unwrap NAT64 (`64:ff9b::/96`) wrappers, so `allow_private_endpoints` /
 /// `allow_private_health_checks` keep their historical semantics.
 ///
+/// Known cloud instance-metadata endpoints (for example `fd00:ec2::254` and
+/// `100.100.100.200`) are also flagged, by exact address only, so ULA and
+/// shared-address-space backends around them stay accepted.
+///
 /// [`classify_ip`]: crate::connectivity::classify_ip
 /// [`is_private_ip`]: crate::connectivity::is_private_ip
 /// [RFC 1918]: https://datatracker.ietf.org/doc/html/rfc1918
 pub fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
     let class = classify_without_nat64(ip);
-    class.is_loopback() || class.is_link_local() || class.is_this_host() || class.is_unspecified()
+    class.is_loopback()
+        || class.is_link_local()
+        || class.is_this_host()
+        || class.is_unspecified()
+        || class.is_cloud_metadata()
 }
 
 /// Returns `true` for hostnames that commonly resolve to
-/// SSRF-sensitive addresses (loopback, cloud metadata) or
-/// alternate IP representations (decimal, hex, octal).
+/// SSRF-sensitive addresses (loopback including the `.localhost`
+/// subtree, cloud metadata) or alternate IP representations
+/// (decimal, hex, octal).
 pub(super) fn is_ssrf_sensitive_hostname(host: &str) -> bool {
     let host = strip_root_dot(host);
     if let Some(ip) = try_parse_alternate_ip(host) {
         return is_ssrf_sensitive(&normalize_mapped_ipv4(ip));
     }
-    host.eq_ignore_ascii_case("localhost") || is_cluster_dns_name(host)
+    host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || is_cluster_dns_name(host)
 }
 
 /// Whether `host` is listed and trips only the name rules, never localhost or an IP spelling.
@@ -303,10 +322,10 @@ pub(super) fn is_trusted_cluster_dns_name(cluster: &Cluster, host: &str) -> bool
             .any(|entry| strip_root_dot(entry).eq_ignore_ascii_case(host))
 }
 
-/// Whether `host` trips the `.local`, `.internal`, or `metadata.` name rules.
+/// Whether `host` trips the `.local`, `.internal`, `metadata`, or `metadata.` name rules.
 fn is_cluster_dns_name(host: &str) -> bool {
     let lower = host.to_ascii_lowercase();
-    lower.ends_with(".local") || lower.ends_with(".internal") || lower.starts_with("metadata.")
+    lower.ends_with(".local") || lower.ends_with(".internal") || lower == "metadata" || lower.starts_with("metadata.")
 }
 
 /// Attempt to parse a host as an IPv4 address in an alternate
@@ -902,9 +921,9 @@ clusters:
             }),
             ..Cluster::with_defaults("web", vec!["127.0.0.1:80".into()])
         }];
-        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        let err = validate_clusters(&clusters, &data_plane_allowed()).unwrap_err();
         assert!(
-            err.to_string().contains("sensitive address"),
+            err.to_string().contains("health check endpoint"),
             "should reject loopback health check: {err}"
         );
     }
@@ -927,10 +946,73 @@ clusters:
             ..Cluster::with_defaults("web", vec!["127.0.0.1:80".into()])
         }];
         let opts = InsecureOptions {
+            allow_private_endpoints: true,
             allow_private_health_checks: true,
             ..InsecureOptions::default()
         };
         validate_clusters(&clusters, &opts).expect("allow_private_health_checks should demote error to warning");
+    }
+
+    #[test]
+    fn health_check_interval_upper_bound() {
+        for (interval_ms, accepted) in [(3_600_000, true), (3_600_001, false)] {
+            let clusters = vec![Cluster {
+                health_check: Some(crate::config::HealthCheckConfig {
+                    check_type: crate::config::HealthCheckType::Http,
+                    expected_status: 200,
+                    grpc_service: String::new(),
+                    healthy_threshold: 2,
+                    interval_ms,
+                    passive_healthy_threshold: None,
+                    passive_unhealthy_threshold: None,
+                    path: "/health".to_owned(),
+                    timeout_ms: 2000,
+                    unhealthy_threshold: 3,
+                }),
+                ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
+            }];
+            let result = validate_clusters(&clusters, &InsecureOptions::default());
+            assert_eq!(result.is_ok(), accepted, "interval_ms {interval_ms}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_flags_cloud_metadata_addresses() {
+        for addr in ["fd00:ec2::254", "100.100.100.200"] {
+            assert!(
+                super::is_ssrf_sensitive(&addr.parse().unwrap()),
+                "{addr} is a cloud metadata endpoint and should be flagged"
+            );
+        }
+        for addr in ["fd00::1", "100.64.0.1"] {
+            assert!(
+                !super::is_ssrf_sensitive(&addr.parse().unwrap()),
+                "{addr} is an ordinary private backend and should not be flagged"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_bare_metadata_and_localhost_subtree_endpoints() {
+        for endpoint in ["metadata:80", "api.localhost:80", "API.LOCALHOST.:80"] {
+            let clusters = vec![Cluster::with_defaults("web", vec![endpoint.into()])];
+            let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+            assert!(
+                err.to_string().contains("sensitive address"),
+                "{endpoint} should be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn localhost_subtree_cannot_be_trusted_listed() {
+        let mut cluster = Cluster::with_defaults("web", vec!["api.localhost:80".into()]);
+        cluster.trusted_private_endpoints = vec!["api.localhost".to_owned()];
+        let result = validate_clusters(&[cluster], &InsecureOptions::default());
+        assert!(
+            result.is_err(),
+            "api.localhost must stay rejected when listed: {result:?}"
+        );
     }
 
     #[test]
@@ -1071,9 +1153,9 @@ clusters:
             }),
             ..Cluster::with_defaults("web", vec!["::ffff:127.0.0.1:80".into()])
         }];
-        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        let err = validate_clusters(&clusters, &data_plane_allowed()).unwrap_err();
         assert!(
-            err.to_string().contains("sensitive address"),
+            err.to_string().contains("health check endpoint"),
             "IPv4-mapped loopback should be rejected: {err}"
         );
     }
@@ -1095,9 +1177,9 @@ clusters:
             }),
             ..Cluster::with_defaults("web", vec!["[::1]:80".into()])
         }];
-        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        let err = validate_clusters(&clusters, &data_plane_allowed()).unwrap_err();
         assert!(
-            err.to_string().contains("sensitive address"),
+            err.to_string().contains("health check endpoint"),
             "bracketed IPv6 loopback should be rejected: {err}"
         );
     }
@@ -1410,9 +1492,9 @@ clusters:
             }),
             ..Cluster::with_defaults("web", vec!["localhost:80".into()])
         }];
-        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        let err = validate_clusters(&clusters, &data_plane_allowed()).unwrap_err();
         assert!(
-            err.to_string().contains("sensitive address"),
+            err.to_string().contains("health check endpoint"),
             "hostname 'localhost' should be rejected: {err}"
         );
     }
@@ -1434,9 +1516,9 @@ clusters:
             }),
             ..Cluster::with_defaults("web", vec!["[fe80::1]:80".into()])
         }];
-        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        let err = validate_clusters(&clusters, &data_plane_allowed()).unwrap_err();
         assert!(
-            err.to_string().contains("sensitive address"),
+            err.to_string().contains("health check endpoint"),
             "IPv6 link-local should be rejected: {err}"
         );
     }
@@ -1638,5 +1720,18 @@ clusters:
             !super::is_ssrf_sensitive_hostname("134744072"),
             "decimal 134744072 (8.8.8.8) should NOT be flagged"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// Options that pass the data-plane endpoint check, so only the
+    /// health check SSRF gate can reject.
+    fn data_plane_allowed() -> InsecureOptions {
+        InsecureOptions {
+            allow_private_endpoints: true,
+            ..InsecureOptions::default()
+        }
     }
 }

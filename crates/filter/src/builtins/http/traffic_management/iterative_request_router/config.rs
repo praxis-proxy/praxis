@@ -29,6 +29,10 @@ const MAX_STEPS: usize = 20;
 /// Default maximum iteration state accumulator bytes.
 const DEFAULT_MAX_STATE_BYTES: usize = 52_428_800; // 50 MiB
 
+/// Ceiling for `max_response_bytes` and `max_state_bytes`, bounding the
+/// buffered per-request memory across iterations.
+const MAX_BYTES_CEILING: usize = 1_073_741_824; // 1 GiB
+
 /// Maximum iterative depth for loop prevention.
 const MAX_DEPTH: u8 = 3;
 
@@ -70,7 +74,7 @@ pub(crate) struct IterativeRequestRouterConfig {
     #[serde(default = "default_max_iterations")]
     pub(crate) max_iterations: u32,
 
-    /// Maximum response body bytes per sub-request.
+    /// Maximum response body bytes per sub-request (at most 1 GiB).
     #[serde(default = "default_max_response_bytes")]
     pub(crate) max_response_bytes: usize,
 
@@ -79,7 +83,7 @@ pub(crate) struct IterativeRequestRouterConfig {
     #[serde(default)]
     pub(crate) max_stream_response_bytes: Option<usize>,
 
-    /// Maximum accumulated iteration state bytes.
+    /// Maximum accumulated iteration state bytes (at most 1 GiB).
     #[serde(default = "default_max_state_bytes")]
     pub(crate) max_state_bytes: usize,
 
@@ -244,6 +248,15 @@ pub(crate) fn validate(cfg: &IterativeRequestRouterConfig) -> Result<(), FilterE
         return Err("iterative_request_router: max_response_bytes must be > 0"
             .to_owned()
             .into());
+    }
+
+    for (field, value) in [
+        ("max_state_bytes", cfg.max_state_bytes),
+        ("max_response_bytes", cfg.max_response_bytes),
+    ] {
+        if value > MAX_BYTES_CEILING {
+            return Err(format!("iterative_request_router: {field} must be <= {MAX_BYTES_CEILING}").into());
+        }
     }
 
     if let Some(0) = cfg.step_timeout_ms {

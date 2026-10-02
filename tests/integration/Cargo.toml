@@ -44,7 +44,7 @@ pingora-core = { workspace = true }
 praxis = { workspace = true }
 praxis-core = { workspace = true, features = ["test-support"] }
 praxis-filter = { workspace = true }
-praxis-protocol = { workspace = true }
+praxis-protocol = { workspace = true, features = ["test-support"] }
 praxis-test-utils = { workspace = true }
 praxis-tls = { workspace = true }
 rustls = { workspace = true }

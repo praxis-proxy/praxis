@@ -17,7 +17,7 @@ mod upstream;
 pub(crate) use classification::classify_without_nat64;
 pub use classification::{IpClassification, classify_ip};
 pub use connection_options::ConnectionOptions;
-pub use network::{CidrRange, is_private_ip, normalize_mapped_ipv4};
+pub use network::{CidrRange, is_private_ip, is_private_upstream_ip, normalize_mapped_ipv4};
 pub use target::{
     InvalidTarget, PreparedSubrequest, PreparedTarget, UrlTargetError, prepare_url_target, validate_url_target,
 };

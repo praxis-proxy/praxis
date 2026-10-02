@@ -38,6 +38,8 @@ use openssl::{
     },
 };
 
+use crate::paths::workspace_root;
+
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
@@ -60,6 +62,11 @@ const TARGET_VOLUME: &str = "praxis-fips-host-target";
 
 /// The tests to run: the listener probes of the FIPS module.
 const TEST_FILTER: &str = "fips::listener_";
+
+/// How many tests [`TEST_FILTER`] must select: the `listener_*` tests in
+/// `tests/integration/tests/suite/fips.rs`. A filter that selects none would
+/// otherwise pass vacuously.
+const EXPECTED_PROBES: usize = 5; // listener_* tests in tests/integration/tests/suite/fips.rs
 
 // -----------------------------------------------------------------------------
 // CLI Arguments
@@ -244,15 +251,21 @@ fn handshake_completes(port: u16) -> bool {
 // Probe Tests
 // -----------------------------------------------------------------------------
 
-/// Run the listener probes against the published port.
+/// Run the listener probes against the published port, after checking that
+/// the filter selects exactly [`EXPECTED_PROBES`] tests.
 fn run_probe_tests(args: &Args, work: &Path, port: u16) -> Result<(), String> {
     let addr = format!("127.0.0.1:{port}");
-    let status = if args.host_cargo {
-        host_cargo_test(&addr, work)
-    } else {
-        toolchain_cargo_test(&args.toolchain_image, &addr, work)
-    }
-    .map_err(|err| format!("cannot run the probe tests: {err}"))?;
+    let cargo_test = |libtest: &[&str]| {
+        if args.host_cargo {
+            host_cargo_test(&addr, work, libtest)
+        } else {
+            toolchain_cargo_test(&args.toolchain_image, &addr, work, libtest)
+        }
+    };
+    check_selection(cargo_test(&[TEST_FILTER, "--list", "--format", "terse"]))?;
+    let status = cargo_test(&[TEST_FILTER])
+        .status()
+        .map_err(|err| format!("cannot run the probe tests: {err}"))?;
     if status.success() {
         Ok(())
     } else {
@@ -260,23 +273,57 @@ fn run_probe_tests(args: &Args, work: &Path, port: u16) -> Result<(), String> {
     }
 }
 
-/// The probe tests with this host's cargo.
-fn host_cargo_test(addr: &str, work: &Path) -> std::io::Result<std::process::ExitStatus> {
-    Command::new(env!("CARGO"))
+/// Run a libtest `--list` command and require it to name exactly
+/// [`EXPECTED_PROBES`] tests.
+fn check_selection(mut list: Command) -> Result<(), String> {
+    let listing = list
+        .output()
+        .map_err(|err| format!("cannot list the probe tests: {err}"))?;
+    if !listing.status.success() {
+        return Err(format!(
+            "listing the probe tests failed: {}",
+            String::from_utf8_lossy(&listing.stderr).trim()
+        ));
+    }
+    let selected = count_listed(&String::from_utf8_lossy(&listing.stdout));
+    if selected != EXPECTED_PROBES {
+        return Err(format!(
+            "the probe filter selected {selected} tests, expected {EXPECTED_PROBES}; update \
+             TEST_FILTER/EXPECTED_PROBES"
+        ));
+    }
+    Ok(())
+}
+
+/// Count the tests in a libtest `--list --format terse` listing, ignoring
+/// benchmarks and any other lines.
+fn count_listed(listing: &str) -> usize {
+    listing
+        .lines()
+        .filter(|line| line.trim_end().ends_with(": test"))
+        .count()
+}
+
+/// The probe tests with this host's cargo, passing `libtest` after `--`.
+fn host_cargo_test(addr: &str, work: &Path, libtest: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO"));
+    command
         .current_dir(workspace_root())
         .args(["test", "--target-dir", "target/fips", "--no-default-features"])
-        .args(["-p", "praxis-tests-integration", "--test", "suite", "--", TEST_FILTER])
+        .args(["-p", "praxis-tests-integration", "--test", "suite", "--"])
+        .args(libtest)
         .env("PRAXIS_FIPS_HOST", "1")
         .env("PRAXIS_FIPS_PROBE_ADDR", addr)
-        .env("PRAXIS_FIPS_PROBE_CA", work.join("ca.pem"))
-        .status()
+        .env("PRAXIS_FIPS_PROBE_CA", work.join("ca.pem"));
+    command
 }
 
 /// The probe tests inside the toolchain image, on the host network so the
 /// published port is reachable, with the checkout bind-mounted and the same
-/// cache volumes as `make test-fips-host`.
-fn toolchain_cargo_test(toolchain_image: &str, addr: &str, work: &Path) -> std::io::Result<std::process::ExitStatus> {
-    Command::new("podman")
+/// cache volumes as `make test-fips-host`, passing `libtest` after `--`.
+fn toolchain_cargo_test(toolchain_image: &str, addr: &str, work: &Path, libtest: &[&str]) -> Command {
+    let mut command = Command::new("podman");
+    command
         .args(["run", "--rm", "--network", "host", "--userns=keep-id"])
         .args(["--security-opt", "label=disable"])
         .args([
@@ -299,16 +346,10 @@ fn toolchain_cargo_test(toolchain_image: &str, addr: &str, work: &Path) -> std::
             "--test",
             "suite",
             "--ignore-rust-version",
+            "--",
         ])
-        .args(["--", TEST_FILTER])
-        .status()
-}
-
-/// The workspace root, two levels up from xtask's manifest.
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+        .args(libtest);
+    command
 }
 
 // -----------------------------------------------------------------------------
@@ -525,5 +566,23 @@ mod tests {
         let config = std::fs::read_to_string(work.path().join("config.yaml")).expect("read");
         assert!(config.contains("cert_path: /probe/cert.pem"), "{config}");
         assert!(config.contains(&format!("0.0.0.0:{CONTAINER_PORT}")), "{config}");
+    }
+
+    #[test]
+    fn count_listed_counts_each_test_line() {
+        let listing = "fips::listener_a: test\nfips::listener_b: test\nfips::listener_c: test\n\
+                       fips::listener_d: test\nfips::listener_e: test\n";
+        assert_eq!(count_listed(listing), 5, "five test lines are five tests");
+    }
+
+    #[test]
+    fn count_listed_is_zero_for_an_empty_listing() {
+        assert_eq!(count_listed(""), 0, "an empty listing selects nothing");
+    }
+
+    #[test]
+    fn count_listed_ignores_benches_and_other_lines() {
+        let listing = "   Compiling praxis v0.1.0\nfips::listener_a: test\nbench_x: bench\n\n0 tests, 1 benchmarks\n";
+        assert_eq!(count_listed(listing), 1, "only `: test` lines count");
     }
 }

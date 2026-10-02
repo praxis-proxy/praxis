@@ -27,8 +27,22 @@ use crate::{
 // -----------------------------------------------------------------------------
 
 /// Characters unsafe in query values that must be percent-encoded:
-/// space, `"`, `#`, `&`, `+`, and `=`.
-const QUERY_VALUE_ENCODE_SET: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'#').add(b'&').add(b'+').add(b'=');
+/// controls, space, `"`, `#`, `%`, `&`, `'`, `+`, `<`, `=`, `>`, and
+/// `` ` `` (the [WHATWG query set] plus query delimiters).
+///
+/// [WHATWG query set]: https://url.spec.whatwg.org/#query-percent-encode-set
+const QUERY_VALUE_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'&')
+    .add(b'\'')
+    .add(b'+')
+    .add(b'<')
+    .add(b'=')
+    .add(b'>')
+    .add(b'`');
 
 // -----------------------------------------------------------------------------
 // UrlRewriteConfig
@@ -338,6 +352,7 @@ fn compile_single_operation(config: OperationConfig) -> Result<Operation, Filter
 /// Compile a `regex_replace` operation from its YAML value.
 fn compile_regex_replace(value: &serde_yaml::Value) -> Result<Operation, FilterError> {
     #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
     struct RegexReplace {
         /// The regex pattern to match against the path.
         pattern: String,
@@ -1105,6 +1120,32 @@ operations:
             rewritten.contains("%26more%3Dstuff"),
             "& and = should be encoded: {rewritten}"
         );
+    }
+
+    #[tokio::test]
+    async fn add_query_params_encodes_percent() -> Result<(), Box<dyn std::error::Error>> {
+        let filter = make_filter(&[Op::AddQuery(&[("k", "10%")])]);
+        let req = test_utils::make_request(Method::GET, "/path");
+        let mut ctx = test_utils::make_filter_context(&req);
+        drop(filter.on_request(&mut ctx).await.map_err(|e| e.to_string())?);
+        assert_eq!(
+            ctx.rewritten_path.as_deref(),
+            Some("/path?k=10%25"),
+            "literal % should be percent-encoded"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn regex_replace_rejects_unknown_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            "operations:\n  - regex_replace:\n      pattern: a\n      replacement: b\n      bogus: 1\n",
+        )?;
+        assert!(
+            UrlRewriteFilter::from_config(&cfg).is_err(),
+            "unknown regex_replace field should be rejected"
+        );
+        Ok(())
     }
 
     // -------------------------------------------------------------------------

@@ -23,12 +23,13 @@
 //!
 //! # Route templates
 //!
-//! The `route` label grows with the number of configured routes. For APIs with
-//! dynamic path segments (e.g., `/users/42/orders`), each unique path produces
-//! a distinct series. [`RouteTemplates`] collapses these by matching request
-//! paths against templates like `/users/{id}/orders`, labeling all matched
-//! requests with the template instead of the raw path. This keeps the label
-//! bounded and meaningful without losing per-route observability.
+//! The `route` label grows with the number of configured routes. Without a
+//! template the label falls back to the matched router pattern (for example
+//! the `/users/` prefix), not the raw request path, so it stays bounded.
+//! [`RouteTemplates`] lets operators split paths under a prefix route into
+//! finer-grained templates such as `/users/{id}/orders`, labeling all matched
+//! requests with the template, for per-endpoint observability without
+//! unbounded cardinality.
 
 use std::collections::HashMap;
 

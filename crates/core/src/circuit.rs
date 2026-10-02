@@ -182,17 +182,18 @@ impl CircuitInner {
         }
     }
 
-    /// If the half-open probe has timed out, reset to `Open` and
-    /// re-attempt recovery. Otherwise reject (probe still in flight).
+    /// If the half-open probe has timed out, abandon it and issue a
+    /// fresh probe token. Otherwise reject (probe still in flight).
+    ///
+    /// The generation bump in [`Self::transition_to_half_open`]
+    /// invalidates the stale probe's token, so its late outcome is
+    /// ignored; releasing it still decrements `in_flight`.
     fn try_reset_stale_probe(&mut self, config: &CircuitBreakerConfig, now: Instant) -> CircuitCheck {
         if self
             .half_opened_at
             .is_some_and(|half_opened_at| now.duration_since(half_opened_at) >= config.half_open_timeout)
         {
-            self.state = CircuitState::Open;
-            self.opened_at = Some(now);
-            self.half_opened_at = None;
-            self.try_open_to_half_open(config, now)
+            self.transition_to_half_open(now)
         } else {
             CircuitCheck::Rejected
         }
@@ -768,6 +769,21 @@ mod tests {
     // -------------------------------------------------------------------------
     // Generation tracking
     // -------------------------------------------------------------------------
+
+    #[test]
+    fn stale_probe_reissues_probe_with_nonzero_recovery_window() {
+        let cb = CircuitBreaker::new(config(1, 20, 1));
+        record_failure_from_check(&cb, cb.try_acquire());
+        cb.inner.lock().unwrap().opened_at = Instant::now().checked_sub(Duration::from_millis(30));
+        let _probe = cb.try_acquire();
+        cb.inner.lock().unwrap().half_opened_at = Instant::now().checked_sub(Duration::from_millis(5));
+        assert!(cb.precheck(), "precheck should admit once the probe is stale");
+        assert!(
+            matches!(cb.try_acquire(), CircuitCheck::Allowed(_)),
+            "try_acquire should issue a fresh probe once the old one is stale"
+        );
+        assert_eq!(cb.state(), CircuitState::HalfOpen, "circuit should stay half-open");
+    }
 
     #[test]
     fn stale_probe_success_ignored() {

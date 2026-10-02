@@ -175,13 +175,13 @@ pub(super) struct GuardrailsConfig {
     #[serde(default)]
     pub action: GuardrailsAction,
 
-    /// Reject a body that exactly reaches the inspection buffer limit
-    /// (1 MiB) instead of inspecting it.
+    /// Reject bodies of 1 MiB or more with 413 instead of inspecting them.
     ///
-    /// Bodies that *exceed* the limit are always rejected with 413 by the
-    /// streaming buffer regardless of this flag — there is no silent
-    /// truncation. This flag only governs a body sized exactly at the
-    /// limit, which is otherwise inspected as-is.
+    /// Bodies larger than the pipeline's effective buffer limit (the
+    /// largest limit any filter in the pipeline requests) are always
+    /// rejected with 413 by the buffer, regardless of this flag; there is
+    /// no silent truncation. Without this flag, bodies of 1 MiB or more
+    /// that fit within the effective limit are inspected in full.
     #[serde(default)]
     pub reject_oversized: bool,
 

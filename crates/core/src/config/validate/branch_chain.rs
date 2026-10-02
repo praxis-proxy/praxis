@@ -467,6 +467,37 @@ filter_chains:
     }
 
     #[test]
+    fn reject_empty_branch_and_inline_chain_names() {
+        for (branch, inline, expected) in [
+            ("\"\"", "inline", "branch name must not be empty"),
+            ("branch", "\"\"", "inline chain name must not be empty"),
+        ] {
+            let yaml = format!(
+                r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: {branch}
+            chains:
+              - name: {inline}
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#
+            );
+            let err = Config::from_yaml(&yaml).unwrap_err();
+            assert!(err.to_string().contains(expected), "expected '{expected}': {err}");
+        }
+    }
+
+    #[test]
     fn reject_empty_on_result_key() {
         let yaml = r#"
 listeners:

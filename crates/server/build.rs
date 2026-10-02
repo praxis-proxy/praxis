@@ -93,12 +93,26 @@ fn load_metadata() -> Option<Metadata> {
         command.other_options(vec!["--filter-platform".to_owned(), target]);
     }
 
-    command.exec().ok()
+    exec_metadata(&command)
+}
+
+/// Run a metadata command, surfacing failures as a build warning.
+///
+/// The fallback (no external filters registered) is kept, but the failure
+/// is no longer silent.
+fn exec_metadata(command: &cargo_metadata::MetadataCommand) -> Option<Metadata> {
+    match command.exec() {
+        Ok(metadata) => Some(metadata),
+        Err(err) => {
+            println!("cargo:warning=praxis: cargo metadata failed ({err}); external filters not registered");
+            None
+        },
+    }
 }
 
 /// Resolve active package features from Cargo's build-script environment.
 fn active_features() -> Option<ActiveFeatures> {
-    let metadata = cargo_metadata::MetadataCommand::new().no_deps().exec().ok()?;
+    let metadata = exec_metadata(cargo_metadata::MetadataCommand::new().no_deps())?;
     let package = metadata.packages.iter().find(|pkg| pkg.name == "praxis-proxy")?;
     let feature_names_by_env: HashMap<String, String> = package
         .features

@@ -30,7 +30,7 @@ use super::{
     compression::{adjust_compression, configure_compression},
     connected_to_upstream, fail_to_proxy,
     health_util::{ended_by_client, record_passive_health},
-    hop_by_hop::RemoveHeader as _,
+    hop_by_hop::{self, RemoveHeader as _},
     logging_util::{logging_cleanup, maybe_emit_fallback_access_log},
     metrics_util::emit_request_metrics,
     request_body_filter, request_filter, response_body_filter, response_filter, response_trailer_filter,
@@ -295,6 +295,7 @@ impl ProxyHttp for PingoraHttpHandler {
     {
         let span = ctx.request_span.clone();
         let _entered = span.enter();
+        hop_by_hop::strip_reserved_internal_header_map(upstream_trailers);
         response_trailers::capture(upstream_trailers, ctx);
         Ok(())
     }
@@ -314,7 +315,9 @@ impl ProxyHttp for PingoraHttpHandler {
         }
         let span = ctx.request_span.clone();
         let _entered = span.enter();
-        Ok(response_trailer_filter::execute(&pipeline, upstream_trailers, ctx))
+        let produced = response_trailer_filter::execute(&pipeline, upstream_trailers, ctx);
+        hop_by_hop::strip_reserved_internal_header_map(upstream_trailers);
+        Ok(produced)
     }
 
     fn response_body_filter(
@@ -444,6 +447,7 @@ impl ProxyHttp for PingoraHttpHandler {
 
         let is_upgrade = session.is_upgrade_req();
         upstream_request::strip_hop_by_hop(upstream_request, is_upgrade);
+        upstream_request::restore_te_trailers(upstream_request, &session.req_header().headers);
         upstream_request.strip_reserved_internal();
         upstream_request::apply_authority_override(upstream_request, ctx)?;
         upstream_request::apply_rewritten_path(upstream_request, ctx)?;
@@ -470,6 +474,7 @@ impl ProxyHttp for PingoraHttpHandler {
         let pipeline = ctx.pipeline(&self.pipeline);
         let span = ctx.request_span.clone();
         let exchange_span = ctx.upstream_exchange_span.clone();
+        let upstream_ver = upstream_response.version;
         let result = response_filter::execute(&pipeline, upstream_response, ctx)
             .instrument(exchange_span)
             .instrument(span)
@@ -477,8 +482,8 @@ impl ProxyHttp for PingoraHttpHandler {
         if result.is_ok() {
             // RFC 9110 §7.6.3: the response Via received-protocol is the leg this
             // proxy received the response on — the upstream connection — not the
-            // downstream client's version.
-            let upstream_ver = upstream_response.version;
+            // downstream client's version, captured before filters can rebuild
+            // the header.
             via::append_response_via(upstream_response, upstream_ver);
             adjust_compression(session, upstream_response, pipeline.compression_config());
         }

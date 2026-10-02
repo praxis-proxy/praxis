@@ -74,7 +74,7 @@ use self::{
     sanitize::{
         apply_pre_read_header_mutations, apply_request_header_mutations, body_exceeds_limit, ensure_destination_host,
         response_body_overflow_limit, sanitize_subrequest_headers, sanitize_subresponse_headers, set_authority_host,
-        streaming_transport_limit, strip_reserved_headers, subresponse_from_rejection,
+        streaming_transport_limit, strip_reserved_headers, subrequest_uri, subresponse_from_rejection,
     },
     transport::{build_peer, classify_transport_failure, stream_termination_cause},
 };
@@ -931,15 +931,12 @@ impl FilteredSubrequestExecutor {
             }
             let request = SubRequest {
                 method: current_request.method.clone(),
-                uri: filter_ctx.rewritten_path.as_ref().map_or_else(
-                    || current_request.uri.clone(),
-                    |path| http::Uri::try_from(path.as_str()).unwrap_or_else(|_| current_request.uri.clone()),
-                ),
+                uri: subrequest_uri(filter_ctx.rewritten_path.as_ref(), &current_request.uri)?,
                 headers: sub_headers,
                 body: request_body.unwrap_or_default(),
             };
             let mut framework_headers = FrameworkHeaders::new();
-            framework_headers.set_depth(self.depth + 1);
+            framework_headers.set_depth(self.depth.saturating_add(1));
             filter_ctx.apply_trace_propagation(&mut framework_headers);
             let transport_budget = step_budget
                 .checked_sub(step_started.elapsed())

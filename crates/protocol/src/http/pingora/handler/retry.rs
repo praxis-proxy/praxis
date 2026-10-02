@@ -94,12 +94,36 @@ pub(super) fn classify_error(e: &pingora_core::Error) -> RetryOutcome {
         | ErrorType::TLSHandshakeFailure
         | ErrorType::TLSHandshakeTimedout => RetryOutcome::ConnectFailure,
         ErrorType::ConnectionClosed => RetryOutcome::Reset,
-        ErrorType::H2Error | ErrorType::H2Downgrade | ErrorType::InvalidH2 => RetryOutcome::RefusedStream,
+        ErrorType::H2Error => classify_h2_error(e),
+        ErrorType::H2Downgrade | ErrorType::InvalidH2 => RetryOutcome::RefusedStream,
         ErrorType::HTTPStatus(code) => RetryOutcome::StatusCode(*code),
         ErrorType::ReadError | ErrorType::ReadTimedout | ErrorType::WriteError | ErrorType::WriteTimedout => {
             RetryOutcome::Reset
         },
         _ => RetryOutcome::Other,
+    }
+}
+
+/// Classify an `H2Error` by the underlying [`h2::Error`].
+///
+/// Only a `REFUSED_STREAM` reset guarantees the upstream did not process the
+/// request ([RFC 9113 Section 8.7]), so only that maps to
+/// [`RetryOutcome::RefusedStream`]. A GOAWAY or I/O failure is treated like a
+/// connection reset, and any other stream or connection error (for example
+/// `INTERNAL_ERROR` after the backend acted) is never retriable.
+///
+/// [`h2::Error`]: h2::Error
+/// [RFC 9113 Section 8.7]: https://datatracker.ietf.org/doc/html/rfc9113#section-8.7
+fn classify_h2_error(e: &pingora_core::Error) -> RetryOutcome {
+    let Some(h2_error) = e.root_cause().downcast_ref::<h2::Error>() else {
+        return RetryOutcome::Other;
+    };
+    if h2_error.reason() == Some(h2::Reason::REFUSED_STREAM) {
+        RetryOutcome::RefusedStream
+    } else if h2_error.is_go_away() || h2_error.is_io() {
+        RetryOutcome::Reset
+    } else {
+        RetryOutcome::Other
     }
 }
 
@@ -382,6 +406,41 @@ mod tests {
         assert!(
             matches!(decision, RetryDecision::DoNotRetry),
             "an adapted body over the replay limit must block the retry"
+        );
+    }
+
+    fn h2_error_with_reason(reason: h2::Reason) -> pingora_core::BError {
+        pingora_core::Error::because(
+            pingora_core::ErrorType::H2Error,
+            "while reading h2 header",
+            h2::Error::from(reason),
+        )
+    }
+
+    #[test]
+    fn h2_refused_stream_is_refused_stream() {
+        assert_eq!(
+            classify_error(&h2_error_with_reason(h2::Reason::REFUSED_STREAM)),
+            RetryOutcome::RefusedStream,
+            "REFUSED_STREAM guarantees no processing and must classify as refused stream"
+        );
+    }
+
+    #[test]
+    fn h2_internal_error_is_not_refused_stream() {
+        assert_eq!(
+            classify_error(&h2_error_with_reason(h2::Reason::INTERNAL_ERROR)),
+            RetryOutcome::Other,
+            "a generic H2 stream error may follow processing and must not be retriable"
+        );
+    }
+
+    #[test]
+    fn h2_error_without_cause_is_other() {
+        assert_eq!(
+            classify_error(&pingora_core::Error::new(pingora_core::ErrorType::H2Error)),
+            RetryOutcome::Other,
+            "an H2 error with no h2 cause must not be assumed refused"
         );
     }
 }

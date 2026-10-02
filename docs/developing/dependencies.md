@@ -37,7 +37,11 @@ them on every pull request.
   declared-but-unused dependencies.
 - **cargo xtask lint-deps** (via `make lint`):
   requires three-component semver on every
-  workspace dependency.
+  workspace dependency, and requires every member
+  crate's dependencies to inherit from the
+  workspace (`workspace = true`) or use a `path`;
+  a dependency marked `# workspace:ignore` (inline
+  or on the line before) is exempt.
 
 Accepted, documented advisory exceptions carry a
 reason each. cargo-deny ignores live in [deny.toml];

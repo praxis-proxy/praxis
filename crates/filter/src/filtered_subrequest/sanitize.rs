@@ -10,7 +10,7 @@
 use http::HeaderMap;
 use praxis_core::reserved_headers::{HOP_BY_HOP_HEADERS, RESPONSE_HOP_BY_HOP_HEADERS};
 
-use crate::{FilterError, HttpFilterContext, SubResponse, actions::Rejection};
+use crate::{FilterError, HttpFilterContext, SubResponse, actions::Rejection, has_dot_dot_traversal};
 
 /// Strip all reserved internal headers from sub-request headers
 /// so the core executor re-injects depth via
@@ -41,13 +41,44 @@ pub(super) fn apply_request_header_mutations(headers: &mut HeaderMap, ctx: &Http
         headers.insert(name.clone(), value.clone());
     }
     for (name, value) in &ctx.extra_request_headers {
-        if let (Ok(name), Ok(value)) = (
+        if let (Ok(header_name), Ok(header_value)) = (
             http::header::HeaderName::from_bytes(name.as_bytes()),
             http::HeaderValue::from_str(value),
         ) {
-            headers.insert(name, value);
+            headers.insert(header_name, header_value);
+        } else {
+            tracing::warn!(header = %name, "dropping invalid extra header on sub-request");
         }
     }
+}
+
+/// Resolve the sub-request URI from a filter-rewritten path.
+///
+/// Without a rewrite the current request URI is reused. A rewrite must be
+/// an origin-form path: it starts with a single `/`, parses as a URI with
+/// neither scheme nor authority, and has no `..` path segment (plain or
+/// percent-encoded). Anything else fails closed instead of silently
+/// falling back to the original URI or retargeting the sub-request at
+/// another authority.
+///
+/// # Errors
+///
+/// Returns [`FilterError`] when the rewritten path is not a valid
+/// origin-form path.
+pub(super) fn subrequest_uri(rewritten_path: Option<&String>, current: &http::Uri) -> Result<http::Uri, FilterError> {
+    rewritten_path.map_or_else(
+        || Ok(current.clone()),
+        |path| {
+            Some(path.as_str())
+                .filter(|candidate| candidate.starts_with('/') && !candidate.starts_with("//"))
+                .and_then(|candidate| http::Uri::try_from(candidate).ok())
+                .filter(|uri| uri.scheme().is_none() && uri.authority().is_none())
+                .filter(|uri| !has_dot_dot_traversal(uri.path()))
+                .ok_or_else(|| -> FilterError {
+                    format!("filtered_subrequest: invalid rewritten sub-request path: {path:?}").into()
+                })
+        },
+    )
 }
 
 /// Apply body pre-read mutations to the request snapshot that header

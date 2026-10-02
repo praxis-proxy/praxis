@@ -225,7 +225,7 @@ impl StickySessionsFilter {
             .map(String::from)
             .or_else(|| Self::find_request_cookie(ctx, cookie_name))
             .filter(|key| store.get(key).is_some())
-            .unwrap_or_else(|| generate_session_id(endpoint));
+            .unwrap_or_else(generate_session_id);
 
         store.put(&session_key, Arc::clone(endpoint));
 
@@ -394,19 +394,12 @@ impl HttpFilter for StickySessionsFilter {
     }
 }
 
-/// Generate a stable, opaque session identifier from an endpoint address.
+/// Generate a random, opaque session identifier (16 hex characters).
 ///
-/// Not cryptographic, but sufficient for routing identifiers.
-fn generate_session_id(endpoint: &str) -> String {
-    use std::hash::{Hash as _, Hasher as _};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    endpoint.hash(&mut hasher);
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos()
-        .hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+/// Drawn from the thread-local CSPRNG so IDs minted for the same
+/// endpoint at the same instant cannot collide or be predicted.
+fn generate_session_id() -> String {
+    format!("{:016x}", rand::random::<u64>())
 }
 
 // -----------------------------------------------------------------------------

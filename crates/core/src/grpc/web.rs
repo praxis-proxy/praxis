@@ -27,7 +27,8 @@ pub enum GrpcCodec {
     /// `+json`.
     Json,
 
-    /// Some other `+codec`, which Praxis forwards without interpreting.
+    /// Some other `+codec`. The codec name is not preserved: translation
+    /// answers bare `application/grpc` (see [`Self::grpc_content_type`]).
     Other,
 }
 
