@@ -25,11 +25,13 @@ use serde::Deserialize;
 /// let admin: AdminConfig = serde_yaml::from_str(
 ///     r#"
 /// address: "127.0.0.1:9901"
+/// metrics_address: "127.0.0.1:9910"
 /// verbose: true
 /// "#,
 /// )
 /// .unwrap();
 /// assert_eq!(admin.address.as_deref(), Some("127.0.0.1:9901"));
+/// assert_eq!(admin.metrics_address.as_deref(), Some("127.0.0.1:9910"));
 /// assert!(admin.verbose);
 /// ```
 #[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
@@ -41,6 +43,12 @@ pub struct AdminConfig {
     /// `insecure_options.allow_public_admin: true` is configured at the
     /// top level.
     pub address: Option<String>,
+
+    /// Metrics and Health check endpoint bind address. When configured, /metrics,
+    /// /ready and /health endpoints are exposed by this address
+    ///
+    /// Defaults to disabled (`None`).
+    pub metrics_address: Option<String>,
 
     /// Include per-cluster detail in `/ready` response.
     pub verbose: bool,
@@ -67,6 +75,10 @@ mod tests {
     fn defaults_are_none_and_false() {
         let admin = AdminConfig::default();
         assert!(admin.address.is_none(), "address should default to None");
+        assert!(
+            admin.metrics_address.is_none(),
+            "metrics_address should default to None"
+        );
         assert!(!admin.verbose, "verbose should default to false");
     }
 
@@ -75,6 +87,7 @@ mod tests {
         let admin: AdminConfig = serde_yaml::from_str(
             r#"
 address: "127.0.0.1:9901"
+metrics_address: "127.0.0.1:9910"
 verbose: true
 "#,
         )
@@ -84,6 +97,11 @@ verbose: true
             Some("127.0.0.1:9901"),
             "address should be parsed"
         );
+        assert_eq!(
+            admin.metrics_address.as_deref(),
+            Some("127.0.0.1:9910"),
+            "metrics_address should be parsed"
+        );
         assert!(admin.verbose, "verbose should be true");
     }
 
@@ -91,6 +109,10 @@ verbose: true
     fn parse_empty_yields_defaults() {
         let admin: AdminConfig = serde_yaml::from_str("{}").unwrap();
         assert!(admin.address.is_none(), "address should default to None");
+        assert!(
+            admin.metrics_address.is_none(),
+            "metrics_address should default to None"
+        );
         assert!(!admin.verbose, "verbose should default to false");
     }
 }
