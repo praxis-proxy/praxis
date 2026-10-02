@@ -11,13 +11,13 @@ use serde::Deserialize;
 
 /// Admin API and health/metrics listener settings.
 ///
-/// Both `address` and `metrics_address` require a loopback bind
-/// (`127.0.0.1`, `[::1]`, or IPv4-mapped loopback such as
-/// `[::ffff:127.0.0.1]`). Non-loopback addresses require
-/// `insecure_options.allow_public_admin: true`.
+/// `address` requires a loopback bind (`127.0.0.1`, `[::1]`, or IPv4-mapped
+/// loopback such as `[::ffff:127.0.0.1]`) unless
+/// `insecure_options.allow_public_admin: true`. `metrics_address` may bind to
+/// any interface without that override.
 ///
-/// No authentication is performed; access control relies on
-/// loopback binding and network-level restrictions.
+/// No authentication is performed. The admin API relies on loopback binding;
+/// use network-level restrictions when the health/metrics listener is public.
 ///
 /// ```
 /// use praxis_core::config::AdminConfig;
@@ -46,7 +46,8 @@ pub struct AdminConfig {
 
     /// Metrics and health endpoint bind address. When configured, `/healthy`,
     /// `/ready`, and `/metrics` are exposed here; `address` remains the `/api/*`
-    /// listener.
+    /// listener. This address may be non-loopback without setting
+    /// `insecure_options.allow_public_admin`.
     ///
     /// Defaults to disabled (`None`).
     pub metrics_address: Option<String>,

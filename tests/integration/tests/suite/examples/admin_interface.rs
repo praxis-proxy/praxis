@@ -61,12 +61,14 @@ fn admin_interface_serves_health_and_metrics() {
     wait_for_tcp(&metrics_addr);
     wait_for_tcp(&proxy_addr);
 
-    let (admin_metrics_status, _) = http_get(&admin_addr, "/metrics", None);
-    assert_eq!(admin_metrics_status, 404, "admin listener must not expose metrics");
-    let (admin_ready_status, _) = http_get(&admin_addr, "/ready", None);
-    assert_eq!(admin_ready_status, 404, "admin listener must not expose readiness");
-    let (admin_api_status, _) = http_get(&admin_addr, "/api/pipelines", None);
-    assert_eq!(admin_api_status, 200, "admin listener should expose the API");
+    for path in ["/healthy", "/ready", "/metrics"] {
+        let (status, body) = http_get(&admin_addr, path, None);
+        assert_eq!(status, 404, "admin listener must not expose {path}: {body}");
+    }
+    for path in ["/api/pipelines", "/api/stats"] {
+        let (status, body) = http_get(&admin_addr, path, None);
+        assert_eq!(status, 200, "admin listener should expose {path}: {body}");
+    }
 
     let (healthy_status, _) = http_get(&metrics_addr, "/healthy", None);
     assert_eq!(healthy_status, 200, "/healthy should return 200");
@@ -78,11 +80,10 @@ fn admin_interface_serves_health_and_metrics() {
     assert_eq!(proxy_status, 200, "proxy should return 200");
     assert_eq!(proxy_body, "admin-test", "proxy should forward to backend");
 
-    let (health_api_status, _) = http_get(&metrics_addr, "/api/pipelines", None);
-    assert_eq!(
-        health_api_status, 404,
-        "health/metrics listener must not expose the admin API"
-    );
+    for path in ["/api/pipelines", "/api/stats"] {
+        let (status, body) = http_get(&metrics_addr, path, None);
+        assert_eq!(status, 404, "health/metrics listener must not expose {path}: {body}");
+    }
 
     let (metrics_status, metrics_body) = http_get(&metrics_addr, "/metrics", None);
     assert_eq!(metrics_status, 200, "/metrics should return 200");
