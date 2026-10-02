@@ -4,30 +4,39 @@
 #
 # Operations execute in declared order:
 #
-#   /v1/users?debug=true&trace=1
+#   /v1/users?api-version=2024-01&user=alice&debug=true&trace=1
 #        |
 #        v
-#   +-------------------------+
-#   | regex_replace           |  /v1/users -> /v2/users
-#   +-------------------------+
+#   +------------------------------+
+#   | regex_replace                |  /v1/users -> /v2/users
+#   +------------------------------+
 #        |
 #        v
-#   +-------------------------+
-#   | strip_query_params      |  ?debug=true&trace=1 -> (empty)
-#   +-------------------------+
+#   +------------------------------+
+#   | strip_query_params           |  drops debug and trace
+#   +------------------------------+
 #        |
 #        v
-#   +-------------------------+
-#   | add_query_params        |  -> ?source=gateway
-#   +-------------------------+
+#   +------------------------------+
+#   | preserve_query_params_only   |  keeps only api-version and user
+#   +------------------------------+
 #        |
 #        v
-#   /v2/users?source=gateway
+#   +------------------------------+
+#   | add_query_params             |  appends source=gateway
+#   +------------------------------+
+#        |
+#        v
+#   /v2/users?api-version=2024-01&user=alice&source=gateway
+#
+# strip_query_params is a denylist (remove these); preserve_query_params_only
+# is an allowlist (keep only these). They compose: strip handles known-bad params
+# first, then preserve enforces the exact set the upstream accepts.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/transformation/url-rewriting.yaml
-#   curl http://localhost:8080/v1/users?debug=true
-#   # Request reaches backend as /v2/users?source=gateway
+#   curl "http://localhost:8080/v1/users?api-version=2024-01&user=alice&debug=true"
+#   # Request reaches backend as /v2/users?api-version=2024-01&user=alice&source=gateway
 #
 # NOTE: The router checks rewritten_path before the original
 # URI, so "rewrite then route" pipelines work: place a rewrite
@@ -58,6 +67,9 @@ filter_chains:
           - strip_query_params:
               - debug
               - trace
+          - preserve_query_params_only:
+              - api-version
+              - user
           - add_query_params:
               source: gateway
 

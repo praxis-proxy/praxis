@@ -13,10 +13,7 @@ Operations are applied in declaration order, allowing complex multi-step transfo
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `operations` | OperationConfig[] | no | Ordered list of rewrite operations to apply. |
-| `operations[].regex_replace` | any | no | Regex-based path replacement. |
-| `operations[].strip_query_params` | any | no | Remove named query parameters. |
-| `operations[].add_query_params` | any | no | Append query parameters. |
+| `operations` | (`RegexReplace` \| `StripQueryParams` \| `AddQueryParams` \| `PreserveQueryParamsOnly`)[] | no | Ordered list of rewrite operations to apply. |
 | `allow_rewrite_override` | bool | no | When `true`, suppresses the duplicate-rewrite validation error if another rewrite filter precedes this one. |
 
 ## Example
@@ -31,4 +28,7 @@ operations:
       - debug
   - add_query_params:
       source: gateway
+  - preserve_query_params_only:
+      - api-version
+      - user
 ```
