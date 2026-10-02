@@ -38,8 +38,6 @@ mod normalize;
 mod request_body_filter;
 /// Request filter hook.
 mod request_filter;
-/// Reserved internal header utilities.
-mod reserved_headers;
 /// Response body filter hook.
 mod response_body_filter;
 /// Response filter hook.

@@ -211,7 +211,7 @@ pub(crate) fn strip_hop_by_hop_header_map(headers: &mut HeaderMap, static_list: 
 pub(crate) fn strip_reserved_internal_header_map(headers: &mut HeaderMap) {
     let to_remove: Vec<http::HeaderName> = headers
         .keys()
-        .filter(|name| super::reserved_headers::is_reserved_internal_header(name))
+        .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()))
         .cloned()
         .collect();
 
@@ -249,7 +249,7 @@ pub(crate) trait RemoveHeader {
         let to_remove: Vec<http::HeaderName> = self
             .headers()
             .keys()
-            .filter(|name| super::reserved_headers::is_reserved_internal_header(name))
+            .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()))
             .cloned()
             .collect();
 
