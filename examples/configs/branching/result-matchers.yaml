@@ -1,15 +1,25 @@
 # Branch Result Matchers (contains, not, any_of)
 #
 # Branches on a family of filter results instead of one
-# exact value. The json_rpc filter publishes each call's
-# kind and method; `not` turns away anything that isn't a
-# JSON-RPC request, `contains` blocks every admin method,
-# and `any_of` tags health-check methods.
+# exact value. The json_rpc filter records each call's
+# kind and method as filter results; `not` turns away
+# anything that isn't a JSON-RPC request, `contains`
+# blocks recorded method names with "admin" in them, and
+# `any_of` tags health-check methods.
 #
 # `not` also fires when the filter wrote no value for the
 # key, so a request with no JSON-RPC body at all is turned
 # away too. It's the same rule a guardrail needs: a
 # missing verdict never counts as a pass.
+#
+# `contains` and `any_of` only see what json_rpc recorded.
+# It records no `method` for a name it can't carry in a
+# header value (one with control characters), so such a
+# request skips the admin branch and reaches the backend
+# unchanged. For a deny-by-default policy, write an
+# allowlist with `not` instead, like the `kind` branch
+# below: it also fires when the key is missing, so an
+# unrecorded value is turned away rather than let through.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/branching/result-matchers.yaml
@@ -60,8 +70,10 @@ filter_chains:
                     status: 400
                     body: "expected a JSON-RPC request"
 
-          # The whole admin method family, wherever "admin"
-          # shows up in the name
+          # Recorded method names with "admin" anywhere in
+          # them. A name json_rpc couldn't record (control
+          # characters) leaves no method result, so this
+          # branch never sees it; see the header above
           - name: block_admin_methods
             on_result:
               filter: json_rpc
