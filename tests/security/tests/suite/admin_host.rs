@@ -107,6 +107,34 @@ fn public_admin_bind_accepts_dns_name_hosts() {
     assert_eq!(status, 200, "a non-loopback metrics bind must accept DNS Host: {body}");
 }
 
+#[test]
+fn public_metrics_bind_does_not_require_public_admin_override() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let admin_port = free_port();
+    let metrics_port = free_port();
+    let yaml = format!(
+        "{}admin:\n  address: \"127.0.0.1:{admin_port}\"\n  metrics_address: \"0.0.0.0:{metrics_port}\"\n",
+        simple_proxy_yaml(proxy_port, backend_port)
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let _proxy = start_full_proxy(&config);
+    let metrics = format!("127.0.0.1:{metrics_port}");
+    wait_for_tcp(&metrics);
+
+    let (status, body) = admin_request(&metrics, "GET", "/healthy", Some("metrics.internal.example"));
+    assert_eq!(
+        status, 200,
+        "public metrics bind must accept a DNS Host without the override: {body}"
+    );
+
+    let (status, body) = admin_request(&metrics, "GET", "/metrics", Some("metrics.internal.example"));
+    assert_eq!(
+        status, 200,
+        "public bind must serve Prometheus metrics without the override: {body}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

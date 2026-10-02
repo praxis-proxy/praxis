@@ -24,10 +24,11 @@ The health and metrics listener exposes these endpoints:
 | `/metrics` | Prometheus text exposition format |
 
 The separate `admin.address` listener exposes the management API, including
-`/api/log-level`. Each listener
-must bind to a loopback address by default. Binding
-to a non-loopback address requires
-`insecure_options.allow_public_admin: true`.
+`/api/log-level`. The admin API is restricted to loopback by default and
+requires `insecure_options.allow_public_admin: true` for a non-loopback bind.
+The health and metrics listener may bind to a non-loopback address without
+that flag; use network controls to restrict access because it has no
+authentication.
 
 A loopback listener answers `421` on every path
 unless `Host` is a loopback IP literal or `localhost`

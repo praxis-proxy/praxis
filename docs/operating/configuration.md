@@ -183,9 +183,10 @@ without the other; the two listeners must not overlap.
 
 The health and metrics listener only serves those three endpoints; the admin
 listener serves `/api/kv/*` and `/api/pipelines`. Other paths return
-`404 NOT FOUND`. Neither listener has authentication; keep them on loopback
-or a management network (non-loopback binds require
-`insecure_options.allow_public_admin`).
+`404 NOT FOUND`. Neither listener has authentication. The admin API must bind
+to loopback unless `insecure_options.allow_public_admin` is enabled; the
+health and metrics listener can bind to any interface, so restrict access with
+network controls when it is not bound to loopback.
 
 ```yaml
 admin:
@@ -205,11 +206,13 @@ admin:
   verbose: true
 ```
 
-By default, both endpoints must bind to a loopback
-address (`127.0.0.1` or `[::1]`). Binding to any
+By default, the admin API must bind to a loopback
+address (`127.0.0.1` or `[::1]`). Binding it to any
 non-loopback address (including `0.0.0.0` / `[::]` or a
 LAN IP) is a validation error unless
-`insecure_options.allow_public_admin: true` is set.
+`insecure_options.allow_public_admin: true` is set. The health and metrics
+listener has no loopback-only validation; bind it to a specific interface and
+use network controls to limit access when exposing it.
 
 ## Annotated Example
 

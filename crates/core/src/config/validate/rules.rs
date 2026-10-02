@@ -85,11 +85,20 @@ impl Config {
         validate_listener_names(&self.listeners)?;
         validate_filter_chains(&self.filter_chains, &self.listeners)?;
         validate_branch_chains(&self.filter_chains)?;
-        let metrics_address = validate_admin_address(
-            "admin.metrics_address",
-            self.admin.metrics_address.as_deref(),
-            self.insecure_options.allow_public_admin,
-        )?;
+        let metrics_address = self
+            .admin
+            .metrics_address
+            .as_deref()
+            .map(|addr| parse_management_address("admin.metrics_address", addr))
+            .transpose()?;
+        if let Some(address) = metrics_address
+            && !normalize_mapped_ipv4(address.ip()).is_loopback()
+        {
+            warn!(
+                address = %address,
+                "health and metrics listener binds to a non-loopback address without authentication"
+            );
+        }
         let admin_address = validate_admin_address(
             "admin.address",
             self.admin.address.as_deref(),
@@ -251,16 +260,14 @@ fn validate_cluster_names(clusters: &[crate::config::Cluster]) -> Result<(), Pro
 // Admin Address Validation
 // -----------------------------------------------------------------------------
 
-/// Reject admin addresses that bind outside loopback unless explicitly allowed.
+/// Reject admin API addresses that bind outside loopback unless explicitly allowed.
 fn validate_admin_address(
     field: &str,
     addr: Option<&str>,
     allow_public: bool,
 ) -> Result<Option<SocketAddr>, ProxyError> {
     let Some(addr) = addr else { return Ok(None) };
-    let socket_addr: SocketAddr = addr
-        .parse()
-        .map_err(|_parse_err| ProxyError::Config(format!("invalid {field} '{addr}'")))?;
+    let socket_addr = parse_management_address(field, addr)?;
     if normalize_mapped_ipv4(socket_addr.ip()).is_loopback() {
         return Ok(Some(socket_addr));
     }
@@ -268,7 +275,7 @@ fn validate_admin_address(
         warn!(
             address = %addr,
             field,
-            "admin or metrics endpoint binds to a non-loopback address; allowed by insecure_options.allow_public_admin"
+            "admin API binds to a non-loopback address; allowed by insecure_options.allow_public_admin"
         );
         return Ok(Some(socket_addr));
     }
@@ -276,6 +283,12 @@ fn validate_admin_address(
         "{field} '{addr}' must bind to a loopback address (127.0.0.1 or [::1]); \
          set insecure_options.allow_public_admin: true to allow non-loopback binding"
     )))
+}
+
+/// Parse a management listener address without imposing a bind-interface policy.
+fn parse_management_address(field: &str, addr: &str) -> Result<SocketAddr, ProxyError> {
+    addr.parse()
+        .map_err(|_parse_err| ProxyError::Config(format!("invalid {field} '{addr}'")))
 }
 
 /// Reject management listeners that overlap each other or a data listener.
@@ -683,6 +696,25 @@ filter_chains:
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("invalid admin.metrics_address"), "got: {err}");
+    }
+
+    #[test]
+    fn accept_public_metrics_address_without_public_admin_override() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+admin:
+  metrics_address: "0.0.0.0:9902"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(config.admin.metrics_address.as_deref(), Some("0.0.0.0:9902"));
     }
 
     #[test]

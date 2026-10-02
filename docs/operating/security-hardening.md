@@ -16,9 +16,11 @@ ambiguous configuration:
   externally reachable.
 - TLS certificate verification is enabled by default
   for upstream connections.
-- Admin endpoints are restricted to loopback; non-loopback
+- The admin API is restricted to loopback; non-loopback
   binding is a validation error unless
-  `insecure_options.allow_public_admin` is set.
+  `insecure_options.allow_public_admin` is set. The health/metrics listener
+  can bind to non-loopback addresses and should be protected with network
+  controls.
 - A loopback admin or health/metrics listener rejects requests whose `Host`
   is not a loopback name, blocking DNS rebinding from
   the operator's browser (see
@@ -133,9 +135,8 @@ browsers always send `Host`, so only a client that
 already reaches the socket directly can omit it. Use `127.0.0.1`, `[::1]`,
 or `localhost` for both listeners; a local DNS alias is rejected.
 
-The check is skipped when either listener binds a
-non-loopback address (`allow_public_admin`), because
-operators may legitimately reach it by DNS name. Such a
+The check is skipped on a listener bound to a non-loopback
+address, because operators may reach it by DNS name. Such a
 listener is still reachable through loopback on the same
 host, so protect it with network controls rather than
 relying on the bind address.
