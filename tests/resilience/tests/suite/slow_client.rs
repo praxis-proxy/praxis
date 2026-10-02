@@ -10,23 +10,23 @@ use std::{
 };
 
 use praxis_core::config::Config;
-use praxis_test_utils::{free_port, http_get, start_backend, start_proxy};
+use praxis_test_utils::{free_port, http_get, http_post, parse_status, start_echo_backend, start_proxy};
 
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
 #[test]
-fn slow_client_headers_eventually_timeout() {
-    let backend_port = start_backend("timeout-ok");
+fn slow_client_body_eventually_timeout() {
+    let backend = start_echo_backend();
     let proxy_port = free_port();
-    let yaml = downstream_timeout_yaml(proxy_port, backend_port, 500);
+    let yaml = downstream_timeout_yaml(proxy_port, backend.port(), 500);
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
     let mut stream = TcpStream::connect(proxy.addr()).expect("TCP connect");
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("set read timeout");
 
     let request = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10000\r\n\r\npartial";
@@ -35,21 +35,35 @@ fn slow_client_headers_eventually_timeout() {
         .expect("write request with partial body");
 
     let start = Instant::now();
-    let mut buf = [0_u8; 4096];
-    let _result = stream.read(&mut buf);
+    let mut raw = Vec::new();
+    let read = stream.read_to_end(&mut raw);
     let elapsed = start.elapsed();
+    let response = String::from_utf8_lossy(&raw);
 
     assert!(
-        elapsed < Duration::from_secs(3),
-        "slow client with downstream read timeout should not hang; took {elapsed:?}"
+        matches!(read, Ok(len) if len > 0),
+        "proxy should answer the stalled upload and then close the connection, got {read:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "the 500 ms downstream read timeout should cut the upload off well before the echo backend's own 5 s \
+         read timeout; took {elapsed:?}"
+    );
+    assert_eq!(
+        parse_status(&response),
+        400,
+        "a downstream body read timeout should get the proxy's 400, not a forwarded backend response: {response}"
     );
 
-    let (status, body) = http_get(proxy.addr(), "/", None);
+    let (status, body) = http_post(proxy.addr(), "/", "after-slow-client");
     assert_eq!(
         status, 200,
         "proxy should remain healthy after slow client; got {status}"
     );
-    assert_eq!(body, "timeout-ok", "proxy should serve new requests normally");
+    assert_eq!(
+        body, "after-slow-client",
+        "proxy should echo new request bodies normally"
+    );
 }
 
 #[test]

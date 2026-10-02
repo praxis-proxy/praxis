@@ -24,6 +24,7 @@ mod circuit_breaker;
 mod cloud_events;
 mod conditional_filters;
 mod credential_injection;
+mod credential_injection_env_vars;
 mod csrf;
 mod default_config;
 mod endpoint_selector;

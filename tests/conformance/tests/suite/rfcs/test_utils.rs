@@ -139,6 +139,33 @@ fn handle_crlf_connection(mut stream: TcpStream, malformed_header: &[u8]) {
     let _sent = stream.write_all(&response);
 }
 
+/// Start a backend that answers every request with `status_line`
+/// followed by an otherwise well-formed response (headers and a short
+/// body).
+pub(super) fn start_status_line_backend(status_line: &[u8]) -> u16 {
+    let (listener, port) = praxis_test_utils::net::port::bind_unique_port();
+    let status_line = status_line.to_vec();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let status_line = status_line.clone();
+            std::thread::spawn(move || {
+                handle_status_line_connection(stream, &status_line);
+            });
+        }
+    });
+    port
+}
+
+/// Handle a single connection for the status-line backend.
+fn handle_status_line_connection(mut stream: TcpStream, status_line: &[u8]) {
+    drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
+    let mut buf = [0_u8; 4096];
+    let _bytes = stream.read(&mut buf);
+    let mut response = status_line.to_vec();
+    response.extend_from_slice(b"\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    let _sent = stream.write_all(&response);
+}
+
 /// Start a backend that sends garbage (non-HTTP) bytes.
 pub(super) fn start_garbage_backend() -> u16 {
     let (listener, port) = praxis_test_utils::net::port::bind_unique_port();

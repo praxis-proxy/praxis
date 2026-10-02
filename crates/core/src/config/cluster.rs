@@ -267,11 +267,10 @@ pub struct Cluster {
     /// Per-read timeout in milliseconds.
     ///
     /// Applies to each individual read operation on an
-    /// established upstream connection. A timeout fires a 502
-    /// response to the client. Use [`total_connection_timeout_ms`]
-    /// to bound the entire exchange instead.
-    ///
-    /// [`total_connection_timeout_ms`]: Cluster::total_connection_timeout_ms
+    /// established upstream connection. For HTTP, a timeout
+    /// before the response starts gets the client a 504; once
+    /// the response is streaming, the client connection is
+    /// closed with the body cut short.
     #[serde(default)]
     pub read_timeout_ms: Option<u64>,
 
@@ -284,9 +283,10 @@ pub struct Cluster {
     /// Total connection timeout in milliseconds (TCP + TLS).
     ///
     /// Bounds the combined TCP handshake and TLS negotiation.
-    /// When exceeded, the connection attempt fails with a 502
-    /// response. Prefer this over [`connection_timeout_ms`] for
-    /// TLS-enabled clusters where the handshake dominates latency.
+    /// When exceeded, the connection attempt fails; for HTTP, the
+    /// client gets a 504 once any retries are used up. Prefer
+    /// this over [`connection_timeout_ms`] for TLS-enabled
+    /// clusters where the handshake dominates latency.
     ///
     /// [`connection_timeout_ms`]: Cluster::connection_timeout_ms
     #[serde(default)]
@@ -301,8 +301,13 @@ pub struct Cluster {
     /// Per-write timeout in milliseconds.
     ///
     /// Applies to each individual write operation on an
-    /// established upstream connection. A timeout fires a 502
-    /// response to the client.
+    /// established upstream connection. For HTTP, a timed-out
+    /// request body write stops the upload; the proxy then waits
+    /// for whatever response the upstream sends and answers 504
+    /// if none arrives. Pair it with [`read_timeout_ms`] so that
+    /// wait is bounded.
+    ///
+    /// [`read_timeout_ms`]: Cluster::read_timeout_ms
     #[serde(default)]
     pub write_timeout_ms: Option<u64>,
 
