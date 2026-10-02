@@ -4109,7 +4109,7 @@ fn host_entry_with_branch(branch_name: &str, on_result: Option<&str>, inner: Vec
             on_result: on_result.map(|value| praxis_core::config::BranchCondition {
                 filter: "headers".to_owned(),
                 key: "status".to_owned(),
-                value: value.to_owned(),
+                value: praxis_core::config::ResultMatch::Exact(value.to_owned()),
             }),
             rejoin: "next".to_owned(),
         }]),
@@ -8152,7 +8152,7 @@ async fn a_pre_read_result_reaches_the_branches_of_a_later_promoter() {
     branch.condition = Some(ResolvedBranchCondition {
         filter_name: Arc::from("P"),
         key: Arc::from("verdict"),
-        value: Arc::from("flagged"),
+        matcher: praxis_core::config::ResultMatch::Exact("flagged".to_owned()),
     });
     let mut promoter = scripted_pf(1, "P", &log, Scripted::Continue, Scripted::Continue);
     promoter.branches = vec![branch];
@@ -8325,7 +8325,7 @@ async fn unfired_conditional_branch_does_not_run_on_response() {
     branch.condition = Some(ResolvedBranchCondition {
         filter_name: Arc::from("A"),
         key: Arc::from("status"),
-        value: Arc::from("hit"),
+        matcher: praxis_core::config::ResultMatch::Exact("hit".to_owned()),
     });
     let mut host = scripted_pf(0, "A", &log, Scripted::Continue, Scripted::Continue);
     host.branches = vec![branch];
