@@ -1,25 +1,29 @@
 # Branch Result Matchers (contains, not, any_of)
 #
-# Branches on a family of filter results instead of one
-# exact value. The json_rpc filter records each call's
-# kind and method as filter results; `not` turns away
-# anything that isn't a JSON-RPC request, `contains`
-# blocks recorded method names with "admin" in them, and
-# `any_of` tags health-check methods.
+# Builds a deny-by-default JSON-RPC allowlist out of
+# branch result matchers. The json_rpc filter records
+# each call's kind and method as filter results, and four
+# branches on it run in order:
 #
-# `not` also fires when the filter wrote no value for the
-# key, so a request with no JSON-RPC body at all is turned
-# away too. It's the same rule a guardrail needs: a
-# missing verdict never counts as a pass.
+#   1. `not: request` on kind turns away anything that
+#      isn't a JSON-RPC request with a 400. `not` also
+#      fires when the filter recorded no kind at all, so
+#      a request with no JSON-RPC body is turned away too.
+#   2. `contains: health` on method tags health checks
+#      (health, health_check) with X-Health-Check, then
+#      keeps going (rejoin: next).
+#   3. `any_of` on method lets the listed methods through
+#      by skipping ahead to the router.
+#   4. A branch with no condition answers everything that
+#      got this far with a 403.
 #
-# `contains` and `any_of` only see what json_rpc recorded.
-# It records no `method` for a name it can't carry in a
-# header value (one with control characters), so such a
-# request skips the admin branch and reaches the backend
-# unchanged. For a deny-by-default policy, write an
-# allowlist with `not` instead, like the `kind` branch
-# below: it also fires when the key is missing, so an
-# unrecorded value is turned away rather than let through.
+# The allowlist plus the unconditional deny is what makes
+# this fail closed. A deny branch that matches bad names
+# (say `contains: admin`) only fires on a method it can
+# see, and json_rpc records no method for a name with
+# control characters in it. The unconditional deny needs
+# no value to fire: an unlisted method and a method
+# json_rpc couldn't record both end up there.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/branching/result-matchers.yaml
@@ -28,12 +32,17 @@
 #   # Health check: tagged with X-Health-Check and forwarded
 #   curl -X POST http://localhost:8080/ \
 #     -H "Content-Type: application/json" \
-#     -d '{"jsonrpc":"2.0","method":"ping","id":1}'
+#     -d '{"jsonrpc":"2.0","method":"health","id":1}'
 #
-#   # Admin method: blocked with 403
+#   # Unlisted method: 403
 #   curl -X POST http://localhost:8080/ \
 #     -H "Content-Type: application/json" \
 #     -d '{"jsonrpc":"2.0","method":"admin_reset","id":2}'
+#
+#   # Method json_rpc can't record (control character): 403
+#   curl -X POST http://localhost:8080/ \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","method":"admin\u0001reset","id":3}'
 #
 #   # Notification (no id), or no JSON-RPC body: 400
 #   curl -X POST http://localhost:8080/ \
@@ -49,7 +58,7 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      # Publishes `kind` (request, notification, ...) and
+      # Records `kind` (request, notification, ...) and
       # `method` as filter results for the branches below
       - filter: json_rpc
         max_body_bytes: 65536 # 64 KiB
@@ -70,32 +79,15 @@ filter_chains:
                     status: 400
                     body: "expected a JSON-RPC request"
 
-          # Recorded method names with "admin" anywhere in
-          # them. A name json_rpc couldn't record (control
-          # characters) leaves no method result, so this
-          # branch never sees it; see the header above
-          - name: block_admin_methods
-            on_result:
-              filter: json_rpc
-              key: method
-              result:
-                contains: admin
-            rejoin: terminal
-            chains:
-              - name: admin_blocked
-                filters:
-                  - filter: static_response
-                    status: 403
-                    body: "admin methods are blocked"
-
           # Health checks, tagged so the backend can answer
-          # them cheaply; rejoin: next keeps them flowing
+          # them cheaply; rejoin: next moves on to the
+          # allowlist, which still has to let them through
           - name: tag_health_checks
             on_result:
               filter: json_rpc
               key: method
               result:
-                any_of: [ping, health]
+                contains: health
             rejoin: next
             chains:
               - name: health_tag
@@ -105,7 +97,35 @@ filter_chains:
                       - name: X-Health-Check
                         value: "true"
 
+          # The allowlist: a listed method skips ahead to
+          # the router, past the deny below. The rejoin does
+          # all the work, so the chain has nothing to run
+          - name: allow_listed_methods
+            on_result:
+              filter: json_rpc
+              key: method
+              result:
+                any_of: [ping, echo, health, health_check]
+            rejoin: routing
+            chains:
+              - name: allowed
+                filters: []
+
+          # No on_result, so it fires for everything that
+          # got this far: unlisted methods, and methods
+          # json_rpc couldn't record
+          - name: deny_everything_else
+            rejoin: terminal
+            chains:
+              - name: method_not_allowed
+                filters:
+                  - filter: static_response
+                    status: 403
+                    body: "method not allowed"
+
+      # Named target for the allowlist's skip-to rejoin
       - filter: router
+        name: routing
         routes:
           - path_prefix: "/"
             cluster: backend

@@ -318,54 +318,79 @@ fn reentrance_normal_flow() {
 }
 
 #[test]
-fn result_matchers_any_of_tags_each_listed_method() {
+fn result_matchers_any_of_forwards_listed_methods_untouched() {
     let backend_guard = start_header_echo_backend();
     let proxy = start_result_matchers_proxy(backend_guard.port());
 
-    for method in ["ping", "health"] {
+    for method in ["ping", "echo"] {
         let raw = http_send(proxy.addr(), &json_post("/", &rpc_call(method)));
         let body = parse_body(&raw).to_lowercase();
 
-        assert_eq!(parse_status(&raw), 200, "{method} should reach the backend");
+        assert_eq!(parse_status(&raw), 200, "any_of should let {method} through");
         assert!(
-            body.contains("x-health-check: true"),
-            "any_of should tag {method} for the backend, got:\n{body}"
+            !body.contains("x-health-check"),
+            "{method} is not a health check and should not be tagged, got:\n{body}"
         );
     }
 }
 
 #[test]
-fn result_matchers_forward_other_requests_untouched() {
+fn result_matchers_contains_tags_listed_health_checks() {
     let backend_guard = start_header_echo_backend();
     let proxy = start_result_matchers_proxy(backend_guard.port());
 
-    let raw = http_send(proxy.addr(), &json_post("/", &rpc_call("eth_blockNumber")));
-    let body = parse_body(&raw).to_lowercase();
+    for method in ["health", "health_check"] {
+        let raw = http_send(proxy.addr(), &json_post("/", &rpc_call(method)));
+        let body = parse_body(&raw).to_lowercase();
 
-    assert_eq!(
-        parse_status(&raw),
-        200,
-        "a request that is not admin should get past not and contains"
-    );
-    assert!(
-        !body.contains("x-health-check"),
-        "any_of should not tag an unlisted method, got:\n{body}"
-    );
+        assert_eq!(
+            parse_status(&raw),
+            200,
+            "{method} is listed and should reach the backend"
+        );
+        assert!(
+            body.contains("x-health-check: true"),
+            "contains: health should tag {method} for the backend, got:\n{body}"
+        );
+    }
 }
 
 #[test]
-fn result_matchers_contains_blocks_every_admin_method() {
+fn result_matchers_deny_unlisted_methods() {
     let backend_guard = start_backend_with_shutdown("ok");
     let proxy = start_result_matchers_proxy(backend_guard.port());
 
-    for method in ["admin_reset", "system_admin_stats"] {
+    for method in ["admin_reset", "eth_blockNumber", "healthz"] {
         let raw = http_send(proxy.addr(), &json_post("/", &rpc_call(method)));
 
-        assert_eq!(parse_status(&raw), 403, "contains: admin should block {method}");
+        assert_eq!(parse_status(&raw), 403, "{method} is not listed and should be denied");
         assert_eq!(
             parse_body(&raw),
-            "admin methods are blocked",
-            "the admin branch should answer {method}"
+            "method not allowed",
+            "the unconditional deny should answer {method}"
+        );
+    }
+}
+
+#[test]
+fn result_matchers_deny_methods_json_rpc_cannot_record() {
+    let backend_guard = start_backend_with_shutdown("ok");
+    let proxy = start_result_matchers_proxy(backend_guard.port());
+
+    // JSON escapes that decode to a control character, so json_rpc records
+    // the call's kind but no method. Even a listed name fails closed.
+    for method in [r"admin\u0001reset", r"ping\u0001"] {
+        let raw = http_send(proxy.addr(), &json_post("/", &rpc_call(method)));
+
+        assert_eq!(
+            parse_status(&raw),
+            403,
+            "a method json_rpc could not record ({method}) should be denied"
+        );
+        assert_eq!(
+            parse_body(&raw),
+            "method not allowed",
+            "the unconditional deny should answer {method}"
         );
     }
 }
