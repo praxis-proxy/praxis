@@ -401,6 +401,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reselected_peer_presents_its_own_sni_when_authority_follows_the_endpoint() {
+        for host in ["alpha.reselect-sni.test", "beta.reselect-sni.test"] {
+            peer_utils::seed_dns(host, &[std::net::IpAddr::from([127, 0, 0, 1])]);
+        }
+        let config: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+clusters:
+  - name: mixed
+    endpoints: ["alpha.reselect-sni.test:443", "beta.reselect-sni.test:443"]
+    http:
+      authority: { from: endpoint }
+    tls: {}
+"#,
+        )
+        .unwrap();
+        let lb = praxis_filter::LoadBalancerFilter::from_config(&config).unwrap();
+        let mut pipeline =
+            praxis_filter::FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins()).unwrap();
+        pipeline.set_allow_private_upstreams(true);
+        let pipeline = Arc::new(pipeline);
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, http::HeaderValue::from_static("client.example.com"));
+        let request = praxis_filter::Request {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers,
+        };
+
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.cluster = Some(Arc::from("mixed"));
+        let mut filter_ctx = ctx.build_filter_context(&pipeline, &request, None);
+        drop(lb.on_request(&mut filter_ctx).await.unwrap());
+        ctx.cluster = filter_ctx.cluster.take();
+        ctx.upstream = filter_ctx.upstream.take();
+        ctx.endpoint_reselector = filter_ctx.endpoint_reselector.take();
+        ctx.attempted_endpoints = std::mem::take(&mut filter_ctx.attempted_endpoints);
+        drop(filter_ctx);
+        ctx.pinned_pipeline = Some(Arc::clone(&pipeline));
+
+        let first = execute(&mut ctx).await.expect("first attempt should build a peer");
+        let first_address = Arc::clone(&ctx.upstream_for_retry.as_ref().unwrap().address);
+        assert_eq!(
+            first.sni,
+            peer_utils::derive_sni(&first_address),
+            "the first attempt should present its endpoint's name, not the downstream Host"
+        );
+
+        ctx.reselect_on_retry = true;
+        let retry = execute(&mut ctx).await.expect("the retry should build a peer");
+        let retry_address = Arc::clone(&ctx.upstream_for_retry.as_ref().unwrap().address);
+        assert_ne!(
+            retry_address, first_address,
+            "the retry should reselect the other endpoint"
+        );
+        assert_eq!(
+            retry.sni,
+            peer_utils::derive_sni(&retry_address),
+            "a reselected endpoint must present its own name, not carry the first attempt's SNI forward"
+        );
+    }
+
+    #[tokio::test]
     async fn valid_address_builds_peer() {
         assert!(
             build_peer(&make_upstream("127.0.0.1:8080"), false).await.is_ok(),

@@ -27,6 +27,8 @@
 
 use std::{borrow::Cow, collections::HashMap};
 
+use praxis_core::config::ResultMatch;
+
 use crate::FilterError;
 
 // -----------------------------------------------------------------------------
@@ -125,6 +127,33 @@ impl FilterResultSet {
         self.get(key).is_some_and(|v| v == value)
     }
 
+    /// Whether the result for `key` satisfies a branch [`ResultMatch`].
+    ///
+    /// [`ResultMatch::Not`] matches a missing key; every other matcher needs
+    /// the key to be present.
+    ///
+    /// ```
+    /// use praxis_core::config::ResultMatch;
+    /// use praxis_filter::FilterResultSet;
+    ///
+    /// let mut rs = FilterResultSet::new();
+    /// rs.set("verdict", "unsafe03").unwrap();
+    ///
+    /// let contains_unsafe = ResultMatch::Contains {
+    ///     contains: "unsafe".to_owned(),
+    /// };
+    /// let not_safe = ResultMatch::Not {
+    ///     not: "safe".to_owned(),
+    /// };
+    /// assert!(rs.matches_with("verdict", &contains_unsafe));
+    /// assert!(rs.matches_with("verdict", &not_safe));
+    /// assert!(rs.matches_with("missing", &not_safe));
+    /// assert!(!rs.matches_with("missing", &ResultMatch::Exact("safe".to_owned())));
+    /// ```
+    pub fn matches_with(&self, key: &str, matcher: &ResultMatch) -> bool {
+        result_matches(self.get(key), matcher)
+    }
+
     /// Set a result key-value pair.
     ///
     /// # Errors
@@ -162,13 +191,15 @@ impl FilterResultSet {
 // Cross-filter result matching
 // -----------------------------------------------------------------------------
 
-/// Whether a filter's result set contains a specific key-value pair.
+/// Whether a filter's result for `key` satisfies a branch [`ResultMatch`].
 ///
-/// Used by both branch chain evaluation and step transition matching.
+/// A filter that wrote no results at all is treated like a missing key, so
+/// [`ResultMatch::Not`] matches it.
 ///
 /// ```
 /// use std::collections::HashMap;
 ///
+/// use praxis_core::config::ResultMatch;
 /// use praxis_filter::{FilterResultSet, matches_filter_result};
 ///
 /// let mut results = HashMap::new();
@@ -176,29 +207,40 @@ impl FilterResultSet {
 /// rs.set("action", "loop").unwrap();
 /// results.insert("classifier", rs);
 ///
+/// let is_loop = ResultMatch::Exact("loop".to_owned());
+/// let not_done = ResultMatch::Not {
+///     not: "done".to_owned(),
+/// };
 /// assert!(matches_filter_result(
 ///     &results,
 ///     "classifier",
 ///     "action",
-///     "loop"
+///     &is_loop
 /// ));
 /// assert!(!matches_filter_result(
-///     &results,
-///     "classifier",
-///     "action",
-///     "done"
+///     &results, "unknown", "action", &is_loop
 /// ));
-/// assert!(!matches_filter_result(
-///     &results, "unknown", "action", "loop"
+/// assert!(matches_filter_result(
+///     &results, "unknown", "action", &not_done
 /// ));
 /// ```
 pub fn matches_filter_result(
     results: &HashMap<&str, FilterResultSet>,
     filter_name: &str,
     key: &str,
-    value: &str,
+    matcher: &ResultMatch,
 ) -> bool {
-    results.get(filter_name).is_some_and(|rs| rs.matches(key, value))
+    result_matches(results.get(filter_name).and_then(|rs| rs.get(key)), matcher)
+}
+
+/// Whether a result value, or its absence, satisfies `matcher`.
+fn result_matches(actual: Option<&str>, matcher: &ResultMatch) -> bool {
+    match matcher {
+        ResultMatch::Exact(expected) => actual == Some(expected.as_str()),
+        ResultMatch::AnyOf { any_of } => actual.is_some_and(|value| any_of.iter().any(|candidate| candidate == value)),
+        ResultMatch::Contains { contains } => actual.is_some_and(|value| value.contains(contains.as_str())),
+        ResultMatch::Not { not } => actual != Some(not.as_str()),
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -283,6 +325,114 @@ mod tests {
     fn matches_false_missing_key() {
         let rs = FilterResultSet::new();
         assert!(!rs.matches("status", "hit"), "missing key should return false");
+    }
+
+    #[test]
+    fn matches_with_exact_needs_an_equal_value() {
+        let rs = verdict("unsafe03");
+        let exact = ResultMatch::Exact("unsafe03".to_owned());
+
+        assert!(rs.matches_with("verdict", &exact), "equal value should match");
+        assert!(
+            !rs.matches_with("verdict", &ResultMatch::Exact("unsafe".to_owned())),
+            "a prefix is not an exact match"
+        );
+        assert!(!rs.matches_with("missing", &exact), "missing key should not match");
+    }
+
+    #[test]
+    fn matches_with_contains_needs_the_substring() {
+        let needle = ResultMatch::Contains {
+            contains: "unsafe".to_owned(),
+        };
+
+        assert!(
+            verdict("unsafe03").matches_with("verdict", &needle),
+            "prefix should match"
+        );
+        assert!(
+            verdict("very-unsafe").matches_with("verdict", &needle),
+            "suffix should match"
+        );
+        assert!(
+            !verdict("safe").matches_with("verdict", &needle),
+            "missing substring should not match"
+        );
+        assert!(
+            !verdict("UNSAFE").matches_with("verdict", &needle),
+            "contains is case-sensitive"
+        );
+        assert!(
+            !verdict("unsafe").matches_with("missing", &needle),
+            "missing key should not match"
+        );
+    }
+
+    #[test]
+    fn matches_with_not_matches_any_other_value_or_none() {
+        let not_safe = ResultMatch::Not { not: "safe".to_owned() };
+
+        assert!(
+            verdict("unsafe03").matches_with("verdict", &not_safe),
+            "different value should match"
+        );
+        assert!(
+            !verdict("safe").matches_with("verdict", &not_safe),
+            "the rejected value should not match"
+        );
+        assert!(
+            verdict("safe").matches_with("missing", &not_safe),
+            "missing key should match"
+        );
+        assert!(
+            verdict("").matches_with("verdict", &not_safe),
+            "an empty value is not safe"
+        );
+    }
+
+    #[test]
+    fn matches_with_any_of_needs_a_listed_value() {
+        let codes = ResultMatch::AnyOf {
+            any_of: vec!["2".to_owned(), "4".to_owned(), "6".to_owned()],
+        };
+
+        assert!(verdict("2").matches_with("verdict", &codes), "first entry should match");
+        assert!(verdict("6").matches_with("verdict", &codes), "last entry should match");
+        assert!(
+            !verdict("0").matches_with("verdict", &codes),
+            "unlisted value should not match"
+        );
+        assert!(
+            !verdict("24").matches_with("verdict", &codes),
+            "entries match whole values only"
+        );
+        assert!(
+            !verdict("2").matches_with("missing", &codes),
+            "missing key should not match"
+        );
+    }
+
+    #[test]
+    fn matches_filter_result_treats_a_silent_filter_as_a_missing_key() {
+        let mut results = HashMap::new();
+        results.insert("guard", verdict("unsafe03"));
+        let not_safe = ResultMatch::Not { not: "safe".to_owned() };
+        let contains = ResultMatch::Contains {
+            contains: "unsafe".to_owned(),
+        };
+
+        assert!(
+            matches_filter_result(&results, "guard", "verdict", &contains),
+            "the named filter's result should be checked"
+        );
+        assert!(
+            !matches_filter_result(&results, "other", "verdict", &contains),
+            "a filter with no results has no value to contain anything"
+        );
+        assert!(
+            matches_filter_result(&results, "other", "verdict", &not_safe),
+            "not should match a filter that wrote no results"
+        );
     }
 
     #[test]
@@ -466,5 +616,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rs.get("owned_key"), Some("owned_val"), "Cow::Owned should work");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// A result set holding one `verdict` entry.
+    fn verdict(value: &'static str) -> FilterResultSet {
+        let mut rs = FilterResultSet::new();
+        rs.set("verdict", value).unwrap();
+        rs
     }
 }

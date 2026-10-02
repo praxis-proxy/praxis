@@ -46,6 +46,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [named-chain-ref.yaml](configs/branching/named-chain-ref.yaml) | A branch references a top-level chain by name instead of defining filters inline |
 | [nested-branches.yaml](configs/branching/nested-branches.yaml) | Branch filters that themselves contain branches, forming a multi-level decision tree |
 | [reentrance.yaml](configs/branching/reentrance.yaml) | Loops back to a named filter up to N times |
+| [result-matchers.yaml](configs/branching/result-matchers.yaml) | Builds a deny-by-default JSON-RPC allowlist out of branch result matchers |
 | [unconditional-branch.yaml](configs/branching/unconditional-branch.yaml) | Always runs a utility chain before continuing the main pipeline |
 
 ### Observability
@@ -150,6 +151,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | ------ | ------------- |
 | [basic-auth.yaml](configs/security/basic-auth.yaml) | Authenticate requests using HTTP Basic Authentication (RFC 7617) |
 | [cors.yaml](configs/security/cors.yaml) | Spec-compliant CORS filter with preflight handling, origin validation, and credential support |
+| [credential-injection-env-vars.yaml](configs/security/credential-injection-env-vars.yaml) | Injects per-service API credentials read from environment variables, so no secret is written into the config |
 | [credential-injection.yaml](configs/security/credential-injection.yaml) | Injects per-cluster API credentials into upstream requests |
 | [csrf.yaml](configs/security/csrf.yaml) | Cross-site request forgery protection via origin validation |
 | [downstream-read-timeout.yaml](configs/security/downstream-read-timeout.yaml) | Protects against slow client attacks by limiting how long the proxy waits for data from downstream clients |
@@ -168,6 +170,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 
 | File | Description |
 | ------ | ------------- |
+| [authority-from-endpoint.yaml](configs/traffic-management/authority-from-endpoint.yaml) | Sends each upstream request's Host header as the address of the endpoint the load balancer picked, so one cluster can front endpoints that answer to different hostnames |
 | [authority-override.yaml](configs/traffic-management/authority-override.yaml) | Demonstrates overriding the HTTP Host header sent to a specific upstream cluster, including requests received over HTTP/2 |
 | [basic-reverse-proxy.yaml](configs/traffic-management/basic-reverse-proxy.yaml) | Minimal config: one listener, one upstream, default filter chain |
 | [bound-upstream-condition.yaml](configs/traffic-management/bound-upstream-condition.yaml) | Gates a filter on the logical upstream the router bound for the request |

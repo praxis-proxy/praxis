@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use http::header::HeaderValue;
 use praxis_core::{
     config::{CachedClusterTls, Cluster, RetryPolicy},
     connectivity::{ConnectionOptions, Upstream},
@@ -15,6 +14,7 @@ use praxis_core::{
 use tracing::debug;
 
 use super::{
+    authority::AuthorityResolver,
     reselector::EndpointReselector,
     strategy::{Strategy, build_strategy},
 };
@@ -40,9 +40,9 @@ type RetryMemo = Vec<(Arc<RetryPolicy>, Arc<RetryPolicy>)>;
 
 /// Resolved state for a single cluster.
 pub(super) struct ClusterEntry {
-    /// Pre-parsed upstream authority override as a [`HeaderValue`].
-    /// `None` means forward the downstream `Host` header unchanged.
-    pub(super) authority: Option<HeaderValue>,
+    /// Upstream `Host` for each attempt; forwards the downstream `Host`
+    /// when the cluster sets no authority.
+    pub(super) authority: AuthorityResolver,
 
     /// Connection options derived from the cluster config.
     pub(super) opts: Arc<ConnectionOptions>,
@@ -84,20 +84,24 @@ impl ClusterEntry {
     /// Build an [`Upstream`] from a selected address and request context.
     ///
     /// When TLS is configured and no explicit SNI is set, the SNI is
-    /// taken from the cluster `authority` override, then the request
+    /// taken from the cluster's fixed `authority`, then the request
     /// `Host` header, then the request URI authority (HTTP/2
     /// `:authority`). The configured authority wins over `Host` so a
     /// client cannot steer the upstream TLS name. The chosen value
     /// goes through [`sni_candidate`]: SNI must be a bare DNS
     /// hostname per [RFC 6066], so ports and the root dot are
-    /// stripped and IP literals produce no SNI.
+    /// stripped and IP literals produce no SNI. A cluster whose
+    /// authority follows the endpoint skips all of this and leaves SNI
+    /// unset, so the peer derives it from each attempt's own endpoint
+    /// address.
     ///
     /// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
     pub(super) fn build_upstream(&self, addr: Arc<str>, ctx: &HttpFilterContext<'_>) -> Upstream {
+        let authority = self.authority.for_address(&addr);
         let tls = self.tls.clone().map(|mut t| {
             if t.sni().is_none()
-                && let Some(sni) = self
-                    .authority
+                && !self.authority.follows_endpoint()
+                && let Some(sni) = authority
                     .as_ref()
                     .and_then(|v| v.to_str().ok())
                     .or_else(|| {
@@ -115,7 +119,7 @@ impl ClusterEntry {
         });
         Upstream {
             address: addr,
-            authority: self.authority.clone(),
+            authority,
             connection: Arc::clone(&self.opts),
             tls,
         }
@@ -193,8 +197,9 @@ fn sni_candidate(host: &str) -> Option<&str> {
 ///
 /// # Errors
 ///
-/// Returns [`FilterError`] if the authority override cannot be parsed
-/// as a valid HTTP header value.
+/// Returns [`FilterError`] if the authority override, or an endpoint
+/// address the authority is taken from, cannot be parsed as a valid HTTP
+/// authority.
 pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, FilterError> {
     let endpoints = build_weighted_endpoints(cluster);
     let total_weight: u32 = endpoints.iter().map(|ep| ep.weight).sum();
@@ -206,7 +211,7 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
     );
 
     let tls = build_cached_tls(cluster)?;
-    let authority = build_authority(cluster)?;
+    let authority = AuthorityResolver::build(cluster)?;
     let strategy = Arc::new(build_strategy(&cluster.load_balancer_strategy, endpoints));
     let retry_policy = Arc::new(cluster.retry_policy.clone().unwrap_or_else(RetryPolicy::legacy_default));
     let retry_state = Arc::new(ClusterRetryState::new(retry_policy.retry_budget.as_ref()));
@@ -237,25 +242,6 @@ fn build_cached_tls(cluster: &Cluster) -> Result<Option<CachedClusterTls>, Filte
         format!(
             "cluster '{}': TLS material is unreadable, refusing to fall back to plaintext: {e}",
             cluster.name,
-        )
-        .into()
-    })
-}
-
-/// Pre-parse the authority override as a [`HeaderValue`].
-///
-/// Returns an error instead of silently disabling the override, so
-/// that programmatic callers of `LoadBalancerFilter::new` cannot
-/// accidentally forward the caller's original `Host` header.
-fn build_authority(cluster: &Cluster) -> Result<Option<HeaderValue>, FilterError> {
-    let Some(a) = cluster.http.authority.as_deref() else {
-        return Ok(None);
-    };
-    cluster.validate_authority().map_err(|e| e.to_string())?;
-    HeaderValue::from_str(a).map(Some).map_err(|e| {
-        format!(
-            "cluster '{}': authority '{}' is not a valid HTTP header value: {e}",
-            cluster.name, a,
         )
         .into()
     })

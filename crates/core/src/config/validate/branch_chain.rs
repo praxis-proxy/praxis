@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 
 use crate::{
-    config::{BranchChainConfig, ChainRef, FilterChainConfig, FilterEntry},
+    config::{BranchChainConfig, ChainRef, FilterChainConfig, FilterEntry, ResultMatch},
     errors::ProxyError,
 };
 
@@ -47,6 +47,10 @@ const MAX_BRANCHES_PER_FILTER: usize = 16;
 
 /// Maximum total branch chain count across all filter chains.
 const MAX_TOTAL_BRANCHES: usize = 256;
+
+/// Maximum length of an `on_result.result` value in bytes. Filter results are
+/// capped at the same length, so a longer value could never match.
+const MAX_RESULT_VALUE_LEN: usize = 256;
 
 // -----------------------------------------------------------------------------
 // Branch Chain Validation
@@ -307,7 +311,7 @@ fn validate_on_result_filter_name(branch: &BranchChainConfig) -> Result<(), Prox
     Ok(())
 }
 
-/// Validate `on_result.key` and `on_result.value` are non-empty
+/// Validate `on_result.key` and every `on_result.result` value are non-empty
 /// and contain only safe characters.
 fn validate_on_result_key_value(branch: &BranchChainConfig) -> Result<(), ProxyError> {
     let Some(cond) = &branch.on_result else {
@@ -320,12 +324,37 @@ fn validate_on_result_key_value(branch: &BranchChainConfig) -> Result<(), ProxyE
         )));
     }
     validate_on_result_field(&cond.key, "key", bname)?;
-    if cond.value.is_empty() {
+
+    let (field, values) = match &cond.value {
+        ResultMatch::Exact(value) => ("result", std::slice::from_ref(value)),
+        ResultMatch::AnyOf { any_of } => ("result.any_of", any_of.as_slice()),
+        ResultMatch::Contains { contains } => ("result.contains", std::slice::from_ref(contains)),
+        ResultMatch::Not { not } => ("result.not", std::slice::from_ref(not)),
+    };
+    if values.is_empty() {
         return Err(ProxyError::Config(format!(
-            "branch '{bname}': on_result.result must not be empty"
+            "branch '{bname}': on_result.{field} must list at least one value"
         )));
     }
-    validate_on_result_field(&cond.value, "result", bname)
+    values
+        .iter()
+        .try_for_each(|value| validate_on_result_value(value, field, bname))
+}
+
+/// Validate one `on_result.result` value: non-empty, short enough that a
+/// filter result could ever equal it, and made of safe characters.
+fn validate_on_result_value(value: &str, field: &str, branch_name: &str) -> Result<(), ProxyError> {
+    if value.is_empty() {
+        return Err(ProxyError::Config(format!(
+            "branch '{branch_name}': on_result.{field} must not be empty"
+        )));
+    }
+    if value.len() > MAX_RESULT_VALUE_LEN {
+        return Err(ProxyError::Config(format!(
+            "branch '{branch_name}': on_result.{field} must be at most {MAX_RESULT_VALUE_LEN} bytes"
+        )));
+    }
+    validate_on_result_field(value, field, branch_name)
 }
 
 /// Validate a single `on_result` field uses safe characters.
@@ -1416,5 +1445,120 @@ filter_chains:
                 && err.to_string().contains(&(super::MAX_TOTAL_BRANCHES + 5).to_string()),
             "prior branch count must accumulate into the cumulative total: {err}"
         );
+    }
+
+    #[test]
+    fn result_operators_load_through_config() {
+        for result in [
+            "result: 0",
+            "result: true",
+            "result: {contains: unsafe}",
+            "result: {not: safe}",
+            "result: {any_of: [2, 4, 6]}",
+        ] {
+            let config = Config::from_yaml(&on_result_config(result))
+                .unwrap_or_else(|err| panic!("{result} should load through the full config: {err}"));
+            assert_eq!(config.filter_chains.len(), 1, "{result}: the chain should be kept");
+        }
+    }
+
+    #[test]
+    fn reject_empty_result_operands() {
+        let cases = [
+            (
+                "result: {any_of: []}",
+                "on_result.result.any_of must list at least one value",
+            ),
+            (
+                "result: {any_of: [ok, \"\"]}",
+                "on_result.result.any_of must not be empty",
+            ),
+            (
+                "result: {contains: \"\"}",
+                "on_result.result.contains must not be empty",
+            ),
+            ("result: {not: \"\"}", "on_result.result.not must not be empty"),
+        ];
+        for (result, expected) in cases {
+            let err = Config::from_yaml(&on_result_config(result)).unwrap_err();
+            assert!(
+                err.to_string().contains(expected),
+                "{result} should be rejected with '{expected}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_result_operand_with_special_chars() {
+        let cases = [
+            (
+                "result: {any_of: [ok, \"bad.value\"]}",
+                "on_result.result.any_of 'bad.value'",
+            ),
+            ("result: {contains: \"un safe\"}", "on_result.result.contains 'un safe'"),
+            ("result: {not: \"safe!\"}", "on_result.result.not 'safe!'"),
+        ];
+        for (result, expected) in cases {
+            let err = Config::from_yaml(&on_result_config(result)).unwrap_err();
+            assert!(
+                err.to_string().contains(expected),
+                "{result} should be rejected with '{expected}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_result_value_longer_than_a_filter_result() {
+        let at_limit = "a".repeat(super::MAX_RESULT_VALUE_LEN);
+        let over_limit = "a".repeat(super::MAX_RESULT_VALUE_LEN + 1);
+
+        Config::from_yaml(&on_result_config(&format!("result: {{contains: {at_limit}}}")))
+            .unwrap_or_else(|err| panic!("a value at the limit should load: {err}"));
+        let exact = Config::from_yaml(&on_result_config(&format!("result: {over_limit}"))).unwrap_err();
+        let any_of =
+            Config::from_yaml(&on_result_config(&format!("result: {{any_of: [ok, {over_limit}]}}"))).unwrap_err();
+
+        assert!(
+            exact.to_string().contains("on_result.result must be at most 256 bytes"),
+            "an exact value over the limit should be rejected: {exact}"
+        );
+        assert!(
+            any_of
+                .to_string()
+                .contains("on_result.result.any_of must be at most 256 bytes"),
+            "an any_of entry over the limit should be rejected: {any_of}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// A config with one branch whose `on_result` uses the given `result:` line.
+    fn on_result_config(result: &str) -> String {
+        format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            on_result:
+              filter: headers
+              key: verdict
+              {result}
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#
+        )
     }
 }

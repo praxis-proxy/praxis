@@ -399,7 +399,7 @@ fn resolve_condition(cond: &BranchCondition) -> ResolvedBranchCondition {
     ResolvedBranchCondition {
         filter_name: Arc::from(cond.filter.as_str()),
         key: Arc::from(cond.key.as_str()),
-        value: Arc::from(cond.value.as_str()),
+        matcher: cond.value.clone(),
     }
 }
 
@@ -705,12 +705,16 @@ mod tests {
         let cond = BranchCondition {
             filter: "cache".to_owned(),
             key: "status".to_owned(),
-            value: "hit".to_owned(),
+            value: praxis_core::config::ResultMatch::Not { not: "hit".to_owned() },
         };
         let resolved = resolve_condition(&cond);
         assert_eq!(resolved.filter_name.as_ref(), "cache", "filter_name mismatch");
         assert_eq!(resolved.key.as_ref(), "status", "key mismatch");
-        assert_eq!(resolved.value.as_ref(), "hit", "value mismatch");
+        assert_eq!(
+            resolved.matcher,
+            praxis_core::config::ResultMatch::Not { not: "hit".to_owned() },
+            "the matcher operator should carry over"
+        );
     }
 
     #[test]
@@ -892,7 +896,7 @@ mod tests {
                 on_result: Some(BranchCondition {
                     filter: "request_id".to_owned(),
                     key: "status".to_owned(),
-                    value: "hit".to_owned(),
+                    value: praxis_core::config::ResultMatch::Exact("hit".to_owned()),
                 }),
                 rejoin: "terminal".to_owned(),
             }]),
@@ -1007,7 +1011,7 @@ mod tests {
                 on_result: Some(BranchCondition {
                     filter: "nonexistent_filter".to_owned(),
                     key: "status".to_owned(),
-                    value: "hit".to_owned(),
+                    value: praxis_core::config::ResultMatch::Exact("hit".to_owned()),
                 }),
                 rejoin: "next".to_owned(),
             }]),
@@ -1172,7 +1176,7 @@ mod tests {
             on_result: on_result.map(|(filter, key, value)| BranchCondition {
                 filter: filter.to_owned(),
                 key: key.to_owned(),
-                value: value.to_owned(),
+                value: praxis_core::config::ResultMatch::Exact(value.to_owned()),
             }),
             rejoin: "next".to_owned(),
         }

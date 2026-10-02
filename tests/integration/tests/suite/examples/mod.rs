@@ -12,6 +12,7 @@ mod access_logging;
 mod admin_interface;
 mod all_examples_validate;
 mod api_key_filter;
+mod authority_from_endpoint;
 mod authority_override;
 mod basic_reverse_proxy;
 #[cfg(feature = "iterative-request-router")]
@@ -23,6 +24,7 @@ mod circuit_breaker;
 mod cloud_events;
 mod conditional_filters;
 mod credential_injection;
+mod credential_injection_env_vars;
 mod csrf;
 mod default_config;
 mod endpoint_selector;

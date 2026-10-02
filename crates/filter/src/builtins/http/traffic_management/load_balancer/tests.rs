@@ -33,7 +33,7 @@ fn try_new_rejects_semantically_invalid_authority() {
     let cluster = Cluster {
         http: praxis_core::config::ClusterHttpOptions {
             version: praxis_core::config::UpstreamHttpVersion::default(),
-            authority: Some(Arc::from("https://api.example.com")),
+            authority: Some("https://api.example.com".into()),
             ..praxis_core::config::ClusterHttpOptions::default()
         },
         ..test_cluster("api", &["127.0.0.1:8080"])
@@ -76,7 +76,7 @@ fn new_panics_on_invalid_authority() {
     let cluster = Cluster {
         http: praxis_core::config::ClusterHttpOptions {
             version: praxis_core::config::UpstreamHttpVersion::default(),
-            authority: Some(Arc::from("user@api.example.com")),
+            authority: Some("user@api.example.com".into()),
             ..praxis_core::config::ClusterHttpOptions::default()
         },
         ..test_cluster("api", &["127.0.0.1:8080"])
@@ -388,7 +388,7 @@ async fn sni_prefers_cluster_authority_over_host_header() -> Result<(), crate::F
     let cluster = Cluster {
         tls: Some(praxis_core::config::ClusterTls::default()),
         http: praxis_core::config::ClusterHttpOptions {
-            authority: Some(Arc::from("backend.internal:8443")),
+            authority: Some("backend.internal:8443".into()),
             ..praxis_core::config::ClusterHttpOptions::default()
         },
         ..Cluster::with_defaults("authority-sni", vec!["10.0.0.1:443".into()])
@@ -434,6 +434,154 @@ async fn explicit_sni_overrides_host_header() {
         upstream.tls.as_ref().unwrap().sni(),
         Some("override.example.com"),
         "explicit sni should override Host header"
+    );
+}
+
+#[tokio::test]
+async fn endpoint_authority_names_each_selected_endpoint() {
+    let lb = LoadBalancerFilter::new(&[endpoint_authority_cluster(
+        "mixed",
+        &["api-a.example.com:8080", "api-b.example.com:80"],
+    )]);
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert("host", http::HeaderValue::from_static("client.example.com"));
+
+    let mut seen = HashMap::new();
+    for _ in 0..2 {
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.cluster = Some(Arc::from("mixed"));
+        drop(lb.on_request(&mut ctx).await.unwrap());
+        let upstream = ctx.upstream.expect("upstream should be set");
+        let authority = upstream.authority.expect("authority should follow the endpoint");
+        seen.insert(upstream.address.to_string(), authority.to_str().unwrap().to_owned());
+    }
+
+    assert_eq!(
+        seen.get("api-a.example.com:8080").map(String::as_str),
+        Some("api-a.example.com:8080"),
+        "a non-default port should stay in the endpoint authority"
+    );
+    assert_eq!(
+        seen.get("api-b.example.com:80").map(String::as_str),
+        Some("api-b.example.com"),
+        "port 80 is the plaintext default and should be left out"
+    );
+}
+
+#[tokio::test]
+async fn endpoint_authority_leaves_sni_unset_instead_of_copying_host() {
+    let cluster = Cluster {
+        tls: Some(praxis_core::config::ClusterTls::default()),
+        ..endpoint_authority_cluster("mixed", &["api-a.example.com:443"])
+    };
+    let lb = LoadBalancerFilter::new(&[cluster]);
+
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert("host", http::HeaderValue::from_static("client.example.com"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("mixed"));
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+    let upstream = ctx.upstream.expect("upstream should be set");
+    assert!(
+        upstream.tls.as_ref().unwrap().sni().is_none(),
+        "SNI must not copy the downstream Host; the peer derives it from the endpoint"
+    );
+    assert_eq!(
+        upstream.authority.as_ref().and_then(|value| value.to_str().ok()),
+        Some("api-a.example.com"),
+        "port 443 is the TLS default and should be left out of the authority"
+    );
+}
+
+#[tokio::test]
+async fn endpoint_authority_keeps_an_explicit_sni() {
+    let cluster = Cluster {
+        tls: Some(praxis_core::config::ClusterTls {
+            sni: Some("shared.example.com".into()),
+            ..praxis_core::config::ClusterTls::default()
+        }),
+        ..endpoint_authority_cluster("mixed", &["api-a.example.com:443"])
+    };
+    let lb = LoadBalancerFilter::new(&[cluster]);
+
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert("host", http::HeaderValue::from_static("client.example.com"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("mixed"));
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+    let upstream = ctx.upstream.expect("upstream should be set");
+    assert_eq!(
+        upstream.tls.as_ref().unwrap().sni(),
+        Some("shared.example.com"),
+        "a configured tls.sni still wins for every endpoint"
+    );
+}
+
+#[tokio::test]
+async fn endpoint_authority_reselection_names_the_new_endpoint() {
+    let lb = LoadBalancerFilter::new(&[endpoint_authority_cluster(
+        "mixed",
+        &["api-a.example.com:80", "api-b.example.com:8080"],
+    )]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("mixed"));
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+    let first = ctx.upstream.take().expect("upstream should be set");
+
+    let reselector = ctx.endpoint_reselector.clone().expect("reselector should be set");
+    let next = reselector
+        .select_address(None, &ctx.attempted_endpoints)
+        .expect("an alternate endpoint should be available for retry");
+    let retry = reselector.build_upstream(next);
+
+    assert_ne!(
+        retry.address, first.address,
+        "the retry should go to the other endpoint"
+    );
+    let want = if retry.address.as_ref() == "api-a.example.com:80" {
+        "api-a.example.com"
+    } else {
+        "api-b.example.com:8080"
+    };
+    assert_eq!(
+        retry.authority.as_ref().and_then(|value| value.to_str().ok()),
+        Some(want),
+        "a reselected attempt must send its own endpoint's authority, not the first one's"
+    );
+}
+
+#[tokio::test]
+async fn endpoint_authority_names_a_pinned_endpoint() {
+    let lb = LoadBalancerFilter::new(&[endpoint_authority_cluster("mixed", &["api-a.example.com:8080"])]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("mixed"));
+    ctx.pinned_endpoint_address = Some(Arc::from("api-a.example.com:8080"));
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+    let upstream = ctx.upstream.expect("the pinned endpoint should have been used");
+    assert_eq!(
+        upstream.authority.as_ref().and_then(|value| value.to_str().ok()),
+        Some("api-a.example.com:8080"),
+        "a session-affinity pin should still send the endpoint's own authority"
+    );
+}
+
+#[test]
+fn build_cluster_entry_rejects_endpoint_authority_from_an_unusable_address() {
+    let Err(err) = build_cluster_entry(&endpoint_authority_cluster("mixed", &["bad host:80"])) else {
+        panic!("an endpoint that cannot be an HTTP authority must fail the build");
+    };
+    assert!(
+        err.to_string().contains("cannot be used as the upstream authority"),
+        "the error should explain why the endpoint was refused: {err}"
     );
 }
 
@@ -572,7 +720,7 @@ async fn tls_and_sni_wired_from_cluster() {
     let cluster = Cluster {
         http: praxis_core::config::ClusterHttpOptions {
             version: praxis_core::config::UpstreamHttpVersion::default(),
-            authority: Some(Arc::from("public.example.com")),
+            authority: Some("public.example.com".into()),
             ..praxis_core::config::ClusterHttpOptions::default()
         },
         tls: Some(praxis_core::config::ClusterTls {
@@ -1527,6 +1675,19 @@ fn cluster_with_application(name: &str, endpoints: &[&str], protocol: Option<&st
         http: praxis_core::config::ClusterHttpOptions {
             application_protocol: protocol.map(Arc::from),
             application_provider: provider.map(Arc::from),
+            ..praxis_core::config::ClusterHttpOptions::default()
+        },
+        ..Cluster::with_defaults(name, endpoints.iter().map(|s| (*s).into()).collect())
+    }
+}
+
+/// Build a plaintext [`Cluster`] whose upstream `Host` follows the selected endpoint.
+fn endpoint_authority_cluster(name: &str, endpoints: &[&str]) -> Cluster {
+    Cluster {
+        http: praxis_core::config::ClusterHttpOptions {
+            authority: Some(praxis_core::config::UpstreamAuthority::Derived {
+                from: praxis_core::config::AuthoritySource::Endpoint,
+            }),
             ..praxis_core::config::ClusterHttpOptions::default()
         },
         ..Cluster::with_defaults(name, endpoints.iter().map(|s| (*s).into()).collect())

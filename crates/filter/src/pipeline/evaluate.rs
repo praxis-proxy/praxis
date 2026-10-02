@@ -159,7 +159,7 @@ fn should_branch_fire(
             host_results,
             cond.filter_name.as_ref(),
             cond.key.as_ref(),
-            cond.value.as_ref(),
+            &cond.matcher,
         ),
     }
 }
@@ -336,6 +336,7 @@ mod tests {
     use async_trait::async_trait;
     use bytes::Bytes;
     use http::Method;
+    use praxis_core::config::ResultMatch;
 
     use super::*;
     use crate::{
@@ -445,6 +446,70 @@ mod tests {
             counter.load(Ordering::SeqCst),
             0,
             "mismatched branch filter should not have executed"
+        );
+    }
+
+    #[tokio::test]
+    async fn not_matcher_takes_the_branch_for_any_other_result() {
+        assert!(
+            matcher_fires(not_matcher("safe"), Some("unsafe03")).await,
+            "not: safe should take the branch for an unsafe03 verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn not_matcher_skips_the_branch_for_the_rejected_result() {
+        assert!(
+            !matcher_fires(not_matcher("safe"), Some("safe")).await,
+            "not: safe should not take the branch for a safe verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn not_matcher_takes_the_branch_when_no_result_was_written() {
+        assert!(
+            matcher_fires(not_matcher("safe"), None).await,
+            "not: safe should take the branch when the filter gave no verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn contains_matcher_takes_the_branch_on_a_substring() {
+        let unsafe_family = || ResultMatch::Contains {
+            contains: "unsafe".to_owned(),
+        };
+
+        assert!(
+            matcher_fires(unsafe_family(), Some("unsafe03")).await,
+            "contains: unsafe should take the branch for unsafe03"
+        );
+        assert!(
+            !matcher_fires(unsafe_family(), Some("safe")).await,
+            "contains: unsafe should not take the branch for safe"
+        );
+        assert!(
+            !matcher_fires(unsafe_family(), None).await,
+            "contains: unsafe should not take the branch without a result"
+        );
+    }
+
+    #[tokio::test]
+    async fn any_of_matcher_takes_the_branch_for_a_listed_result() {
+        let unsafe_codes = || ResultMatch::AnyOf {
+            any_of: vec!["2".to_owned(), "4".to_owned(), "6".to_owned()],
+        };
+
+        assert!(
+            matcher_fires(unsafe_codes(), Some("4")).await,
+            "any_of: [2, 4, 6] should take the branch for 4"
+        );
+        assert!(
+            !matcher_fires(unsafe_codes(), Some("0")).await,
+            "any_of: [2, 4, 6] should not take the branch for 0"
+        );
+        assert!(
+            !matcher_fires(unsafe_codes(), None).await,
+            "any_of: [2, 4, 6] should not take the branch without a result"
         );
     }
 
@@ -1420,6 +1485,40 @@ mod tests {
         );
     }
 
+    /// Whether a branch keyed on `guard`'s `verdict` result fires for
+    /// `matcher` when the filter wrote `verdict` (or wrote nothing).
+    async fn matcher_fires(matcher: ResultMatch, verdict: Option<&'static str>) -> bool {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut branch = make_branch(
+            "matcher",
+            None,
+            RejoinTarget::Next,
+            None,
+            vec![counting_pf(Arc::clone(&counter))],
+        );
+        branch.condition = Some(ResolvedBranchCondition {
+            filter_name: Arc::from("guard"),
+            key: Arc::from("verdict"),
+            matcher,
+        });
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        if let Some(verdict) = verdict {
+            let mut rs = FilterResultSet::new();
+            rs.set("verdict", verdict).unwrap();
+            ctx.filter_results.insert("guard", rs);
+        }
+
+        drop(evaluate_branches(&[branch], &mut ctx).await.unwrap());
+
+        counter.load(Ordering::SeqCst) == 1
+    }
+
+    /// A `not` matcher rejecting `value`.
+    fn not_matcher(value: &str) -> ResultMatch {
+        ResultMatch::Not { not: value.to_owned() }
+    }
+
     /// Build a [`ResolvedBranch`] for testing.
     fn make_branch(
         name: &str,
@@ -1432,7 +1531,7 @@ mod tests {
             condition: condition.map(|(filter, key, value)| ResolvedBranchCondition {
                 filter_name: Arc::from(filter),
                 key: Arc::from(key),
-                value: Arc::from(value),
+                matcher: ResultMatch::Exact(value.to_owned()),
             }),
             filters,
             max_iterations,

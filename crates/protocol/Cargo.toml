@@ -67,6 +67,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+praxis-core = { workspace = true, features = ["test-support"] }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 tempfile = { workspace = true }

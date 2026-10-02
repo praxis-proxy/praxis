@@ -4,7 +4,8 @@
 //! Every example config must pass the pipeline validation server startup runs.
 //!
 //! Examples that need a build feature this binary lacks, or deployment files
-//! that only exist on a real host, are skipped rather than failed.
+//! and environment variables that only exist on a real host, are skipped
+//! rather than failed.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -56,13 +57,16 @@ const GATED_FILTERS: &[(&str, bool)] = &[
 
 /// Whether a resolution error is about this environment rather than the
 /// example: a filter or config form behind a disabled build feature, or
-/// deployment files (certificates, policies) the example expects on the host.
+/// deployment files (certificates, policies) or environment variables
+/// (credentials) the example expects on the host.
 fn environmental(error: &str) -> bool {
     let gated = GATED_FILTERS
         .iter()
         .any(|(filter, enabled)| !enabled && error.contains(&format!("unknown filter type: '{filter}'")));
     let binding = !cfg!(feature = "upstream-binding") && error.contains("needs the upstream-binding build feature");
-    gated || binding || error.contains("No such file or directory")
+    let unset_credential =
+        error.contains("credential_injection: environment variable '") && error.contains("' not set");
+    gated || binding || unset_credential || error.contains("No such file or directory")
 }
 
 /// Load `path` and resolve its pipelines the way server startup does.

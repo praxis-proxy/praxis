@@ -265,6 +265,61 @@ clusters:
     }
 
     #[test]
+    fn accept_cluster_with_endpoint_authority() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["api-a.example.com:443", "api-b.example.com:443"]
+    http:
+      authority: { from: endpoint }
+    tls: {}
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert!(
+            config.clusters[0]
+                .http
+                .authority
+                .as_ref()
+                .is_some_and(crate::config::UpstreamAuthority::follows_endpoint),
+            "authority should parse as the endpoint-derived form"
+        );
+    }
+
+    #[test]
+    fn reject_cluster_with_unknown_authority_source() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["10.0.0.1:80"]
+    http:
+      authority: { from: upstream }
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("upstream"),
+            "the unknown authority source should be named: {err}"
+        );
+    }
+
+    #[test]
     fn accept_cluster_without_authority() {
         let yaml = r#"
 listeners:

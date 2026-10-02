@@ -3,7 +3,7 @@
 
 //! Public snapshot of a resolved [`FilterPipeline`] for admin inspection.
 
-use praxis_core::config::{Condition, FailureMode, ResponseCondition};
+use praxis_core::config::{Condition, FailureMode, ResponseCondition, ResultMatch};
 use serde::Serialize;
 
 use super::{
@@ -83,8 +83,9 @@ pub struct BranchConditionInfo {
     pub filter: String,
     /// Result key.
     pub key: String,
-    /// Expected result value (YAML `result`).
-    pub result: String,
+    /// Expected result (YAML `result`): a string for an exact match, or a
+    /// single-key object such as `{"not": "safe"}` for an operator.
+    pub result: ResultMatch,
 }
 
 // -----------------------------------------------------------------------------
@@ -170,7 +171,7 @@ fn branch_condition_info(cond: &ResolvedBranchCondition) -> BranchConditionInfo 
     BranchConditionInfo {
         filter: cond.filter_name.to_string(),
         key: cond.key.to_string(),
-        result: cond.value.to_string(),
+        result: cond.matcher.clone(),
     }
 }
 
@@ -340,11 +341,48 @@ mod tests {
         let cond = ResolvedBranchCondition {
             filter_name: "router".into(),
             key: "matched".into(),
-            value: "true".into(),
+            matcher: ResultMatch::Exact("true".to_owned()),
         };
         let info = branch_condition_info(&cond);
         assert_eq!(info.filter, "router", "the filter name is copied");
         assert_eq!(info.key, "matched", "the key is copied");
-        assert_eq!(info.result, "true", "the value is copied");
+        assert_eq!(
+            info.result,
+            ResultMatch::Exact("true".to_owned()),
+            "the value is copied"
+        );
+    }
+
+    #[test]
+    fn branch_condition_info_renders_exact_as_a_string_and_operators_as_objects() {
+        let render = |matcher: ResultMatch| {
+            let info = branch_condition_info(&ResolvedBranchCondition {
+                filter_name: "guard".into(),
+                key: "verdict".into(),
+                matcher,
+            });
+            serde_json::to_value(info)
+                .expect("condition info serializes")
+                .get("result")
+                .cloned()
+        };
+
+        assert_eq!(
+            render(ResultMatch::Exact("true".to_owned())),
+            Some(serde_json::json!("true")),
+            "an exact result keeps its plain string form"
+        );
+        assert_eq!(
+            render(ResultMatch::Not { not: "safe".to_owned() }),
+            Some(serde_json::json!({"not": "safe"})),
+            "an operator renders as a single-key object"
+        );
+        assert_eq!(
+            render(ResultMatch::AnyOf {
+                any_of: vec!["2".to_owned(), "4".to_owned()]
+            }),
+            Some(serde_json::json!({"any_of": ["2", "4"]})),
+            "any_of renders its list"
+        );
     }
 }

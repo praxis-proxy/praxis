@@ -29,6 +29,8 @@
 
 use std::sync::Arc;
 
+use praxis_core::config::ResultMatch;
+
 use super::filter::PipelineFilter;
 use crate::actions::{Rejection, StreamingTerminalResponse, TerminalResponse};
 
@@ -70,8 +72,8 @@ pub(crate) struct ResolvedBranchCondition {
     /// Result key to match.
     pub key: Arc<str>,
 
-    /// Expected value.
-    pub value: Arc<str>,
+    /// How the result value is compared.
+    pub matcher: ResultMatch,
 }
 
 // -----------------------------------------------------------------------------

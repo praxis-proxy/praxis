@@ -3,6 +3,7 @@
 
 //! Load-balancer filter: select an upstream endpoint from the routed cluster.
 
+mod authority;
 mod entry;
 mod reselector;
 mod strategy;
@@ -134,8 +135,9 @@ impl LoadBalancerFilter {
     ///
     /// # Panics
     ///
-    /// Panics when a cluster contains an invalid authority override.
-    /// Use [`Self::try_new`] when cluster definitions are not already
+    /// Panics when a cluster contains an invalid authority override, or
+    /// an endpoint that `authority: { from: endpoint }` cannot turn into
+    /// one. Use [`Self::try_new`] when cluster definitions are not already
     /// validated.
     #[expect(clippy::panic, reason = "preserves the infallible public constructor contract")]
     pub fn new(clusters: &[Cluster]) -> Self {
@@ -149,8 +151,9 @@ impl LoadBalancerFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if any cluster's authority override
-    /// is invalid.
+    /// Returns [`FilterError`] if any cluster's authority override is
+    /// invalid, including an endpoint that `{ from: endpoint }` cannot
+    /// turn into one.
     pub fn try_new(clusters: &[Cluster]) -> Result<Self, FilterError> {
         Self::try_new_with_source(clusters, ClusterSource::default())
     }
@@ -160,8 +163,9 @@ impl LoadBalancerFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if any cluster's authority override
-    /// is invalid.
+    /// Returns [`FilterError`] if any cluster's authority override is
+    /// invalid, including an endpoint that `{ from: endpoint }` cannot
+    /// turn into one.
     fn try_new_with_source(clusters: &[Cluster], cluster_source: ClusterSource) -> Result<Self, FilterError> {
         let map = clusters
             .iter()

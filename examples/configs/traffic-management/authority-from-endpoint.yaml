@@ -1,0 +1,51 @@
+# Upstream Authority From the Selected Endpoint
+#
+# Sends each upstream request's Host header as the address of the endpoint
+# the load balancer picked, so one cluster can front endpoints that answer
+# to different hostnames.
+#
+# With `authority: { from: endpoint }` the first endpoint receives
+# `Host: localhost:9000` and the second `Host: 127.0.0.1:9001`, whatever
+# Host the client sent. The port is left out only when it is the scheme
+# default (80, or 443 when the cluster sets `tls`), and a retry to another
+# endpoint sends that endpoint's address. A plain string sends one fixed
+# authority to every endpoint instead (see authority-override.yaml).
+#
+# On a `tls` cluster without `tls.sni`, the TLS SNI follows the endpoint
+# too rather than copying the client's Host, so certificate verification
+# works per endpoint with no `tls.sni` at all:
+#
+#   endpoints: ["api-a.example.com:443", "api-b.example.com:443"]
+#   http:
+#     authority: { from: endpoint }
+#   tls: {}
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/authority-from-endpoint.yaml
+#
+#   curl -H "Host: anything.example.com" http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "localhost:9000"
+              - "127.0.0.1:9001"
+            http:
+              authority: { from: endpoint }
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
+  allow_private_upstreams: true # "localhost" resolves to loopback at connection time
