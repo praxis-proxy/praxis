@@ -302,15 +302,19 @@ These two concepts are distinct, take care to not conflate them.
 
 ## Reserved Headers
 
-**Client-unspoofable headers**: Headers with `x-praxis-*` or `x-ext-*` prefixes
-are reserved and automatically stripped from incoming requests. Use these for
-metadata promoted from request bodies or set by trusted filters (like
-`json_body_field`). Clients cannot forge these headers, making them safe for
-security-sensitive routing and filtering decisions.
+**Client-unspoofable headers**: Headers with the reserved prefixes
+`x-praxis-*`, `x-ext-protocol-*`, and `x-ext-agent-*`
+(`RESERVED_HEADER_PREFIXES` in `crates/core/src/reserved_headers.rs`) cannot
+come from clients: a client request carrying one is rejected with 400, they are
+stripped before forwarding to backends, and stripped from backend responses.
+Other `x-ext-*` names are NOT reserved. Use reserved prefixes for metadata
+promoted from request bodies or set by trusted filters (like
+`json_body_field`), making them safe for security-sensitive routing and
+filtering decisions.
 
 Example: `json_body_field` promotes a body field to `x-praxis-guard-model`,
 which `guardrails` then uses in a condition. The client cannot bypass guardrails
-by sending an `x-praxis-guard-model` header directly.
+by sending an `x-praxis-guard-model` header directly (the request is rejected).
 
 ## Key Patterns
 

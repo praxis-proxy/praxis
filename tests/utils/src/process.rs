@@ -58,30 +58,22 @@ impl PraxisProcess {
     ///
     /// Panics if the process cannot be spawned or never becomes ready.
     pub fn spawn_with_ulimit(config_yaml: &str, ready_addr: &str, ulimit: Option<&str>) -> Self {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let config_path = dir.path().join("praxis.yaml");
-        fs::write(&config_path, config_yaml).expect("write config");
-        let stdout = fs::File::create(dir.path().join("stdout.log")).expect("create stdout log");
-        let stderr = fs::File::create(dir.path().join("stderr.log")).expect("create stderr log");
+        Self::spawn_inner(config_yaml, ready_addr, ulimit, &[])
+    }
 
-        let prefix = ulimit.map_or_else(String::new, |args| format!("ulimit {args} && "));
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(format!("{prefix}exec \"$0\" -c \"$1\""))
-            .arg(praxis_bin())
-            .arg(&config_path)
-            .env("NO_COLOR", "1")
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(stderr)
-            .spawn()
-            .expect("spawn praxis");
-        let mut process = Self {
-            child: Some(child),
-            dir,
-        };
-        process.wait_ready(ready_addr);
-        process
+    /// Like [`PraxisProcess::spawn`], with each `(name, value)` in `env` set
+    /// in the child's environment.
+    ///
+    /// Use it for config that reads the environment at startup: the test
+    /// process's own environment cannot be changed safely while other tests
+    /// run, and the values given here override anything the developer has
+    /// exported under the same names.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process cannot be spawned or never becomes ready.
+    pub fn spawn_with_env(config_yaml: &str, ready_addr: &str, env: &[(&str, &str)]) -> Self {
+        Self::spawn_inner(config_yaml, ready_addr, None, env)
     }
 
     /// Process ID of the running `praxis`.
@@ -177,6 +169,36 @@ impl PraxisProcess {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// Write `config_yaml` to a temp dir and start `praxis` on it, applying
+    /// `ulimit` and `env` to the child, then wait for `ready_addr`.
+    fn spawn_inner(config_yaml: &str, ready_addr: &str, ulimit: Option<&str>, env: &[(&str, &str)]) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config_path = dir.path().join("praxis.yaml");
+        fs::write(&config_path, config_yaml).expect("write config");
+        let stdout = fs::File::create(dir.path().join("stdout.log")).expect("create stdout log");
+        let stderr = fs::File::create(dir.path().join("stderr.log")).expect("create stderr log");
+
+        let prefix = ulimit.map_or_else(String::new, |args| format!("ulimit {args} && "));
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{prefix}exec \"$0\" -c \"$1\""))
+            .arg(praxis_bin())
+            .arg(&config_path)
+            .env("NO_COLOR", "1")
+            .envs(env.iter().copied())
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(stderr)
+            .spawn()
+            .expect("spawn praxis");
+        let mut process = Self {
+            child: Some(child),
+            dir,
+        };
+        process.wait_ready(ready_addr);
+        process
     }
 
     /// Wait until `addr` accepts TCP connections.

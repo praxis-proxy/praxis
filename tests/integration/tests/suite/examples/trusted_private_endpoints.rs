@@ -86,8 +86,8 @@ fn example_config(backend_port: u16, listed: bool) -> Config {
             !yaml.contains("trusted_private_endpoints"),
             "the unlisted variant must drop the list"
         );
-        // Past the load-time health check name rule, so the connect-time check is what refuses.
-        yaml.push_str("\ninsecure_options:\n  allow_private_health_checks: true\n");
+        // Past the load-time endpoint and health check name rules, so the connect-time check is what refuses.
+        yaml.push_str("\ninsecure_options:\n  allow_private_endpoints: true\n  allow_private_health_checks: true\n");
     }
     Config::from_yaml(&yaml).expect("trusted private endpoints example should parse")
 }

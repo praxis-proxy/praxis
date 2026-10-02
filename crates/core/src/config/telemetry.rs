@@ -11,6 +11,13 @@ use serde::{Deserialize, Serialize};
 // Constants
 // -----------------------------------------------------------------------------
 
+/// Upper bound on `telemetry.batch_interval_secs`.
+const MAX_BATCH_INTERVAL_SECS: u64 = 300; // 5 min
+
+/// Upper bound on `telemetry.batch_size`; the exporter preallocates a
+/// queue proportional to it.
+const MAX_BATCH_SIZE: usize = 65_536; // 64 Ki spans
+
 /// OTel-standard environment variable for resource attributes
 /// (format: `key1=value1,key2=value2`).
 const OTEL_RESOURCE_ATTRIBUTES_ENV_VAR: &str = "OTEL_RESOURCE_ATTRIBUTES";
@@ -150,7 +157,8 @@ impl TelemetryConfig {
     /// # Errors
     ///
     /// Returns an error if `batch_size` or `batch_interval_secs` is
-    /// explicitly set to zero, `otlp_endpoint` is empty/whitespace-only,
+    /// explicitly set to zero, `batch_size` exceeds [`MAX_BATCH_SIZE`],
+    /// `batch_interval_secs` exceeds [`MAX_BATCH_INTERVAL_SECS`], `otlp_endpoint` is empty/whitespace-only,
     /// or `sampling_rate` is outside the `0.0..=1.0` range.
     #[expect(clippy::too_many_lines, reason = "validation logic naturally verbose")]
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -159,6 +167,18 @@ impl TelemetryConfig {
         }
         if self.batch_interval_secs == Some(0) {
             return Err("telemetry.batch_interval_secs must be > 0".to_owned());
+        }
+        if let Some(size) = self.batch_size
+            && size > MAX_BATCH_SIZE
+        {
+            return Err(format!("telemetry.batch_size must be <= {MAX_BATCH_SIZE}, got {size}"));
+        }
+        if let Some(secs) = self.batch_interval_secs
+            && secs > MAX_BATCH_INTERVAL_SECS
+        {
+            return Err(format!(
+                "telemetry.batch_interval_secs must be <= {MAX_BATCH_INTERVAL_SECS} (5 min), got {secs}"
+            ));
         }
         if self
             .otlp_endpoint
@@ -833,6 +853,48 @@ otlp_headers:
         assert!(
             err.contains("batch_size must be > 0"),
             "expected batch_size error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_oversized_batch_size() {
+        let config = TelemetryConfig {
+            batch_size: Some(65_537),
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("batch_size must be <= 65536"),
+            "expected batch_size ceiling error, got: {err}"
+        );
+        let at_max = TelemetryConfig {
+            batch_size: Some(65_536),
+            ..Default::default()
+        };
+        assert!(
+            at_max.validate().is_ok(),
+            "batch_size at the ceiling should be accepted"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_oversized_batch_interval_secs() {
+        let config = TelemetryConfig {
+            batch_interval_secs: Some(301),
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.contains("batch_interval_secs must be <= 300"),
+            "expected batch_interval_secs ceiling error, got: {err}"
+        );
+        let at_max = TelemetryConfig {
+            batch_interval_secs: Some(300),
+            ..Default::default()
+        };
+        assert!(
+            at_max.validate().is_ok(),
+            "batch_interval_secs at the ceiling should be accepted"
         );
     }
 

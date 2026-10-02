@@ -158,12 +158,13 @@ load_balancer_strategy:
 
 ### Endpoint Changes
 
-Adding or removing an endpoint re-hashes
-approximately `1/N` of traffic, where `N` is the
-number of endpoints. The remaining traffic continues
-to reach the same backends. This property makes
-consistent hashing suitable for caching layers where
-cache locality matters.
+`consistent_hash` is weighted modulo hashing: the
+key selects slot `fnv1a(key) % Σweight`. Adding or
+removing an endpoint changes `Σweight` and therefore
+remaps most keys, not `1/N` of them. Use `ring_hash`
+or `maglev` when minimal disruption on endpoint
+changes matters (for example, caching layers that
+depend on cache locality).
 
 ### Security Note
 

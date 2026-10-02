@@ -7,7 +7,7 @@ use std::sync::{Arc, atomic::AtomicU64};
 
 use praxis_core::health::ClusterHealthState;
 
-use super::endpoint::WeightedEndpoint;
+use super::{endpoint::WeightedEndpoint, is_excluded};
 
 // -----------------------------------------------------------------------------
 // Random
@@ -124,11 +124,6 @@ fn pick_where(
         last = Some(ep);
     }
     last.map(|ep| Arc::clone(&ep.address))
-}
-
-/// Returns `true` if `addr` appears in the exclusion list.
-fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
-    exclude.iter().any(|e| e.as_ref() == addr)
 }
 
 // -----------------------------------------------------------------------------

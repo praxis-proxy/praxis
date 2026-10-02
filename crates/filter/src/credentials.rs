@@ -285,7 +285,12 @@ impl DeferredCredential {
         // keeps an unzeroized copy of the secret off the heap for every
         // destination it is *not* authorized for.
         let value = match HeaderValue::from_str(&self.value) {
-            Ok(value) => value,
+            Ok(mut value) => {
+                // Keep the secret out of HPACK/QPACK dynamic tables and
+                // `Debug` output.
+                value.set_sensitive(true);
+                value
+            },
             Err(error) => {
                 // `error` (http's InvalidHeaderValue) never echoes the offending
                 // bytes, and the secret value itself is deliberately not logged.
@@ -420,6 +425,18 @@ mod tests {
         let out = tracing::subscriber::with_default(subscriber, f);
         let bytes = buffer.0.lock().expect("buffer lock").clone();
         (out, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[test]
+    fn injected_credential_is_marked_sensitive() {
+        let cred = credential("api.example.com:443", "Bearer sk-secret");
+        let mut headers = HeaderMap::new();
+        let injected = inject_if_authorized(&cred, "api.example.com:443", &mut headers);
+        assert!(injected, "matching authority should inject the credential");
+        assert!(
+            headers.get("authorization").is_some_and(HeaderValue::is_sensitive),
+            "the injected credential header must be marked sensitive"
+        );
     }
 
     #[test]

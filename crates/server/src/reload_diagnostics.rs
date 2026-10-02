@@ -60,7 +60,7 @@ fn detect_listener_topology_changes_with(old: &Config, new: &Config, old_by_name
     for name in old_names.difference(&new_names) {
         warn!(
             listener = %name,
-            "listener removed in config; requires restart to unbind"
+            "listener removed in config; it stays bound and keeps serving its previous pipeline (health checks for it are no longer updated) until restart"
         );
     }
 

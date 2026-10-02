@@ -25,6 +25,12 @@ use crate::{
 struct TimeoutFilterConfig {
     /// Maximum allowed elapsed time from request receipt to response headers,
     /// in milliseconds. Requests that exceed this limit receive a 504.
+    ///
+    /// Enforcement is post-hoc: the check runs once response headers
+    /// arrive, so the request has already reached the upstream and any
+    /// non-idempotent side effects have already happened. It does not
+    /// bound a hung upstream; use cluster connection/read timeouts for
+    /// that.
     timeout_ms: u64,
 }
 
@@ -36,6 +42,10 @@ struct TimeoutFilterConfig {
 ///
 /// This does not cancel the upstream connection; the upstream has already
 /// responded by the time this check runs. It is useful for enforcing SLAs.
+/// Because enforcement is post-hoc, the request has already been
+/// delivered upstream (non-idempotent side effects have happened), and a
+/// hung upstream is not bounded by this filter; configure cluster
+/// timeouts for that.
 ///
 /// # YAML configuration
 ///

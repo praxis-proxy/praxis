@@ -14,6 +14,14 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Upper bound on the sub-request circuit breaker's recovery and
+/// half-open windows; larger values leave a circuit effectively stuck.
+const MAX_CIRCUIT_WINDOW_SECS: u64 = 3_600; // 1 hour
+
+// -----------------------------------------------------------------------------
 // SubRequestCircuitBreakerConfig
 // -----------------------------------------------------------------------------
 
@@ -61,7 +69,8 @@ impl SubRequestCircuitBreakerConfig {
     /// # Errors
     ///
     /// Returns an error if `consecutive_failures`,
-    /// `recovery_window_secs`, or `half_open_timeout_secs` is zero.
+    /// `recovery_window_secs`, or `half_open_timeout_secs` is zero, or
+    /// if either window exceeds one hour (`MAX_CIRCUIT_WINDOW_SECS`).
     pub fn validate(&self) -> Result<(), String> {
         if self.consecutive_failures == 0 {
             return Err("subrequest_circuit_breaker: consecutive_failures must be > 0".to_owned());
@@ -71,6 +80,16 @@ impl SubRequestCircuitBreakerConfig {
         }
         if self.half_open_timeout_secs == 0 {
             return Err("subrequest_circuit_breaker: half_open_timeout_secs must be > 0".to_owned());
+        }
+        for (field, secs) in [
+            ("recovery_window_secs", self.recovery_window_secs),
+            ("half_open_timeout_secs", self.half_open_timeout_secs),
+        ] {
+            if secs > MAX_CIRCUIT_WINDOW_SECS {
+                return Err(format!(
+                    "runtime.subrequest_circuit_breaker.{field} ({secs}) must be <= {MAX_CIRCUIT_WINDOW_SECS} (1 hour)"
+                ));
+            }
         }
         Ok(())
     }
@@ -595,6 +614,30 @@ subrequest_circuit_breaker:
         assert!(
             err.contains("half_open_timeout_secs must be > 0"),
             "should reject zero half_open: {err}"
+        );
+    }
+
+    #[test]
+    fn subrequest_circuit_breaker_validate_window_ceiling() {
+        let recovery = SubRequestCircuitBreakerConfig {
+            consecutive_failures: 5,
+            recovery_window_secs: 3_601,
+            half_open_timeout_secs: 30,
+        };
+        let recovery_err = recovery.validate().unwrap_err();
+        assert!(
+            recovery_err.contains("runtime.subrequest_circuit_breaker.recovery_window_secs (3601) must be <= 3600"),
+            "should reject recovery window over 1 hour: {recovery_err}"
+        );
+        let half_open = SubRequestCircuitBreakerConfig {
+            consecutive_failures: 5,
+            recovery_window_secs: 3_600,
+            half_open_timeout_secs: 3_601,
+        };
+        let half_open_err = half_open.validate().unwrap_err();
+        assert!(
+            half_open_err.contains("half_open_timeout_secs (3601) must be <= 3600"),
+            "should reject half-open timeout over 1 hour: {half_open_err}"
         );
     }
 

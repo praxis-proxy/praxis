@@ -941,6 +941,33 @@ async fn null_origin_rejected_with_distinct_reason() {
     );
 }
 
+#[tokio::test]
+async fn referer_with_userinfo_rejected() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(&["https://*.trusted.example"], 100, false);
+    let mut req = crate::test_utils::make_request(http::Method::POST, "/submit");
+    req.headers
+        .insert("referer", "https://evil@x.trusted.example/p".parse()?);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await?;
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "Referer carrying userinfo must not be trusted"
+    );
+    Ok(())
+}
+
+#[test]
+fn extract_origin_referer_with_userinfo_is_none() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("referer", "https://user@example.com/path".parse()?);
+    assert!(
+        extract_origin(&headers).is_none(),
+        "Referer with userinfo should not yield an origin"
+    );
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

@@ -23,9 +23,9 @@ Steps inherit the request's logical upstream binding, so a step's `load_balancer
 |-------|------|---------|-------------|
 | `initial_step` | string | yes | Name of the first step to execute. |
 | `max_iterations` | integer | no | Maximum iterations before aborting (default 10, max 100). |
-| `max_response_bytes` | integer | no | Maximum response body bytes per sub-request. |
+| `max_response_bytes` | integer | no | Maximum response body bytes per sub-request (at most 1 GiB). |
 | `max_stream_response_bytes` | integer | no | Optional cumulative byte ceiling for one logical streamed response. This is intentionally distinct from buffered per-step response limits. |
-| `max_state_bytes` | integer | no | Maximum accumulated iteration state bytes. |
+| `max_state_bytes` | integer | no | Maximum accumulated iteration state bytes (at most 1 GiB). |
 | `step_timeout_ms` | integer | no | Per-step timeout in milliseconds. Defaults to `timeout_ms`. |
 | `steps` | StepConfig[] | yes | Named steps, each with filters and transition rules. |
 | `steps[].name` | string | yes | Step name (must be unique within the router). |

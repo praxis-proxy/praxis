@@ -36,6 +36,7 @@ mod filter_docs;
 mod fips;
 mod lint_deps;
 mod lint_example_tests;
+mod paths;
 #[cfg(feature = "dev")]
 mod port;
 mod publish;

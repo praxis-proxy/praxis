@@ -209,6 +209,13 @@ impl PerIpState {
 /// (SIIT, e.g. `64:ff9b::/96`), they arrive as IPv6 addresses sharing a
 /// prefix; keep the default 128 there so translated clients are not grouped together.
 ///
+/// The per-IP table fails closed: once it holds 200,000 keys that are
+/// still within their idle window (`2 * burst / rate` seconds), every
+/// previously unseen client gets a 429 until entries age out. A large
+/// `burst`-to-`rate` ratio stretches that window, so a client rotating
+/// addresses can hold the table full more cheaply; on internet-facing
+/// listeners prefer `ipv6_prefix_len: 64` and a modest ratio.
+///
 /// State is all managed locally.
 ///
 /// `shadow: true` evaluates the limit without rejecting: over-limit

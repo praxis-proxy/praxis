@@ -5,12 +5,16 @@
 
 Rejects requests matching string, regex, or PII rules against headers and/or body content.
 
+## Configuration Notes
+
+Body rules match the raw body text. Non-negated body rules are also evaluated against decoded JSON object keys and string values, so JSON escapes (`\u0020`) cannot hide blocked content.
+
 ## Configuration
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `action` | `reject` \| `flag` | no | What to do when a rule matches (default: reject). |
-| `reject_oversized` | bool | no | Reject a body that exactly reaches the inspection buffer limit (1 MiB) instead of inspecting it. Bodies that *exceed* the limit are always rejected with 413 by the streaming buffer regardless of this flag — there is no silent truncation. This flag only governs a body sized exactly at the limit, which is otherwise inspected as-is. |
+| `reject_oversized` | bool | no | Reject bodies of 1 MiB or more with 413 instead of inspecting them. Bodies larger than the pipeline's effective buffer limit (the largest limit any filter in the pipeline requests) are always rejected with 413 by the buffer, regardless of this flag; there is no silent truncation. Without this flag, bodies of 1 MiB or more that fit within the effective limit are inspected in full. |
 | `rules` | RuleConfig[] | yes | List of rules to evaluate. |
 | `rules[].name` | string | no | Header name (required when `target` is [`Header`]). |
 | `rules[].contains` | string \| (`ssn` \| `credit_card` \| `phone` \| `email`)[] | no | Literal substring (case-insensitive) or PII category list. |

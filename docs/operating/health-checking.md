@@ -352,10 +352,14 @@ SSRF-sensitive addresses. Loopback (`127.0.0.0/8`,
 
 For local development, set
 `insecure_options.allow_private_health_checks: true`
-to allow probing loopback and private addresses:
+to allow probing loopback and private addresses. The
+probed endpoints also carry data-plane traffic, so they
+must pass the endpoint check too; set
+`allow_private_endpoints: true` alongside it:
 
 ```yaml
 insecure_options:
+  allow_private_endpoints: true
   allow_private_health_checks: true
 ```
 

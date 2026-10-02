@@ -3,6 +3,7 @@
 
 //! Load-balancer filter: select an upstream endpoint from the routed cluster.
 
+mod authority;
 mod entry;
 mod reselector;
 mod strategy;
@@ -19,7 +20,10 @@ mod strategy;
 )]
 mod tests;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, atomic::Ordering},
+};
 
 use async_trait::async_trait;
 use metrics::SharedString;
@@ -131,8 +135,9 @@ impl LoadBalancerFilter {
     ///
     /// # Panics
     ///
-    /// Panics when a cluster contains an invalid authority override.
-    /// Use [`Self::try_new`] when cluster definitions are not already
+    /// Panics when a cluster contains an invalid authority override, or
+    /// an endpoint that `authority: { from: endpoint }` cannot turn into
+    /// one. Use [`Self::try_new`] when cluster definitions are not already
     /// validated.
     #[expect(clippy::panic, reason = "preserves the infallible public constructor contract")]
     pub fn new(clusters: &[Cluster]) -> Self {
@@ -146,8 +151,9 @@ impl LoadBalancerFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if any cluster's authority override
-    /// is invalid.
+    /// Returns [`FilterError`] if any cluster's authority override is
+    /// invalid, including an endpoint that `{ from: endpoint }` cannot
+    /// turn into one.
     pub fn try_new(clusters: &[Cluster]) -> Result<Self, FilterError> {
         Self::try_new_with_source(clusters, ClusterSource::default())
     }
@@ -157,8 +163,9 @@ impl LoadBalancerFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if any cluster's authority override
-    /// is invalid.
+    /// Returns [`FilterError`] if any cluster's authority override is
+    /// invalid, including an endpoint that `{ from: endpoint }` cannot
+    /// turn into one.
     fn try_new_with_source(clusters: &[Cluster], cluster_source: ClusterSource) -> Result<Self, FilterError> {
         let map = clusters
             .iter()
@@ -367,11 +374,15 @@ impl HttpFilter for LoadBalancerFilter {
             );
         }
 
-        if let Some(h) = health
-            && h.endpoints().iter().all(|ep| !ep.is_healthy())
-        {
-            warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
-            crate::metrics::record_lb_panic_mode(SharedString::from(Arc::clone(cluster)));
+        if let Some(h) = health {
+            if h.endpoints().iter().all(|ep| !ep.is_healthy()) {
+                if !entry.panic_mode_logged.swap(true, Ordering::Relaxed) {
+                    warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
+                }
+                crate::metrics::record_lb_panic_mode(SharedString::from(Arc::clone(cluster)));
+            } else if entry.panic_mode_logged.load(Ordering::Relaxed) {
+                entry.panic_mode_logged.store(false, Ordering::Relaxed);
+            }
         }
 
         let addr = entry.strategy.select(ctx, health, &[]).ok_or_else(|| -> FilterError {

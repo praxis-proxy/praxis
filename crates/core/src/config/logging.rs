@@ -65,7 +65,8 @@ pub struct LoggingConfig {
     /// Use a background thread for log I/O.
     #[serde(default = "default_non_blocking")]
     pub non_blocking: bool,
-    /// Non-blocking queue capacity in lines.
+    /// Non-blocking queue capacity in lines. Rejected when
+    /// `non_blocking` is `false`, since no queue exists then.
     pub buffer_size: Option<u32>,
 }
 
@@ -92,16 +93,7 @@ impl LoggingConfig {
     ///
     /// Returns a human-readable message when the configuration is invalid.
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(buffer_size) = self.buffer_size {
-            if buffer_size == 0 {
-                return Err("runtime.logging.buffer_size must be > 0 when set".to_owned());
-            }
-            if buffer_size > MAX_BUFFER_SIZE_LINES {
-                return Err(format!(
-                    "runtime.logging.buffer_size ({buffer_size}) exceeds maximum ({MAX_BUFFER_SIZE_LINES})"
-                ));
-            }
-        }
+        self.validate_buffer_size()?;
 
         match self.output {
             LogOutput::Stdout | LogOutput::Stderr => {
@@ -122,6 +114,25 @@ impl LoggingConfig {
             },
         }
 
+        Ok(())
+    }
+
+    /// Validate `buffer_size`: only with `non_blocking`, and within `1..=MAX_BUFFER_SIZE_LINES`.
+    fn validate_buffer_size(&self) -> Result<(), String> {
+        let Some(buffer_size) = self.buffer_size else {
+            return Ok(());
+        };
+        if !self.non_blocking {
+            return Err("runtime.logging.buffer_size is only valid when non_blocking is true".to_owned());
+        }
+        if buffer_size == 0 {
+            return Err("runtime.logging.buffer_size must be > 0 when set".to_owned());
+        }
+        if buffer_size > MAX_BUFFER_SIZE_LINES {
+            return Err(format!(
+                "runtime.logging.buffer_size ({buffer_size}) exceeds maximum ({MAX_BUFFER_SIZE_LINES})"
+            ));
+        }
         Ok(())
     }
 
@@ -208,6 +219,20 @@ mod tests {
             ..LoggingConfig::default()
         };
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn buffer_size_with_blocking_writer_rejected() {
+        let cfg = LoggingConfig {
+            buffer_size: Some(1_024),
+            non_blocking: false,
+            ..LoggingConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.contains("runtime.logging.buffer_size is only valid when non_blocking is true"),
+            "{err}"
+        );
     }
 
     #[test]

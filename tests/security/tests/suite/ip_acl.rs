@@ -38,7 +38,7 @@ fn allow_loopback_permits_request() {
 }
 
 #[test]
-#[should_panic(expected = "both allow and deny")]
+#[should_panic(expected = "mutually exclusive")]
 fn reject_config_with_both_allow_and_deny() {
     let backend_port = start_backend("ok");
     let proxy_port = free_port();

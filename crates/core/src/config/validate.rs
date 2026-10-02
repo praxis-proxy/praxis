@@ -31,12 +31,16 @@ pub(crate) const MAX_CONNECTIONS: u32 = 1_000_000;
 // Shared Name Validation
 // -----------------------------------------------------------------------------
 
-/// Reject names containing characters outside `[a-zA-Z0-9_-]`.
+/// Reject empty names and names containing characters outside
+/// `[a-zA-Z0-9_-]`.
 ///
-/// Used for listener, cluster, and filter chain names to ensure
-/// compatibility with metrics labels, log parsing, and routing
-/// references.
+/// Used for listener, cluster, filter chain, branch, and inline chain
+/// names to ensure compatibility with metrics labels, log parsing, and
+/// routing references.
 pub(crate) fn validate_name_chars(name: &str, kind: &str) -> Result<(), ProxyError> {
+    if name.is_empty() {
+        return Err(ProxyError::Config(format!("{kind} name must not be empty")));
+    }
     if !name
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')

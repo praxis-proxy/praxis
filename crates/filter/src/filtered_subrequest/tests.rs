@@ -127,6 +127,43 @@ fn connection_token_survives_obs_text_sibling() {
 }
 
 // -----------------------------------------------------------------------------
+// subrequest_uri
+// -----------------------------------------------------------------------------
+
+#[test]
+fn subrequest_uri_rejects_absolute_and_traversal_paths() -> Result<(), crate::FilterError> {
+    let current = http::Uri::try_from("/original")?;
+    for path in [
+        "http://evil/x",
+        "//evil",
+        "/a/../b",
+        "/a/..?q=1",
+        "/a/%2e%2E/b",
+        "relative",
+    ] {
+        assert!(
+            super::sanitize::subrequest_uri(Some(&path.to_owned()), &current).is_err(),
+            "rewritten path {path:?} must fail closed"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn subrequest_uri_accepts_origin_form_path() -> Result<(), crate::FilterError> {
+    let current = http::Uri::try_from("/original")?;
+    let uri = super::sanitize::subrequest_uri(Some(&"/ok?x=1".to_owned()), &current)?;
+    assert_eq!(
+        uri.path(),
+        "/ok",
+        "origin-form rewrite should become the sub-request path"
+    );
+    let unchanged = super::sanitize::subrequest_uri(None, &current)?;
+    assert_eq!(unchanged, current, "without a rewrite the current URI is reused");
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
 // strip_reserved_headers
 // -----------------------------------------------------------------------------
 

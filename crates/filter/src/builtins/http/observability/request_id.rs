@@ -23,6 +23,9 @@ use crate::{
 /// Default header name when none is configured.
 const DEFAULT_HEADER_NAME: &str = "X-Request-ID";
 
+/// Maximum accepted length of a client-supplied request ID.
+const MAX_INBOUND_ID_LEN: usize = 128; // 128 bytes
+
 // -----------------------------------------------------------------------------
 // Config
 // -----------------------------------------------------------------------------
@@ -199,13 +202,27 @@ impl HttpFilter for RequestIdFilter {
     }
 }
 
-/// Client-supplied value for `header_name`, if present and UTF-8.
+/// Client-supplied value for `header_name`, if present and well-formed.
+///
+/// IDs longer than [`MAX_INBOUND_ID_LEN`] or containing characters other
+/// than ASCII alphanumerics, `-`, `_`, `.` and `:` are ignored so a fresh
+/// ID is generated instead.
 fn inbound_header_value(ctx: &HttpFilterContext<'_>, header_name: &str) -> Option<String> {
     ctx.request
         .headers
         .get(header_name)
         .and_then(|value| value.to_str().ok())
+        .filter(|id| is_valid_inbound_id(id))
         .map(str::to_owned)
+}
+
+/// Returns `true` if a client-supplied request ID is safe to propagate.
+fn is_valid_inbound_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_INBOUND_ID_LEN
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
 }
 
 /// Reuse a request-scoped [`TraceContext`] ID when this filter uses `x-request-id`.
@@ -247,6 +264,42 @@ fn adopt_request_id(ctx: &mut HttpFilterContext<'_>, header_name: &str, id: &str
 )]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejects_malformed_inbound_id() -> Result<(), Box<dyn std::error::Error>> {
+        let filter = make_filter("");
+        let long_id = "a".repeat(MAX_INBOUND_ID_LEN.saturating_add(1));
+        for bad in ["has space", "tab\there", long_id.as_str()] {
+            let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+            req.headers.insert(
+                http::header::HeaderName::from_static("x-request-id"),
+                http::header::HeaderValue::from_str(bad)?,
+            );
+            let mut ctx = crate::test_utils::make_filter_context(&req);
+            drop(filter.on_request(&mut ctx).await.map_err(|e| e.to_string())?);
+            let forwarded = ctx.extra_request_headers.first().map(|(_, v)| v.as_str());
+            assert!(
+                forwarded.is_some_and(|v| v != bad),
+                "malformed ID {bad:?} should be replaced by a generated one"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn keeps_well_formed_inbound_id() -> Result<(), Box<dyn std::error::Error>> {
+        let filter = make_filter("");
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(
+            http::header::HeaderName::from_static("x-request-id"),
+            http::header::HeaderValue::from_static("a.b:c_d-1"),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        drop(filter.on_request(&mut ctx).await.map_err(|e| e.to_string())?);
+        let forwarded = ctx.extra_request_headers.first().map(|(_, v)| v.as_str());
+        assert_eq!(forwarded, Some("a.b:c_d-1"), "well-formed ID should be kept");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn generates_id_when_header_missing() {

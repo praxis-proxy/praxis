@@ -44,6 +44,21 @@ use crate::{
 /// Pre-parsed `Origin` header value for Vary responses.
 const VARY_ORIGIN: &str = "Origin";
 
+/// Upstream CORS response headers replaced by the filter on CORS requests.
+///
+/// For any request carrying an `Origin`, the filter is authoritative:
+/// these headers are stripped from the upstream response before the
+/// filter decides what (if anything) to inject.
+const UPSTREAM_CORS_HEADERS: [&str; 7] = [
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
+    "access-control-expose-headers",
+    "access-control-allow-methods",
+    "access-control-allow-headers",
+    "access-control-max-age",
+    "access-control-allow-private-network",
+];
+
 // -----------------------------------------------------------------------------
 // CorsFilter
 // -----------------------------------------------------------------------------
@@ -56,6 +71,10 @@ const VARY_ORIGIN: &str = "Origin";
 ///
 /// `allow_credentials: true` is incompatible with wildcard origins,
 /// methods, or headers per the Fetch spec.
+///
+/// For requests carrying an `Origin` header, the filter is authoritative:
+/// upstream `Access-Control-*` response headers are stripped and replaced
+/// by the filter's own headers (or omitted for disallowed origins).
 ///
 /// # YAML configuration
 ///
@@ -330,6 +349,11 @@ impl HttpFilter for CorsFilter {
             return Ok(FilterAction::Continue);
         };
 
+        if strip_upstream_cors_headers(resp) {
+            trace!("stripped upstream CORS response headers");
+            ctx.response_headers_modified = true;
+        }
+
         if self.resolve_origin(origin).is_none() {
             trace!(origin = %origin, "disallowed origin; omitting CORS headers");
             if self.policy.needs_vary() {
@@ -344,4 +368,20 @@ impl HttpFilter for CorsFilter {
         ctx.response_headers_modified = true;
         Ok(FilterAction::Continue)
     }
+}
+
+// -----------------------------------------------------------------------------
+// Upstream Header Stripping
+// -----------------------------------------------------------------------------
+
+/// Remove every upstream CORS response header listed in
+/// [`UPSTREAM_CORS_HEADERS`].
+///
+/// Returns `true` when at least one header was removed.
+fn strip_upstream_cors_headers(resp: &mut crate::context::Response) -> bool {
+    let mut stripped = false;
+    for name in UPSTREAM_CORS_HEADERS {
+        stripped |= resp.headers.remove(name).is_some();
+    }
+    stripped
 }

@@ -13,7 +13,7 @@ use std::{
 
 use praxis_core::health::ClusterHealthState;
 
-use super::endpoint::WeightedEndpoint;
+use super::{endpoint::WeightedEndpoint, is_excluded};
 
 // -----------------------------------------------------------------------------
 // LeastConnections
@@ -163,11 +163,6 @@ impl LeastConnections {
         }
         best.map(|(_, load, _, pos)| (pos, load))
     }
-}
-
-/// Returns `true` if `addr` appears in the exclusion list.
-fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
-    exclude.iter().any(|e| e.as_ref() == addr)
 }
 
 // -----------------------------------------------------------------------------

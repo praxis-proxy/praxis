@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use http::header::HeaderValue;
 use praxis_core::{
     config::{CachedClusterTls, RetryPolicy},
     connectivity::{ConnectionOptions, Upstream},
@@ -13,7 +12,7 @@ use praxis_core::{
     retry::ClusterRetryState,
 };
 
-use super::strategy::Strategy;
+use super::{authority::AuthorityResolver, strategy::Strategy};
 
 // -----------------------------------------------------------------------------
 // EndpointReselector
@@ -28,10 +27,11 @@ pub struct EndpointReselector {
     opts: Arc<ConnectionOptions>,
     /// Optional TLS configuration for the cluster.
     tls: Option<CachedClusterTls>,
-    /// Pre-parsed upstream authority override, carried so a retry to a
-    /// reselected endpoint keeps rewriting `Host` instead of silently
-    /// reverting to the downstream value.
-    authority: Option<HeaderValue>,
+    /// The cluster's upstream `Host` source, carried so a retry to a
+    /// reselected endpoint keeps rewriting `Host` (to the new endpoint's
+    /// address when the authority follows the endpoint) instead of
+    /// silently reverting to the downstream value.
+    authority: AuthorityResolver,
     /// Hash key captured at first selection (for consistent-hash).
     hash_key: Option<Arc<str>>,
     /// Resolved retry policy for this cluster.
@@ -51,7 +51,7 @@ impl EndpointReselector {
         strategy: Arc<Strategy>,
         opts: Arc<ConnectionOptions>,
         tls: Option<CachedClusterTls>,
-        authority: Option<HeaderValue>,
+        authority: AuthorityResolver,
         hash_key: Option<Arc<str>>,
         retry_policy: Arc<RetryPolicy>,
         retry_state: Arc<ClusterRetryState>,
@@ -75,9 +75,10 @@ impl EndpointReselector {
     /// Build an [`Upstream`] for `addr`.
     #[must_use]
     pub fn build_upstream(&self, addr: Arc<str>) -> Upstream {
+        let authority = self.authority.for_address(&addr);
         Upstream {
             address: addr,
-            authority: self.authority.clone(),
+            authority,
             connection: Arc::clone(&self.opts),
             tls: self.tls.clone(),
         }

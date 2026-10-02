@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use http::header::HeaderValue;
 use praxis_core::{
     config::{CachedClusterTls, Cluster, RetryPolicy},
     connectivity::{ConnectionOptions, Upstream},
@@ -15,24 +14,35 @@ use praxis_core::{
 use tracing::debug;
 
 use super::{
+    authority::AuthorityResolver,
     reselector::EndpointReselector,
     strategy::{Strategy, build_strategy},
 };
 use crate::{FilterError, filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Maximum route overrides memoized per cluster.
+///
+/// Sized to hold every route that overrides one cluster in practical
+/// configs, so alternating routes do not thrash a single slot.
+const MAX_RETRY_MEMO_ENTRIES: usize = 16;
+
+// -----------------------------------------------------------------------------
 // ClusterEntry
 // -----------------------------------------------------------------------------
 
-/// Memo slot pairing a route override policy (the cache key, compared by
+/// Memo entries pairing a route override policy (the cache key, compared by
 /// [`Arc`] identity) with the merged policy computed from it.
-type RetryMemoSlot = Option<(Arc<RetryPolicy>, Arc<RetryPolicy>)>;
+type RetryMemo = Vec<(Arc<RetryPolicy>, Arc<RetryPolicy>)>;
 
 /// Resolved state for a single cluster.
 pub(super) struct ClusterEntry {
-    /// Pre-parsed upstream authority override as a [`HeaderValue`].
-    /// `None` means forward the downstream `Host` header unchanged.
-    pub(super) authority: Option<HeaderValue>,
+    /// Upstream `Host` for each attempt; forwards the downstream `Host`
+    /// when the cluster sets no authority.
+    pub(super) authority: AuthorityResolver,
 
     /// Connection options derived from the cluster config.
     pub(super) opts: Arc<ConnectionOptions>,
@@ -55,10 +65,15 @@ pub(super) struct ClusterEntry {
     /// Shared active-request counter and retry budget.
     pub(super) retry_state: Arc<ClusterRetryState>,
 
-    /// One-slot memo of the last route-override retry merge, keyed by the
-    /// route policy's [`Arc`] identity. Holding the route [`Arc`] both keys
-    /// the cache and pins its address against reuse.
-    merged_retry_memo: ArcSwap<RetryMemoSlot>,
+    /// Bounded memo of route-override retry merges, keyed by the route
+    /// policy's [`Arc`] identity, most recent first. Holding the route
+    /// [`Arc`] both keys the cache and pins its address against reuse.
+    merged_retry_memo: ArcSwap<RetryMemo>,
+
+    /// Whether the panic-mode warning has been logged for the current
+    /// all-unhealthy episode, so the warning fires once per transition
+    /// instead of on every request.
+    pub(super) panic_mode_logged: std::sync::atomic::AtomicBool,
 
     /// Lazily built reselector for the common case: no hash key and no
     /// route retry override. The reselector is stateless config data.
@@ -68,45 +83,67 @@ pub(super) struct ClusterEntry {
 impl ClusterEntry {
     /// Build an [`Upstream`] from a selected address and request context.
     ///
-    /// When TLS is configured and no explicit SNI is set, falls back
-    /// to the `Host` header from the request. The port is stripped
-    /// from the host value because SNI must be a bare hostname
-    /// per [RFC 6066].
+    /// When TLS is configured and no explicit SNI is set, the SNI is
+    /// taken from the cluster's fixed `authority`, then the request
+    /// `Host` header, then the request URI authority (HTTP/2
+    /// `:authority`). The configured authority wins over `Host` so a
+    /// client cannot steer the upstream TLS name. The chosen value
+    /// goes through [`sni_candidate`]: SNI must be a bare DNS
+    /// hostname per [RFC 6066], so ports and the root dot are
+    /// stripped and IP literals produce no SNI. A cluster whose
+    /// authority follows the endpoint skips all of this and leaves SNI
+    /// unset, so the peer derives it from each attempt's own endpoint
+    /// address.
     ///
-    /// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
+    /// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
     pub(super) fn build_upstream(&self, addr: Arc<str>, ctx: &HttpFilterContext<'_>) -> Upstream {
+        let authority = self.authority.for_address(&addr);
         let tls = self.tls.clone().map(|mut t| {
             if t.sni().is_none()
-                && let Some(host) = ctx
-                    .request
-                    .headers
-                    .get(http::header::HOST)
+                && !self.authority.follows_endpoint()
+                && let Some(sni) = authority
+                    .as_ref()
                     .and_then(|v| v.to_str().ok())
+                    .or_else(|| {
+                        ctx.request
+                            .headers
+                            .get(http::header::HOST)
+                            .and_then(|v| v.to_str().ok())
+                    })
+                    .or_else(|| ctx.request.uri.authority().map(http::uri::Authority::as_str))
+                    .and_then(sni_candidate)
             {
-                t.set_sni(strip_host_port(host));
+                t.set_sni(sni);
             }
             t
         });
         Upstream {
             address: addr,
-            authority: self.authority.clone(),
+            authority,
             connection: Arc::clone(&self.opts),
             tls,
         }
     }
 
     /// Merge the route-level retry override onto this cluster's policy,
-    /// memoizing the last merge by the route policy's [`Arc`] identity.
+    /// memoizing up to [`MAX_RETRY_MEMO_ENTRIES`] merges by the route
+    /// policy's [`Arc`] identity.
     pub(super) fn merged_retry_policy(&self, route: &Arc<RetryPolicy>) -> Arc<RetryPolicy> {
-        let cached = self.merged_retry_memo.load();
-        if let Some((cached_route, merged)) = cached.as_ref()
-            && Arc::ptr_eq(cached_route, route)
-        {
-            return Arc::clone(merged);
+        if let Some(merged) = lookup_memo(&self.merged_retry_memo.load(), route) {
+            return merged;
         }
         let merged = Arc::new(self.retry_policy.merge_override(route));
-        self.merged_retry_memo
-            .store(Arc::new(Some((Arc::clone(route), Arc::clone(&merged)))));
+        self.merged_retry_memo.rcu(|memo| {
+            let mut next = RetryMemo::with_capacity(MAX_RETRY_MEMO_ENTRIES);
+            next.push((Arc::clone(route), Arc::clone(&merged)));
+            next.extend(
+                memo.iter()
+                    .filter(|(cached_route, _)| !Arc::ptr_eq(cached_route, route))
+                    .take(MAX_RETRY_MEMO_ENTRIES.saturating_sub(1))
+                    .cloned(),
+            );
+            next
+        });
         merged
     }
 
@@ -135,24 +172,34 @@ impl ClusterEntry {
     }
 }
 
-/// Extract the hostname from a `Host` header value, stripping the port.
+/// Find the memoized merge for `route` by [`Arc`] identity.
+fn lookup_memo(memo: &RetryMemo, route: &Arc<RetryPolicy>) -> Option<Arc<RetryPolicy>> {
+    memo.iter()
+        .find(|(cached_route, _)| Arc::ptr_eq(cached_route, route))
+        .map(|(_, merged)| Arc::clone(merged))
+}
+
+/// Derive a TLS SNI name from an authority (`host[:port]`).
 ///
-/// Handles both plain hosts (`example.com:8443` -> `example.com`)
-/// and IPv6 bracket notation (`[::1]:8443` -> `[::1]`).
-fn strip_host_port(host: &str) -> &str {
-    if let Some(bracket_end) = host.find(']') {
-        host.get(..=bracket_end).unwrap_or(host)
-    } else {
-        host.rsplit_once(':').map_or(host, |(h, _)| h)
-    }
+/// Strips the port and a trailing root dot. Returns `None` for an
+/// empty host or an IP literal, since [RFC 6066] forbids IP
+/// addresses in the `server_name` extension.
+///
+/// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
+fn sni_candidate(host: &str) -> Option<&str> {
+    let host = super::super::strip_port(host);
+    let host = host.strip_suffix('.').unwrap_or(host);
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    (!host.is_empty() && bare.parse::<std::net::IpAddr>().is_err()).then_some(host)
 }
 
 /// Build a [`ClusterEntry`] from a cluster definition.
 ///
 /// # Errors
 ///
-/// Returns [`FilterError`] if the authority override cannot be parsed
-/// as a valid HTTP header value.
+/// Returns [`FilterError`] if the authority override, or an endpoint
+/// address the authority is taken from, cannot be parsed as a valid HTTP
+/// authority.
 pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, FilterError> {
     let endpoints = build_weighted_endpoints(cluster);
     let total_weight: u32 = endpoints.iter().map(|ep| ep.weight).sum();
@@ -164,7 +211,7 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
     );
 
     let tls = build_cached_tls(cluster)?;
-    let authority = build_authority(cluster)?;
+    let authority = AuthorityResolver::build(cluster)?;
     let strategy = Arc::new(build_strategy(&cluster.load_balancer_strategy, endpoints));
     let retry_policy = Arc::new(cluster.retry_policy.clone().unwrap_or_else(RetryPolicy::legacy_default));
     let retry_state = Arc::new(ClusterRetryState::new(retry_policy.retry_budget.as_ref()));
@@ -177,7 +224,8 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
         application_provider: cluster.http.application_provider.clone(),
         retry_policy,
         retry_state,
-        merged_retry_memo: ArcSwap::from_pointee(None),
+        merged_retry_memo: ArcSwap::from_pointee(RetryMemo::new()),
+        panic_mode_logged: std::sync::atomic::AtomicBool::new(false),
         default_reselector: std::sync::OnceLock::new(),
     })
 }
@@ -199,25 +247,6 @@ fn build_cached_tls(cluster: &Cluster) -> Result<Option<CachedClusterTls>, Filte
     })
 }
 
-/// Pre-parse the authority override as a [`HeaderValue`].
-///
-/// Returns an error instead of silently disabling the override, so
-/// that programmatic callers of `LoadBalancerFilter::new` cannot
-/// accidentally forward the caller's original `Host` header.
-fn build_authority(cluster: &Cluster) -> Result<Option<HeaderValue>, FilterError> {
-    let Some(a) = cluster.http.authority.as_deref() else {
-        return Ok(None);
-    };
-    cluster.validate_authority().map_err(|e| e.to_string())?;
-    HeaderValue::from_str(a).map(Some).map_err(|e| {
-        format!(
-            "cluster '{}': authority '{}' is not a valid HTTP header value: {e}",
-            cluster.name, a,
-        )
-        .into()
-    })
-}
-
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -229,48 +258,80 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strip_host_port_with_port() {
+    fn sni_candidate_strips_port() {
         assert_eq!(
-            strip_host_port("example.com:8443"),
-            "example.com",
-            "should strip port from host"
+            sni_candidate("example.com:443"),
+            Some("example.com"),
+            "port should be stripped"
         );
     }
 
     #[test]
-    fn strip_host_port_without_port() {
+    fn sni_candidate_strips_root_dot() {
         assert_eq!(
-            strip_host_port("example.com"),
-            "example.com",
-            "host without port should be unchanged"
+            sni_candidate("example.com."),
+            Some("example.com"),
+            "root dot should be stripped"
         );
     }
 
     #[test]
-    fn strip_host_port_ipv6_with_port() {
-        assert_eq!(
-            strip_host_port("[::1]:8443"),
-            "[::1]",
-            "should strip port from IPv6 bracket notation"
-        );
+    fn sni_candidate_rejects_ipv4() {
+        assert_eq!(sni_candidate("10.0.0.1"), None, "IPv4 literal must not become SNI");
     }
 
     #[test]
-    fn strip_host_port_ipv6_without_port() {
-        assert_eq!(
-            strip_host_port("[::1]"),
-            "[::1]",
-            "IPv6 without port should be unchanged"
-        );
+    fn sni_candidate_rejects_ipv6_with_port() {
+        assert_eq!(sni_candidate("[::1]:8443"), None, "IPv6 literal must not become SNI");
     }
 
     #[test]
-    fn strip_host_port_standard_https() {
-        assert_eq!(
-            strip_host_port("example.com:443"),
-            "example.com",
-            "should strip default HTTPS port"
+    fn sni_candidate_rejects_empty() {
+        assert_eq!(sni_candidate(""), None, "empty host must not become SNI");
+    }
+
+    #[test]
+    fn merged_retry_policy_memoizes_alternating_routes() -> Result<(), FilterError> {
+        let cluster: Cluster =
+            serde_yaml::from_str("name: memo\nendpoints:\n  - \"203.0.113.1:80\"\nretry_policy:\n  max_retries: 2\n")?;
+        let entry = build_cluster_entry(&cluster)?;
+        let route_a = Arc::new(RetryPolicy {
+            max_retries: Some(5),
+            ..RetryPolicy::default()
+        });
+        let route_b = Arc::new(RetryPolicy {
+            max_retries: Some(7),
+            ..RetryPolicy::default()
+        });
+
+        let first_a = entry.merged_retry_policy(&route_a);
+        let first_b = entry.merged_retry_policy(&route_b);
+        let second_a = entry.merged_retry_policy(&route_a);
+        let second_b = entry.merged_retry_policy(&route_b);
+        assert!(
+            Arc::ptr_eq(&first_a, &second_a),
+            "route A must stay memoized after route B is merged"
         );
+        assert!(Arc::ptr_eq(&first_b, &second_b), "route B must stay memoized");
+        Ok(())
+    }
+
+    #[test]
+    fn merged_retry_policy_memo_is_bounded() -> Result<(), FilterError> {
+        let cluster = Cluster::with_defaults("memo", vec!["203.0.113.1:80".into()]);
+        let entry = build_cluster_entry(&cluster)?;
+        let routes: Vec<Arc<RetryPolicy>> = std::iter::repeat_with(|| Arc::new(RetryPolicy::default()))
+            .take(40)
+            .collect();
+        for route in &routes {
+            drop(entry.merged_retry_policy(route));
+        }
+        assert_eq!(
+            entry.merged_retry_memo.load().len(),
+            MAX_RETRY_MEMO_ENTRIES,
+            "memo must not grow past its bound"
+        );
+        Ok(())
     }
 
     #[test]

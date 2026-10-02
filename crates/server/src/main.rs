@@ -61,7 +61,9 @@ fn main() -> ExitCode {
     praxis::install_crypto_provider();
 
     let cli = Cli::parse();
-    let explicit = cli.config.or_else(|| std::env::var("PRAXIS_CONFIG").ok());
+    let explicit = cli
+        .config
+        .or_else(|| std::env::var("PRAXIS_CONFIG").ok().filter(|value| !value.is_empty()));
 
     if cli.validate {
         if let Err(error) = commands::load_and_validate_for_cli(explicit.as_deref()) {

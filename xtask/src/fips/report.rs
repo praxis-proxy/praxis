@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use super::{binary, environment, graph, guards};
+use crate::paths::workspace_root;
 
 // -----------------------------------------------------------------------------
 // CLI Arguments
@@ -266,13 +267,6 @@ fn write_report(out: &Path, text: &str) {
     }
 }
 
-/// The workspace root: the parent of the xtask crate, fixed at compile time
-/// so the binary works when run directly as well as through `cargo run`.
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_owned)
-}
 
 // -----------------------------------------------------------------------------
 // Tests

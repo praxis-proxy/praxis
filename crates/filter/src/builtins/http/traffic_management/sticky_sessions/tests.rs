@@ -78,11 +78,14 @@ clusters:
 
 #[test]
 fn generate_session_id_is_unique() {
-    let id1 = generate_session_id("10.0.0.1:80");
-    std::thread::sleep(Duration::from_millis(1));
-    let id2 = generate_session_id("10.0.0.1:80");
-    assert_ne!(id1, id2);
-    assert_eq!(id1.len(), 16);
+    let id1 = generate_session_id();
+    let id2 = generate_session_id();
+    assert_ne!(id1, id2, "consecutive session IDs should differ");
+    assert_eq!(id1.len(), 16, "session ID should be 16 hex characters");
+    assert!(
+        id1.bytes().all(|b| b.is_ascii_hexdigit()),
+        "session ID should be hex: {id1}"
+    );
 }
 
 #[test]

@@ -30,6 +30,9 @@ admin-api = []
 upstream-binding = ["praxis-filter/upstream-binding"]
 # SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
 spiffe = ["praxis-tls/spiffe"]
+# Test-only hooks (the upstream retry gate) for the integration suites. Off
+# by default so release builds carry no test synchronization on the data path.
+test-support = []
 # The `policy` filter (Praxis Policy Engine) in the filter crate this crate
 # embeds. Off by default at the library level, like the other forwards here;
 # the `praxis-proxy` binary turns it on via its own default. A library consumer
@@ -64,6 +67,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+praxis-core = { workspace = true, features = ["test-support"] }
 rcgen = { workspace = true }
 rustls = { workspace = true }
 tempfile = { workspace = true }

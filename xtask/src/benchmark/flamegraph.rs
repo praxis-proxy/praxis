@@ -5,6 +5,7 @@
 
 use std::{
     io::Write as _,
+    os::unix::process::ExitStatusExt as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -150,14 +151,40 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
     println!("Measurement: {}s...", args.duration);
     run_vegeta_load(args, &tmpdir, args.duration);
 
-    stop_processes(&mut perf, perf_pid, &mut praxis, &mut backend);
+    stop_processes(&perf_data, &mut perf, perf_pid, &mut praxis, &mut backend);
+    require_perf_data(&perf_data);
 
     println!("Generating flamegraph...");
-    let collapsed_path = output_svg.replace(".svg", ".collapsed.txt");
+    let collapsed_path = collapsed_path(&output_svg).to_string_lossy().into_owned();
     generate_flamegraph(&perf_data, &output_svg, &collapsed_path);
 
     println!("Flamegraph written to {output_svg}");
     println!("Collapsed stacks written to {collapsed_path}");
+}
+
+/// The collapsed-stacks path beside the SVG: its extension replaced, so a
+/// `.svg` elsewhere in the path is left alone.
+fn collapsed_path(svg: &str) -> PathBuf {
+    Path::new(svg).with_extension("collapsed.txt")
+}
+
+/// The perf log beside the recording.
+fn perf_log_path(perf_data: &Path) -> PathBuf {
+    perf_data.with_file_name("perf.log")
+}
+
+/// Print the perf log and exit 1.
+fn fail_with_perf_log(perf_data: &Path, reason: &str) -> ! {
+    let log = std::fs::read_to_string(perf_log_path(perf_data)).unwrap_or_default();
+    eprintln!("error: {reason}\n{log}");
+    std::process::exit(1);
+}
+
+/// Exit 1 unless perf wrote a non-empty recording.
+fn require_perf_data(perf_data: &Path) {
+    if !std::fs::metadata(perf_data).is_ok_and(|meta| meta.len() > 0) {
+        fail_with_perf_log(perf_data, "perf record wrote no data");
+    }
 }
 
 /// Resolve output SVG path, generating a timestamped default.
@@ -207,13 +234,14 @@ fn start_perf_record(pid: u32, perf_data: &Path) -> std::process::Child {
             perf_data.to_str().unwrap(),
         ])
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(std::fs::File::create(perf_log_path(perf_data)).expect("failed to create perf.log"))
         .spawn()
         .expect("failed to start perf")
 }
 
 /// Stop perf, praxis, and backend processes.
 fn stop_processes(
+    perf_data: &Path,
     perf: &mut std::process::Child,
     perf_pid: i32,
     praxis: &mut std::process::Child,
@@ -222,7 +250,10 @@ fn stop_processes(
     println!("Stopping perf...");
     nix::sys::signal::kill(nix::unistd::Pid::from_raw(perf_pid), nix::sys::signal::Signal::SIGINT)
         .expect("failed to send SIGINT to perf");
-    let _perf_status = perf.wait();
+    // perf record re-raises SIGINT after flushing, so dying by it is success.
+    let perf_ok = perf
+        .wait()
+        .is_ok_and(|status| status.success() || status.signal() == Some(nix::sys::signal::Signal::SIGINT as i32));
 
     println!("Stopping Praxis...");
     let _killed = praxis.kill();
@@ -231,6 +262,10 @@ fn stop_processes(
     println!("Stopping backend...");
     let _killed = backend.kill();
     let _backend_status = backend.wait();
+
+    if !perf_ok {
+        fail_with_perf_log(perf_data, "perf record failed");
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -312,7 +347,10 @@ fn collapse_perf_stacks(perf_data: &Path) -> Vec<u8> {
         .wait_with_output()
         .expect("failed to read collapsed output");
 
-    let _script_status = perf_script.wait();
+    if !perf_script.wait().is_ok_and(|status| status.success()) {
+        eprintln!("error: perf script failed");
+        std::process::exit(1);
+    }
     if !collapsed.status.success() {
         eprintln!("error: inferno-collapse-perf failed");
         std::process::exit(1);
@@ -363,5 +401,32 @@ async fn wait_for_tcp(port: u16) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn collapsed_path_replaces_the_extension() {
+        assert_eq!(
+            collapsed_path("out.svg"),
+            PathBuf::from("out.collapsed.txt"),
+            "the .svg extension becomes .collapsed.txt"
+        );
+    }
+
+    #[test]
+    fn collapsed_path_leaves_svg_in_directories_alone() {
+        assert_eq!(
+            collapsed_path("a.svg.d/out.svg"),
+            PathBuf::from("a.svg.d/out.collapsed.txt"),
+            "only the file extension changes"
+        );
     }
 }

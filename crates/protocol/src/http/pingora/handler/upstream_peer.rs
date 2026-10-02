@@ -5,14 +5,12 @@
 //!
 //! [`Upstream`]: praxis_core::connectivity::Upstream
 
-use std::{
-    net::SocketAddr,
-    sync::{
-        Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Instant,
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::{
+    Condvar, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
+use std::{net::SocketAddr, sync::Arc, time::Instant};
 
 use pingora_core::{
     Result,
@@ -28,12 +26,16 @@ use super::super::context::PingoraRequestCtx;
 // -----------------------------------------------------------------------------
 
 /// Test-only: when armed, upstream connect retries park until released.
+#[cfg(any(test, feature = "test-support"))]
 static UPSTREAM_RETRY_GATE_ARMED: AtomicBool = AtomicBool::new(false);
 /// Park mutex for the test retry gate.
+#[cfg(any(test, feature = "test-support"))]
 static UPSTREAM_RETRY_GATE_PARK: Mutex<()> = Mutex::new(());
 /// Condvar for the test retry gate.
+#[cfg(any(test, feature = "test-support"))]
 static UPSTREAM_RETRY_GATE_CV: Condvar = Condvar::new();
 /// Serializes tests that arm the retry gate.
+#[cfg(any(test, feature = "test-support"))]
 static UPSTREAM_RETRY_GATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Serializes integration tests that arm the upstream retry gate.
@@ -41,6 +43,7 @@ static UPSTREAM_RETRY_GATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 /// # Panics
 ///
 /// Panics if the lock mutex is poisoned.
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn lock_upstream_retry_gate_tests() -> std::sync::MutexGuard<'static, ()> {
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
@@ -52,9 +55,11 @@ pub fn lock_upstream_retry_gate_tests() -> std::sync::MutexGuard<'static, ()> {
 /// Releases an armed upstream-retry wait (see [`arm_upstream_retry_gate`]).
 ///
 /// The gate clears automatically on drop.
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub struct UpstreamRetryGateRelease;
 
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for UpstreamRetryGateRelease {
     fn drop(&mut self) {
         clear_upstream_retry_gate_wait();
@@ -62,6 +67,7 @@ impl Drop for UpstreamRetryGateRelease {
 }
 
 /// Clear the armed flag and wake parked retries.
+#[cfg(any(test, feature = "test-support"))]
 fn clear_upstream_retry_gate_wait() {
     UPSTREAM_RETRY_GATE_ARMED.store(false, Ordering::SeqCst);
     UPSTREAM_RETRY_GATE_CV.notify_all();
@@ -72,11 +78,27 @@ fn clear_upstream_retry_gate_wait() {
 /// # Panics
 ///
 /// Panics if the test-lock mutex is poisoned.
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn arm_upstream_retry_gate() -> (std::sync::MutexGuard<'static, ()>, UpstreamRetryGateRelease) {
     let guard = lock_upstream_retry_gate_tests();
     UPSTREAM_RETRY_GATE_ARMED.store(true, Ordering::SeqCst);
     (guard, UpstreamRetryGateRelease)
+}
+
+/// Park a retry attempt while the test gate is armed.
+#[cfg(any(test, feature = "test-support"))]
+fn wait_for_upstream_retry_gate(retries: u32) {
+    if retries > 0 && UPSTREAM_RETRY_GATE_ARMED.load(Ordering::SeqCst) {
+        #[expect(clippy::expect_used, reason = "poisoned mutex/condvar is unrecoverable")]
+        {
+            let mut park = UPSTREAM_RETRY_GATE_PARK.lock().expect("upstream retry gate park lock");
+            while UPSTREAM_RETRY_GATE_ARMED.load(Ordering::SeqCst) {
+                park = UPSTREAM_RETRY_GATE_CV.wait(park).expect("upstream retry gate wait");
+            }
+            drop(park);
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -91,16 +113,8 @@ pub fn arm_upstream_retry_gate() -> (std::sync::MutexGuard<'static, ()>, Upstrea
 /// alternate host (after applying any pending backoff).
 #[expect(clippy::too_many_lines, reason = "retry orchestration reads clearer as one function")]
 pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>> {
-    if ctx.retries > 0 && UPSTREAM_RETRY_GATE_ARMED.load(Ordering::SeqCst) {
-        #[expect(clippy::expect_used, reason = "poisoned mutex/condvar is unrecoverable")]
-        {
-            let mut park = UPSTREAM_RETRY_GATE_PARK.lock().expect("upstream retry gate park lock");
-            while UPSTREAM_RETRY_GATE_ARMED.load(Ordering::SeqCst) {
-                park = UPSTREAM_RETRY_GATE_CV.wait(park).expect("upstream retry gate wait");
-            }
-            drop(park);
-        }
-    }
+    #[cfg(any(test, feature = "test-support"))]
+    wait_for_upstream_retry_gate(ctx.retries);
 
     if let Some(backoff) = ctx.pending_backoff.take()
         && !backoff.is_zero()
@@ -383,6 +397,68 @@ mod tests {
             reselected.tls.as_ref().and_then(|t| t.sni()),
             Some("configured.example.com"),
             "an SNI set in the cluster config must win over the carried one"
+        );
+    }
+
+    #[tokio::test]
+    async fn reselected_peer_presents_its_own_sni_when_authority_follows_the_endpoint() {
+        for host in ["alpha.reselect-sni.test", "beta.reselect-sni.test"] {
+            peer_utils::seed_dns(host, &[std::net::IpAddr::from([127, 0, 0, 1])]);
+        }
+        let config: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+clusters:
+  - name: mixed
+    endpoints: ["alpha.reselect-sni.test:443", "beta.reselect-sni.test:443"]
+    http:
+      authority: { from: endpoint }
+    tls: {}
+"#,
+        )
+        .unwrap();
+        let lb = praxis_filter::LoadBalancerFilter::from_config(&config).unwrap();
+        let mut pipeline =
+            praxis_filter::FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins()).unwrap();
+        pipeline.set_allow_private_upstreams(true);
+        let pipeline = Arc::new(pipeline);
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, http::HeaderValue::from_static("client.example.com"));
+        let request = praxis_filter::Request {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers,
+        };
+
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.cluster = Some(Arc::from("mixed"));
+        let mut filter_ctx = ctx.build_filter_context(&pipeline, &request, None);
+        drop(lb.on_request(&mut filter_ctx).await.unwrap());
+        ctx.cluster = filter_ctx.cluster.take();
+        ctx.upstream = filter_ctx.upstream.take();
+        ctx.endpoint_reselector = filter_ctx.endpoint_reselector.take();
+        ctx.attempted_endpoints = std::mem::take(&mut filter_ctx.attempted_endpoints);
+        drop(filter_ctx);
+        ctx.pinned_pipeline = Some(Arc::clone(&pipeline));
+
+        let first = execute(&mut ctx).await.expect("first attempt should build a peer");
+        let first_address = Arc::clone(&ctx.upstream_for_retry.as_ref().unwrap().address);
+        assert_eq!(
+            first.sni,
+            peer_utils::derive_sni(&first_address),
+            "the first attempt should present its endpoint's name, not the downstream Host"
+        );
+
+        ctx.reselect_on_retry = true;
+        let retry = execute(&mut ctx).await.expect("the retry should build a peer");
+        let retry_address = Arc::clone(&ctx.upstream_for_retry.as_ref().unwrap().address);
+        assert_ne!(
+            retry_address, first_address,
+            "the retry should reselect the other endpoint"
+        );
+        assert_eq!(
+            retry.sni,
+            peer_utils::derive_sni(&retry_address),
+            "a reselected endpoint must present its own name, not carry the first attempt's SNI forward"
         );
     }
 

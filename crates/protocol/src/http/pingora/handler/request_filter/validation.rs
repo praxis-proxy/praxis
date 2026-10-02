@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Host header validation and Max-Forwards handling per [RFC 9110]/[RFC 9112].
+//! Host header, request path, and Max-Forwards validation per [RFC 9110]/[RFC 9112].
 //!
 //! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 //! [RFC 9112]: https://datatracker.ietf.org/doc/html/rfc9112
@@ -47,7 +47,8 @@ pub(super) fn validate_host_header(session: &mut Session) -> Option<Rejection> {
 enum HostCheck {
     /// Single valid host header present (or absent on HTTP/1.0).
     Valid,
-    /// Duplicate identical hosts; caller should collapse to one.
+    /// Duplicate identical hosts; caller should collapse to one. Defence in
+    /// depth: the Pingora fork already rejects duplicate Host headers.
     Canonicalize(http::HeaderValue),
     /// Reject with the given status.
     Reject(Rejection),
@@ -73,6 +74,11 @@ fn check_host_values(version: http::Version, hosts: &http::header::GetAll<'_, ht
         return HostCheck::Reject(Rejection::status(400));
     }
 
+    if !is_valid_host_grammar(first) {
+        debug!("rejecting request with malformed Host header");
+        return HostCheck::Reject(Rejection::status(400));
+    }
+
     let Some(second) = iter.next() else {
         return HostCheck::Valid;
     };
@@ -90,6 +96,75 @@ fn check_host_values(version: http::Version, hosts: &http::header::GetAll<'_, ht
     }
 
     HostCheck::Canonicalize(first.clone())
+}
+
+/// Whether a Host value matches `uri-host [ ":" port ]` per
+/// [RFC 9110 Section 7.2].
+///
+/// Parsing as an [`Authority`] rejects whitespace, path delimiters and
+/// stray colons; userinfo is not part of the Host grammar. [`Authority`]
+/// does not validate the port text at all, so the port (possibly empty,
+/// as `port = *DIGIT` allows) is checked separately, as is anything
+/// trailing an IP-literal's closing bracket.
+///
+/// [RFC 9110 Section 7.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.2
+/// [`Authority`]: http::uri::Authority
+fn is_valid_host_grammar(value: &http::HeaderValue) -> bool {
+    let Ok(authority) = http::uri::Authority::try_from(value.as_bytes()) else {
+        return false;
+    };
+    let text = authority.as_str();
+    if text.contains('@') {
+        return false;
+    }
+
+    let port = if text.starts_with('[') {
+        let Some((_, rest)) = text.split_once(']') else {
+            return false;
+        };
+        if rest.is_empty() {
+            return true;
+        }
+        let Some(port) = rest.strip_prefix(':') else {
+            return false;
+        };
+        port
+    } else if text.contains(['[', ']']) {
+        return false;
+    } else {
+        let Some((_, port)) = text.split_once(':') else {
+            return true;
+        };
+        port
+    };
+
+    port.is_empty() || (port.bytes().all(|byte| byte.is_ascii_digit()) && port.parse::<u16>().is_ok())
+}
+
+// -----------------------------------------------------------------------------
+// Request Path Validation
+// -----------------------------------------------------------------------------
+
+/// Reject request paths containing `..` segments.
+///
+/// Routing and path-conditioned filters match the raw request path,
+/// while upstreams typically resolve dot-segments per
+/// [RFC 3986 Section 5.2.4]. A path like `/public/../admin` would
+/// therefore match a `/public` route yet reach `/admin` upstream.
+/// Rejecting these paths up front closes that gap for every filter.
+/// Percent-encoded dot variants (`%2e%2e`) are rejected too.
+///
+/// [RFC 3986 Section 5.2.4]: https://datatracker.ietf.org/doc/html/rfc3986#section-5.2.4
+pub(super) fn validate_request_path(session: &Session) -> Option<Rejection> {
+    check_request_path(session.req_header().uri.path())
+}
+
+/// Pure path check behind [`validate_request_path`].
+fn check_request_path(path: &str) -> Option<Rejection> {
+    praxis_filter::has_dot_dot_traversal(path).then(|| {
+        debug!("rejecting request path with dot-dot segment");
+        Rejection::status(400)
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -148,6 +223,47 @@ fn parse_max_forwards(session: &Session) -> Option<u32> {
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // Request Path Validation
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn dot_dot_path_rejected() {
+        assert!(
+            check_request_path("/a/../b").is_some_and(|r| r.status == 400),
+            "dot-dot segment should be rejected with 400"
+        );
+    }
+
+    #[test]
+    fn encoded_dot_dot_path_rejected() {
+        assert!(
+            check_request_path("/a/%2e%2e/b").is_some_and(|r| r.status == 400),
+            "percent-encoded dot-dot segment should be rejected with 400"
+        );
+    }
+
+    #[test]
+    fn route_escape_path_rejected() {
+        assert!(
+            check_request_path("/public/../admin").is_some(),
+            "path escaping a prefix route should be rejected"
+        );
+    }
+
+    #[test]
+    fn plain_and_double_slash_paths_accepted() {
+        assert!(
+            check_request_path("/a/b..c/d").is_none(),
+            "dots inside a segment are allowed"
+        );
+        assert!(
+            check_request_path("//etc/passwd").is_none(),
+            "double slash is left to routing"
+        );
+        assert!(check_request_path("/a/./b").is_none(), "single-dot segment is allowed");
+    }
 
     // -------------------------------------------------------------------------
     // Host Header Validation (RFC 9110 §7.2 / RFC 9112 §3.2)
@@ -248,6 +364,40 @@ mod tests {
             matches!(result, HostCheck::Valid),
             "HTTP/2 without Host should be allowed"
         );
+    }
+
+    fn single_host_check(value: &'static str) -> HostCheck {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, http::HeaderValue::from_static(value));
+        check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST))
+    }
+
+    #[test]
+    fn malformed_host_grammar_rejected() {
+        for value in ["a b", "h/p", "h:abc", "h:99999", "h:+80", "user@h", "[::1]x", "a[::1]"] {
+            assert!(
+                matches!(single_host_check(value), HostCheck::Reject(_)),
+                "malformed Host {value:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn well_formed_host_grammar_accepted() {
+        for value in [
+            "example.com",
+            "example.com.",
+            "example.com:443",
+            "example.com:",
+            "[::1]",
+            "[::1]:8080",
+            "localhost",
+        ] {
+            assert!(
+                matches!(single_host_check(value), HostCheck::Valid),
+                "well-formed Host {value:?} must be accepted"
+            );
+        }
     }
 
     // -------------------------------------------------------------------------

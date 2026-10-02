@@ -155,6 +155,8 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
 
     if listener.protocol == ProtocolKind::Tcp {
         validate_tcp_routing(listener)?;
+    } else {
+        reject_tcp_only_fields(listener)?;
     }
 
     super::timeouts::apply_tcp_defaults(listener);
@@ -171,6 +173,22 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
     }
 
     Ok(())
+}
+
+/// Reject TCP-only fields on a non-TCP listener instead of silently ignoring them.
+fn reject_tcp_only_fields(listener: &Listener) -> Result<(), ProxyError> {
+    let tcp_only = [
+        ("upstream", listener.upstream.is_some()),
+        ("cluster", listener.cluster.is_some()),
+        ("tcp_session_timeout_ms", listener.tcp_session_timeout_ms.is_some()),
+        ("tcp_max_duration_secs", listener.tcp_max_duration_secs.is_some()),
+    ];
+    tcp_only.iter().find(|(_, set)| *set).map_or(Ok(()), |(field, _)| {
+        Err(ProxyError::Config(format!(
+            "listener '{name}': '{field}' only applies to protocol: tcp",
+            name = listener.name
+        )))
+    })
 }
 
 /// Validate `max_connections` is at least 1 and within the allowed ceiling.
@@ -279,6 +297,25 @@ listeners:
                 .contains("requires an upstream address, cluster, or filter chains"),
             "error should mention upstream, cluster, or filter chains: {err}"
         );
+    }
+
+    #[test]
+    fn http_listener_rejects_tcp_only_fields() {
+        for (field, value) in [
+            ("upstream", "\"10.0.0.1:80\""),
+            ("cluster", "web"),
+            ("tcp_session_timeout_ms", "30000"),
+            ("tcp_max_duration_secs", "60"),
+        ] {
+            let yaml = format!("name: web\naddress: \"127.0.0.1:8080\"\n{field}: {value}\n");
+            let listener: Listener = serde_yaml::from_str(&yaml).unwrap();
+            let err = validate_listeners(&mut [listener]).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("listener 'web': '{field}' only applies to protocol: tcp")),
+                "{field} on an HTTP listener should be rejected: {err}"
+            );
+        }
     }
 
     #[test]

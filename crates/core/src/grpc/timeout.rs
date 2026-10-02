@@ -178,6 +178,9 @@ impl GrpcTimeout {
         if digits.len() > MAX_TIMEOUT_DIGITS {
             return Err(GrpcTimeoutParseError::TooManyDigits { got: digits.len() });
         }
+        if !digits.iter().all(u8::is_ascii_digit) {
+            return Err(GrpcTimeoutParseError::NonDigit);
+        }
         let text = str::from_utf8(digits).map_err(|_err| GrpcTimeoutParseError::NonDigit)?;
         let value = text.parse::<u64>().map_err(|_err| GrpcTimeoutParseError::NonDigit)?;
         if value == 0 {
@@ -396,6 +399,7 @@ mod tests {
             ("10x", GrpcTimeoutParseError::UnknownUnit { unit: 'x' }),
             ("1.5S", GrpcTimeoutParseError::NonDigit),
             ("-5S", GrpcTimeoutParseError::NonDigit),
+            ("+5S", GrpcTimeoutParseError::NonDigit),
             (" 5S", GrpcTimeoutParseError::NonDigit),
             ("0S", GrpcTimeoutParseError::Zero),
             ("123456789S", GrpcTimeoutParseError::TooManyDigits { got: 9 }),
@@ -709,11 +713,10 @@ mod tests {
 
     #[test]
     fn parse_with_plus_sign() {
-        // Plus sign is accepted by Rust's parse::<u64>(), so the parser accepts it
-        // (even though the gRPC spec says "ASCII digits", the implementation allows it)
-        let result = GrpcTimeout::parse("+10S");
-        assert!(result.is_ok(), "plus sign is accepted by u64 parsing");
-        assert_eq!(result.unwrap().value(), 10);
+        assert!(
+            GrpcTimeout::parse("+10S").is_err(),
+            "the gRPC spec allows only ASCII digits, so a leading plus is rejected"
+        );
     }
 
     #[test]

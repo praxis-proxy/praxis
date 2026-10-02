@@ -570,8 +570,8 @@ clusters:
 "#;
     let config = Config::from_yaml(yaml).unwrap();
     assert_eq!(
-        config.clusters[0].http.authority.as_deref(),
-        Some("api.example.com"),
+        config.clusters[0].http.authority,
+        Some("api.example.com".into()),
         "authority should be parsed"
     );
 }
@@ -598,8 +598,8 @@ clusters:
 "#;
     let config = Config::from_yaml(yaml).unwrap();
     assert_eq!(
-        config.clusters[0].http.authority.as_deref(),
-        Some("api.example.com:8443"),
+        config.clusters[0].http.authority,
+        Some("api.example.com:8443".into()),
         "authority should be independent of SNI"
     );
     assert_eq!(
@@ -729,8 +729,8 @@ clusters:
     let value = serde_yaml::to_value(&config.clusters[0]).unwrap();
     let back: praxis_core::config::Cluster = serde_yaml::from_value(value).unwrap();
     assert_eq!(
-        back.http.authority.as_deref(),
-        Some("api.example.com"),
+        back.http.authority,
+        Some("api.example.com".into()),
         "authority should roundtrip through serde"
     );
 }
@@ -757,13 +757,96 @@ clusters:
 "#;
     let config = Config::from_yaml(yaml).unwrap();
     assert_eq!(
-        config.clusters[0].http.authority.as_deref(),
-        Some("api.example.com"),
+        config.clusters[0].http.authority,
+        Some("api.example.com".into()),
         "first cluster should have authority"
     );
     assert!(
         config.clusters[1].http.authority.is_none(),
         "second cluster should have no authority"
+    );
+}
+
+#[test]
+fn accept_inline_endpoint_authority_with_verified_tls() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "echo-api.example.com:443"
+              - "httpbin.example.org:443"
+            http:
+              authority: { from: endpoint }
+            tls: {}
+"#;
+    Config::from_yaml(yaml).expect("SNI follows each hostname endpoint, so verify needs no tls.sni");
+}
+
+#[test]
+fn reject_inline_endpoint_authority_with_ip_endpoint_and_no_sni() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "echo-api.example.com:443"
+              - "203.0.113.7:443"
+            http:
+              authority: { from: endpoint }
+            tls: {}
+"#;
+    let err = Config::from_yaml(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("endpoint '203.0.113.7:443' is an IP address"),
+        "an IP endpoint has no name for SNI, so verify still needs tls.sni: {err}"
+    );
+}
+
+#[test]
+fn reject_misspelled_authority_source_key() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+    http:
+      authority: { frm: endpoint }
+"#;
+    let err = Config::from_yaml(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("frm"),
+        "the misspelled key should be named: {err}"
     );
 }
 

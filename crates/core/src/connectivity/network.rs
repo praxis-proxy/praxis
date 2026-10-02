@@ -5,7 +5,7 @@
 
 use std::net::IpAddr;
 
-use super::classification::classify_without_nat64;
+use super::classification::{classify_ip, classify_without_nat64};
 
 // -----------------------------------------------------------------------------
 // IP Normalization
@@ -95,6 +95,22 @@ pub fn normalize_mapped_ipv4(ip: IpAddr) -> IpAddr {
 /// ```
 pub fn is_private_ip(ip: &IpAddr) -> bool {
     let class = classify_without_nat64(ip);
+    class.is_loopback()
+        || class.is_private_network()
+        || class.is_link_local()
+        || class.is_shared_address_space()
+        || class.is_this_host()
+        || class.is_unspecified()
+}
+
+/// Like [`is_private_ip`] but classifies through NAT64 (`64:ff9b::/96`)
+/// wrappers, for the upstream DNS gate.
+///
+/// On a DNS64 network a public name that resolves to a private IPv4 address
+/// is synthesized as `64:ff9b::a.b.c.d`; unwrapping it keeps the runtime
+/// rebinding check from being bypassed that way.
+pub fn is_private_upstream_ip(ip: &IpAddr) -> bool {
+    let class = classify_ip(ip);
     class.is_loopback()
         || class.is_private_network()
         || class.is_link_local()
@@ -540,6 +556,22 @@ mod tests {
         assert!(
             !is_private_ip(&"::ffff:8.8.8.8".parse().unwrap()),
             "mapped 8.8.8.8 is public"
+        );
+    }
+
+    #[test]
+    fn is_private_upstream_ip_unwraps_nat64() {
+        assert!(
+            is_private_upstream_ip(&"64:ff9b::a00:1".parse().unwrap()),
+            "NAT64-wrapped 10.0.0.1 is private for the upstream gate"
+        );
+        assert!(
+            is_private_upstream_ip(&"64:ff9b::127.0.0.1".parse().unwrap()),
+            "NAT64-wrapped loopback is private for the upstream gate"
+        );
+        assert!(
+            !is_private_upstream_ip(&"64:ff9b::8.8.8.8".parse().unwrap()),
+            "NAT64-wrapped public address is not private"
         );
     }
 

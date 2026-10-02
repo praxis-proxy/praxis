@@ -85,6 +85,41 @@ pub(super) fn validate_tcp_group_consistency(
     Ok(())
 }
 
+/// Reject configs whose grouped TCP listeners disagree on `filter_chains`
+/// or `max_connections`.
+///
+/// Public entry point for callers outside the TCP service (config
+/// validation and hot reload), which must enforce the same group
+/// invariants as startup registration.
+///
+/// ```
+/// use praxis_core::config::Config;
+/// use praxis_protocol::tcp::validate_tcp_groups;
+///
+/// let consistent = Config::from_yaml(
+///     r#"
+/// listeners:
+///   - name: db1
+///     address: "0.0.0.0:5432"
+///     protocol: tcp
+///     upstream: "10.0.0.1:5432"
+///   - name: db2
+///     address: "0.0.0.0:5433"
+///     protocol: tcp
+///     upstream: "10.0.0.1:5432"
+/// "#,
+/// )?;
+/// assert!(validate_tcp_groups(&consistent).is_ok());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] naming the first inconsistent pair.
+pub fn validate_tcp_groups(config: &Config) -> Result<(), ProxyError> {
+    validate_tcp_group_consistency(&group_tcp_listeners(config))
+}
+
 // -----------------------------------------------------------------------------
 // Listener Registration
 // -----------------------------------------------------------------------------
@@ -178,6 +213,58 @@ listeners:
         let default_timeout = config.listeners[0].tcp_session_timeout_ms;
         let key = (Some("10.0.0.1:5432".to_owned()), None, default_timeout, None);
         assert_eq!(groups[&key].len(), 2, "both listeners should be in the same group");
+    }
+
+    #[test]
+    fn validate_tcp_groups_rejects_divergent_filter_chains() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: db1
+    address: "0.0.0.0:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+    filter_chains: [a]
+  - name: db2
+    address: "0.0.0.0:5433"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+    filter_chains: [b]
+filter_chains:
+  - name: a
+    filters: []
+  - name: b
+    filters: []
+"#,
+        )
+        .unwrap();
+        let err = validate_tcp_groups(&config).unwrap_err().to_string();
+        assert!(
+            err.contains("db1") && err.contains("db2") && err.contains("filter_chains"),
+            "error should name both listeners and the field: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_tcp_groups_accepts_consistent_groups() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: db1
+    address: "0.0.0.0:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+  - name: db2
+    address: "0.0.0.0:5433"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+"#,
+        )
+        .unwrap();
+        assert!(
+            validate_tcp_groups(&config).is_ok(),
+            "identical grouped listeners should validate"
+        );
     }
 
     #[test]

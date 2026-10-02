@@ -188,7 +188,9 @@ pub struct InsecureOptions {
     /// or cloud metadata addresses.
     pub allow_private_endpoints: bool,
 
-    /// Allow health checks to loopback/metadata addresses.
+    /// Allow health checks to loopback/metadata addresses. The probed
+    /// endpoints are cluster endpoints too, so they also need
+    /// `allow_private_endpoints`.
     pub allow_private_health_checks: bool,
 
     /// Allow upstream connections to resolve to private or reserved IP

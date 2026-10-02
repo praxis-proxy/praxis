@@ -586,54 +586,103 @@ async fn terminal_branch_without_response_fails_closed() {
 }
 
 #[tokio::test]
-async fn terminal_branch_with_cluster_selection_forwards_upstream() {
-    use super::branch::{RejoinTarget, ResolvedBranch};
-
+async fn terminal_branch_with_upstream_selection_forwards_upstream() -> Result<(), FilterError> {
     let after_ran = Arc::new(AtomicUsize::new(0));
-    let mut branching = PipelineFilter::new(
-        0,
-        AnyFilter::Http(Box::new(CountingFilter {
-            counter: Arc::new(AtomicUsize::new(0)),
-        })),
-        vec![],
-        vec![],
+    let pipeline = terminal_branch_pipeline(
+        AnyFilter::Http(Box::new(UpstreamSelectFilter("10.0.0.1:80"))),
+        Arc::clone(&after_ran),
     );
-    branching.branches = vec![ResolvedBranch {
-        name: Arc::from("routing_branch"),
-        condition: None,
-        filters: vec![PipelineFilter::new(
-            10,
-            AnyFilter::Http(Box::new(ClusterSelectFilter("backend"))),
-            vec![],
-            vec![],
-        )],
-        max_iterations: None,
-        rejoin: RejoinTarget::Terminal,
-    }];
-    let after = PipelineFilter::new(
-        1,
-        AnyFilter::Http(Box::new(CountingFilter {
-            counter: Arc::clone(&after_ran),
-        })),
-        vec![],
-        vec![],
-    );
-
-    let pipeline = test_pipeline(BodyCapabilities::default(), vec![branching, after]);
-
     let req = crate::test_utils::make_request(Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    let action = pipeline.execute_http_request(&mut ctx).await?;
     assert!(
         matches!(action, FilterAction::Continue),
-        "terminal branch that selected a cluster should continue to upstream forwarding"
+        "terminal branch that selected an upstream should continue to upstream forwarding"
     );
-    assert!(ctx.cluster.is_some(), "cluster should be set by the branch filter");
+    assert!(ctx.upstream.is_some(), "upstream should be set by the branch filter");
     assert_eq!(
         after_ran.load(Ordering::SeqCst),
         0,
         "filters after a terminal branch point must not run"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_branch_with_preexisting_cluster_fails_closed() -> Result<(), FilterError> {
+    let after_ran = Arc::new(AtomicUsize::new(0));
+    let pipeline = terminal_branch_pipeline(
+        AnyFilter::Http(Box::new(CountingFilter {
+            counter: Arc::new(AtomicUsize::new(0)),
+        })),
+        Arc::clone(&after_ran),
+    );
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("backend"));
+    let action = pipeline.execute_http_request(&mut ctx).await?;
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 500),
+        "a cluster chosen before a terminal branch must not make it forward upstream"
+    );
+    assert_eq!(
+        after_ran.load(Ordering::SeqCst),
+        0,
+        "filters after a terminal branch point must not run"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_branch_reselecting_upstream_forwards_upstream() -> Result<(), FilterError> {
+    let after_ran = Arc::new(AtomicUsize::new(0));
+    let pipeline = terminal_branch_pipeline(
+        AnyFilter::Http(Box::new(UpstreamSelectFilter("10.0.0.1:80"))),
+        Arc::clone(&after_ran),
+    );
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.upstream = Some(praxis_core::connectivity::Upstream {
+        address: Arc::from("10.0.0.9:80"),
+        authority: None,
+        connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+    });
+    let action = pipeline.execute_http_request(&mut ctx).await?;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a terminal branch that re-selects the upstream should still forward"
+    );
+    assert_eq!(
+        ctx.upstream.as_ref().map(|upstream| &*upstream.address),
+        Some("10.0.0.1:80"),
+        "the branch's own selection should be the one forwarded"
+    );
+    Ok(())
+}
+
+/// Build `[host (with a terminal branch holding `branch_filter`), after]`.
+fn terminal_branch_pipeline(branch_filter: AnyFilter, after_ran: Arc<AtomicUsize>) -> FilterPipeline {
+    let mut branching = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(ClusterSelectFilter("backend"))),
+        vec![],
+        vec![],
+    );
+    branching.branches = vec![ResolvedBranch {
+        name: Arc::from("terminal_branch"),
+        condition: None,
+        filters: vec![PipelineFilter::new(10, branch_filter, vec![], vec![])],
+        max_iterations: None,
+        rejoin: RejoinTarget::Terminal,
+    }];
+    let after = PipelineFilter::new(
+        1,
+        AnyFilter::Http(Box::new(CountingFilter { counter: after_ran })),
+        vec![],
+        vec![],
+    );
+    test_pipeline(BodyCapabilities::default(), vec![branching, after])
 }
 
 #[tokio::test]
@@ -4237,6 +4286,26 @@ impl HttpFilter for ClusterSelectFilter {
 
     async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         ctx.cluster = Some(Arc::from(self.0));
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// A filter that selects a fixed upstream address in `on_request`.
+struct UpstreamSelectFilter(&'static str);
+
+#[async_trait]
+impl HttpFilter for UpstreamSelectFilter {
+    fn name(&self) -> &'static str {
+        "upstream_select"
+    }
+
+    async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        ctx.upstream = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from(self.0),
+            authority: None,
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
         Ok(FilterAction::Continue)
     }
 }
