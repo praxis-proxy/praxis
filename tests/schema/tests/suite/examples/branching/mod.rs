@@ -30,6 +30,7 @@ fn all_branching_examples_parse_and_build() {
         "branching/named-chain-ref.yaml",
         "branching/nested-branches.yaml",
         "branching/reentrance.yaml",
+        "branching/result-matchers.yaml",
         "branching/unconditional-branch.yaml",
     ];
 

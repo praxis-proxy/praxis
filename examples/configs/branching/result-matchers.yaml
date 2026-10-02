@@ -1,0 +1,108 @@
+# Branch Result Matchers (contains, not, any_of)
+#
+# Branches on a family of filter results instead of one
+# exact value. The json_rpc filter publishes each call's
+# kind and method; `not` turns away anything that isn't a
+# JSON-RPC request, `contains` blocks every admin method,
+# and `any_of` tags health-check methods.
+#
+# `not` also fires when the filter wrote no value for the
+# key, so a request with no JSON-RPC body at all is turned
+# away too. It's the same rule a guardrail needs: a
+# missing verdict never counts as a pass.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/branching/result-matchers.yaml
+#
+# Exercise:
+#   # Health check: tagged with X-Health-Check and forwarded
+#   curl -X POST http://localhost:8080/ \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","method":"ping","id":1}'
+#
+#   # Admin method: blocked with 403
+#   curl -X POST http://localhost:8080/ \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","method":"admin_reset","id":2}'
+#
+#   # Notification (no id), or no JSON-RPC body: 400
+#   curl -X POST http://localhost:8080/ \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","method":"ping"}'
+#   curl http://localhost:8080/
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      # Publishes `kind` (request, notification, ...) and
+      # `method` as filter results for the branches below
+      - filter: json_rpc
+        max_body_bytes: 65536 # 64 KiB
+        branch_chains:
+          # Anything but a request: notifications, responses,
+          # and bodies that aren't JSON-RPC (no kind at all)
+          - name: reject_non_requests
+            on_result:
+              filter: json_rpc
+              key: kind
+              result:
+                not: request
+            rejoin: terminal
+            chains:
+              - name: not_a_request
+                filters:
+                  - filter: static_response
+                    status: 400
+                    body: "expected a JSON-RPC request"
+
+          # The whole admin method family, wherever "admin"
+          # shows up in the name
+          - name: block_admin_methods
+            on_result:
+              filter: json_rpc
+              key: method
+              result:
+                contains: admin
+            rejoin: terminal
+            chains:
+              - name: admin_blocked
+                filters:
+                  - filter: static_response
+                    status: 403
+                    body: "admin methods are blocked"
+
+          # Health checks, tagged so the backend can answer
+          # them cheaply; rejoin: next keeps them flowing
+          - name: tag_health_checks
+            on_result:
+              filter: json_rpc
+              key: method
+              result:
+                any_of: [ping, health]
+            rejoin: next
+            chains:
+              - name: health_tag
+                filters:
+                  - filter: headers
+                    request_add:
+                      - name: X-Health-Check
+                        value: "true"
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

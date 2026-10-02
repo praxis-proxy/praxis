@@ -46,6 +46,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [named-chain-ref.yaml](configs/branching/named-chain-ref.yaml) | A branch references a top-level chain by name instead of defining filters inline |
 | [nested-branches.yaml](configs/branching/nested-branches.yaml) | Branch filters that themselves contain branches, forming a multi-level decision tree |
 | [reentrance.yaml](configs/branching/reentrance.yaml) | Loops back to a named filter up to N times |
+| [result-matchers.yaml](configs/branching/result-matchers.yaml) | Branches on a family of filter results instead of one exact value |
 | [unconditional-branch.yaml](configs/branching/unconditional-branch.yaml) | Always runs a utility chain before continuing the main pipeline |
 
 ### Observability
