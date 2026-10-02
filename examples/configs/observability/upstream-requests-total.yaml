@@ -3,17 +3,17 @@
 # Prometheus counter for requests that reached an upstream endpoint,
 # labeled by cluster, endpoint and status class. Requests answered by the
 # proxy itself are excluded, so the gap against praxis_http_requests_total
-# is proxy-generated traffic. Scraped via the admin /metrics endpoint.
+# is proxy-generated traffic. Scraped via the metrics listener.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/upstream-requests-total.yaml
 #
 # Exercise:
 #   curl -s http://localhost:8080/api/hello
-#   curl -s http://localhost:9901/metrics | grep upstream_requests_total
+#   curl -s http://localhost:9902/metrics | grep upstream_requests_total
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 insecure_options:
   allow_private_endpoints: true

@@ -25,7 +25,7 @@ fn tcp_connections_total_increments_on_each_connection() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 
 insecure_options:
   allow_private_upstreams: true

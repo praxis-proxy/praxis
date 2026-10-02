@@ -19,7 +19,8 @@ use praxis_core::{
     health::{EndpointHealth, HealthRegistry},
 };
 use praxis_test_utils::{
-    free_port, http_get, start_backend_with_shutdown, start_full_proxy, start_proxy, wait_for_http,
+    ensure_crypto_provider, free_port, http_get, start_backend_with_shutdown, start_full_proxy, start_proxy,
+    wait_for_http,
 };
 
 // -----------------------------------------------------------------------------
@@ -284,6 +285,7 @@ filter_chains:
 
 #[test]
 fn ready_endpoint_reports_cluster_health() {
+    ensure_crypto_provider();
     let backend_port_guard = start_backend_with_shutdown("ok");
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
@@ -296,7 +298,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 filter_chains:
   - name: main
     filters:
@@ -372,6 +374,9 @@ insecure_options:
     let (status, body) = http_get(&format!("127.0.0.1:{admin_port}"), "/healthy", None);
     assert_eq!(status, 200, "/healthy should always return 200");
     assert!(body.contains("ok"), "/healthy body should contain ok: {body}");
+
+    let (status, _) = http_get(&format!("127.0.0.1:{admin_port}"), "/metrics", None);
+    assert_eq!(status, 200, "/metrics should install its recorder");
 }
 
 #[test]
@@ -386,7 +391,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 filter_chains:
   - name: main
     filters:

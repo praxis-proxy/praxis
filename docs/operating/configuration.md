@@ -109,7 +109,7 @@ rather than silently adopted as the baseline.
   `subrequest_max_connections`,
   `subrequest_circuit_breaker`, `upstream_ca_file`,
   `upstream_keepalive_pool_size`)
-- The `admin` section (the admin endpoint binds at
+- The `admin` section (both listener addresses bind at
   startup)
 
 **Rejected (reload fails, nothing changes):**
@@ -152,9 +152,10 @@ See [hot-reload.yaml] for an example.
 
 ## Admin
 
-`admin.address` binds a separate HTTP listener that serves
-`/healthy`, `/ready`, `/metrics`, `/api/kv/*`, and
-`/api/pipelines`.
+`admin.address` binds the management API listener for `/api/*` routes.
+`admin.metrics_address` independently binds the health and metrics listener
+for `/healthy`, `/ready`, and `/metrics`. Either listener can be configured
+without the other; the two listeners must not overlap.
 
 - `/healthy` returns `200 OK` with `{"status":"ok"}`
   once the server is accepting connections (liveness).
@@ -180,16 +181,16 @@ See [hot-reload.yaml] for an example.
   header matcher values, including session identifiers, are redacted.
   Filter it with `?listener=NAME`.
 
-Any other path returns `404 NOT FOUND`. Useful for orchestrator
-health checks and monitoring without exposing them on
-the main listeners. The admin listener has no
-authentication; keep it on loopback or a management
-network (non-loopback binds require
+The health and metrics listener only serves those three endpoints; the admin
+listener serves `/api/kv/*` and `/api/pipelines`. Other paths return
+`404 NOT FOUND`. Neither listener has authentication; keep them on loopback
+or a management network (non-loopback binds require
 `insecure_options.allow_public_admin`).
 
 ```yaml
 admin:
   address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 ```
 
 When `admin.verbose: true`, the `/ready` response
@@ -200,10 +201,11 @@ topology.
 ```yaml
 admin:
   address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
   verbose: true
 ```
 
-By default, the admin endpoint must bind to a loopback
+By default, both endpoints must bind to a loopback
 address (`127.0.0.1` or `[::1]`). Binding to any
 non-loopback address (including `0.0.0.0` / `[::]` or a
 LAN IP) is a validation error unless
@@ -498,8 +500,9 @@ validation error.
 ## Metrics
 
 Optional Prometheus metric collection toggles. HTTP
-request metrics on `/metrics` are always recorded when
-the admin endpoint is enabled. Per-filter hook duration
+request metrics are recorded when either admin listener
+is configured; `/metrics` is exposed only when
+`admin.metrics_address` is set. Per-filter hook duration
 histograms are opt-in.
 
 ```yaml
@@ -513,8 +516,8 @@ records wall-clock duration for each HTTP filter hook
 `filter` (filter name), `phase` (`request` or
 `response`), `stream` (`headers` or `body`).
 
-Requires `admin.address` to scrape via `/metrics`.
-Enabling `filter_duration` without admin logs a startup
+Requires `admin.metrics_address` to scrape via `/metrics`.
+Enabling `filter_duration` without a metrics listener logs a startup
 warning; metrics are recorded but not exposed.
 
 ## Header and Request Limits

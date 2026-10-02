@@ -9,7 +9,7 @@
 #   cargo run -p praxis-proxy -- -c examples/configs/operations/file-descriptor-limits.yaml
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 runtime:
   # Soft RLIMIT_NOFILE set at startup, clamped to the hard limit. Leave it

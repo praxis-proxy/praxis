@@ -372,6 +372,7 @@ listeners:
 
 admin:
   address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 clusters:
   - name: api

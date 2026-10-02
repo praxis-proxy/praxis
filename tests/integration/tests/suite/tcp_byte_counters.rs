@@ -42,7 +42,7 @@ fn proxy_yaml(listener: &str, proxy_port: u16, admin_port: u16, backend_port: u1
     format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: {listener}
     address: "127.0.0.1:{proxy_port}"

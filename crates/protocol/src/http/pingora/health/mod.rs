@@ -3,7 +3,7 @@
 
 //! Health check infrastructure: admin endpoints, probes, and background runner.
 
-/// DNS rebinding defence (`Host` check) for a loopback-bound admin listener.
+/// DNS rebinding defense (`Host` check) for loopback-bound management listeners.
 #[cfg(feature = "admin-api")]
 pub(crate) mod admin_host;
 /// Cluster endpoint metadata for `/api/stats`. Kept ungated for reload.
@@ -24,7 +24,7 @@ mod pipelines_admin;
 pub mod probe;
 /// Background health check runner.
 pub mod runner;
-/// Admin HTTP service (`/ready`, `/healthy`, `/metrics`, `/api/*`).
+/// Admin API and health/metrics HTTP services.
 #[cfg(feature = "admin-api")]
 mod service;
 #[cfg(feature = "admin-api")]
@@ -37,9 +37,10 @@ pub(in crate::http::pingora) use service::escape_json_string;
 #[cfg(feature = "admin-api")]
 pub use service::{
     AdminEndpointOptions, PingoraAdminService, PingoraHealthService, PrometheusAdminRecorder,
-    add_admin_endpoints_to_pingora_server, add_admin_endpoints_to_pingora_server_with_recorder,
-    add_health_endpoint_to_pingora_server, add_health_endpoint_to_pingora_server_with_pipelines,
-    add_prometheus_upkeep_to_pingora_server, install_prometheus_admin_recorder,
+    add_admin_api_to_pingora_server, add_admin_endpoints_to_pingora_server,
+    add_admin_endpoints_to_pingora_server_with_recorder, add_health_endpoint_to_pingora_server,
+    add_health_endpoint_to_pingora_server_with_pipelines, add_prometheus_upkeep_to_pingora_server,
+    install_prometheus_admin_recorder,
 };
 #[cfg(feature = "admin-api")]
 pub use stats_admin::{ProcessVersionInfo, StatsAdminState};

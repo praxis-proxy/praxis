@@ -81,10 +81,10 @@ USER praxis:praxis
 WORKDIR /etc/praxis
 
 # Port 8080: proxy listener (see container-default.yaml)
-# Port 9901: admin API for healthcheck and metrics
-EXPOSE 8080 9901
+# Port 9902: health checks and metrics
+EXPOSE 8080 9902
 
 HEALTHCHECK --interval=5s --timeout=3s --start-period=2s \
-    CMD wget -qO- http://127.0.0.1:9901/healthy || exit 1
+    CMD wget -qO- http://127.0.0.1:9902/healthy || exit 1
 
 ENTRYPOINT ["praxis", "-c", "/etc/praxis/config.yaml"]

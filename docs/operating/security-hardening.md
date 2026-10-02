@@ -19,7 +19,7 @@ ambiguous configuration:
 - Admin endpoints are restricted to loopback; non-loopback
   binding is a validation error unless
   `insecure_options.allow_public_admin` is set.
-- A loopback admin listener rejects requests whose `Host`
+- A loopback admin or health/metrics listener rejects requests whose `Host`
   is not a loopback name, blocking DNS rebinding from
   the operator's browser (see
   [Admin DNS Rebinding](#admin-dns-rebinding)).
@@ -117,9 +117,8 @@ browser treats the admin API as same-origin and can read
 `PUT`/`DELETE` to `/api/log-level` and `/api/kv/*`.
 
 Every such request still carries the attacker's name in
-`Host`. When `admin.address` is a loopback address, every
-admin route (including `/healthy`, `/ready`, and
-`/metrics`) answers `421 Misdirected Request` with
+`Host`. When either `admin.address` or `admin.metrics_address` is a loopback
+address, every route on that listener answers `421 Misdirected Request` with
 `{"error":"misdirected request"}` unless each `Host`
 header (and any absolute-form request authority) is one
 of:
@@ -131,12 +130,10 @@ of:
 
 A request with no `Host` at all (HTTP/1.0) is served:
 browsers always send `Host`, so only a client that
-already reaches the socket directly can omit it. Probe
-and scrape the admin port as `127.0.0.1`, `[::1]`, or
-`localhost`; a local DNS alias for the admin address is
-rejected.
+already reaches the socket directly can omit it. Use `127.0.0.1`, `[::1]`,
+or `localhost` for both listeners; a local DNS alias is rejected.
 
-The check is skipped when the admin listener binds a
+The check is skipped when either listener binds a
 non-loopback address (`allow_public_admin`), because
 operators may legitimately reach it by DNS name. Such a
 listener is still reachable through loopback on the same

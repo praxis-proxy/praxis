@@ -3,17 +3,17 @@
 # Selectively disables individual label dimensions on Prometheus metrics to
 # bound total time-series cardinality. Every dimension is on by default;
 # turning one off drops it from every metric that carries it while leaving
-# the metric itself available on the admin /metrics endpoint.
+# the metric itself available on the metrics listener.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/metric-label-sets.yaml
 #
 # Exercise:
 #   curl -s http://localhost:8080/api/hello
-#   curl -s http://localhost:9901/metrics | grep praxis_http_requests_total
+#   curl -s http://localhost:9902/metrics | grep praxis_http_requests_total
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 metrics:
   labels:

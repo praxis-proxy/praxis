@@ -404,13 +404,13 @@ pub(crate) fn warn_experimental_features() {
 ///
 /// The `admin-api` feature gates the admin HTTP surface; without it a
 /// configured `admin.address` binds nothing, so the operator's intent
-/// (health, metrics, and management endpoints) is silently unmet.
+/// (the admin API and health/metrics endpoints) is silently unmet.
 #[cfg(not(feature = "admin-api"))]
 pub(crate) fn warn_admin_configured_without_feature(config: &Config) {
     if config.admin.address.is_some() || config.admin.metrics_address.is_some() {
         tracing::warn!(
             "admin.address or admin.metrics_address is set but this build lacks the `admin-api` feature; \
-            the admin endpoints (/healthy, /ready, /metrics, /api/*) are disabled"
+            the admin API (/api/*) and health/metrics endpoints (/healthy, /ready, /metrics) are disabled"
         );
     }
 }

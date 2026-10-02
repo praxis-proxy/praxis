@@ -28,7 +28,7 @@ fn proxy_yaml(proxy_port: u16, admin_port: u16, backend_port: u16) -> String {
     format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: inflight
     address: "127.0.0.1:{proxy_port}"

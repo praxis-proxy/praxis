@@ -34,7 +34,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [routing]
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 filter_chains:
   - name: routing
     filters:
@@ -60,7 +60,7 @@ insecure_options:
     }
     praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server(
         &mut server,
-        config.admin.address.as_ref().unwrap(),
+        config.admin.metrics_address.as_ref().unwrap(),
         None,
         false,
     );

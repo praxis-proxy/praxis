@@ -305,8 +305,8 @@ pub fn try_run_server_with_composition(
     #[cfg(feature = "admin-api")]
     let stats_started_at = std::time::Instant::now();
 
-    // Install before pipelines and health checks emit startup metrics.
-    // handle is later shared by `/metrics` and the managed upkeep service.
+    // Install before startup instrumentation emits metrics. `/api/stats` reads
+    // this recorder even when only the admin API listener is configured.
     // Label selection is installed first and never changed: a gauge guard
     // acquired before a change and released after it would increment one
     // series and decrement another, stranding both.
@@ -679,43 +679,41 @@ fn register_admin_endpoints(
     prometheus_recorder: Option<praxis_protocol::http::pingora::health::PrometheusAdminRecorder>,
     stats_started_at: std::time::Instant,
 ) {
-    if let Some(prometheus_recorder) = prometheus_recorder {
-        let options = praxis_protocol::http::pingora::health::AdminEndpointOptions {
-            health_registry: Some(health_registry.clone()),
-            kv_registry: Some(state.kv_stores.clone()),
-            pipelines: Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
-            log_level: state.log_level.clone(),
-            stats: Some(praxis_protocol::http::pingora::health::StatsAdminState {
-                started_at: stats_started_at,
-                version: crate::version::process_version_info(),
-                listener_meta: Arc::clone(&state.listener_meta),
-                cluster_meta: Arc::clone(&state.cluster_meta),
-            }),
-            verbose: config.admin.verbose,
-        };
+    if let Some(admin_addr) = &config.admin.address {
+        praxis_protocol::http::pingora::health::add_admin_api_to_pingora_server(
+            server.server_mut(),
+            admin_addr,
+            praxis_protocol::http::pingora::health::AdminEndpointOptions {
+                health_registry: Some(health_registry.clone()),
+                kv_registry: Some(state.kv_stores.clone()),
+                pipelines: Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
+                log_level: state.log_level.clone(),
+                stats: Some(praxis_protocol::http::pingora::health::StatsAdminState {
+                    started_at: stats_started_at,
+                    version: crate::version::process_version_info(),
+                    listener_meta: Arc::clone(&state.listener_meta),
+                    cluster_meta: Arc::clone(&state.cluster_meta),
+                }),
+                verbose: config.admin.verbose,
+            },
+        );
+    }
 
+    if let Some(prometheus_recorder) = prometheus_recorder {
         praxis_protocol::http::pingora::health::add_prometheus_upkeep_to_pingora_server(
             server.server_mut(),
             prometheus_recorder,
         );
+    }
 
-        if let Some(admin_addr) = &config.admin.address {
-            praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
-                server.server_mut(),
-                admin_addr,
-                options,
-            );
-        }
-
-        if let Some(metrics_addr) = &config.admin.metrics_address {
-            praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server_with_pipelines(
-                server.server_mut(),
-                metrics_addr,
-                Some(health_registry),
-                config.admin.verbose,
-                Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
-            );
-        }
+    if let Some(metrics_addr) = &config.admin.metrics_address {
+        praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server_with_pipelines(
+            server.server_mut(),
+            metrics_addr,
+            Some(health_registry),
+            config.admin.verbose,
+            Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
+        );
     }
 }
 

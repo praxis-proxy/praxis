@@ -5,42 +5,41 @@ logs, and health endpoints for monitoring proxy
 behavior. This guide covers setup, metric reference,
 logging configuration, and usage patterns.
 
-## Admin Endpoint
+## Admin and Metrics Endpoints
 
-All observability endpoints are served from a
-dedicated admin listener. Enable it by setting
-`admin.address` in your config:
+Health and metrics endpoints use a dedicated listener. Configure
+`admin.metrics_address`; the separate `admin.address` is reserved for `/api/*`:
 
 ```yaml
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 ```
 
-The admin listener exposes these endpoints:
+The health and metrics listener exposes these endpoints:
 
 | Path | Purpose |
 | ----------- | ----------------------------------------- |
 | `/healthy` | Liveness probe - returns `200` once the server is accepting connections |
 | `/ready` | Readiness probe - returns cluster health status; `503` when any cluster has zero healthy endpoints |
 | `/metrics` | Prometheus text exposition format |
-| `/api/log-level` | Runtime process log level overlays (`PUT` / `GET` / `HEAD` / `DELETE`) |
 
-Any other path returns `404`. The admin listener
+The separate `admin.address` listener exposes the management API, including
+`/api/log-level`. Each listener
 must bind to a loopback address by default. Binding
 to a non-loopback address requires
 `insecure_options.allow_public_admin: true`.
 
-A loopback admin listener answers `421` on every path
+A loopback listener answers `421` on every path
 unless `Host` is a loopback IP literal or `localhost`
 (a request without `Host` is served), which blocks
 DNS rebinding attacks from a browser. Point probes and
 scrapers at `127.0.0.1`, `[::1]`, or `localhost`. See
 [Admin DNS Rebinding](security-hardening.md#admin-dns-rebinding).
 
-The admin surface (including `/metrics`) is compiled
+The admin and health/metrics surfaces are compiled
 in by the `admin-api` build feature, on by default. A
 binary built without it exposes no admin endpoints
-regardless of `admin.address`. See
+regardless of either address. See
 [Build Features](build-features.md).
 
 ### Verbose Readiness
@@ -52,7 +51,7 @@ detail:
 
 ```yaml
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
   verbose: true
 ```
 
@@ -96,7 +95,7 @@ Verbose response:
 
 Verbose mode exposes internal topology (cluster
 names, endpoint counts). Keep it off in production
-unless the admin port is network-isolated.
+unless the health/metrics listener is network-isolated.
 
 ### Runtime log levels (`/api/log-level`)
 
@@ -471,7 +470,7 @@ The six hook combinations are:
 `bound_upstream` and `selected_upstream` pair only with
 `body`; neither phase has a header hook.
 
-Enabling `filter_duration` without `admin.address`
+Enabling `filter_duration` without `admin.metrics_address`
 records metrics internally but does not expose them.
 A startup warning is logged in this case.
 
@@ -489,7 +488,7 @@ scrape_configs:
     scrape_interval: 15s
     static_configs:
       - targets:
-          - "127.0.0.1:9901"
+          - "127.0.0.1:9902"
 ```
 
 For Kubernetes deployments with multiple replicas,
@@ -803,6 +802,7 @@ features:
 ```yaml
 admin:
   address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
   verbose: true
 
 metrics:
@@ -840,7 +840,7 @@ filter_chains:
 
 This enables:
 
-- Prometheus scraping on `127.0.0.1:9901/metrics`
+- Prometheus scraping on `127.0.0.1:9902/metrics`
 - Liveness and readiness probes with verbose cluster
   detail
 - Per-filter hook duration histograms
