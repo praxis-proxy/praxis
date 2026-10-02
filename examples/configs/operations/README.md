@@ -4,7 +4,7 @@ Operational configurations for deployment, administration, and runtime managemen
 
 ## When to Use
 
-- Configure admin API endpoints for health checks and metrics scraping
+- Configure the admin API and health/metrics listeners separately
 - Set up containerized deployments
 - Enable hot configuration reload
 - Configure TLS for listeners and upstreams
@@ -12,9 +12,9 @@ Operational configurations for deployment, administration, and runtime managemen
 
 ## Key Configs
 
-**Admin API**: Exposes health checks (`/healthy`, `/ready`), metrics (`/metrics`), and runtime state endpoints on a dedicated listener.
+**Admin API**: The `admin.address` listener serves management endpoints (`/api/*`). Configure `admin.metrics_address` separately for health checks (`/healthy`, `/ready`) and metrics (`/metrics`).
 
-**Container Default**: Minimal production configuration for containerized deployments with admin API on port 9901 and proxy listener on port 8080.
+**Container Default**: Minimal production configuration for containerized deployments with health checks on port 9902 and proxy traffic on port 8080.
 
 **Config Reload**: Enables live configuration reloading without process restart. Watches the config file for changes and swaps filter pipelines atomically.
 

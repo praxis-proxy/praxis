@@ -19,8 +19,7 @@ default = []
 # Off by default at the library level; the `praxis-proxy` binary turns it
 # on via its own default so lean builds (--no-default-features) can drop it.
 config-reload = ["praxis-tls/config-reload"]
-# Admin HTTP surface: management API (/api/*), Prometheus /metrics, and the
-# /healthy + /ready endpoints. Off => none of those endpoints are compiled in
+# Admin and health/metrics HTTP surfaces. Off => those endpoints are not compiled in
 # (the proxy data path and background health checks are unaffected). Library
 # default is off; the `praxis-proxy` binary and the test harness turn it on.
 admin-api = []

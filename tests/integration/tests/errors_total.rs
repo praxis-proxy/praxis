@@ -110,7 +110,7 @@ fn errors_total_counts_filter_rejections() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: errors-reject
     address: "127.0.0.1:{proxy_port}"
@@ -161,7 +161,7 @@ fn errors_total_counts_unreachable_upstreams() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: errors-unreachable
     address: "127.0.0.1:{proxy_port}"
@@ -214,7 +214,7 @@ fn errors_total_absent_on_the_happy_path() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: errors-none
     address: "127.0.0.1:{proxy_port}"
@@ -264,7 +264,7 @@ fn errors_total_counts_request_body_rejections() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: errors-body
     address: "127.0.0.1:{proxy_port}"

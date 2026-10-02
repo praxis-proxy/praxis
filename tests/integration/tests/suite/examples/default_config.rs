@@ -24,7 +24,8 @@ const DEFAULT_CONFIG: &str = praxis_core::config::DEFAULT_CONFIG;
 fn default_config_root_returns_200() {
     let proxy_port = free_port();
     let admin_port = free_port();
-    let yaml = default_config_with_test_ports(proxy_port, admin_port);
+    let metrics_port = free_port();
+    let yaml = default_config_with_test_ports(proxy_port, admin_port, metrics_port);
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
     let (status, body) = http_get(proxy.addr(), "/", None);
@@ -38,7 +39,8 @@ fn default_config_root_returns_200() {
 fn default_config_other_path_returns_404() {
     let proxy_port = free_port();
     let admin_port = free_port();
-    let yaml = default_config_with_test_ports(proxy_port, admin_port);
+    let metrics_port = free_port();
+    let yaml = default_config_with_test_ports(proxy_port, admin_port, metrics_port);
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
     let (status, body) = http_get(proxy.addr(), "/anything", None);
@@ -50,11 +52,12 @@ fn default_config_other_path_returns_404() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-/// Return the embedded default config with per-test listener and admin ports.
+/// Return the embedded default config with per-test listener and management ports.
 ///
-/// `patch_yaml` handles known default listener forms. The admin listener is
-/// patched separately because it is not an endpoint.
-fn default_config_with_test_ports(proxy_port: u16, admin_port: u16) -> String {
+/// `patch_yaml` handles known default listener forms. The management listeners
+/// are patched separately because they are not data-plane endpoints.
+fn default_config_with_test_ports(proxy_port: u16, admin_port: u16, metrics_port: u16) -> String {
     patch_yaml(DEFAULT_CONFIG, proxy_port, &HashMap::new())
         .replace("127.0.0.1:9901", &format!("127.0.0.1:{admin_port}"))
+        .replace("127.0.0.1:9902", &format!("127.0.0.1:{metrics_port}"))
 }

@@ -44,7 +44,7 @@ fn proxy_with_admin(
     format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
@@ -238,7 +238,7 @@ fn metrics_upstream_retry_success_after_transient_connect_failure() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
@@ -307,7 +307,7 @@ fn metrics_circuit_breaker_open_gauge() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
@@ -395,7 +395,7 @@ fn metrics_circuit_breaker_gauge_recovers_to_zero() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
@@ -460,7 +460,7 @@ fn metrics_circuit_breaker_drop_clears_gauge_on_reload() {
         format!(
             r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
@@ -491,7 +491,7 @@ filter_chains:
     let without_cb = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
@@ -544,7 +544,7 @@ fn metrics_health_transitions_and_endpoint_gauges() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
@@ -605,7 +605,7 @@ fn metrics_lb_panic_mode_when_all_unhealthy() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
@@ -670,7 +670,7 @@ fn metrics_tcp_lb_panic_mode_when_all_unhealthy() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: tcp_default
     address: "127.0.0.1:{proxy_port}"
@@ -739,7 +739,7 @@ fn metrics_config_reload_success_and_failure() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
@@ -771,7 +771,7 @@ filter_chains:
     let good = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"

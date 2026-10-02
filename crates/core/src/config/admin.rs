@@ -9,9 +9,9 @@ use serde::Deserialize;
 // AdminConfig
 // -----------------------------------------------------------------------------
 
-/// Admin endpoint settings for health check listeners.
+/// Admin API and health/metrics listener settings.
 ///
-/// When `address` is set, validation requires a loopback bind
+/// Both `address` and `metrics_address` require a loopback bind
 /// (`127.0.0.1`, `[::1]`, or IPv4-mapped loopback such as
 /// `[::ffff:127.0.0.1]`). Non-loopback addresses require
 /// `insecure_options.allow_public_admin: true`.
@@ -44,8 +44,9 @@ pub struct AdminConfig {
     /// top level.
     pub address: Option<String>,
 
-    /// Metrics and Health check endpoint bind address. When configured, /metrics,
-    /// /ready and /health endpoints are exposed by this address
+    /// Metrics and health endpoint bind address. When configured, `/healthy`,
+    /// `/ready`, and `/metrics` are exposed here; `address` remains the `/api/*`
+    /// listener.
     ///
     /// Defaults to disabled (`None`).
     pub metrics_address: Option<String>,

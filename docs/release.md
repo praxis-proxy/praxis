@@ -189,8 +189,8 @@ The standard image is a minimal Alpine container:
 - Dynamically linked musl build against Alpine's OpenSSL (`libcrypto3`,
   `libssl3`), with LTO, single codegen unit, and stripped symbols
 - Runs as non-root user (`praxis`)
-- Exposes ports `8080` (proxy) and `9901` (admin)
-- Built-in health check at `http://127.0.0.1:9901/healthy`
+- Exposes ports `8080` (proxy) and `9902` (health and metrics)
+- Built-in health check at `http://127.0.0.1:9902/healthy`
 - Config directory: `/etc/praxis`
 
 The `-fips` image runs on `ubi9/ubi-minimal` instead,

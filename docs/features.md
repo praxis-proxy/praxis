@@ -172,12 +172,13 @@ deployment guidance.
   (X-Request-ID by default); echoed in responses
 - **Access logging** - structured request/response logging
   via `tracing`
-- **Prometheus metrics** - `/metrics` on the admin
+- **Prometheus metrics** - `/metrics` on the health/metrics
   listener exposes request counts and duration
   histograms. Optional per-filter hook duration
   histograms (`metrics.filter_duration`, default off).
 - **Admin health endpoints** - `/ready` and `/healthy`
-  on a dedicated admin listener. `/ready` returns
+  on the dedicated health/metrics listener configured with
+  `admin.metrics_address`. `/ready` returns
   per-cluster health status with healthy/unhealthy/total
   counts when active health checks are configured, and
   returns 503 when any cluster has zero healthy

@@ -52,8 +52,8 @@ default = ["config-reload", "admin-api", "policy-engine"]
 # `notify`). On by default; disable for a leaner build that drops the
 # watchers and the `notify`/`arc-swap`/`tokio` deps they pull into tls.
 config-reload = ["dep:notify", "praxis-protocol/config-reload"]
-# Admin HTTP surface (management API, Prometheus /metrics, /healthy, /ready).
-# On by default; the endpoints still only bind when `admin.address` is set.
+# Admin API and health/metrics HTTP surfaces. On by default; listeners bind
+# only when `admin.address` or `admin.metrics_address` is set.
 # Disable for a build with no external observability/admin surface.
 admin-api = ["praxis-protocol/admin-api"]
 dev = ["basic-auth-filter"]

@@ -28,7 +28,7 @@ fn tcp_connection_metrics_example_emits_histogram() {
         HashMap::from([
             ("127.0.0.1:5432", proxy_port),
             ("127.0.0.1:15432", backend_port),
-            ("127.0.0.1:9901", admin_port),
+            ("127.0.0.1:9902", admin_port),
         ]),
     );
 
@@ -75,7 +75,7 @@ fn tcp_connection_metrics_example_forwards_traffic() {
         HashMap::from([
             ("127.0.0.1:5432", proxy_port),
             ("127.0.0.1:15432", backend_port),
-            ("127.0.0.1:9901", admin_port),
+            ("127.0.0.1:9902", admin_port),
         ]),
     );
 

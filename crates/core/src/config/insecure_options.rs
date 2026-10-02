@@ -209,7 +209,7 @@ pub struct InsecureOptions {
     /// [`trusted_private_endpoints`]: crate::config::Cluster::trusted_private_endpoints
     pub allow_private_upstreams: bool,
 
-    /// Allow admin endpoint on non-loopback addresses (`0.0.0.0`, LAN IPs, etc.).
+    /// Allow either admin or health/metrics listener on non-loopback addresses (`0.0.0.0`, LAN IPs, etc.).
     pub allow_public_admin: bool,
 
     /// Allow running as root (UID 0).

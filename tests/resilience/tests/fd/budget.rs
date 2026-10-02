@@ -45,7 +45,7 @@ fn baseline_descriptors_are_small() {
 
     assert!(
         proxy.baseline <= 64,
-        "an idle proxy with one listener and the admin endpoint holds {} descriptors",
+        "an idle proxy with one listener and the metrics endpoint holds {} descriptors",
         proxy.baseline
     );
 }
@@ -446,7 +446,7 @@ fn config(port: u16, admin: u16, setup: &Setup<'_>) -> String {
         r#"
 shutdown_timeout_secs: 1
 admin:
-  address: "127.0.0.1:{admin}"
+  metrics_address: "127.0.0.1:{admin}"
 runtime:
   threads: 1
   {runtime}

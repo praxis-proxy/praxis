@@ -14,7 +14,7 @@ listeners:
       - main
 
 admin:
-  address: "127.0.0.1:9090"
+  metrics_address: "127.0.0.1:9090"
 
 insecure_options:
   allow_private_endpoints: true # example proxies to local backends
