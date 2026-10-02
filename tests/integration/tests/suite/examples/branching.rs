@@ -377,15 +377,14 @@ fn result_matchers_deny_methods_json_rpc_cannot_record() {
     let backend_guard = start_backend_with_shutdown("ok");
     let proxy = start_result_matchers_proxy(backend_guard.port());
 
-    // JSON escapes that decode to a control character, so json_rpc records
-    // the call's kind but no method. Even a listed name fails closed.
     for method in [r"admin\u0001reset", r"ping\u0001"] {
         let raw = http_send(proxy.addr(), &json_post("/", &rpc_call(method)));
 
         assert_eq!(
             parse_status(&raw),
             403,
-            "a method json_rpc could not record ({method}) should be denied"
+            "{method} decodes to a control character, so json_rpc records no method for it \
+             and even a listed name should fail closed"
         );
         assert_eq!(
             parse_body(&raw),
