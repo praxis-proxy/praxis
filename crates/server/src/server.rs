@@ -313,11 +313,8 @@ pub fn try_run_server_with_composition(
     praxis_protocol::http::pingora::metrics::install_metric_labels(config.metrics.labels.clone());
 
     #[cfg(feature = "admin-api")]
-    let prometheus_recorder = config
-        .admin
-        .address
-        .as_ref()
-        .map(|_| praxis_protocol::http::pingora::health::install_prometheus_admin_recorder());
+    let prometheus_recorder = (config.admin.address.is_some() || config.admin.metrics_address.is_some())
+        .then(praxis_protocol::http::pingora::health::install_prometheus_admin_recorder);
 
     let health_registry = build_health_registry(&config.clusters);
     let (state, registry) = build_server_state(&config, composition, &health_registry, log_level)?;
@@ -682,9 +679,9 @@ fn register_admin_endpoints(
     prometheus_recorder: Option<praxis_protocol::http::pingora::health::PrometheusAdminRecorder>,
     stats_started_at: std::time::Instant,
 ) {
-    if let (Some(admin_addr), Some(prometheus_recorder)) = (&config.admin.address, prometheus_recorder) {
+    if let Some(prometheus_recorder) = prometheus_recorder {
         let options = praxis_protocol::http::pingora::health::AdminEndpointOptions {
-            health_registry: Some(health_registry),
+            health_registry: Some(health_registry.clone()),
             kv_registry: Some(state.kv_stores.clone()),
             pipelines: Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
             log_level: state.log_level.clone(),
@@ -697,12 +694,28 @@ fn register_admin_endpoints(
             verbose: config.admin.verbose,
         };
 
-        praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server_with_recorder(
+        praxis_protocol::http::pingora::health::add_prometheus_upkeep_to_pingora_server(
             server.server_mut(),
-            admin_addr,
-            options,
             prometheus_recorder,
         );
+
+        if let Some(admin_addr) = &config.admin.address {
+            praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
+                server.server_mut(),
+                admin_addr,
+                options,
+            );
+        }
+
+        if let Some(metrics_addr) = &config.admin.metrics_address {
+            praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server_with_pipelines(
+                server.server_mut(),
+                metrics_addr,
+                Some(health_registry),
+                config.admin.verbose,
+                Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
+            );
+        }
     }
 }
 

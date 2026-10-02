@@ -84,8 +84,12 @@ impl Config {
         validate_listener_names(&self.listeners)?;
         validate_filter_chains(&self.filter_chains, &self.listeners)?;
         validate_branch_chains(&self.filter_chains)?;
+        validate_admin_address(
+            self.admin.metrics_address.as_deref(),
+            self.insecure_options.allow_public_admin,
+        )?;
         validate_admin_address(self.admin.address.as_deref(), self.insecure_options.allow_public_admin)?;
-        warn_filter_duration_without_admin(self.metrics.filter_duration, self.admin.address.is_some());
+        warn_filter_duration_without_admin(self.metrics.filter_duration, self.admin.metrics_address.is_some());
 
         for listener in &self.listeners {
             if listener.protocol != ProtocolKind::Tcp && listener.filter_chains.is_empty() {
