@@ -6,7 +6,6 @@
 
 mod config;
 mod headers;
-mod origin;
 
 pub use self::config::DisallowedOriginMode;
 
@@ -29,8 +28,8 @@ use tracing::{debug, trace};
 use self::{
     config::{CorsConfig, validate_config},
     headers::{build_preflight_rejection, inject_response_headers},
-    origin::{OriginPolicy, build_origin_policy},
 };
+use super::origin_matcher::{OriginMatcher, build_origin_matcher};
 use crate::{
     FilterAction, FilterError, Rejection,
     factory::parse_filter_config,
@@ -99,7 +98,7 @@ const VARY_ORIGIN: &str = "Origin";
 #[expect(clippy::struct_excessive_bools, reason = "CORS spec flags")]
 pub struct CorsFilter {
     /// Pre-computed origin matching policy.
-    policy: OriginPolicy,
+    policy: OriginMatcher,
 
     /// Whether to send `Access-Control-Allow-Credentials: true`.
     allow_credentials: bool,
@@ -164,7 +163,7 @@ impl CorsFilter {
             cfg.allow_methods
         };
 
-        let policy = build_origin_policy(&cfg.allow_origins);
+        let policy = build_origin_matcher(&cfg.allow_origins);
 
         Ok(Box::new(Self {
             policy,
@@ -195,7 +194,7 @@ impl CorsFilter {
 
     /// The ACAO header value: `*` for static wildcard, else the origin.
     fn acao_value<'a>(&self, origin: &'a str) -> &'a str {
-        if matches!(self.policy, OriginPolicy::Any) && !self.allow_credentials {
+        if matches!(self.policy, OriginMatcher::Any) && !self.allow_credentials {
             return "*";
         }
         origin

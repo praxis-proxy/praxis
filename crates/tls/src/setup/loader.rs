@@ -16,38 +16,13 @@
 //!
 //! [`Zeroizing`]: zeroize::Zeroizing
 
-use std::sync::Arc;
-
 use rustls::{
-    crypto::CryptoProvider,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _},
     sign::CertifiedKey,
 };
 use zeroize::Zeroizing;
 
 use crate::{CertKeyPair, TlsError};
-
-// -----------------------------------------------------------------------------
-// Crypto Provider
-// -----------------------------------------------------------------------------
-
-/// Return the process-wide [`CryptoProvider`] installed during bootstrap.
-///
-/// Fails with [`TlsError::NoCryptoProvider`] when none is installed. This
-/// used to fall back to `aws_lc_rs`, which meant the provider actually in use
-/// depended on construction order rather than on configuration — see
-/// [`crate::provider`].
-///
-/// ```ignore
-/// let provider = praxis_tls::setup::default_crypto_provider()?;
-/// assert!(!provider.cipher_suites.is_empty());
-/// ```
-///
-/// [`CryptoProvider`]: rustls::crypto::CryptoProvider
-/// [`TlsError::NoCryptoProvider`]: crate::TlsError::NoCryptoProvider
-pub(crate) fn default_crypto_provider() -> Result<Arc<CryptoProvider>, TlsError> {
-    crate::provider::installed_provider()
-}
 
 // -----------------------------------------------------------------------------
 // Certificate Loading
@@ -81,7 +56,7 @@ pub(crate) fn certify(
     key: PrivateKeyDer<'static>,
     pair: &CertKeyPair,
 ) -> Result<CertifiedKey, TlsError> {
-    let provider = default_crypto_provider()?;
+    let provider = crate::provider::installed_provider()?;
     let signing_key = provider
         .key_provider
         .load_private_key(key)
@@ -182,16 +157,6 @@ pub(crate) fn load_cert_and_key(
 mod tests {
     use super::*;
     use crate::test_utils::gen_test_certs;
-
-    #[test]
-    fn default_crypto_provider_returns_provider() {
-        crate::provider::install();
-        let provider = default_crypto_provider().expect("provider installed above");
-        assert!(
-            !provider.cipher_suites.is_empty(),
-            "crypto provider should have at least one cipher suite"
-        );
-    }
 
     #[test]
     fn load_cert_and_key_valid_pair() {

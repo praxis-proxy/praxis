@@ -298,7 +298,7 @@ impl Cluster {
         let Some(authority) = self.http.authority.as_deref() else {
             return Ok(());
         };
-        super::validate::cluster::validate_authority(authority, &self.name)
+        super::validate::cluster::authority::validate_authority(authority, &self.name)
     }
 
     /// Build a cluster with only a name and endpoints; all other

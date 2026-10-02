@@ -35,9 +35,7 @@ use super::{
         GovernedNames, apply_request_assertions, apply_response_assertions, snapshot_response_headers,
         unreachable_response_levels,
     },
-    common_message_format::{
-        entity_for_protocol_method, entity_for_protocol_method_post, llm_entity_post, llm_entity_pre,
-    },
+    common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
@@ -877,7 +875,7 @@ impl PolicyFilter {
         parsed: &ParsedLlmRequest,
         model: String,
     ) -> Result<FilterAction, FilterError> {
-        let (entity_type, hook_name) = llm_entity_pre();
+        let (entity_type, hook_name) = (ENTITY_LLM, HOOK_CMF_LLM_INPUT);
 
         // Reject before identity because an unmatched model has no policy to run.
         if self.cfg.llm.require_route && !self.llm_route_selects(&model) {
@@ -1046,7 +1044,7 @@ impl PolicyFilter {
             return Ok(FilterAction::Continue);
         }
 
-        let (entity_type, hook_name) = llm_entity_post();
+        let (entity_type, hook_name) = (ENTITY_LLM, HOOK_CMF_LLM_OUTPUT);
         let headers = Self::snapshot_headers(ctx);
         let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
             // Missing request identity would otherwise skip response policy.

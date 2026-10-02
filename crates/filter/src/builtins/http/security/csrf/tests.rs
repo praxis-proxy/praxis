@@ -5,10 +5,7 @@
 
 use praxis_core::config::InsecureOptions;
 
-use super::{
-    CsrfFilter,
-    origin::{build_trusted_origins, extract_origin},
-};
+use super::{super::origin_matcher::build_origin_matcher, CsrfFilter, origin::extract_origin};
 use crate::{FilterAction, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
@@ -145,27 +142,27 @@ trusted_origins: ["https://*.*.example.com"]
 
 #[test]
 fn websocket_scheme_normalized_to_https() {
-    let origins = build_trusted_origins(&["https://example.com".to_owned()]);
+    let origins = build_origin_matcher(&["https://example.com".to_owned()]);
     assert!(
-        origins.is_trusted("wss://example.com"),
+        origins.is_allowed("wss://example.com"),
         "wss:// origin should match https:// trusted origin"
     );
 }
 
 #[test]
 fn websocket_scheme_normalized_to_http() {
-    let origins = build_trusted_origins(&["http://example.com".to_owned()]);
+    let origins = build_origin_matcher(&["http://example.com".to_owned()]);
     assert!(
-        origins.is_trusted("ws://example.com"),
+        origins.is_allowed("ws://example.com"),
         "ws:// origin should match http:// trusted origin"
     );
 }
 
 #[test]
 fn websocket_scheme_with_default_port_normalized() {
-    let origins = build_trusted_origins(&["https://example.com".to_owned()]);
+    let origins = build_origin_matcher(&["https://example.com".to_owned()]);
     assert!(
-        origins.is_trusted("wss://example.com:443"),
+        origins.is_allowed("wss://example.com:443"),
         "wss:// with :443 should match https:// trusted origin"
     );
 }
@@ -200,41 +197,41 @@ enforce_percentage: 0
 
 #[test]
 fn trusted_origins_any_matches_all() {
-    let origins = build_trusted_origins(&["*".to_owned()]);
+    let origins = build_origin_matcher(&["*".to_owned()]);
     assert!(
-        origins.is_trusted("https://anything.example.com"),
+        origins.is_allowed("https://anything.example.com"),
         "Any policy should match any origin"
     );
 }
 
 #[test]
 fn trusted_origins_exact_match() {
-    let origins = build_trusted_origins(&["https://example.com".to_owned()]);
-    assert!(origins.is_trusted("https://example.com"), "exact origin should match");
+    let origins = build_origin_matcher(&["https://example.com".to_owned()]);
+    assert!(origins.is_allowed("https://example.com"), "exact origin should match");
 }
 
 #[test]
 fn trusted_origins_exact_no_match() {
-    let origins = build_trusted_origins(&["https://example.com".to_owned()]);
+    let origins = build_origin_matcher(&["https://example.com".to_owned()]);
     assert!(
-        !origins.is_trusted("https://evil.com"),
+        !origins.is_allowed("https://evil.com"),
         "non-listed origin should not match"
     );
 }
 
 #[test]
 fn trusted_origins_wildcard_subdomain() {
-    let origins = build_trusted_origins(&["https://*.example.com".to_owned()]);
+    let origins = build_origin_matcher(&["https://*.example.com".to_owned()]);
     assert!(
-        origins.is_trusted("https://app.example.com"),
+        origins.is_allowed("https://app.example.com"),
         "wildcard subdomain should match"
     );
     assert!(
-        !origins.is_trusted("https://example.com"),
+        !origins.is_allowed("https://example.com"),
         "bare domain should not match wildcard"
     );
     assert!(
-        !origins.is_trusted("https://a.b.example.com"),
+        !origins.is_allowed("https://a.b.example.com"),
         "nested subdomain should not match"
     );
 }
@@ -547,36 +544,36 @@ async fn put_with_wildcard_subdomain_continues() {
 
 #[test]
 fn trusted_origin_normalizes_https_default_port() {
-    let origins = build_trusted_origins(&["https://example.com".to_owned()]);
+    let origins = build_origin_matcher(&["https://example.com".to_owned()]);
     assert!(
-        origins.is_trusted("https://example.com:443"),
+        origins.is_allowed("https://example.com:443"),
         "https with explicit :443 should match bare origin"
     );
 }
 
 #[test]
 fn trusted_origin_configured_with_default_port_matches_bare() {
-    let origins = build_trusted_origins(&["https://example.com:443".to_owned()]);
+    let origins = build_origin_matcher(&["https://example.com:443".to_owned()]);
     assert!(
-        origins.is_trusted("https://example.com"),
+        origins.is_allowed("https://example.com"),
         "bare origin should match configured :443"
     );
 }
 
 #[test]
 fn trusted_origin_normalizes_http_default_port() {
-    let origins = build_trusted_origins(&["http://example.com".to_owned()]);
+    let origins = build_origin_matcher(&["http://example.com".to_owned()]);
     assert!(
-        origins.is_trusted("http://example.com:80"),
+        origins.is_allowed("http://example.com:80"),
         "http with explicit :80 should match bare origin"
     );
 }
 
 #[test]
 fn trusted_origin_preserves_non_default_port() {
-    let origins = build_trusted_origins(&["https://example.com".to_owned()]);
+    let origins = build_origin_matcher(&["https://example.com".to_owned()]);
     assert!(
-        !origins.is_trusted("https://example.com:8443"),
+        !origins.is_allowed("https://example.com:8443"),
         "non-default port should not match bare origin"
     );
 }
@@ -948,7 +945,7 @@ async fn null_origin_rejected_with_distinct_reason() {
 /// Build a [`CsrfFilter`] with the given config.
 fn make_filter(origins: &[&str], enforce_pct: u8, sec_fetch: bool) -> CsrfFilter {
     let origin_strings: Vec<String> = origins.iter().map(|s| (*s).to_owned()).collect();
-    let trusted = build_trusted_origins(&origin_strings);
+    let trusted = build_origin_matcher(&origin_strings);
     CsrfFilter {
         enable_sec_fetch_site: sec_fetch,
         enforce_percentage: enforce_pct,

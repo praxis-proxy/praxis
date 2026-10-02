@@ -4,7 +4,7 @@
 //! Cluster validation: endpoints, weights, SNI hostnames, timeouts, and health check addresses.
 
 mod application;
-mod authority;
+pub(in crate::config) mod authority;
 mod endpoints;
 mod health_check;
 mod load_balancer;
@@ -14,11 +14,6 @@ mod tls;
 pub use health_check::is_ssrf_sensitive;
 
 use crate::{config::InsecureOptions, errors::ProxyError};
-
-/// Validate the configured authority override for one cluster.
-pub(in crate::config) fn validate_authority(authority: &str, cluster_name: &str) -> Result<(), ProxyError> {
-    authority::validate_authority(authority, cluster_name)
-}
 
 // -----------------------------------------------------------------------------
 // Cluster Validation Constants

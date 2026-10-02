@@ -26,8 +26,9 @@ use tracing::{debug, trace, warn};
 
 use self::{
     config::{CsrfConfig, validate_config},
-    origin::{TrustedOrigins, build_trusted_origins, extract_origin},
+    origin::extract_origin,
 };
+use super::origin_matcher::{OriginMatcher, build_origin_matcher};
 use crate::{
     FilterAction, FilterError, Rejection,
     factory::parse_filter_config,
@@ -89,7 +90,7 @@ pub struct CsrfFilter {
     safe_methods: Vec<String>,
 
     /// Pre-compiled trusted origin matching policy.
-    trusted: TrustedOrigins,
+    trusted: OriginMatcher,
 }
 
 impl CsrfFilter {
@@ -121,7 +122,7 @@ impl CsrfFilter {
         let cfg: CsrfConfig = parse_filter_config("csrf", config)?;
         validate_config(&cfg)?;
 
-        let trusted = build_trusted_origins(&cfg.trusted_origins);
+        let trusted = build_origin_matcher(&cfg.trusted_origins);
 
         let safe_methods = cfg.safe_methods.into_iter().map(|m| m.to_ascii_uppercase()).collect();
 
@@ -237,7 +238,7 @@ impl HttpFilter for CsrfFilter {
             return Ok(self.reject_or_log(method, None, "missing origin"));
         };
 
-        if self.trusted.is_trusted(&origin) {
+        if self.trusted.is_allowed(&origin) {
             trace!(origin = %origin, "origin trusted");
             return Ok(FilterAction::Continue);
         }

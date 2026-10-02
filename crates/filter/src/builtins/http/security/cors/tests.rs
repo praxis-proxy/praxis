@@ -5,11 +5,12 @@
 
 use http::HeaderValue;
 
-use super::{
-    CorsFilter, VARY_ORIGIN,
-    origin::{OriginPolicy, build_origin_policy},
+use super::{CorsFilter, VARY_ORIGIN};
+use crate::{
+    FilterAction, Rejection,
+    builtins::http::security::origin_matcher::{OriginMatcher, build_origin_matcher},
+    filter::HttpFilter as _,
 };
-use crate::{FilterAction, Rejection, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -325,7 +326,7 @@ allow_origins: ["https://*.*.example.com"]
 
 #[test]
 fn origin_policy_any_matches_all() {
-    let policy = OriginPolicy::Any;
+    let policy = OriginMatcher::Any;
     assert!(
         policy.is_allowed("https://anything.example.com"),
         "Any policy should match any origin"
@@ -334,13 +335,13 @@ fn origin_policy_any_matches_all() {
 
 #[test]
 fn origin_policy_exact_match() {
-    let policy = build_origin_policy(&["https://example.com".to_owned()]);
+    let policy = build_origin_matcher(&["https://example.com".to_owned()]);
     assert!(policy.is_allowed("https://example.com"), "exact origin should match");
 }
 
 #[test]
 fn origin_policy_exact_no_match() {
-    let policy = build_origin_policy(&["https://example.com".to_owned()]);
+    let policy = build_origin_matcher(&["https://example.com".to_owned()]);
     assert!(
         !policy.is_allowed("https://evil.com"),
         "non-listed origin should not match"
@@ -349,7 +350,7 @@ fn origin_policy_exact_no_match() {
 
 #[test]
 fn origin_policy_wildcard_subdomain_match() {
-    let policy = build_origin_policy(&["https://*.example.com".to_owned()]);
+    let policy = build_origin_matcher(&["https://*.example.com".to_owned()]);
     assert!(
         policy.is_allowed("https://app.example.com"),
         "wildcard subdomain should match"
@@ -358,7 +359,7 @@ fn origin_policy_wildcard_subdomain_match() {
 
 #[test]
 fn origin_policy_wildcard_subdomain_no_match() {
-    let policy = build_origin_policy(&["https://*.example.com".to_owned()]);
+    let policy = build_origin_matcher(&["https://*.example.com".to_owned()]);
     assert!(
         !policy.is_allowed("https://example.com"),
         "bare domain should not match wildcard subdomain"
@@ -765,7 +766,7 @@ async fn preflight_wildcard_headers_allows_any_header() {
 
 #[test]
 fn multiple_exact_origins_match_and_reject() {
-    let policy = build_origin_policy(&[
+    let policy = build_origin_matcher(&[
         "https://alpha.example.com".to_owned(),
         "https://beta.example.com".to_owned(),
     ]);
@@ -785,7 +786,7 @@ fn multiple_exact_origins_match_and_reject() {
 
 #[test]
 fn deep_nested_subdomain_not_matched_by_wildcard() {
-    let policy = build_origin_policy(&["https://*.example.com".to_owned()]);
+    let policy = build_origin_matcher(&["https://*.example.com".to_owned()]);
     assert!(
         !policy.is_allowed("https://a.b.example.com"),
         "deep nested subdomain should not match single-level wildcard"
@@ -959,7 +960,7 @@ async fn preflight_case_mismatch_method_rejected() {
 
 #[test]
 fn wildcard_does_not_cross_scheme_boundary() {
-    let policy = build_origin_policy(&["https://*.example.com".to_owned()]);
+    let policy = build_origin_matcher(&["https://*.example.com".to_owned()]);
     assert!(
         !policy.is_allowed("https://sub.example.org"),
         "wildcard *.example.com should not match example.org"
@@ -972,7 +973,7 @@ fn wildcard_does_not_cross_scheme_boundary() {
 
 #[test]
 fn origin_with_port_matches_exact() {
-    let policy = build_origin_policy(&["https://example.com:8080".to_owned()]);
+    let policy = build_origin_matcher(&["https://example.com:8080".to_owned()]);
     assert!(
         policy.is_allowed("https://example.com:8080"),
         "exact origin with port should match"
@@ -1032,7 +1033,7 @@ async fn disallowed_preflight_with_pna_includes_private_network_in_vary() {
 
 #[test]
 fn origin_policy_case_insensitive_match() {
-    let policy = build_origin_policy(&["https://example.com".to_owned()]);
+    let policy = build_origin_matcher(&["https://example.com".to_owned()]);
     assert!(
         policy.is_allowed("HTTPS://EXAMPLE.COM"),
         "case-insensitive origin should match"
@@ -1045,13 +1046,13 @@ fn origin_policy_case_insensitive_match() {
 
 #[test]
 fn origin_policy_default_port_normalization() {
-    let policy = build_origin_policy(&["https://example.com".to_owned()]);
+    let policy = build_origin_matcher(&["https://example.com".to_owned()]);
     assert!(
         policy.is_allowed("https://example.com:443"),
         "https with :443 should match without port"
     );
 
-    let policy_http = build_origin_policy(&["http://example.com".to_owned()]);
+    let policy_http = build_origin_matcher(&["http://example.com".to_owned()]);
     assert!(
         policy_http.is_allowed("http://example.com:80"),
         "http with :80 should match without port"
@@ -1060,7 +1061,7 @@ fn origin_policy_default_port_normalization() {
 
 #[test]
 fn origin_policy_configured_with_default_port_matches_without() {
-    let policy = build_origin_policy(&["https://example.com:443".to_owned()]);
+    let policy = build_origin_matcher(&["https://example.com:443".to_owned()]);
     assert!(
         policy.is_allowed("https://example.com"),
         "configured :443 should match request without port"
@@ -1069,7 +1070,7 @@ fn origin_policy_configured_with_default_port_matches_without() {
 
 #[test]
 fn origin_policy_wildcard_case_insensitive() {
-    let policy = build_origin_policy(&["https://*.example.com".to_owned()]);
+    let policy = build_origin_matcher(&["https://*.example.com".to_owned()]);
     assert!(
         policy.is_allowed("HTTPS://APP.EXAMPLE.COM"),
         "wildcard should match case-insensitive subdomain"
@@ -1078,13 +1079,13 @@ fn origin_policy_wildcard_case_insensitive() {
 
 #[test]
 fn origin_policy_websocket_scheme_normalization() {
-    let policy = build_origin_policy(&["https://example.com".to_owned()]);
+    let policy = build_origin_matcher(&["https://example.com".to_owned()]);
     assert!(
         policy.is_allowed("wss://example.com"),
         "wss should normalize to https and match"
     );
 
-    let policy_http = build_origin_policy(&["http://example.com".to_owned()]);
+    let policy_http = build_origin_matcher(&["http://example.com".to_owned()]);
     assert!(
         policy_http.is_allowed("ws://example.com"),
         "ws should normalize to http and match"
@@ -1151,7 +1152,7 @@ fn make_filter(
     reject_mode: bool,
 ) -> CorsFilter {
     let origin_strings: Vec<String> = origins.iter().map(|s| (*s).to_owned()).collect();
-    let policy = build_origin_policy(&origin_strings);
+    let policy = build_origin_matcher(&origin_strings);
     CorsFilter {
         policy,
         allow_credentials: credentials,

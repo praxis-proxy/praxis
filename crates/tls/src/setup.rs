@@ -17,14 +17,15 @@ pub mod sni;
 
 use std::sync::Arc;
 
-pub(crate) use loader::default_crypto_provider;
 use rustls::{
     ServerConfig,
     server::{ServerSessionMemoryCache, StoresServerSessions, WantsServerCert},
     version,
 };
 
-use crate::{CipherSuiteId, ClientCertMode, ListenerTls, TlsError, TlsVersion, client_auth};
+use crate::{
+    CipherSuiteId, ClientCertMode, ListenerTls, TlsError, TlsVersion, client_auth, provider::installed_provider,
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -223,7 +224,7 @@ fn build_config_builder(
             vec![&version::TLS12, &version::TLS13]
         },
     };
-    let provider = maybe_filter_provider(default_crypto_provider()?, tls.cipher_suites.as_deref())?;
+    let provider = maybe_filter_provider(installed_provider()?, tls.cipher_suites.as_deref())?;
     ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&versions)
         .map_err(|err| TlsError::ServerConfigError {
@@ -708,7 +709,7 @@ mod tests {
     #[test]
     fn maybe_filter_provider_none_returns_original() {
         ensure_crypto_provider();
-        let provider = default_crypto_provider().expect("provider installed above");
+        let provider = installed_provider().expect("provider installed above");
         let original_count = provider.cipher_suites.len();
 
         let result = maybe_filter_provider(Arc::clone(&provider), None).expect("None filter should succeed");
@@ -722,7 +723,7 @@ mod tests {
     #[test]
     fn maybe_filter_provider_restricts_suites() {
         ensure_crypto_provider();
-        let provider = default_crypto_provider().expect("provider installed above");
+        let provider = installed_provider().expect("provider installed above");
         let ids = [CipherSuiteId::Tls13Aes256GcmSha384];
 
         let result = maybe_filter_provider(provider, Some(&ids)).expect("single-suite filter should succeed");
@@ -745,7 +746,7 @@ mod tests {
     #[test]
     fn maybe_filter_provider_preserves_configured_order() {
         ensure_crypto_provider();
-        let provider = default_crypto_provider().expect("provider installed above");
+        let provider = installed_provider().expect("provider installed above");
         let ids = [CipherSuiteId::Tls13Aes256GcmSha384, CipherSuiteId::Tls13Aes128GcmSha256];
 
         let result = maybe_filter_provider(provider, Some(&ids)).expect("two-suite filter should succeed");
@@ -769,7 +770,7 @@ mod tests {
     #[test]
     fn maybe_filter_provider_reverses_provider_order_when_configured() {
         ensure_crypto_provider();
-        let provider = default_crypto_provider().expect("provider installed above");
+        let provider = installed_provider().expect("provider installed above");
         let ids = [
             CipherSuiteId::Tls13Aes128GcmSha256,
             CipherSuiteId::Tls13Aes256GcmSha384,
