@@ -69,9 +69,46 @@ pub struct FilterChainConfig {
     /// Unique name for this filter chain.
     pub name: String,
 
+    /// Conditions inherited by every filter expanded from this chain.
+    ///
+    /// Each entry's effective request conditions are the chain's `conditions`
+    /// followed by that filter's own `conditions` (AND-composed, chain first).
+    /// Empty means the chain adds no gating. See [`Self::expanded_entries`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+
     /// Ordered list of filters in this chain.
     #[serde(default)]
     pub filters: Vec<FilterEntry>,
+}
+
+impl FilterChainConfig {
+    /// Clone this chain's filter entries with the chain-level [`conditions`]
+    /// prepended to each entry's request conditions.
+    ///
+    /// Chain conditions come first, so they are evaluated before a filter's own
+    /// conditions; because condition vectors AND together (short-circuiting),
+    /// the effective gate is `chain AND filter`. An empty chain `conditions`
+    /// leaves each entry untouched.
+    ///
+    /// [`conditions`]: Self::conditions
+    #[must_use]
+    pub fn expanded_entries(&self) -> Vec<FilterEntry> {
+        self.filters
+            .iter()
+            .map(|entry| {
+                if self.conditions.is_empty() {
+                    return entry.clone();
+                }
+                let mut cloned = entry.clone();
+                let mut combined = Vec::with_capacity(self.conditions.len().saturating_add(cloned.conditions.len()));
+                combined.extend(self.conditions.iter().cloned());
+                combined.append(&mut cloned.conditions);
+                cloned.conditions = combined;
+                cloned
+            })
+            .collect()
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -358,6 +395,165 @@ filters:
             chain.filters[0].response_conditions.len(),
             1,
             "should have 1 response condition"
+        );
+    }
+
+    /// Extract the `path_prefix` predicate from a `when` condition for assertions.
+    fn when_path_prefix(condition: &Condition) -> Option<&str> {
+        match condition {
+            Condition::When(matcher) => matcher.path_prefix.as_deref(),
+            Condition::Unless(_) => None,
+        }
+    }
+
+    #[test]
+    fn parse_chain_level_conditions() {
+        let yaml = r#"
+name: guarded
+conditions:
+  - when:
+      bound_upstream:
+        application_provider: "openai"
+filters:
+  - filter: request_id
+  - filter: access_log
+"#;
+        let chain: FilterChainConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(chain.conditions.len(), 1, "chain should carry one condition");
+        assert!(
+            chain.filters.iter().all(|entry| entry.conditions.is_empty()),
+            "declared entries keep their own (empty) conditions until expansion"
+        );
+    }
+
+    #[test]
+    fn expanded_entries_without_chain_conditions_is_noop() {
+        let yaml = r#"
+name: plain
+filters:
+  - filter: headers
+    conditions:
+      - when:
+          path_prefix: "/api"
+"#;
+        let chain: FilterChainConfig = serde_yaml::from_str(yaml).unwrap();
+        let expanded = chain.expanded_entries();
+        assert_eq!(expanded.len(), 1, "one entry expected");
+        assert_eq!(expanded[0].conditions.len(), 1, "entry keeps its single condition");
+        assert_eq!(
+            when_path_prefix(&expanded[0].conditions[0]),
+            Some("/api"),
+            "condition unchanged"
+        );
+    }
+
+    #[test]
+    fn expanded_entries_inherits_chain_conditions() {
+        let yaml = r#"
+name: guarded
+conditions:
+  - when:
+      path_prefix: "/api"
+filters:
+  - filter: request_id
+  - filter: access_log
+"#;
+        let chain: FilterChainConfig = serde_yaml::from_str(yaml).unwrap();
+        let expanded = chain.expanded_entries();
+        assert_eq!(expanded.len(), 2, "two entries expected");
+        for entry in &expanded {
+            assert_eq!(entry.conditions.len(), 1, "each entry inherits one chain condition");
+            assert_eq!(
+                when_path_prefix(&entry.conditions[0]),
+                Some("/api"),
+                "inherited predicate"
+            );
+        }
+    }
+
+    #[test]
+    fn expanded_entries_prepends_chain_before_local() {
+        let yaml = r#"
+name: guarded
+conditions:
+  - when:
+      path_prefix: "/chain"
+filters:
+  - filter: headers
+    conditions:
+      - when:
+          path_prefix: "/local"
+"#;
+        let chain: FilterChainConfig = serde_yaml::from_str(yaml).unwrap();
+        let expanded = chain.expanded_entries();
+        assert_eq!(expanded[0].conditions.len(), 2, "chain AND local compose");
+        assert_eq!(
+            when_path_prefix(&expanded[0].conditions[0]),
+            Some("/chain"),
+            "chain condition is evaluated first"
+        );
+        assert_eq!(
+            when_path_prefix(&expanded[0].conditions[1]),
+            Some("/local"),
+            "local condition follows"
+        );
+    }
+
+    #[test]
+    fn expanded_entries_leaves_source_untouched() {
+        let yaml = r#"
+name: guarded
+conditions:
+  - when:
+      path_prefix: "/api"
+filters:
+  - filter: request_id
+"#;
+        let chain: FilterChainConfig = serde_yaml::from_str(yaml).unwrap();
+        let expanded = chain.expanded_entries();
+        assert_eq!(
+            expanded[0].conditions.len(),
+            1,
+            "expanded entry inherits the chain condition"
+        );
+        assert!(
+            chain.filters[0].conditions.is_empty(),
+            "expansion clones; the source entry is not mutated"
+        );
+    }
+
+    #[test]
+    fn chain_conditions_round_trip_serialization() {
+        let yaml = r#"
+name: guarded
+conditions:
+  - when:
+      path_prefix: "/api"
+filters:
+  - filter: request_id
+"#;
+        let chain: FilterChainConfig = serde_yaml::from_str(yaml).unwrap();
+        let serialized = serde_yaml::to_string(&chain).unwrap();
+        assert!(
+            serialized.contains("conditions:"),
+            "declared conditions are preserved: {serialized}"
+        );
+        let reparsed: FilterChainConfig = serde_yaml::from_str(&serialized).unwrap();
+        assert_eq!(reparsed.conditions.len(), 1, "conditions survive a round trip");
+    }
+
+    #[test]
+    fn empty_chain_conditions_are_not_serialized() {
+        let yaml = r#"
+name: plain
+filters:
+  - filter: request_id
+"#;
+        let chain: FilterChainConfig = serde_yaml::from_str(yaml).unwrap();
+        let serialized = serde_yaml::to_string(&chain).unwrap();
+        assert!(
+            !serialized.contains("conditions:"),
+            "empty chain conditions are skipped: {serialized}"
         );
     }
 

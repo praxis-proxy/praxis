@@ -3,7 +3,9 @@
 
 //! Public snapshot of a resolved [`FilterPipeline`] for admin inspection.
 
-use praxis_core::config::{Condition, FailureMode, ResponseCondition};
+use praxis_core::config::{
+    Condition, FailureMode, ResponseCondition, redact_condition_headers, redact_response_condition_headers,
+};
 use serde::Serialize;
 
 use super::{
@@ -118,12 +120,16 @@ fn snapshot_filters(filters: &[PipelineFilter]) -> Vec<FilterIntrospection> {
 /// Snapshot one filter with branch rejoin labels against `siblings`.
 fn snapshot_filter(index: usize, pf: &PipelineFilter, siblings: &[PipelineFilter]) -> FilterIntrospection {
     let (phases, request_body, response_body) = phase_and_body_info(pf);
+    let mut conditions = pf.conditions.clone();
+    redact_condition_headers(&mut conditions);
+    let mut response_conditions = pf.response_conditions.clone();
+    redact_response_condition_headers(&mut response_conditions);
     FilterIntrospection {
         index,
         filter: pf.filter.name().to_owned(),
         name: pf.name.as_ref().map(ToString::to_string),
-        conditions: pf.conditions.clone(),
-        response_conditions: pf.response_conditions.clone(),
+        conditions,
+        response_conditions,
         failure_mode: pf.failure_mode,
         phases,
         request_body,

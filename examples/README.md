@@ -110,6 +110,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [conditional-filters.yaml](configs/pipeline/conditional-filters.yaml) | Filters support `conditions` (request phase) and `response_conditions` (response phase) to gate execution |
 | [failure-mode.yaml](configs/pipeline/failure-mode.yaml) | Demonstrates open and closed failure handling for filters |
 | [grpc-condition.yaml](configs/pipeline/grpc-condition.yaml) | The `grpc` condition predicate gates a filter on whether the request carries gRPC, classified from the `content-type` header alone (`application/grpc`, `application/grpc+proto`, `application/grpc+json`, or any other `application/grpc+<codec>`) |
+| [inherited-conditions.yaml](configs/pipeline/inherited-conditions.yaml) | A named filter chain declares one `conditions:` block that every filter in the chain inherits |
 | [iterative-request-router-circuit-breaker.yaml](configs/pipeline/iterative-request-router-circuit-breaker.yaml) | Demonstrates circuit breaker integration with the iterative request router |
 | [iterative-request-router-sequence.yaml](configs/pipeline/iterative-request-router-sequence.yaml) | Demonstrates sequential sub-request execution where each step completes before the next begins |
 | [selected-upstream-conditions.yaml](configs/pipeline/selected-upstream-conditions.yaml) | Gate a filter on the application metadata the load balancer publishes when it selects an upstream |

@@ -151,6 +151,18 @@ independent; a filter can have both. Branch
 conditions (`on_result`) are evaluated after the
 filter runs but before the pipeline advances.
 
+A named chain can also declare a chain-level
+`conditions:` block that every filter in the chain
+inherits. The chain condition is prepended to each
+filter's own request conditions (effective = chain
+AND filter), so a shared gate is written once instead
+of on every filter. Because request conditions gate a
+filter's response hook too, the inherited gate scopes
+the whole chain across both phases. See
+[Inherited Chain Conditions](../filters/README.md#inherited-chain-conditions)
+and
+[`examples/configs/pipeline/inherited-conditions.yaml`](../../examples/configs/pipeline/inherited-conditions.yaml).
+
 ### Body-phase conditions in StreamBuffer mode
 
 Body-inspecting filters use `BodyMode::StreamBuffer`,

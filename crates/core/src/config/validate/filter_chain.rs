@@ -43,12 +43,18 @@ pub(super) fn validate_filter_chains(chains: &[FilterChainConfig], listeners: &[
 /// config-generation or editing accident rather than intent.
 fn validate_conditions(chains: &[FilterChainConfig]) -> Result<(), ProxyError> {
     for chain in chains {
+        // Chain-level conditions are inherited by every expanded filter, so they
+        // get the same well-formedness checks as per-filter request conditions.
+        validate_request_condition_list(&chain.name, CHAIN_CONDITIONS_LABEL, &chain.conditions)?;
         for entry in &chain.filters {
             validate_entry_conditions(&chain.name, entry)?;
         }
     }
     Ok(())
 }
+
+/// Label used in diagnostics for a chain's inherited (chain-level) conditions.
+const CHAIN_CONDITIONS_LABEL: &str = "<chain-level conditions>";
 
 /// Reject empty condition predicates on one filter entry, recursing
 /// into inline branch chains.
@@ -79,7 +85,15 @@ fn validate_entry_conditions(chain_name: &str, entry: &FilterEntry) -> Result<()
 
 /// Reject empty request-condition predicates on one filter entry.
 fn validate_request_conditions(chain_name: &str, entry: &FilterEntry) -> Result<(), ProxyError> {
-    for (idx, condition) in entry.conditions.iter().enumerate() {
+    validate_request_condition_list(chain_name, &entry.filter_type, &entry.conditions)
+}
+
+/// Reject empty request-condition predicates over a list of conditions.
+///
+/// Shared by per-filter request conditions and chain-level (inherited)
+/// conditions; `filter` labels the source in diagnostics.
+fn validate_request_condition_list(chain_name: &str, filter: &str, conditions: &[Condition]) -> Result<(), ProxyError> {
+    for (idx, condition) in conditions.iter().enumerate() {
         let matcher = match condition {
             Condition::When(inner) | Condition::Unless(inner) => inner,
         };
@@ -97,13 +111,12 @@ fn validate_request_conditions(chain_name: &str, entry: &FilterEntry) -> Result<
                  headers, bound_upstream, or selected_upstream (an empty \
                  condition matches every request, so 'unless' would disable \
                  the filter entirely)",
-                filter = entry.filter_type,
             )));
         }
-        validate_condition_containers(chain_name, &entry.filter_type, idx, matcher)?;
-        validate_condition_paths(chain_name, &entry.filter_type, idx, matcher)?;
-        validate_condition_bound_upstream(chain_name, &entry.filter_type, idx, matcher)?;
-        validate_condition_selected_upstream(chain_name, &entry.filter_type, idx, matcher)?;
+        validate_condition_containers(chain_name, filter, idx, matcher)?;
+        validate_condition_paths(chain_name, filter, idx, matcher)?;
+        validate_condition_bound_upstream(chain_name, filter, idx, matcher)?;
+        validate_condition_selected_upstream(chain_name, filter, idx, matcher)?;
     }
     Ok(())
 }
@@ -366,6 +379,11 @@ pub(super) fn validate_selected_upstream_matchers(
     }
 
     for chain in chains {
+        // Chain-level conditions are inherited by every expanded filter, so
+        // their bound/selected matchers get the same catalog cross-check as a
+        // per-filter matcher — validated once per chain (mirrors how
+        // `validate_conditions` well-formedness-checks the same list).
+        validate_condition_list_application(&chain.name, CHAIN_CONDITIONS_LABEL, &chain.conditions, &declared)?;
         for entry in &chain.filters {
             validate_entry_selected_upstream(&chain.name, entry, &declared)?;
         }
@@ -440,19 +458,32 @@ fn validate_entry_application_conditions(
     entry: &FilterEntry,
     declared: &DeclaredUpstreams<'_>,
 ) -> Result<(), ProxyError> {
-    for (idx, condition) in entry.conditions.iter().enumerate() {
+    validate_condition_list_application(chain_name, &entry.filter_type, &entry.conditions, declared)
+}
+
+/// Check one list of conditions' `selected_upstream`/`bound_upstream` matchers
+/// against the declared catalog. Shared by per-filter conditions and
+/// chain-level conditions (which every expanded filter inherits), so a typo in
+/// a chain condition is caught at config time exactly like a per-filter one.
+fn validate_condition_list_application(
+    chain_name: &str,
+    filter: &str,
+    conditions: &[Condition],
+    declared: &DeclaredUpstreams<'_>,
+) -> Result<(), ProxyError> {
+    for (idx, condition) in conditions.iter().enumerate() {
         let matcher = match condition {
             Condition::When(inner) | Condition::Unless(inner) => inner,
         };
         if let Some(selected) = &matcher.selected_upstream {
             check_application_match_values(
-                &ApplicationMatcherLocation::new(chain_name, entry, idx, "selected_upstream", selected),
+                &ApplicationMatcherLocation::new(chain_name, filter, idx, "selected_upstream", selected),
                 &declared.selected,
             )?;
         }
         if let Some(bound) = &matcher.bound_upstream {
             check_application_match_values(
-                &ApplicationMatcherLocation::new(chain_name, entry, idx, "bound_upstream", bound),
+                &ApplicationMatcherLocation::new(chain_name, filter, idx, "bound_upstream", bound),
                 &declared.bound,
             )?;
         }
@@ -497,17 +528,19 @@ struct ApplicationMatcherLocation<'cfg> {
 }
 
 impl<'cfg> ApplicationMatcherLocation<'cfg> {
-    /// Build a matcher location from its containing filter entry.
+    /// Build a matcher location from its filter label. Per-filter callers pass
+    /// the entry's `filter_type`; the chain-level caller passes
+    /// [`CHAIN_CONDITIONS_LABEL`].
     fn new(
         chain_name: &'cfg str,
-        entry: &'cfg FilterEntry,
+        filter: &'cfg str,
         index: usize,
         axis: &'static str,
         matcher: &'cfg SelectedUpstreamMatch,
     ) -> Self {
         Self {
             chain_name,
-            filter: &entry.filter_type,
+            filter,
             index,
             axis,
             matcher,
@@ -841,6 +874,70 @@ filter_chains:
             err.to_string().contains("condition 0 is empty"),
             "an empty unless predicate silently disables the filter: {err}"
         );
+    }
+
+    #[test]
+    fn reject_empty_chain_level_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    conditions:
+      - unless: {}
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("condition 0 is empty") && err.to_string().contains("chain-level conditions"),
+            "an empty chain-level predicate is validated like a per-filter one: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_chain_level_condition_path_without_slash() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    conditions:
+      - when:
+          path_prefix: "api"
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("must start with '/'"),
+            "chain-level path predicates get the same leading-slash check: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_chain_level_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    conditions:
+      - when:
+          path_prefix: "/api"
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).expect("a well-formed chain-level condition is accepted");
     }
 
     #[test]
@@ -1691,6 +1788,90 @@ filter_chains:
         assert!(
             err.to_string().contains("no single cluster declares both"),
             "each half of the pair is on a different cluster, so no binding can match both: {err}"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn reject_chain_level_bound_upstream_typo_matching_no_cluster() {
+        let yaml = r#"
+listeners: [{name: web, address: "127.0.0.1:8080", filter_chains: [main]}]
+filter_chains:
+  - name: main
+    conditions: [{unless: {bound_upstream: {application_provider: opnai}}}]
+    filters:
+      - filter: request_id
+      - filter: load_balancer
+        clusters: [{name: backend, http: {application_provider: openai}, endpoints: ["10.0.0.1:80"]}]
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("bound_upstream.application_provider 'opnai' matches no cluster"),
+            "a chain-level bound matcher naming no declared provider must fail like a per-filter one: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_chain_level_selected_upstream_typo_matching_no_cluster() {
+        let yaml = r#"
+listeners: [{name: web, address: "127.0.0.1:8080", filter_chains: [main]}]
+filter_chains:
+  - name: main
+    conditions: [{when: {selected_upstream: {application_provider: vlim}}}]
+    filters:
+      - filter: path_rewrite
+        prefix: "/v1"
+        replacement: "/vllm/v1"
+clusters:
+  - name: backend
+    http:
+      application_provider: vllm
+    endpoints: ["10.0.0.1:80"]
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("application_provider 'vlim' matches no cluster"),
+            "a chain-level selected_upstream typo must be rejected: {err}"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn accept_chain_level_bound_upstream_naming_a_declared_cluster() {
+        let yaml = r#"
+listeners: [{name: web, address: "127.0.0.1:8080", filter_chains: [main]}]
+filter_chains:
+  - name: main
+    conditions: [{unless: {bound_upstream: {application_provider: openai}}}]
+    filters:
+      - filter: request_id
+      - filter: load_balancer
+        clusters: [{name: backend, http: {application_provider: openai}, endpoints: ["10.0.0.1:80"]}]
+"#;
+        Config::from_yaml(yaml).expect("a chain-level bound matcher naming a declared cluster parses");
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn reject_chain_level_bound_upstream_pair_no_single_cluster_declares() {
+        let yaml = r#"
+listeners: [{name: web, address: "127.0.0.1:8080", filter_chains: [main]}]
+filter_chains:
+  - name: main
+    conditions: [{when: {bound_upstream: {application_protocol: openai_responses, application_provider: openai}}}]
+    filters:
+      - filter: request_id
+      - filter: load_balancer
+        clusters:
+          - {name: a, http: {application_protocol: openai_responses}, endpoints: ["10.0.0.1:80"]}
+          - {name: b, http: {application_provider: openai}, endpoints: ["10.0.0.2:80"]}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("no single cluster declares both"),
+            "a chain-level pair split across two clusters must fail: {err}"
         );
     }
 

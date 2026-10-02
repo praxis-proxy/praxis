@@ -15,8 +15,8 @@ use praxis_filter::{
     HttpFilter, HttpFilterContext, Rejection, SelectedUpstreamBodyOutcome,
 };
 use praxis_test_utils::{
-    Backend, free_port, http_post, http_send, parse_body, parse_status, registry_with, start_echo_backend,
-    start_full_proxy_with_registry, start_header_echo_backend,
+    Backend, free_port, http_post, http_send, parse_body, parse_header, parse_status, registry_with,
+    start_echo_backend, start_full_proxy_with_registry, start_header_echo_backend,
 };
 
 struct AppendBoundMarker;
@@ -457,6 +457,58 @@ insecure_options:
     )
 }
 
+/// Three named chains where the middle chain carries a *chain-level*
+/// `bound_upstream` condition, inherited by both a dual-hook body filter and a
+/// `headers` response filter. The router (which binds) and load balancer (which
+/// dispatches the bound cluster) stay ungated: gating the router on the binding
+/// it creates would fail the ordering check, and gating the load balancer would
+/// starve the generic path of any dispatch. Requests to `/bound/` bind the
+/// `tagged` cluster (provider `test`), so the inherited condition fires both
+/// hooks; requests to `/` bind `generic` (no provider), so neither fires.
+fn chain_conditional_yaml(proxy_port: u16, tagged_port: u16, generic_port: u16, filter_name: &str) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [route, gated, dispatch]
+filter_chains:
+  - name: route
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/bound/"
+            cluster: tagged
+          - path_prefix: "/"
+            cluster: generic
+  - name: gated
+    conditions:
+      - when:
+          bound_upstream:
+            application_provider: test
+    filters:
+      - filter: {filter_name}
+      - filter: headers
+        response_set:
+          - name: "X-Bound-Hook"
+            value: "fired"
+  - name: dispatch
+    filters:
+      - filter: load_balancer
+        cluster_source: bound_upstream
+        clusters:
+          - name: tagged
+            http:
+              application_provider: test
+            endpoints: ["127.0.0.1:{tagged_port}"]
+          - name: generic
+            endpoints: ["127.0.0.1:{generic_port}"]
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
+
 fn branch_yaml(proxy_port: u16, backend_port: u16, filter_name: &str) -> String {
     format!(
         r#"
@@ -635,6 +687,59 @@ fn dual_hook_with_bound_condition_runs_at_barrier() {
         body.matches("|pre").count(),
         0,
         "the pre-read hook must not run when the effective phase is the barrier: {body}"
+    );
+}
+
+#[test]
+fn chain_condition_gates_bound_body_and_response_only_when_bound() {
+    let tagged = start_echo_backend();
+    let generic = start_echo_backend();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&chain_conditional_yaml(
+        proxy_port,
+        tagged.port(),
+        generic.port(),
+        "append_pre_or_bound_marker",
+    ))
+    .unwrap();
+    let registry = registry_with("append_pre_or_bound_marker", || Box::new(AppendPreOrBoundMarker));
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let bound = http_send(
+        proxy.addr(),
+        "POST /bound/echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8\r\nConnection: close\r\n\r\noriginal",
+    );
+    assert_eq!(parse_status(&bound), 200);
+    assert_eq!(
+        parse_body(&bound),
+        "original|bound",
+        "the inherited chain-level condition defers the dual-hook body filter to the barrier"
+    );
+    assert_eq!(
+        parse_body(&bound).matches("|pre").count(),
+        0,
+        "the pre-read hook must not run when the inherited condition selects the barrier"
+    );
+    assert_eq!(
+        parse_header(&bound, "X-Bound-Hook").as_deref(),
+        Some("fired"),
+        "the same inherited condition gates the headers response filter"
+    );
+
+    let unbound = http_send(
+        proxy.addr(),
+        "POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 8\r\nConnection: close\r\n\r\noriginal",
+    );
+    assert_eq!(parse_status(&unbound), 200);
+    assert_eq!(
+        parse_body(&unbound),
+        "original",
+        "an unmatched binding skips the inherited body hook"
+    );
+    assert_eq!(
+        parse_header(&unbound, "X-Bound-Hook"),
+        None,
+        "an unmatched binding skips the inherited response hook"
     );
 }
 

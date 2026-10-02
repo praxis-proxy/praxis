@@ -641,6 +641,99 @@ filter_chains:
     }
 
     #[test]
+    fn accept_branch_named_ref_to_conditioned_chain() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: guarded
+    conditions:
+      - when:
+          path_prefix: "/api"
+    filters:
+      - filter: headers
+  - name: main
+    filters:
+      - filter: headers
+        name: pre_route
+        branch_chains:
+          - name: my_branch
+            chains:
+              - guarded
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml)
+            .expect("a branch reference to a conditioned chain is accepted and inherits its conditions");
+    }
+
+    #[test]
+    fn accept_inline_branch_named_ref_to_conditioned_chain() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: guarded
+    conditions:
+      - when:
+          path_prefix: "/api"
+    filters:
+      - filter: headers
+  - name: main
+    filters:
+      - filter: headers
+        name: pre_route
+        branch_chains:
+          - name: outer
+            chains:
+              - name: inline_wrapper
+                filters:
+                  - filter: headers
+                    branch_chains:
+                      - name: inner
+                        chains:
+                          - guarded
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml)
+            .expect("a nested named reference to a conditioned chain is accepted and inherits its conditions");
+    }
+
+    #[test]
+    fn accept_branch_named_ref_to_unconditioned_chain() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: utility
+    filters:
+      - filter: headers
+  - name: main
+    conditions:
+      - when:
+          path_prefix: "/api"
+    filters:
+      - filter: headers
+        name: pre_route
+        branch_chains:
+          - name: my_branch
+            chains:
+              - utility
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml)
+            .expect("a conditioned chain on the listener path may still host branches to plain chains");
+    }
+
+    #[test]
     fn reject_unknown_chain_ref() {
         let yaml = r#"
 listeners:

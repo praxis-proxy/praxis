@@ -151,6 +151,105 @@ fn pipelines_per_listener_envelope_and_404() {
 }
 
 #[test]
+fn pipelines_redacts_credential_condition_matchers() {
+    let backend_port = start_backend("pipelines-redaction");
+    let proxy_port = free_port();
+    let admin_port = free_port();
+    let yaml = format!(
+        r#"
+insecure_options:
+  allow_private_endpoints: true
+admin:
+  address: "127.0.0.1:{admin_port}"
+listeners:
+  - name: web
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [gated, main]
+filter_chains:
+  - name: gated
+    conditions:
+      - when:
+          headers:
+            Authorization: "Bearer chain-secret"
+            X-Tenant: acme
+    filters:
+      - filter: headers
+        request_add:
+          - name: X-Seen
+            value: "true"
+        conditions:
+          - unless:
+              headers:
+                X-Api-Key: filter-secret
+                X-Environment: prod
+        response_conditions:
+          - when:
+              headers:
+                Set-Cookie: session=response-secret
+                Content-Type: application/json
+        branch_chains:
+          - name: audit_branch
+            rejoin: next
+            chains: [audit]
+  - name: audit
+    conditions:
+      - when:
+          headers:
+            Cookie: session=branch-secret
+            X-Branch: enabled
+    filters:
+      - filter: request_id
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - address: "127.0.0.1:{backend_port}"
+"#
+    );
+    let config = Config::from_yaml(&yaml).expect("redaction fixture should parse");
+    let _proxy = start_full_proxy(&config);
+    let admin_addr = format!("127.0.0.1:{admin_port}");
+    wait_for_tcp(&admin_addr);
+
+    let (status, json) = get_pipelines_json(&admin_addr, "/api/pipelines?listener=web");
+    assert_eq!(status, 200, "per-listener pipeline view should succeed: {json}");
+    let gated = &json["listener"]["filters"][0];
+    assert_eq!(gated["conditions"][0]["when"]["headers"]["Authorization"], "[REDACTED]");
+    assert_eq!(gated["conditions"][0]["when"]["headers"]["X-Tenant"], "acme");
+    assert_eq!(gated["conditions"][1]["unless"]["headers"]["X-Api-Key"], "[REDACTED]");
+    assert_eq!(gated["conditions"][1]["unless"]["headers"]["X-Environment"], "prod");
+    assert_eq!(
+        gated["response_conditions"][0]["when"]["headers"]["Set-Cookie"],
+        "[REDACTED]"
+    );
+    assert_eq!(
+        gated["response_conditions"][0]["when"]["headers"]["Content-Type"],
+        "application/json"
+    );
+    let branch_filter = &gated["branches"][0]["filters"][0];
+    assert_eq!(
+        branch_filter["conditions"][0]["when"]["headers"]["Cookie"],
+        "[REDACTED]"
+    );
+    assert_eq!(branch_filter["conditions"][0]["when"]["headers"]["X-Branch"], "enabled");
+
+    let (status, aggregate) = get_pipelines_json(&admin_addr, "/api/pipelines");
+    assert_eq!(status, 200, "aggregate pipeline view should succeed: {aggregate}");
+    for secret in ["chain-secret", "filter-secret", "response-secret", "branch-secret"] {
+        assert!(
+            !aggregate.to_string().contains(secret),
+            "aggregate view exposed {secret}: {aggregate}"
+        );
+    }
+}
+
+#[test]
 fn pipelines_view_updates_after_reload() {
     let backend_port = start_backend("pipelines-reload");
     let proxy_port = free_port();

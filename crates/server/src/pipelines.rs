@@ -184,20 +184,37 @@ pub(crate) fn resolve_pipelines_with_composition(
     // builds where a dependency turned the filter on through feature
     // unification.
     praxis_filter::set_policy_subrequest_connector(subrequest_client.connector());
-    let chains: HashMap<&str, &[_]> = config
+    let chains_by_name: HashMap<&str, &_> = config
         .filter_chains
         .iter()
-        .map(|chain| (chain.name.as_str(), chain.filters.as_slice()))
+        .map(|chain| (chain.name.as_str(), chain))
+        .collect();
+    // Resolve named references (from branch chains and outbound/subrequest
+    // bindings) against *expanded* entries so they inherit chain-level
+    // conditions exactly like the listener path below. `build_filters` moves
+    // each entry's `conditions` into the `PipelineFilter` via `mem::take`, so
+    // only request-phase conditions flow through — never body hooks, which
+    // branch children still do not run. `expanded_by_name` is declared first so
+    // it outlives every `build_with_chains` borrow of `chains`.
+    let expanded_by_name: HashMap<&str, Vec<praxis_core::config::FilterEntry>> = chains_by_name
+        .iter()
+        .map(|(name, chain)| (*name, chain.expanded_entries()))
+        .collect();
+    let chains: HashMap<&str, &[praxis_core::config::FilterEntry]> = expanded_by_name
+        .iter()
+        .map(|(name, entries)| (*name, entries.as_slice()))
         .collect();
     let mut pipelines = HashMap::with_capacity(config.listeners.len());
     for listener in &config.listeners {
         let mut entries = Vec::new();
         for chain_name in &listener.filter_chains {
-            let chain_filters = chains.get(chain_name.as_str()).ok_or_else(|| {
+            let chain = chains_by_name.get(chain_name.as_str()).ok_or_else(|| {
                 let lname = &listener.name;
                 format!("unknown chain '{chain_name}' for listener '{lname}'")
             })?;
-            entries.extend_from_slice(chain_filters);
+            // Clone each entry with the chain's `conditions` prepended, so every
+            // expanded filter inherits the chain-level gate (chain AND filter).
+            entries.extend(chain.expanded_entries());
         }
 
         validate_terminal_position(&entries, &listener.name)?;
@@ -560,6 +577,84 @@ filter_chains:
         .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
         assert_eq!(pipeline.len(), 3, "two chains should produce 3 filters total");
+    }
+
+    #[test]
+    fn resolve_pipelines_inherits_chain_conditions() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use praxis_core::config::{Condition, FilterEntry};
+
+        /// Request-condition `path_prefix` values on one flattened entry, in order.
+        fn entry_prefixes(entry: &FilterEntry) -> Vec<Option<String>> {
+            entry
+                .conditions
+                .iter()
+                .map(|condition| match condition {
+                    Condition::When(matcher) => matcher.path_prefix.clone(),
+                    Condition::Unless(_) => None,
+                })
+                .collect()
+        }
+
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [guarded]
+filter_chains:
+  - name: guarded
+    conditions:
+      - when:
+          path_prefix: "/api"
+    filters:
+      - filter: request_id
+      - filter: headers
+        request_add:
+          - name: "x-tag"
+            value: "on"
+        conditions:
+          - when:
+              path_prefix: "/api/v2"
+"#,
+        )
+        .unwrap();
+        let registry = FilterRegistry::with_builtins();
+
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_in_validator = Arc::clone(&ran);
+        let (_registry_factory, composition) = ServerComposition::standard()
+            .add_pipeline_validator(move |ctx| {
+                let entries = ctx.entries();
+                assert_eq!(entries.len(), 2, "two filters expanded from the chain");
+                assert_eq!(
+                    entry_prefixes(&entries[0]),
+                    vec![Some("/api".to_owned())],
+                    "the first filter inherits only the chain condition"
+                );
+                assert_eq!(
+                    entry_prefixes(&entries[1]),
+                    vec![Some("/api".to_owned()), Some("/api/v2".to_owned())],
+                    "the second filter inherits the chain condition first, then its own"
+                );
+                ran_in_validator.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .into_parts();
+
+        resolve_pipelines_with_composition(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            &composition,
+        )
+        .unwrap();
+
+        assert_eq!(ran.load(Ordering::SeqCst), 1, "the pipeline validator must run once");
     }
 
     #[test]
