@@ -37,6 +37,11 @@ const NEGATIVE_DNS_TTL_SECS: u64 = 5;
 /// Maximum cached DNS entries before oldest-entry eviction.
 const MAX_DNS_ENTRIES: usize = 1_024;
 
+/// Maximum concurrent client-selected DNS lookups. Waiting for a slot is
+/// covered by the caller's URL deadline. A lookup keeps its slot after the
+/// caller times out until the blocking resolver actually finishes.
+const MAX_PER_CALL_DNS_LOOKUPS: usize = 64;
+
 /// How long a positive answer may be served past its TTL while re-resolution
 /// keeps failing for lack of a local resource.
 const MAX_STALE_SECS: u64 = 300; // 5 min
@@ -370,6 +375,51 @@ pub(crate) async fn resolve_host_cached(host: &str) -> Result<Vec<IpAddr>, Addre
     resolve_host_cached_with(host, &SystemLookup).await
 }
 
+/// Resolve a client-selected host once without reading, joining, or changing
+/// the process-wide positive/negative cache or its in-flight resolutions.
+pub(crate) async fn resolve_host_per_call(host: &str) -> Result<Vec<IpAddr>, AddressResolutionError> {
+    resolve_host_per_call_with(host, &SystemLookup, per_call_dns_admission()).await
+}
+
+/// Shared admission bound for per-call DNS without sharing cached answers or
+/// per-host in-flight results.
+fn per_call_dns_admission() -> &'static Arc<tokio::sync::Semaphore> {
+    static ADMISSION: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    ADMISSION.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(MAX_PER_CALL_DNS_LOOKUPS)))
+}
+
+/// Run one lookup under admission. The detached owner retains the permit if
+/// the caller's deadline expires while `getaddrinfo` is still blocking.
+async fn resolve_host_per_call_with<L: BlockingLookup>(
+    host: &str,
+    lookup: &L,
+    admission: &Arc<tokio::sync::Semaphore>,
+) -> Result<Vec<IpAddr>, AddressResolutionError> {
+    let permit = Arc::clone(admission)
+        .acquire_owned()
+        .await
+        .map_err(|err| AddressResolutionError::Task {
+            address: host.to_owned(),
+            message: err.to_string(),
+        })?;
+    let task_host = host.to_owned();
+    let task_lookup = lookup.clone();
+    let ips = tokio::spawn(async move {
+        let _permit = permit;
+        task_lookup.lookup(task_host).await
+    })
+    .await
+    .map_err(|err| AddressResolutionError::Task {
+        address: host.to_owned(),
+        message: err.to_string(),
+    })??;
+    if ips.is_empty() {
+        Err(AddressResolutionError::Empty(host.to_owned()))
+    } else {
+        Ok(ips)
+    }
+}
+
 /// Cache-checked, single-flight resolution over an injectable [`BlockingLookup`].
 /// The real machinery behind [`resolve_host_cached`]; tests drive it with a
 /// controllable lookup double.
@@ -612,7 +662,7 @@ fn literal_socket_addr(address: &str) -> Option<SocketAddr> {
 }
 
 /// Seed the DNS cache so a test hostname resolves to `ips` without a resolver.
-#[cfg(feature = "test-support")]
+#[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub fn seed_dns(host: &str, ips: &[IpAddr]) {
     insert_cached(host, Ok(Arc::from(ips)));
@@ -1868,6 +1918,171 @@ mod tests {
         assert!(matches!(err, AddressResolutionError::Empty(_)), "got {err}");
         let cached = lookup_cached(host).expect("negative cache entry");
         assert!(matches!(cached, Err(AddressResolutionError::RecentFailure { .. })));
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "covers positive, negative, and absent cache entries"
+    )]
+    async fn per_call_bypasses_positive_and_negative_cache_without_replacing_them() {
+        let positive = "per-call-positive.praxis-test.invalid";
+        insert_cached(positive, Ok(Arc::from(["1.2.3.4".parse::<IpAddr>().unwrap()])));
+        let fresh = ControlledLookup::new(Behavior::Ok(vec!["5.6.7.8".parse().unwrap()]));
+        fresh.release.notify_one();
+        assert_eq!(
+            resolve_host_per_call_with(positive, &fresh, per_call_dns_admission())
+                .await
+                .unwrap(),
+            vec!["5.6.7.8".parse::<IpAddr>().unwrap()],
+            "per-call lookup must ignore the positive cache entry"
+        );
+        assert_eq!(fresh.calls.load(Ordering::SeqCst), 1, "fresh lookup must run once");
+        assert_eq!(
+            resolve_host_cached_with(positive, &fresh).await.unwrap(),
+            vec!["1.2.3.4".parse::<IpAddr>().unwrap()],
+            "per-call lookup must leave the positive answer intact"
+        );
+        assert_eq!(fresh.calls.load(Ordering::SeqCst), 1, "cached read must not repeat DNS");
+
+        let negative = "per-call-negative.praxis-test.invalid";
+        insert_cached(negative, Err("cached failure".to_owned()));
+        let recovered = ControlledLookup::new(Behavior::Ok(vec!["9.8.7.6".parse().unwrap()]));
+        recovered.release.notify_one();
+        assert_eq!(
+            resolve_host_per_call_with(negative, &recovered, per_call_dns_admission())
+                .await
+                .unwrap(),
+            vec!["9.8.7.6".parse::<IpAddr>().unwrap()],
+            "per-call lookup must ignore the negative cache entry"
+        );
+        assert!(
+            matches!(
+                resolve_host_cached_with(negative, &recovered).await,
+                Err(AddressResolutionError::RecentFailure { .. })
+            ),
+            "per-call success must leave the cached failure intact"
+        );
+        assert_eq!(
+            recovered.calls.load(Ordering::SeqCst),
+            1,
+            "cached failure must not repeat DNS"
+        );
+
+        let uncached = "per-call-new.praxis-test.invalid";
+        let only_this_call = ControlledLookup::new(Behavior::Ok(vec!["4.3.2.1".parse().unwrap()]));
+        only_this_call.release.notify_one();
+        resolve_host_per_call_with(uncached, &only_this_call, per_call_dns_admission())
+            .await
+            .expect("per-call lookup succeeds without populating the cache");
+        assert!(
+            lookup_cached(uncached).is_none(),
+            "per-call success must not populate cache"
+        );
+        assert!(
+            lookup_cached(positive).is_some(),
+            "per-call lookup must not evict cached entries"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "verifies independent in-flight cache and per-call lookups"
+    )]
+    async fn per_call_does_not_join_or_publish_to_cached_inflight() {
+        let host = "per-call-inflight.praxis-test.invalid";
+        let cached = ControlledLookup::new(Behavior::Ok(vec!["1.2.3.4".parse().unwrap()]));
+        let cached_lookup = cached.clone();
+        let cached_task = tokio::spawn(async move { resolve_host_cached_with(host, &cached_lookup).await });
+        await_lookup_started(&cached.calls).await;
+        assert!(
+            dns_inflight().contains_key(&cache_key(host)),
+            "cached lookup must remain in flight while its resolver waits"
+        );
+
+        let per_call = ControlledLookup::new(Behavior::Empty);
+        per_call.release.notify_one();
+        assert!(
+            matches!(
+                resolve_host_per_call_with(host, &per_call, per_call_dns_admission()).await,
+                Err(AddressResolutionError::Empty(_))
+            ),
+            "per-call lookup must use its own empty answer"
+        );
+        assert_eq!(
+            per_call.calls.load(Ordering::SeqCst),
+            1,
+            "per-call resolver must run once"
+        );
+        assert!(
+            !cached_task.is_finished(),
+            "per-call result must not complete cached lookup"
+        );
+        assert!(
+            lookup_cached(host).is_none(),
+            "per-call failure must not populate cache"
+        );
+
+        cached.release.notify_one();
+        assert_eq!(
+            cached_task.await.unwrap().unwrap(),
+            vec!["1.2.3.4".parse::<IpAddr>().unwrap()],
+            "cached in-flight lookup must publish its own answer"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "verifies admission ownership across cancellation")]
+    async fn per_call_admission_survives_caller_cancellation() {
+        let admission = Arc::new(tokio::sync::Semaphore::new(1));
+        let first = ControlledLookup::new(Behavior::Ok(vec!["1.2.3.4".parse().unwrap()]));
+        let first_lookup = first.clone();
+        let first_admission = Arc::clone(&admission);
+        let first_caller = tokio::spawn(async move {
+            resolve_host_per_call_with("first.praxis-test.invalid", &first_lookup, &first_admission).await
+        });
+        await_lookup_started(&first.calls).await;
+        assert_eq!(
+            admission.available_permits(),
+            0,
+            "first lookup must hold the only permit"
+        );
+
+        first_caller.abort();
+        let second = ControlledLookup::new(Behavior::Ok(vec!["5.6.7.8".parse().unwrap()]));
+        let second_lookup = second.clone();
+        let second_admission = Arc::clone(&admission);
+        let second_caller = tokio::spawn(async move {
+            resolve_host_per_call_with("second.praxis-test.invalid", &second_lookup, &second_admission).await
+        });
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            second.calls.load(Ordering::SeqCst),
+            0,
+            "canceling the first caller must not let the second resolver start"
+        );
+        assert_eq!(
+            admission.available_permits(),
+            0,
+            "canceling the caller must not release the permit while its resolver is blocked"
+        );
+
+        first.release.notify_one();
+        await_lookup_started(&second.calls).await;
+        second.release.notify_one();
+        assert_eq!(
+            second_caller.await.unwrap().unwrap(),
+            vec!["5.6.7.8".parse::<IpAddr>().unwrap()],
+            "second lookup must finish after the first releases admission"
+        );
+        assert_eq!(
+            admission.available_permits(),
+            1,
+            "completed lookups must release the permit"
+        );
     }
 
     #[tokio::test]
