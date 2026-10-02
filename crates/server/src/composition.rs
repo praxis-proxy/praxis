@@ -13,12 +13,12 @@
 //! - **Standard `praxis` binary**: use [`run_server`](crate::run_server) (built-in and auto-discovered filters, no
 //!   customization).
 //! - **Custom filter registry only**: use [`run_server_with_registry`](crate::run_server_with_registry).
-//! - **Full composition control** (custom registry, pipeline extensions, validators): use
+//! - **Full composition control** (custom registry, pipeline extensions, validators, runtime services): use
 //!   [`run_server_with_composition`](crate::run_server_with_composition) with a [`ServerComposition`].
 //!
 //! ## What it carries
 //!
-//! [`ServerComposition`] holds three things, each called at a different point in the server's lifecycle:
+//! [`ServerComposition`] holds four things, each called at a different point in the server's lifecycle:
 //!
 //! 1. **Registry construction** (startup only): A factory that builds the filter [`FilterRegistry`]. It runs once at
 //!    startup and receives a [`RegistryContext`] exposing the server-owned [`SubRequestClient`], the one runtime handle
@@ -33,6 +33,10 @@
 //!    [`ValidatorContext`] and may reject it, but cannot mutate it. Use this to enforce downstream policy (required
 //!    filters, forbidden configurations, etc.).
 //!
+//! 4. **Runtime services** (serving mode only): Process-lifetime tasks run on the server-owned runtime. They receive
+//!    opaque shutdown and readiness handles instead of Pingora or mutable server access. Validation and dump never
+//!    start them.
+//!
 //! The composition never exposes mutable pipelines, watchers, listeners, or
 //! publication handles. It is a description consumed by the server, not a hook
 //! into a running one.
@@ -42,6 +46,7 @@
 use std::{fmt, sync::Arc};
 
 use praxis_core::{
+    RuntimeService,
     config::{Config, FilterEntry, Listener},
     subrequest::SubRequestClient,
 };
@@ -68,6 +73,26 @@ type ExtensionFactory =
 ///
 /// `Send + Sync` for the same reason as [`ExtensionFactory`].
 type PipelineValidator = Box<dyn Fn(&ValidatorContext<'_>) -> Result<(), CompositionError> + Send + Sync>;
+
+/// Named process-lifetime task contributed by a downstream distribution.
+pub(crate) struct RuntimeServiceRegistration {
+    /// Human-readable service name used by the runtime.
+    name: String,
+    /// Opaque service task.
+    service: Arc<dyn RuntimeService>,
+}
+
+impl RuntimeServiceRegistration {
+    /// Service name used by the runtime.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Opaque service task.
+    pub(crate) fn service(&self) -> Arc<dyn RuntimeService> {
+        Arc::clone(&self.service)
+    }
+}
 
 // -----------------------------------------------------------------------------
 // CompositionError
@@ -264,11 +289,11 @@ impl<'ctx> ValidatorContext<'ctx> {
 
 /// The reload-durable half of a [`ServerComposition`].
 ///
-/// A [`ServerComposition`] splits into two parts: a startup-only registry factory
-/// (consumed once) and this reload-durable `PipelineComposition` (cloned into the
-/// config-reload watcher). This struct holds the pipeline-extension factories and
-/// validators applied on every pipeline rebuild, both at startup and on every
-/// config reload.
+/// A [`ServerComposition`] splits into a startup-only registry factory, this
+/// reload-durable `PipelineComposition` (cloned into the config-reload watcher),
+/// and serving-only runtime services. This struct holds the pipeline-extension
+/// factories and validators applied on every pipeline rebuild, both at startup
+/// and on every config reload.
 ///
 /// The default value applies no extensions and no validators, which is what the
 /// standard non-embedded `praxis` binary uses when calling [`run_server`](crate::run_server).
@@ -310,6 +335,16 @@ impl PipelineComposition {
     }
 }
 
+/// Startup-only and reload-durable pieces extracted from a composition.
+pub(crate) struct CompositionParts {
+    /// Builds the registry exactly once for this lifecycle.
+    pub(crate) registry_factory: RegistryFactory,
+    /// Extension factories and validators retained across reloads.
+    pub(crate) pipeline: PipelineComposition,
+    /// Process-lifetime services installed only by the serving path.
+    pub(crate) runtime_services: Vec<RuntimeServiceRegistration>,
+}
+
 // -----------------------------------------------------------------------------
 // ServerComposition
 // -----------------------------------------------------------------------------
@@ -319,8 +354,9 @@ impl PipelineComposition {
 /// Construct one with [`ServerComposition::standard`] (built-in and
 /// auto-discovered filters), [`ServerComposition::with_registry`] (a
 /// pre-built registry), or [`ServerComposition::with_registry_factory`] (a
-/// registry built from server context), then layer on pipeline extensions and
-/// validators. Pass it to [`run_server_with_composition`].
+/// registry built from server context), then layer on pipeline extensions,
+/// validators, and runtime services. Pass it to
+/// [`run_server_with_composition`].
 ///
 /// ```
 /// use praxis::{CompositionError, PipelineExtension, RequestExtensions, ServerComposition};
@@ -358,6 +394,8 @@ pub struct ServerComposition {
     extension_factories: Vec<ExtensionFactory>,
     /// Read-only validators run against each built pipeline.
     validators: Vec<PipelineValidator>,
+    /// Process-lifetime services installed on the serving runtime.
+    runtime_services: Vec<RuntimeServiceRegistration>,
 }
 
 impl ServerComposition {
@@ -399,6 +437,7 @@ impl ServerComposition {
             registry_factory: Box::new(factory),
             extension_factories: Vec::new(),
             validators: Vec::new(),
+            runtime_services: Vec::new(),
         }
     }
 
@@ -431,16 +470,46 @@ impl ServerComposition {
         self
     }
 
-    /// Split into the startup-only registry factory and the reload-durable
-    /// pipeline composition.
-    pub(crate) fn into_parts(self) -> (RegistryFactory, PipelineComposition) {
-        (
-            self.registry_factory,
-            PipelineComposition {
+    /// Register a process-lifetime task on the server-owned serving runtime.
+    ///
+    /// The service is installed only by [`run_server_with_composition`];
+    /// offline validation and dump consume the same composition but never
+    /// start it. The task receives Praxis-owned shutdown and readiness wrappers
+    /// through [`RuntimeService::run`] and cannot access mutable server or
+    /// Pingora lifecycle state. Capture a cloneable command or resource handle
+    /// from the same service state in extension factories when reload candidates
+    /// must communicate with the long-lived worker.
+    ///
+    /// The shutdown notification begins request draining rather than marking
+    /// it complete. The worker may stop background activity, but resources
+    /// shared with filters must remain usable until consumer-owned handles are
+    /// dropped after in-flight requests finish.
+    ///
+    /// [`run_server_with_composition`]: crate::run_server_with_composition
+    #[must_use]
+    pub fn add_runtime_service<N, S>(mut self, name: N, service: S) -> Self
+    where
+        N: Into<String>,
+        S: RuntimeService,
+    {
+        self.runtime_services.push(RuntimeServiceRegistration {
+            name: name.into(),
+            service: Arc::new(service),
+        });
+        self
+    }
+
+    /// Split into the startup-only registry factory, reload-durable pipeline
+    /// composition, and serving-only runtime services.
+    pub(crate) fn into_parts(self) -> CompositionParts {
+        CompositionParts {
+            registry_factory: self.registry_factory,
+            pipeline: PipelineComposition {
                 extension_factories: Arc::from(self.extension_factories),
                 validators: Arc::from(self.validators),
             },
-        )
+            runtime_services: self.runtime_services,
+        }
     }
 }
 
@@ -466,6 +535,7 @@ impl Default for ServerComposition {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use praxis_core::{RuntimeServiceContext, RuntimeServiceFuture};
     use praxis_filter::RequestExtensions;
 
     use super::*;
@@ -477,6 +547,15 @@ mod tests {
     impl PipelineExtension for Marker {
         fn prepare(&self, extensions: &mut RequestExtensions) {
             extensions.insert(self.clone());
+        }
+    }
+
+    /// No-op task used to inspect runtime-service registration.
+    struct TestRuntimeService;
+
+    impl RuntimeService for TestRuntimeService {
+        fn run(self: Arc<Self>, _context: RuntimeServiceContext) -> RuntimeServiceFuture {
+            Box::pin(async {})
         }
     }
 
@@ -496,15 +575,19 @@ mod tests {
     }
 
     #[test]
-    fn default_composition_has_no_extensions_or_validators() {
-        let (_factory, pipeline) = ServerComposition::default().into_parts();
+    fn default_composition_has_no_extensions_validators_or_services() {
+        let parts = ServerComposition::default().into_parts();
         assert!(
-            pipeline.extension_factories.is_empty(),
+            parts.pipeline.extension_factories.is_empty(),
             "the standard composition applies no extensions"
         );
         assert!(
-            pipeline.validators.is_empty(),
+            parts.pipeline.validators.is_empty(),
             "the standard composition applies no validators"
+        );
+        assert!(
+            parts.runtime_services.is_empty(),
+            "the standard composition runs no services"
         );
     }
 
@@ -517,14 +600,25 @@ mod tests {
             observed_in_factory.store(std::ptr::from_ref(ctx.subrequest_client()).addr(), Ordering::SeqCst);
             Ok(FilterRegistry::with_builtins())
         });
-        let (factory, _pipeline) = composition.into_parts();
+        let parts = composition.into_parts();
         let ctx = RegistryContext::new(&client);
-        factory(&ctx).expect("standard registry build should succeed");
+        (parts.registry_factory)(&ctx).expect("standard registry build should succeed");
         assert_eq!(
             observed.load(Ordering::SeqCst),
             std::ptr::from_ref(&client).addr(),
             "the factory must observe the server-owned client"
         );
+    }
+
+    #[test]
+    fn runtime_service_registration_preserves_name_and_service() {
+        let parts = ServerComposition::standard()
+            .add_runtime_service("downstream-store", TestRuntimeService)
+            .into_parts();
+
+        assert_eq!(parts.runtime_services.len(), 1);
+        assert_eq!(parts.runtime_services[0].name(), "downstream-store");
+        let _service = parts.runtime_services[0].service();
     }
 
     #[test]
@@ -537,7 +631,7 @@ mod tests {
             let ext: Box<dyn PipelineExtension> = Box::new(Marker(7));
             Ok(ext)
         });
-        let (_factory, pipeline_composition) = composition.into_parts();
+        let pipeline_composition = composition.into_parts().pipeline;
 
         let config = single_listener_config();
         let listener = &config.listeners[0];
@@ -567,7 +661,7 @@ mod tests {
         let client = empty_subrequest_client();
         let composition = ServerComposition::standard()
             .add_pipeline_extension_factory(|_ctx| Err(CompositionError::new("factory refused")));
-        let (_factory, pipeline_composition) = composition.into_parts();
+        let pipeline_composition = composition.into_parts().pipeline;
 
         let config = single_listener_config();
         let listener = &config.listeners[0];
@@ -583,7 +677,7 @@ mod tests {
     fn validate_propagates_validator_errors() {
         let composition = ServerComposition::standard()
             .add_pipeline_validator(|_ctx| Err(CompositionError::new("validator refused")));
-        let (_factory, pipeline_composition) = composition.into_parts();
+        let pipeline_composition = composition.into_parts().pipeline;
 
         let config = single_listener_config();
         let listener = &config.listeners[0];
@@ -598,7 +692,7 @@ mod tests {
     #[test]
     fn validate_passes_when_every_validator_accepts() {
         let composition = ServerComposition::standard().add_pipeline_validator(|_ctx| Ok(()));
-        let (_factory, pipeline_composition) = composition.into_parts();
+        let pipeline_composition = composition.into_parts().pipeline;
 
         let config = single_listener_config();
         let listener = &config.listeners[0];

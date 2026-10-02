@@ -241,9 +241,11 @@ curl http://127.0.0.1:9901/healthy
 
 ### /ready (Readiness)
 
-Returns per-cluster health status when active health
-checks are configured. Returns `503` when any cluster
-has zero healthy endpoints.
+Returns `503` while a composed runtime service is still
+initializing. Once runtime initialization completes, it
+returns per-cluster health status when active health checks
+are configured and returns `503` when any cluster has zero
+healthy endpoints.
 
 ```console
 curl http://127.0.0.1:9901/ready
@@ -253,6 +255,12 @@ Without health checks configured:
 
 ```json
 {"status":"ok"}
+```
+
+While a runtime service is initializing (returns HTTP 503):
+
+```json
+{"status":"initializing","runtime_services":"pending"}
 ```
 
 With health checks, all clusters healthy:

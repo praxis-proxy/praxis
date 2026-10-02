@@ -6,6 +6,10 @@
 /// Pingora-specific server factory and runtime.
 pub mod pingora;
 mod runtime;
+mod service;
 
 pub use pingora::{PingoraServerRuntime, build_http_server};
 pub use runtime::RuntimeOptions;
+pub use service::{
+    RuntimeReadiness, RuntimeReady, RuntimeService, RuntimeServiceContext, RuntimeServiceFuture, RuntimeShutdown,
+};

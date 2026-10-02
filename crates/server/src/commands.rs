@@ -69,27 +69,7 @@ pub(crate) fn load_and_validate_for_cli(
 /// unknown filter types, undefined chain references, or filter instantiation
 /// errors.
 pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    praxis_core::logging::validate_log_overrides(config)?;
-    praxis_core::logging::validate_logging(config)?;
-    let registry = praxis::build_full_registry();
-    if praxis_tls::provider::required()
-        && let Some(reason) = praxis::fips_blocker(&registry)
-    {
-        return Err(reason.into());
-    }
-    let health_registry = praxis_core::health::build_health_registry(&config.clusters);
-    let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    let subrequest_client = praxis::build_subrequest_client(config);
-    let session_stores = std::sync::Arc::new(praxis_filter::SessionStoreRegistry::new());
-    praxis::resolve_pipelines(
-        config,
-        &registry,
-        &health_registry,
-        &kv_stores,
-        &session_stores,
-        &subrequest_client,
-    )?;
-    Ok(())
+    praxis::validate_config(config)
 }
 
 // -----------------------------------------------------------------------------

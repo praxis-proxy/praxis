@@ -423,6 +423,7 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
                     listener_meta,
                     cluster_meta,
                 }),
+                runtime_readiness: None,
                 verbose: config.admin.verbose,
             },
         );
