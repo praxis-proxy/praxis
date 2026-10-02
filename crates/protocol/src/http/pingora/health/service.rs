@@ -205,7 +205,7 @@ pub fn add_health_endpoint_to_pingora_server(
 ) {
     let recorder = install_prometheus_admin_recorder();
     add_prometheus_upkeep_to_pingora_server(server, recorder);
-    add_health_endpoint_to_pingora_server_with_pipelines(server, metrics_addr, registry, verbose, None)
+    add_health_endpoint_to_pingora_server_with_pipelines(server, metrics_addr, registry, verbose, None);
 }
 
 /// Add the health and metrics listener with live pipeline readiness.
@@ -424,6 +424,7 @@ pub fn add_admin_api_to_pingora_server(server: &mut Server, admin_addr: &str, op
     bind_admin_api_to_pingora_server(server, admin_addr, options);
 }
 
+/// Construct and register the API service without changing recorder lifecycle.
 fn bind_admin_api_to_pingora_server(server: &mut Server, admin_addr: &str, options: AdminEndpointOptions) {
     let verbose = options.verbose;
     let require_loopback_host = admin_host::is_loopback_host(admin_addr);
@@ -527,7 +528,7 @@ pub fn add_admin_endpoints_to_pingora_server_with_recorder(
     recorder: PrometheusAdminRecorder,
 ) {
     add_prometheus_upkeep_to_pingora_server(server, recorder);
-    bind_admin_api_to_pingora_server(server, admin_addr, options)
+    bind_admin_api_to_pingora_server(server, admin_addr, options);
 }
 
 /// Register recorder upkeep after installing the recorder before startup
@@ -1153,7 +1154,7 @@ mod tests {
     }
 
     /// Serve one raw HTTP request through `svc` over an in-memory stream.
-    async fn serve<S: ServeHttp>(svc: &S, raw: &[u8]) -> Response<Vec<u8>> {
+    async fn serve<S: ServeHttp + Sync>(svc: &S, raw: &[u8]) -> Response<Vec<u8>> {
         use tokio::io::AsyncWriteExt as _;
 
         let (mut client, server) = tokio::io::duplex(65_536); // 64 KiB

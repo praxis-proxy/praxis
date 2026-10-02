@@ -78,6 +78,7 @@ impl Config {
     /// let err = Config::from_yaml("listeners: []\n").unwrap_err();
     /// assert!(err.to_string().contains("at least one listener"));
     /// ```
+    #[expect(clippy::too_many_lines, reason = "top-level configuration validation sequence")]
     pub fn validate(&mut self) -> Result<(), ProxyError> {
         warn_active_insecure_options(&self.insecure_options);
         validate_listeners(&mut self.listeners)?;
