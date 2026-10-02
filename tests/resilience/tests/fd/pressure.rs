@@ -30,8 +30,11 @@ use praxis_test_utils::{
 fn a_burst_near_the_limit_is_shed_with_503_not_failed() {
     let _serial = crate::serial();
     let backend = start_slow_backend("slow", Duration::from_millis(500));
-    let (port, admin) = (free_port(), free_port());
-    let mut proxy = PraxisProcess::spawn(&http_config(port, admin, backend, "max_open_files: 256"), &addr(port));
+    let (port, metrics) = (free_port(), free_port());
+    let mut proxy = PraxisProcess::spawn(
+        &http_config(port, metrics, backend, "max_open_files: 256", None),
+        &addr(port),
+    );
 
     let report = collect_responses(open_requests(&addr(port), "/", 150));
 
@@ -53,7 +56,7 @@ fn a_burst_near_the_limit_is_shed_with_503_not_failed() {
         "requests within the limit must still succeed: {report:?}"
     );
     assert!(
-        overload_rejects(admin) > 0,
+        overload_rejects(metrics) > 0,
         "sheds must be counted as file_descriptors overload rejects"
     );
     assert_eq!(
@@ -73,8 +76,11 @@ fn a_burst_near_the_limit_is_shed_with_503_not_failed() {
 fn shed_responses_carry_retry_after_and_close() {
     let _serial = crate::serial();
     let backend = start_slow_backend("slow", Duration::from_millis(500));
-    let (port, admin) = (free_port(), free_port());
-    let proxy = PraxisProcess::spawn(&http_config(port, admin, backend, "max_open_files: 256"), &addr(port));
+    let (port, metrics) = (free_port(), free_port());
+    let proxy = PraxisProcess::spawn(
+        &http_config(port, metrics, backend, "max_open_files: 256", None),
+        &addr(port),
+    );
 
     let responses = read_raw_responses(open_requests(&addr(port), "/", 150));
     let shed: Vec<&(String, bool)> = responses
@@ -107,13 +113,14 @@ fn shed_responses_carry_retry_after_and_close() {
 fn disabling_shedding_lets_requests_fail_at_the_limit() {
     let _serial = crate::serial();
     let backend = start_slow_backend("slow", Duration::from_millis(500));
-    let (port, admin) = (free_port(), free_port());
+    let (port, metrics) = (free_port(), free_port());
     let _proxy = PraxisProcess::spawn(
         &http_config(
             port,
-            admin,
+            metrics,
             backend,
             "max_open_files: 256\n  shed_on_fd_pressure: false",
+            None,
         ),
         &addr(port),
     );
@@ -129,7 +136,11 @@ fn disabling_shedding_lets_requests_fail_at_the_limit() {
         report.count(502) + report.failures.len() > 0,
         "without shedding, 150 in-flight requests must run out of descriptors: {report:?}"
     );
-    assert_eq!(overload_rejects(admin), 0, "no file_descriptors rejects when disabled");
+    assert_eq!(
+        overload_rejects(metrics),
+        0,
+        "no file_descriptors rejects when disabled"
+    );
 }
 
 #[test]
@@ -140,8 +151,8 @@ fn disabling_shedding_lets_requests_fail_at_the_limit() {
 fn tcp_listener_closes_new_connections_near_the_limit() {
     let _serial = crate::serial();
     let echo = start_tcp_echo_backend();
-    let (port, admin) = (free_port(), free_port());
-    let mut proxy = PraxisProcess::spawn(&tcp_config(port, admin, echo), &addr(port));
+    let (port, metrics) = (free_port(), free_port());
+    let mut proxy = PraxisProcess::spawn(&tcp_config(port, metrics, echo), &addr(port));
 
     let sessions: Vec<Option<TcpStream>> = std::iter::repeat_with(|| echo_session(&addr(port))).take(120).collect();
     let served = sessions.iter().flatten().count();
@@ -153,7 +164,7 @@ fn tcp_listener_closes_new_connections_near_the_limit() {
     );
     assert!(served < 120, "sessions past the limit must be closed: all 120 served");
     assert!(
-        overload_rejects(admin) > 0,
+        overload_rejects(metrics) > 0,
         "TCP sheds must be counted ({served} of 120 served):\n{}",
         proxy.logs()
     );
@@ -174,17 +185,28 @@ fn tcp_listener_closes_new_connections_near_the_limit() {
 fn descriptor_usage_is_exported() {
     let _serial = crate::serial();
     let backend = start_slow_backend("ok", Duration::ZERO);
-    let (port, admin) = (free_port(), free_port());
-    let proxy = PraxisProcess::spawn(&http_config(port, admin, backend, "max_open_files: 512"), &addr(port));
-
-    let actual = u64::try_from(proxy.open_fds()).expect("fd count fits u64");
-    let metrics = wait_for_metric(admin, "praxis_process_open_fds", |open| open.abs_diff(actual) <= 16);
-    assert!(
-        metrics.contains("praxis_process_max_fds 512"),
-        "the limit gauge must match max_open_files:\n{metrics}"
+    let (proxy_port, metrics_port, admin_port) = (free_port(), free_port(), free_port());
+    let proxy = PraxisProcess::spawn(
+        &http_config(
+            proxy_port,
+            metrics_port,
+            backend,
+            "max_open_files: 512",
+            Some(admin_port),
+        ),
+        &addr(proxy_port),
     );
 
-    let (status, body) = http_get(&addr(admin), "/api/stats", None);
+    let actual = u64::try_from(proxy.open_fds()).expect("fd count fits u64");
+    let scrape = wait_for_metric(metrics_port, "praxis_process_open_fds", |open| {
+        open.abs_diff(actual) <= 16
+    });
+    assert!(
+        scrape.contains("praxis_process_max_fds 512"),
+        "the limit gauge must match max_open_files:\n{scrape}"
+    );
+
+    let (status, body) = http_get(&addr(admin_port), "/api/stats", None);
     assert_eq!(status, 200, "stats endpoint: {body}");
     let stats: serde_json::Value = serde_json::from_str(&body).expect("stats JSON");
     assert_eq!(stats["file_descriptors"]["limit"], 512, "stats limit: {body}");
@@ -200,14 +222,15 @@ fn descriptor_usage_is_exported() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-/// HTTP proxy on `port` routing to `backend`, admin on `admin`, with
-/// `runtime_lines` under `runtime:`.
-fn http_config(port: u16, admin: u16, backend: u16, runtime_lines: &str) -> String {
+/// HTTP proxy on `port` routing to `backend`, with metrics on `metrics` and
+/// an optional admin API on `admin`.
+fn http_config(port: u16, metrics: u16, backend: u16, runtime_lines: &str, admin: Option<u16>) -> String {
+    let admin_address = admin.map_or_else(String::new, |port| format!("  address: \"127.0.0.1:{port}\"\n"));
     format!(
         r#"
 shutdown_timeout_secs: 1
 admin:
-  metrics_address: "127.0.0.1:{admin}"
+{admin_address}  metrics_address: "127.0.0.1:{metrics}"
 runtime:
   threads: 1
   {runtime_lines}
@@ -233,14 +256,14 @@ insecure_options:
     )
 }
 
-/// TCP proxy on `port` forwarding to `upstream`, admin on `admin`, with
+/// TCP proxy on `port` forwarding to `upstream`, metrics on `metrics`, with
 /// `max_open_files: 256`.
-fn tcp_config(port: u16, admin: u16, upstream: u16) -> String {
+fn tcp_config(port: u16, metrics: u16, upstream: u16) -> String {
     format!(
         r#"
 shutdown_timeout_secs: 1
 admin:
-  metrics_address: "127.0.0.1:{admin}"
+  metrics_address: "127.0.0.1:{metrics}"
 runtime:
   threads: 1
   max_open_files: 256
@@ -298,12 +321,12 @@ fn wait_for_status(addr: &str, want: u16, timeout: Duration) -> u16 {
     }
 }
 
-/// Scrape `/metrics` until sample `name` satisfies `accept`, since the gauge
+/// Scrape `/metrics` on `metrics` until sample `name` satisfies `accept`, since the gauge
 /// is published by a periodic sampler.
-fn wait_for_metric<F: Fn(u64) -> bool>(admin: u16, name: &str, accept: F) -> String {
+fn wait_for_metric<F: Fn(u64) -> bool>(metrics: u16, name: &str, accept: F) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let (_, body) = http_get(&addr(admin), "/metrics", None);
+        let (_, body) = http_get(&addr(metrics), "/metrics", None);
         if metric_value(&body, name).is_some_and(&accept) {
             return body;
         }
@@ -323,9 +346,9 @@ fn metric_value(body: &str, name: &str) -> Option<u64> {
         .and_then(|value| format!("{value:.0}").parse().ok())
 }
 
-/// `praxis_overload_rejects_total{reason="file_descriptors"}` on `admin`.
-fn overload_rejects(admin: u16) -> u64 {
-    let (_, body) = http_get(&addr(admin), "/metrics", None);
+/// `praxis_overload_rejects_total{reason="file_descriptors"}` on `metrics`.
+fn overload_rejects(metrics: u16) -> u64 {
+    let (_, body) = http_get(&addr(metrics), "/metrics", None);
     metric_value(&body, "praxis_overload_rejects_total{reason=\"file_descriptors\"}").unwrap_or(0)
 }
 

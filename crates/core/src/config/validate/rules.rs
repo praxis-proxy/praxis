@@ -79,6 +79,7 @@ impl Config {
     /// let err = Config::from_yaml("listeners: []\n").unwrap_err();
     /// assert!(err.to_string().contains("at least one listener"));
     /// ```
+    #[expect(clippy::too_many_lines, reason = "top-level configuration validation sequence")]
     pub fn validate(&mut self) -> Result<(), ProxyError> {
         warn_active_insecure_options(&self.insecure_options);
         validate_listeners(&mut self.listeners)?;
@@ -305,6 +306,12 @@ fn validate_management_listener_addresses(
         ));
     }
 
+    if admin_address.is_none() && metrics_address.is_none() {
+        return Ok(());
+    }
+
+    let listener_addresses = parse_listener_addresses(listeners)?;
+
     for (field, management_address) in [
         ("admin.address", admin_address),
         ("admin.metrics_address", metrics_address),
@@ -312,12 +319,8 @@ fn validate_management_listener_addresses(
         let Some(management_address) = management_address else {
             continue;
         };
-        for listener in listeners {
-            let listener_address: SocketAddr = listener
-                .address
-                .parse()
-                .map_err(|_parse_err| ProxyError::Config(format!("invalid listener address '{}'", listener.address)))?;
-            if addresses_overlap(management_address, listener_address) {
+        for (listener, listener_address) in &listener_addresses {
+            if addresses_overlap(management_address, *listener_address) {
                 return Err(ProxyError::Config(format!(
                     "{field} overlaps listener '{}' address '{}'",
                     listener.name, listener.address
@@ -326,6 +329,22 @@ fn validate_management_listener_addresses(
         }
     }
     Ok(())
+}
+
+/// Parse each data-listener address once for management overlap checks.
+fn parse_listener_addresses(
+    listeners: &[crate::config::Listener],
+) -> Result<Vec<(&crate::config::Listener, SocketAddr)>, ProxyError> {
+    listeners
+        .iter()
+        .map(|listener| {
+            listener
+                .address
+                .parse::<SocketAddr>()
+                .map(|address| (listener, address))
+                .map_err(|_parse_err| ProxyError::Config(format!("invalid listener address '{}'", listener.address)))
+        })
+        .collect()
 }
 
 /// Warn when filter duration metrics are enabled without a metrics endpoint.

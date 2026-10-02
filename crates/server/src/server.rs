@@ -293,7 +293,6 @@ pub fn try_run_server_with_registry(
 /// [`with_bootstrap_logging`]: praxis_core::logging::with_bootstrap_logging
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
-#[expect(clippy::too_many_lines, reason = "startup sequence with feature-gated steps")]
 pub fn try_run_server_with_composition(
     config: Config,
     composition: ServerComposition,
@@ -671,6 +670,7 @@ fn watcher_params(
     clippy::too_many_arguments,
     reason = "admin wiring needs registry, meta stores, and metrics"
 )]
+#[expect(clippy::too_many_lines, reason = "registering the independent management services")]
 fn register_admin_endpoints(
     server: &mut PingoraServerRuntime,
     config: &Config,
@@ -684,7 +684,7 @@ fn register_admin_endpoints(
             server.server_mut(),
             admin_addr,
             praxis_protocol::http::pingora::health::AdminEndpointOptions {
-                health_registry: Some(health_registry.clone()),
+                health_registry: Some(Arc::clone(&health_registry)),
                 kv_registry: Some(state.kv_stores.clone()),
                 pipelines: Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
                 log_level: state.log_level.clone(),

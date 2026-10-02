@@ -93,13 +93,11 @@ fn loopback_metrics_listener_rejects_rebound_host_on_every_route() {
 #[test]
 fn public_admin_bind_accepts_dns_name_hosts() {
     let (_proxy, admin, metrics) = start_admin("0.0.0.0", true);
-    for path in ["/api/stats"] {
-        let (status, body) = admin_request(&admin, "GET", path, Some("admin.internal.example"));
-        assert_eq!(
-            status, 200,
-            "a non-loopback bind must serve DNS-name Hosts on {path}: {body}"
-        );
-    }
+    let (status, body) = admin_request(&admin, "GET", "/api/stats", Some("admin.internal.example"));
+    assert_eq!(
+        status, 200,
+        "a non-loopback bind must serve DNS-name Hosts on /api/stats: {body}"
+    );
 
     let (status, body) = admin_request(&admin, "PUT", "/api/kv/store/key", Some("admin.internal.example"));
     assert_eq!(status, 404, "a non-loopback bind must route KV writes: {body}");

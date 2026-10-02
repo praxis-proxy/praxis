@@ -182,7 +182,8 @@ without the other; the two listeners must not overlap.
   Filter it with `?listener=NAME`.
 
 The health and metrics listener only serves those three endpoints; the admin
-listener serves `/api/kv/*` and `/api/pipelines`. Other paths return
+listener serves `/api/kv/*`, `/api/pipelines`, `/api/log-level`, and
+`/api/stats`. Other paths return
 `404 NOT FOUND`. Neither listener has authentication. The admin API must bind
 to loopback unless `insecure_options.allow_public_admin` is enabled; the
 health and metrics listener can bind to any interface, so restrict access with
