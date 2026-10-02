@@ -744,6 +744,9 @@ Defaults keep today's behavior: non-blocking stdout,
 text or JSON via `PRAXIS_LOG_FORMAT`, lossy overflow
 when the buffer is full.
 
+`buffer_size` sizes the non-blocking queue, so it is
+rejected when `non_blocking` is `false`.
+
 Praxis does not rotate log files. With `output: file`
 the log grows in place at `file_path`; rotation and
 retention are the platform's responsibility (journald,

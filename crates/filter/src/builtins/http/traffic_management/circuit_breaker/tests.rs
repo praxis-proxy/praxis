@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use praxis_core::circuit::CircuitBreakerConfig as CoreCircuitBreakerConfig;
 
-use super::CircuitBreakerFilter;
+use super::{CircuitBreakerFilter, InstrumentedCircuitBreaker, lock_gauge_owners};
 use crate::{FilterAction, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
@@ -50,6 +50,29 @@ clusters:
         err.to_string().contains("consecutive_failures must be > 0"),
         "should reject zero threshold: {err}"
     );
+}
+
+#[test]
+fn from_config_rejects_duplicate_cluster() -> Result<(), serde_yaml::Error> {
+    let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+        "
+clusters:
+  - name: backend
+    consecutive_failures: 3
+    recovery_window_secs: 30
+  - name: backend
+    consecutive_failures: 5
+    recovery_window_secs: 30
+",
+    )?;
+    let result = CircuitBreakerFilter::from_config(&yaml);
+    assert!(
+        result
+            .err()
+            .is_some_and(|e| e.to_string().contains("duplicate cluster 'backend'")),
+        "duplicate cluster names should be rejected"
+    );
+    Ok(())
 }
 
 #[test]
@@ -353,7 +376,7 @@ fn make_filter(threshold: u32, recovery_secs: u64) -> CircuitBreakerFilter {
     let mut breakers = std::collections::HashMap::new();
     breakers.insert(
         Arc::from("backend"),
-        super::InstrumentedCircuitBreaker::new(
+        InstrumentedCircuitBreaker::new(
             "backend",
             CoreCircuitBreakerConfig {
                 threshold,
@@ -375,11 +398,33 @@ fn make_two_cluster_filter(threshold: u32, recovery_secs: u64) -> CircuitBreaker
     let mut breakers = std::collections::HashMap::new();
     breakers.insert(
         Arc::from("cluster-a"),
-        super::InstrumentedCircuitBreaker::new("cluster-a", config.clone()),
+        InstrumentedCircuitBreaker::new("cluster-a", config.clone()),
     );
     breakers.insert(
         Arc::from("cluster-b"),
-        super::InstrumentedCircuitBreaker::new("cluster-b", config),
+        InstrumentedCircuitBreaker::new("cluster-b", config),
     );
     CircuitBreakerFilter { breakers }
+}
+
+#[test]
+fn stale_breaker_drop_keeps_newer_gauge_owner() {
+    let config = CoreCircuitBreakerConfig {
+        threshold: 1,
+        recovery_window: std::time::Duration::from_secs(30),
+        half_open_timeout: std::time::Duration::from_secs(30),
+    };
+    let old = InstrumentedCircuitBreaker::new("gauge-owner-reload", config.clone());
+    let new = InstrumentedCircuitBreaker::new("gauge-owner-reload", config);
+    drop(old);
+    assert_eq!(
+        lock_gauge_owners().get("gauge-owner-reload"),
+        Some(&new.owner_id),
+        "dropping the stale breaker must not release the newer breaker's gauge"
+    );
+    drop(new);
+    assert!(
+        !lock_gauge_owners().contains_key("gauge-owner-reload"),
+        "dropping the current owner should release the gauge"
+    );
 }

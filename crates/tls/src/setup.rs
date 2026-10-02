@@ -36,7 +36,7 @@ use crate::{CipherSuiteId, ClientCertMode, ListenerTls, TlsError, TlsVersion, cl
 /// (more with client certificates), so this costs about a megabyte per
 /// listener. Stateless tickets would avoid the cache, but the OpenSSL provider
 /// has no ticketer and rustls would not check one for FIPS.
-const SESSION_CACHE_ENTRIES: usize = 4_096;
+pub(crate) const SESSION_CACHE_ENTRIES: usize = 4_096;
 
 /// The session cache every listener config uses.
 fn session_storage() -> Arc<dyn StoresServerSessions + Send + Sync> {
@@ -44,11 +44,17 @@ fn session_storage() -> Arc<dyn StoresServerSessions + Send + Sync> {
 }
 
 /// Apply the settings every listener config shares once its certificates are
-/// wired: the ALPN list, the session cache and the Extended Master Secret
-/// requirement. When the
-/// deployment requires FIPS mode, a config that would not operate in it is an
-/// error rather than a listener.
-fn finish_server_config(mut config: ServerConfig, advertise_http_alpn: bool) -> Result<ServerConfig, TlsError> {
+/// wired: the ALPN list, the session cache, the cipher suite preference and the
+/// Extended Master Secret requirement. When `prefer_server_order` is set (an
+/// operator configured `cipher_suites`), the server's suite order wins over the
+/// client's. When the deployment requires FIPS mode, a config that would not
+/// operate in it is an error rather than a listener.
+fn finish_server_config(
+    mut config: ServerConfig,
+    advertise_http_alpn: bool,
+    prefer_server_order: bool,
+) -> Result<ServerConfig, TlsError> {
+    config.ignore_client_order = prefer_server_order;
     config.alpn_protocols = if advertise_http_alpn {
         alpn_protocols()
     } else {
@@ -128,7 +134,7 @@ pub fn build_server_config(tls: &ListenerTls, advertise_http_alpn: bool) -> Resu
         builder.with_cert_resolver(Arc::new(resolver))
     };
 
-    let config = finish_server_config(config, advertise_http_alpn)?;
+    let config = finish_server_config(config, advertise_http_alpn, tls.cipher_suites.is_some())?;
     Ok(Arc::new(config))
 }
 
@@ -196,7 +202,10 @@ pub fn build_reloadable_server_config(
     let cert_handle = resolver.arc();
 
     let config = builder.with_cert_resolver(Arc::new(resolver));
-    let config = finish_server_config(config, advertise_http_alpn)?;
+    let mut config = finish_server_config(config, advertise_http_alpn, tls.cipher_suites.is_some())?;
+    if let Some(handle) = &verifier_handle {
+        config.session_storage = Arc::new(crate::reload::VerifierBoundSessions(Arc::clone(handle)));
+    }
 
     Ok(ReloadableServerConfig {
         config: Arc::new(config),
@@ -706,6 +715,40 @@ mod tests {
     }
 
     #[test]
+    fn configured_cipher_suites_prefer_server_order() -> Result<(), Box<dyn std::error::Error>> {
+        ensure_crypto_provider();
+        let certs = gen_test_certs();
+        let restricted = ListenerTls {
+            certificates: vec![CertKeyPair {
+                cert_path: certs.cert_path.to_str().ok_or("cert path is not UTF-8")?.to_owned(),
+                default: false,
+                key_path: certs.key_path.to_str().ok_or("key path is not UTF-8")?.to_owned(),
+                server_names: Vec::new(),
+            }],
+            cipher_suites: Some(vec![CipherSuiteId::Tls13Aes256GcmSha384]),
+            client_ca: None,
+            client_cert_mode: ClientCertMode::None,
+            trusted_spiffe_ids: Vec::new(),
+            hot_reload: None,
+            min_version: None,
+        };
+        let unrestricted = ListenerTls {
+            cipher_suites: None,
+            ..restricted.clone()
+        };
+
+        assert!(
+            build_server_config(&restricted, true)?.ignore_client_order,
+            "configured cipher_suites should make the server order win"
+        );
+        assert!(
+            !build_server_config(&unrestricted, true)?.ignore_client_order,
+            "without cipher_suites the client order should be honoured"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn maybe_filter_provider_none_returns_original() {
         ensure_crypto_provider();
         let provider = default_crypto_provider().expect("provider installed above");
@@ -846,6 +889,38 @@ mod tests {
             "ALPN should include h2 and http/1.1"
         );
         assert!(result.verifier_handle.is_none(), "no mTLS means no verifier handle");
+    }
+
+    #[test]
+    #[cfg(feature = "config-reload")]
+    fn build_reloadable_server_config_mtls_binds_session_cache() -> Result<(), Box<dyn std::error::Error>> {
+        ensure_crypto_provider();
+        let certs = gen_test_certs();
+        let tls = ListenerTls {
+            certificates: vec![CertKeyPair {
+                cert_path: certs.cert_path.to_str().ok_or("cert path is not UTF-8")?.to_owned(),
+                default: false,
+                key_path: certs.key_path.to_str().ok_or("key path is not UTF-8")?.to_owned(),
+                server_names: Vec::new(),
+            }],
+            cipher_suites: None,
+            client_ca: Some(CaConfig {
+                ca_path: certs.ca_cert_path.to_str().ok_or("CA path is not UTF-8")?.to_owned(),
+                crl_paths: Vec::new(),
+            }),
+            client_cert_mode: ClientCertMode::Require,
+            trusted_spiffe_ids: Vec::new(),
+            hot_reload: None,
+            min_version: None,
+        };
+
+        let result = build_reloadable_server_config(&tls, true)?;
+        assert!(result.verifier_handle.is_some(), "mTLS should expose a verifier handle");
+        assert!(
+            result.config.session_storage.can_cache(),
+            "verifier-bound session storage should cache sessions"
+        );
+        Ok(())
     }
 
     #[test]

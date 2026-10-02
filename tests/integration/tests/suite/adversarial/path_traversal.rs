@@ -5,7 +5,8 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_body, parse_status, simple_proxy_yaml, start_proxy, start_uri_echo_backend,
+    free_port, http_get, http_send, parse_body, parse_status, simple_proxy_yaml, start_backend, start_proxy,
+    start_uri_echo_backend,
 };
 
 // -----------------------------------------------------------------------------
@@ -136,4 +137,71 @@ fn double_slash_path_forwarded_intact() {
         !body.contains("/../"),
         "double-slash should not introduce traversal (body: {body})"
     );
+}
+
+#[test]
+fn dotdot_segment_rejected_with_400() -> Result<(), Box<dyn std::error::Error>> {
+    let backend_port_guard = start_uri_echo_backend();
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml)?;
+    let proxy = start_proxy(&config);
+
+    for path in ["/a/../b", "/a/%2e%2e/b"] {
+        let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        let raw = http_send(proxy.addr(), &request);
+        assert_eq!(
+            parse_status(&raw),
+            400,
+            "dot-dot path {path} should be rejected with 400"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn dotdot_cannot_escape_prefix_route() -> Result<(), Box<dyn std::error::Error>> {
+    let public_port = start_backend("public");
+    let admin_port = start_backend("admin");
+    let proxy_port = free_port();
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/public"
+            cluster: "public"
+          - path_prefix: "/admin"
+            cluster: "admin"
+      - filter: load_balancer
+        clusters:
+          - name: "public"
+            endpoints:
+              - "127.0.0.1:{public_port}"
+          - name: "admin"
+            endpoints:
+              - "127.0.0.1:{admin_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+    let config = Config::from_yaml(&yaml)?;
+    let proxy = start_proxy(&config);
+
+    let request = "GET /public/../admin HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    let raw = http_send(proxy.addr(), request);
+    assert_eq!(parse_status(&raw), 400, "/public/../admin should be rejected with 400");
+    let body = parse_body(&raw);
+    assert!(
+        !body.contains("public") && !body.contains("admin"),
+        "rejected traversal must not reach any backend (body: {body})"
+    );
+    Ok(())
 }

@@ -138,14 +138,14 @@ fn validate_endpoint_weight(weight: u32, addr: &str, cluster_name: &str) -> Resu
 }
 
 /// Reject endpoints that resolve to SSRF-sensitive addresses
-/// when the cluster has no health check configured.
+/// unless `allow_private_endpoints` is set.
 ///
-/// Clusters with health checks are covered by
-/// [`validate_health_check_ssrf`], gated by `allow_private_health_checks`.
+/// Health-checked clusters are additionally gated by
+/// `allow_private_health_checks` in [`validate_health_check_ssrf`].
 ///
 /// [`validate_health_check_ssrf`]: super::health_check::validate_health_check_ssrf
 fn validate_endpoint_ssrf(cluster: &Cluster, insecure_options: &InsecureOptions) -> Result<(), ProxyError> {
-    if cluster.health_check.is_some() || insecure_options.allow_private_endpoints {
+    if insecure_options.allow_private_endpoints {
         return Ok(());
     }
     for ep in &cluster.endpoints {
@@ -294,28 +294,32 @@ mod tests {
     }
 
     #[test]
-    fn ssrf_skip_endpoint_check_when_health_check_present() {
-        let clusters = vec![Cluster {
-            health_check: Some(crate::config::HealthCheckConfig {
-                check_type: crate::config::HealthCheckType::Http,
-                expected_status: 200,
-                grpc_service: String::new(),
-                healthy_threshold: 2,
-                interval_ms: 5000,
-                passive_healthy_threshold: None,
-                passive_unhealthy_threshold: None,
-                path: "/health".to_owned(),
-                timeout_ms: 2000,
-                unhealthy_threshold: 3,
-            }),
-            ..Cluster::with_defaults("web", vec!["127.0.0.1:80".into()])
-        }];
+    fn ssrf_endpoint_check_applies_even_with_health_check() -> Result<(), Box<dyn std::error::Error>> {
+        let clusters = vec![health_checked_loopback_cluster()];
         let opts = InsecureOptions {
             allow_private_health_checks: true,
             ..InsecureOptions::default()
         };
-        validate_clusters(&clusters, &opts)
-            .expect("endpoint SSRF defers to health check SSRF when health check present");
+        let Err(err) = validate_clusters(&clusters, &opts) else {
+            return Err("health-checked loopback endpoint should still need allow_private_endpoints".into());
+        };
+        assert!(
+            err.to_string().contains("endpoint '127.0.0.1:80'"),
+            "error should name the endpoint: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ssrf_health_checked_endpoint_accepted_with_both_overrides() -> Result<(), Box<dyn std::error::Error>> {
+        let clusters = vec![health_checked_loopback_cluster()];
+        let opts = InsecureOptions {
+            allow_private_endpoints: true,
+            allow_private_health_checks: true,
+            ..InsecureOptions::default()
+        };
+        validate_clusters(&clusters, &opts)?;
+        Ok(())
     }
 
     #[test]
@@ -587,5 +591,28 @@ clusters:
         let clusters = vec![Cluster::with_defaults("web", vec!["134744072:80".into()])];
         validate_clusters(&clusters, &InsecureOptions::default())
             .expect("decimal 134744072 (8.8.8.8) should not be flagged");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// Build a loopback cluster with an HTTP health check.
+    fn health_checked_loopback_cluster() -> Cluster {
+        Cluster {
+            health_check: Some(crate::config::HealthCheckConfig {
+                check_type: crate::config::HealthCheckType::Http,
+                expected_status: 200,
+                grpc_service: String::new(),
+                healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health".to_owned(),
+                timeout_ms: 2000,
+                unhealthy_threshold: 3,
+            }),
+            ..Cluster::with_defaults("web", vec!["127.0.0.1:80".into()])
+        }
     }
 }

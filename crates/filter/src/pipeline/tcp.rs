@@ -61,22 +61,29 @@ impl FilterPipeline {
 
     /// Run all TCP disconnect filters in reverse order.
     ///
+    /// Every filter's `on_disconnect` runs even after an earlier one fails,
+    /// so per-connection cleanup is never skipped.
+    ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if any filter fails.
+    /// Returns the first [`FilterError`] from a filter whose failure mode
+    /// is closed, after all hooks have run.
     pub async fn execute_tcp_disconnect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<(), FilterError> {
+        let mut first_err: Option<FilterError> = None;
         for pf in self.filters.iter().rev() {
             let tcp_filter = match &pf.filter {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
             };
             trace!(filter = tcp_filter.name(), "on_disconnect");
-            if let Err(e) = tcp_filter.on_disconnect(ctx).await {
-                check_failure_mode(tcp_filter.name(), e, "tcp disconnect", pf.failure_mode)?;
+            if let Err(e) = tcp_filter.on_disconnect(ctx).await
+                && let Err(closed) = check_failure_mode(tcp_filter.name(), e, "tcp disconnect", pf.failure_mode)
+            {
+                first_err.get_or_insert(closed);
             }
         }
 
-        Ok(())
+        first_err.map_or(Ok(()), Err)
     }
 }
 
@@ -304,6 +311,29 @@ mod tests {
         assert!(
             result.is_err(),
             "closed (default) failure_mode should propagate disconnect error"
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_closed_error_still_runs_remaining_hooks() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let pipeline = make_tcp_pipeline(vec![
+            Box::new(CountingTcpFilter {
+                connects: Arc::clone(&connects),
+                disconnects: Arc::clone(&disconnects),
+            }),
+            Box::new(ErrorDisconnectTcpFilter),
+        ]);
+        let mut ctx = make_ctx();
+
+        let result = pipeline.execute_tcp_disconnect(&mut ctx).await;
+
+        assert!(result.is_err(), "closed disconnect error should still be returned");
+        assert_eq!(
+            disconnects.load(Ordering::SeqCst),
+            1,
+            "earlier filter's on_disconnect must run after a later filter fails closed"
         );
     }
 

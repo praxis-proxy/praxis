@@ -100,6 +100,7 @@ listeners:
     address: "127.0.0.1:{port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_private_health_checks: true
 clusters:
   - name: db
@@ -253,6 +254,8 @@ listeners:
   - name: default
     address: "127.0.0.1:{port}"
     filter_chains: [main]
+insecure_options:
+  allow_private_endpoints: true
 clusters:
   - name: backend
     endpoints:

@@ -118,6 +118,16 @@ rather than silently adopted as the baseline.
   listener. Its handler executes only filters of the
   protocol it was started with, so the reload is refused
   until the change is reverted or the process restarts.
+- Grouped TCP listeners (same upstream, cluster and
+  timeouts) whose `filter_chains` or `max_connections`
+  disagree.
+- A change to a bound TCP listener's `upstream`,
+  `cluster`, `tcp_session_timeout_ms` or
+  `tcp_max_duration_secs`, removal of a bound TCP
+  listener, or a change to
+  `insecure_options.allow_private_upstreams` while TCP
+  listeners exist. The TCP service captures these at
+  startup.
 
 Stateful filters (rate limiter, circuit breaker) reset
 their state on reload. Operators should expect a brief
@@ -591,10 +601,10 @@ runtime:
   - `consecutive_failures`: failure threshold before the
     circuit opens (required, must be > 0).
   - `recovery_window_secs`: seconds the circuit stays
-    open before allowing a probe (required, must be > 0).
+    open before allowing a probe (required, 1..=3600).
   - `half_open_timeout_secs`: seconds a half-open probe
     may remain in-flight before the circuit resets to open
-    (default 30).
+    (default 30, 1..=3600).
 
   The circuit breaker state is preserved across config
   reloads. Use the `transport_error: circuit_open`
@@ -716,6 +726,11 @@ shutdown:
 ```yaml
 shutdown_timeout_secs: 60    # default: 30
 ```
+
+On SIGTERM listeners stop accepting new connections. The
+first up-to-5 s is a grace period in which in-flight
+requests keep running; the remainder bounds the runtime
+drain; the total never exceeds `shutdown_timeout_secs`.
 
 Once the drain completes, Praxis flushes queued log lines
 and exports pending OTLP spans, then exits `0`. A startup

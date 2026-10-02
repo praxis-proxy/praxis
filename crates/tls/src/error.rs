@@ -110,6 +110,18 @@ pub enum TlsError {
         value: String,
     },
 
+    /// `client_ca` is set but `client_cert_mode` is `none`, so the CA would be
+    /// silently ignored.
+    #[error(
+        "client_ca is set but client_cert_mode is none; set client_cert_mode (request, require) or remove client_ca"
+    )]
+    ClientCaWithoutMode,
+
+    /// A cluster `client_cert` sets `server_names` or `default`, which only
+    /// apply to listener certificates.
+    #[error("cluster tls.client_cert does not accept server_names or default; remove them")]
+    ClusterClientCertSelectors,
+
     /// `client_cert_mode` is `request` or `require` but `client_ca` is not set.
     #[error("client_ca is required when client_cert_mode is {mode:?}")]
     MissingClientCa {
@@ -179,6 +191,15 @@ mod tests {
         assert!(
             err.to_string().contains("client_ca"),
             "should mention missing client_ca: {err}"
+        );
+    }
+
+    #[test]
+    fn error_display_client_ca_without_mode() {
+        let msg = TlsError::ClientCaWithoutMode.to_string();
+        assert!(
+            msg.contains("client_ca") && msg.contains("client_cert_mode"),
+            "should mention client_ca and client_cert_mode: {msg}"
         );
     }
 

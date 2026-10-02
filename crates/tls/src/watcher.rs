@@ -32,7 +32,9 @@ use crate::{CertKeyPair, ClientCertMode, setup::loader};
 /// Debounce window for filesystem events.
 const DEBOUNCE_MS: u64 = 500; // 500 ms
 
-/// Minimum cooldown after a successful reload to prevent rapid churn.
+/// Backoff value after a successful reload. It only seeds the failure retry
+/// timer, which is idle after a success; new filesystem events always debounce
+/// for [`DEBOUNCE_MS`] and restart the backoff.
 const MIN_SUCCESS_COOLDOWN_MS: u64 = 5_000; // 5 seconds
 
 /// Maximum backoff delay on consecutive reload failures.
@@ -197,12 +199,13 @@ async fn watch_loop(
     loop {
         tokio::select! {
             Some(()) = rx.recv() => {
-                tracing::debug!(debounce_ms = backoff_ms, "filesystem change detected, debouncing");
-                if drain_and_debounce(&mut rx, backoff_ms, &mut shutdown).await {
+                tracing::debug!(debounce_ms = DEBOUNCE_MS, "filesystem change detected, debouncing");
+                if drain_and_debounce(&mut rx, DEBOUNCE_MS, &mut shutdown).await {
                     tracing::info!("certificate file watcher shutting down (during debounce)");
                     return;
                 }
 
+                backoff_ms = DEBOUNCE_MS;
                 retry_pending = !reload_with_backoff(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms);
             }
             () = tokio::time::sleep(Duration::from_millis(backoff_ms)), if retry_pending => {
@@ -316,8 +319,10 @@ fn reload_with_backoff(
     *backoff_ms = next_backoff(reloaded, *backoff_ms);
     if !reloaded {
         tracing::warn!(
+            cert_ok,
+            verifier_ok,
             retry_in_ms = *backoff_ms,
-            "certificate reload failed; retrying after backoff"
+            "certificate or client verifier reload failed; retrying after backoff"
         );
     }
     reloaded

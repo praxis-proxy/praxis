@@ -13,3 +13,4 @@ mod service;
 mod tls;
 
 pub use service::PingoraTcp;
+pub use tls::validate_tcp_groups;

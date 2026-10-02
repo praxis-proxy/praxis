@@ -6,6 +6,8 @@
 
 use clap::Parser;
 
+use crate::paths::workspace_root;
+
 // -----------------------------------------------------------------------------
 // Allowlist
 // -----------------------------------------------------------------------------
@@ -14,20 +16,7 @@ use clap::Parser;
 /// requirement. Each entry must have a justification. Shrink this list over
 /// time by adding tests.
 const SKIP: &[&str] = &[
-    // Operations: runtime/container configs that don't exercise filters
-    "operations/container-default.yaml",
-    "operations/log-overrides.yaml",
-    // Payload processing
-    "payload-processing/compression.yaml",
-    "payload-processing/stream-buffer.yaml",
-    // Pipeline
-    "pipeline/composed-chains.yaml",
-    "pipeline/failure-mode.yaml",
     // Protocols: TLS/mTLS variants requiring cert infrastructure
-    "protocols/mixed-protocol.yaml",
-    "protocols/tcp-proxy.yaml",
-    "protocols/tcp-timeouts.yaml",
-    "protocols/tcp-tls-termination.yaml",
     "protocols/tls-cipher-suites.yaml",
     "protocols/tls-http-reencrypt.yaml",
     "protocols/tls-mtls-both.yaml",
@@ -36,18 +25,10 @@ const SKIP: &[&str] = &[
     "protocols/tls-mtls-spiffe.yaml",
     "protocols/tls-mtls-upstream.yaml",
     "protocols/tls-multi-cert.yaml",
-    "protocols/tls-termination.yaml",
     "protocols/tls-verify-disabled.yaml",
     "protocols/tls-version-constraint.yaml",
     "protocols/upstream-ca-file.yaml",
     "protocols/upstream-tls.yaml",
-    // Security: configs needing specialized test harness
-    "security/cors.yaml",
-    "security/downstream-read-timeout.yaml",
-    "security/forwarded-headers.yaml",
-    // Traffic management
-    "traffic-management/rate-limiting.yaml",
-    "traffic-management/timeout.yaml",
 ];
 
 // -----------------------------------------------------------------------------
@@ -63,12 +44,21 @@ pub(crate) struct Args;
 // -----------------------------------------------------------------------------
 
 /// Verify that every example config under `examples/configs/` is referenced by
-/// at least one test file under `tests/`.
+/// at least one test file under `tests/`, and that every [`SKIP`] entry still
+/// names an untested config.
 pub(crate) fn run(_args: Args) {
     let root = workspace_root();
-    let configs = collect_yaml_files(&root.join("examples/configs"));
-    let test_sources = read_all_sources(&root.join("tests"));
+    let configs = or_exit(collect_yaml_files(&root.join("examples/configs")));
+    if configs.is_empty() {
+        eprintln!(
+            "error: no example configs found under {}",
+            root.join("examples/configs").display()
+        );
+        std::process::exit(1);
+    }
+    let test_sources = or_exit(read_all_sources(&root.join("tests")));
 
+    let stale = stale_skips(SKIP, &configs, &test_sources);
     let missing: Vec<&str> = configs
         .iter()
         .filter(|c| !SKIP.contains(&c.as_str()))
@@ -76,15 +66,31 @@ pub(crate) fn run(_args: Args) {
         .map(String::as_str)
         .collect();
 
-    if missing.is_empty() {
+    if missing.is_empty() && stale.is_empty() {
+        let skipped = SKIP.len();
         println!(
-            "all {count} example configs have test coverage ({skip} skipped)",
-            count = configs.len() - SKIP.iter().filter(|s| configs.contains(&(**s).to_owned())).count(),
-            skip = SKIP.iter().filter(|s| configs.contains(&(**s).to_owned())).count(),
+            "all {count} example configs have test coverage ({skipped} skipped)",
+            count = configs.len() - skipped,
         );
-    } else {
+        return;
+    }
+    report_failures(&stale, &missing);
+    std::process::exit(1);
+}
+
+/// Print the stale SKIP entries and the untested configs.
+fn report_failures(stale: &[&str], missing: &[&str]) {
+    if !stale.is_empty() {
+        eprintln!(
+            "stale SKIP entries (tested or no longer present); remove them from xtask/src/lint_example_tests.rs:"
+        );
+        for path in stale {
+            eprintln!("  {path}");
+        }
+    }
+    if !missing.is_empty() {
         eprintln!("example configs without integration tests:");
-        for path in &missing {
+        for path in missing {
             eprintln!("  {path}");
         }
         if let Some(eg) = missing.first() {
@@ -93,8 +99,24 @@ pub(crate) fn run(_args: Args) {
                  or add the path to the SKIP allowlist in xtask/src/lint_example_tests.rs",
             );
         }
-        std::process::exit(1);
     }
+}
+
+/// SKIP entries that no longer belong: referenced by a test, or naming a
+/// config that does not exist.
+fn stale_skips<'a>(skip: &[&'a str], configs: &[String], sources: &str) -> Vec<&'a str> {
+    skip.iter()
+        .copied()
+        .filter(|entry| sources.contains(entry) || !configs.iter().any(|c| c == entry))
+        .collect()
+}
+
+/// Unwrap an I/O result, or print the error and exit 1.
+fn or_exit<T>(result: std::io::Result<T>) -> T {
+    result.unwrap_or_else(|err| {
+        eprintln!("error: {err}");
+        std::process::exit(1);
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -102,52 +124,46 @@ pub(crate) fn run(_args: Args) {
 // -----------------------------------------------------------------------------
 
 /// Collect all `.yaml` file paths relative to `root`.
-fn collect_yaml_files(root: &std::path::Path) -> Vec<String> {
+fn collect_yaml_files(root: &std::path::Path) -> std::io::Result<Vec<String>> {
     let mut files = Vec::new();
-    walk_dir(root, root, "yaml", &mut files);
+    walk_dir(root, root, "yaml", &mut files)?;
     files.sort();
-    files
+    Ok(files)
 }
 
 /// Read all `.rs` files under `root` into a single concatenated string.
-fn read_all_sources(root: &std::path::Path) -> String {
+fn read_all_sources(root: &std::path::Path) -> std::io::Result<String> {
     let mut paths = Vec::new();
-    walk_dir(root, root, "rs", &mut paths);
+    walk_dir(root, root, "rs", &mut paths)?;
 
     let mut buf = String::new();
     for rel in &paths {
-        if let Ok(content) = std::fs::read_to_string(root.join(rel)) {
-            buf.push_str(&content);
-        }
+        let path = root.join(rel);
+        let content = std::fs::read_to_string(&path).map_err(|err| with_path(&path, &err))?;
+        buf.push_str(&content);
     }
-    buf
+    Ok(buf)
 }
 
 /// Recursively collect files with `ext` under `base`, storing paths relative
 /// to `root`.
-fn walk_dir(base: &std::path::Path, root: &std::path::Path, ext: &str, out: &mut Vec<String>) {
-    let Ok(entries) = std::fs::read_dir(base) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
+fn walk_dir(base: &std::path::Path, root: &std::path::Path, ext: &str, out: &mut Vec<String>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(base).map_err(|err| with_path(base, &err))? {
+        let path = entry.map_err(|err| with_path(base, &err))?.path();
         if path.is_dir() {
-            walk_dir(&path, root, ext, out);
+            walk_dir(&path, root, ext, out)?;
         } else if path.extension().is_some_and(|e| e == ext)
             && let Ok(rel) = path.strip_prefix(root)
         {
             out.push(rel.to_string_lossy().into_owned());
         }
     }
+    Ok(())
 }
 
-/// Locate the workspace root directory.
-fn workspace_root() -> std::path::PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
-    std::path::Path::new(&manifest_dir)
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .to_owned()
+/// An I/O error prefixed with the path it concerns.
+fn with_path(path: &std::path::Path, err: &std::io::Error) -> std::io::Error {
+    std::io::Error::new(err.kind(), format!("{}: {err}", path.display()))
 }
 
 // -----------------------------------------------------------------------------
@@ -192,9 +208,9 @@ mod tests {
     }
 
     #[test]
-    fn collect_yaml_finds_real_examples() {
+    fn collect_yaml_finds_real_examples() -> std::io::Result<()> {
         let root = workspace_root();
-        let configs = collect_yaml_files(&root.join("examples/configs"));
+        let configs = collect_yaml_files(&root.join("examples/configs"))?;
         assert!(
             configs.len() > 50,
             "expected 50+ example configs, found {}",
@@ -204,17 +220,48 @@ mod tests {
             configs.contains(&"traffic-management/basic-reverse-proxy.yaml".to_owned()),
             "basic-reverse-proxy.yaml should be in the config list"
         );
+        Ok(())
     }
 
     #[test]
-    fn all_skip_entries_exist_on_disk() {
+    fn all_skip_entries_exist_on_disk() -> std::io::Result<()> {
         let root = workspace_root();
-        let configs = collect_yaml_files(&root.join("examples/configs"));
+        let configs = collect_yaml_files(&root.join("examples/configs"))?;
         for entry in SKIP {
             assert!(
                 configs.contains(&(*entry).to_owned()),
                 "SKIP entry does not exist: {entry}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn collect_yaml_fails_on_a_missing_directory() {
+        assert!(
+            collect_yaml_files(std::path::Path::new("/nonexistent")).is_err(),
+            "a missing directory is an error, not an empty list"
+        );
+    }
+
+    #[test]
+    fn stale_skips_reports_a_tested_entry() {
+        let configs = vec!["a.yaml".to_owned(), "b.yaml".to_owned()];
+        let sources = r#"load_example_config("a.yaml", port)"#;
+        assert_eq!(
+            stale_skips(&["a.yaml", "b.yaml"], &configs, sources),
+            vec!["a.yaml"],
+            "an entry a test references is stale"
+        );
+    }
+
+    #[test]
+    fn stale_skips_reports_a_nonexistent_entry() {
+        let configs = vec!["b.yaml".to_owned()];
+        assert_eq!(
+            stale_skips(&["gone.yaml", "b.yaml"], &configs, ""),
+            vec!["gone.yaml"],
+            "an entry naming no config is stale"
+        );
     }
 }

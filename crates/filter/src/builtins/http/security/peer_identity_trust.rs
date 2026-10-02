@@ -58,7 +58,11 @@ struct TrustedPeerConfig {
     /// known ahead of time.
     organization: Option<String>,
 
-    /// Certificate serial number.
+    /// Certificate serial number, hex-encoded as reported by the TLS stack.
+    ///
+    /// Compared after normalization: `:` separators and surrounding
+    /// whitespace are removed, hex digits are lowercased, and leading zeros
+    /// are dropped, so `00:2A`, `2a`, and `2A` are equivalent.
     serial_number: Option<String>,
 }
 
@@ -81,6 +85,10 @@ struct TrustedPeerConfig {
 /// (`RequireNamed` listener mode), so it is not a match field here.
 /// `cert_digest` and `serial_number` pin a specific certificate;
 /// `organization` is useful for bootstrap and controlled tests.
+/// Serial numbers are hex and compared case-insensitively, ignoring `:`
+/// separators and leading zeros. A serial number is only unique per
+/// issuing CA, so prefer `cert_digest` when the listener trusts more than
+/// one client CA; entries without `cert_digest` log a warning at load.
 ///
 /// # YAML configuration
 ///
@@ -104,7 +112,7 @@ struct TrustedPeer {
     /// X.509 subject organization.
     organization: Option<String>,
 
-    /// Certificate serial number.
+    /// Certificate serial number, normalized by [`normalize_serial`].
     serial_number: Option<String>,
 }
 
@@ -198,10 +206,18 @@ fn validate_peers(raw: Vec<TrustedPeerConfig>) -> Result<Vec<TrustedPeer>, Filte
             );
         }
 
+        if p.cert_digest.is_none() {
+            tracing::warn!(
+                entry = i,
+                "peer_identity_trust: trusted peer without cert_digest matches any certificate with the \
+                 same organization or serial number; prefer cert_digest"
+            );
+        }
+
         peers.push(TrustedPeer {
             cert_digest: p.cert_digest.as_deref().map(decode_validated_hex),
             organization: p.organization,
-            serial_number: p.serial_number,
+            serial_number: p.serial_number.as_deref().map(normalize_serial),
         });
     }
     Ok(peers)
@@ -249,11 +265,30 @@ fn matches_peer(identity: &TlsPeerIdentity, peer: &TrustedPeer) -> bool {
         return false;
     }
     if let Some(serial) = &peer.serial_number
-        && identity.serial_number.as_deref() != Some(serial.as_str())
+        && identity.serial_number.as_deref().map(normalize_serial).as_deref() != Some(serial.as_str())
     {
         return false;
     }
     true
+}
+
+/// Normalize a hex serial number for comparison.
+///
+/// Strips `:` separators and surrounding whitespace, lowercases, and drops
+/// leading zeros (an all-zero serial becomes `"0"`).
+fn normalize_serial(serial: &str) -> String {
+    let compact: String = serial
+        .trim()
+        .chars()
+        .filter(|c| *c != ':')
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    let trimmed = compact.trim_start_matches('0');
+    if trimmed.is_empty() {
+        "0".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -474,6 +509,31 @@ mod tests {
         assert!(
             matches!(action, FilterAction::Reject(r) if r.status == 403),
             "wrong serial should reject"
+        );
+    }
+
+    #[tokio::test]
+    async fn serial_matches_after_normalization() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let f = parse("trusted_peers:\n  - serial_number: '00:2a:FF'")?;
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.peer_identity = Some(make_identity(vec![1], "any", "2AFF"));
+
+        let action = f.on_request(&mut ctx).await?;
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "serial should match regardless of case, separators, and leading zeros"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn normalize_serial_handles_all_zero() {
+        assert_eq!(normalize_serial("00:00"), "0", "all-zero serial should normalize to 0");
+        assert_eq!(
+            normalize_serial(" 0A "),
+            "a",
+            "whitespace and leading zeros should be dropped"
         );
     }
 

@@ -49,11 +49,13 @@ Tags follow the format `v<MAJOR>.<MINOR>.<PATCH>` (e.g.
 `v1.0.0-rc.1`), and must match
 `workspace.package.version`; the release workflow rejects
 mismatched tags. A pre-release tag cuts a pre-release
-draft. Push the tag to the repository:
+draft. Push the tag to `praxis-proxy/praxis` itself,
+not to a fork (`upstream` below is whichever remote
+points there):
 
 ```console
 git tag v0.1.0
-git push origin v0.1.0
+git push upstream v0.1.0
 ```
 
 The release runs in two phases

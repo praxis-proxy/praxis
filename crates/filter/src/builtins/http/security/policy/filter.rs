@@ -19,7 +19,8 @@ use ppe::praxis_policy_core::{
         CmfHook, Message, MessagePayload, Role,
         constants::{
             ENTITY_HTTP, ENTITY_LLM, ENTITY_NAME_GLOBAL, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT,
-            HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_PRE_INVOKE,
+            HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH,
+            HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
         },
     },
     engine::PolicyEngine,
@@ -124,6 +125,18 @@ enum GatedIdentity {
 /// the upstream request body and the downstream response. It also enables
 /// `cmf.llm_output` for non-streaming inference responses. APL field
 /// mutators do not rewrite inference bodies.
+///
+/// `body_access: read_write` also enables response-phase `tool:` rules,
+/// including attribute-only `post_invocation` rules. Under `read_only`, these
+/// rules are skipped and a warning is emitted. A response-only route adds no
+/// request-phase route rule; identity checks and `global` policy still apply.
+///
+/// `prompt:` and `resource:` response rules do not currently run under either
+/// body access mode. Use `pre_invocation` for those controls.
+///
+/// Policies with MCP entity routes cannot declare `authorization:` on an
+/// `http:` route. Use `global` for shared authorization; route-scoped
+/// `authentication:` remains supported.
 ///
 /// Response-body hooks run on a small dedicated runtime while the worker
 /// waits, for at most twice the engine's per-plugin timeout
@@ -350,9 +363,25 @@ impl PolicyFilter {
         // needs no operator-set mode. `has_hooks_for` reports whether a hook
         // was wired by the policy (registered handler or route annotation).
         let http_global = mgr.has_hooks_for(HOOK_HTTP_REQUEST);
-        let mcp_routes = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
+        // The engine installs a route's pre and post halves independently, so a
+        // route whose only declarations are `result.<field>` pipelines or
+        // `post_invocation` steps registers the post hook and no pre hook. Both
+        // halves count toward `mcp_routes`: the response phase dispatches off
+        // `entity_routes`, so a post-only policy needs it true.
+        let mcp_pre = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_PROMPT_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_RESOURCE_PRE_FETCH);
+        // Split by entity because only the tool half is dispatched. The
+        // response phase builds its payload with
+        // `build_response_content_for_method`, which projects `tools/call` and
+        // nothing else, so a prompt or resource post hook is registered,
+        // reached, and then skipped on empty content. The two get different
+        // advice below.
+        let mcp_post_tool = mgr.has_hooks_for(HOOK_CMF_TOOL_POST_INVOKE);
+        let mcp_post_undispatched =
+            mgr.has_hooks_for(HOOK_CMF_PROMPT_POST_INVOKE) || mgr.has_hooks_for(HOOK_CMF_RESOURCE_POST_FETCH);
+        let mcp_post = mcp_post_tool || mcp_post_undispatched;
+        let mcp_routes = mcp_pre || mcp_post;
         let llm_post = mgr.has_hooks_for(HOOK_CMF_LLM_OUTPUT);
         // A post-only route still needs request state for response dispatch.
         let llm_routes = mgr.has_hooks_for(HOOK_CMF_LLM_INPUT) || llm_post;
@@ -399,6 +428,12 @@ impl PolicyFilter {
             Self::warn_on_inference_gaps(&policy_config, http_global, &cfg, llm_post);
         }
         Self::warn_on_inert_inference_defaults(&policy_config, llm_routes);
+        Self::warn_on_entity_response_gaps(&cfg, mcp_post_tool, mcp_post_undispatched);
+
+        // Reject an `http:` route that no classified request can reach.
+        if let Some(message) = Self::http_route_beside_entity_routes(&yaml, mcp_routes) {
+            return Err(message.into());
+        }
 
         // Reject controls that cannot reach the writable response-header phase.
         let unreachable = unreachable_response_levels(&policy_config);
@@ -508,6 +543,63 @@ impl PolicyFilter {
              Deny `custom.llm.stream` in the request phase for the models this policy must \
              enforce on the way back.",
         );
+    }
+
+    /// Warn when configured MCP entity response rules cannot run.
+    fn warn_on_entity_response_gaps(cfg: &PolicyFilterConfig, post_tool: bool, post_undispatched: bool) {
+        if post_tool && !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy declares response-phase `tool:` rules (`result.<field>` or \
+                 `post_invocation`) but `body_access` is `read_only`, which does not buffer the \
+                 response: those rules will never run. Set `body_access: read_write` to enable \
+                 them.",
+            );
+        }
+        if post_undispatched {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy declares response-phase `prompt:` or `resource:` rules \
+                 (`result.<field>` or `post_invocation`): those rules never run. The response \
+                 payload is projected for `tools/call` only, so the hook is registered and then \
+                 skipped. `body_access: read_write` does not change this. Move the control to the \
+                 request phase (`pre_invocation`), which is dispatched for all three entity types.",
+            );
+        }
+    }
+
+    /// Return a load error for an `http:` authorization route alongside MCP
+    /// entity routes, or `None` when no such route exists.
+    pub(super) fn http_route_beside_entity_routes(yaml: &str, mcp_routes: bool) -> Option<String> {
+        if !mcp_routes {
+            return None;
+        }
+        // RouteEntry omits authorization steps, so inspect the raw YAML and
+        // reject a parse failure rather than skip this check.
+        let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(yaml) else {
+            return Some(
+                "policy: praxis could not re-read the policy document to check the `http:` route \
+                 contract. Refusing to load, because an `http:` route whose `authorization:` \
+                 never runs cannot be ruled out."
+                    .to_owned(),
+            );
+        };
+        let routes = doc.get("routes").and_then(serde_yaml::Value::as_sequence)?;
+        let offenders = routes
+            .iter()
+            .filter(|route| route.get("http").is_some() && route.get("authorization").is_some())
+            .count();
+        if offenders == 0 {
+            return None;
+        }
+        Some(format!(
+            "policy: {offenders} `http:` route(s) declare `authorization:` alongside MCP entity \
+             routes. A classified MCP request is evaluated against its entity route, so those \
+             steps never run for a tool, prompt, or resource call and the route would gate \
+             nothing. Move cross-cutting rules into the `global` block, which is layered into \
+             every entity route, or front non-MCP traffic with a separate listener/filter. A \
+             route-scoped `authentication:` list is unaffected and may stay."
+        ))
     }
 
     /// Warn when inference defaults have no route to apply them.

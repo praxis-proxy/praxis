@@ -431,6 +431,33 @@ fn te_tab_prefix_obfuscation_handled_safely() {
     );
 }
 
+/// A non-chunked coding ahead of `chunked` must not be silently dropped.
+#[test]
+fn te_unsupported_coding_before_chunked_not_implemented() -> Result<(), Box<dyn std::error::Error>> {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml)?;
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Transfer-Encoding: gzip, chunked\r\n\
+         Connection: close\r\n\
+         \r\n\
+         0\r\n\r\n",
+    );
+
+    assert_eq!(
+        parse_status(&raw),
+        501,
+        "unsupported transfer coding must be answered with 501"
+    );
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // Tests - Content-Length Edge Cases (continued)
 // -----------------------------------------------------------------------------

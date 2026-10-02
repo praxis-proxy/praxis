@@ -182,6 +182,11 @@ fn split_identity(pem: &[u8]) -> Result<(Vec<CertificateDer<'static>>, PrivateKe
         .map_err(|err| TlsError::ClientConfigError {
             detail: format!("client certificate PEM: {err}"),
         })?;
+    if chain.is_empty() {
+        return Err(TlsError::ClientConfigError {
+            detail: "client identity PEM contains no certificate".to_owned(),
+        });
+    }
     let key = PrivateKeyDer::from_pem_slice(pem).map_err(|err| TlsError::ClientConfigError {
         detail: format!("client key PEM: {err}"),
     })?;
@@ -317,6 +322,17 @@ mod tests {
             matches!(err, Err(TlsError::ClientConfigError { .. })),
             "a client identity PEM with no private key is a config error"
         );
+    }
+
+    #[test]
+    fn a_client_identity_without_a_certificate_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let key_only = rcgen::KeyPair::generate()?.serialize_pem();
+        let result = split_identity(key_only.as_bytes());
+        assert!(
+            matches!(&result, Err(TlsError::ClientConfigError { detail }) if detail.contains("no certificate")),
+            "a key-only identity PEM should be rejected for carrying no certificate"
+        );
+        Ok(())
     }
 
     #[test]

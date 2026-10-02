@@ -51,6 +51,31 @@ pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
     }
 }
 
+/// Re-add `te: trailers` to an HTTP/2 upstream request when the downstream
+/// request asked for it.
+///
+/// [`strip_hop_by_hop`] removes `te` unconditionally, yet
+/// [RFC 9113 Section 8.2.2] allows `te: trailers` on HTTP/2 and gRPC
+/// upstreams require it. The value is restored only on an HTTP/2 leg (the
+/// version Pingora sets before this hook) and only as the bare `trailers`
+/// token, since every other TE value is hop-by-hop. Per
+/// [RFC 9110 Section 10.1.4] `trailers` takes no parameters, so an exact
+/// token match is correct.
+///
+/// [RFC 9113 Section 8.2.2]: https://datatracker.ietf.org/doc/html/rfc9113#section-8.2.2
+/// [RFC 9110 Section 10.1.4]: https://datatracker.ietf.org/doc/html/rfc9110#section-10.1.4
+pub(crate) fn restore_te_trailers(req: &mut RequestHeader, downstream: &http::HeaderMap) {
+    if req.version != http::Version::HTTP_2 {
+        return;
+    }
+    let wants_trailers = downstream.get_all(http::header::TE).iter().any(|value| {
+        praxis_core::reserved_headers::connection_tokens(value).any(|token| token.eq_ignore_ascii_case("trailers"))
+    });
+    if wants_trailers {
+        let _insert = req.insert_header(http::header::TE, "trailers");
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Path Rewriting
 // -----------------------------------------------------------------------------
@@ -960,7 +985,7 @@ mod tests {
         assert_eq!(
             req.headers.get("transfer-encoding").unwrap(),
             "chunked",
-            "compound transfer codings ending in chunked are normalized to plain chunked"
+            "compound codings are rejected with 501 in request_filter; the strip itself still normalizes to chunked"
         );
     }
 
@@ -1331,5 +1356,54 @@ mod tests {
             let _inserted = req.insert_header((*name).to_owned(), (*value).to_owned());
         }
         req
+    }
+
+    fn te_downstream(value: &'static str) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::TE, http::HeaderValue::from_static(value));
+        headers
+    }
+
+    #[test]
+    fn te_trailers_restored_on_h2_leg() -> Result<(), Box<dyn std::error::Error>> {
+        let mut req = RequestHeader::build("POST", b"/", None)?;
+        req.set_version(http::Version::HTTP_2);
+
+        restore_te_trailers(&mut req, &te_downstream("trailers, gzip"));
+
+        assert_eq!(
+            req.headers.get(http::header::TE).map(http::HeaderValue::as_bytes),
+            Some(b"trailers".as_slice()),
+            "only the trailers token must be forwarded on an HTTP/2 leg"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn te_trailers_not_restored_on_h1_leg() -> Result<(), Box<dyn std::error::Error>> {
+        let mut req = RequestHeader::build("POST", b"/", None)?;
+        req.set_version(http::Version::HTTP_11);
+
+        restore_te_trailers(&mut req, &te_downstream("trailers"));
+
+        assert!(
+            req.headers.get(http::header::TE).is_none(),
+            "TE must stay stripped on an HTTP/1.1 leg"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn te_without_trailers_not_restored_on_h2_leg() -> Result<(), Box<dyn std::error::Error>> {
+        let mut req = RequestHeader::build("POST", b"/", None)?;
+        req.set_version(http::Version::HTTP_2);
+
+        restore_te_trailers(&mut req, &te_downstream("gzip, chunked"));
+
+        assert!(
+            req.headers.get(http::header::TE).is_none(),
+            "TE without trailers must not be forwarded"
+        );
+        Ok(())
     }
 }

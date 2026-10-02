@@ -20,7 +20,7 @@ use std::{
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora_core::{apps::ServerApp, protocols::Stream, server::ShutdownWatch};
-use praxis_core::connectivity::is_private_ip;
+use praxis_core::connectivity::is_private_upstream_ip;
 use praxis_filter::{FilterAction, FilterPipeline, TcpFilterContext};
 use praxis_tls::sni;
 use tokio::{
@@ -35,10 +35,10 @@ use tracing::{Instrument as _, Span, debug, error, info, info_span, trace, warn}
 // -----------------------------------------------------------------------------
 
 /// Initial peek buffer size for SNI extraction.
-const PEEK_INITIAL: usize = 1024;
+const PEEK_INITIAL: usize = 1_024; // 1 KiB
 
 /// Maximum peek buffer size before giving up on SNI extraction.
-const PEEK_MAX: usize = 16384; // 16 KiB
+const PEEK_MAX: usize = 16_384; // 16 KiB
 
 /// Timeout for upstream TCP connect (including DNS resolution).
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -714,7 +714,7 @@ enum TcpCloseReason {
     Error,
     /// The server shut down while forwarding.
     Shutdown,
-    /// The idle `session_timeout` elapsed.
+    /// The hard `session_timeout` deadline elapsed.
     SessionTimeout,
     /// The overall `max_duration` elapsed and the session was force-closed.
     MaxDuration,
@@ -733,7 +733,7 @@ impl TcpCloseReason {
     }
 }
 
-/// Forward with an idle timeout, returning the close reason on shutdown or timeout.
+/// Forward under a hard session deadline, returning the close reason on shutdown or timeout.
 async fn forward_with_timeout<F: Future<Output = io::Result<(u64, u64)>>>(
     copy_future: F,
     shutdown_rx: &mut watch::Receiver<bool>,
@@ -784,7 +784,7 @@ async fn forward_no_timeout<F: Future<Output = io::Result<(u64, u64)>>>(
 /// Bytes forwarded in each direction, accumulated as the copy progresses.
 ///
 /// `copy_bidirectional` only reports its totals on a clean return, so a
-/// cancelled session (shutdown, idle timeout, max-duration force-close)
+/// cancelled session (shutdown, session deadline, max-duration force-close)
 /// would otherwise report zero for exactly the long-lived sessions whose
 /// throughput matters most. Counting inside the stream adapter keeps the
 /// totals exact on every close path.
@@ -918,12 +918,13 @@ async fn resolve_and_connect(upstream_addr: &str, allow_private: bool) -> Option
 
 /// Return the first private/reserved IP among resolved socket addresses.
 ///
-/// Uses [`is_private_ip`] which handles IPv4-mapped IPv6 normalization
-/// internally, so `::ffff:10.0.0.1` is correctly identified.
+/// Uses [`is_private_upstream_ip`], which normalizes IPv4-mapped IPv6 and
+/// unwraps NAT64 (`64:ff9b::/96`) answers, so `::ffff:10.0.0.1` and
+/// `64:ff9b::a00:1` are both identified as private.
 ///
-/// [`is_private_ip`]: praxis_core::connectivity::is_private_ip
+/// [`is_private_upstream_ip`]: praxis_core::connectivity::is_private_upstream_ip
 fn find_private_addr(addrs: &[SocketAddr]) -> Option<std::net::IpAddr> {
-    addrs.iter().map(SocketAddr::ip).find(is_private_ip)
+    addrs.iter().map(SocketAddr::ip).find(is_private_upstream_ip)
 }
 
 /// Resolve a listener metrics label from the connection local address.

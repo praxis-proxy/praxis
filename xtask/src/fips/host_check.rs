@@ -261,15 +261,33 @@ fn fips_mode_setup(attestation: &mut Attestation) {
     match Command::new("fips-mode-setup").arg("--check").output() {
         Err(_) => attestation.info("fips-mode-setup is not installed; the kernel flag above stands in for its check"),
         Ok(output) => {
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let text = [&output.stdout, &output.stderr]
+                .map(|stream| String::from_utf8_lossy(stream).trim().to_owned())
+                .into_iter()
+                .filter(|stream| !stream.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
             attestation.fact("host.fips_mode_setup", text.clone());
-            if text.contains("FIPS mode is enabled") {
+            if fips_mode_setup_verdict(output.status.success(), &text) {
                 attestation.ok(&format!("fips-mode-setup --check: {text}"));
             } else {
-                attestation.fail(&format!("fips-mode-setup --check: {text}"));
+                attestation.fail(&format!(
+                    "fips-mode-setup --check (exit {}): {text}",
+                    output
+                        .status
+                        .code()
+                        .map_or_else(|| "signal".to_owned(), |code| code.to_string())
+                ));
             }
         },
     }
+}
+
+/// Whether `fips-mode-setup --check` reports FIPS mode: it must exit
+/// successfully, say FIPS mode is enabled, and not report an inconsistent
+/// state.
+fn fips_mode_setup_verdict(success: bool, text: &str) -> bool {
+    success && text.contains("FIPS mode is enabled") && !text.contains("Inconsistent")
 }
 
 /// The module the host's OpenSSL loads: `openssl list -providers` must show
@@ -550,5 +568,37 @@ mod tests {
         let json: Value = serde_json::from_str(&attestation.json()).expect("valid json");
         assert_eq!(json["failures"], 1);
         assert_eq!(json["facts"]["host.kernel_fips"], "1");
+    }
+
+    #[test]
+    fn fips_mode_setup_verdict_accepts_enabled() {
+        assert!(
+            fips_mode_setup_verdict(true, "FIPS mode is enabled."),
+            "a successful enabled check passes"
+        );
+    }
+
+    #[test]
+    fn fips_mode_setup_verdict_rejects_disabled() {
+        assert!(
+            !fips_mode_setup_verdict(false, "FIPS mode is disabled."),
+            "a disabled check fails"
+        );
+    }
+
+    #[test]
+    fn fips_mode_setup_verdict_rejects_failed_inconsistent() {
+        assert!(
+            !fips_mode_setup_verdict(false, "FIPS mode is enabled.\nInconsistent state detected."),
+            "an inconsistent check that exits nonzero fails"
+        );
+    }
+
+    #[test]
+    fn fips_mode_setup_verdict_rejects_successful_inconsistent() {
+        assert!(
+            !fips_mode_setup_verdict(true, "FIPS mode is enabled.\nInconsistent state detected."),
+            "an inconsistent state fails even with a zero exit"
+        );
     }
 }

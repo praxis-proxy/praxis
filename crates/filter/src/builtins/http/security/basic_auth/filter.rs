@@ -181,11 +181,11 @@ impl HttpFilter for BasicAuthFilter {
         };
 
         if !self.source.verify(ctx, username, password) {
-            tracing::debug!(username = %username, "authentication failed");
+            tracing::debug!(username = ?username, "authentication failed");
             return Ok(challenge_rejection(&self.challenge));
         }
 
-        tracing::debug!(username = %username, "authentication successful");
+        tracing::debug!(username = ?username, "authentication successful");
 
         let identity = AuthenticatedIdentity::new(
             username.to_owned(),

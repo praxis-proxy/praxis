@@ -507,6 +507,33 @@ steps:
 }
 
 #[test]
+fn rejects_max_state_bytes_over_ceiling() -> Result<(), crate::FilterError> {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+max_state_bytes: 1073741825
+steps:
+  - name: step1
+    filters:
+      - filter: static_response
+        status: 200
+    on_result:
+      - default: true
+        done: true
+",
+    )?;
+    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml)?;
+    let result = config::validate(&cfg);
+    assert!(
+        result
+            .err()
+            .is_some_and(|e| e.to_string().contains("max_state_bytes must be <=")),
+        "max_state_bytes above 1 GiB should be rejected"
+    );
+    Ok(())
+}
+
+#[test]
 fn rejects_zero_max_stream_response_bytes() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         "
