@@ -20,7 +20,7 @@ const MAX_HOSTNAME_LEN: usize = 253;
 /// The supported form is `host [ ":" port ]`, where `host` is an
 /// ASCII DNS hostname or bracketed IPv6 address. Schemes, paths,
 /// userinfo, query strings, and fragments are rejected.
-pub(super) fn validate_authority(authority: &str, cluster_name: &str) -> Result<(), ProxyError> {
+pub(in crate::config) fn validate_authority(authority: &str, cluster_name: &str) -> Result<(), ProxyError> {
     if authority.is_empty() {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': authority must not be empty"
