@@ -127,6 +127,9 @@ impl SubResponseBody {
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, SubRequestError> {
         let client_span = std::mem::replace(&mut self.client_span, tracing::Span::none());
         let result = self.next_chunk_inner().instrument(client_span.clone()).await;
+        if result.is_err() {
+            super::client::record_subrequest_client_error(&client_span, "subrequest_body");
+        }
         if !self.done {
             self.client_span = client_span;
         }

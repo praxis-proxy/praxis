@@ -145,7 +145,7 @@ impl SubRequestClient {
         let client_span = Span::none();
 
         let result = self
-            .open_exchange_inner(peer, request, timeout, framework_headers)
+            .open_exchange_inner(peer, request, timeout, framework_headers, &client_span)
             .instrument(client_span.clone())
             .await;
         if result.is_err() && !client_span.is_disabled() {
@@ -158,17 +158,18 @@ impl SubRequestClient {
     /// Open an HTTP exchange while its per-attempt span is active.
     #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
     #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit per-attempt span keeps propagation bound to this exchange"
+    )]
     async fn open_exchange_inner<'conn>(
         &'conn self,
         peer: &HttpPeer,
         request: &SubRequest,
         timeout: Duration,
         framework_headers: Option<&FrameworkHeaders>,
+        client_span: &Span,
     ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
-        #[cfg(feature = "otel")]
-        let client_span = Span::current();
-        #[cfg(not(feature = "otel"))]
-        let client_span = Span::none();
         let exchange_started = tokio::time::Instant::now();
         let deadline = exchange_started
             .checked_add(timeout)
@@ -210,7 +211,7 @@ impl SubRequestClient {
         }
         #[cfg(feature = "otel")]
         {
-            inject_subrequest_trace_context(&mut req_header, &client_span);
+            inject_subrequest_trace_context(&mut req_header, client_span);
         }
         ensure_host_header(&mut req_header, &bounded_peer)?;
         if !request.body.is_empty() || empty_body_needs_framing(&request.method) {
@@ -358,7 +359,7 @@ impl SubRequestClient {
             }
             break status;
         };
-        record_subrequest_client_status(&client_span, status);
+        record_subrequest_client_status(client_span, status);
 
         if !(100..=599).contains(&status) {
             session.shutdown().await;
@@ -584,6 +585,7 @@ impl SubRequestClient {
         // Enforce deadline on body collection phase.
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
+            record_subrequest_client_error(&client_span, "subrequest_body");
             return Err(SubRequestError::DeadlineExceeded);
         }
 
@@ -635,11 +637,14 @@ impl SubRequestClient {
 
             Ok(Bytes::from(body_buf))
         })
-        .instrument(client_span)
+        .instrument(client_span.clone())
         .await
         .unwrap_or_else(|_elapsed| Err(SubRequestError::DeadlineExceeded));
 
         // Finalize circuit guard with full-exchange outcome.
+        if body_result.is_err() {
+            record_subrequest_client_error(&client_span, "subrequest_body");
+        }
         let result = body_result.map(|body| SubResponse {
             status,
             headers: resp_headers,
@@ -705,6 +710,14 @@ fn record_subrequest_client_status(client_span: &Span, status: u16) {
     }
 }
 
+/// Mark a failed sub-request phase without exporting transport error text.
+pub(super) fn record_subrequest_client_error(client_span: &Span, error_type: &'static str) {
+    if !client_span.is_disabled() {
+        client_span.record("otel.status_code", "ERROR");
+        client_span.record("error.type", error_type);
+    }
+}
+
 /// Return the bounded `error.type` value for an HTTP error status.
 fn subrequest_client_status_error_type(status: u16) -> Option<String> {
     (status >= 400).then(|| status.to_string())
@@ -719,6 +732,7 @@ async fn fail_header_exchange(
     termination: &'static str,
     error: SubRequestError,
 ) -> SubRequestError {
+    record_subrequest_client_error(&exchange.client_span, "subrequest_header");
     drop(circuit_guard);
     dispose_session_abnormal(
         exchange.session,
@@ -784,6 +798,37 @@ mod tests {
                 "subrequest CLIENT error.type for HTTP {status}"
             );
         }
+    }
+
+    #[test]
+    fn subrequest_body_error_marks_client_span_without_error_text() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = StatusRecordCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let span = tracing::info_span!(
+            "subrequest_client",
+            "otel.status_code" = tracing::field::Empty,
+            "error.type" = tracing::field::Empty,
+        );
+        record_subrequest_client_error(&span, "subrequest_body");
+
+        let fields = capture
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            fields
+                .iter()
+                .any(|(name, value)| name == "otel.status_code" && value == "\"ERROR\"")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(name, value)| name == "error.type" && value == "\"subrequest_body\"")
+        );
     }
 
     #[derive(Clone, Default)]

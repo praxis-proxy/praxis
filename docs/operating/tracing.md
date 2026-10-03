@@ -73,9 +73,13 @@ exported span IDs to inspect.
 
 ## Verification
 
-`cargo test --all-features -p praxis-tests-integration --test
-otel_cross_gateway -- --nocapture` runs two local Praxis proxies through an
-OTLP test receiver. The test parses the exported IDs and checks the chain
+This command runs two local Praxis proxies through an OTLP test receiver:
+
+```console
+cargo test --all-features -p praxis-tests-integration --test otel_cross_gateway -- --nocapture
+```
+
+The test parses the exported IDs and checks the chain
 `edge SERVER -> edge CLIENT -> provider SERVER -> provider CLIENT`, checks the
 backend's received client span ID, exercises missing/malformed/unsampled
 contexts, and scans exported span data for body and credential sentinels.
