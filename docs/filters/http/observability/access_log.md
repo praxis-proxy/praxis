@@ -17,6 +17,8 @@ Logs structured access records for each request and response.
 | `conditions.min_duration_ms` | integer | no |  |
 | `conditions.status_classes` | (`1xx` \| `2xx` \| `3xx` \| `4xx` \| `5xx`)[] | no |  |
 | `conditions.paths` | string[] | no |  |
+| `sink` | `Stdout` \| `File` | no | Output sink: `{type: stdout}` or `{type: file, path: ...}`. Omitted means emit through the tracing subscriber. |
+| `sink.path` | string | yes | Destination path, opened in append+create mode. |
 
 ## Example
 
@@ -36,4 +38,7 @@ conditions:                   # optional emit-time gates (AND across keys)
   min_duration_ms: 1000
   status_classes: [4xx, 5xx]  # OR within list
   paths: ["/api"]             # OR within list; segment-boundary prefixes
+sink:                         # optional; default emits via the subscriber
+  type: file                  # `stdout` or `file`
+  path: /var/log/praxis/access.log  # required for `file`, rejected for `stdout`
 ```

@@ -1,0 +1,49 @@
+# Access Log File Sink
+#
+# Writes NDJSON access log records directly to a file, bypassing the
+# tracing subscriber. The file is opened in append+create mode at
+# startup and the handle is retained, so rename-based rotation keeps
+# writing to the rotated file; restart the proxy to reopen. logrotate's
+# copytruncate works without a reopen but can lose records written
+# between the copy and the truncate.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/observability/access-log-file-sink.yaml
+#   curl http://localhost:8080/
+#   tail -f /tmp/praxis-access.log
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+
+      - filter: access_log
+        fields:
+          - method
+          - path
+          - status
+          - duration_ms
+          - request_id
+        sink:
+          type: file
+          path: /tmp/praxis-access.log
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
