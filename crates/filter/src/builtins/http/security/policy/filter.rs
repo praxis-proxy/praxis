@@ -222,6 +222,10 @@ pub struct PolicyFilter {
     /// Bound on one response-phase hook dispatch, derived from the engine's
     /// per-plugin timeout.
     response_dispatch_timeout: std::time::Duration,
+    /// The transport installed on the engine, kept so tests can see which
+    /// connector policy calls go through.
+    #[cfg(test)]
+    transport: Arc<PolicyHttpTransport>,
 }
 
 impl PolicyFilter {
@@ -288,11 +292,12 @@ impl PolicyFilter {
         ppe::install_builtins(&mgr);
 
         // The lazy connection pool must not bind to the temporary init runtime.
-        if !mgr.set_http_transport(Self::http_transport(
+        let transport = Self::http_transport(
             subrequest_connector,
             cfg.allow_private_idp,
             &cfg.trusted_private_endpoints,
-        )) {
+        );
+        if !mgr.set_http_transport(Arc::<PolicyHttpTransport>::clone(&transport)) {
             // Set-once, and this manager was just constructed, so a refusal
             // means the engine changed under us rather than a double install.
             tracing::warn!(
@@ -481,7 +486,15 @@ impl PolicyFilter {
             llm_request_mutator_warned: AtomicBool::new(false),
             llm_response_mutator_warned: AtomicBool::new(false),
             response_dispatch_timeout: dispatch_timeout,
+            #[cfg(test)]
+            transport,
         })
+    }
+
+    /// Test accessor for the transport installed on the engine.
+    #[cfg(test)]
+    pub(super) fn transport(&self) -> &PolicyHttpTransport {
+        &self.transport
     }
 
     /// Test accessor for the hook the response half dispatches, if any.

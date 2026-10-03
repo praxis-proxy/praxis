@@ -5826,3 +5826,107 @@ global:
     std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
+
+// -----------------------------------------------------------------------------
+// Sub-request connector handoff
+// -----------------------------------------------------------------------------
+
+#[test]
+fn a_registry_hands_its_connector_to_the_policy_filters_it_builds() {
+    let (_dir, path) = write_single_plugin_config();
+    let pool = crate::test_support::connector(8, None);
+    let mut registry = FilterRegistry::with_builtins();
+    registry.set_policy_connector(&pool);
+
+    let filter = registry
+        .build_policy(&policy_filter_config(&path))
+        .expect("filter should construct");
+
+    let held = filter
+        .transport()
+        .shared()
+        .expect("the registry's connector must reach the installed transport");
+    assert!(
+        std::ptr::eq(held.connector(), pool.connector()),
+        "policy calls must go through the runtime's pool, not a copy or a pool of their own"
+    );
+}
+
+#[test]
+fn a_registry_without_a_connector_leaves_policy_calls_a_pool_of_their_own() {
+    let (_dir, path) = write_single_plugin_config();
+
+    let filter = FilterRegistry::with_builtins()
+        .build_policy(&policy_filter_config(&path))
+        .expect("a policy filter must still build without a runtime connector");
+
+    assert!(
+        filter.transport().shared().is_none(),
+        "with no connector handed over, the transport falls back to a private pool"
+    );
+}
+
+#[test]
+fn two_runtimes_building_at_once_keep_their_own_policy_connectors() {
+    let (_dir, path) = write_single_plugin_config();
+    let shared = FilterRegistry::with_builtins();
+    let pools = [
+        crate::test_support::connector(8, None),
+        crate::test_support::connector(8, None),
+    ];
+
+    let filters = build_in_concurrent_runtimes(&shared, &pools, &policy_filter_config(&path));
+
+    assert_eq!(filters.len(), pools.len(), "every runtime must build its policy filter");
+    for (filter, pool) in filters.iter().zip(&pools) {
+        let held = filter
+            .transport()
+            .shared()
+            .expect("every runtime handed over a connector");
+        assert!(
+            std::ptr::eq(held.connector(), pool.connector()),
+            "each runtime's policy calls must use its own pool, even though both handed theirs over \
+             before either built"
+        );
+    }
+    assert!(
+        shared.policy_connector().is_none(),
+        "the registry both runtimes copied must not pick up either one's connector"
+    );
+}
+
+/// A `policy` filter config pointing at the policy document at `path`.
+fn policy_filter_config(path: &str) -> serde_yaml::Value {
+    serde_yaml::from_str(&format!("config_path: {path}")).expect("valid policy filter config")
+}
+
+/// Build one policy filter per connector, each on its own thread the way a
+/// runtime does: copy `shared`, hand the copy its connector, wait until every
+/// runtime has handed its connector over, then build.
+fn build_in_concurrent_runtimes(
+    shared: &FilterRegistry,
+    pools: &[praxis_core::subrequest::SubRequestConnector],
+    config: &serde_yaml::Value,
+) -> Vec<PolicyFilter> {
+    let barrier = std::sync::Barrier::new(pools.len());
+    std::thread::scope(|scope| {
+        let runtimes: Vec<_> = pools
+            .iter()
+            .map(|pool| {
+                let handed = &barrier;
+                scope.spawn(move || {
+                    let mut registry = shared.clone();
+                    registry.set_policy_connector(pool);
+                    handed.wait();
+                    registry
+                        .build_policy(config)
+                        .expect("each runtime's policy filter should construct")
+                })
+            })
+            .collect();
+        runtimes
+            .into_iter()
+            .map(|runtime| runtime.join().expect("a runtime must not panic"))
+            .collect()
+    })
+}

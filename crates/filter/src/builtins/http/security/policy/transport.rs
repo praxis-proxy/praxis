@@ -99,6 +99,12 @@ impl PolicyHttpTransport {
         self.client.get_or_init(|| build_client(self.shared.clone()))
     }
 
+    /// Test accessor for the connector this transport was handed, if any.
+    #[cfg(test)]
+    pub(super) fn shared(&self) -> Option<&SubRequestConnector> {
+        self.shared.as_ref()
+    }
+
     /// Resolve the destination within `budget` and return the remaining time.
     ///
     /// # Errors
