@@ -125,8 +125,9 @@ pub fn init_tracing(config: &Config) -> Result<TracingGuard, ProxyError> {
 
 /// Validate log overrides from config without initializing the global subscriber.
 ///
-/// Useful for configuration validation that needs to check log override
-/// syntax without affecting the global tracing state.
+/// Loading a config already runs this check as part of [`Config::validate`].
+/// Call it for a [`Config`] whose `runtime.log_overrides` changed after it
+/// was loaded.
 ///
 /// # Errors
 ///
@@ -143,10 +144,18 @@ pub fn init_tracing(config: &Config) -> Result<TracingGuard, ProxyError> {
 ///     filters:
 ///       - filter: static_response
 /// "#;
-/// let config = praxis_core::config::Config::from_yaml(yaml).unwrap();
+/// let mut config = praxis_core::config::Config::from_yaml(yaml).unwrap();
 /// praxis_core::logging::validate_log_overrides(&config).unwrap();
+///
+/// config
+///     .runtime
+///     .log_overrides
+///     .insert("praxis_core".to_owned(), "verbose".to_owned());
+/// assert!(praxis_core::logging::validate_log_overrides(&config).is_err());
 /// ```
 ///
+/// [`Config`]: crate::config::Config
+/// [`Config::validate`]: crate::config::Config::validate
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
 pub fn validate_log_overrides(config: &Config) -> Result<(), ProxyError> {
     build_env_filter(config)?;
@@ -155,9 +164,17 @@ pub fn validate_log_overrides(config: &Config) -> Result<(), ProxyError> {
 
 /// Validate `runtime.logging` without initializing the global subscriber.
 ///
+/// Loading a config already runs this check as part of [`Config::validate`].
+/// Call it for a [`Config`] whose `runtime.logging` changed after it was
+/// loaded.
+///
 /// # Errors
 ///
 /// Returns [`ProxyError::Config`] when logging settings are invalid.
+///
+/// [`Config`]: crate::config::Config
+/// [`Config::validate`]: crate::config::Config::validate
+/// [`ProxyError::Config`]: crate::errors::ProxyError::Config
 pub fn validate_logging(config: &Config) -> Result<(), ProxyError> {
     config.runtime.logging.validate().map_err(ProxyError::Config)
 }

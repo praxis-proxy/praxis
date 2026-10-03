@@ -71,16 +71,6 @@ pub(crate) fn reload_pipelines(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
-    if let Err(err) = praxis_core::logging::validate_log_overrides(new_config) {
-        error!(error = %err, "config reload failed: invalid log_overrides");
-        return Err(err.into());
-    }
-
-    if let Err(err) = praxis_core::logging::validate_logging(new_config) {
-        error!(error = %err, "config reload failed: invalid logging config");
-        return Err(err.into());
-    }
-
     if let Err(err) = reject_protocol_changes(new_config, live) {
         error!(error = %err, "config reload failed: listener protocol changed; requires restart");
         return Err(err);

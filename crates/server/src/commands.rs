@@ -52,8 +52,6 @@ pub(crate) fn load_and_validate_for_cli(
 /// Validate a parsed configuration by building filter pipelines.
 ///
 /// Runs the full validation suite that server startup performs:
-/// - Validates log override module paths and levels
-/// - Validates logging configuration (targets, format, output paths)
 /// - Instantiates filter factories from the registry
 /// - Resolves and expands filter chains
 /// - Applies ordering and body-limit checks to pipelines
@@ -67,12 +65,10 @@ pub(crate) fn load_and_validate_for_cli(
 ///
 /// # Errors
 ///
-/// Returns an error if any validation step fails: invalid log configuration,
-/// unknown filter types, undefined chain references, filter instantiation
-/// errors, or inconsistent TCP listener groups.
+/// Returns an error if any validation step fails: unknown filter types,
+/// undefined chain references, filter instantiation errors, or inconsistent
+/// TCP listener groups.
 pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    praxis_core::logging::validate_log_overrides(config)?;
-    praxis_core::logging::validate_logging(config)?;
     let registry = praxis::build_full_registry();
     if praxis_tls::provider::required()
         && let Some(reason) = praxis::fips_blocker(&registry)
