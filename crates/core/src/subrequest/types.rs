@@ -251,6 +251,8 @@ pub struct StreamingSubResponse {
 /// Owns the live Pingora HTTP session, admission permit, connector
 /// (for session release), and all streaming deadlines.
 pub struct SubResponseBody {
+    /// HTTP client span kept active through streaming response completion.
+    pub(super) client_span: tracing::Span,
     /// Live Pingora HTTP session.
     pub(super) session: Option<pingora_core::protocols::http::client::HttpSession<()>>,
     /// Peer address for connection pooling.

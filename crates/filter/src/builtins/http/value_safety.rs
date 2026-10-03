@@ -11,7 +11,7 @@
 ///
 /// Body-derived values that are promoted to metadata or filter results use
 /// the same rule as headers so every promotion sink has one safety policy.
-pub(crate) fn is_safe_promoted_value(s: &str) -> bool {
+pub fn is_safe_promoted_value(s: &str) -> bool {
     // Byte-scan equivalent of `HeaderValue::from_str(s).is_ok()` without
     // allocating a value just to learn Ok/Err: the http crate accepts
     // HTAB, SP, visible ASCII, and obs-text (0x80-0xFF), rejecting other
@@ -20,7 +20,7 @@ pub(crate) fn is_safe_promoted_value(s: &str) -> bool {
 }
 
 /// Returns `true` if `s` is unsafe to promote to headers or metadata.
-pub(crate) fn contains_control_chars(s: &str) -> bool {
+pub fn contains_control_chars(s: &str) -> bool {
     !is_safe_promoted_value(s)
 }
 

@@ -30,6 +30,8 @@ admin-api = []
 upstream-binding = ["praxis-filter/upstream-binding"]
 # SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
 spiffe = ["praxis-tls/spiffe"]
+# W3C remote parenting and exported HTTP client spans. Off by default.
+otel = ["praxis-core/otel", "dep:tracing-opentelemetry"]
 # Test-only hooks (the upstream retry gate) for the integration suites. Off
 # by default so release builds carry no test synchronization on the data path.
 test-support = []
@@ -65,6 +67,7 @@ serde_yaml = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 
 [dev-dependencies]
 praxis-core = { workspace = true, features = ["test-support"] }

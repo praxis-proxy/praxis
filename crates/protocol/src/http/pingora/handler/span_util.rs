@@ -29,7 +29,7 @@ pub(super) fn http_version_label(version: http::Version) -> &'static str {
 /// the upstream exchange.
 ///
 /// Called from the `logging` hook to fill in `http.response.status_code`,
-/// `otel.status_code` and `error.type` (5xx only), `http.route` and the
+/// `otel.status_code` and `error.type` (5xx only on SERVER spans), `http.route` and the
 /// `otel.name` upgrade to `{method} {route}` (when a route matched),
 /// `upstream.address`, and `upstream.cluster` on the root request span,
 /// and response attributes on the upstream exchange span.
@@ -95,6 +95,7 @@ fn record_upstream_exchange_span(ctx: &PingoraRequestCtx, response: Option<&ping
         .or_else(|| response.map(|resp| resp.status.as_u16()))
     {
         ctx.upstream_exchange_span.record("http.response.status_code", status);
+        praxis_core::subrequest::record_http_client_status(&ctx.upstream_client_span, status);
     }
     ctx.upstream_exchange_span
         .record("http.response.body.size", ctx.response_body_bytes);

@@ -172,6 +172,14 @@ pub(super) fn create_request_span(session: &Session, ctx: &PingoraRequestCtx) ->
         span.record("client.address", tracing::field::display(addr));
     }
 
+    #[cfg(feature = "otel")]
+    if let Some(parent) = praxis_core::trace_context::extract_remote_context(&session.req_header().headers) {
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        // Set the W3C parent before this span enters the filter pipeline.
+        let _set_parent = span.set_parent(parent);
+    }
+
     span
 }
 

@@ -9,7 +9,7 @@ pub mod payload_processing;
 mod security;
 mod traffic_management;
 mod transformation;
-pub(crate) mod value_safety;
+pub mod value_safety;
 
 #[cfg(feature = "cloud-events-filter")]
 pub use observability::CloudEventsFilter;

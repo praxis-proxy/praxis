@@ -262,12 +262,19 @@ pub struct PingoraRequestCtx {
     /// `logging` hook before the span is dropped.
     pub request_span: Span,
 
+    /// HTTP client span for the current upstream request attempt.
+    ///
+    /// Created when Pingora selects a peer, before it dials. Its context is
+    /// injected into the final upstream request headers after connection, and
+    /// the next attempt replaces it rather than reusing a stale span ID.
+    pub upstream_client_span: Span,
+
     /// Child span covering upstream request/response exchange.
     ///
-    /// Created in `connected_to_upstream` after the connection is
-    /// established (or reused). Response-phase attributes
-    /// (`http.response.status_code`, `http.response.body.size`) are
-    /// recorded in the `logging` hook before the span is dropped.
+    /// Created below the per-attempt client span when Pingora selects a peer.
+    /// Response-phase attributes (`http.response.status_code`,
+    /// `http.response.body.size`) are recorded in the `logging` hook before
+    /// the span is dropped.
     pub upstream_exchange_span: Span,
 
     /// When this request was received.
@@ -627,6 +634,7 @@ impl Default for PingoraRequestCtx {
             request_is_idempotent: false,
             request_snapshot: None,
             request_span: Span::none(),
+            upstream_client_span: Span::none(),
             request_start: Instant::now(),
             upstream_exchange_span: Span::none(),
             response_body_buffer: None,
