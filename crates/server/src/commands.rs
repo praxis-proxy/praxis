@@ -135,6 +135,8 @@ fn default_config_source() -> String {
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
 
     #[test]
@@ -188,9 +190,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_catches_invalid_log_overrides() {
-        let config = Config::from_yaml(
-            r#"
+    fn load_and_validate_for_cli_rejects_invalid_log_overrides() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
 runtime:
   log_overrides:
     "invalid module": "info"
@@ -205,9 +208,8 @@ filter_chains:
 "#,
         )
         .unwrap();
-        let result = validate_config_for_startup(&config);
-        assert!(result.is_err(), "invalid log overrides should fail validation");
-        let err = result.err().unwrap().to_string();
+        let path = file.path().to_str().unwrap();
+        let err = load_and_validate_for_cli(Some(path)).unwrap_err().to_string();
         assert!(
             err.contains("invalid module path 'invalid module'"),
             "error should mention invalid module path: {err}"

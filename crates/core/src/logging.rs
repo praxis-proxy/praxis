@@ -767,28 +767,7 @@ fn validate_and_build_directives(
     base: &tracing_subscriber::EnvFilter,
     overrides: &std::collections::HashMap<String, String>,
 ) -> Result<String, ProxyError> {
-    let mut errors: Vec<String> = Vec::new();
-
-    for (module, level) in overrides.iter().collect::<std::collections::BTreeMap<_, _>>() {
-        if !is_valid_module_path(module) {
-            errors.push(format!(
-                "invalid module path '{module}' (must be alphanumeric, '_', or '::')"
-            ));
-        }
-        if !is_valid_log_level(level) {
-            errors.push(format!(
-                "invalid level '{level}' for module '{module}' \
-                 (must be error, warn, info, debug, or trace)"
-            ));
-        }
-    }
-
-    if !errors.is_empty() {
-        return Err(ProxyError::Config(format!(
-            "invalid log_overrides: {}",
-            errors.join("; ")
-        )));
-    }
+    validate_log_override_entries(overrides)?;
 
     let mut directives = base.to_string();
     for (module, level) in overrides.iter().collect::<std::collections::BTreeMap<_, _>>() {
@@ -812,6 +791,42 @@ fn validate_and_build_directives(
 /// Returns [`ProxyError::Config`] when overrides are invalid.
 pub fn build_baseline_directive(config: &Config) -> Result<String, ProxyError> {
     Ok(build_env_filter(config)?.to_string())
+}
+
+/// Check every `runtime.log_overrides` entry for a valid module path and level.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] listing every invalid entry, sorted by module.
+///
+/// [`ProxyError::Config`]: crate::errors::ProxyError::Config
+pub(crate) fn validate_log_override_entries(
+    overrides: &std::collections::HashMap<String, String>,
+) -> Result<(), ProxyError> {
+    let mut errors: Vec<String> = Vec::new();
+
+    for (module, level) in overrides.iter().collect::<std::collections::BTreeMap<_, _>>() {
+        if !is_valid_module_path(module) {
+            errors.push(format!(
+                "invalid module path '{module}' (must be alphanumeric, '_', or '::')"
+            ));
+        }
+        if !is_valid_log_level(level) {
+            errors.push(format!(
+                "invalid level '{level}' for module '{module}' \
+                 (must be error, warn, info, debug, or trace)"
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        return Ok(());
+    }
+
+    Err(ProxyError::Config(format!(
+        "invalid runtime.log_overrides: {}",
+        errors.join("; ")
+    )))
 }
 
 /// Returns `true` if `module_path` is a valid Rust module path and is non-empty.
