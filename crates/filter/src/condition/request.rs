@@ -128,6 +128,7 @@ impl HeaderSource for Request {
 ///     path_prefix: Some("/api".into()),
 ///     methods: None,
 ///     headers: None,
+///     headers_present: None,
 ///     bound_upstream: None,
 ///     selected_upstream: None,
 /// });
@@ -140,6 +141,7 @@ impl HeaderSource for Request {
 ///     path_prefix: Some("/api".into()),
 ///     methods: None,
 ///     headers: None,
+///     headers_present: None,
 ///     bound_upstream: None,
 ///     selected_upstream: None,
 /// });
@@ -468,6 +470,7 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         };
@@ -483,6 +486,7 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         };
@@ -498,6 +502,7 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         };
@@ -518,6 +523,7 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: Some(hdr_map),
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         };
@@ -538,6 +544,7 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: Some(hdr_map),
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         };
@@ -553,6 +560,7 @@ mod tests {
             path_prefix: Some("/healthz".to_owned()),
             methods: Some(vec!["GET".to_owned()]),
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         };
@@ -571,6 +579,7 @@ mod tests {
             path_prefix: Some("/healthz".to_owned()),
             methods: Some(vec!["GET".to_owned()]),
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         };
@@ -589,6 +598,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         };
@@ -991,22 +1001,19 @@ mod tests {
             path_prefix: Some("/pkg.Svc".to_owned()),
             methods: Some(vec!["POST".to_owned()]),
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         };
         assert!(
-            should_execute(&[when(m)], &req),
+            should_execute(&[when(m.clone())], &req),
             "all three predicates match, so the filter should run"
         );
 
         let m = ConditionMatch {
-            grpc: Some(true),
-            path: None,
             path_prefix: Some("/other".to_owned()),
             methods: None,
-            headers: None,
-            bound_upstream: None,
-            selected_upstream: None,
+            ..m
         };
         assert!(
             !should_execute(&[when(m)], &req),
@@ -1359,6 +1366,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         }
@@ -1398,6 +1406,7 @@ mod tests {
             path_prefix: Some(prefix.to_owned()),
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         }
@@ -1411,6 +1420,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         }
@@ -1424,6 +1434,7 @@ mod tests {
             path_prefix: None,
             methods: Some(methods.iter().map(|s| (*s).to_owned()).collect()),
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         }
@@ -1441,6 +1452,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         }
@@ -1454,6 +1466,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: Some(SelectedUpstreamMatch {
                 application_protocol: protocol.map(str::to_owned),
@@ -1470,6 +1483,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: Some(ApplicationMatch {
                 application_protocol: protocol.map(str::to_owned),
                 application_provider: provider.map(str::to_owned),
@@ -1510,33 +1524,10 @@ mod tests {
         /// Strategy for an arbitrary single-field predicate.
         fn predicate() -> impl Strategy<Value = ConditionMatch> {
             prop_oneof![
-                path().prop_map(|p| ConditionMatch {
-                    grpc: None,
-                    path: Some(p),
-                    path_prefix: None,
-                    methods: None,
-                    headers: None,
-                    bound_upstream: None,
-                    selected_upstream: None,
-                }),
-                path().prop_map(|p| ConditionMatch {
-                    grpc: None,
-                    path: None,
-                    path_prefix: Some(p),
-                    methods: None,
-                    headers: None,
-                    bound_upstream: None,
-                    selected_upstream: None,
-                }),
-                proptest::collection::vec("(GET|POST|PUT|DELETE|PATCH)", 1..=3).prop_map(|ms| ConditionMatch {
-                    grpc: None,
-                    path: None,
-                    path_prefix: None,
-                    methods: Some(ms),
-                    headers: None,
-                    bound_upstream: None,
-                    selected_upstream: None,
-                }),
+                path().prop_map(|p| exact_path_match(&p)),
+                path().prop_map(|p| path_match(&p)),
+                proptest::collection::vec("(GET|POST|PUT|DELETE|PATCH)", 1..=3)
+                    .prop_map(|ms| method_match(&ms.iter().map(String::as_str).collect::<Vec<_>>())),
             ]
         }
 

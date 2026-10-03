@@ -818,6 +818,7 @@ mod tests {
         let conds = vec![ResponseCondition::When(ResponseConditionMatch {
             status: Some(vec![200]),
             headers: None,
+            headers_present: None,
         })];
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let mut resp = crate::test_utils::make_response();
@@ -840,6 +841,7 @@ mod tests {
         let conds = vec![ResponseCondition::When(ResponseConditionMatch {
             status: Some(vec![404]),
             headers: None,
+            headers_present: None,
         })];
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let mut resp = crate::test_utils::make_response();
@@ -862,6 +864,7 @@ mod tests {
         let conds = vec![ResponseCondition::When(ResponseConditionMatch {
             status: Some(vec![200]),
             headers: None,
+            headers_present: None,
         })];
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let ctx = crate::test_utils::make_filter_context(&req);
@@ -886,6 +889,7 @@ mod tests {
         let conditions = vec![ResponseCondition::Unless(ResponseConditionMatch {
             status: Some(vec![400]),
             headers: None,
+            headers_present: None,
         })];
 
         let filter = StubFilter;

@@ -88,19 +88,21 @@ fn validate_request_conditions(chain_name: &str, entry: &FilterEntry) -> Result<
             && matcher.path_prefix.is_none()
             && matcher.methods.is_none()
             && matcher.headers.is_none()
+            && matcher.headers_present.is_none()
             && matcher.bound_upstream.is_none()
             && matcher.selected_upstream.is_none()
         {
             return Err(ProxyError::Config(format!(
                 "filter '{filter}' in chain '{chain_name}': condition {idx} is \
                  empty; set at least one of grpc, path, path_prefix, methods, \
-                 headers, bound_upstream, or selected_upstream (an empty \
-                 condition matches every request, so 'unless' would disable \
-                 the filter entirely)",
+                 headers, headers_present, bound_upstream, or selected_upstream \
+                 (an empty condition matches every request, so 'unless' would \
+                 disable the filter entirely)",
                 filter = entry.filter_type,
             )));
         }
         validate_condition_containers(chain_name, &entry.filter_type, idx, matcher)?;
+        validate_condition_headers_present(chain_name, &entry.filter_type, idx, matcher)?;
         validate_condition_paths(chain_name, &entry.filter_type, idx, matcher)?;
         validate_condition_bound_upstream(chain_name, &entry.filter_type, idx, matcher)?;
         validate_condition_selected_upstream(chain_name, &entry.filter_type, idx, matcher)?;
@@ -135,9 +137,9 @@ fn validate_condition_selected_upstream(
 /// Reject request-condition predicates given as empty containers.
 ///
 /// An empty container is as pathological as an all-absent predicate:
-/// `methods: []` can never match, while `headers: {}` and
-/// `selected_upstream: {}` match every request and so silently disable an
-/// `unless`.
+/// `methods: []` can never match, while `headers: {}`,
+/// `headers_present: []` and `selected_upstream: {}` match every request and
+/// so silently disable an `unless`.
 fn validate_condition_containers(
     chain_name: &str,
     filter: &str,
@@ -150,6 +152,9 @@ fn validate_condition_containers(
     if matcher.headers.as_ref().is_some_and(HashMap::is_empty) {
         return Err(empty_predicate_error(chain_name, filter, idx, "headers"));
     }
+    if matcher.headers_present.as_ref().is_some_and(Vec::is_empty) {
+        return Err(empty_predicate_error(chain_name, filter, idx, "headers_present"));
+    }
     if matcher
         .selected_upstream
         .as_ref()
@@ -159,6 +164,25 @@ fn validate_condition_containers(
             "filter '{filter}' in chain '{chain_name}': condition {idx} has \
              an empty selected_upstream predicate; set application_protocol, \
              application_provider, or both",
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a `headers_present` name that is not a valid HTTP header name.
+///
+/// No request can carry such a header, so a `when` would never run the
+/// filter and an `unless` would never skip it.
+fn validate_condition_headers_present(
+    chain_name: &str,
+    filter: &str,
+    idx: usize,
+    matcher: &ConditionMatch,
+) -> Result<(), ProxyError> {
+    if let Some(name) = first_invalid_header_name(matcher.headers_present.iter().flatten()) {
+        return Err(ProxyError::Config(format!(
+            "filter '{filter}' in chain '{chain_name}': condition {idx} \
+             headers_present has invalid header name '{name}'",
         )));
     }
     Ok(())
@@ -248,30 +272,44 @@ fn validate_response_conditions(chain_name: &str, entry: &FilterEntry) -> Result
         let matcher = match condition {
             ResponseCondition::When(inner) | ResponseCondition::Unless(inner) => inner,
         };
-        if matcher.status.is_none() && matcher.headers.is_none() {
+        if matcher.status.is_none() && matcher.headers.is_none() && matcher.headers_present.is_none() {
             return Err(ProxyError::Config(format!(
                 "filter '{filter}' in chain '{chain_name}': response condition \
-                 {idx} is empty; set at least one of status or headers",
+                 {idx} is empty; set at least one of status, headers, or \
+                 headers_present",
                 filter = entry.filter_type,
             )));
         }
-        if matcher.status.as_ref().is_some_and(Vec::is_empty) {
-            return Err(empty_predicate_error(
-                chain_name,
-                &entry.filter_type,
-                idx,
-                "response status",
-            ));
-        }
-        if matcher.headers.as_ref().is_some_and(HashMap::is_empty) {
-            return Err(empty_predicate_error(
-                chain_name,
-                &entry.filter_type,
-                idx,
-                "response headers",
-            ));
-        }
+        validate_response_condition_containers(chain_name, &entry.filter_type, idx, matcher)?;
         validate_response_predicate_values(chain_name, &entry.filter_type, idx, matcher)?;
+    }
+    Ok(())
+}
+
+/// Reject response-condition predicates given as empty containers.
+///
+/// `status: []` can never match, while `headers: {}` and
+/// `headers_present: []` match every response and so silently disable an
+/// `unless`.
+fn validate_response_condition_containers(
+    chain_name: &str,
+    filter: &str,
+    idx: usize,
+    matcher: &ResponseConditionMatch,
+) -> Result<(), ProxyError> {
+    if matcher.status.as_ref().is_some_and(Vec::is_empty) {
+        return Err(empty_predicate_error(chain_name, filter, idx, "response status"));
+    }
+    if matcher.headers.as_ref().is_some_and(HashMap::is_empty) {
+        return Err(empty_predicate_error(chain_name, filter, idx, "response headers"));
+    }
+    if matcher.headers_present.as_ref().is_some_and(Vec::is_empty) {
+        return Err(empty_predicate_error(
+            chain_name,
+            filter,
+            idx,
+            "response headers_present",
+        ));
     }
     Ok(())
 }
@@ -300,20 +338,27 @@ fn validate_response_predicate_values(
              has invalid status code {status} (expected 100-599)",
         )));
     }
-    if let Some(name) = matcher
-        .headers
-        .iter()
-        .flatten()
-        .map(|(name, _)| name)
-        .filter(|name| http::header::HeaderName::from_bytes(name.as_bytes()).is_err())
-        .min()
-    {
+    if let Some(name) = first_invalid_header_name(
+        matcher
+            .headers
+            .iter()
+            .flat_map(HashMap::keys)
+            .chain(matcher.headers_present.iter().flatten()),
+    ) {
         return Err(ProxyError::Config(format!(
             "filter '{filter}' in chain '{chain_name}': response condition {idx} \
              has invalid header name '{name}'",
         )));
     }
     Ok(())
+}
+
+/// The lexically smallest name that is not a valid HTTP header name, so the
+/// error is the same on every run whatever the map iteration order.
+fn first_invalid_header_name<'cfg, I: Iterator<Item = &'cfg String>>(names: I) -> Option<&'cfg String> {
+    names
+        .filter(|name| http::header::HeaderName::from_bytes(name.as_bytes()).is_err())
+        .min()
 }
 
 /// Error for a condition predicate given as an empty container.
@@ -1306,6 +1351,138 @@ filter_chains:
     }
 
     #[test]
+    fn accept_headers_present_only_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        request_set:
+          - name: X-Model
+            value: default
+        conditions:
+          - unless:
+              headers_present: [X-Model]
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml);
+        assert!(
+            config.is_ok(),
+            "headers_present alone is a complete predicate and must not be rejected as empty: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn empty_condition_error_lists_the_headers_present_predicate() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - unless: {}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("headers, headers_present, bound_upstream"),
+            "the remedy should name the headers_present predicate: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_headers_present_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - unless:
+              headers_present: []
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("filter 'static_response' in chain 'main': condition 0 has an empty headers_present list"),
+            "an empty headers_present list matches vacuously and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_invalid_headers_present_name() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - when:
+              path_prefix: "/"
+          - unless:
+              headers_present: [x-model, "bad header"]
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "filter 'static_response' in chain 'main': condition 1 headers_present has invalid header name 'bad header'"
+            ),
+            "a header name no request can carry must be rejected with its full location: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_invalid_headers_present_name_in_inline_branch_chain() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+                    conditions:
+                      - when:
+                          headers_present: ["x:model"]
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("headers_present has invalid header name 'x:model'"),
+            "invalid headers_present names inside inline branch chains should be rejected: {err}"
+        );
+    }
+
+    #[test]
     fn reject_condition_path_without_leading_slash() {
         let yaml = r#"
 listeners:
@@ -1463,6 +1640,105 @@ filter_chains:
         assert!(
             err.to_string().contains("invalid header name 'bad header'"),
             "a header name that no response can carry must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_response_headers_present_only_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        response_set:
+          - name: Cache-Control
+            value: no-store
+        response_conditions:
+          - unless:
+              headers_present: [cache-control]
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml);
+        assert!(
+            config.is_ok(),
+            "headers_present alone is a complete response predicate: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn reject_empty_response_headers_present_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        response_conditions:
+          - unless:
+              headers_present: []
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("filter 'headers' in chain 'main': condition 0 has an empty response headers_present list"),
+            "an empty response headers_present list matches vacuously and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_response_condition_invalid_headers_present_name() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        response_conditions:
+          - when:
+              status: [200]
+          - unless:
+              headers_present: ["bad header"]
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains(
+                "filter 'headers' in chain 'main': response condition 1 has invalid header name 'bad header'"
+            ),
+            "a headers_present name that no response can carry must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_response_condition_error_lists_headers_present() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        response_conditions:
+          - unless: {}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("set at least one of status, headers, or headers_present"),
+            "the remedy should name the headers_present predicate: {err}"
         );
     }
 

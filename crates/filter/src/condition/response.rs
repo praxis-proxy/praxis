@@ -30,6 +30,7 @@ use crate::context::Response;
 /// let when = ResponseCondition::When(ResponseConditionMatch {
 ///     status: Some(vec![200]),
 ///     headers: None,
+///     headers_present: None,
 /// });
 /// assert!(should_execute_response(&[when], &resp));
 /// ```
@@ -52,6 +53,7 @@ pub fn should_execute_response(conditions: &[ResponseCondition], resp: &Response
 /// let when = ResponseCondition::When(ResponseConditionMatch {
 ///     status: Some(vec![404]),
 ///     headers: None,
+///     headers_present: None,
 /// });
 /// assert!(should_execute_response_ref(&[when], status, &headers));
 /// ```
@@ -309,6 +311,7 @@ mod tests {
         let m = ResponseConditionMatch {
             status: None,
             headers: None,
+            headers_present: None,
         };
         assert!(should_execute_response(&[resp_when(m)], &resp));
     }
@@ -635,6 +638,7 @@ mod tests {
         ResponseConditionMatch {
             status: Some(codes.to_vec()),
             headers: None,
+            headers_present: None,
         }
     }
 
@@ -647,6 +651,7 @@ mod tests {
         ResponseConditionMatch {
             status: None,
             headers: Some(headers),
+            headers_present: None,
         }
     }
 }

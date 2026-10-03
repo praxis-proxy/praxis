@@ -2892,6 +2892,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: Some(praxis_core::config::ApplicationMatch {
                 application_protocol: None,
                 application_provider: Some("openai".to_owned()),
@@ -3549,6 +3550,7 @@ mod tests {
             path_prefix: Some("/v1".to_owned()),
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: Some(praxis_core::config::ApplicationMatch {
                 application_protocol: Some("openai_responses".to_owned()),
                 application_provider: None,

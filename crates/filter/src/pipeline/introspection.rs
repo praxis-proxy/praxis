@@ -264,6 +264,7 @@ mod tests {
         let conditions = vec![ResponseCondition::When(ResponseConditionMatch {
             status: Some(vec![500]),
             headers: None,
+            headers_present: None,
         })];
         let phases = http_phases(BodyAccess::None, BodyAccess::None, &conditions);
         assert_eq!(

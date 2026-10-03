@@ -528,6 +528,7 @@ mod tests {
         let conds = vec![ResponseCondition::When(ResponseConditionMatch {
             status: None,
             headers: Some(HashMap::from([("x-key".to_owned(), "val".to_owned())])),
+            headers_present: None,
         })];
         assert!(
             resp_conditions_use_headers(&conds),
@@ -540,6 +541,7 @@ mod tests {
         let conds = vec![ResponseCondition::When(ResponseConditionMatch {
             status: Some(vec![200]),
             headers: None,
+            headers_present: None,
         })];
         assert!(
             !resp_conditions_use_headers(&conds),
@@ -560,6 +562,7 @@ mod tests {
         let conds = vec![ResponseCondition::Unless(ResponseConditionMatch {
             status: None,
             headers: Some(HashMap::from([("x-skip".to_owned(), "yes".to_owned())])),
+            headers_present: None,
         })];
         assert!(
             resp_conditions_use_headers(&conds),
@@ -592,6 +595,7 @@ mod tests {
         let conditions = vec![ResponseCondition::When(ResponseConditionMatch {
             status: Some(vec![200]),
             headers: None,
+            headers_present: None,
         })];
         let filter = PipelineFilter::new(0, AnyFilter::Http(Box::new(ResponseBodyFilter)), vec![], conditions);
         let caps = compute_body_capabilities(&[filter]);
@@ -1316,6 +1320,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: Some(ApplicationMatch {
                 application_protocol: None,
                 application_provider: Some("openai".to_owned()),

@@ -5193,6 +5193,7 @@ fn gate_condition(header: &str, value: &str) -> Vec<praxis_core::config::Conditi
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         },
@@ -5493,6 +5494,7 @@ fn when_path(prefix: &str) -> praxis_core::config::Condition {
         path_prefix: Some(prefix.to_owned()),
         methods: None,
         headers: None,
+        headers_present: None,
         bound_upstream: None,
         selected_upstream: None,
     })
@@ -5540,6 +5542,7 @@ fn unless_path(prefix: &str) -> praxis_core::config::Condition {
         path_prefix: Some(prefix.to_owned()),
         methods: None,
         headers: None,
+        headers_present: None,
         bound_upstream: None,
         selected_upstream: None,
     })
@@ -5550,6 +5553,7 @@ fn when_status(codes: &[u16]) -> praxis_core::config::ResponseCondition {
     praxis_core::config::ResponseCondition::When(praxis_core::config::ResponseConditionMatch {
         status: Some(codes.to_vec()),
         headers: None,
+        headers_present: None,
     })
 }
 
@@ -6200,6 +6204,7 @@ fn trace_propagation_honors_trace_context_conditions() {
         path_prefix: Some("/api".to_owned()),
         methods: None,
         headers: None,
+        headers_present: None,
         bound_upstream: None,
         selected_upstream: None,
     });
@@ -6221,6 +6226,7 @@ async fn request_body_after_request_phase_does_not_start_trace_context() {
         path_prefix: Some("/api".to_owned()),
         methods: None,
         headers: None,
+        headers_present: None,
         bound_upstream: None,
         selected_upstream: None,
     });
@@ -6258,6 +6264,7 @@ async fn ambiguous_pre_read_header_does_not_fail_the_request() {
         path_prefix: None,
         methods: None,
         headers: Some(HashMap::from([("x-tenant".to_owned(), "a".to_owned())])),
+        headers_present: None,
         bound_upstream: None,
         selected_upstream: None,
     });
