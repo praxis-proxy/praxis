@@ -82,7 +82,9 @@ struct UrlRewriteConfig {
 
 /// A single rewrite operation in deserialized form.
 ///
-/// Each YAML list entry contains exactly one operation key:
+/// The operation type is the sole key in the YAML mapping; the custom
+/// [`Deserialize`] impl rejects empty entries, unknown keys, and entries
+/// with more than one key at parse time.
 ///
 /// ```yaml
 /// operations:
@@ -92,21 +94,59 @@ struct UrlRewriteConfig {
 ///   - strip_query_params: [debug]
 ///   - add_query_params:
 ///       version: "2"
+///   - preserve_query_params_only: [api-version]
 /// ```
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OperationConfig {
+#[derive(Debug)]
+enum OperationConfig {
     /// Regex-based path replacement.
-    #[serde(default)]
-    regex_replace: Option<serde_yaml::Value>,
+    RegexReplace(serde_yaml::Value),
 
     /// Remove named query parameters.
-    #[serde(default)]
-    strip_query_params: Option<serde_yaml::Value>,
+    StripQueryParams(serde_yaml::Value),
 
     /// Append query parameters.
-    #[serde(default)]
-    add_query_params: Option<serde_yaml::Value>,
+    AddQueryParams(serde_yaml::Value),
+
+    /// Retain only the named query parameters, dropping all others.
+    PreserveQueryParamsOnly(serde_yaml::Value),
+}
+
+impl<'de> Deserialize<'de> for OperationConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let serde_yaml::Value::Mapping(mapping) = serde_yaml::Value::deserialize(deserializer)? else {
+            return Err(serde::de::Error::custom(
+                "url_rewrite: operation entry must be a mapping",
+            ));
+        };
+        if mapping.is_empty() {
+            return Err(serde::de::Error::custom("url_rewrite: empty operation entry"));
+        }
+        if mapping.len() > 1 {
+            return Err(serde::de::Error::custom(
+                "url_rewrite: each operations entry must contain exactly one operation; \
+                 split into separate list entries",
+            ));
+        }
+        let (key, val) = mapping
+            .into_iter()
+            .next()
+            .ok_or_else(|| serde::de::Error::custom("url_rewrite: empty operation entry"))?;
+        let op_name = key
+            .as_str()
+            .ok_or_else(|| serde::de::Error::custom("url_rewrite: operation key must be a string"))?;
+        match op_name {
+            "regex_replace" => Ok(Self::RegexReplace(val)),
+            "strip_query_params" => Ok(Self::StripQueryParams(val)),
+            "add_query_params" => Ok(Self::AddQueryParams(val)),
+            "preserve_query_params_only" => Ok(Self::PreserveQueryParamsOnly(val)),
+            other => Err(serde::de::Error::custom(format!(
+                "url_rewrite: unknown operation `{other}`"
+            ))),
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -131,6 +171,9 @@ struct OperationConfig {
 ///       - debug
 ///   - add_query_params:
 ///       source: gateway
+///   - preserve_query_params_only:
+///       - api-version
+///       - user
 /// ```
 ///
 /// # Example
@@ -235,6 +278,9 @@ enum Operation {
     /// Append query parameters.
     /// Pre-encoded `k=v&k2=v2` suffix, percent-encoded once at config load.
     AddQueryParams(String),
+
+    /// Retain only the named query parameters; drop all others.
+    PreserveQueryParamsOnly(HashSet<String>),
 }
 
 // -----------------------------------------------------------------------------
@@ -258,6 +304,9 @@ fn apply_operations<'a>(
             },
             Operation::StripQueryParams(names) => {
                 query = apply_strip(query, names);
+            },
+            Operation::PreserveQueryParamsOnly(names) => {
+                query = apply_preserve(query, names);
             },
             Operation::AddQueryParams(encoded) => {
                 let base = query.take().unwrap_or(Cow::Borrowed(""));
@@ -309,6 +358,30 @@ fn apply_strip<'a>(query: Option<Cow<'a, str>>, names: &HashSet<String>) -> Opti
     }
 }
 
+/// Retain only the named query parameters, returning `None` if the
+/// result is empty (including when `names` is empty or there is no
+/// query string).
+fn apply_preserve<'a>(query: Option<Cow<'a, str>>, names: &HashSet<String>) -> Option<Cow<'a, str>> {
+    let qs = query?;
+
+    let all_preserved = qs.split('&').all(|pair| {
+        let key = pair.split('=').next().unwrap_or("");
+        let decoded = percent_decode_str(key).decode_utf8_lossy();
+        names.contains(decoded.as_ref())
+    });
+    if all_preserved && !names.is_empty() {
+        return Some(qs);
+    }
+
+    let filtered = preserve_params(&qs, names);
+    trace!(kept = ?names, "preserved query params only");
+    if filtered.is_empty() {
+        None
+    } else {
+        Some(Cow::Owned(filtered))
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Compilation
 // -----------------------------------------------------------------------------
@@ -321,31 +394,10 @@ fn compile_operations(configs: Vec<OperationConfig>) -> Result<Vec<Operation>, F
 /// Compile one [`OperationConfig`] into an executable [`Operation`].
 fn compile_single_operation(config: OperationConfig) -> Result<Operation, FilterError> {
     match config {
-        OperationConfig {
-            regex_replace: Some(v),
-            strip_query_params: None,
-            add_query_params: None,
-        } => compile_regex_replace(&v),
-        OperationConfig {
-            regex_replace: None,
-            strip_query_params: Some(v),
-            add_query_params: None,
-        } => compile_strip_query_params(&v),
-        OperationConfig {
-            regex_replace: None,
-            strip_query_params: None,
-            add_query_params: Some(v),
-        } => compile_add_query_params(&v),
-        OperationConfig {
-            regex_replace: None,
-            strip_query_params: None,
-            add_query_params: None,
-        } => Err("url_rewrite: empty operation entry".into()),
-        _ => Err(
-            "url_rewrite: each operations entry must contain exactly one operation; \
-             split into separate list entries"
-                .into(),
-        ),
+        OperationConfig::RegexReplace(v) => compile_regex_replace(&v),
+        OperationConfig::StripQueryParams(v) => compile_strip_query_params(&v),
+        OperationConfig::AddQueryParams(v) => compile_add_query_params(&v),
+        OperationConfig::PreserveQueryParamsOnly(v) => compile_preserve_query_params_only(&v),
     }
 }
 
@@ -389,6 +441,13 @@ fn compile_add_query_params(value: &serde_yaml::Value) -> Result<Operation, Filt
     )))
 }
 
+/// Compile a `preserve_query_params_only` operation from its YAML value.
+fn compile_preserve_query_params_only(value: &serde_yaml::Value) -> Result<Operation, FilterError> {
+    let names: HashSet<String> = serde_yaml::from_value(value.clone())
+        .map_err(|e| format!("url_rewrite: preserve_query_params_only config: {e}"))?;
+    Ok(Operation::PreserveQueryParamsOnly(names))
+}
+
 /// Percent-encode `pairs` into a ready `k=v&k2=v2` query suffix.
 fn encode_query_pairs<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> String {
     use std::fmt::Write as _;
@@ -424,6 +483,21 @@ fn strip_params(qs: &str, remove: &HashSet<String>) -> String {
             let key = pair.split('=').next().unwrap_or("");
             let decoded = percent_decode_str(key).decode_utf8_lossy();
             !remove.contains(decoded.as_ref())
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Retain only the named parameters from a query string.
+///
+/// Keys from the query string are percent-decoded before
+/// comparison so that `%61pi-version` matches an entry of `api-version`.
+fn preserve_params(qs: &str, keep: &HashSet<String>) -> String {
+    qs.split('&')
+        .filter(|pair| {
+            let key = pair.split('=').next().unwrap_or("");
+            let decoded = percent_decode_str(key).decode_utf8_lossy();
+            keep.contains(decoded.as_ref())
         })
         .collect::<Vec<_>>()
         .join("&")
@@ -1096,7 +1170,7 @@ operations:
         )
         .expect("valid yaml");
         let result = UrlRewriteFilter::from_config(&config);
-        assert!(result.is_err(), "multi-key operation entry should be rejected by serde");
+        assert!(result.is_err(), "multi-key operation entry should be rejected");
     }
 
     #[tokio::test]
@@ -1160,6 +1234,8 @@ operations:
         StripQuery(&'a [&'a str]),
         /// List of (key, value) pairs to add.
         AddQuery(&'a [(&'a str, &'a str)]),
+        /// Allowlist of query param names to keep.
+        PreserveOnly(&'a [&'a str]),
     }
 
     /// Build a [`UrlRewriteFilter`] from a slice of test operations.
@@ -1173,8 +1249,142 @@ operations:
                 },
                 Op::StripQuery(names) => Operation::StripQueryParams(names.iter().map(|s| (*s).to_owned()).collect()),
                 Op::AddQuery(pairs) => Operation::AddQueryParams(encode_query_pairs(pairs.iter().copied())),
+                Op::PreserveOnly(names) => {
+                    Operation::PreserveQueryParamsOnly(names.iter().map(|s| (*s).to_owned()).collect())
+                },
             })
             .collect();
         UrlRewriteFilter { operations }
+    }
+
+    #[test]
+    fn from_config_empty_operation_entry_rejected() {
+        let config = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+operations:
+  - {}
+"#,
+        )
+        .unwrap();
+        let result = UrlRewriteFilter::from_config(&config);
+        assert!(result.is_err(), "empty operation entry should be rejected by serde");
+    }
+
+    #[tokio::test]
+    async fn preserve_query_params_only_retains_listed_drops_others() {
+        let filter = make_filter(&[Op::PreserveOnly(&["api-version", "user"])]);
+        let req = test_utils::make_request(Method::GET, "/path?api-version=2024-01&user=alice&debug=1&trace=true");
+        let mut ctx = test_utils::make_filter_context(&req);
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        assert_eq!(
+            ctx.rewritten_path.as_deref(),
+            Some("/path?api-version=2024-01&user=alice"),
+            "only allowed params should be retained"
+        );
+    }
+
+    #[tokio::test]
+    async fn preserve_query_params_only_empty_list_drops_all() {
+        let filter = make_filter(&[Op::PreserveOnly(&[])]);
+        let req = test_utils::make_request(Method::GET, "/path?a=1&b=2");
+        let mut ctx = test_utils::make_filter_context(&req);
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        assert_eq!(
+            ctx.rewritten_path.as_deref(),
+            Some("/path"),
+            "empty allowlist should drop entire query string"
+        );
+    }
+
+    #[tokio::test]
+    async fn preserve_query_params_only_no_query_string_is_noop() {
+        let filter = make_filter(&[Op::PreserveOnly(&["a"])]);
+        let req = test_utils::make_request(Method::GET, "/path");
+        let mut ctx = test_utils::make_filter_context(&req);
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        assert!(
+            ctx.rewritten_path.is_none(),
+            "preserve with no query string should be a no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn preserve_query_params_only_single_param() {
+        let filter = make_filter(&[Op::PreserveOnly(&["keep"])]);
+        let req = test_utils::make_request(Method::GET, "/path?keep=yes&drop=1");
+        let mut ctx = test_utils::make_filter_context(&req);
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        assert_eq!(
+            ctx.rewritten_path.as_deref(),
+            Some("/path?keep=yes"),
+            "single preserved param should be kept"
+        );
+    }
+
+    #[tokio::test]
+    async fn preserve_query_params_only_repeated_params_all_instances_retained() {
+        let filter = make_filter(&[Op::PreserveOnly(&["a"])]);
+        let req = test_utils::make_request(Method::GET, "/path?a=1&b=2&a=3");
+        let mut ctx = test_utils::make_filter_context(&req);
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        assert_eq!(
+            ctx.rewritten_path.as_deref(),
+            Some("/path?a=1&a=3"),
+            "all instances of a preserved param should be retained in order"
+        );
+    }
+
+    #[tokio::test]
+    async fn preserve_query_params_only_all_already_in_list_is_noop() {
+        let filter = make_filter(&[Op::PreserveOnly(&["a", "b"])]);
+        let req = test_utils::make_request(Method::GET, "/path?a=1&b=2");
+        let mut ctx = test_utils::make_filter_context(&req);
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        assert!(
+            ctx.rewritten_path.is_none(),
+            "preserving all existing params should not trigger a rewrite"
+        );
+    }
+
+    #[tokio::test]
+    async fn preserve_query_params_only_unknown_param_not_in_list_dropped() {
+        let filter = make_filter(&[Op::PreserveOnly(&["known"])]);
+        let req = test_utils::make_request(Method::GET, "/path?unknown=1");
+        let mut ctx = test_utils::make_filter_context(&req);
+
+        drop(filter.on_request(&mut ctx).await.unwrap());
+
+        assert_eq!(
+            ctx.rewritten_path.as_deref(),
+            Some("/path"),
+            "param not in the allowlist should be dropped, leaving no query string"
+        );
+    }
+
+    #[test]
+    fn from_config_preserve_query_params_only_parses() {
+        let config = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+operations:
+  - preserve_query_params_only:
+      - api-version
+      - user
+"#,
+        )
+        .unwrap();
+        let result = UrlRewriteFilter::from_config(&config);
+        assert!(result.is_ok(), "preserve_query_params_only should parse successfully");
     }
 }
