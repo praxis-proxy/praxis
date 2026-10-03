@@ -10,13 +10,14 @@ Logs structured access records for each request and response.
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `sample_rate` | number | no | Fraction of requests to log (0.0, 1.0]. Defaults to 1.0. |
-| `fields` | any[] | no | Scalar field tokens; replaces the default ten when present. |
+| `fields` | any[] | no | Scalar field tokens; replaces the default ten when present. Mutually exclusive with `template`. |
 | `request_headers` | string[] | no | Request header names allowed for `request_header.<name>` tokens. |
 | `response_headers` | string[] | no | Response header names allowed for `response_header.<name>` tokens. |
 | `conditions` | AccessLogEmitConditions | no | Emit-time conditions (AND across keys). |
 | `conditions.min_duration_ms` | integer | no |  |
 | `conditions.status_classes` | (`1xx` \| `2xx` \| `3xx` \| `4xx` \| `5xx`)[] | no |  |
 | `conditions.paths` | string[] | no |  |
+| `template` | string | no | Text template string with `{field}` placeholders. When present, output is a rendered text line instead of JSON. Mutually exclusive with `fields`. |
 
 ## Example
 
@@ -36,4 +37,5 @@ conditions:                   # optional emit-time gates (AND across keys)
   min_duration_ms: 1000
   status_classes: [4xx, 5xx]  # OR within list
   paths: ["/api"]             # OR within list; segment-boundary prefixes
+template: "{method} {path} [{status}] {duration_ms}ms"  # optional; when set, output is a text line
 ```

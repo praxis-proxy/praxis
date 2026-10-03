@@ -54,6 +54,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | File | Description |
 | ------ | ------------- |
 | [access-log-fields.yaml](configs/observability/access-log-fields.yaml) | Logs only server errors with a lean field set |
+| [access-log-template.yaml](configs/observability/access-log-template.yaml) | Emits a human-readable log line for each request using a configurable text template |
 | [access-logging.yaml](configs/observability/access-logging.yaml) | Structured JSON logging with sampling; logs ~10% of requests. request_id ensures each log line has a correlation ID. access_log emits method, path, status, and timing |
 | [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after the upstream response completes |
 | [errors-total.yaml](configs/observability/errors-total.yaml) | Prometheus counter for proxy errors classified by cause, covering filter rejections, timeouts, unreachable upstreams and internal faults |

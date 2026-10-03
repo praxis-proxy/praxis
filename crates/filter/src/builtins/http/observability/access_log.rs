@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Structured JSON access log filter with optional sampling, field selection,
-//! header projection, and emit-time conditions.
+//! Structured access log filter with configurable format, field selection,
+//! sampling, header projection, and emit-time conditions.
 
 #![allow(clippy::missing_docs_in_private_items, reason = "internal emit plan types")]
 
@@ -49,11 +49,22 @@ use crate::{
 ///   min_duration_ms: 1000
 ///   status_classes: [4xx, 5xx]  # OR within list
 ///   paths: ["/api"]             # OR within list; segment-boundary prefixes
+/// template: "{method} {path} [{status}] {duration_ms}ms"  # optional; when set, output is a text line
 /// ```
 ///
 /// When `fields` is omitted, the default ten fields are emitted:
 /// `method`, `path`, `client_ip`, `status`, `duration_ms`, `cluster`,
 /// `upstream`, `request_id`, `request_body_bytes`, `response_body_bytes`.
+///
+/// When `template` is set, output is a text line rendered from the `{field}`
+/// placeholders. Otherwise output is JSON (the default). Either shape goes
+/// through the tracing subscriber.
+///
+/// Template tokens follow the same names as field tokens: `{method}`,
+/// `{path}`, `{client_ip}`, `{status}`, `{duration_ms}`, `{cluster}`,
+/// `{upstream}`, `{request_id}`, `{request_body_bytes}`,
+/// `{response_body_bytes}`, `{trace_id}`, `{span_id}`,
+/// `{request_header.user-agent}`, `{response_header.content-type}`.
 ///
 /// Pipeline `conditions` / `response_conditions` on the filter entry still gate
 /// whether this filter runs; access-log `conditions` are evaluated at emit time.
@@ -75,7 +86,7 @@ pub struct AccessLogFilter {
     /// Fraction of requests to log, in `(0.0, 1.0]`; `1.0` logs everything.
     sample_rate: f64,
 
-    /// Selected fields and header projections.
+    /// Selected fields, format shape, and header projections.
     emit_plan: EmitPlan,
 
     /// Emit-time gates evaluated after the response is known.
@@ -98,6 +109,7 @@ struct AccessLogConfig {
     sample_rate: f64,
 
     /// Scalar field tokens; replaces the default ten when present.
+    /// Mutually exclusive with `template`.
     fields: Option<Vec<serde_yaml::Value>>,
 
     /// Request header names allowed for `request_header.<name>` tokens.
@@ -108,6 +120,10 @@ struct AccessLogConfig {
 
     /// Emit-time conditions (AND across keys).
     conditions: Option<AccessLogEmitConditions>,
+
+    /// Text template string with `{field}` placeholders. When present, output is
+    /// a rendered text line instead of JSON. Mutually exclusive with `fields`.
+    template: Option<String>,
 }
 
 /// Emit-time access log conditions.
@@ -202,11 +218,28 @@ enum FieldToken {
     Metadata(String),
 }
 
+/// A segment in a parsed text template: a static string or an interpolated field.
+#[derive(Clone, Debug)]
+enum TemplatePart {
+    Literal(String),
+    Field(FieldToken),
+}
+
+/// Emit shape for a log record.
+#[derive(Clone, Debug)]
+enum EmitShape {
+    /// Ten hardcoded default fields via `tracing::info!` flat format.
+    DefaultFlat,
+    /// User-selected field projection emitted as a `record` JSON field.
+    JsonRecord(Vec<FieldToken>),
+    /// Text line built from a parsed template, emitted as the record message.
+    Text(Vec<TemplatePart>),
+}
+
 /// Runtime emit plan built from config.
 #[derive(Clone, Debug)]
 struct EmitPlan {
-    fields: Vec<FieldToken>,
-    is_default: bool,
+    shape: EmitShape,
 }
 
 /// Cached response metadata for emit on the body phase.
@@ -241,6 +274,12 @@ impl AccessLogFilter {
             return Err(format!("access_log: sample_rate must be in (0.0, 1.0], got {}", cfg.sample_rate).into());
         }
 
+        // A template names its own fields inline, so pairing it with a `fields`
+        // projection is ambiguous.
+        if cfg.fields.is_some() && cfg.template.is_some() {
+            return Err("access_log: fields and template are mutually exclusive".into());
+        }
+
         if let Some(fields) = &cfg.fields {
             if fields.is_empty() {
                 return Err("access_log: fields must not be empty when present".into());
@@ -264,30 +303,44 @@ impl AccessLogFilter {
             return Err("access_log: response_headers must not be empty when present".into());
         }
 
-        let field_tokens = parse_field_tokens(
-            cfg.fields
-                .as_ref()
-                .map(|values| values.iter().filter_map(serde_yaml::Value::as_str).collect::<Vec<_>>()),
-            &request_headers,
-            &response_headers,
-        )?;
+        let shape = if let Some(template) = cfg.template {
+            if template.trim().is_empty() {
+                return Err("access_log: template must not be empty".into());
+            }
+            let parts = parse_template(&template, &request_headers, &response_headers)?;
+            if !parts.iter().any(|part| matches!(part, TemplatePart::Field(_))) {
+                return Err("access_log: template must contain at least one {field} token".into());
+            }
+            EmitShape::Text(parts)
+        } else {
+            let field_tokens = parse_field_tokens(
+                cfg.fields
+                    .as_ref()
+                    .map(|values| values.iter().filter_map(serde_yaml::Value::as_str).collect::<Vec<_>>()),
+                &request_headers,
+                &response_headers,
+            )?;
+            if cfg.fields.is_none() {
+                EmitShape::DefaultFlat
+            } else {
+                EmitShape::JsonRecord(field_tokens)
+            }
+        };
+
+        let needs_response_headers = match &shape {
+            EmitShape::DefaultFlat => false,
+            EmitShape::JsonRecord(fields) => fields.iter().any(|t| matches!(t, FieldToken::ResponseHeader(_))),
+            EmitShape::Text(parts) => parts
+                .iter()
+                .any(|p| matches!(p, TemplatePart::Field(FieldToken::ResponseHeader(_)))),
+        };
 
         validate_emit_conditions(cfg.conditions.as_ref())?;
-
-        let needs_response_headers = field_tokens
-            .iter()
-            .any(|token| matches!(token, FieldToken::ResponseHeader(_)));
-
-        let is_default = cfg.fields.is_none();
-        let emit_plan = EmitPlan {
-            fields: field_tokens,
-            is_default,
-        };
 
         Ok(Self {
             sample_rate: cfg.sample_rate,
             counter: AtomicU64::default(),
-            emit_plan,
+            emit_plan: EmitPlan { shape },
             emit_conditions: cfg.conditions,
             needs_response_headers,
         })
@@ -382,7 +435,8 @@ impl AccessLogFilter {
         true
     }
 
-    /// Emit a structured access log entry for the current request.
+    /// Emit a structured access log entry for the current request through the
+    /// tracing subscriber, shaping the record per the configured [`EmitShape`].
     fn emit_access_log(
         &self,
         ctx: &HttpFilterContext<'_>,
@@ -390,13 +444,17 @@ impl AccessLogFilter {
         response_headers: Option<&http::HeaderMap>,
         duration_ms: u64,
     ) {
-        if self.emit_plan.is_default {
-            Self::emit_default(ctx, status, duration_ms);
-            return;
+        match &self.emit_plan.shape {
+            EmitShape::DefaultFlat => Self::emit_default(ctx, status, duration_ms),
+            EmitShape::JsonRecord(fields) => {
+                let record = build_record_from_fields(fields, ctx, status, response_headers, duration_ms);
+                emit_projected_record(&record);
+            },
+            EmitShape::Text(parts) => {
+                let line = render_text_template(parts, ctx, status, response_headers, duration_ms);
+                emit_projected_line(&line);
+            },
         }
-
-        let record = self.emit_plan.build_record(ctx, status, response_headers, duration_ms);
-        emit_projected_record(&record);
     }
 
     /// Default ten-field emit path.
@@ -418,6 +476,121 @@ impl AccessLogFilter {
         );
     }
 }
+
+// -----------------------------------------------------------------------------
+// Template parsing and rendering
+// -----------------------------------------------------------------------------
+
+/// Parse a text template string into a `Vec<TemplatePart>`.
+///
+/// Each `{token}` in the template is parsed as a [`FieldToken`] and becomes a
+/// [`TemplatePart::Field`]. All other text becomes [`TemplatePart::Literal`].
+/// Header tokens are validated against `request_headers` and `response_headers`.
+///
+/// # Errors
+///
+/// Returns [`FilterError`] for unclosed braces, unknown field tokens, or header
+/// tokens that are not listed in the corresponding allowlist.
+#[expect(clippy::too_many_lines, reason = "single-pass brace/token scanner")]
+fn parse_template(
+    template: &str,
+    request_headers: &HashSet<String>,
+    response_headers: &HashSet<String>,
+) -> Result<Vec<TemplatePart>, FilterError> {
+    let mut parts = Vec::new();
+    let mut literal = String::new();
+    let mut chars = template.chars();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '{' => {
+                // Flush the literal text accumulated before this token.
+                if !literal.is_empty() {
+                    parts.push(TemplatePart::Literal(std::mem::take(&mut literal)));
+                }
+
+                // Collect the token name up to the closing brace. A second '{'
+                // (or the end of the string) before a '}' means this brace was
+                // never closed.
+                let mut token = String::new();
+                let mut closed = false;
+                for next in chars.by_ref() {
+                    match next {
+                        '}' => {
+                            closed = true;
+                            break;
+                        },
+                        '{' => return Err("access_log: unclosed brace in template".into()),
+                        _ => token.push(next),
+                    }
+                }
+                if !closed {
+                    return Err("access_log: unclosed brace in template".into());
+                }
+
+                let field = parse_scalar_field_token(token.trim())?;
+                match &field {
+                    FieldToken::RequestHeader(name) if !request_headers.contains(name) => {
+                        return Err(
+                            format!("access_log: request_header.{name} requires {name:?} in request_headers").into(),
+                        );
+                    },
+                    FieldToken::ResponseHeader(name) if !response_headers.contains(name) => {
+                        return Err(format!(
+                            "access_log: response_header.{name} requires {name:?} in response_headers"
+                        )
+                        .into());
+                    },
+                    _ => {},
+                }
+                parts.push(TemplatePart::Field(field));
+            },
+            '}' => return Err("access_log: unexpected '}' in template".into()),
+            _ => literal.push(ch),
+        }
+    }
+
+    if !literal.is_empty() {
+        parts.push(TemplatePart::Literal(literal));
+    }
+
+    Ok(parts)
+}
+
+/// Render template parts into a log line string.
+///
+/// Each [`TemplatePart::Literal`] is emitted verbatim. Each
+/// [`TemplatePart::Field`] is resolved to its value for this request/response
+/// and sanitized with [`sanitize_for_log`] so body-derived values cannot forge
+/// log lines; unknown or missing values fall back to `"-"`.
+fn render_text_template(
+    parts: &[TemplatePart],
+    ctx: &HttpFilterContext<'_>,
+    status: u16,
+    response_headers: Option<&http::HeaderMap>,
+    duration_ms: u64,
+) -> String {
+    let mut result = String::new();
+
+    for part in parts {
+        match part {
+            TemplatePart::Literal(literal) => {
+                result.push_str(literal);
+            },
+            TemplatePart::Field(field) => {
+                let map =
+                    build_record_from_fields(std::slice::from_ref(field), ctx, status, response_headers, duration_ms);
+                let value = map.into_values().next().unwrap_or_else(|| "-".to_owned());
+                result.push_str(&sanitize_for_log(&value));
+            },
+        }
+    }
+    result
+}
+
+// -----------------------------------------------------------------------------
+// Shared emit helpers
+// -----------------------------------------------------------------------------
 
 /// Returns `true` for responses that Pingora delivers without a body phase.
 ///
@@ -511,7 +684,7 @@ pub fn emit_access_record(ctx: &HttpFilterContext<'_>, status: u16) {
 }
 
 impl EmitPlan {
-    #[expect(clippy::too_many_lines, reason = "field projection match arms")]
+    #[cfg_attr(not(test), expect(dead_code, reason = "called from unit tests only"))]
     fn build_record(
         &self,
         ctx: &HttpFilterContext<'_>,
@@ -519,96 +692,113 @@ impl EmitPlan {
         response_headers: Option<&http::HeaderMap>,
         duration_ms: u64,
     ) -> BTreeMap<String, String> {
-        let path = sanitize_for_log(ctx.request.uri.path());
-        let client_ip = ctx.client_addr.map(|a| a.to_string()).unwrap_or_default();
-        let duration_ms = duration_ms.to_string();
-
-        let mut record = BTreeMap::new();
-        for token in &self.fields {
-            match token {
-                FieldToken::Method => {
-                    record.insert("method".to_owned(), ctx.request.method.to_string());
-                },
-                FieldToken::Path => {
-                    record.insert("path".to_owned(), path.to_string());
-                },
-                FieldToken::ClientIp => {
-                    record.insert("client_ip".to_owned(), client_ip.clone());
-                },
-                FieldToken::Status => {
-                    record.insert("status".to_owned(), status.to_string());
-                },
-                FieldToken::DurationMs => {
-                    record.insert("duration_ms".to_owned(), duration_ms.clone());
-                },
-                FieldToken::Cluster => {
-                    record.insert("cluster".to_owned(), ctx.cluster_name().unwrap_or("-").to_owned());
-                },
-                FieldToken::Upstream => {
-                    record.insert("upstream".to_owned(), ctx.upstream_addr().unwrap_or("-").to_owned());
-                },
-                FieldToken::RequestId => {
-                    record.insert("request_id".to_owned(), ctx.request_id().unwrap_or("-").to_owned());
-                },
-                FieldToken::RequestBodyBytes => {
-                    record.insert("request_body_bytes".to_owned(), ctx.request_body_bytes.to_string());
-                },
-                FieldToken::ResponseBodyBytes => {
-                    record.insert("response_body_bytes".to_owned(), ctx.response_body_bytes.to_string());
-                },
-                FieldToken::TraceId => {
-                    record.insert("trace_id".to_owned(), current_trace_id());
-                },
-                FieldToken::SpanId => {
-                    record.insert("span_id".to_owned(), current_span_id());
-                },
-                FieldToken::GrpcStatus => {
-                    let value = ctx
-                        .grpc_completion()
-                        .map_or_else(|| "-".to_owned(), |completion| completion.raw_code().to_string());
-                    record.insert("grpc_status".to_owned(), value);
-                },
-                FieldToken::GrpcStatusName => {
-                    let value = ctx
-                        .grpc_completion()
-                        .map_or_else(|| "-".to_owned(), praxis_core::grpc::GrpcCompletion::code_name);
-                    record.insert("grpc_status_name".to_owned(), value);
-                },
-                FieldToken::GrpcMessage => {
-                    let value = ctx
-                        .grpc_completion()
-                        .and_then(|completion| completion.message())
-                        .map_or_else(|| "-".to_owned(), |message| sanitize_for_log(message).into_owned());
-                    record.insert("grpc_message".to_owned(), value);
-                },
-                FieldToken::GrpcStatusDetailsBin => {
-                    let value = ctx
-                        .grpc_completion()
-                        .and_then(|completion| completion.status_details_bin())
-                        .unwrap_or("-")
-                        .to_owned();
-                    record.insert("grpc_status_details_bin".to_owned(), value);
-                },
-                FieldToken::RequestHeader(name) => {
-                    let value = first_header_value(&ctx.request.headers, name).unwrap_or_else(|| "-".to_owned());
-                    let key = format!("request_header.{}", header_json_key(name));
-                    record.insert(key, value);
-                },
-                FieldToken::ResponseHeader(name) => {
-                    let value = response_headers
-                        .and_then(|headers| first_header_value(headers, name))
-                        .unwrap_or_else(|| "-".to_owned());
-                    let key = format!("response_header.{}", header_json_key(name));
-                    record.insert(key, value);
-                },
-                FieldToken::Metadata(key) => {
-                    let value = ctx.get_metadata(key).unwrap_or("-").to_owned();
-                    record.insert(format!("metadata.{key}"), value);
-                },
-            }
+        match &self.shape {
+            EmitShape::JsonRecord(fields) => {
+                build_record_from_fields(fields, ctx, status, response_headers, duration_ms)
+            },
+            _ => BTreeMap::new(),
         }
-        record
     }
+}
+
+/// Build a record from an explicit list of field tokens.
+#[expect(clippy::too_many_lines, reason = "field projection match arms")]
+fn build_record_from_fields(
+    fields: &[FieldToken],
+    ctx: &HttpFilterContext<'_>,
+    status: u16,
+    response_headers: Option<&http::HeaderMap>,
+    duration_ms: u64,
+) -> BTreeMap<String, String> {
+    let path = sanitize_for_log(ctx.request.uri.path());
+    let client_ip = ctx.client_addr.map(|a| a.to_string()).unwrap_or_default();
+    let duration_ms = duration_ms.to_string();
+
+    let mut record = BTreeMap::new();
+    for token in fields {
+        match token {
+            FieldToken::Method => {
+                record.insert("method".to_owned(), ctx.request.method.to_string());
+            },
+            FieldToken::Path => {
+                record.insert("path".to_owned(), path.to_string());
+            },
+            FieldToken::ClientIp => {
+                record.insert("client_ip".to_owned(), client_ip.clone());
+            },
+            FieldToken::Status => {
+                record.insert("status".to_owned(), status.to_string());
+            },
+            FieldToken::DurationMs => {
+                record.insert("duration_ms".to_owned(), duration_ms.clone());
+            },
+            FieldToken::Cluster => {
+                record.insert("cluster".to_owned(), ctx.cluster_name().unwrap_or("-").to_owned());
+            },
+            FieldToken::Upstream => {
+                record.insert("upstream".to_owned(), ctx.upstream_addr().unwrap_or("-").to_owned());
+            },
+            FieldToken::RequestId => {
+                record.insert("request_id".to_owned(), ctx.request_id().unwrap_or("-").to_owned());
+            },
+            FieldToken::RequestBodyBytes => {
+                record.insert("request_body_bytes".to_owned(), ctx.request_body_bytes.to_string());
+            },
+            FieldToken::ResponseBodyBytes => {
+                record.insert("response_body_bytes".to_owned(), ctx.response_body_bytes.to_string());
+            },
+            FieldToken::TraceId => {
+                record.insert("trace_id".to_owned(), current_trace_id());
+            },
+            FieldToken::SpanId => {
+                record.insert("span_id".to_owned(), current_span_id());
+            },
+            FieldToken::GrpcStatus => {
+                let value = ctx
+                    .grpc_completion()
+                    .map_or_else(|| "-".to_owned(), |completion| completion.raw_code().to_string());
+                record.insert("grpc_status".to_owned(), value);
+            },
+            FieldToken::GrpcStatusName => {
+                let value = ctx
+                    .grpc_completion()
+                    .map_or_else(|| "-".to_owned(), praxis_core::grpc::GrpcCompletion::code_name);
+                record.insert("grpc_status_name".to_owned(), value);
+            },
+            FieldToken::GrpcMessage => {
+                let value = ctx
+                    .grpc_completion()
+                    .and_then(|completion| completion.message())
+                    .map_or_else(|| "-".to_owned(), |message| sanitize_for_log(message).into_owned());
+                record.insert("grpc_message".to_owned(), value);
+            },
+            FieldToken::GrpcStatusDetailsBin => {
+                let value = ctx
+                    .grpc_completion()
+                    .and_then(|completion| completion.status_details_bin())
+                    .unwrap_or("-")
+                    .to_owned();
+                record.insert("grpc_status_details_bin".to_owned(), value);
+            },
+            FieldToken::RequestHeader(name) => {
+                let value = first_header_value(&ctx.request.headers, name).unwrap_or_else(|| "-".to_owned());
+                let key = format!("request_header.{}", header_json_key(name));
+                record.insert(key, value);
+            },
+            FieldToken::ResponseHeader(name) => {
+                let value = response_headers
+                    .and_then(|headers| first_header_value(headers, name))
+                    .unwrap_or_else(|| "-".to_owned());
+                let key = format!("response_header.{}", header_json_key(name));
+                record.insert(key, value);
+            },
+            FieldToken::Metadata(key) => {
+                let value = ctx.get_metadata(key).unwrap_or("-").to_owned();
+                record.insert(format!("metadata.{key}"), value);
+            },
+        }
+    }
+    record
 }
 
 #[async_trait]
@@ -911,6 +1101,15 @@ fn emit_projected_record(record: &BTreeMap<String, String>) {
     info!(message = "access", record = %json);
 }
 
+/// Emit a rendered text-template line through the tracing subscriber.
+///
+/// Unlike [`emit_projected_record`], a template always renders to exactly one
+/// string, so it needs no dynamic-field workaround: it fits a single static
+/// tracing field regardless of what the template contains.
+fn emit_projected_line(line: &str) {
+    info!(message = "access", line = %line);
+}
+
 // -----------------------------------------------------------------------------
 // Numeric Conversion
 // -----------------------------------------------------------------------------
@@ -978,6 +1177,18 @@ mod tests {
         AccessLogFilter::build(cfg).unwrap()
     }
 
+    fn default_filter() -> AccessLogFilter {
+        AccessLogFilter {
+            sample_rate: 1.0,
+            counter: AtomicU64::default(),
+            emit_plan: EmitPlan {
+                shape: EmitShape::DefaultFlat,
+            },
+            emit_conditions: None,
+            needs_response_headers: false,
+        }
+    }
+
     #[test]
     fn from_config_defaults_to_log_all() {
         let config = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
@@ -987,8 +1198,7 @@ mod tests {
             "access_log",
             "default config should produce access_log filter"
         );
-        assert!(filter.emit_plan.is_default);
-        assert_eq!(filter.emit_plan.fields.len(), DEFAULT_FIELDS.len());
+        assert!(matches!(filter.emit_plan.shape, EmitShape::DefaultFlat));
     }
 
     #[test]
@@ -1125,8 +1335,10 @@ request_headers: [user-agent]
         )
         .unwrap();
         let filter = test_filter(&yaml);
-        assert!(!filter.emit_plan.is_default);
-        assert_eq!(filter.emit_plan.fields.len(), 3);
+        assert!(matches!(filter.emit_plan.shape, EmitShape::JsonRecord(_)));
+        if let EmitShape::JsonRecord(fields) = &filter.emit_plan.shape {
+            assert_eq!(fields.len(), 3);
+        }
     }
 
     #[test]
@@ -1168,18 +1380,133 @@ conditions:
         assert!(err.to_string().contains("without globs"), "got: {err}");
     }
 
+    // -------------------------------------------------------------------------
+    // Format / template config parsing
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn from_config_rejects_format_key() {
+        // `format` was removed: output type is inferred from `template` presence,
+        // so the key is now rejected by deny_unknown_fields.
+        let yaml: serde_yaml::Value = serde_yaml::from_str("format: text\ntemplate: \"{method} {path}\"").unwrap();
+        let err = AccessLogFilter::from_config(&yaml).err().expect("should fail");
+        assert!(err.to_string().contains("unknown field"), "got: {err}");
+    }
+
+    #[test]
+    fn from_config_rejects_fields_with_template() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("fields: [method]\ntemplate: \"{method}\"").unwrap();
+        let err = AccessLogFilter::from_config(&yaml).err().expect("should fail");
+        assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+    }
+
+    #[test]
+    fn from_config_rejects_empty_template() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("template: \"   \"").unwrap();
+        let err = AccessLogFilter::from_config(&yaml).err().expect("should fail");
+        assert!(err.to_string().contains("template must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn from_config_template_builds_text_shape() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("template: \"{method} {path} {status}\"").unwrap();
+        let filter = test_filter(&yaml);
+        assert!(
+            matches!(filter.emit_plan.shape, EmitShape::Text(_)),
+            "template config should build a Text emit shape"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Template parsing
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn parse_template_extracts_literals_and_field_tokens() {
+        let headers = HashSet::new();
+        let parts = parse_template("{method} {path} [{status}]", &headers, &headers).unwrap();
+        assert_eq!(parts.len(), 6); // Field, Literal, Field, Literal, Field, Literal
+    }
+
+    #[test]
+    fn parse_template_rejects_unclosed_brace() {
+        let headers = HashSet::new();
+        let err = parse_template("{method {path}", &headers, &headers).unwrap_err();
+        assert!(err.to_string().contains("unclosed"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_template_rejects_unknown_token() {
+        let headers = HashSet::new();
+        let err = parse_template("{not_a_field}", &headers, &headers).unwrap_err();
+        assert!(err.to_string().contains("unknown field token"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_template_rejects_request_header_without_allowlist() {
+        let headers = HashSet::new();
+        let err = parse_template("{request_header.user-agent}", &headers, &headers).unwrap_err();
+        assert!(err.to_string().contains("request_headers"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_template_accepts_allowed_header() {
+        let mut req_headers = HashSet::new();
+        req_headers.insert("user-agent".to_owned());
+        let res_headers = HashSet::new();
+        let parts = parse_template("{request_header.user-agent}", &req_headers, &res_headers).unwrap();
+        assert_eq!(parts.len(), 1);
+        assert!(matches!(&parts[0], TemplatePart::Field(FieldToken::RequestHeader(n)) if n == "user-agent"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Text rendering
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn render_text_template_interpolates_method_path_status() {
+        let parts = vec![
+            TemplatePart::Field(FieldToken::Method),
+            TemplatePart::Literal(" ".to_owned()),
+            TemplatePart::Field(FieldToken::Path),
+            TemplatePart::Literal(" ".to_owned()),
+            TemplatePart::Field(FieldToken::Status),
+        ];
+        let req = crate::test_utils::make_request(http::Method::GET, "/api");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        let line = render_text_template(&parts, &ctx, 200, None, 42);
+        assert_eq!(line, "GET /api 200");
+    }
+
+    #[test]
+    fn render_text_template_uses_dash_for_missing_values() {
+        let parts = vec![TemplatePart::Field(FieldToken::Cluster)];
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        let line = render_text_template(&parts, &ctx, 200, None, 0);
+        assert_eq!(line, "-", "missing cluster should render as dash");
+    }
+
+    #[test]
+    fn render_text_template_sanitizes_field_values() {
+        let parts = vec![TemplatePart::Field(FieldToken::Metadata("llm.model".to_owned()))];
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("llm.model", "gpt\ninjected 200");
+        let line = render_text_template(&parts, &ctx, 200, None, 0);
+        assert!(
+            !line.contains('\n'),
+            "newlines in field values must not forge log lines"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Sampling and emit conditions (unchanged)
+    // -------------------------------------------------------------------------
+
     #[test]
     fn should_log_every_request_by_default() {
-        let filter = AccessLogFilter {
-            sample_rate: 1.0,
-            counter: AtomicU64::default(),
-            emit_plan: EmitPlan {
-                fields: vec![],
-                is_default: true,
-            },
-            emit_conditions: None,
-            needs_response_headers: false,
-        };
+        let filter = default_filter();
         for _ in 0..5 {
             assert!(filter.should_log(), "sample_rate=1.0 should log every request");
         }
@@ -1191,8 +1518,7 @@ conditions:
             sample_rate: 0.25,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
-                fields: vec![],
-                is_default: true,
+                shape: EmitShape::DefaultFlat,
             },
             emit_conditions: None,
             needs_response_headers: false,
@@ -1213,8 +1539,7 @@ conditions:
                 sample_rate: rate,
                 counter: AtomicU64::default(),
                 emit_plan: EmitPlan {
-                    fields: vec![],
-                    is_default: true,
+                    shape: EmitShape::DefaultFlat,
                 },
                 emit_conditions: None,
                 needs_response_headers: false,
@@ -1240,8 +1565,7 @@ conditions:
             sample_rate: 1.0,
             counter: AtomicU64::default(),
             emit_plan: EmitPlan {
-                fields: vec![FieldToken::Method],
-                is_default: false,
+                shape: EmitShape::JsonRecord(vec![FieldToken::Method]),
             },
             emit_conditions: Some(AccessLogEmitConditions {
                 min_duration_ms: None,
@@ -1265,8 +1589,7 @@ conditions:
     #[test]
     fn build_record_includes_selected_fields_only() {
         let plan = EmitPlan {
-            fields: vec![FieldToken::Method, FieldToken::Status],
-            is_default: false,
+            shape: EmitShape::JsonRecord(vec![FieldToken::Method, FieldToken::Status]),
         };
         let req = crate::test_utils::make_request(http::Method::POST, "/api");
         let ctx = crate::test_utils::make_filter_context(&req);
@@ -1290,13 +1613,12 @@ conditions:
     #[expect(clippy::too_many_lines, reason = "one assertion per rendered gRPC field")]
     fn build_record_renders_grpc_completion() {
         let plan = EmitPlan {
-            fields: vec![
+            shape: EmitShape::JsonRecord(vec![
                 FieldToken::GrpcStatus,
                 FieldToken::GrpcStatusName,
                 FieldToken::GrpcMessage,
                 FieldToken::GrpcStatusDetailsBin,
-            ],
-            is_default: false,
+            ]),
         };
         let req = grpc_request();
         let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -1347,8 +1669,7 @@ conditions:
     #[test]
     fn build_record_emits_filter_metadata() {
         let plan = EmitPlan {
-            fields: vec![FieldToken::Metadata("llm.model".to_owned())],
-            is_default: false,
+            shape: EmitShape::JsonRecord(vec![FieldToken::Metadata("llm.model".to_owned())]),
         };
         let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
         let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -1361,8 +1682,7 @@ conditions:
     #[test]
     fn build_record_dashes_absent_metadata() {
         let plan = EmitPlan {
-            fields: vec![FieldToken::Metadata("llm.model".to_owned())],
-            is_default: false,
+            shape: EmitShape::JsonRecord(vec![FieldToken::Metadata("llm.model".to_owned())]),
         };
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let ctx = crate::test_utils::make_filter_context(&req);
@@ -1378,12 +1698,11 @@ conditions:
     #[test]
     fn build_record_grpc_fields_are_dashes_for_non_grpc_responses() {
         let plan = EmitPlan {
-            fields: vec![
+            shape: EmitShape::JsonRecord(vec![
                 FieldToken::GrpcStatus,
                 FieldToken::GrpcStatusName,
                 FieldToken::GrpcMessage,
-            ],
-            is_default: false,
+            ]),
         };
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let ctx = crate::test_utils::make_filter_context(&req);
@@ -1413,8 +1732,7 @@ conditions:
     #[test]
     fn build_record_trace_id_defaults_to_dash_without_span() {
         let plan = EmitPlan {
-            fields: vec![FieldToken::TraceId, FieldToken::SpanId],
-            is_default: false,
+            shape: EmitShape::JsonRecord(vec![FieldToken::TraceId, FieldToken::SpanId]),
         };
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let ctx = crate::test_utils::make_filter_context(&req);
@@ -1444,6 +1762,10 @@ conditions:
         assert_eq!(span_id.len(), 16, "span_id must be 16 hex chars, got {span_id}");
         assert_ne!(span_id, "0".repeat(16), "span_id must not be all-zero");
     }
+
+    // -------------------------------------------------------------------------
+    // Sanitization (unchanged)
+    // -------------------------------------------------------------------------
 
     #[test]
     fn sanitize_strips_newlines() {
@@ -1524,18 +1846,13 @@ conditions:
         );
     }
 
+    // -------------------------------------------------------------------------
+    // HttpFilter hooks (unchanged)
+    // -------------------------------------------------------------------------
+
     #[tokio::test]
     async fn on_response_continues_with_no_header() {
-        let filter = AccessLogFilter {
-            sample_rate: 1.0,
-            counter: AtomicU64::default(),
-            emit_plan: EmitPlan {
-                fields: vec![],
-                is_default: true,
-            },
-            emit_conditions: None,
-            needs_response_headers: false,
-        };
+        let filter = default_filter();
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         let action = filter.on_response(&mut ctx).await.unwrap();
@@ -1546,20 +1863,10 @@ conditions:
     }
 
     #[tokio::test]
-    #[expect(clippy::too_many_lines, reason = "integration-style filter context setup")]
     async fn on_response_with_populated_context_continues() {
         use praxis_core::connectivity::{ConnectionOptions, Upstream};
 
-        let filter = AccessLogFilter {
-            sample_rate: 1.0,
-            counter: AtomicU64::default(),
-            emit_plan: EmitPlan {
-                fields: vec![],
-                is_default: true,
-            },
-            emit_conditions: None,
-            needs_response_headers: false,
-        };
+        let filter = default_filter();
         let mut headers = http::HeaderMap::new();
         headers.insert("x-request-id", "req-123".parse().unwrap());
         let req = crate::context::Request {
@@ -1590,16 +1897,7 @@ conditions:
 
     #[tokio::test]
     async fn on_response_stores_state_in_filter_state() {
-        let filter = AccessLogFilter {
-            sample_rate: 1.0,
-            counter: AtomicU64::default(),
-            emit_plan: EmitPlan {
-                fields: vec![],
-                is_default: true,
-            },
-            emit_conditions: None,
-            needs_response_headers: false,
-        };
+        let filter = default_filter();
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.current_filter_id = Some(42);
@@ -1618,16 +1916,7 @@ conditions:
 
     #[tokio::test]
     async fn on_response_no_header_skips_filter_state() {
-        let filter = AccessLogFilter {
-            sample_rate: 1.0,
-            counter: AtomicU64::default(),
-            emit_plan: EmitPlan {
-                fields: vec![],
-                is_default: true,
-            },
-            emit_conditions: None,
-            needs_response_headers: false,
-        };
+        let filter = default_filter();
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.current_filter_id = Some(42);
@@ -1680,16 +1969,7 @@ conditions:
 
     #[tokio::test]
     async fn on_response_stores_status_for_bodyless() {
-        let filter = AccessLogFilter {
-            sample_rate: 1.0,
-            counter: AtomicU64::default(),
-            emit_plan: EmitPlan {
-                fields: vec![],
-                is_default: true,
-            },
-            emit_conditions: None,
-            needs_response_headers: false,
-        };
+        let filter = default_filter();
         let req = crate::test_utils::make_request(http::Method::DELETE, "/api/users/42");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.current_filter_id = Some(42);
@@ -1708,16 +1988,7 @@ conditions:
 
     #[test]
     fn on_response_body_continues_before_end_of_stream() {
-        let filter = AccessLogFilter {
-            sample_rate: 1.0,
-            counter: AtomicU64::default(),
-            emit_plan: EmitPlan {
-                fields: vec![],
-                is_default: true,
-            },
-            emit_conditions: None,
-            needs_response_headers: false,
-        };
+        let filter = default_filter();
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.current_filter_id = Some(42);
@@ -1730,18 +2001,8 @@ conditions:
     }
 
     #[tokio::test]
-    #[expect(clippy::too_many_lines, reason = "integration-style filter context setup")]
     async fn on_response_body_uses_status_from_on_response() {
-        let filter = AccessLogFilter {
-            sample_rate: 1.0,
-            counter: AtomicU64::default(),
-            emit_plan: EmitPlan {
-                fields: vec![],
-                is_default: true,
-            },
-            emit_conditions: None,
-            needs_response_headers: false,
-        };
+        let filter = default_filter();
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.current_filter_id = Some(42);
@@ -1770,16 +2031,7 @@ conditions:
 
     #[test]
     fn response_body_access_is_read_only() {
-        let filter = AccessLogFilter {
-            sample_rate: 1.0,
-            counter: AtomicU64::default(),
-            emit_plan: EmitPlan {
-                fields: vec![],
-                is_default: true,
-            },
-            emit_conditions: None,
-            needs_response_headers: false,
-        };
+        let filter = default_filter();
         assert_eq!(
             filter.response_body_access(),
             BodyAccess::ReadOnly,
@@ -1807,17 +2059,20 @@ conditions:
     }
 
     // -------------------------------------------------------------------------
-    // Emission Shape
+    // Emission Shape (unchanged)
     // -------------------------------------------------------------------------
 
     /// Capture `tracing` output emitted synchronously by `f` on this thread.
     fn capture_logs<F: FnOnce()>(f: F) -> String {
-        use std::sync::{Arc, Mutex};
+        use std::{
+            io::Write,
+            sync::{Arc, Mutex},
+        };
 
         #[derive(Clone)]
         struct Buffer(Arc<Mutex<Vec<u8>>>);
 
-        impl std::io::Write for Buffer {
+        impl Write for Buffer {
             fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
                 self.0.lock().expect("buffer lock").extend_from_slice(buf);
                 Ok(buf.len())
@@ -2035,5 +2290,28 @@ conditions:
         let mut trailers = http::HeaderMap::new();
         let _prev = trailers.insert("grpc-status", http::HeaderValue::from_static(status));
         praxis_core::grpc::GrpcCompletion::from_headers(&trailers)
+    }
+
+    #[test]
+    fn render_text_template_substitutes_request_id_and_response_header() {
+        let template = "{method} id={request_id} agent={response_header.user-agent}";
+        let mut request_headers = HashSet::new();
+        let mut response_headers = HashSet::new();
+
+        request_headers.insert(String::from("user-agent"));
+        response_headers.insert(String::from("user-agent"));
+        let parts = parse_template(template, &request_headers, &response_headers).unwrap();
+        assert_eq!(parts.len(), 5, "method, literal, request_id, literal, response_header");
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert("x-request-id", "abdc".parse().unwrap());
+        let ctx = crate::test_utils::make_filter_context(&req);
+        let mut response_headers_map = http::HeaderMap::new();
+        response_headers_map.insert("user-agent", "my-agent".parse().unwrap());
+        let line = render_text_template(&parts, &ctx, 200, Some(&response_headers_map), 5);
+        assert_eq!(
+            line, "GET id=abdc agent=my-agent",
+            "template should interpolate method, request id, and response header"
+        );
     }
 }
