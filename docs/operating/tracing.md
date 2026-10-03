@@ -59,11 +59,17 @@ The `iterative-request-router` build feature emits `filtered_subrequest` step
 spans beneath the active request/filter context, with step name and iteration.
 Those routing spans contain no prompt or body data.
 
-Span attributes are bounded to HTTP method, server address/port, response
-status, and configured routing metadata. Praxis does not record Authorization
-or cookie headers, exporter credentials, prompts, request or response bodies,
-or raw request IDs in spans. Sampling may omit spans; a propagated unsampled
-context intentionally has no exported span IDs to inspect.
+Server spans also record the request URL path and `User-Agent`. The optional
+`request_id` filter can record a validated client-supplied request ID. These
+values can contain sensitive or identifying information even though Praxis
+does not record request or response bodies, Authorization or cookie headers,
+or exporter credentials. Avoid placing secrets or personal data in URL paths,
+User-Agent values, or request IDs, and control access and retention for the
+collector accordingly. Redacting or hashing these fields would change existing
+trace attributes and should be considered as a separate design decision.
+
+Sampling may omit spans; a propagated unsampled context intentionally has no
+exported span IDs to inspect.
 
 ## Verification
 

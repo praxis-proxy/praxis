@@ -358,11 +358,7 @@ impl SubRequestClient {
             }
             break status;
         };
-        client_span.record("http.response.status_code", status);
-        if status >= 500 {
-            client_span.record("otel.status_code", "ERROR");
-            client_span.record("error.type", status.to_string().as_str());
-        }
+        record_subrequest_client_status(&client_span, status);
 
         if !(100..=599).contains(&status) {
             session.shutdown().await;
@@ -700,6 +696,20 @@ fn subrequest_client_span(peer: &HttpPeer, request: &SubRequest) -> Span {
     )
 }
 
+/// Record generic HTTP CLIENT response status attributes.
+fn record_subrequest_client_status(client_span: &Span, status: u16) {
+    client_span.record("http.response.status_code", status);
+    if let Some(error_type) = subrequest_client_status_error_type(status) {
+        client_span.record("otel.status_code", "ERROR");
+        client_span.record("error.type", error_type.as_str());
+    }
+}
+
+/// Return the bounded `error.type` value for an HTTP error status.
+fn subrequest_client_status_error_type(status: u16) -> Option<String> {
+    (status >= 400).then(|| status.to_string())
+}
+
 /// Tear down an abnormally terminated header exchange: drop the circuit
 /// guard (recording a failure via its `Drop` impl), discard the session,
 /// record the termination metric, and hand back the error to return.
@@ -724,7 +734,83 @@ async fn fail_header_exchange(
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::too_many_lines, clippy::items_after_statements, reason = "tests")]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    #[test]
+    fn subrequest_client_status_marks_4xx_and_5xx_as_errors() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        for (status, expected) in [(200, None), (404, Some("404")), (500, Some("500"))] {
+            assert_eq!(subrequest_client_status_error_type(status).as_deref(), expected);
+            let capture = StatusRecordCapture::default();
+            let subscriber = tracing_subscriber::registry().with(capture.clone());
+            let _guard = tracing::subscriber::set_default(subscriber);
+            let span = tracing::info_span!(
+                "subrequest_client",
+                "http.response.status_code" = tracing::field::Empty,
+                "otel.status_code" = tracing::field::Empty,
+                "error.type" = tracing::field::Empty,
+            );
+            record_subrequest_client_status(&span, status);
+            drop(span);
+
+            let fields = capture
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            assert!(
+                fields
+                    .iter()
+                    .any(|(name, value)| { name == "http.response.status_code" && value == &status.to_string() })
+            );
+            assert_eq!(
+                fields
+                    .iter()
+                    .find(|(name, _)| name == "otel.status_code")
+                    .map(|(_, value)| value.as_str()),
+                expected.map(|_| "\"ERROR\""),
+                "subrequest CLIENT OTel status for HTTP {status}"
+            );
+            let error_type = expected.map(|value| format!("\"{value}\""));
+            assert_eq!(
+                fields
+                    .iter()
+                    .find(|(name, _)| name == "error.type")
+                    .map(|(_, value)| value.as_str()),
+                error_type.as_deref(),
+                "subrequest CLIENT error.type for HTTP {status}"
+            );
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct StatusRecordCapture(Arc<Mutex<Vec<(String, String)>>>);
+
+    impl<S> tracing_subscriber::Layer<S> for StatusRecordCapture
+    where
+        S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+    {
+        fn on_record(
+            &self,
+            _id: &tracing::span::Id,
+            record: &tracing::span::Record<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Visitor<'fields>(&'fields mut Vec<(String, String)>);
+
+            impl tracing::field::Visit for Visitor<'_> {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    self.0.push((field.name().to_owned(), format!("{value:?}")));
+                }
+            }
+
+            let mut captured = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            record.record(&mut Visitor(&mut captured));
+        }
+    }
 
     #[test]
     fn max_interim_responses_constant_is_32() {

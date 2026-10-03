@@ -358,6 +358,7 @@ impl ProxyHttp for PingoraHttpHandler {
     ) -> Box<pingora_core::Error> {
         let span = ctx.request_span.clone();
         let _entered = span.enter();
+        connected_to_upstream::record_attempt_failure(e.as_ref(), ctx);
         // A truncated replay buffer means a retry would resend a partial
         // request body — refuse rather than corrupt the request upstream.
         if session.as_mut().retry_buffer_truncated() {
@@ -376,6 +377,7 @@ impl ProxyHttp for PingoraHttpHandler {
         ctx: &mut Self::CTX,
         client_reused: bool,
     ) -> Box<pingora_core::Error> {
+        connected_to_upstream::record_attempt_failure(e.as_ref(), ctx);
         // Never retry once a final response reached the client: a second
         // attempt cannot rewrite the response line, so its body would be
         // spliced after whatever was already sent. A non-final 1xx (e.g.
@@ -496,14 +498,16 @@ impl ProxyHttp for PingoraHttpHandler {
 
     async fn upstream_peer(&self, _session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
         let span = ctx.request_span.clone();
-        upstream_peer::execute(ctx).instrument(span).await
+        let peer = upstream_peer::execute(ctx).instrument(span).await?;
+        connected_to_upstream::open_attempt(&peer, ctx);
+        Ok(peer)
     }
 
     async fn connected_to_upstream(
         &self,
         _session: &mut Session,
         reused: bool,
-        peer: &HttpPeer,
+        _peer: &HttpPeer,
         #[cfg(unix)] _fd: std::os::unix::io::RawFd,
         #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
         digest: Option<&pingora_core::protocols::Digest>,
@@ -524,7 +528,7 @@ impl ProxyHttp for PingoraHttpHandler {
         if ctx.retries > 0 {
             metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_SUCCESS);
         }
-        connected_to_upstream::execute(reused, peer, digest, ctx);
+        connected_to_upstream::record_connected(reused, digest, ctx);
         Ok(())
     }
 
