@@ -428,7 +428,13 @@ fn string_attribute<'attributes>(span: &'attributes Span, name: &str) -> Option<
         .and_then(|value| value.value.as_ref())
         .and_then(|value| match value {
             Value::StringValue(value) => Some(value.as_str()),
-            _ => None,
+            Value::BoolValue(_)
+            | Value::IntValue(_)
+            | Value::DoubleValue(_)
+            | Value::ArrayValue(_)
+            | Value::KvlistValue(_)
+            | Value::BytesValue(_)
+            | Value::StringValueStrindex(_) => None,
         })
 }
 
@@ -441,7 +447,12 @@ fn u16_attribute(span: &Span, name: &str) -> Option<u16> {
         .and_then(|value| match value {
             Value::IntValue(value) => u16::try_from(*value).ok(),
             Value::StringValue(value) => value.parse::<u16>().ok(),
-            _ => None,
+            Value::BoolValue(_)
+            | Value::DoubleValue(_)
+            | Value::ArrayValue(_)
+            | Value::KvlistValue(_)
+            | Value::BytesValue(_)
+            | Value::StringValueStrindex(_) => None,
         })
 }
 
