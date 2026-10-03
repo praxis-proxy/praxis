@@ -65,7 +65,7 @@ use praxis_core::{
     subrequest::{SubRequest, SubRequestClient, SubRequestConnector},
 };
 use praxis_test_utils::{
-    free_port, http_send, parse_body, parse_status, start_full_proxy, start_header_echo_backend, start_proxy,
+    Backend, free_port, http_send, parse_body, parse_status, start_full_proxy, start_header_echo_backend, start_proxy,
     wait_for_tcp,
 };
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -123,6 +123,10 @@ fn exported_parentage_links_edge_provider_and_backend() {
     let retry_dead_port = free_port();
     let mid_proxy_failure_port = start_hanging_backend();
     let mid_proxy_edge_port = free_port();
+    let not_found_backend = Backend::status(404, "not found").start_with_shutdown();
+    let internal_error_backend = Backend::status(500, "internal error").start_with_shutdown();
+    let not_found_edge_port = free_port();
+    let internal_error_edge_port = free_port();
     let endpoint = format!("http://127.0.0.1:{collector_port}");
     let provider_config = proxy_config(provider_port, backend.port(), &endpoint, "provider");
     let edge_config = proxy_config(edge_port, provider_port, &endpoint, "edge");
@@ -141,6 +145,18 @@ fn exported_parentage_links_edge_provider_and_backend() {
         &endpoint,
         "reset",
     );
+    let not_found_edge_config = proxy_config(
+        not_found_edge_port,
+        not_found_backend.port(),
+        &endpoint,
+        "not-found-edge",
+    );
+    let internal_error_edge_config = proxy_config(
+        internal_error_edge_port,
+        internal_error_backend.port(),
+        &endpoint,
+        "internal-error-edge",
+    );
     let tracing_guard = praxis_core::logging::init_tracing(&edge_config).expect("OTLP tracing setup");
 
     let provider = start_proxy(&provider_config);
@@ -148,9 +164,13 @@ fn exported_parentage_links_edge_provider_and_backend() {
     let routing_edge = start_full_proxy(&routing_edge_config);
     let retry_edge = start_proxy(&retry_edge_config);
     let mid_proxy_edge = start_proxy(&mid_proxy_edge_config);
+    let not_found_edge = start_proxy(&not_found_edge_config);
+    let internal_error_edge = start_proxy(&internal_error_edge_config);
     wait_for_tcp(routing_edge.addr());
     wait_for_tcp(retry_edge.addr());
     wait_for_tcp(mid_proxy_edge.addr());
+    wait_for_tcp(not_found_edge.addr());
+    wait_for_tcp(internal_error_edge.addr());
 
     let valid_trace_id = "11111111111111111111111111111111";
     let incoming_parent_id = "2222222222222222";
@@ -181,6 +201,18 @@ fn exported_parentage_links_edge_provider_and_backend() {
         mid_proxy_edge.addr(),
         &format!("00-{mid_proxy_trace_id}-aaaaaaaaaaaaaaaa-01"),
     );
+    let not_found_trace_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let not_found_status = send_status_request(
+        not_found_edge.addr(),
+        &format!("00-{not_found_trace_id}-cccccccccccccccc-01"),
+    );
+    let internal_error_trace_id = "dddddddddddddddddddddddddddddddd";
+    let internal_error_status = send_status_request(
+        internal_error_edge.addr(),
+        &format!("00-{internal_error_trace_id}-eeeeeeeeeeeeeeee-01"),
+    );
+    assert_eq!(not_found_status, 404, "status backend should return 404");
+    assert_eq!(internal_error_status, 500, "status backend should return 500");
 
     let subrequest_client = SubRequestClient::new(SubRequestConnector::new(2, None));
     let subrequest_peer = pingora_core::upstreams::peer::HttpPeer::new(
@@ -216,9 +248,13 @@ fn exported_parentage_links_edge_provider_and_backend() {
     drop(routing_edge);
     drop(retry_edge);
     drop(mid_proxy_edge);
+    drop(not_found_edge);
+    drop(internal_error_edge);
+    drop(not_found_backend);
+    drop(internal_error_backend);
     drop(tracing_guard);
 
-    let spans = wait_for_spans(&collector, 37);
+    let spans = wait_for_spans(&collector, 41);
     let valid_backend_headers = echoed_headers(&valid_response);
     let absent_backend_headers = echoed_headers(&absent_response);
     let malformed_backend_headers = echoed_headers(&malformed_response);
@@ -326,6 +362,8 @@ fn exported_parentage_links_edge_provider_and_backend() {
         mid_proxy_trace_id,
         successful_mid_proxy_client,
     );
+    assert_exported_http_status(&spans, not_found_trace_id, 404, None);
+    assert_exported_http_status(&spans, internal_error_trace_id, 500, Some("500"));
 
     let absent_id = parent_trace_id(&absent_backend_headers);
     let absent = assert_linked_trace(&spans, &absent_id, None);
@@ -454,6 +492,74 @@ fn u16_attribute(span: &Span, name: &str) -> Option<u16> {
             | Value::BytesValue(_)
             | Value::StringValueStrindex(_) => None,
         })
+}
+
+fn assert_exported_http_status(spans: &[Span], trace_id: &str, status: u16, server_error: Option<&str>) {
+    let trace_spans = spans
+        .iter()
+        .filter(|span| hex(&span.trace_id) == trace_id)
+        .collect::<Vec<_>>();
+    let server = trace_spans
+        .iter()
+        .copied()
+        .find(|span| span.kind == SpanKind::Server as i32)
+        .expect("exported HTTP SERVER span");
+    let client = trace_spans
+        .iter()
+        .copied()
+        .find(|span| span.kind == SpanKind::Client as i32)
+        .expect("exported HTTP CLIENT span");
+    assert_eq!(
+        trace_spans
+            .iter()
+            .filter(|span| span.kind == SpanKind::Server as i32)
+            .count(),
+        1,
+        "status request should produce one SERVER span"
+    );
+    assert_eq!(
+        trace_spans
+            .iter()
+            .filter(|span| span.kind == SpanKind::Client as i32)
+            .count(),
+        1,
+        "status request should produce one CLIENT span"
+    );
+    assert_eq!(
+        client.parent_span_id, server.span_id,
+        "CLIENT belongs to the SERVER request"
+    );
+    assert_eq!(
+        u16_attribute(server, "http.response.status_code"),
+        Some(status),
+        "exported SERVER span records the response status"
+    );
+    assert_eq!(
+        u16_attribute(client, "http.response.status_code"),
+        Some(status),
+        "exported CLIENT span records the upstream response status"
+    );
+    assert!(span_has_error_status(client), "HTTP CLIENT status is exported as Error");
+    let client_error_type = status.to_string();
+    assert_eq!(
+        string_attribute(client, "error.type"),
+        Some(client_error_type.as_str()),
+        "exported CLIENT span uses the numeric HTTP status as error.type"
+    );
+    assert_eq!(
+        span_has_error_status(server),
+        server_error.is_some(),
+        "HTTP SERVER status follows the 5xx-only error policy"
+    );
+    assert_eq!(
+        string_attribute(server, "error.type"),
+        server_error,
+        "SERVER error.type is present for 5xx statuses only"
+    );
+}
+
+fn span_has_error_status(span: &Span) -> bool {
+    span.status.as_ref().is_some_and(|status| status.code == 2)
 }
 
 struct LinkedTrace<'spans> {
@@ -620,6 +726,12 @@ fn send_retry_request(proxy_addr: &str, traceparent: &str) -> String {
         "connect retry must reach the live backend"
     );
     parse_body(&response)
+}
+
+fn send_status_request(proxy_addr: &str, traceparent: &str) -> u16 {
+    let request =
+        format!("GET /status HTTP/1.1\r\nHost: localhost\r\ntraceparent: {traceparent}\r\nConnection: close\r\n\r\n");
+    parse_status(&http_send(proxy_addr, &request))
 }
 
 fn start_hanging_backend() -> u16 {
