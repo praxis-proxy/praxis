@@ -869,9 +869,9 @@ filter_chains:
 fn ip_endpoint_with_endpoint_authority_verifies_against_the_ip_san() {
     let certs = TestCertificates::generate();
     let backend_port = start_tls_backend(&certs, "ip-san-ok");
-    let yaml = ip_endpoint_authority_yaml(backend_port, &certs.ca_cert_path, "allow_tls_without_sni: true");
+    let yaml = ip_endpoint_authority_yaml(backend_port, &certs.ca_cert_path);
 
-    let config = Config::from_yaml(&yaml).expect("valid YAML config");
+    let config = Config::from_yaml(&yaml).expect("an IP endpoint with the endpoint authority needs no tls.sni");
     let proxy = start_proxy(&config);
 
     let (status, body) = http_get(proxy.addr(), "/", Some("client.example.com"));
@@ -886,7 +886,7 @@ fn ip_endpoint_with_endpoint_authority_verifies_against_the_ip_san() {
 fn ip_endpoint_with_endpoint_authority_rejects_a_cert_without_the_ip_san() {
     let certs = TestCertificates::generate_dns_only("upstream.test");
     let backend_port = start_tls_backend(&certs, "should-not-reach");
-    let yaml = ip_endpoint_authority_yaml(backend_port, &certs.ca_cert_path, "allow_tls_without_sni: true");
+    let yaml = ip_endpoint_authority_yaml(backend_port, &certs.ca_cert_path);
 
     let config = Config::from_yaml(&yaml).expect("valid YAML config");
     let proxy = start_proxy(&config);
@@ -2691,9 +2691,9 @@ insecure_options:
 // -----------------------------------------------------------------------------
 
 /// A plain listener in front of one verifying TLS cluster with a single
-/// `127.0.0.1` endpoint, `authority: { from: endpoint }`, no `tls.sni`, the
-/// CA at `ca` trusted, and `extra_insecure` added to `insecure_options`.
-fn ip_endpoint_authority_yaml(backend_port: u16, ca: &std::path::Path, extra_insecure: &str) -> String {
+/// `127.0.0.1` endpoint, `authority: { from: endpoint }`, no `tls.sni`, and
+/// the CA at `ca` trusted.
+fn ip_endpoint_authority_yaml(backend_port: u16, ca: &std::path::Path) -> String {
     format!(
         r#"
 listeners:
@@ -2719,7 +2719,6 @@ filter_chains:
                 ca_path: "{ca}"
 insecure_options:
   allow_private_endpoints: true
-  {extra_insecure}
 "#,
         proxy_port = free_port(),
         ca = ca.display(),
