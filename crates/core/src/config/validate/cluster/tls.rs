@@ -89,14 +89,17 @@ fn check_sni_verify_requirement(
     if insecure_options.allow_tls_without_sni {
         warn!(
             cluster = %cluster_name,
-            "upstream TLS enabled without SNI; hostname verification will be degraded \
-             (allowed by insecure_options.allow_tls_without_sni)"
+            "upstream TLS without tls.sni: the certificate is verified against the cluster's fixed authority \
+             if set, else the client's Host header, falling back to the endpoint address when that is not a \
+             hostname (allowed by insecure_options.allow_tls_without_sni)"
         );
         return Ok(());
     }
     Err(ProxyError::Config(format!(
         "cluster '{cluster_name}': upstream TLS with verification enabled but no sni configured; \
-         set tls.sni or set insecure_options.allow_tls_without_sni: true to allow degraded verification"
+         set tls.sni, or authority: {{ from: endpoint }} to verify each endpoint against its own name or IP SAN, \
+         or set insecure_options.allow_tls_without_sni: true to verify against the authority or client Host header \
+         instead"
     )))
 }
 
@@ -155,6 +158,8 @@ fn check_no_upstream_crls(ca: Option<&praxis_tls::CaConfig>, cluster_name: &str)
     reason = "tests use unwrap/expect/indexing/raw strings for brevity"
 )]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use praxis_tls::{CaConfig, ClusterTls};
 
     use super::super::validate_clusters;
@@ -422,9 +427,18 @@ mod tests {
             ..Cluster::with_defaults("web", vec!["10.0.0.1:443".into()])
         }];
         let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("no sni configured"),
-            "should reject TLS+verify without SNI: {err}"
+            message.contains("no sni configured"),
+            "should reject TLS+verify without SNI: {message}"
+        );
+        assert!(
+            message.contains("authority: { from: endpoint }"),
+            "the error should offer the endpoint authority as a fix: {message}"
+        );
+        assert!(
+            message.contains("verify against the authority or client Host header instead"),
+            "the error should say what the opt-in really does: {message}"
         );
     }
 
@@ -438,7 +452,13 @@ mod tests {
             allow_tls_without_sni: true,
             ..InsecureOptions::default()
         };
-        validate_clusters(&clusters, &opts).expect("allow_tls_without_sni should demote error to warning");
+        let logs = capture_warnings(|| {
+            validate_clusters(&clusters, &opts).expect("allow_tls_without_sni should demote error to warning");
+        });
+        assert!(
+            logs.contains("client's Host header") && logs.contains("falling back to the endpoint address"),
+            "the warning should say where the verification name comes from: {logs}"
+        );
     }
 
     #[test]
@@ -567,6 +587,40 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Run `func` and return everything it logged at WARN or above.
+    fn capture_warnings<F: FnOnce()>(func: F) -> String {
+        let buffer = Buffer(Arc::new(Mutex::new(Vec::new())));
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            // Another test in this binary may install a global subscriber
+            // concurrently, leaving callsite interest cached without this one.
+            tracing::callsite::rebuild_interest_cache();
+            func();
+        });
+        let bytes = buffer.0.lock().unwrap().clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Shared in-memory sink for captured log output.
+    #[derive(Clone)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     /// A verifying TLS cluster with no `tls.sni` whose `Host` follows the endpoint.
     fn endpoint_authority_cluster(endpoints: &[&str]) -> Cluster {

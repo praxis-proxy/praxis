@@ -164,6 +164,12 @@ relying on the bind address.
   with exactly one certificate and `hot_reload` not
   set to `false`. Every other listener needs a
   restart to pick up a new CRL.
+- For upstream TLS, set `tls.sni` to the name on the
+  backend certificate, especially for a hostname
+  behind a load balancer. With
+  `authority: { from: endpoint }` and no `tls.sni`,
+  each endpoint is verified against its own hostname,
+  or an IP endpoint against the certificate's IP SAN.
 
 ## Access Control
 
@@ -259,6 +265,15 @@ in development:
 - **`verify: false`** on upstream TLS: Disables
   certificate verification. Acceptable only for
   local development with self-signed certs.
+- **`allow_tls_without_sni`**: Lets a verifying TLS
+  cluster run with neither `tls.sni` nor
+  `authority: { from: endpoint }`. The certificate is
+  then checked against the cluster's fixed
+  `authority` if set, else the client's `Host`
+  header, so a client picks which name the backend
+  must prove. When that is not a hostname, the
+  endpoint address is used instead. Set `tls.sni`
+  instead of enabling this.
 - **Binding to `0.0.0.0`**: Exposes the listener on
   all interfaces. Use specific addresses in
   production.

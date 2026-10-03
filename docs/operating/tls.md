@@ -192,6 +192,15 @@ Add `tls:` to a cluster to TLS-connect to endpoints.
 certificate verification (default: `true`). See
 [upstream-tls] and [tls-verify-disabled].
 
+A verifying cluster without `sni` needs
+`authority: { from: endpoint }`, which verifies each
+endpoint against its own hostname, or an IP endpoint
+against the certificate's IP SAN. The alternative,
+`insecure_options.allow_tls_without_sni`, takes the
+name from the cluster's fixed `authority` or the
+client's `Host` header instead; see
+[Security Hardening](security-hardening.md).
+
 ### Upstream mTLS (Client Certificate)
 
 Present a client certificate to upstream servers.
