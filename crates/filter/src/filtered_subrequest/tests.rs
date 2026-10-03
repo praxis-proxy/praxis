@@ -608,6 +608,27 @@ async fn build_peer_names_an_ip_address_by_its_ip() {
 }
 
 #[tokio::test]
+async fn build_peer_refuses_a_tls_peer_with_no_server_name() {
+    let tls: praxis_tls::ClusterTls = serde_yaml::from_str("verify: true").unwrap();
+    let mut cached = praxis_tls::CachedClusterTls::try_from_config(&tls).unwrap();
+    cached.set_sni("");
+    let upstream = praxis_core::connectivity::Upstream {
+        address: std::sync::Arc::from("127.0.0.1:9443"),
+        connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: Some(cached),
+        authority: None,
+    };
+
+    let err = super::transport::build_peer(&upstream, false)
+        .await
+        .expect_err("a TLS peer with an empty name must not be built");
+    assert!(
+        matches!(err, super::transport::PeerError::MissingServerName(_)),
+        "expected MissingServerName, got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn build_peer_rejects_hostname_resolving_to_private_address() {
     let upstream = praxis_core::connectivity::Upstream {
         address: std::sync::Arc::from("localhost:9444"),
@@ -622,7 +643,9 @@ async fn build_peer_rejects_hostname_resolving_to_private_address() {
     assert!(
         matches!(
             err,
-            praxis_core::connectivity::peer::AddressResolutionError::PrivateAddress { .. }
+            super::transport::PeerError::Resolve(
+                praxis_core::connectivity::peer::AddressResolutionError::PrivateAddress { .. }
+            )
         ),
         "expected PrivateAddress, got: {err}"
     );

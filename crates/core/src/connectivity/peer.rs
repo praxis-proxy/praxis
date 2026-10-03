@@ -145,6 +145,14 @@ impl AddressResolutionError {
     }
 }
 
+/// A TLS upstream with no server name to verify its certificate against.
+#[derive(Debug, thiserror::Error)]
+#[error("refusing TLS to upstream '{address}': no server name to verify its certificate against")]
+pub struct MissingServerName {
+    /// The upstream address no name was found for.
+    pub address: String,
+}
+
 /// Cached DNS resolution: the complete raw address set (portless, resolver
 /// order), or the failure message when the last resolution failed.
 struct DnsCacheEntry {
@@ -828,6 +836,48 @@ pub fn derive_sni(address: &str) -> String {
     name.to_owned()
 }
 
+/// The name a TLS peer for `address` presents and verifies the upstream
+/// certificate against.
+///
+/// `tls.sni` wins when set, whether configured or filled in from the
+/// request by the load balancer. Otherwise the name comes from the
+/// endpoint address (see [`derive_sni`]).
+///
+/// ```
+/// use praxis_core::connectivity::peer;
+/// use praxis_tls::{CachedClusterTls, ClusterTls};
+///
+/// let mut tls = CachedClusterTls::try_from_config(&ClusterTls::default()).unwrap();
+/// assert_eq!(
+///     peer::tls_server_name(&tls, "10.0.0.5:443").unwrap(),
+///     "10.0.0.5"
+/// );
+///
+/// tls.set_sni("api.example.com");
+/// assert_eq!(
+///     peer::tls_server_name(&tls, "10.0.0.5:443").unwrap(),
+///     "api.example.com"
+/// );
+///
+/// tls.set_sni("");
+/// assert!(peer::tls_server_name(&tls, "10.0.0.5:443").is_err());
+/// ```
+///
+/// # Errors
+///
+/// Returns [`MissingServerName`] when neither gives a name. Pingora's
+/// connector turns certificate verification off for an empty name, so a
+/// TLS peer must never be built with one.
+pub fn tls_server_name(tls: &praxis_tls::CachedClusterTls, address: &str) -> Result<String, MissingServerName> {
+    let name = tls.sni().map_or_else(|| derive_sni(address), str::to_owned);
+    if name.is_empty() {
+        return Err(MissingServerName {
+            address: address.to_owned(),
+        });
+    }
+    Ok(name)
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -1199,6 +1249,36 @@ mod tests {
             "rustls parses a bare IPv6 address, not the bracketed authority form"
         );
         assert_eq!(derive_sni("[2001:db8::1]:443"), "2001:db8::1");
+    }
+
+    #[test]
+    fn tls_server_name_refuses_an_empty_name() {
+        let mut tls = praxis_tls::CachedClusterTls::try_from_config(&praxis_tls::ClusterTls::default()).unwrap();
+        let unnamed_address = tls_server_name(&tls, ":443").unwrap_err();
+        assert_eq!(unnamed_address.address, ":443", "the error should name the upstream");
+
+        tls.set_sni("");
+        let empty_sni = tls_server_name(&tls, "10.0.0.5:443").unwrap_err();
+        assert!(
+            empty_sni.to_string().contains("no server name"),
+            "an empty configured name must be refused, not fall back to the address: {empty_sni}"
+        );
+    }
+
+    #[test]
+    fn tls_server_name_prefers_the_set_sni_over_the_address() {
+        let mut tls = praxis_tls::CachedClusterTls::try_from_config(&praxis_tls::ClusterTls::default()).unwrap();
+        assert_eq!(
+            tls_server_name(&tls, "backend.example.com:443").unwrap(),
+            "backend.example.com"
+        );
+
+        tls.set_sni("api.example.com");
+        assert_eq!(
+            tls_server_name(&tls, "backend.example.com:443").unwrap(),
+            "api.example.com",
+            "a set SNI should win over the endpoint name"
+        );
     }
 
     #[test]

@@ -269,6 +269,8 @@ fn apply_per_try_timeout(ctx: &PingoraRequestCtx, upstream: &mut Upstream) {
 ///
 /// When `sni` is `None`, derives it from the upstream address: a hostname
 /// endpoint is verified by name, an IP endpoint by its certificate's IP SAN.
+/// A TLS upstream that ends up with no name at all is refused with a
+/// connect error instead of being dialed.
 ///
 /// `allow_private` mirrors `insecure_options.allow_private_upstreams`:
 /// when it is `false`, an upstream hostname that resolves into a private
@@ -283,14 +285,10 @@ async fn build_peer(upstream: &Upstream, allow_private: bool) -> Result<Box<Http
     let sni = upstream
         .tls
         .as_ref()
-        .and_then(|t| t.sni().map(str::to_owned))
-        .unwrap_or_else(|| {
-            if tls_enabled {
-                peer_utils::derive_sni(&upstream.address)
-            } else {
-                String::new()
-            }
-        });
+        .map(|tls| peer_utils::tls_server_name(tls, &upstream.address))
+        .transpose()
+        .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::ConnectError, error.to_string()))?
+        .unwrap_or_default();
 
     let mut peer = HttpPeer::new(addr, tls_enabled, sni);
     // Pingora 0.9.0 sanitizes the upstream request (removing headers a client
@@ -503,6 +501,23 @@ clusters:
         assert_eq!(
             peer.sni, "127.0.0.1",
             "an IP endpoint without tls.sni should be verified against its IP SAN"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_peer_refuses_a_tls_peer_with_no_server_name() {
+        let upstream = tls_upstream("127.0.0.1:8443", Some(""));
+        let err = build_peer(&upstream, false)
+            .await
+            .expect_err("a TLS peer with an empty name must not be built");
+        assert_eq!(
+            err.etype(),
+            &pingora_core::ErrorType::ConnectError,
+            "the refusal should surface as a connect error (502)"
+        );
+        assert!(
+            err.to_string().contains("no server name"),
+            "the error should say why the peer was refused: {err}"
         );
     }
 
