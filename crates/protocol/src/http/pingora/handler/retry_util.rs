@@ -62,12 +62,7 @@ pub(super) fn handle_connect_failure(
             // alternate host. Legacy same-endpoint retries keep the saved
             // upstream (and its counter) for the next attempt.
             if policy.configured {
-                if let Some(upstream) = ctx.upstream_for_retry.as_ref()
-                    && let Some(reselector) = ctx.endpoint_reselector.as_ref()
-                {
-                    reselector.release(&upstream.address);
-                }
-                ctx.upstream_for_retry = None;
+                clear_for_reselection(ctx);
             }
             let upstream_address = ctx
                 .upstream_for_retry
@@ -134,12 +129,7 @@ pub(super) fn maybe_retry_response(ctx: &mut PingoraRequestCtx, status: u16) -> 
             // alternate host. Legacy same-endpoint retries keep the saved
             // upstream (and its counter) for the next attempt.
             if policy.configured {
-                if let Some(upstream) = ctx.upstream_for_retry.as_ref()
-                    && let Some(reselector) = ctx.endpoint_reselector.as_ref()
-                {
-                    reselector.release(&upstream.address);
-                }
-                ctx.upstream_for_retry = None;
+                clear_for_reselection(ctx);
             }
             debug!(
                 status,
@@ -165,6 +155,23 @@ pub(super) fn release_retry_state(ctx: &mut PingoraRequestCtx) {
         state.leave();
         ctx.cluster_retry_state_released = true;
     }
+}
+
+/// Release the failed endpoint's in-flight counter and clear the saved
+/// upstream so the next attempt reselects, keeping the SNI that attempt
+/// presented for the reselected upstream to reuse.
+fn clear_for_reselection(ctx: &mut PingoraRequestCtx) {
+    let failed = ctx.upstream_for_retry.take();
+    if let Some(upstream) = failed.as_ref()
+        && let Some(reselector) = ctx.endpoint_reselector.as_ref()
+    {
+        reselector.release(&upstream.address);
+    }
+    ctx.prior_attempt_sni = failed
+        .as_ref()
+        .and_then(|upstream| upstream.tls.as_ref())
+        .and_then(|tls| tls.sni())
+        .map(Arc::from);
 }
 
 /// Record `result=exhausted` only when at least one retry was already attempted.

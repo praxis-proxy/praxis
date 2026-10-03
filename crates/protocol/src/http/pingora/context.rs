@@ -354,6 +354,11 @@ pub struct PingoraRequestCtx {
     /// Pending backoff delay to apply before the next `upstream_peer` call.
     pub pending_backoff: Option<std::time::Duration>,
 
+    /// SNI the failed attempt presented, kept when a retry clears
+    /// `upstream_for_retry` to reselect so the next attempt presents the
+    /// same name instead of deriving one from the new endpoint.
+    pub prior_attempt_sni: Option<Arc<str>>,
+
     /// Whether the next upstream attempt should re-select (alternate host).
     pub reselect_on_retry: bool,
 
@@ -649,6 +654,7 @@ impl Default for PingoraRequestCtx {
             cluster_retry_state_released: false,
             endpoint_reselector: None,
             pending_backoff: None,
+            prior_attempt_sni: None,
             reselect_on_retry: false,
             upstream: None,
             upstream_for_retry: None,

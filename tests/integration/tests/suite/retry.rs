@@ -3,13 +3,27 @@
 
 //! Integration tests for policy-driven retry behavior.
 
-use std::time::{Duration, Instant};
-
-use praxis_core::config::Config;
-use praxis_test_utils::{
-    Backend, free_port, http_get, http_send, parse_status, simple_proxy_yaml, start_backend_with_shutdown, start_proxy,
-    start_reused_connection_kill_backend,
+use std::{
+    net::IpAddr,
+    time::{Duration, Instant},
 };
+
+use praxis_core::{config::Config, connectivity::peer::seed_dns};
+use praxis_test_utils::{
+    Backend, TestCertificates, free_port, http_get, http_send, parse_status, simple_proxy_yaml,
+    start_backend_with_shutdown, start_proxy, start_reused_connection_kill_backend, start_tls_backend,
+};
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// The `Host` the TLS retry test sends, and the only name its backend's
+/// certificate carries.
+const SNI_RETRY_HOST: &str = "api.sni-retry.test";
+
+/// The live TLS endpoint's hostname, which its certificate does not name.
+const SNI_RETRY_ENDPOINT: &str = "live.sni-retry.test";
 
 // -----------------------------------------------------------------------------
 // Utilities
@@ -519,5 +533,67 @@ fn sequential_requests_to_dead_backend_all_fail() {
             status, 502,
             "request {i} to sole dead backend should return 502 after retries"
         );
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests: TLS on a reselected retry
+// -----------------------------------------------------------------------------
+
+#[test]
+fn reselected_tls_retry_keeps_the_host_derived_sni() {
+    let certs = TestCertificates::generate_dns_only(SNI_RETRY_HOST);
+    let live_port = start_tls_backend(&certs, "sni-kept");
+    seed_dns(SNI_RETRY_ENDPOINT, &[IpAddr::from([127, 0, 0, 1])]);
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "127.0.0.1:9"
+              - "{SNI_RETRY_ENDPOINT}:{live_port}"
+            load_balancer_strategy: round_robin
+            retry_policy:
+              max_retries: 2
+              retriable_conditions: [connect_failure]
+              backoff:
+                base_interval_ms: 1
+                max_interval_ms: 5
+            tls:
+              ca:
+                ca_path: "{ca}"
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true
+  allow_tls_without_sni: true
+"#,
+        ca = certs.ca_cert_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    for i in 0..4 {
+        let (status, body) = http_get(proxy.addr(), &format!("/req-{i}"), Some(SNI_RETRY_HOST));
+        assert_eq!(
+            status, 200,
+            "request {i}: the live backend's certificate names only the Host, so a retry that swaps the \
+             Host-derived SNI for the endpoint's name fails verification; got {body}"
+        );
+        assert_eq!(body, "sni-kept", "request {i} should reach the live TLS backend");
     }
 }
