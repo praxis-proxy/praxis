@@ -68,7 +68,6 @@ use praxis_core::{
 };
 use tracing::{Instrument as _, warn};
 
-pub use self::types::{CalloutOutcome, CalloutResponse, StagedUpstream, StagedUpstreamFallback, SubrequestRuntime};
 use self::{
     context::{SubrequestRuntimeResources, build_sub_filter_context},
     sanitize::{
@@ -88,6 +87,10 @@ pub(crate) use self::{
 };
 #[cfg(feature = "iterative-request-router")]
 pub(crate) use self::{continuation::SubrequestCompletion, sanitize::normalize_response_status};
+pub use self::{
+    streaming::StreamBodySuppressed,
+    types::{CalloutOutcome, CalloutResponse, StagedUpstream, StagedUpstreamFallback, SubrequestRuntime},
+};
 #[cfg(feature = "chain-binding")]
 use crate::credentials::{PendingCredentials, ResolvedDestination};
 #[cfg(feature = "bound-upstream-request-body")]
