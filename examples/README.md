@@ -111,6 +111,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [conditional-filters.yaml](configs/pipeline/conditional-filters.yaml) | Filters support `conditions` (request phase) and `response_conditions` (response phase) to gate execution |
 | [failure-mode.yaml](configs/pipeline/failure-mode.yaml) | Demonstrates open and closed failure handling for filters |
 | [grpc-condition.yaml](configs/pipeline/grpc-condition.yaml) | The `grpc` condition predicate gates a filter on whether the request carries gRPC, classified from the `content-type` header alone (`application/grpc`, `application/grpc+proto`, `application/grpc+json`, or any other `application/grpc+<codec>`) |
+| [header-presence-condition.yaml](configs/pipeline/header-presence-condition.yaml) | The `headers_present` condition predicate gates a filter on whether headers are present, whatever their values |
 | [iterative-request-router-circuit-breaker.yaml](configs/pipeline/iterative-request-router-circuit-breaker.yaml) | Demonstrates circuit breaker integration with the iterative request router |
 | [iterative-request-router-sequence.yaml](configs/pipeline/iterative-request-router-sequence.yaml) | Demonstrates sequential sub-request execution where each step completes before the next begins |
 | [route-on-promoted-header.yaml](configs/pipeline/route-on-promoted-header.yaml) | Classify a request in an early filter, promote the result to a reserved `x-praxis-*` header, and route on that header |

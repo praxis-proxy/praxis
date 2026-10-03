@@ -26,8 +26,8 @@
 #                                    | Run filter  |
 #                                    +-------------+
 #
-# Request predicates: path, path_prefix, methods, headers.
-# Response predicates: status, headers.
+# Request predicates: path, path_prefix, methods, headers, headers_present.
+# Response predicates: status, headers, headers_present.
 # Multiple conditions are ANDed.
 #
 # Three patterns demonstrated here:
