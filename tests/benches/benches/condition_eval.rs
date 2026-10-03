@@ -215,6 +215,7 @@ fn when_path(prefix: &str) -> Condition {
         path_prefix: Some(prefix.to_owned()),
         methods: None,
         headers: None,
+        headers_present: None,
         selected_upstream: None,
     })
 }
@@ -228,6 +229,7 @@ fn when_methods(methods: &[&str]) -> Condition {
         path_prefix: None,
         methods: Some(methods.iter().map(|s| (*s).to_owned()).collect()),
         headers: None,
+        headers_present: None,
         selected_upstream: None,
     })
 }
@@ -242,6 +244,7 @@ fn when_headers(pairs: &[(&str, &str)]) -> Condition {
         path_prefix: None,
         methods: None,
         headers: Some(map),
+        headers_present: None,
         selected_upstream: None,
     })
 }
@@ -255,6 +258,7 @@ fn unless_path(prefix: &str) -> Condition {
         path_prefix: Some(prefix.to_owned()),
         methods: None,
         headers: None,
+        headers_present: None,
         selected_upstream: None,
     })
 }

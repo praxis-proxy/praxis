@@ -90,6 +90,29 @@ pub struct ConditionMatch {
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
 
+    /// Headers that must all be present, whatever their values.
+    ///
+    /// Names are case-insensitive. Under `unless`, the filter is skipped
+    /// whenever the request already carries every listed header.
+    ///
+    /// ```
+    /// use praxis_core::config::Condition;
+    ///
+    /// let conditions: Vec<Condition> = serde_yaml::from_str(
+    ///     r#"
+    /// - unless:
+    ///     headers_present: ["x-model"]
+    /// "#,
+    /// )
+    /// .unwrap();
+    /// assert!(matches!(
+    ///     &conditions[0],
+    ///     Condition::Unless(m) if m.headers_present.as_deref() == Some(&["x-model".to_owned()][..])
+    /// ));
+    /// ```
+    #[serde(default)]
+    pub headers_present: Option<Vec<String>>,
+
     /// Request must be bound to a logical upstream matching this
     /// predicate.
     ///
@@ -351,6 +374,47 @@ path_prefix: "/health"
             back.path_prefix.as_deref(),
             Some("/pkg.Svc"),
             "path_prefix should survive a serialize round trip"
+        );
+    }
+
+    #[test]
+    fn parse_headers_present_predicate() {
+        let m: ConditionMatch = serde_yaml::from_str("headers_present: [x-model, X-Tenant]\n").unwrap();
+        assert_eq!(
+            m.headers_present.as_deref(),
+            Some(&["x-model".to_owned(), "X-Tenant".to_owned()][..]),
+            "headers_present should keep every listed name as written"
+        );
+        assert!(m.headers.is_none(), "headers should stay unset");
+    }
+
+    #[test]
+    fn headers_present_defaults_to_unset() {
+        let m: ConditionMatch = serde_yaml::from_str("path: \"/\"\n").unwrap();
+        assert!(
+            m.headers_present.is_none(),
+            "headers_present should be None when omitted"
+        );
+    }
+
+    #[test]
+    fn reject_scalar_headers_present_predicate() {
+        let err = serde_yaml::from_str::<ConditionMatch>("headers_present: x-model\n").unwrap_err();
+        assert!(
+            err.to_string().contains("sequence"),
+            "headers_present takes a list of names, not one: {err}"
+        );
+    }
+
+    #[test]
+    fn headers_present_round_trips_through_serialization() {
+        let m: ConditionMatch = serde_yaml::from_str("headers_present: [x-model]\n").unwrap();
+        let yaml = serde_yaml::to_string(&m).unwrap();
+        let back: ConditionMatch = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            back.headers_present.as_deref(),
+            Some(&["x-model".to_owned()][..]),
+            "headers_present should survive a serialize round trip"
         );
     }
 

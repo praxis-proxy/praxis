@@ -290,6 +290,7 @@ mod tests {
             path_prefix: Some("/x".to_owned()),
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         })];

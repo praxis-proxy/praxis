@@ -5193,6 +5193,7 @@ fn gate_condition(header: &str, value: &str) -> Vec<praxis_core::config::Conditi
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         },
@@ -5373,6 +5374,128 @@ async fn body_condition_conflicting_promoters_error() {
     );
 }
 
+/// Build a single request condition on `headers_present: [header]`.
+fn presence_condition(unless: bool, header: &str) -> Vec<praxis_core::config::Condition> {
+    let matcher = praxis_core::config::ConditionMatch {
+        grpc: None,
+        path: None,
+        path_prefix: None,
+        methods: None,
+        headers: None,
+        headers_present: Some(vec![header.to_owned()]),
+        bound_upstream: None,
+        selected_upstream: None,
+    };
+    vec![if unless {
+        praxis_core::config::Condition::Unless(matcher)
+    } else {
+        praxis_core::config::Condition::When(matcher)
+    }]
+}
+
+#[tokio::test]
+async fn body_condition_headers_present_sees_promoted_header() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let pipeline = make_pipeline_with_conditions(vec![
+        (
+            Box::new(PromoterBodyFilter {
+                name: "promoter",
+                header: "x-model",
+                value: "gpt",
+                via_set: true,
+            }),
+            vec![],
+        ),
+        (
+            Box::new(GatedRecordingBodyFilter { ran: Arc::clone(&ran) }),
+            presence_condition(false, "x-model"),
+        ),
+    ]);
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(b"{}"));
+    let _outcome = pipeline
+        .execute_http_request_body(&mut ctx, &mut body, true)
+        .await
+        .unwrap();
+    assert!(
+        ran.load(Ordering::SeqCst),
+        "when headers_present should see a header an earlier body filter queued this pass"
+    );
+}
+
+#[tokio::test]
+async fn body_condition_unless_headers_present_skips_after_promotion() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let pipeline = make_pipeline_with_conditions(vec![
+        (
+            Box::new(PromoterBodyFilter {
+                name: "promoter",
+                header: "x-model",
+                value: "gpt",
+                via_set: false,
+            }),
+            vec![],
+        ),
+        (
+            Box::new(GatedRecordingBodyFilter { ran: Arc::clone(&ran) }),
+            presence_condition(true, "x-model"),
+        ),
+    ]);
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(b"{}"));
+    let _outcome = pipeline
+        .execute_http_request_body(&mut ctx, &mut body, true)
+        .await
+        .unwrap();
+    assert!(
+        !ran.load(Ordering::SeqCst),
+        "unless headers_present should skip once an earlier body filter promoted the header"
+    );
+}
+
+#[tokio::test]
+async fn body_condition_unless_headers_present_skips_when_client_sent_header() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let pipeline = make_pipeline_with_conditions(vec![(
+        Box::new(GatedRecordingBodyFilter { ran: Arc::clone(&ran) }),
+        presence_condition(true, "x-model"),
+    )]);
+    let mut req = crate::test_utils::make_request(Method::POST, "/");
+    req.headers.insert("x-model", "anything".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(b"{}"));
+    let _outcome = pipeline
+        .execute_http_request_body(&mut ctx, &mut body, true)
+        .await
+        .unwrap();
+    assert!(
+        !ran.load(Ordering::SeqCst),
+        "unless headers_present should skip the body hook when the request already carries the header"
+    );
+}
+
+#[tokio::test]
+async fn body_condition_unless_headers_present_runs_without_header() {
+    let ran = Arc::new(AtomicBool::new(false));
+    let pipeline = make_pipeline_with_conditions(vec![(
+        Box::new(GatedRecordingBodyFilter { ran: Arc::clone(&ran) }),
+        presence_condition(true, "x-model"),
+    )]);
+    let req = crate::test_utils::make_request(Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(b"{}"));
+    let _outcome = pipeline
+        .execute_http_request_body(&mut ctx, &mut body, true)
+        .await
+        .unwrap();
+    assert!(
+        ran.load(Ordering::SeqCst),
+        "unless headers_present should run the body hook when nothing set the header"
+    );
+}
+
 /// Build a [`FilterPipeline`] from the given HTTP filters (no conditions).
 fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
     let filters: Vec<_> = filters
@@ -5493,6 +5616,7 @@ fn when_path(prefix: &str) -> praxis_core::config::Condition {
         path_prefix: Some(prefix.to_owned()),
         methods: None,
         headers: None,
+        headers_present: None,
         bound_upstream: None,
         selected_upstream: None,
     })
@@ -5540,6 +5664,7 @@ fn unless_path(prefix: &str) -> praxis_core::config::Condition {
         path_prefix: Some(prefix.to_owned()),
         methods: None,
         headers: None,
+        headers_present: None,
         bound_upstream: None,
         selected_upstream: None,
     })
@@ -5550,6 +5675,7 @@ fn when_status(codes: &[u16]) -> praxis_core::config::ResponseCondition {
     praxis_core::config::ResponseCondition::When(praxis_core::config::ResponseConditionMatch {
         status: Some(codes.to_vec()),
         headers: None,
+        headers_present: None,
     })
 }
 
@@ -6200,6 +6326,7 @@ fn trace_propagation_honors_trace_context_conditions() {
         path_prefix: Some("/api".to_owned()),
         methods: None,
         headers: None,
+        headers_present: None,
         bound_upstream: None,
         selected_upstream: None,
     });
@@ -6221,6 +6348,7 @@ async fn request_body_after_request_phase_does_not_start_trace_context() {
         path_prefix: Some("/api".to_owned()),
         methods: None,
         headers: None,
+        headers_present: None,
         bound_upstream: None,
         selected_upstream: None,
     });
@@ -6258,6 +6386,7 @@ async fn ambiguous_pre_read_header_does_not_fail_the_request() {
         path_prefix: None,
         methods: None,
         headers: Some(HashMap::from([("x-tenant".to_owned(), "a".to_owned())])),
+        headers_present: None,
         bound_upstream: None,
         selected_upstream: None,
     });

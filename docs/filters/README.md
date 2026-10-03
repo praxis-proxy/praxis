@@ -494,6 +494,7 @@ rejected.
 | `path_prefix`       | URI starts with value                           |
 | `methods`           | Method in list                                  |
 | `headers`           | All listed headers match                        |
+| `headers_present`   | All listed headers are present, any value       |
 | `selected_upstream` | Load-balancer-selected upstream metadata match  |
 
 `grpc` classifies the request from its `content-type` header
@@ -527,6 +528,31 @@ filter_chains:
           - name: "X-Api-Version"
             value: "v2"
 ```
+
+`headers_present` takes a list of header names and matches
+when every one of them is on the request, whatever the value
+(an empty value counts). Names are case-insensitive. Under
+`unless` it runs a filter only when a header is missing,
+which suits filling in defaults without overwriting what the
+client sent. In the pre-read body phase it also sees headers
+that earlier body filters promoted. Request headers come from
+the client, so any client can skip a filter gated this way by
+sending the header; only use it where that's fine or where a
+trusted hop sets or strips the header. See
+[header-presence-condition.yaml].
+
+```yaml
+# Set a default model only when the client didn't pick one.
+- filter: headers
+  conditions:
+    - unless:
+        headers_present: ["X-Model"]
+  request_set:
+    - name: "X-Model"
+      value: "default"
+```
+
+[header-presence-condition.yaml]: ../../examples/configs/pipeline/header-presence-condition.yaml
 
 Use `path` for exact matching (e.g., health checks on `/`):
 
@@ -590,7 +616,7 @@ combines a `selected_upstream` condition with the
 
 Use `response_conditions` to gate `on_response` execution.
 Response predicates: `status` (list of status codes),
-`headers`.
+`headers`, `headers_present`.
 
 ```yaml
 - filter: headers

@@ -1439,23 +1439,43 @@ fn require_unique_value(values: Vec<String>, name: &HeaderName, source: &str) ->
 /// [`resolve_trusted_header_state`]: HttpFilterContext::resolve_trusted_header_state
 pub(crate) struct EffectiveHeaders<'c, 'r>(pub(crate) &'c HttpFilterContext<'r>);
 
+impl EffectiveHeaders<'_, '_> {
+    /// What the pending and trusted mutations say about `name`, before the
+    /// original request is consulted.
+    ///
+    /// [`Absent`] means no mutation mentioned it, so the original request
+    /// decides.
+    ///
+    /// [`Absent`]: TrustedHeaderState::Absent
+    fn overlay_state(&self, name: &HeaderName) -> Result<TrustedHeaderState, ConditionError> {
+        let ctx = self.0;
+        // This pass's grouped queues are the last writer this pass.
+        match ctx.pending_header_value(name).map_err(|_e| ambiguous(name))? {
+            PendingHeaderResult::Removed => Ok(TrustedHeaderState::Removed),
+            PendingHeaderResult::Value(v) => Ok(TrustedHeaderState::Value(v)),
+            PendingHeaderResult::Absent => ctx.resolve_trusted_header_state(name).map_err(|_e| ambiguous(name)),
+        }
+    }
+}
+
 impl HeaderSource for EffectiveHeaders<'_, '_> {
     type Error = ConditionError;
 
     fn header(&self, name: &HeaderName) -> Result<Option<Cow<'_, str>>, ConditionError> {
-        let ctx = self.0;
-        // This pass's grouped queues are the last writer this pass.
-        match ctx.pending_header_value(name).map_err(|_e| ambiguous(name))? {
-            PendingHeaderResult::Removed => return Ok(None),
-            PendingHeaderResult::Value(v) => return Ok(Some(Cow::Owned(v))),
-            PendingHeaderResult::Absent => {},
-        }
-        match ctx.resolve_trusted_header_state(name).map_err(|_e| ambiguous(name))? {
+        match self.overlay_state(name)? {
             TrustedHeaderState::Removed => Ok(None),
             TrustedHeaderState::Value(v) => Ok(Some(Cow::Owned(v))),
             // Fall through to the original request. The `Request` source is
             // infallible, so the error arm is unreachable.
-            TrustedHeaderState::Absent => ctx.request.header(name).map_err(|e| match e {}),
+            TrustedHeaderState::Absent => self.0.request.header(name).map_err(|e| match e {}),
+        }
+    }
+
+    fn contains(&self, name: &HeaderName) -> Result<bool, ConditionError> {
+        match self.overlay_state(name)? {
+            TrustedHeaderState::Removed => Ok(false),
+            TrustedHeaderState::Value(_) => Ok(true),
+            TrustedHeaderState::Absent => self.0.request.contains(name).map_err(|e| match e {}),
         }
     }
 }
@@ -2716,6 +2736,87 @@ content-length: 0
         assert!(
             effective_value(&ctx, "x-gate").is_err(),
             "two distinct promoted values should be an error"
+        );
+    }
+
+    /// Ask the pre-read overlay whether `name` is present.
+    fn effective_contains(ctx: &HttpFilterContext<'_>, name: &str) -> Result<bool, ConditionError> {
+        use crate::condition::HeaderSource as _;
+        EffectiveHeaders(ctx).contains(&HeaderName::from_bytes(name.as_bytes()).unwrap())
+    }
+
+    #[test]
+    fn effective_headers_contains_original_value_that_is_not_text() {
+        let mut req = crate::test_utils::make_request(Method::GET, "/");
+        req.headers
+            .insert("x-user", http::HeaderValue::from_bytes("José".as_bytes()).unwrap());
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert_eq!(
+            effective_value(&ctx, "x-user").unwrap(),
+            None,
+            "a non-text original value has no text form"
+        );
+        assert!(
+            effective_contains(&ctx, "x-user").unwrap(),
+            "a non-text original value is still present, as the request phase sees it"
+        );
+    }
+
+    #[test]
+    fn effective_headers_contains_pending_and_promoted_headers() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        assert!(
+            !effective_contains(&ctx, "x-gate").unwrap(),
+            "nothing set the header yet"
+        );
+        ctx.prior_pre_read_mutations
+            .push(TrustedHeaderMutation::Add("x-gate".parse().unwrap(), "on".to_owned()));
+        assert!(
+            effective_contains(&ctx, "x-gate").unwrap(),
+            "a header promoted on a prior pass should be present"
+        );
+        ctx.request_headers_to_set
+            .push(("x-model".parse().unwrap(), "gpt".parse().unwrap()));
+        assert!(
+            effective_contains(&ctx, "x-model").unwrap(),
+            "a header queued this pass should be present"
+        );
+    }
+
+    #[test]
+    fn effective_headers_contains_honors_removals() {
+        let mut req = crate::test_utils::make_request(Method::GET, "/");
+        req.headers.insert("x-gate", "on".parse().unwrap());
+        req.headers.insert("x-model", "gpt".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.prior_pre_read_mutations
+            .push(TrustedHeaderMutation::Remove("x-gate".parse().unwrap()));
+        ctx.request_headers_to_remove.push("x-model".parse().unwrap());
+        assert!(
+            !effective_contains(&ctx, "x-gate").unwrap(),
+            "a trusted Remove should mask the original header"
+        );
+        assert!(
+            !effective_contains(&ctx, "x-model").unwrap(),
+            "a pending removal should mask the original header"
+        );
+    }
+
+    #[test]
+    fn effective_headers_contains_propagates_ambiguity() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.prior_pre_read_mutations
+            .push(TrustedHeaderMutation::Add("x-gate".parse().unwrap(), "a".to_owned()));
+        ctx.prior_pre_read_mutations
+            .push(TrustedHeaderMutation::Add("x-gate".parse().unwrap(), "b".to_owned()));
+        assert!(
+            matches!(
+                effective_contains(&ctx, "x-gate"),
+                Err(ConditionError::AmbiguousHeader { .. })
+            ),
+            "the overlay fails closed on ambiguity for presence as it does for values"
         );
     }
 

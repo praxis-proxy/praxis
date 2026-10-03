@@ -3,7 +3,8 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    RoutedBackend, free_port, http_get, http_send, parse_body, parse_status, start_header_echo_backend, start_proxy,
+    RoutedBackend, free_port, http_get, http_send, parse_body, parse_header, parse_status, start_header_echo_backend,
+    start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -325,5 +326,139 @@ insecure_options:
     assert!(
         !body.to_lowercase().contains("x-tracked"),
         "X-Tracked should NOT be present on /healthz path, got:\n{body}"
+    );
+}
+
+#[test]
+fn request_condition_unless_headers_present_keeps_client_value() {
+    let backend_guard = start_header_echo_backend();
+    let backend_port = backend_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: headers
+        conditions:
+          - unless:
+              headers_present: [X-Request-Id]
+        request_set:
+          - name: X-Request-Id
+            value: "gateway-generated"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "request without the header should return 200");
+    let body = parse_body(&raw).to_lowercase();
+    assert!(
+        body.contains("x-request-id: gateway-generated"),
+        "a request without X-Request-Id should get the gateway value, got:\n{body}"
+    );
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nX-Request-Id: client-123\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "request with the header should return 200");
+    let body = parse_body(&raw).to_lowercase();
+    assert!(
+        body.contains("x-request-id: client-123"),
+        "the client's X-Request-Id should reach the backend unchanged, got:\n{body}"
+    );
+    assert!(
+        !body.contains("gateway-generated"),
+        "the headers filter should be skipped when the client sent X-Request-Id, got:\n{body}"
+    );
+}
+
+#[test]
+fn response_condition_unless_headers_present_fills_missing_header() {
+    let backend_port = RoutedBackend::new()
+        .route_with_headers("/cached", 200, "cached", vec![("Cache-Control", "max-age=60")])
+        .route("/", 200, "plain")
+        .start();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+      - filter: headers
+        response_conditions:
+          - unless:
+              headers_present: [cache-control]
+        response_set:
+          - name: Cache-Control
+            value: "no-store"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET /plain HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "response without Cache-Control should return 200"
+    );
+    assert_eq!(
+        parse_header(&raw, "cache-control").as_deref(),
+        Some("no-store"),
+        "a response without Cache-Control should get the default"
+    );
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET /cached HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "response with Cache-Control should return 200");
+    assert_eq!(
+        parse_header(&raw, "cache-control").as_deref(),
+        Some("max-age=60"),
+        "the backend's Cache-Control should pass through untouched"
     );
 }

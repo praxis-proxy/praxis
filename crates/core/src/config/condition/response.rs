@@ -71,6 +71,24 @@ pub struct ResponseConditionMatch {
     /// Response headers that must be present and match.
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
+
+    /// Response headers that must all be present, whatever their values.
+    ///
+    /// Names are case-insensitive. Under `unless`, the filter is skipped
+    /// whenever the response already carries every listed header.
+    ///
+    /// ```
+    /// use praxis_core::config::ResponseConditionMatch;
+    ///
+    /// let m: ResponseConditionMatch =
+    ///     serde_yaml::from_str("headers_present: [cache-control]").unwrap();
+    /// assert_eq!(
+    ///     m.headers_present.as_deref(),
+    ///     Some(&["cache-control".to_owned()][..])
+    /// );
+    /// ```
+    #[serde(default)]
+    pub headers_present: Option<Vec<String>>,
 }
 
 // -----------------------------------------------------------------------------
@@ -137,6 +155,37 @@ headers:
             "text/html",
             "content-type header mismatch"
         );
+    }
+
+    #[test]
+    fn parse_response_condition_unless_headers_present() {
+        let yaml = r#"
+- unless:
+    headers_present: [cache-control, ETag]
+"#;
+        let conds: Vec<ResponseCondition> = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            matches!(
+                &conds[0],
+                ResponseCondition::Unless(m)
+                    if m.headers_present.as_deref() == Some(&["cache-control".to_owned(), "ETag".to_owned()][..])
+                        && m.headers.is_none()
+            ),
+            "should be Unless condition with both headers_present names"
+        );
+    }
+
+    #[test]
+    fn response_headers_present_round_trips_through_serialization() {
+        let m: ResponseConditionMatch = serde_yaml::from_str("status: [200]\nheaders_present: [etag]\n").unwrap();
+        let yaml = serde_yaml::to_string(&m).unwrap();
+        let back: ResponseConditionMatch = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            back.headers_present.as_deref(),
+            Some(&["etag".to_owned()][..]),
+            "headers_present should survive a serialize round trip"
+        );
+        assert_eq!(back.status.as_deref(), Some(&[200][..]), "status should survive too");
     }
 
     #[test]
