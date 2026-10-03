@@ -96,7 +96,7 @@ fn disabled_dimensions_disappear_from_the_scrape() {
         HashMap::from([
             ("127.0.0.1:8080", proxy_port),
             ("127.0.0.1:3000", backend.port()),
-            ("127.0.0.1:9901", admin_port),
+            ("127.0.0.1:9902", admin_port),
         ]),
     );
 
@@ -157,7 +157,7 @@ fn disabled_cluster_drops_from_the_failure_path_metrics() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 listeners:
   - name: web
     address: "127.0.0.1:{proxy_port}"

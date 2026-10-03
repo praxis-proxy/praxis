@@ -18,7 +18,7 @@
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/grpc-health-check.yaml
 #
 # Inspect endpoint health (verbose adds the per-cluster breakdown):
-#   curl -s localhost:9901/ready | jq
+#   curl -s localhost:9902/ready | jq
 
 listeners:
   - name: grpc
@@ -62,7 +62,7 @@ filter_chains:
               version: h2
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
   verbose: true # per-cluster healthy/unhealthy counts on /ready
 
 insecure_options:

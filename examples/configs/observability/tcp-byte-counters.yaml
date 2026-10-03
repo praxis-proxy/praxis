@@ -3,17 +3,17 @@
 # Prometheus counters for bytes forwarded over TCP connections in each
 # direction, labeled by listener. Totals stay accurate when a session ends
 # on an idle timeout or shutdown rather than a clean close. Scraped via the
-# admin /metrics endpoint.
+# metrics listener.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/tcp-byte-counters.yaml
 #
 # Exercise:
 #   echo "SELECT 1" | nc localhost 5432
-#   curl -s http://localhost:9901/metrics | grep tcp_bytes
+#   curl -s http://localhost:9902/metrics | grep tcp_bytes
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 insecure_options:
   allow_private_upstreams: true

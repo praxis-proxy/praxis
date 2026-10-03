@@ -3,7 +3,7 @@
 # Prometheus counter for proxy errors classified by cause, covering filter
 # rejections, timeouts, unreachable upstreams and internal faults. Counted
 # once per request against the first cause, so retries do not multiply the
-# total. Scraped via the admin /metrics endpoint.
+# total. Scraped via the metrics listener.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/errors-total.yaml
@@ -11,10 +11,10 @@
 # Exercise:
 #   curl -s http://localhost:8080/healthy/
 #   curl -s http://localhost:8080/broken/
-#   curl -s http://localhost:9901/metrics | grep errors_total
+#   curl -s http://localhost:9902/metrics | grep errors_total
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 insecure_options:
   allow_private_endpoints: true

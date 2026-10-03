@@ -20,7 +20,7 @@ arc-swap = { workspace = true }
 praxis = { workspace = true, features = ["config-reload", "admin-api"] }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
-# The shared harness exercises the admin/health endpoints and cert hot-reload;
+# The shared harness exercises admin/health/metrics endpoints and cert hot-reload;
 # enabling these here propagates (via feature unification) to every test crate
 # that depends on the harness, so the full test surface is always built.
 praxis-protocol = { workspace = true, features = ["admin-api", "config-reload"] }

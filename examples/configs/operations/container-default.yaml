@@ -3,7 +3,7 @@
 # Default config for containerized deployments. The proxy
 # listener binds to all interfaces so traffic reaches it
 # from outside the container's network namespace; the
-# admin endpoint stays on loopback, where the image's
+# health/metrics endpoint stays on loopback, where the image's
 # HEALTHCHECK reaches it.
 #
 # Usage:
@@ -11,7 +11,7 @@
 #   curl http://localhost:8080/
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 listeners:
   - name: default

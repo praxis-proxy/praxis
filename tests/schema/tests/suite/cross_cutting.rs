@@ -52,7 +52,7 @@ filter_chains:
         status: 200
 "#;
     let err = Config::from_yaml(yaml).unwrap_err();
-    assert!(err.to_string().contains("invalid admin_address"), "got: {err}");
+    assert!(err.to_string().contains("invalid admin.address"), "got: {err}");
 }
 
 #[test]

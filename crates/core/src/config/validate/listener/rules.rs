@@ -136,6 +136,16 @@ impl AddressOverlapTracker {
     }
 }
 
+/// Return whether two socket addresses would bind overlapping TCP listeners.
+pub(in crate::config::validate) fn addresses_overlap(
+    first: std::net::SocketAddr,
+    second: std::net::SocketAddr,
+) -> bool {
+    let mut tracker = AddressOverlapTracker::default();
+    let _overlap = tracker.record(first);
+    tracker.record(second)
+}
+
 /// Normalize IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) to IPv4.
 fn normalize_mapped_ip(ip: IpAddr) -> IpAddr {
     match ip {

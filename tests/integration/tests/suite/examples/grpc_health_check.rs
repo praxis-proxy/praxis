@@ -28,7 +28,7 @@ fn example(proxy_port: u16, admin_port: u16, serving: u16, other: u16) -> Config
         HashMap::from([
             ("127.0.0.1:50051", serving),
             ("127.0.0.1:50052", other),
-            ("127.0.0.1:9901", admin_port),
+            ("127.0.0.1:9902", admin_port),
         ]),
     )
 }

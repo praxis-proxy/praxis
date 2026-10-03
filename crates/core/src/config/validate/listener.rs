@@ -7,4 +7,4 @@ mod address;
 mod rules;
 mod timeouts;
 
-pub(in crate::config::validate) use rules::{validate_listener_names, validate_listeners};
+pub(in crate::config::validate) use rules::{addresses_overlap, validate_listener_names, validate_listeners};
