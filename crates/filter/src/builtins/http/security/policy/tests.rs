@@ -876,7 +876,7 @@ fn build_filter(config_path: String) -> PolicyFilter {
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
     };
-    PolicyFilter::new(cfg).expect("filter should construct")
+    PolicyFilter::new(cfg, None).expect("filter should construct")
 }
 
 /// Body filter that records the authenticated subject visible at its position
@@ -1110,7 +1110,7 @@ fn rejects_zero_max_buffer_bytes() {
         max_buffer_bytes: 0,
         llm: super::config::LlmOptions::default(),
     };
-    let err = match PolicyFilter::new(cfg) {
+    let err = match PolicyFilter::new(cfg, None) {
         Ok(_) => panic!("zero max_buffer_bytes must be rejected"),
         Err(e) => e.to_string(),
     };
@@ -1129,7 +1129,7 @@ fn rejects_oversized_max_buffer_bytes() {
         max_buffer_bytes: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1,
         llm: super::config::LlmOptions::default(),
     };
-    let err = match PolicyFilter::new(cfg) {
+    let err = match PolicyFilter::new(cfg, None) {
         Ok(_) => panic!("oversized max_buffer_bytes must be rejected"),
         Err(e) => e.to_string(),
     };
@@ -2123,7 +2123,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
     };
-    let filter = PolicyFilter::new(cfg).expect("filter should construct");
+    let filter = PolicyFilter::new(cfg, None).expect("filter should construct");
 
     let token = mint_jwt(&standard_claims("alice"));
     let mut req = make_request(Method::POST, "/");
@@ -2967,7 +2967,7 @@ async fn response_phase_without_request_identity_fails_closed() {
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
     };
-    let filter = PolicyFilter::new(cfg).expect("filter should construct");
+    let filter = PolicyFilter::new(cfg, None).expect("filter should construct");
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
@@ -3235,33 +3235,27 @@ fn try_build_filter(config_path: String) -> Result<PolicyFilter, crate::FilterEr
 
 /// Build a filter with the configured private-destination policy.
 ///
-/// Registers a shared connector first, so the transport these filters
-/// install takes the same path a server does instead of falling back to a
-/// private pool. Any registered connector will do here — the point is that
-/// one is registered at all — but the registration is a process-wide
-/// last-wins slot, so this holds the lock across the construction that reads
-/// it back rather than overwriting what a concurrent test is asserting on.
+/// Hands the filter a connector of its own, so the transport it installs
+/// takes the same path a server's does instead of falling back to a
+/// private pool.
 fn try_build_filter_allowing_private(
     config_path: String,
     allow_private_idp: bool,
 ) -> Result<PolicyFilter, crate::FilterError> {
-    let _guard = crate::policy_connector::REGISTRATION_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::set_policy_subrequest_connector(&crate::test_support::connector(
-        praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE,
-        None,
-    ));
-    PolicyFilter::new(PolicyFilterConfig {
-        config_path,
-        allow_private_idp,
-        trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadOnly,
-        require_protocol_metadata: true,
-        init_timeout_secs: 30,
-        max_buffer_bytes: 10_485_760,
-        llm: super::config::LlmOptions::default(),
-    })
+    let connector = crate::test_support::connector(praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE, None);
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp,
+            trusted_private_endpoints: vec![],
+            body_access: super::config::BodyAccessMode::ReadOnly,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm: super::config::LlmOptions::default(),
+        },
+        Some(connector),
+    )
 }
 
 #[test]
@@ -3892,7 +3886,7 @@ routes:
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
     };
-    let err = PolicyFilter::new(cfg)
+    let err = PolicyFilter::new(cfg, None)
         .err()
         .expect("an unappliable response contract must refuse to start");
     let msg = err.to_string();
@@ -4249,16 +4243,19 @@ routes:
 
 /// Build a policy filter with custom inference options.
 fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) -> PolicyFilter {
-    PolicyFilter::new(PolicyFilterConfig {
-        config_path,
-        allow_private_idp: false,
-        trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadOnly,
-        require_protocol_metadata: true,
-        init_timeout_secs: 30,
-        max_buffer_bytes: 10_485_760,
-        llm,
-    })
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            body_access: super::config::BodyAccessMode::ReadOnly,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm,
+        },
+        None,
+    )
     .expect("filter should construct")
 }
 
@@ -4617,19 +4614,22 @@ fn the_inference_ceiling_defaults_to_the_json_rpc_one() {
 #[test]
 fn the_lower_ceiling_binds_when_both_apply() {
     let (_dir, path) = write_llm_route_config();
-    let filter = PolicyFilter::new(PolicyFilterConfig {
-        config_path: path,
-        allow_private_idp: false,
-        trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadWrite,
-        require_protocol_metadata: true,
-        init_timeout_secs: 30,
-        max_buffer_bytes: 10_485_760,
-        llm: super::config::LlmOptions {
-            max_request_bytes: 4096,
-            ..Default::default()
+    let filter = PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path: path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            body_access: super::config::BodyAccessMode::ReadWrite,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm: super::config::LlmOptions {
+                max_request_bytes: 4096,
+                ..Default::default()
+            },
         },
-    })
+        None,
+    )
     .expect("filter should construct");
 
     assert!(
@@ -4648,19 +4648,22 @@ fn rejects_an_out_of_range_inference_ceiling() {
         (praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1, "exceeds the maximum"),
     ] {
         let (_dir, path) = write_llm_route_config();
-        let err = PolicyFilter::new(PolicyFilterConfig {
-            config_path: path,
-            allow_private_idp: false,
-            trusted_private_endpoints: vec![],
-            body_access: super::config::BodyAccessMode::ReadOnly,
-            require_protocol_metadata: true,
-            init_timeout_secs: 30,
-            max_buffer_bytes: 10_485_760,
-            llm: super::config::LlmOptions {
-                max_request_bytes,
-                ..Default::default()
+        let err = PolicyFilter::new(
+            PolicyFilterConfig {
+                config_path: path,
+                allow_private_idp: false,
+                trusted_private_endpoints: vec![],
+                body_access: super::config::BodyAccessMode::ReadOnly,
+                require_protocol_metadata: true,
+                init_timeout_secs: 30,
+                max_buffer_bytes: 10_485_760,
+                llm: super::config::LlmOptions {
+                    max_request_bytes,
+                    ..Default::default()
+                },
             },
-        })
+            None,
+        )
         .err()
         .unwrap_or_else(|| panic!("{max_request_bytes} must be rejected"))
         .to_string();
@@ -4718,16 +4721,19 @@ async fn inference_request_without_a_token_is_rejected_by_identity() {
 
 /// Build a read-write inference policy filter.
 fn build_read_write_filter(config_path: String) -> PolicyFilter {
-    PolicyFilter::new(PolicyFilterConfig {
-        config_path,
-        allow_private_idp: false,
-        trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadWrite,
-        require_protocol_metadata: true,
-        init_timeout_secs: 30,
-        max_buffer_bytes: 10_485_760,
-        llm: super::config::LlmOptions::default(),
-    })
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            body_access: super::config::BodyAccessMode::ReadWrite,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm: super::config::LlmOptions::default(),
+        },
+        None,
+    )
     .expect("filter should construct")
 }
 
@@ -5744,7 +5750,7 @@ fn an_http_route_beside_entity_routes_fails_filter_construction() {
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
     };
-    let err = PolicyFilter::new(cfg).err().expect("construction must fail");
+    let err = PolicyFilter::new(cfg, None).err().expect("construction must fail");
     assert!(
         format!("{err}").contains("declare `authorization:` alongside MCP entity routes"),
         "the refusal has to reach the operator as a startup failure; got {err}",

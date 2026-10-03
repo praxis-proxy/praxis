@@ -120,6 +120,7 @@ pub(crate) type TcpFilterFactoryFn = fn(&serde_yaml::Value) -> Result<Box<dyn Tc
 // -----------------------------------------------------------------------------
 
 /// A protocol-tagged filter factory.
+#[derive(Clone)]
 pub enum FilterFactory {
     /// Factory for HTTP-level filters.
     Http(HttpFilterFactory),
