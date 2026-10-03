@@ -30,6 +30,7 @@ use ppe::praxis_policy_core::{
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
 };
+use praxis_core::subrequest::SubRequestConnector;
 
 use super::{
     assertions::{
@@ -50,6 +51,7 @@ use super::{
         reserialize_json_rpc_response_body,
     },
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
+    transport::PolicyHttpTransport,
 };
 use crate::{
     AuthenticatedIdentity, FilterAction, FilterError, Rejection,
@@ -220,6 +222,10 @@ pub struct PolicyFilter {
     /// Bound on one response-phase hook dispatch, derived from the engine's
     /// per-plugin timeout.
     response_dispatch_timeout: std::time::Duration,
+    /// The transport installed on the engine, kept so tests can see which
+    /// connector policy calls go through.
+    #[cfg(test)]
+    transport: Arc<PolicyHttpTransport>,
 }
 
 impl PolicyFilter {
@@ -228,6 +234,10 @@ impl PolicyFilter {
     /// factories, wires the APL visitor, and initializes the manager.
     /// Errors abort filter chain construction at server startup —
     /// failing fast is what we want for misconfigured policy.
+    ///
+    /// Policy calls, including the JWKS fetches made while initializing, go
+    /// through `subrequest_connector`, or through a pool of their own without
+    /// one.
     ///
     /// # Errors
     ///
@@ -238,7 +248,10 @@ impl PolicyFilter {
         clippy::too_many_lines,
         reason = "linear construction + init steps; splitting obscures the startup flow"
     )]
-    pub(crate) fn new(cfg: PolicyFilterConfig) -> Result<Self, FilterError> {
+    pub(crate) fn new(
+        cfg: PolicyFilterConfig,
+        subrequest_connector: Option<SubRequestConnector>,
+    ) -> Result<Self, FilterError> {
         // Bound the per-request ReadWrite buffer ceiling: 0 makes every
         // non-empty body fail, and an unbounded value multiplies per-request
         // memory by concurrency. The pipeline's unbounded-buffer startup check
@@ -279,7 +292,12 @@ impl PolicyFilter {
         ppe::install_builtins(&mgr);
 
         // The lazy connection pool must not bind to the temporary init runtime.
-        if !Self::install_http_transport(&mgr, cfg.allow_private_idp, &cfg.trusted_private_endpoints) {
+        let transport = Self::http_transport(
+            subrequest_connector,
+            cfg.allow_private_idp,
+            &cfg.trusted_private_endpoints,
+        );
+        if !mgr.set_http_transport(Arc::<PolicyHttpTransport>::clone(&transport)) {
             // Set-once, and this manager was just constructed, so a refusal
             // means the engine changed under us rather than a double install.
             tracing::warn!(
@@ -468,7 +486,15 @@ impl PolicyFilter {
             llm_request_mutator_warned: AtomicBool::new(false),
             llm_response_mutator_warned: AtomicBool::new(false),
             response_dispatch_timeout: dispatch_timeout,
+            #[cfg(test)]
+            transport,
         })
+    }
+
+    /// Test accessor for the transport installed on the engine.
+    #[cfg(test)]
+    pub(super) fn transport(&self) -> &PolicyHttpTransport {
+        &self.transport
     }
 
     /// Test accessor for the hook the response half dispatches, if any.
@@ -635,17 +661,37 @@ impl PolicyFilter {
         }
     }
 
-    /// Praxis-side factory hook, wired via `register_http` in
-    /// `filter/src/registry.rs`.
+    /// Build a filter from its YAML config without the runtime's sub-request
+    /// connector, so its policy calls open a connection pool of their own.
+    ///
+    /// A [`FilterRegistry`] builds `policy` filters with the connector handed
+    /// to [`FilterRegistry::set_policy_connector`] instead.
     ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if the config block fails to parse
     /// as a `PolicyFilterConfig` or filter construction fails.
+    ///
+    /// [`FilterRegistry`]: crate::FilterRegistry
+    /// [`FilterRegistry::set_policy_connector`]: crate::FilterRegistry::set_policy_connector
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: PolicyFilterConfig = parse_filter_config("policy", config)?;
-        let filter = Self::new(cfg)?;
-        Ok(Box::new(filter))
+        Ok(Box::new(Self::new(cfg, None)?))
+    }
+
+    /// Build a filter from its YAML config whose policy calls go through
+    /// `subrequest_connector`, or through a pool of their own without one.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the config block fails to parse
+    /// as a `PolicyFilterConfig` or filter construction fails.
+    pub(crate) fn from_config_with_connector(
+        config: &serde_yaml::Value,
+        subrequest_connector: Option<SubRequestConnector>,
+    ) -> Result<Self, FilterError> {
+        let cfg: PolicyFilterConfig = parse_filter_config("policy", config)?;
+        Self::new(cfg, subrequest_connector)
     }
 
     /// Snapshot the request's HTTP headers into a case-normalized
@@ -774,12 +820,12 @@ impl PolicyFilter {
         Self::publish_identity_projection(ctx, Self::authenticated_identity(identity));
     }
 
-    /// Install the proxy-backed transport with the configured destination policy.
-    fn install_http_transport(
-        mgr: &Arc<PolicyEngine>,
+    /// Build the proxy-backed transport with the configured destination policy.
+    fn http_transport(
+        subrequest_connector: Option<SubRequestConnector>,
         allow_private: bool,
         trusted_private_endpoints: &[String],
-    ) -> bool {
+    ) -> Arc<PolicyHttpTransport> {
         if allow_private {
             tracing::info!(
                 target: "policy.filter",
@@ -799,10 +845,11 @@ impl PolicyFilter {
                 "policy: permitting private addresses for pinned policy endpoints"
             );
         }
-        mgr.set_http_transport(Arc::new(super::transport::PolicyHttpTransport::new(
+        Arc::new(PolicyHttpTransport::with_connector(
+            subrequest_connector,
             allow_private,
             allowlist,
-        )))
+        ))
     }
 
     /// Build the public string-valued identity projection from a validated payload.

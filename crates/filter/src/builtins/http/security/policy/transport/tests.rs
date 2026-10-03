@@ -904,7 +904,7 @@ async fn a_failed_exchange_is_never_resent() {
 
 #[test]
 fn a_new_transport_builds_its_client_lazily() {
-    let transport = PolicyHttpTransport::new(false, no_allowlist());
+    let transport = PolicyHttpTransport::with_connector(None, false, no_allowlist());
     assert!(transport.client.get().is_none(), "the client is built on first use");
 }
 
@@ -912,7 +912,7 @@ fn a_new_transport_builds_its_client_lazily() {
 async fn a_transport_that_was_never_handed_a_client_builds_its_own_and_dispatches() {
     praxis_tls::provider::install();
     let backend = Backend::spawn(Reply::Keepalive(OK_RESPONSE));
-    let transport = PolicyHttpTransport::new(true, no_allowlist());
+    let transport = PolicyHttpTransport::with_connector(None, true, no_allowlist());
     assert!(transport.client.get().is_none(), "nothing built yet");
 
     let response = transport
@@ -930,39 +930,17 @@ async fn a_transport_that_was_never_handed_a_client_builds_its_own_and_dispatche
 
 #[test]
 fn a_transport_keeps_the_connector_it_was_built_with() {
-    let _guard = crate::policy_connector::REGISTRATION_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let own = crate::test_support::connector(8, None);
     let transport = PolicyHttpTransport::with_connector(Some(own.clone()), true, no_allowlist());
 
-    crate::set_policy_subrequest_connector(&crate::test_support::connector(1, None));
-
     assert!(
         std::ptr::eq(transport.client().connector().connector(), own.connector()),
-        "the pool must be the one captured at construction, not the newest registration"
+        "policy calls must go through the connector the transport was handed, not a pool of its own"
     );
 }
 
 #[test]
-fn a_transport_built_after_registration_uses_the_registered_pool() {
-    let _guard = crate::policy_connector::REGISTRATION_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let shared = crate::test_support::connector(16, None);
-    crate::set_policy_subrequest_connector(&shared);
-
-    let transport = PolicyHttpTransport::new(true, no_allowlist());
-
-    assert!(
-        std::ptr::eq(transport.client().connector().connector(), shared.connector()),
-        "a transport built the way the filter builds it must pick up the host's registration \
-         instead of opening a private pool"
-    );
-}
-
-#[test]
-fn a_transport_built_without_a_registration_falls_back() {
+fn a_transport_built_without_a_connector_falls_back() {
     praxis_tls::provider::install();
     let transport = PolicyHttpTransport::with_connector(None, true, no_allowlist());
     assert!(transport.client.get().is_none(), "nothing built before first use");
@@ -971,7 +949,7 @@ fn a_transport_built_without_a_registration_falls_back() {
 }
 
 #[test]
-fn the_registered_connector_is_the_one_policy_calls_use() {
+fn the_runtime_connector_is_the_one_policy_calls_use() {
     let shared = crate::test_support::connector(16, None);
     let client = build_client(Some(shared.clone()));
     assert!(
@@ -981,7 +959,7 @@ fn the_registered_connector_is_the_one_policy_calls_use() {
 }
 
 #[test]
-fn two_transports_from_one_registration_share_a_pool() {
+fn two_transports_over_one_connector_share_a_pool() {
     let shared = crate::test_support::connector(16, None);
     let first = build_client(Some(shared.clone()));
     let second = build_client(Some(shared.clone()));
@@ -992,13 +970,30 @@ fn two_transports_from_one_registration_share_a_pool() {
 }
 
 #[test]
-fn an_unregistered_host_falls_back_to_its_own_pool() {
+fn a_missing_connector_falls_back_to_a_pool_of_its_own() {
     praxis_tls::provider::install();
     let first = build_client(None);
     let second = build_client(None);
     assert!(
         !std::ptr::eq(first.connector().connector(), second.connector().connector()),
         "the fallback is a private pool, so it cannot be mistaken for the shared one"
+    );
+}
+
+#[test]
+fn a_missing_connector_warns_that_policy_calls_open_a_second_pool() {
+    praxis_tls::provider::install();
+    let (_client, logs) = capture_warnings(|| build_client(None));
+    assert!(
+        logs.contains("second connection pool"),
+        "an operator must be told policy calls bypass the runtime's pool; got: {logs}"
+    );
+
+    let shared = crate::test_support::connector(8, None);
+    let (_client, logs) = capture_warnings(|| build_client(Some(shared)));
+    assert!(
+        logs.is_empty(),
+        "a transport handed a connector has nothing to warn about; got: {logs}"
     );
 }
 
@@ -1154,10 +1149,40 @@ fn drain_body(stream: &mut TcpStream, head: &str) {
     }
 }
 
+/// Run `f` and return its result with everything it logged at warn level
+/// or above on this thread.
+fn capture_warnings<T, F: FnOnce() -> T>(f: F) -> (T, String) {
+    /// Shared sink the captured subscriber writes into.
+    #[derive(Clone)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let buffer = Buffer(Arc::new(Mutex::new(Vec::new())));
+    let writer = buffer.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let bytes = buffer.0.lock().unwrap().clone();
+    (out, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 /// Build a transport with a private test pool.
 fn transport(allow_private: bool) -> PolicyHttpTransport {
     praxis_tls::provider::install();
-    let transport = PolicyHttpTransport::new(allow_private, no_allowlist());
+    let transport = PolicyHttpTransport::with_connector(None, allow_private, no_allowlist());
     transport
         .client
         .set(build_client(None))
