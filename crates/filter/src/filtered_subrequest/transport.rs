@@ -13,7 +13,8 @@ use crate::StreamTerminationCause;
 ///
 /// Applies TLS settings (CA, client cert, verify toggle) and
 /// connection options (timeouts) from the upstream config. Derives
-/// SNI from the address hostname when not explicitly configured.
+/// SNI from the address (hostname, or IP for IP SAN verification) when
+/// not explicitly configured.
 ///
 /// Resolution goes through [`resolve_upstream_checked`], so a sub-request
 /// upstream hostname that resolves into a private or reserved range is

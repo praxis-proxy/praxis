@@ -593,6 +593,21 @@ async fn build_peer_derives_sni_from_hostname_address() {
 }
 
 #[tokio::test]
+async fn build_peer_names_an_ip_address_by_its_ip() {
+    let tls: praxis_tls::ClusterTls = serde_yaml::from_str("verify: true").unwrap();
+    let cached = praxis_tls::CachedClusterTls::try_from_config(&tls).unwrap();
+    let upstream = praxis_core::connectivity::Upstream {
+        address: std::sync::Arc::from("[::1]:9443"),
+        connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: Some(cached),
+        authority: None,
+    };
+
+    let peer = super::transport::build_peer(&upstream, false).await.unwrap();
+    assert_eq!(peer.sni, "::1", "an IP address must be verified against its IP SAN");
+}
+
+#[tokio::test]
 async fn build_peer_rejects_hostname_resolving_to_private_address() {
     let upstream = praxis_core::connectivity::Upstream {
         address: std::sync::Arc::from("localhost:9444"),

@@ -105,7 +105,8 @@ pub struct ClusterHttpOptions {
     /// scheme default (80, or 443 with `tls`), and a retry to another
     /// endpoint sends that endpoint's address. Without `tls.sni`, the
     /// TLS SNI follows the endpoint too rather than copying the
-    /// downstream `Host`; an IP endpoint gets no SNI.
+    /// downstream `Host`; an IP endpoint is verified against its
+    /// certificate's IP SAN.
     ///
     /// ```
     /// # use praxis_core::config::Cluster;

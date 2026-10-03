@@ -794,20 +794,22 @@ pub fn is_ip_literal(host: &str) -> bool {
         .is_ok()
 }
 
-/// Derive an SNI hostname from an `address` string in `host:port` form.
+/// Derive the TLS server name for an `address` in `host:port` form.
 ///
-/// Returns the host portion if it is a DNS name. Returns an empty
-/// string if the host is an IP address (IP-based SNI is not standard
-/// per [RFC 6066]).
+/// A DNS name comes back as the hostname. An IP address comes back as
+/// the bare IP, brackets stripped: rustls verifies it against the
+/// certificate's IP SAN and, as [RFC 6066] requires, sends no SNI
+/// extension for it.
 ///
 /// ```
 /// use praxis_core::connectivity::peer;
 ///
 /// assert_eq!(peer::derive_sni("api.example.com:443"), "api.example.com");
-/// assert_eq!(peer::derive_sni("127.0.0.1:443"), "");
+/// assert_eq!(peer::derive_sni("127.0.0.1:443"), "127.0.0.1");
+/// assert_eq!(peer::derive_sni("[::1]:443"), "::1");
 /// ```
 ///
-/// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
+/// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
 pub fn derive_sni(address: &str) -> String {
     let raw = address.rsplit_once(':').map_or(address, |(host_part, _)| host_part);
     // Certificates never carry the root dot; a dotted IP spelling keeps it and fails closed.
@@ -817,15 +819,13 @@ pub fn derive_sni(address: &str) -> String {
     } else {
         stripped
     };
-    if is_ip_literal(host) {
-        tracing::debug!(
-            address,
-            "upstream is an IP without explicit SNI; TLS hostname verification is meaningless"
-        );
-        return String::new();
-    }
-    tracing::debug!(address, sni = host, "derived SNI from upstream address");
-    host.to_owned()
+    let name = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .filter(|inner| inner.parse::<IpAddr>().is_ok())
+        .unwrap_or(host);
+    tracing::debug!(address, sni = name, "derived TLS server name from upstream address");
+    name.to_owned()
 }
 
 // -----------------------------------------------------------------------------
@@ -1183,13 +1183,31 @@ mod tests {
     }
 
     #[test]
-    fn derive_sni_returns_empty_for_ip() {
-        assert_eq!(derive_sni("127.0.0.1:8443"), "", "should return empty for IP address");
+    fn derive_sni_returns_the_ip_for_an_ipv4_address() {
+        assert_eq!(
+            derive_sni("10.0.0.5:443"),
+            "10.0.0.5",
+            "an IPv4 endpoint should be verified against its IP SAN, so its name is the IP"
+        );
     }
 
     #[test]
-    fn derive_sni_returns_empty_for_ipv6() {
-        assert_eq!(derive_sni("[::1]:8443"), "", "should return empty for IPv6 address");
+    fn derive_sni_returns_the_unbracketed_ip_for_an_ipv6_address() {
+        assert_eq!(
+            derive_sni("[::1]:8443"),
+            "::1",
+            "rustls parses a bare IPv6 address, not the bracketed authority form"
+        );
+        assert_eq!(derive_sni("[2001:db8::1]:443"), "2001:db8::1");
+    }
+
+    #[test]
+    fn derive_sni_keeps_brackets_around_a_non_ip() {
+        assert_eq!(
+            derive_sni("[backend]:443"),
+            "[backend]",
+            "only a real IPv6 literal loses its brackets; anything else stays invalid and fails closed"
+        );
     }
 
     #[test]

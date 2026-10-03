@@ -90,7 +90,8 @@ impl ClusterEntry {
     /// client cannot steer the upstream TLS name. The chosen value
     /// goes through [`sni_candidate`]: SNI must be a bare DNS
     /// hostname per [RFC 6066], so ports and the root dot are
-    /// stripped and IP literals produce no SNI. A cluster whose
+    /// stripped and an IP literal is skipped, leaving the peer to
+    /// derive the name from the endpoint address. A cluster whose
     /// authority follows the endpoint skips all of this and leaves SNI
     /// unset, so the peer derives it from each attempt's own endpoint
     /// address.

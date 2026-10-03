@@ -267,8 +267,8 @@ fn apply_per_try_timeout(ctx: &PingoraRequestCtx, upstream: &mut Upstream) {
 /// TLS certificates are already pre-parsed in the [`CachedClusterTls`]
 /// attached to the upstream, so this performs no filesystem I/O.
 ///
-/// When `sni` is `None`, derives it from the upstream address hostname
-/// (unless it is an IP address).
+/// When `sni` is `None`, derives it from the upstream address: a hostname
+/// endpoint is verified by name, an IP endpoint by its certificate's IP SAN.
 ///
 /// `allow_private` mirrors `insecure_options.allow_private_upstreams`:
 /// when it is `false`, an upstream hostname that resolves into a private
@@ -496,10 +496,14 @@ clusters:
         );
     }
 
-    #[test]
-    fn sni_not_set_with_ip_address_leaves_sni_empty() {
-        let sni = peer_utils::derive_sni("127.0.0.1:8443");
-        assert_eq!(sni, "", "SNI should be empty for IP address");
+    #[tokio::test]
+    async fn build_peer_names_an_ip_endpoint_by_its_ip() {
+        let upstream = tls_upstream("127.0.0.1:8443", None);
+        let peer = build_peer(&upstream, false).await.expect("should build TLS peer");
+        assert_eq!(
+            peer.sni, "127.0.0.1",
+            "an IP endpoint without tls.sni should be verified against its IP SAN"
+        );
     }
 
     #[tokio::test]
