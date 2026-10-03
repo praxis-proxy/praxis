@@ -23,6 +23,14 @@ use crate::{
     context::PendingStreamChunks, extensions::RequestExtensions,
 };
 
+/// Present only while a cancelled streaming sub-request runs its completion
+/// body hooks. Their output is discarded, but earlier chunks or response
+/// headers may already have been delivered. Filters that remember stream
+/// delivery must ignore this synthetic completion pass while preserving any
+/// delivery evidence recorded before suppression.
+#[derive(Clone, Copy, Debug)]
+pub struct StreamBodySuppressed;
+
 /// Streaming body implementation for a filtered sub-request's response.
 pub(crate) struct FilteredStreamingBody {
     /// Upstream streaming body handle. `None` after cancellation.
@@ -290,7 +298,10 @@ impl StreamingResponseBody for FilteredStreamingBody {
             if let Some(upstream_body) = self.upstream.take() {
                 (*upstream_body).cancel().await;
             }
-            self.complete_step()?;
+            self.continuation.extensions.insert(StreamBodySuppressed);
+            let completion = self.complete_step();
+            let _ = self.continuation.extensions.remove::<StreamBodySuppressed>();
+            completion?;
         }
         Ok(())
     }

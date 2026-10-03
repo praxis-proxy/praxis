@@ -143,7 +143,7 @@ pub use factory::{
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use filtered_subrequest::{
     CalloutOutcome, CalloutResponse, FilteredSubrequestExecutor, StagedUpstream, StagedUpstreamFallback,
-    SubrequestRuntime,
+    StreamBodySuppressed, SubrequestRuntime,
 };
 pub use grpc_response::GrpcErrorMapping;
 #[cfg(feature = "upstream-binding")]

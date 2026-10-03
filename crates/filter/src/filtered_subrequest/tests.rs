@@ -2318,6 +2318,41 @@ impl crate::HttpFilter for BoundedCompletionFilter {
 // guardrail that blocks the final aggregated frame.
 struct RejectOnCompletionFilter;
 
+struct SuppressionProbeFilter(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for SuppressionProbeFilter {
+    fn name(&self) -> &'static str {
+        "test_suppression_probe"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    fn response_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadOnly
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        if end_of_stream {
+            self.0.store(
+                ctx.extensions.get::<crate::StreamBodySuppressed>().is_some(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::HttpFilter for RejectOnCompletionFilter {
     fn name(&self) -> &'static str {
@@ -2905,6 +2940,93 @@ async fn run_streaming_suppress_error_preserves_parent_extensions() {
     assert!(
         body.next_chunk().await.unwrap().is_none(),
         "a suppressed body must terminate cleanly, not surface a spurious source error"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn suppressed_eos_is_visible_only_during_completion_hooks() {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let saw_suppression = Arc::new(AtomicBool::new(false));
+    let mut registry = callout_registry();
+    let witness = Arc::clone(&saw_suppression);
+    registry
+        .register(
+            "test_suppression_probe",
+            crate::FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(SuppressionProbeFilter(Arc::clone(&witness))))
+            })),
+        )
+        .unwrap();
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&routed_chain_yaml(addr, "- filter: test_suppression_probe")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = streaming_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let mut body = match executor
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("expected streaming response"),
+    };
+    body.suppress().await.unwrap();
+    let mut extensions = crate::RequestExtensions::default();
+    body.swap_extensions(&mut extensions);
+    backend.abort();
+    assert!(
+        saw_suppression.load(Ordering::SeqCst),
+        "suppressed EOS must expose its marker to response-body filters"
+    );
+    assert!(
+        extensions.get::<crate::StreamBodySuppressed>().is_none(),
+        "suppression marker must not escape the cancelled body's completion"
+    );
+
+    // An ordinary EOF runs the same completion callback without the marker.
+    let (normal_addr, normal_backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let mut normal_entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&routed_chain_yaml(normal_addr, "- filter: test_suppression_probe")).unwrap();
+    let normal_pipeline = Arc::new(crate::FilterPipeline::build(&mut normal_entries, &registry).unwrap());
+    let mut normal_body = match executor
+        .run(
+            &normal_pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("expected streaming response"),
+    };
+    while normal_body.next_chunk().await.unwrap().is_some() {}
+    normal_backend.abort();
+    assert!(
+        !saw_suppression.load(Ordering::SeqCst),
+        "ordinary EOS must not look like a suppressed body"
     );
 }
 
