@@ -404,7 +404,7 @@ fn resp_conditions_use_headers(conditions: &[ResponseCondition]) -> bool {
         let m = match c {
             ResponseCondition::When(m) | ResponseCondition::Unless(m) => m,
         };
-        m.headers.is_some()
+        m.headers.is_some() || m.headers_present.is_some()
     })
 }
 
@@ -533,6 +533,19 @@ mod tests {
         assert!(
             resp_conditions_use_headers(&conds),
             "should return true when a condition has headers"
+        );
+    }
+
+    #[test]
+    fn resp_conditions_use_headers_counts_the_headers_present_predicate() {
+        let conds = vec![ResponseCondition::Unless(ResponseConditionMatch {
+            status: Some(vec![200]),
+            headers: None,
+            headers_present: Some(vec!["cache-control".to_owned()]),
+        })];
+        assert!(
+            resp_conditions_use_headers(&conds),
+            "a headers_present predicate reads response headers too"
         );
     }
 

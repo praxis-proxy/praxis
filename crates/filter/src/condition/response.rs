@@ -98,6 +98,12 @@ fn matches_status_headers(m: &ResponseConditionMatch, status: http::StatusCode, 
         }
     }
 
+    if let Some(names) = &m.headers_present
+        && !names.iter().all(|name| headers.contains_key(name.as_str()))
+    {
+        return false;
+    }
+
     true
 }
 
@@ -611,6 +617,68 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn unless_response_headers_present_skips_when_backend_sent_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cache-control", HeaderValue::from_static("max-age=60"));
+        let resp = make_response(200, headers);
+        assert!(
+            !should_execute_response(&[resp_unless(resp_presence_match(&["cache-control"]))], &resp),
+            "unless headers_present should skip the filter whatever value the backend sent"
+        );
+    }
+
+    #[test]
+    fn unless_response_headers_present_runs_when_header_absent() {
+        let resp = make_response(200, HeaderMap::new());
+        assert!(
+            should_execute_response(&[resp_unless(resp_presence_match(&["cache-control"]))], &resp),
+            "unless headers_present should run the filter when the backend left the header out"
+        );
+    }
+
+    #[test]
+    fn when_response_headers_present_needs_every_name_case_insensitively() {
+        let mut headers = HeaderMap::new();
+        headers.insert("etag", HeaderValue::from_static("\"v1\""));
+        let condition = resp_when(resp_presence_match(&["ETag", "Last-Modified"]));
+        assert!(
+            !should_execute_response(std::slice::from_ref(&condition), &make_response(200, headers.clone())),
+            "one missing name should fail the whole predicate"
+        );
+        headers.insert("last-modified", HeaderValue::from_bytes(b"\xff").unwrap());
+        assert!(
+            should_execute_response(&[condition], &make_response(200, headers)),
+            "every name present, in any case and with any value, should satisfy the predicate"
+        );
+    }
+
+    #[test]
+    fn response_headers_present_invalid_name_is_never_present() {
+        let resp = make_response(200, HeaderMap::new());
+        assert!(
+            !should_execute_response(&[resp_when(resp_presence_match(&["bad header"]))], &resp),
+            "an invalid name can never be present"
+        );
+    }
+
+    #[test]
+    fn response_headers_present_ands_with_status() {
+        let mut headers = HeaderMap::new();
+        headers.insert("cache-control", HeaderValue::from_static("no-store"));
+        let mut matcher = resp_presence_match(&["cache-control"]);
+        matcher.status = Some(vec![200]);
+        let condition = resp_when(matcher);
+        assert!(
+            should_execute_response(std::slice::from_ref(&condition), &make_response(200, headers.clone())),
+            "matching status and present header should run the filter"
+        );
+        assert!(
+            !should_execute_response(&[condition], &make_response(404, headers)),
+            "a status mismatch should veto a present header"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -652,6 +720,15 @@ mod tests {
             status: None,
             headers: Some(headers),
             headers_present: None,
+        }
+    }
+
+    /// Build a condition requiring every listed response header to be present.
+    fn resp_presence_match(names: &[&str]) -> ResponseConditionMatch {
+        ResponseConditionMatch {
+            status: None,
+            headers: None,
+            headers_present: Some(names.iter().map(|name| (*name).to_owned()).collect()),
         }
     }
 }

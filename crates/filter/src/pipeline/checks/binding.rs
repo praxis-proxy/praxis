@@ -681,6 +681,7 @@ fn single_binding_condition_state(
         || matcher.path_prefix.is_some()
         || matcher.methods.is_some()
         || matcher.headers.is_some()
+        || matcher.headers_present.is_some()
         || matcher.selected_upstream.is_some();
     let Some(bound) = &matcher.bound_upstream else {
         return BindingConditionState::Maybe;
@@ -3564,6 +3565,33 @@ mod tests {
             matches!(state, BindingConditionState::Maybe),
             "a matching bound tag paired with a request predicate depends on the request"
         );
+    }
+
+    #[test]
+    fn a_matcher_with_a_headers_present_predicate_is_only_maybe() {
+        let metadata =
+            crate::pipeline::catalog::ClusterApplicationMetadata::new(Some(Arc::from("openai_responses")), None);
+        let matcher = ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: None,
+            methods: None,
+            headers: None,
+            headers_present: Some(vec!["x-model".to_owned()]),
+            bound_upstream: Some(praxis_core::config::ApplicationMatch {
+                application_protocol: Some("openai_responses".to_owned()),
+                application_provider: None,
+            }),
+            selected_upstream: None,
+        };
+
+        for condition in [Condition::When(matcher.clone()), Condition::Unless(matcher)] {
+            let state = binding_condition_state(std::slice::from_ref(&condition), Some(&metadata));
+            assert!(
+                matches!(state, BindingConditionState::Maybe),
+                "a matching bound tag paired with headers_present depends on the request: {condition:?}"
+            );
+        }
     }
 
     #[cfg(feature = "iterative-request-router")]

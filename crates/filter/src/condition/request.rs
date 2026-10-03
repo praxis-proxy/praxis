@@ -101,6 +101,10 @@ impl HeaderSource for Request {
     fn header(&self, name: &HeaderName) -> Result<Option<Cow<'_, str>>, Infallible> {
         Ok(self.headers.get(name).and_then(|v| v.to_str().ok()).map(Cow::Borrowed))
     }
+
+    fn contains(&self, name: &HeaderName) -> Result<bool, Infallible> {
+        Ok(self.headers.contains_key(name))
+    }
 }
 
 /// Returns true if the filter should execute given its conditions.
@@ -181,11 +185,12 @@ pub(crate) fn should_execute_bound_selected(
 /// Returns whether the filter should execute, reading header values from
 /// `source` instead of the original request.
 ///
-/// Path and method predicates always read `req`; the header predicate consults
-/// `source`, the `bound_upstream` predicate consults `bound`, and the
-/// `selected_upstream` predicate consults `selected`. The request phase passes
-/// the request itself (infallible); the pre-read body phase passes an overlay
-/// that can fail when a conditioned header has no unambiguous effective value.
+/// Path and method predicates always read `req`; the `headers` and
+/// `headers_present` predicates consult `source`, the `bound_upstream`
+/// predicate consults `bound`, and the `selected_upstream` predicate consults
+/// `selected`. The request phase passes the request itself (infallible); the
+/// pre-read body phase passes an overlay that can fail when a conditioned
+/// header has no unambiguous effective value.
 pub(crate) fn should_execute_from<S: HeaderSource>(
     conditions: &[Condition],
     req: &Request,
@@ -264,6 +269,12 @@ fn matches_request_from<S: HeaderSource>(
         return Ok(false);
     }
 
+    if let Some(names) = &m.headers_present
+        && !headers_present(names, source)?
+    {
+        return Ok(false);
+    }
+
     if let Some(want) = &m.bound_upstream
         && !bound.matches(want)
     {
@@ -291,6 +302,22 @@ fn headers_match<S: HeaderSource>(headers: &HashMap<String, String>, source: &S)
         match source.header(&header_name)? {
             Some(v) if v.as_ref() == value.as_str() => {},
             _ => return Ok(false),
+        }
+    }
+    Ok(true)
+}
+
+/// Whether every listed header is present in `source`, whatever its value.
+///
+/// An unparseable name can never be present, so it is a no-match (validation
+/// rejects such names up front; this keeps evaluation total).
+fn headers_present<S: HeaderSource>(names: &[String], source: &S) -> Result<bool, S::Error> {
+    for name in names {
+        let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
+            return Ok(false);
+        };
+        if !source.contains(&header_name)? {
+            return Ok(false);
         }
     }
     Ok(true)
@@ -897,6 +924,10 @@ mod tests {
             }
             Ok(self.values.get(name).map(|v| Cow::Borrowed(v.as_str())))
         }
+
+        fn contains(&self, name: &HeaderName) -> Result<bool, MockError> {
+            self.header(name).map(|value| value.is_some())
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -1355,6 +1386,182 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // headers_present Predicate
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn unless_headers_present_skips_when_header_sent_with_any_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-model", HeaderValue::from_static("anything"));
+        let req = make_request(Method::POST, "/v1/chat/completions", headers);
+        assert!(
+            !should_execute(&[unless(presence_match(&["x-model"]))], &req),
+            "unless headers_present should skip the filter whatever value the client sent"
+        );
+    }
+
+    #[test]
+    fn unless_headers_present_runs_when_header_absent() {
+        let req = make_request(Method::POST, "/v1/chat/completions", HeaderMap::new());
+        assert!(
+            should_execute(&[unless(presence_match(&["x-model"]))], &req),
+            "unless headers_present should run the filter when the header is missing"
+        );
+    }
+
+    #[test]
+    fn when_headers_present_matches_an_empty_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-model", HeaderValue::from_static(""));
+        let req = make_request(Method::GET, "/", headers);
+        assert!(
+            should_execute(&[when(presence_match(&["x-model"]))], &req),
+            "an empty value is still a present header"
+        );
+    }
+
+    #[test]
+    fn when_headers_present_skips_when_header_absent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-other", HeaderValue::from_static("1"));
+        let req = make_request(Method::GET, "/", headers);
+        assert!(
+            !should_execute(&[when(presence_match(&["x-model"]))], &req),
+            "when headers_present should skip the filter when the header is missing"
+        );
+    }
+
+    #[test]
+    fn headers_present_counts_a_value_that_is_not_visible_ascii() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-user", HeaderValue::from_bytes("José".as_bytes()).unwrap());
+        let req = make_request(Method::GET, "/", headers);
+        assert!(
+            should_execute(&[when(presence_match(&["x-user"]))], &req),
+            "a UTF-8 value has no text form for exact matching, but the header is still present"
+        );
+    }
+
+    #[test]
+    fn headers_present_names_are_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-model", HeaderValue::from_static("gpt"));
+        let req = make_request(Method::GET, "/", headers);
+        assert!(
+            should_execute(&[when(presence_match(&["X-Model"]))], &req),
+            "a mixed-case condition name should match the request header"
+        );
+    }
+
+    #[test]
+    fn headers_present_requires_every_listed_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-model", HeaderValue::from_static("gpt"));
+        let condition = when(presence_match(&["x-model", "x-tenant"]));
+        assert!(
+            !should_execute(
+                std::slice::from_ref(&condition),
+                &make_request(Method::GET, "/", headers.clone())
+            ),
+            "one missing name should fail the whole predicate"
+        );
+        headers.insert("x-tenant", HeaderValue::from_static("acme"));
+        assert!(
+            should_execute(&[condition], &make_request(Method::GET, "/", headers)),
+            "every listed name present should satisfy the predicate"
+        );
+    }
+
+    #[test]
+    fn headers_present_ands_with_exact_headers() {
+        let mut matcher = presence_match(&["x-model"]);
+        matcher.headers = Some(HashMap::from([("x-tenant".to_owned(), "acme".to_owned())]));
+        let condition = when(matcher);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-tenant", HeaderValue::from_static("acme"));
+        assert!(
+            !should_execute(
+                std::slice::from_ref(&condition),
+                &make_request(Method::GET, "/", headers.clone())
+            ),
+            "a missing presence header should veto a matching exact header"
+        );
+        headers.insert("x-model", HeaderValue::from_static("gpt"));
+        assert!(
+            should_execute(
+                std::slice::from_ref(&condition),
+                &make_request(Method::GET, "/", headers.clone())
+            ),
+            "both predicates satisfied should run the filter"
+        );
+        headers.insert("x-tenant", HeaderValue::from_static("other"));
+        assert!(
+            !should_execute(&[condition], &make_request(Method::GET, "/", headers)),
+            "an exact-header mismatch should veto a satisfied presence check"
+        );
+    }
+
+    #[test]
+    fn headers_present_invalid_name_is_never_present() {
+        let req = make_request(Method::GET, "/", HeaderMap::new());
+        assert!(
+            !should_execute(&[when(presence_match(&["x model"]))], &req),
+            "an invalid name can never be present, so when should skip"
+        );
+        assert!(
+            should_execute(&[unless(presence_match(&["x model"]))], &req),
+            "an invalid name can never be present, so unless should run"
+        );
+    }
+
+    #[test]
+    fn headers_present_overlay_sees_added_header() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        let source = MockSource::with(&[("x-model", "gpt")]);
+        let run = should_execute_from(
+            &[unless(presence_match(&["x-model"]))],
+            &req,
+            &source,
+            BoundUpstreamView::default(),
+            SelectedUpstream::none(),
+        )
+        .unwrap();
+        assert!(!run, "a header the overlay added should count as present");
+    }
+
+    #[test]
+    fn headers_present_overlay_remove_masks_original() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-model", HeaderValue::from_static("gpt"));
+        let req = make_request(Method::POST, "/", headers);
+        let run = should_execute_from(
+            &[unless(presence_match(&["x-model"]))],
+            &req,
+            &MockSource::empty(),
+            BoundUpstreamView::default(),
+            SelectedUpstream::none(),
+        )
+        .unwrap();
+        assert!(run, "a header the overlay removed should count as absent");
+    }
+
+    #[test]
+    fn headers_present_overlay_propagates_ambiguity() {
+        let req = make_request(Method::POST, "/", HeaderMap::new());
+        let result = should_execute_from(
+            &[unless(presence_match(&["x-model"]))],
+            &req,
+            &MockSource::ambiguous("x-model"),
+            BoundUpstreamView::default(),
+            SelectedUpstream::none(),
+        );
+        assert!(
+            matches!(result, Err(MockError)),
+            "an ambiguous overlay should fail closed instead of guessing presence"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
@@ -1458,6 +1665,20 @@ mod tests {
         }
     }
 
+    /// Build a condition requiring every listed header to be present.
+    fn presence_match(names: &[&str]) -> ConditionMatch {
+        ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: None,
+            methods: None,
+            headers: None,
+            headers_present: Some(names.iter().map(|name| (*name).to_owned()).collect()),
+            bound_upstream: None,
+            selected_upstream: None,
+        }
+    }
+
     /// Build a condition matching selected-upstream metadata.
     fn selected_upstream_match(protocol: Option<&str>, provider: Option<&str>) -> ConditionMatch {
         ConditionMatch {
@@ -1528,6 +1749,7 @@ mod tests {
                 path().prop_map(|p| path_match(&p)),
                 proptest::collection::vec("(GET|POST|PUT|DELETE|PATCH)", 1..=3)
                     .prop_map(|ms| method_match(&ms.iter().map(String::as_str).collect::<Vec<_>>())),
+                "x-[a-z]{1,6}".prop_map(|name| presence_match(&[name.as_str()])),
             ]
         }
 
