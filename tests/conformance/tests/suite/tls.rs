@@ -6,16 +6,19 @@
 //! Verifies TLS protocol enforcement behavior against
 //! [RFC 8446] (TLS 1.3) requirements. Praxis uses rustls,
 //! which only supports TLS 1.2 and 1.3 with strong cipher
-//! suites.
+//! suites. Upstream certificate identity checks follow
+//! [RFC 9110 Section 4.3.4] and [RFC 9525 Section 6.4].
 //!
 //! [RFC 8446]: https://datatracker.ietf.org/doc/html/rfc8446
+//! [RFC 9110 Section 4.3.4]: https://datatracker.ietf.org/doc/html/rfc9110#section-4.3.4
+//! [RFC 9525 Section 6.4]: https://datatracker.ietf.org/doc/html/rfc9525#section-6.4
 
 use std::sync::Arc;
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    TestCertificates, free_port, https_get, start_backend, start_tls_proxy, start_tls_proxy_no_wait,
-    tls_connection_rejected, wait_for_https,
+    TestCertificates, free_port, http_get, https_get, start_backend, start_proxy, start_tls_backend, start_tls_proxy,
+    start_tls_proxy_no_wait, tls_connection_rejected, wait_for_https,
 };
 
 // -----------------------------------------------------------------------------
@@ -165,6 +168,53 @@ fn rfc8446_invalid_client_cert_rejected_with_mtls() {
 }
 
 // -----------------------------------------------------------------------------
+// Tests - RFC 9110 and RFC 9525 - https Certificate Verification
+// -----------------------------------------------------------------------------
+
+/// [RFC 9110 Section 4.3.4]: when the upstream host is a literal IP
+/// address, the reference identity is an IP-ID ([RFC 9110 Section 4.3.5]),
+/// which matches an `iPAddress` SAN holding the same address, octet for
+/// octet ([RFC 9525 Section 6.4]). An IP endpoint with no `tls.sni` must
+/// verify against the backend certificate's `127.0.0.1` IP SAN, whatever
+/// `Host` the client sends.
+///
+/// [RFC 9110 Section 4.3.4]: https://datatracker.ietf.org/doc/html/rfc9110#section-4.3.4
+/// [RFC 9110 Section 4.3.5]: https://datatracker.ietf.org/doc/html/rfc9110#section-4.3.5
+/// [RFC 9525 Section 6.4]: https://datatracker.ietf.org/doc/html/rfc9525#section-6.4
+#[test]
+fn rfc9110_ip_endpoint_verified_against_ip_san() {
+    let certs = TestCertificates::generate();
+    let backend_port = start_tls_backend(&certs, "ip-san-ok");
+    let config = Config::from_yaml(&ip_endpoint_tls_yaml(backend_port, &certs)).unwrap();
+    let proxy = start_proxy(&config);
+
+    let (status, body) = http_get(proxy.addr(), "/", Some("client.example.com"));
+    assert_eq!(status, 200, "a certificate carrying the endpoint's IP SAN must verify");
+    assert_eq!(body, "ip-san-ok", "the verified upstream should answer");
+}
+
+/// [RFC 9110 Section 4.3.5]: an IP-ID reference identity matches only
+/// an `iPAddress` SAN ([RFC 9525 Section 6.4]), so a certificate that
+/// names the backend by DNS name alone must fail verification for an IP
+/// endpoint, even when the client's `Host` is that DNS name.
+///
+/// [RFC 9110 Section 4.3.5]: https://datatracker.ietf.org/doc/html/rfc9110#section-4.3.5
+/// [RFC 9525 Section 6.4]: https://datatracker.ietf.org/doc/html/rfc9525#section-6.4
+#[test]
+fn rfc9110_ip_endpoint_rejects_cert_without_ip_san() {
+    let certs = TestCertificates::generate_dns_only("localhost");
+    let backend_port = start_tls_backend(&certs, "should-not-reach");
+    let config = Config::from_yaml(&ip_endpoint_tls_yaml(backend_port, &certs)).unwrap();
+    let proxy = start_proxy(&config);
+
+    let (status, _) = http_get(proxy.addr(), "/", Some("localhost"));
+    assert_eq!(
+        status, 502,
+        "a certificate without the endpoint's IP SAN must fail verification"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -198,6 +248,42 @@ insecure_options:
 "#,
         cert = certs.cert_path.display(),
         key = certs.key_path.display(),
+    )
+}
+
+/// Build a proxy YAML config with a plain listener in front of one
+/// verifying TLS cluster: a single `127.0.0.1` endpoint, the authority
+/// following the endpoint, no `tls.sni`, and the test CA trusted.
+fn ip_endpoint_tls_yaml(backend_port: u16, certs: &TestCertificates) -> String {
+    format!(
+        r#"
+listeners:
+  - name: plain
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+            http:
+              authority: {{ from: endpoint }}
+            tls:
+              ca:
+                ca_path: "{ca}"
+insecure_options:
+  allow_private_endpoints: true
+"#,
+        proxy_port = free_port(),
+        ca = certs.ca_cert_path.display(),
     )
 }
 

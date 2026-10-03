@@ -145,6 +145,14 @@ impl AddressResolutionError {
     }
 }
 
+/// A TLS upstream with no server name to verify its certificate against.
+#[derive(Debug, thiserror::Error)]
+#[error("refusing TLS to upstream '{address}': no server name to verify its certificate against")]
+pub struct MissingServerName {
+    /// The upstream address no name was found for.
+    pub address: String,
+}
+
 /// Cached DNS resolution: the complete raw address set (portless, resolver
 /// order), or the failure message when the last resolution failed.
 struct DnsCacheEntry {
@@ -794,20 +802,22 @@ pub fn is_ip_literal(host: &str) -> bool {
         .is_ok()
 }
 
-/// Derive an SNI hostname from an `address` string in `host:port` form.
+/// Derive the TLS server name for an `address` in `host:port` form.
 ///
-/// Returns the host portion if it is a DNS name. Returns an empty
-/// string if the host is an IP address (IP-based SNI is not standard
-/// per [RFC 6066]).
+/// A DNS name comes back as the hostname. An IP address comes back as
+/// the bare IP, brackets stripped: rustls verifies it against the
+/// certificate's IP SAN and, as [RFC 6066] requires, sends no SNI
+/// extension for it.
 ///
 /// ```
 /// use praxis_core::connectivity::peer;
 ///
 /// assert_eq!(peer::derive_sni("api.example.com:443"), "api.example.com");
-/// assert_eq!(peer::derive_sni("127.0.0.1:443"), "");
+/// assert_eq!(peer::derive_sni("127.0.0.1:443"), "127.0.0.1");
+/// assert_eq!(peer::derive_sni("[::1]:443"), "::1");
 /// ```
 ///
-/// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
+/// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
 pub fn derive_sni(address: &str) -> String {
     let raw = address.rsplit_once(':').map_or(address, |(host_part, _)| host_part);
     // Certificates never carry the root dot; a dotted IP spelling keeps it and fails closed.
@@ -817,15 +827,55 @@ pub fn derive_sni(address: &str) -> String {
     } else {
         stripped
     };
-    if is_ip_literal(host) {
-        tracing::debug!(
-            address,
-            "upstream is an IP without explicit SNI; TLS hostname verification is meaningless"
-        );
-        return String::new();
+    let name = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .filter(|inner| inner.parse::<IpAddr>().is_ok())
+        .unwrap_or(host);
+    tracing::debug!(address, sni = name, "derived TLS server name from upstream address");
+    name.to_owned()
+}
+
+/// The name a TLS peer for `address` presents and verifies the upstream
+/// certificate against.
+///
+/// `tls.sni` wins when set, whether configured or filled in from the
+/// request by the load balancer. Otherwise the name comes from the
+/// endpoint address (see [`derive_sni`]).
+///
+/// ```
+/// use praxis_core::connectivity::peer;
+/// use praxis_tls::{CachedClusterTls, ClusterTls};
+///
+/// let mut tls = CachedClusterTls::try_from_config(&ClusterTls::default()).unwrap();
+/// assert_eq!(
+///     peer::tls_server_name(&tls, "10.0.0.5:443").unwrap(),
+///     "10.0.0.5"
+/// );
+///
+/// tls.set_sni("api.example.com");
+/// assert_eq!(
+///     peer::tls_server_name(&tls, "10.0.0.5:443").unwrap(),
+///     "api.example.com"
+/// );
+///
+/// tls.set_sni("");
+/// assert!(peer::tls_server_name(&tls, "10.0.0.5:443").is_err());
+/// ```
+///
+/// # Errors
+///
+/// Returns [`MissingServerName`] when neither gives a name. Pingora's
+/// connector turns certificate verification off for an empty name, so a
+/// TLS peer must never be built with one.
+pub fn tls_server_name(tls: &praxis_tls::CachedClusterTls, address: &str) -> Result<String, MissingServerName> {
+    let name = tls.sni().map_or_else(|| derive_sni(address), str::to_owned);
+    if name.is_empty() {
+        return Err(MissingServerName {
+            address: address.to_owned(),
+        });
     }
-    tracing::debug!(address, sni = host, "derived SNI from upstream address");
-    host.to_owned()
+    Ok(name)
 }
 
 // -----------------------------------------------------------------------------
@@ -1183,13 +1233,61 @@ mod tests {
     }
 
     #[test]
-    fn derive_sni_returns_empty_for_ip() {
-        assert_eq!(derive_sni("127.0.0.1:8443"), "", "should return empty for IP address");
+    fn derive_sni_returns_the_ip_for_an_ipv4_address() {
+        assert_eq!(
+            derive_sni("10.0.0.5:443"),
+            "10.0.0.5",
+            "an IPv4 endpoint should be verified against its IP SAN, so its name is the IP"
+        );
     }
 
     #[test]
-    fn derive_sni_returns_empty_for_ipv6() {
-        assert_eq!(derive_sni("[::1]:8443"), "", "should return empty for IPv6 address");
+    fn derive_sni_returns_the_unbracketed_ip_for_an_ipv6_address() {
+        assert_eq!(
+            derive_sni("[::1]:8443"),
+            "::1",
+            "rustls parses a bare IPv6 address, not the bracketed authority form"
+        );
+        assert_eq!(derive_sni("[2001:db8::1]:443"), "2001:db8::1");
+    }
+
+    #[test]
+    fn tls_server_name_refuses_an_empty_name() {
+        let mut tls = praxis_tls::CachedClusterTls::try_from_config(&praxis_tls::ClusterTls::default()).unwrap();
+        let unnamed_address = tls_server_name(&tls, ":443").unwrap_err();
+        assert_eq!(unnamed_address.address, ":443", "the error should name the upstream");
+
+        tls.set_sni("");
+        let empty_sni = tls_server_name(&tls, "10.0.0.5:443").unwrap_err();
+        assert!(
+            empty_sni.to_string().contains("no server name"),
+            "an empty configured name must be refused, not fall back to the address: {empty_sni}"
+        );
+    }
+
+    #[test]
+    fn tls_server_name_prefers_the_set_sni_over_the_address() {
+        let mut tls = praxis_tls::CachedClusterTls::try_from_config(&praxis_tls::ClusterTls::default()).unwrap();
+        assert_eq!(
+            tls_server_name(&tls, "backend.example.com:443").unwrap(),
+            "backend.example.com"
+        );
+
+        tls.set_sni("api.example.com");
+        assert_eq!(
+            tls_server_name(&tls, "backend.example.com:443").unwrap(),
+            "api.example.com",
+            "a set SNI should win over the endpoint name"
+        );
+    }
+
+    #[test]
+    fn derive_sni_keeps_brackets_around_a_non_ip() {
+        assert_eq!(
+            derive_sni("[backend]:443"),
+            "[backend]",
+            "only a real IPv6 literal loses its brackets; anything else stays invalid and fails closed"
+        );
     }
 
     #[test]

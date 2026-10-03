@@ -5,10 +5,8 @@
 
 use tracing::warn;
 
-use super::health_check::extract_host;
 use crate::{
-    config::{Cluster, Endpoint, InsecureOptions, UpstreamAuthority},
-    connectivity::peer::is_ip_literal,
+    config::{Cluster, InsecureOptions, UpstreamAuthority},
     errors::ProxyError,
 };
 
@@ -47,17 +45,13 @@ pub(super) fn validate_tls_settings(cluster: &Cluster, insecure_options: &Insecu
 
 /// Where a TLS cluster's SNI comes from, as far as config validation can tell.
 #[derive(Clone, Copy, Debug)]
-enum SniSource<'cfg> {
+enum SniSource {
     /// `tls.sni` is set.
     Configured,
 
-    /// `authority: { from: endpoint }` with only hostname endpoints, so each
-    /// attempt names its own endpoint.
+    /// `authority: { from: endpoint }`, so each attempt is verified against
+    /// its own endpoint: a hostname by name, an IP by its certificate's IP SAN.
     Endpoint,
-
-    /// `authority: { from: endpoint }`, but this endpoint is an IP literal
-    /// and has no name to send.
-    IpEndpoint(&'cfg str),
 
     /// No SNI known at config time.
     Missing,
@@ -65,55 +59,47 @@ enum SniSource<'cfg> {
 
 /// The SNI an endpoint-derived authority provides, or [`SniSource::Missing`]
 /// for any other authority mode.
-fn endpoint_sni(cluster: &Cluster) -> SniSource<'_> {
-    if !cluster
+fn endpoint_sni(cluster: &Cluster) -> SniSource {
+    if cluster
         .http
         .authority
         .as_ref()
         .is_some_and(UpstreamAuthority::follows_endpoint)
     {
-        return SniSource::Missing;
+        SniSource::Endpoint
+    } else {
+        SniSource::Missing
     }
-    cluster
-        .endpoints
-        .iter()
-        .map(Endpoint::address)
-        .find(|address| is_ip_literal(extract_host(address)))
-        .map_or(SniSource::Endpoint, SniSource::IpEndpoint)
 }
 
 /// Require SNI when verification is enabled, unless explicitly opted out.
 fn check_sni_verify_requirement(
-    sni: SniSource<'_>,
+    sni: SniSource,
     verify: bool,
     cluster_name: &str,
     insecure_options: &InsecureOptions,
 ) -> Result<(), ProxyError> {
-    let ip_endpoint = match sni {
+    match sni {
         SniSource::Configured | SniSource::Endpoint => return Ok(()),
-        SniSource::IpEndpoint(address) => Some(address),
-        SniSource::Missing => None,
-    };
+        SniSource::Missing => {},
+    }
     if !verify {
         return Ok(());
     }
     if insecure_options.allow_tls_without_sni {
         warn!(
             cluster = %cluster_name,
-            "upstream TLS enabled without SNI; hostname verification will be degraded \
-             (allowed by insecure_options.allow_tls_without_sni)"
+            "upstream TLS without tls.sni: the certificate is verified against the cluster's fixed authority \
+             if set, else the client's Host header, falling back to the endpoint address when that is not a \
+             hostname (allowed by insecure_options.allow_tls_without_sni)"
         );
         return Ok(());
     }
-    let reason = ip_endpoint.map_or_else(
-        || "no sni configured".to_owned(),
-        |address| {
-            format!("no sni configured, and endpoint '{address}' is an IP address with no name to derive one from")
-        },
-    );
     Err(ProxyError::Config(format!(
-        "cluster '{cluster_name}': upstream TLS with verification enabled but {reason}; \
-         set tls.sni or set insecure_options.allow_tls_without_sni: true to allow degraded verification"
+        "cluster '{cluster_name}': upstream TLS with verification enabled but no sni configured; \
+         set tls.sni, or authority: {{ from: endpoint }} to verify each endpoint against its own name or IP SAN, \
+         or set insecure_options.allow_tls_without_sni: true to verify against the authority or client Host header \
+         instead"
     )))
 }
 
@@ -172,6 +158,8 @@ fn check_no_upstream_crls(ca: Option<&praxis_tls::CaConfig>, cluster_name: &str)
     reason = "tests use unwrap/expect/indexing/raw strings for brevity"
 )]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use praxis_tls::{CaConfig, ClusterTls};
 
     use super::super::validate_clusters;
@@ -439,9 +427,18 @@ mod tests {
             ..Cluster::with_defaults("web", vec!["10.0.0.1:443".into()])
         }];
         let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        let message = err.to_string();
         assert!(
-            err.to_string().contains("no sni configured"),
-            "should reject TLS+verify without SNI: {err}"
+            message.contains("no sni configured"),
+            "should reject TLS+verify without SNI: {message}"
+        );
+        assert!(
+            message.contains("authority: { from: endpoint }"),
+            "the error should offer the endpoint authority as a fix: {message}"
+        );
+        assert!(
+            message.contains("verify against the authority or client Host header instead"),
+            "the error should say what the opt-in really does: {message}"
         );
     }
 
@@ -455,7 +452,13 @@ mod tests {
             allow_tls_without_sni: true,
             ..InsecureOptions::default()
         };
-        validate_clusters(&clusters, &opts).expect("allow_tls_without_sni should demote error to warning");
+        let logs = capture_warnings(|| {
+            validate_clusters(&clusters, &opts).expect("allow_tls_without_sni should demote error to warning");
+        });
+        assert!(
+            logs.contains("client's Host header") && logs.contains("falling back to the endpoint address"),
+            "the warning should say where the verification name comes from: {logs}"
+        );
     }
 
     #[test]
@@ -469,33 +472,30 @@ mod tests {
     }
 
     #[test]
-    fn reject_verify_without_sni_when_authority_follows_an_ip_endpoint() {
+    fn accept_verify_without_sni_when_authority_follows_an_ip_endpoint() {
         let clusters = vec![endpoint_authority_cluster(&["api-a.example.com:443", "10.0.0.2:443"])];
-        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
-        assert!(
-            err.to_string().contains("endpoint '10.0.0.2:443' is an IP address"),
-            "an IP endpoint has no name to send as SNI, so the error should name it: {err}"
-        );
+        validate_clusters(&clusters, &InsecureOptions::default())
+            .expect("an IP endpoint is verified against its certificate's IP SAN, so verify needs no tls.sni");
     }
 
     #[test]
-    fn reject_verify_without_sni_when_authority_follows_an_ipv6_endpoint() {
+    fn accept_verify_without_sni_when_authority_follows_an_ipv6_endpoint() {
         let clusters = vec![endpoint_authority_cluster(&["[2001:db8::1]:443"])];
-        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
-        assert!(
-            err.to_string().contains("'[2001:db8::1]:443' is an IP address"),
-            "a bracketed IPv6 endpoint has no name to send as SNI: {err}"
-        );
+        validate_clusters(&clusters, &InsecureOptions::default())
+            .expect("a bracketed IPv6 endpoint is verified against its IP SAN too");
     }
 
     #[test]
-    fn allow_tls_without_sni_covers_an_ip_endpoint_with_endpoint_authority() {
-        let clusters = vec![endpoint_authority_cluster(&["10.0.0.2:443"])];
-        let opts = InsecureOptions {
-            allow_tls_without_sni: true,
-            ..InsecureOptions::default()
-        };
-        validate_clusters(&clusters, &opts).expect("allow_tls_without_sni should still demote the error");
+    fn reject_verify_without_sni_for_an_ip_endpoint_without_endpoint_authority() {
+        let clusters = vec![Cluster {
+            tls: Some(ClusterTls::default()),
+            ..Cluster::with_defaults("web", vec!["10.0.0.2:443".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("no sni configured;"),
+            "without the endpoint authority the name would come from the client Host, so tls.sni is still required: {err}"
+        );
     }
 
     #[test]
@@ -587,6 +587,40 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Run `func` and return everything it logged at WARN or above.
+    fn capture_warnings<F: FnOnce()>(func: F) -> String {
+        let buffer = Buffer(Arc::new(Mutex::new(Vec::new())));
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            // Another test in this binary may install a global subscriber
+            // concurrently, leaving callsite interest cached without this one.
+            tracing::callsite::rebuild_interest_cache();
+            func();
+        });
+        let bytes = buffer.0.lock().unwrap().clone();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    /// Shared in-memory sink for captured log output.
+    #[derive(Clone)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     /// A verifying TLS cluster with no `tls.sni` whose `Host` follows the endpoint.
     fn endpoint_authority_cluster(endpoints: &[&str]) -> Cluster {

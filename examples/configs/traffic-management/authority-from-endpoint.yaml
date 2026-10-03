@@ -13,7 +13,8 @@
 #
 # On a `tls` cluster without `tls.sni`, the TLS SNI follows the endpoint
 # too rather than copying the client's Host, so certificate verification
-# works per endpoint with no `tls.sni` at all:
+# works per endpoint with no `tls.sni` at all (an IP endpoint is checked
+# against the IP SAN on its certificate):
 #
 #   endpoints: ["api-a.example.com:443", "api-b.example.com:443"]
 #   http:

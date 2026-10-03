@@ -795,7 +795,7 @@ filter_chains:
 }
 
 #[test]
-fn reject_inline_endpoint_authority_with_ip_endpoint_and_no_sni() {
+fn accept_inline_endpoint_authority_with_ip_endpoint_and_verified_tls() {
     let yaml = r#"
 listeners:
   - name: web
@@ -818,11 +818,8 @@ filter_chains:
               authority: { from: endpoint }
             tls: {}
 "#;
-    let err = Config::from_yaml(yaml).unwrap_err();
-    assert!(
-        err.to_string().contains("endpoint '203.0.113.7:443' is an IP address"),
-        "an IP endpoint has no name for SNI, so verify still needs tls.sni: {err}"
-    );
+    Config::from_yaml(yaml)
+        .expect("an IP endpoint is verified against its certificate's IP SAN, so verify needs no tls.sni");
 }
 
 #[test]
