@@ -9,7 +9,7 @@
 //! header sanitization. Supports both buffered (collect full body)
 //! and streaming (chunk-by-chunk) response modes.
 
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
 use http::HeaderMap;
@@ -25,10 +25,14 @@ use super::{
         ensure_host_header, is_boundary_stripped, is_request_stripped, min_timeout, record_header_termination,
     },
     types::{
-        FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse, SubResponseBody,
+        FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse,
+        SubResponseBody, UrlSubRequestError,
     },
 };
-use crate::circuit::{CircuitCheck, PeerKey};
+use crate::{
+    circuit::{CircuitCheck, PeerKey},
+    connectivity::{UrlResolutionPolicy, UrlTargetError, prepare_url_target_with_policy},
+};
 
 // -----------------------------------------------------------------------------
 // SubRequestClient
@@ -109,6 +113,97 @@ impl SubRequestClient {
             connector,
             max_response_bytes,
         }
+    }
+
+    /// Execute a buffered request against an absolute HTTP(S) URL.
+    ///
+    /// The explicit `policy` selects cached DNS for operator-configured hosts
+    /// or a fresh per-call lookup for client-selected hosts. The `validate`
+    /// hook sees the complete normalized address set before any connection.
+    /// The URL authority replaces the request's `Host` and supplies TLS SNI.
+    /// The original request body is reused across address attempts. Another
+    /// address is tried after a connection failure or when a peer's circuit is
+    /// already open, before any request is sent to that peer.
+    ///
+    /// `timeout` is one overall budget for DNS, fallback attempts, and response
+    /// collection. `max_response_bytes` is also capped by this client's ceiling.
+    /// For incremental response bodies, use policy-aware target preparation,
+    /// [`crate::connectivity::PreparedTarget::bind`], and [`Self::send_streaming`]
+    /// with appropriate [`StreamLimits`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UrlSubRequestError`]. Its display does not include the URL,
+    /// including any credential-bearing query string.
+    #[expect(clippy::too_many_arguments, reason = "explicit target policy, bounds, and metadata")]
+    #[expect(clippy::too_many_lines, reason = "single-deadline preparation and fallback loop")]
+    pub async fn execute_url<F>(
+        &self,
+        url: &str,
+        request: SubRequest,
+        validate: F,
+        policy: UrlResolutionPolicy,
+        timeout: Duration,
+        max_response_bytes: usize,
+        framework_headers: Option<&FrameworkHeaders>,
+    ) -> Result<SubResponse, UrlSubRequestError>
+    where
+        F: FnOnce(&[SocketAddr]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send,
+    {
+        // Framework metadata is applied after the request's headers by the
+        // existing executor. A URL request must never lose or replace its
+        // authority at that stage.
+        if framework_headers.is_some_and(|headers| {
+            headers.iter().any(|(name, _)| name == http::header::HOST)
+                || headers.removals().any(|name| name == http::header::HOST)
+        }) {
+            return Err(UrlSubRequestError::Exchange(SubRequestError::InvalidRequest(
+                "framework headers cannot change a URL target's Host".to_owned(),
+            )));
+        }
+        let deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or(UrlSubRequestError::DeadlineExceeded)?;
+        let target = prepare_url_target_with_policy(url, deadline.into_std(), validate, policy)
+            .await
+            .map_err(|err| match err {
+                UrlTargetError::DeadlineExceeded => UrlSubRequestError::DeadlineExceeded,
+                other @ (UrlTargetError::InvalidTarget(_)
+                | UrlTargetError::Resolve(_)
+                | UrlTargetError::PolicyRejected(_)) => UrlSubRequestError::Target(other),
+            })?;
+        let prepared = target.bind(request);
+        let mut last_peer_error = None;
+        for peer in prepared.peers() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(UrlSubRequestError::DeadlineExceeded);
+            }
+            match Box::pin(self.execute(
+                &peer,
+                prepared.request(),
+                max_response_bytes,
+                remaining,
+                framework_headers,
+            ))
+            .await
+            {
+                Ok(response) => return Ok(response),
+                Err(err @ (SubRequestError::Connect(_) | SubRequestError::CircuitOpen { .. })) => {
+                    last_peer_error = Some(redact_url_exchange_error(err));
+                },
+                Err(SubRequestError::DeadlineExceeded) => return Err(UrlSubRequestError::DeadlineExceeded),
+                Err(err) => return Err(UrlSubRequestError::Exchange(redact_url_exchange_error(err))),
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(UrlSubRequestError::DeadlineExceeded);
+        }
+        // Preparation rejects an empty address set, so the final error came
+        // from a frozen peer, never a missing attempt.
+        Err(UrlSubRequestError::Exchange(last_peer_error.unwrap_or_else(|| {
+            SubRequestError::Connect("prepared URL target has no peers".to_owned())
+        })))
     }
 
     /// Access the underlying connector for direct pool operations.
@@ -241,7 +336,6 @@ impl SubRequestClient {
             peer = %bounded_peer.address(),
             reused,
             method = %request.method,
-            uri = %request.uri,
             "sub-request: connected"
         );
 
@@ -617,6 +711,25 @@ impl SubRequestClient {
 // -----------------------------------------------------------------------------
 // Private Utilities
 // -----------------------------------------------------------------------------
+
+/// Pingora transport diagnostics may include raw response header bytes. URL
+/// execution must not return those bytes because upstreams can reflect a
+/// credential-bearing query in a malformed response. Keep the error category
+/// while replacing untrusted free-form messages with fixed text.
+fn redact_url_exchange_error(error: SubRequestError) -> SubRequestError {
+    match error {
+        SubRequestError::InvalidRequest(_) => {
+            SubRequestError::InvalidRequest("URL request could not be sent".to_owned())
+        },
+        SubRequestError::Connect(_) => SubRequestError::Connect("upstream connection failed".to_owned()),
+        SubRequestError::Io(_) => SubRequestError::Io("upstream exchange failed".to_owned()),
+        other @ (SubRequestError::AdmissionTimeout { .. }
+        | SubRequestError::DeadlineExceeded
+        | SubRequestError::StreamIdleTimeout { .. }
+        | SubRequestError::CircuitOpen { .. }
+        | SubRequestError::ResponseTooLarge { .. }) => other,
+    }
+}
 
 /// Tear down an abnormally terminated header exchange: drop the circuit
 /// guard (recording a failure via its `Drop` impl), discard the session,

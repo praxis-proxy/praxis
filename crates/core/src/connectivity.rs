@@ -19,7 +19,8 @@ pub use classification::{IpClassification, classify_ip};
 pub use connection_options::ConnectionOptions;
 pub use network::{CidrRange, is_private_ip, is_private_upstream_ip, normalize_mapped_ipv4};
 pub use target::{
-    InvalidTarget, PreparedSubrequest, PreparedTarget, UrlTargetError, prepare_url_target, validate_url_target,
+    InvalidTarget, PreparedSubrequest, PreparedTarget, UrlResolutionPolicy, UrlTargetError, prepare_url_target,
+    prepare_url_target_with_policy, validate_url_target,
 };
 pub(crate) use trusted_private::strip_root_dot;
 pub use trusted_private::validate_host_entries;

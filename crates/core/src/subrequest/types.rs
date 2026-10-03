@@ -205,6 +205,25 @@ pub enum SubRequestError {
     },
 }
 
+/// Failure while preparing or executing a bounded URL sub-request.
+///
+/// Values returned by [`super::SubRequestClient::execute_url`] do not display
+/// the input URL or untrusted transport diagnostics. Address policy errors
+/// retain their source for programmatic inspection without displaying it.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum UrlSubRequestError {
+    /// URL parsing, resolution, or address validation failed.
+    #[error(transparent)]
+    Target(#[from] crate::connectivity::UrlTargetError),
+    /// An exchange failed after target preparation.
+    #[error(transparent)]
+    Exchange(#[from] SubRequestError),
+    /// The single operation deadline expired at any stage.
+    #[error("URL sub-request deadline exceeded")]
+    DeadlineExceeded,
+}
+
 // -----------------------------------------------------------------------------
 // Streaming response types
 // -----------------------------------------------------------------------------

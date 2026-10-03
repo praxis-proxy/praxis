@@ -7,7 +7,7 @@ use std::net::{IpAddr, SocketAddr};
 
 use pingora_core::upstreams::peer::HttpPeer;
 
-use super::peer::{AddressResolutionError, resolve_host_cached};
+use super::peer::{AddressResolutionError, resolve_host_cached, resolve_host_per_call};
 use crate::{connectivity::normalize_mapped_ipv4, subrequest::SubRequest};
 
 /// Failure categories for URL target preparation.
@@ -60,6 +60,21 @@ pub enum InvalidTarget {
     InvalidHost(String),
 }
 
+/// DNS resolution choice for an absolute URL target.
+///
+/// Select [`OperatorCached`](Self::OperatorCached) for an operator-configured
+/// destination. Select [`ClientPerCall`](Self::ClientPerCall) for a destination
+/// selected by a client; this performs a fresh lookup without touching the
+/// shared positive/negative cache or joining its in-flight lookups. IP literals
+/// skip DNS under either policy. The caller must still validate every address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UrlResolutionPolicy {
+    /// Reuse the bounded process-wide DNS cache for configured destinations.
+    OperatorCached,
+    /// Resolve a client-selected hostname for this call only.
+    ClientPerCall,
+}
+
 /// Resolve a bare host (no port, no IPv6 brackets) to its RAW address answers,
 /// BEFORE normalization/dedup. `SystemResolver` returns the complete cached
 /// set; test doubles return scripted raw answers. Never returns `Ok(vec![])`.
@@ -75,6 +90,34 @@ pub(crate) struct SystemResolver;
 impl HostResolver for SystemResolver {
     async fn resolve_host(&self, host: &str) -> Result<Vec<IpAddr>, AddressResolutionError> {
         resolve_host_cached(host).await
+    }
+}
+
+/// Production resolver that bypasses the shared DNS cache.
+struct PerCallResolver;
+
+impl HostResolver for PerCallResolver {
+    async fn resolve_host(&self, host: &str) -> Result<Vec<IpAddr>, AddressResolutionError> {
+        resolve_host_per_call(host).await
+    }
+}
+
+/// Selects one of two resolvers without changing the preparation pipeline.
+struct PolicyResolver<'resolver, C: HostResolver + Sync, P: HostResolver + Sync> {
+    /// Which resolver to call for this URL.
+    policy: UrlResolutionPolicy,
+    /// Resolver for operator-configured hosts.
+    cached: &'resolver C,
+    /// Resolver for client-selected hosts.
+    per_call: &'resolver P,
+}
+
+impl<C: HostResolver + Sync, P: HostResolver + Sync> HostResolver for PolicyResolver<'_, C, P> {
+    async fn resolve_host(&self, host: &str) -> Result<Vec<IpAddr>, AddressResolutionError> {
+        match self.policy {
+            UrlResolutionPolicy::OperatorCached => self.cached.resolve_host(host).await,
+            UrlResolutionPolicy::ClientPerCall => self.per_call.resolve_host(host).await,
+        }
     }
 }
 
@@ -442,6 +485,9 @@ fn peer_for(addr: SocketAddr, is_tls: bool, sni: &str) -> HttpPeer {
 ///
 /// Deciding whether private/loopback addresses are allowed is the hook's job,
 /// not this function's; IP-literal targets still pass through the hook.
+/// This compatibility entry point uses the shared cached resolver. New callers
+/// choosing between configured and client-selected URLs should use
+/// [`prepare_url_target_with_policy`].
 ///
 /// # Errors
 ///
@@ -476,11 +522,42 @@ pub async fn prepare_url_target<F>(
 where
     F: FnOnce(&[SocketAddr]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send,
 {
-    prepare_url_target_with_resolver(url, deadline, validate, &SystemResolver).await
+    prepare_url_target_with_policy(url, deadline, validate, UrlResolutionPolicy::OperatorCached).await
 }
 
-/// The generic preparation pipeline. `prepare_url_target` is the thin wrapper
-/// binding `R = SystemResolver`; tests inject a `FakeResolver`.
+/// Prepare and validate a URL using an explicit DNS resolution policy.
+///
+/// This has the same frozen-address and authority-binding contract as
+/// [`prepare_url_target`]. Both modes validate the complete resolved set before
+/// any dial. This function only prepares a target; callers may bind it for
+/// buffered or streaming execution. Use [`UrlResolutionPolicy::ClientPerCall`]
+/// for client-selected destinations to keep them out of the shared DNS cache.
+///
+/// # Errors
+///
+/// Returns [`UrlTargetError`] for an invalid URL, DNS or policy rejection, or
+/// deadline expiry. Its display text does not include the input URL.
+pub async fn prepare_url_target_with_policy<F>(
+    url: &str,
+    deadline: std::time::Instant,
+    validate: F,
+    policy: UrlResolutionPolicy,
+) -> Result<PreparedTarget, UrlTargetError>
+where
+    F: FnOnce(&[SocketAddr]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send,
+{
+    let cached = SystemResolver;
+    let per_call = PerCallResolver;
+    let resolver = PolicyResolver {
+        policy,
+        cached: &cached,
+        per_call: &per_call,
+    };
+    prepare_url_target_with_resolver(url, deadline, validate, &resolver).await
+}
+
+/// The generic preparation pipeline. The public policy-aware wrapper binds a
+/// production resolver; tests inject a `FakeResolver`.
 #[expect(
     clippy::too_many_lines,
     reason = "linear pin-before-dial pipeline with four deadline checkpoints; splitting would break the one-clock invariant"
@@ -568,7 +645,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::subrequest::{StreamLimits, SubRequestClient, SubRequestConnector};
+    use crate::subrequest::{
+        StreamLimits, SubRequestClient, SubRequestConnector, SubRequestConnectorOptions, SubRequestError,
+        UrlSubRequestError,
+    };
 
     #[test]
     fn invalid_target_display_is_token_only() {
@@ -938,6 +1018,57 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "checks both resolver policies with deterministic answers"
+    )]
+    async fn policy_aware_preparation_selects_injected_resolver() {
+        let cached = FakeResolver::ok(vec!["203.0.113.7".parse().unwrap()]);
+        let per_call = FakeResolver::ok(vec!["127.0.0.1".parse().unwrap()]);
+        let cached_policy = PolicyResolver {
+            policy: UrlResolutionPolicy::OperatorCached,
+            cached: &cached,
+            per_call: &per_call,
+        };
+        let target = prepare_url_target_with_resolver(
+            "http://fixture.invalid:8123/",
+            far_deadline(),
+            |_| Ok(()),
+            &cached_policy,
+        )
+        .await
+        .expect("cached resolver prepares the target");
+        assert_eq!(
+            target.addresses()[0].ip(),
+            "203.0.113.7".parse::<IpAddr>().unwrap(),
+            "operator policy must select the cached resolver"
+        );
+        assert_eq!(cached.call_count(), 1, "cached resolver must run once");
+        assert_eq!(per_call.call_count(), 0, "per-call resolver must remain unused");
+
+        let per_call_policy = PolicyResolver {
+            policy: UrlResolutionPolicy::ClientPerCall,
+            cached: &cached,
+            per_call: &per_call,
+        };
+        let target = prepare_url_target_with_resolver(
+            "http://fixture.invalid:8123/",
+            far_deadline(),
+            |_| Ok(()),
+            &per_call_policy,
+        )
+        .await
+        .expect("per-call resolver prepares the target");
+        assert_eq!(
+            target.addresses()[0].ip(),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
+            "client policy must select the per-call resolver"
+        );
+        assert_eq!(cached.call_count(), 1, "per-call policy must not use cached resolver");
+        assert_eq!(per_call.call_count(), 1, "per-call resolver must run once");
+    }
+
+    #[tokio::test]
     async fn fake_resolver_counts_calls() {
         let fake = FakeResolver::ok(vec!["1.2.3.4".parse().unwrap()]);
         let ips = fake.resolve_host("h").await.unwrap();
@@ -1221,6 +1352,394 @@ mod tests {
         }
         assert_eq!(collected, b"hello-parity");
         drop(streaming);
+    }
+
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "checks address fallback and authority on the wire")]
+    async fn execute_url_uses_frozen_fallback_and_url_authority() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let backend = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 2048];
+            let count = stream.read(&mut buf).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&buf[..count]).into_owned()
+        });
+        let host = "url-fallback.praxis-test.invalid";
+        crate::connectivity::peer::seed_dns(host, &["::1".parse().unwrap(), "127.0.0.1".parse().unwrap()]);
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        let mut request = req_with_host("wrong.example");
+        request.uri = "/wrong".parse().unwrap();
+        let url = format!("http://{host}:{port}/right?token=secret-url-token");
+        let mut seen = Vec::new();
+        let response = Box::pin(client.execute_url(
+            &url,
+            request,
+            |addrs| {
+                seen.extend_from_slice(addrs);
+                Ok(())
+            },
+            UrlResolutionPolicy::OperatorCached,
+            Duration::from_secs(5),
+            1024,
+            None,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            response.body.as_ref(),
+            b"ok",
+            "healthy fallback must return the response body"
+        );
+        assert_eq!(seen.len(), 2, "validation sees every address before either dial");
+        assert_eq!(
+            seen[0].ip(),
+            "::1".parse::<IpAddr>().unwrap(),
+            "validator must see the first DNS answer"
+        );
+        assert_eq!(
+            seen[1].ip(),
+            "127.0.0.1".parse::<IpAddr>().unwrap(),
+            "validator must see the fallback DNS answer"
+        );
+        let captured = backend.await.unwrap();
+        let captured_lower = captured.to_ascii_lowercase();
+        assert!(
+            captured.starts_with("GET /right?token=secret-url-token HTTP/1.1"),
+            "{captured}"
+        );
+        assert!(
+            captured_lower.contains(&format!("host: {host}:{port}\r\n")),
+            "{captured}"
+        );
+        assert!(
+            !captured.contains("wrong.example"),
+            "URL authority must replace the caller's Host header: {captured}"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "tests two requests against an open and a healthy circuit"
+    )]
+    async fn execute_url_skips_open_circuit_and_reaches_healthy_peer() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let backend = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0_u8; 1024];
+                drop(stream.read(&mut buf).await);
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok")
+                    .await
+                    .unwrap();
+            }
+        });
+        let host = "url-circuit-fallback.praxis-test.invalid";
+        crate::connectivity::peer::seed_dns(host, &["::1".parse().unwrap(), "127.0.0.1".parse().unwrap()]);
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::with_options(SubRequestConnectorOptions {
+            keepalive_pool_size: 1,
+            max_connections: Some(2),
+            circuit_breaker: Some(crate::circuit::CircuitBreakerConfig {
+                threshold: 1,
+                recovery_window: Duration::from_secs(30),
+                half_open_timeout: Duration::from_secs(30),
+            }),
+        }));
+        let url = format!("http://{host}:{port}/");
+        for _ in 0..2 {
+            let response = Box::pin(client.execute_url(
+                &url,
+                get_request(),
+                |_| Ok(()),
+                UrlResolutionPolicy::OperatorCached,
+                Duration::from_secs(5),
+                1024,
+                None,
+            ))
+            .await
+            .expect("healthy address remains reachable after the first peer's circuit opens");
+            assert_eq!(
+                response.body.as_ref(),
+                b"ok",
+                "healthy peer must answer despite the other open circuit"
+            );
+        }
+        backend.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "tests typed error and redaction through an upstream response"
+    )]
+    async fn execute_url_redacts_reflected_query_in_upstream_error() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let backend = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 1024];
+            let count = stream.read(&mut buf).await.unwrap();
+            let request = String::from_utf8_lossy(&buf[..count]);
+            let target = request.split_whitespace().nth(1).unwrap();
+            let malformed = format!("HTTP/1.1 200 OK\r\nLocation: {target}\r\nbad header: value\r\n\r\n");
+            stream.write_all(malformed.as_bytes()).await.unwrap();
+        });
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        let url = format!("http://127.0.0.1:{port}/?token=secret-url-token");
+        let err = Box::pin(client.execute_url(
+            &url,
+            get_request(),
+            |_| Ok(()),
+            UrlResolutionPolicy::ClientPerCall,
+            Duration::from_secs(5),
+            1024,
+            None,
+        ))
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, UrlSubRequestError::Exchange(SubRequestError::Io(_))),
+            "malformed upstream response must surface as I/O failure: {err:?}"
+        );
+        assert!(
+            !err.to_string().contains("secret-url-token"),
+            "Display must redact the URL query: {err}"
+        );
+        assert!(
+            !format!("{err:?}").contains("secret-url-token"),
+            "Debug must redact the URL query: {err:?}"
+        );
+        backend.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "verifies full-set rejection before any dial")]
+    async fn execute_url_rejection_prevents_every_dial_and_hides_query() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let host = "url-reject.praxis-test.invalid";
+        crate::connectivity::peer::seed_dns(host, &["127.0.0.1".parse().unwrap(), "10.0.0.1".parse().unwrap()]);
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        let url = format!("http://{host}:{port}/?token=secret-url-token");
+        let err = Box::pin(client.execute_url(
+            &url,
+            get_request(),
+            |addrs| {
+                assert_eq!(addrs.len(), 2, "policy must inspect the full resolved set");
+                Err("private address rejected".into())
+            },
+            UrlResolutionPolicy::OperatorCached,
+            Duration::from_secs(5),
+            1024,
+            None,
+        ))
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, UrlSubRequestError::Target(UrlTargetError::PolicyRejected(_))),
+            "policy rejection must remain a typed target error: {err:?}"
+        );
+        assert!(
+            !err.to_string().contains("secret-url-token"),
+            "policy error must redact the URL query: {err}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "validation rejection must prevent all connection attempts"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "tests that response I/O does not trigger address fallback"
+    )]
+    async fn execute_url_does_not_fall_back_after_response_io_failure() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let backend = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 1024];
+            drop(stream.read(&mut buf).await);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 4\r\nconnection: close\r\n\r\nxx")
+                .await
+                .unwrap();
+        });
+        let host = "url-no-io-fallback.praxis-test.invalid";
+        crate::connectivity::peer::seed_dns(host, &["127.0.0.1".parse().unwrap(), "127.0.0.2".parse().unwrap()]);
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        let url = format!("http://{host}:{port}/");
+        let result = Box::pin(client.execute_url(
+            &url,
+            get_request(),
+            |_| Ok(()),
+            UrlResolutionPolicy::OperatorCached,
+            Duration::from_secs(5),
+            1024,
+            None,
+        ))
+        .await;
+        assert!(
+            matches!(result, Err(UrlSubRequestError::Exchange(SubRequestError::Io(_)))),
+            "an I/O failure after connecting must not fall back: {result:?}"
+        );
+        backend.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "tests response size and deadline on successive exchanges"
+    )]
+    async fn execute_url_enforces_response_limit_and_single_deadline() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let backend = tokio::spawn(async move {
+            for stall in [false, true] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buf = [0_u8; 1024];
+                drop(stream.read(&mut buf).await);
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\n\r\n")
+                    .await
+                    .unwrap();
+                if stall {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                } else {
+                    stream.write_all(b"12345678").await.unwrap();
+                }
+            }
+        });
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        let url = format!("http://127.0.0.1:{port}/");
+        let too_large = Box::pin(client.execute_url(
+            &url,
+            get_request(),
+            |_| Ok(()),
+            UrlResolutionPolicy::ClientPerCall,
+            Duration::from_secs(5),
+            4,
+            None,
+        ))
+        .await;
+        assert!(
+            matches!(
+                too_large,
+                Err(UrlSubRequestError::Exchange(SubRequestError::ResponseTooLarge {
+                    limit: 4,
+                    ..
+                }))
+            ),
+            "response body must obey the per-call four-byte limit: {too_large:?}"
+        );
+        let timed_out = Box::pin(client.execute_url(
+            &url,
+            get_request(),
+            |_| Ok(()),
+            UrlResolutionPolicy::ClientPerCall,
+            Duration::from_millis(50),
+            1024,
+            None,
+        ))
+        .await;
+        assert!(
+            matches!(timed_out, Err(UrlSubRequestError::DeadlineExceeded)),
+            "response wait must obey the single URL deadline: {timed_out:?}"
+        );
+        backend.abort();
+    }
+
+    #[tokio::test]
+    async fn execute_url_rejects_framework_host_override() {
+        let mut headers = crate::subrequest::FrameworkHeaders::new();
+        headers
+            .insert(http::header::HOST, http::HeaderValue::from_static("wrong.example"))
+            .unwrap();
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        let result = Box::pin(client.execute_url(
+            "http://127.0.0.1:9/",
+            get_request(),
+            |_| Ok(()),
+            UrlResolutionPolicy::ClientPerCall,
+            Duration::from_secs(1),
+            1024,
+            Some(&headers),
+        ))
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(UrlSubRequestError::Exchange(SubRequestError::InvalidRequest(_)))
+            ),
+            "framework headers must not override the URL Host authority: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "tests explicit-peer Host on the wire")]
+    async fn explicit_peer_execute_preserves_virtual_host() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let backend = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 1024];
+            let count = stream.read(&mut buf).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&buf[..count]).into_owned()
+        });
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        let peer = HttpPeer::new(addr, false, String::new());
+        let response = Box::pin(client.execute(
+            &peer,
+            &req_with_host("virtual.example"),
+            1024,
+            Duration::from_secs(5),
+            None,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            response.status, 200,
+            "explicit-peer execution must retain a successful response"
+        );
+        let captured = backend.await.unwrap();
+        assert!(
+            captured.to_ascii_lowercase().contains("host: virtual.example\r\n"),
+            "{captured}"
+        );
     }
 
     #[test]
