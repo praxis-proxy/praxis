@@ -359,7 +359,7 @@ impl SubRequestClient {
             }
             break status;
         };
-        record_subrequest_client_status(client_span, status);
+        record_http_client_status(client_span, status);
 
         if !(100..=599).contains(&status) {
             session.shutdown().await;
@@ -701,8 +701,11 @@ fn subrequest_client_span(peer: &HttpPeer, request: &SubRequest) -> Span {
     )
 }
 
-/// Record generic HTTP CLIENT response status attributes.
-fn record_subrequest_client_status(client_span: &Span, status: u16) {
+/// Record HTTP CLIENT response status attributes on an active span.
+pub fn record_http_client_status(client_span: &Span, status: u16) {
+    if client_span.is_disabled() {
+        return;
+    }
     client_span.record("http.response.status_code", status);
     if let Some(error_type) = subrequest_client_status_error_type(status) {
         client_span.record("otel.status_code", "ERROR");
@@ -767,7 +770,7 @@ mod tests {
                 "otel.status_code" = tracing::field::Empty,
                 "error.type" = tracing::field::Empty,
             );
-            record_subrequest_client_status(&span, status);
+            record_http_client_status(&span, status);
             drop(span);
 
             let fields = capture

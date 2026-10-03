@@ -25,6 +25,12 @@ to proxy requests, traces, or logs.
 Sampling is parent based: a sampled inbound parent is continued, an unsampled
 parent stays unsampled, and new roots use `sampling_rate` (or the configured
 default sampler).
+`sampling_rate` is not a hard export-volume limit: a valid sampled remote
+parent is honored even when the local root sampling rate is zero. On listeners
+that accept trace context from untrusted callers, those callers can increase
+tracing work and collector ingest by sending sampled contexts. Apply ingress
+controls where a hard telemetry-volume limit is required; a listener-level
+trace-context trust policy is outside this configuration.
 
 The application must initialize tracing from the loaded configuration and
 retain the returned `TracingGuard` for the server lifetime. The guard shuts

@@ -43,8 +43,7 @@
 //! compare exported IDs and parent IDs instead of matching trace IDs alone.
 
 use std::{
-    io::Read as _,
-    net::{SocketAddr, TcpListener},
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -66,7 +65,7 @@ use praxis_core::{
 };
 use praxis_test_utils::{
     Backend, free_port, http_send, parse_body, parse_status, start_full_proxy, start_header_echo_backend, start_proxy,
-    wait_for_tcp,
+    start_slow_backend, wait_for_tcp,
 };
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
@@ -121,7 +120,7 @@ fn exported_parentage_links_edge_provider_and_backend() {
     let routing_edge_port = free_port();
     let retry_edge_port = free_port();
     let retry_dead_port = free_port();
-    let mid_proxy_failure_port = start_hanging_backend();
+    let mid_proxy_failure_port = start_slow_backend("late response", Duration::from_millis(500));
     let mid_proxy_edge_port = free_port();
     let not_found_backend = Backend::status(404, "not found").start_with_shutdown();
     let internal_error_backend = Backend::status(500, "internal error").start_with_shutdown();
@@ -458,6 +457,96 @@ fn exported_parentage_links_edge_provider_and_backend() {
     );
 }
 
+#[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "this file is an isolated test binary for the process-global tracing subscriber"
+)]
+fn sampled_remote_parent_overrides_zero_root_rate() {
+    // Each sampler configuration needs a separate process because init_tracing
+    // installs the process-global subscriber.
+    if std::env::var_os("PRAXIS_OTEL_ZERO_RATE_CHILD").is_none() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .arg("--exact")
+            .arg("sampled_remote_parent_overrides_zero_root_rate")
+            .env("PRAXIS_OTEL_ZERO_RATE_CHILD", "1")
+            .output()
+            .expect("run zero-rate tracing test in a separate process");
+        assert!(
+            output.status.success(),
+            "zero-rate tracing test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("test sampled_remote_parent_overrides_zero_root_rate ... ok"),
+            "child test did not execute:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+
+    let collector = CapturedSpans::default();
+    let collector_port = free_port();
+    let collector_addr: SocketAddr = ([127, 0, 0, 1], collector_port).into();
+    let collector_runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("collector runtime");
+    let collector_service = collector.clone();
+    collector_runtime.spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(TraceServiceServer::new(collector_service))
+            .serve(collector_addr)
+            .await
+            .expect("collector server");
+    });
+    wait_for_tcp(&format!("127.0.0.1:{collector_port}"));
+
+    let backend = start_header_echo_backend();
+    let provider_port = free_port();
+    let edge_port = free_port();
+    let endpoint = format!("http://127.0.0.1:{collector_port}");
+    let mut edge_config = proxy_config(edge_port, provider_port, &endpoint, "zero-rate-edge");
+    edge_config.telemetry.sampling_rate = Some(0.0);
+    let provider_config = proxy_config(provider_port, backend.port(), &endpoint, "zero-rate-provider");
+    let tracing_guard = praxis_core::logging::init_tracing(&edge_config).expect("OTLP tracing setup");
+    let provider = start_proxy(&provider_config);
+    let edge = start_proxy(&edge_config);
+
+    let trace_id = "abababababababababababababababab";
+    let parent_id = "cdcdcdcdcdcdcdcd";
+    let response = send_request(
+        edge.addr(),
+        Some(&format!("00-{trace_id}-{parent_id}-01")),
+        Some("vendor=sampled"),
+    );
+    let backend_headers = echoed_headers(&response);
+    let root_response = send_request(edge.addr(), None, None);
+    let root_backend_headers = echoed_headers(&root_response);
+    let root_traceparent = header(&root_backend_headers, "traceparent").expect("root context forwarded");
+    assert!(
+        root_traceparent.ends_with("-00"),
+        "zero-rate root must remain unsampled"
+    );
+    let root_trace_id = parent_trace_id(&root_backend_headers);
+
+    drop(edge);
+    drop(provider);
+    drop(tracing_guard);
+
+    let spans = wait_for_spans(&collector, 4);
+    assert!(
+        spans.iter().all(|span| hex(&span.trace_id) != root_trace_id),
+        "zero-rate root must not export spans"
+    );
+    let linked = assert_linked_trace(&spans, trace_id, Some(parent_id));
+    assert_backend_parent(&backend_headers, trace_id, linked.provider_client);
+    assert_eq!(header(&backend_headers, "tracestate"), Some("vendor=sampled"));
+    assert_eq!(hex(&linked.edge.parent_span_id), parent_id);
+}
+
 fn string_attribute<'attributes>(span: &'attributes Span, name: &str) -> Option<&'attributes str> {
     span.attributes
         .iter()
@@ -732,20 +821,6 @@ fn send_status_request(proxy_addr: &str, traceparent: &str) -> u16 {
     let request =
         format!("GET /status HTTP/1.1\r\nHost: localhost\r\ntraceparent: {traceparent}\r\nConnection: close\r\n\r\n");
     parse_status(&http_send(proxy_addr, &request))
-}
-
-fn start_hanging_backend() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind hanging backend");
-    let port = listener.local_addr().expect("hanging backend address").port();
-    std::thread::spawn(move || {
-        if let Ok((mut stream, _address)) = listener.accept() {
-            let mut request = [0_u8; 4096];
-            let _read = stream.read(&mut request);
-            std::thread::sleep(Duration::from_millis(500));
-            drop(stream);
-        }
-    });
-    port
 }
 
 fn echoed_headers(body: &str) -> Vec<(String, String)> {
