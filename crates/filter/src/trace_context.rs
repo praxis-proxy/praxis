@@ -2,6 +2,10 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Request-scoped correlation ids for forwarded requests and sub-requests.
+//!
+//! Header-only propagation mints a synthetic hop ID. With Praxis OpenTelemetry
+//! instrumentation active, protocol and sub-request clients replace it at
+//! send time with the actual exported client span context.
 
 use http::{HeaderName, HeaderValue};
 use praxis_core::{

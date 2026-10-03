@@ -14,7 +14,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use metrics::{counter, histogram};
 use pingora_core::{connectors::http::Connector, protocols::http::client::HttpSession, upstreams::peer::HttpPeer};
-use tracing::{debug, warn};
+use tracing::{Instrument as _, debug, warn};
 
 use super::{
     internals::{
@@ -55,6 +55,7 @@ impl SubResponseBody {
             peer: None,
             connector: None,
             permit: None,
+            client_span: tracing::Span::none(),
             read_timeout: None,
             idle_timeout: Duration::from_secs(30),
             stream_deadline: None,
@@ -123,13 +124,23 @@ impl SubResponseBody {
     ///
     /// Panics if the session is `None` when `done` is `false` (internal
     /// invariant violation).
+    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, SubRequestError> {
+        let client_span = std::mem::replace(&mut self.client_span, tracing::Span::none());
+        let result = self.next_chunk_inner().instrument(client_span.clone()).await;
+        if !self.done {
+            self.client_span = client_span;
+        }
+        result
+    }
+
+    /// Read one body chunk while the sub-request client span is active.
     #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
     #[expect(clippy::too_many_lines, reason = "inline chunk read and deadline enforcement")]
     #[expect(
         clippy::expect_used,
         reason = "session is an invariant: None only when done=true; caller checked !done"
     )]
-    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, SubRequestError> {
+    async fn next_chunk_inner(&mut self) -> Result<Option<Bytes>, SubRequestError> {
         if self.done {
             return Ok(None);
         }

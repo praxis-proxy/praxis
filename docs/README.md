@@ -21,6 +21,8 @@ and security. AI Gateway docs live in
   certificates, mTLS, SNI, hot-reload
 - [Observability](operating/observability.md):
   Prometheus metrics, access logs, admin endpoints
+- [Distributed Tracing](operating/tracing.md):
+  OTLP export, W3C context propagation, and span privacy
 - [Health Checking](operating/health-checking.md):
   active/passive probes, thresholds, admin endpoints
 - [Load Balancing](operating/load-balancing.md):

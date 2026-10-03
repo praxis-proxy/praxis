@@ -61,6 +61,7 @@ pub(super) async fn execute(
     let name_fingerprint_before = (!pipeline.is_empty()).then(|| header_name_fingerprint(&resp.headers));
     ctx.connection_upgraded = is_upgrade_response;
     ctx.upstream_response_status = Some(upstream_response.status.as_u16());
+    super::span_util::record_client_status(&ctx.upstream_client_span, upstream_response.status.as_u16());
     // A gRPC error is often a Trailers-Only response: a single HEADERS
     // frame carrying `grpc-status`, with no trailer frame to follow. The
     // header block is then the only place the outcome appears.

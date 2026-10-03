@@ -459,6 +459,8 @@ impl ProxyHttp for PingoraHttpHandler {
         upstream_request::apply_grpc_deadline_header(upstream_request, ctx);
         let client_ver = ctx.client_http_version.unwrap_or(http::Version::HTTP_11);
         via::append_request_via(upstream_request, client_ver);
+        #[cfg(feature = "otel")]
+        inject_upstream_trace_context(upstream_request, &ctx.upstream_client_span)?;
         Ok(())
     }
 
@@ -473,10 +475,12 @@ impl ProxyHttp for PingoraHttpHandler {
     {
         let pipeline = ctx.pipeline(&self.pipeline);
         let span = ctx.request_span.clone();
+        let client_span = ctx.upstream_client_span.clone();
         let exchange_span = ctx.upstream_exchange_span.clone();
         let upstream_ver = upstream_response.version;
         let result = response_filter::execute(&pipeline, upstream_response, ctx)
             .instrument(exchange_span)
+            .instrument(client_span)
             .instrument(span)
             .await;
         if result.is_ok() {
@@ -530,6 +534,8 @@ impl ProxyHttp for PingoraHttpHandler {
         // ends before parent in tracing output.
         let _exchange_span = std::mem::replace(&mut ctx.upstream_exchange_span, tracing::Span::none());
         drop(_exchange_span);
+        let _client_span = std::mem::replace(&mut ctx.upstream_client_span, tracing::Span::none());
+        drop(_client_span);
         let span = std::mem::replace(&mut ctx.request_span, tracing::Span::none());
         let written_status = session.response_written().map_or(0, |resp| resp.status.as_u16());
         async {
@@ -544,6 +550,31 @@ impl ProxyHttp for PingoraHttpHandler {
         .instrument(span)
         .await;
     }
+}
+
+/// Inject the active exported HTTP client span into the finalized request.
+#[cfg(feature = "otel")]
+fn inject_upstream_trace_context(
+    upstream_request: &mut pingora_http::RequestHeader,
+    client_span: &tracing::Span,
+) -> Result<()> {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    // This is the last request-header mutation hook. Replace conflicting
+    // client/filter values with the client span exported for this attempt.
+    let span_context = client_span.context();
+    let mut propagated = http::HeaderMap::new();
+    if praxis_core::trace_context::inject_context(&mut propagated, &span_context) {
+        let _remove_traceparent = upstream_request.remove_header("traceparent");
+        let _remove_tracestate = upstream_request.remove_header("tracestate");
+        if let Some(value) = propagated.get("traceparent") {
+            upstream_request.insert_header("traceparent", value.clone())?;
+        }
+        if let Some(value) = propagated.get("tracestate") {
+            upstream_request.insert_header("tracestate", value.clone())?;
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------

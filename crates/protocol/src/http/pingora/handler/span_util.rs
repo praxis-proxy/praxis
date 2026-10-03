@@ -95,7 +95,20 @@ fn record_upstream_exchange_span(ctx: &PingoraRequestCtx, response: Option<&ping
         .or_else(|| response.map(|resp| resp.status.as_u16()))
     {
         ctx.upstream_exchange_span.record("http.response.status_code", status);
+        record_client_status(&ctx.upstream_client_span, status);
     }
     ctx.upstream_exchange_span
         .record("http.response.body.size", ctx.response_body_bytes);
+}
+
+/// Record the upstream response on its HTTP client span, including retry responses.
+pub(super) fn record_client_status(span: &tracing::Span, status: u16) {
+    if span.is_disabled() {
+        return;
+    }
+    span.record("http.response.status_code", status);
+    if status >= 500 {
+        span.record("otel.status_code", "ERROR");
+        span.record("error.type", status.to_string().as_str());
+    }
 }

@@ -15,7 +15,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use metrics::histogram;
 use pingora_core::upstreams::peer::{HttpPeer, Peer as _};
-use tracing::{debug, warn};
+use tracing::{Instrument as _, Span, debug, warn};
 
 use super::{
     body::dispose_session_abnormal,
@@ -132,7 +132,6 @@ impl SubRequestClient {
     /// headers, circuit guard, and admission permit. Both `execute()`
     /// and `send_streaming()` call this, then diverge.
     #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
-    #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
     async fn open_exchange<'conn>(
         &'conn self,
         peer: &HttpPeer,
@@ -140,6 +139,36 @@ impl SubRequestClient {
         timeout: Duration,
         framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
+        #[cfg(feature = "otel")]
+        let client_span = subrequest_client_span(peer, request);
+        #[cfg(not(feature = "otel"))]
+        let client_span = Span::none();
+
+        let result = self
+            .open_exchange_inner(peer, request, timeout, framework_headers)
+            .instrument(client_span.clone())
+            .await;
+        if result.is_err() && !client_span.is_disabled() {
+            client_span.record("otel.status_code", "ERROR");
+            client_span.record("error.type", "subrequest");
+        }
+        result
+    }
+
+    /// Open an HTTP exchange while its per-attempt span is active.
+    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
+    #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
+    async fn open_exchange_inner<'conn>(
+        &'conn self,
+        peer: &HttpPeer,
+        request: &SubRequest,
+        timeout: Duration,
+        framework_headers: Option<&FrameworkHeaders>,
+    ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
+        #[cfg(feature = "otel")]
+        let client_span = Span::current();
+        #[cfg(not(feature = "otel"))]
+        let client_span = Span::none();
         let exchange_started = tokio::time::Instant::now();
         let deadline = exchange_started
             .checked_add(timeout)
@@ -178,6 +207,10 @@ impl SubRequestClient {
             for (name, value) in fw.iter() {
                 let _insert = req_header.insert_header(name.clone(), value.clone());
             }
+        }
+        #[cfg(feature = "otel")]
+        {
+            inject_subrequest_trace_context(&mut req_header, &client_span);
         }
         ensure_host_header(&mut req_header, &bounded_peer)?;
         if !request.body.is_empty() || empty_body_needs_framing(&request.method) {
@@ -325,6 +358,11 @@ impl SubRequestClient {
             }
             break status;
         };
+        client_span.record("http.response.status_code", status);
+        if status >= 500 {
+            client_span.record("otel.status_code", "ERROR");
+            client_span.record("error.type", status.to_string().as_str());
+        }
 
         if !(100..=599).contains(&status) {
             session.shutdown().await;
@@ -363,6 +401,7 @@ impl SubRequestClient {
             circuit_guard,
             permit,
             deadline,
+            client_span: client_span.clone(),
         })
     }
 
@@ -468,6 +507,7 @@ impl SubRequestClient {
             peer: Some(exchange.peer),
             connector: Some(exchange.connector.clone()),
             permit: exchange.permit,
+            client_span: exchange.client_span,
             read_timeout,
             idle_timeout: limits.idle_timeout,
             stream_deadline,
@@ -537,6 +577,7 @@ impl SubRequestClient {
             circuit_guard,
             permit: _permit,
             deadline,
+            client_span,
         } = match exchange {
             Ok(ex) => ex,
             Err(err) => return Err(err),
@@ -598,6 +639,7 @@ impl SubRequestClient {
 
             Ok(Bytes::from(body_buf))
         })
+        .instrument(client_span)
         .await
         .unwrap_or_else(|_elapsed| Err(SubRequestError::DeadlineExceeded));
 
@@ -614,9 +656,49 @@ impl SubRequestClient {
     }
 }
 
+/// Replace propagated request headers with the active exported client span context.
+#[cfg(feature = "otel")]
+fn inject_subrequest_trace_context(req_header: &mut pingora_http::RequestHeader, client_span: &Span) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let span_context = client_span.context();
+    let mut propagated = HeaderMap::new();
+    if crate::trace_context::inject_context(&mut propagated, &span_context) {
+        let _remove_traceparent = req_header.remove_header("traceparent");
+        let _remove_tracestate = req_header.remove_header("tracestate");
+        if let Some(value) = propagated.get("traceparent") {
+            let _insert_traceparent = req_header.insert_header("traceparent", value.clone());
+        }
+        if let Some(value) = propagated.get("tracestate") {
+            let _insert_tracestate = req_header.insert_header("tracestate", value.clone());
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Private Utilities
 // -----------------------------------------------------------------------------
+
+/// Create a bounded HTTP client span for a framework sub-request.
+#[cfg(feature = "otel")]
+fn subrequest_client_span(peer: &HttpPeer, request: &SubRequest) -> Span {
+    let (server_address, server_port) = peer._address.as_inet().map_or_else(
+        || ("unix".to_owned(), 0),
+        |address| (address.ip().to_string(), address.port()),
+    );
+    let method = request.method.as_str();
+    tracing::info_span!(
+        "http_client_request",
+        "otel.name" = method,
+        "otel.kind" = "client",
+        "otel.status_code" = tracing::field::Empty,
+        "http.request.method" = method,
+        "http.response.status_code" = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        "server.address" = server_address,
+        "server.port" = server_port,
+    )
+}
 
 /// Tear down an abnormally terminated header exchange: drop the circuit
 /// guard (recording a failure via its `Drop` impl), discard the session,

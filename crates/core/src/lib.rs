@@ -56,6 +56,9 @@ pub mod server;
 pub mod subrequest;
 /// Wall-clock time abstraction for filters.
 pub mod time;
+/// W3C trace-context extraction and injection when the `otel` feature is enabled.
+#[cfg(feature = "otel")]
+pub mod trace_context;
 
 pub use errors::ProxyError;
 pub use logging::TracingGuard;
