@@ -24,9 +24,10 @@ use crate::{
 };
 
 /// Present only while a cancelled streaming sub-request runs its completion
-/// body hooks. Those hooks release filter state, but their output is discarded
-/// and no downstream response headers have been committed by this body.
-/// Filters that remember stream delivery must ignore this completion pass.
+/// body hooks. Their output is discarded, but earlier chunks or response
+/// headers may already have been delivered. Filters that remember stream
+/// delivery must ignore this synthetic completion pass while preserving any
+/// delivery evidence recorded before suppression.
 #[derive(Clone, Copy, Debug)]
 pub struct StreamBodySuppressed;
 
