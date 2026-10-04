@@ -27,6 +27,16 @@ use std::{
 #[cfg(feature = "bound-upstream-request-body")]
 use bytes::Bytes;
 
+/// The client-facing headers of a streaming terminal response were written.
+///
+/// Published only after the downstream header write succeeds, before the first
+/// body pull. It persists across iterative-router steps so response filters
+/// can distinguish a committed stream from a request that merely selected
+/// streaming mode. The marker does not imply that any body bytes were written
+/// or that the peer consumed headers buffered by the transport.
+#[derive(Clone, Copy, Debug)]
+pub struct ClientResponseHeadersCommitted;
+
 // -----------------------------------------------------------------------------
 // AuthenticatedIdentity
 // -----------------------------------------------------------------------------

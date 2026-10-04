@@ -23,8 +23,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_core::config::Config;
 use praxis_filter::{
-    FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext, StreamingResponseBody,
-    StreamingTerminalResponse,
+    ClientResponseHeadersCommitted, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter,
+    HttpFilterContext, RequestExtensions, StreamingResponseBody, StreamingTerminalResponse,
 };
 use praxis_test_utils::{
     custom_filter_yaml, free_port, http_get, http_send, parse_body, parse_header, parse_status, registry_with,
@@ -36,6 +36,61 @@ use praxis_test_utils::{
 // -----------------------------------------------------------------------------
 
 struct MultiChunkStreamingFilter;
+
+/// Observe header commitment before a stream with no body reaches EOF.
+struct HeaderCommitProbeFilter {
+    before_header: Arc<AtomicUsize>,
+    first_pull: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl HttpFilter for HeaderCommitProbeFilter {
+    fn name(&self) -> &'static str {
+        "header_commit_probe"
+    }
+
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.before_header.store(
+            usize::from(ctx.extensions.get::<ClientResponseHeadersCommitted>().is_some()),
+            Ordering::SeqCst,
+        );
+        struct EmptyProbeBody {
+            first_pull: Arc<AtomicUsize>,
+            extensions: RequestExtensions,
+        }
+
+        #[async_trait]
+        impl StreamingResponseBody for EmptyProbeBody {
+            async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+                self.first_pull.store(
+                    usize::from(self.extensions.get::<ClientResponseHeadersCommitted>().is_some()),
+                    Ordering::SeqCst,
+                );
+                Ok(None)
+            }
+
+            async fn suppress(&mut self) -> Result<(), FilterError> {
+                Ok(())
+            }
+
+            async fn cancel(&mut self) {}
+
+            fn swap_extensions(&mut self, extensions: &mut RequestExtensions) {
+                std::mem::swap(&mut self.extensions, extensions);
+            }
+        }
+
+        Ok(FilterAction::StreamingTerminalResponse(Box::new(
+            StreamingTerminalResponse::new(
+                200,
+                Box::new(EmptyProbeBody {
+                    first_pull: Arc::clone(&self.first_pull),
+                    extensions: RequestExtensions::default(),
+                }),
+            ),
+        )))
+    }
+}
 
 #[async_trait]
 impl HttpFilter for MultiChunkStreamingFilter {
@@ -285,6 +340,42 @@ fn streaming_multi_chunk_body_delivered() {
 
     assert_eq!(status, 200, "streaming terminal response should return 200");
     assert_eq!(body, "chunk1chunk2chunk3", "all chunks should be concatenated");
+}
+
+#[test]
+fn streaming_headers_are_committed_before_an_empty_first_body_pull() {
+    let backend = start_echo_backend();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend.port(), "header_commit_probe")).unwrap();
+    let before_header = Arc::new(AtomicUsize::new(usize::MAX));
+    let first_pull = Arc::new(AtomicUsize::new(usize::MAX));
+    let mut registry = FilterRegistry::with_builtins();
+    let before = Arc::clone(&before_header);
+    let first = Arc::clone(&first_pull);
+    registry
+        .register(
+            "header_commit_probe",
+            FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(HeaderCommitProbeFilter {
+                    before_header: Arc::clone(&before),
+                    first_pull: Arc::clone(&first),
+                }))
+            })),
+        )
+        .unwrap();
+    let proxy = start_proxy_with_registry(&config, &registry);
+    before_header.store(usize::MAX, Ordering::SeqCst);
+    first_pull.store(usize::MAX, Ordering::SeqCst);
+
+    let (status, body) = http_get(proxy.addr(), "/", None);
+    assert_eq!(status, 200);
+    assert!(body.is_empty(), "the source emitted no body bytes");
+    assert_eq!(before_header.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        first_pull.load(Ordering::SeqCst),
+        1,
+        "the first pull must observe successful header commitment"
+    );
 }
 
 #[test]
