@@ -31,6 +31,17 @@ use crate::{
 #[derive(Clone, Copy, Debug)]
 pub struct StreamBodySuppressed;
 
+/// The streaming callout's response exceeded its configured byte ceiling.
+///
+/// Callers can downcast a [`FilterError`] to this type to distinguish a body
+/// limit from an upstream stream failure.
+#[derive(Debug, thiserror::Error)]
+#[error("filtered_subrequest: streaming response exceeds configured body limit ({limit} bytes)")]
+pub struct CalloutResponseTooLarge {
+    /// Configured maximum response bytes for the callout.
+    pub limit: usize,
+}
+
 /// Streaming body implementation for a filtered sub-request's response.
 pub(crate) struct FilteredStreamingBody {
     /// Upstream streaming body handle. `None` after cancellation.
@@ -439,11 +450,15 @@ impl CalloutStreamingBody {
         let total = self
             .emitted_bytes
             .checked_add(chunk.len())
-            .ok_or_else(|| -> FilterError { "filtered_subrequest: stream byte count overflow".into() })?;
+            .ok_or_else(|| -> FilterError {
+                Box::new(CalloutResponseTooLarge {
+                    limit: self.max_response_bytes,
+                })
+            })?;
         if total > self.max_response_bytes {
-            return Err("filtered_subrequest: streaming response exceeds configured body limit"
-                .to_owned()
-                .into());
+            return Err(Box::new(CalloutResponseTooLarge {
+                limit: self.max_response_bytes,
+            }));
         }
         self.emitted_bytes = total;
         Ok(Some(chunk))
@@ -544,7 +559,7 @@ impl StreamingResponseBody for CalloutStreamingBody {
 )]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, VecDeque},
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -554,7 +569,30 @@ mod tests {
     use http::HeaderMap;
     use praxis_core::subrequest::{StreamLimits, SubRequest, SubRequestClient, SubRequestError};
 
-    use super::{FilteredStreamingBody, std_instant_to_tokio};
+    use super::{CalloutResponseTooLarge, CalloutStreamingBody, FilteredStreamingBody, std_instant_to_tokio};
+
+    #[test]
+    fn streaming_callout_limit_error_is_typed_and_terminal() {
+        let mut body = CalloutStreamingBody {
+            inner: None,
+            pending: VecDeque::new(),
+            held_extensions: None,
+            deferred_error: None,
+            emitted_bytes: 0,
+            max_response_bytes: 4,
+            finished: false,
+        };
+
+        assert!(body.checked(Bytes::from_static(b"1234")).is_ok());
+        let error = body
+            .checked(Bytes::from_static(b"5"))
+            .expect_err("the fifth byte exceeds the ceiling");
+        assert_eq!(
+            error.downcast_ref::<CalloutResponseTooLarge>().map(|e| e.limit),
+            Some(4)
+        );
+        assert!(body.finished, "the rejected chunk must terminate the stream");
+    }
 
     struct ExpiredDeadlineFilter;
 

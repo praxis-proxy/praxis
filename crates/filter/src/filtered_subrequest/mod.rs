@@ -88,7 +88,7 @@ pub(crate) use self::{
 #[cfg(feature = "iterative-request-router")]
 pub(crate) use self::{continuation::SubrequestCompletion, sanitize::normalize_response_status};
 pub use self::{
-    streaming::StreamBodySuppressed,
+    streaming::{CalloutResponseTooLarge, StreamBodySuppressed},
     types::{CalloutOutcome, CalloutResponse, StagedUpstream, StagedUpstreamFallback, SubrequestRuntime},
 };
 #[cfg(feature = "chain-binding")]
