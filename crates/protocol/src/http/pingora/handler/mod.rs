@@ -876,10 +876,11 @@ mod tests {
         let mut released = false;
         let mut buf = Some(BodyBuffer::new(100));
         buf.as_mut().unwrap().push(Bytes::from_static(b"buffered")).unwrap();
+        buf.as_mut().unwrap().push(Bytes::from_static(b" data")).unwrap();
 
         body_util::release_stream_buffer(&mut body, true, &mut released, &mut buf, false);
         assert!(released);
-        assert_eq!(body.unwrap(), Bytes::from_static(b"buffered"));
+        assert_eq!(body.unwrap(), Bytes::from_static(b"buffered data"));
         assert!(buf.is_none());
     }
 

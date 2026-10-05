@@ -24,14 +24,11 @@ use bytes::Bytes;
 /// assert_eq!(frozen, Bytes::from_static(b"hello world"));
 /// ```
 pub struct BodyBuffer {
-    /// Accumulated body chunks.
-    chunks: Vec<Bytes>,
+    /// Accumulated body bytes.
+    bytes: Vec<u8>,
 
     /// Maximum allowed bytes.
     max_bytes: usize,
-
-    /// Total bytes accumulated so far.
-    total_bytes: usize,
 }
 
 impl BodyBuffer {
@@ -39,9 +36,8 @@ impl BodyBuffer {
     #[must_use]
     pub fn new(max_bytes: usize) -> Self {
         Self {
-            chunks: Vec::new(),
+            bytes: Vec::new(),
             max_bytes,
-            total_bytes: 0,
         }
     }
 
@@ -51,41 +47,40 @@ impl BodyBuffer {
     ///
     /// Returns [`BodyBufferOverflow`] if adding this chunk would exceed `max_bytes`.
     pub fn push(&mut self, chunk: Bytes) -> Result<(), BodyBufferOverflow> {
-        let new_total = self.total_bytes + chunk.len();
+        let attempted = self.bytes.len().saturating_add(chunk.len());
 
-        if new_total > self.max_bytes {
+        if chunk.len() > self.max_bytes.saturating_sub(self.bytes.len()) {
             return Err(BodyBufferOverflow {
                 limit: self.max_bytes,
-                attempted: new_total,
+                attempted,
             });
         }
 
-        self.total_bytes = new_total;
-        self.chunks.push(chunk);
+        if attempted > self.bytes.capacity() {
+            // Grow geometrically for tiny chunks, but never request capacity
+            // beyond the body limit. No incoming backing allocation survives.
+            let capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(attempted)
+                .min(self.max_bytes);
+            self.bytes.reserve_exact(capacity.saturating_sub(self.bytes.len()));
+        }
+        self.bytes.extend_from_slice(&chunk);
+        drop(chunk);
 
         Ok(())
     }
 
     /// Total bytes accumulated so far.
     pub fn total_bytes(&self) -> usize {
-        self.total_bytes
+        self.bytes.len()
     }
 
-    /// Consume the buffer and return a single contiguous `Bytes`.
+    /// Consume the buffer and return the complete body.
     pub fn freeze(self) -> Bytes {
-        match self.chunks.len() {
-            0 => Bytes::new(),
-            1 => self.chunks.into_iter().next().unwrap_or_default(),
-            _ => {
-                let mut combined = Vec::with_capacity(self.total_bytes);
-
-                for chunk in self.chunks {
-                    combined.extend_from_slice(&chunk);
-                }
-
-                Bytes::from(combined)
-            },
-        }
+        Bytes::from(self.bytes)
     }
 }
 
@@ -128,7 +123,16 @@ pub struct BodyBufferOverflow {
     reason = "tests"
 )]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+
+    // -----------------------------------------------------------------------------
+    // Constants
+    // -----------------------------------------------------------------------------
+
+    /// Payload size for fragmentation coverage.
+    const PAYLOAD_BYTES: usize = 65_536; // 64 KiB
 
     #[test]
     fn buffer_empty_freeze_returns_empty_bytes() {
@@ -142,7 +146,7 @@ mod tests {
     }
 
     #[test]
-    fn buffer_single_chunk_freeze_avoids_copy() {
+    fn buffer_single_chunk_freeze_returns_exact_bytes() {
         let mut buf = BodyBuffer::new(1024);
         buf.push(Bytes::from_static(b"hello")).unwrap();
 
@@ -178,11 +182,60 @@ mod tests {
     fn buffer_rejects_overflow() {
         let mut buf = BodyBuffer::new(10);
         buf.push(Bytes::from_static(b"12345")).unwrap();
+        let capacity = buf.bytes.capacity();
 
         let err = buf.push(Bytes::from_static(b"123456")).unwrap_err();
 
         assert_eq!(err.limit, 10, "overflow error should report configured limit");
         assert_eq!(err.attempted, 11, "overflow error should report attempted size");
+        assert_eq!(
+            buf.bytes.capacity(),
+            capacity,
+            "rejected chunk should not reserve storage"
+        );
+        assert_eq!(
+            buf.freeze(),
+            Bytes::from_static(b"12345"),
+            "rejected chunk should not change body"
+        );
+    }
+
+    #[test]
+    fn fixed_payload_storage_is_bounded_across_chunk_counts() {
+        let payload = vec![b'x'; PAYLOAD_BYTES];
+
+        for chunk_bytes in [PAYLOAD_BYTES, 1024, 64, 1] {
+            let mut buf = BodyBuffer::new(PAYLOAD_BYTES);
+            for chunk in payload.chunks(chunk_bytes) {
+                buf.push(Bytes::copy_from_slice(chunk)).unwrap();
+            }
+
+            assert_eq!(buf.total_bytes(), PAYLOAD_BYTES);
+            assert!(
+                buf.bytes.capacity() <= PAYLOAD_BYTES.saturating_mul(2),
+                "{chunk_bytes}-byte chunks must keep storage proportional to payload"
+            );
+            assert_eq!(buf.freeze(), Bytes::copy_from_slice(&payload));
+        }
+    }
+
+    #[test]
+    fn sliced_chunk_does_not_retain_oversized_owner() {
+        let backing: Arc<[u8]> = vec![b'x'; 16_384].into();
+        let owner = Bytes::from_owner(Arc::clone(&backing));
+        let slice = owner.slice(0..1);
+        drop(owner);
+        assert_eq!(Arc::strong_count(&backing), 2, "slice should retain its source owner");
+
+        let mut buf = BodyBuffer::new(1);
+        buf.push(slice).unwrap();
+
+        assert_eq!(
+            Arc::strong_count(&backing),
+            1,
+            "source backing must be released after push"
+        );
+        assert_eq!(buf.freeze(), Bytes::from_static(b"x"));
     }
 
     #[test]
@@ -211,12 +264,15 @@ mod tests {
         assert_eq!(err.attempted, 1, "attempted size should be 1 byte");
 
         let mut buf2 = BodyBuffer::new(0);
-        buf2.push(Bytes::new()).unwrap();
+        for _ in 0..65_536 {
+            buf2.push(Bytes::new()).unwrap();
+        }
         assert_eq!(
             buf2.total_bytes(),
             0,
             "pushing empty bytes into zero-size buffer should succeed"
         );
+        assert_eq!(buf2.bytes.capacity(), 0, "empty chunks should not allocate storage");
     }
 
     #[test]

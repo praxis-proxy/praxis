@@ -125,14 +125,17 @@ access.
 ## BodyBuffer
 
 `BodyBuffer` is the accumulation primitive used by
-`StreamBuffer` mode. It stores a `Vec<Bytes>` with
-a byte ceiling:
+`StreamBuffer` mode. It copies accepted chunks into an
+owned, contiguous `Vec<u8>` with a byte ceiling. Storage
+grows with the payload rather than the chunk count or the
+size of an incoming chunk's backing allocation:
 
-- `push(chunk)` appends; returns
-  `BodyBufferOverflow` if `total_bytes + chunk.len()`
-  exceeds `max_bytes`.
-- `freeze()` concatenates all chunks into a single
-  `Bytes`.
+- `push(chunk)` checks the ceiling before copying and
+  returns `BodyBufferOverflow` if the new payload would
+  exceed `max_bytes`. It releases the incoming `Bytes`
+  owner after copying.
+- `freeze()` transfers the accumulated allocation into a
+  single `Bytes` without copying the payload again.
 
 The handler creates a `BodyBuffer` lazily on the
 first chunk and stores it in the request context
