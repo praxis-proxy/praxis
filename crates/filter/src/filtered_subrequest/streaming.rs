@@ -583,7 +583,8 @@ mod tests {
             finished: false,
         };
 
-        assert!(body.checked(Bytes::from_static(b"1234")).is_ok());
+        body.checked(Bytes::from_static(b"1234"))
+            .expect("the first four bytes fit the ceiling");
         let error = body
             .checked(Bytes::from_static(b"5"))
             .expect_err("the fifth byte exceeds the ceiling");
@@ -592,6 +593,7 @@ mod tests {
             Some(4)
         );
         assert!(body.finished, "the rejected chunk must terminate the stream");
+        drop(body);
     }
 
     struct ExpiredDeadlineFilter;
