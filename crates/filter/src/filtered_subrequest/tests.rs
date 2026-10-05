@@ -2521,6 +2521,23 @@ fn streaming_executor(max_response_bytes: usize) -> crate::FilteredSubrequestExe
     crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, max_response_bytes, Duration::from_secs(5))
 }
 
+fn dual_limit_executor(buffered_bytes: usize, streaming_bytes: usize) -> crate::FilteredSubrequestExecutor {
+    use std::time::{Duration, Instant};
+
+    use praxis_core::subrequest::SubRequestClient;
+
+    let client = SubRequestClient::new(crate::test_support::connector(4, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    crate::FilteredSubrequestExecutor::for_callout_with_limits(
+        client,
+        downstream,
+        0,
+        buffered_bytes,
+        streaming_bytes,
+        Duration::from_secs(5),
+    )
+}
+
 // Drain a streaming body to completion, returning the concatenated payload.
 async fn drain(body: &mut Box<dyn crate::StreamingResponseBody>) -> Result<Vec<u8>, crate::FilterError> {
     let mut out = Vec::new();
@@ -2611,6 +2628,49 @@ async fn run_streaming_yields_upstream_chunks_for_clean_eof() {
     backend.abort();
 
     assert_eq!(payload, b"hello", "the upstream chunk must be delivered on a clean EOF");
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn callout_separate_limits_allow_stream_larger_than_buffered_cap() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nabcdefgh\r\n0\r\n\r\n").await;
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = dual_limit_executor(4, 8);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+
+    let mut body = match executor
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("the streaming callout must open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+    let payload = drain(&mut body).await.expect("the streaming cap permits eight bytes");
+    backend.abort();
+
+    assert_eq!(
+        payload, b"abcdefgh",
+        "the smaller buffered cap must not truncate a stream"
+    );
 }
 
 #[tokio::test]
@@ -3282,6 +3342,46 @@ async fn run_classified_one_byte_over_returns_typed_response_too_large() {
 
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn callout_separate_limits_reject_buffered_body_at_buffered_cap() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabcde").await;
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&buffered_chain_yaml(addr, "")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = dual_limit_executor(4, 8);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+
+    let outcome = executor
+        .run_classified(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("a buffered overflow must be classified");
+    backend.abort();
+
+    match outcome {
+        crate::CalloutOutcome::ResponseTooLarge { actual, limit } => {
+            assert_eq!(actual, Some(5), "the observed body size must be reported");
+            assert_eq!(limit, 4, "the buffered cap must win over the larger streaming cap");
+        },
+        crate::CalloutOutcome::Response(_) => panic!("the buffered body exceeds its four-byte cap"),
+    }
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
 async fn run_classified_real_upstream_502_is_not_response_too_large() {
     use std::{
         sync::Arc,
@@ -3517,7 +3617,7 @@ async fn abnormal_completion_body_is_bounded_by_max_response_bytes() {
 
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
-async fn abnormal_completion_over_ceiling_is_classified_too_large() {
+async fn abnormal_stream_completion_uses_buffered_ceiling() {
     use std::{
         sync::Arc,
         time::{Duration, Instant},
@@ -3529,7 +3629,7 @@ async fn abnormal_completion_over_ceiling_is_classified_too_large() {
         serde_yaml::from_str(&routed_chain_yaml(addr, "- filter: test_bounded_completion\n")).unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let executor = streaming_executor(4);
+    let executor = dual_limit_executor(4, 16);
     let request = crate::SubRequest {
         method: http::Method::GET,
         uri: http::Uri::from_static("/"),
@@ -3547,7 +3647,7 @@ async fn abnormal_completion_over_ceiling_is_classified_too_large() {
     match outcome {
         crate::CalloutOutcome::ResponseTooLarge { actual, limit } => {
             assert_eq!(actual, Some(8), "the flushed completion body size must be preserved");
-            assert_eq!(limit, 4, "the tripped ceiling must be preserved");
+            assert_eq!(limit, 4, "the buffered ceiling must apply to the completed fallback");
         },
         crate::CalloutOutcome::Response(_) => {
             panic!("an 8-byte completion body must breach the 4-byte ceiling")
