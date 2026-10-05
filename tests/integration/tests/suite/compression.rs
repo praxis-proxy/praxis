@@ -6,8 +6,8 @@
 use pingora_core::protocols::http::compression::Algorithm;
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    Backend, bind_unique_port, free_port, http_send, parse_header, parse_status, start_backend_with_shutdown,
-    start_proxy, start_reloadable_proxy,
+    Backend, ReloadableProxyGuard, bind_unique_port, free_port, http_send, parse_header, parse_status,
+    start_backend_with_shutdown, start_proxy, start_reloadable_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -432,13 +432,13 @@ fn gzip_configuration_reload_uses_current_levels_and_honors_removal() {
 
     let body = "high compression generation ".repeat(64);
     let yaml = regression_yaml(proxy_port, backend.port(), &body, "level: 22");
-    proxy.reload(&yaml);
+    reload_to_generation(&proxy, &yaml, &body);
     assert_gzip_response(proxy.addr(), "/static", &body, true);
 
     let body = "removed compression generation ".repeat(64);
     let yaml = regression_yaml(proxy_port, backend.port(), &body, "level: 22")
         .replace("      - filter: compression\n        level: 22\n", "");
-    proxy.reload(&yaml);
+    reload_to_generation(&proxy, &yaml, &body);
     assert_gzip_response(proxy.addr(), "/static", &body, false);
 }
 
@@ -481,6 +481,19 @@ insecure_options:
   allow_private_endpoints: true
 "#
     )
+}
+
+/// Reload `yaml` and wait until `/static` serves `body`.
+///
+/// Probes without `Accept-Encoding`: each generation serves its own body, so the
+/// plain response says which config is live without depending on the
+/// compression behavior the caller is about to assert on.
+fn reload_to_generation(proxy: &ReloadableProxyGuard, yaml: &str, body: &str) {
+    proxy.reload_until(
+        yaml,
+        || send_and_read_body(proxy.addr(), "/static", None).1,
+        |served| served.as_slice() == body.as_bytes(),
+    );
 }
 
 fn assert_gzip_response(addr: &str, path: &str, expected: &str, compressed: bool) {
