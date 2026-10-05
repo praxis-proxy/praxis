@@ -211,7 +211,7 @@ fn body_buffer_mode_delivers_complete_body() {
 
 #[test]
 fn preread_h2_tiny_data_frames_deliver_complete_body() {
-    let body_bytes = 1024_usize;
+    let body_bytes = 1024_usize; // 1 KiB
     let backend = start_echo_backend();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend.port(), "preread_uppercase")).unwrap();
