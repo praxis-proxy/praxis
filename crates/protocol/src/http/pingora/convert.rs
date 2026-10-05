@@ -12,6 +12,7 @@
 //! a given request.
 
 use pingora_proxy::Session;
+use praxis_core::next_hop_headers::is_forbidden_client_response_header;
 use praxis_filter::{Rejection, Request, Response};
 use tracing::debug;
 
@@ -220,7 +221,7 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
 /// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
 fn append_rejection_headers(header: &mut pingora_http::ResponseHeader, rejection: &Rejection) {
     for (name, value) in &rejection.headers {
-        if is_dropped_rejection_header(name) {
+        if is_forbidden_client_response_header(name) {
             debug!(header = %name, "dropping reserved or hop-by-hop header from rejection response");
             continue;
         }
@@ -228,22 +229,13 @@ fn append_rejection_headers(header: &mut pingora_http::ResponseHeader, rejection
     }
     if let Some(headers) = &rejection.header_map {
         for (name, value) in headers.iter() {
-            if is_dropped_rejection_header(name.as_str()) {
+            if is_forbidden_client_response_header(name.as_str()) {
                 debug!(header = %name, "dropping reserved or hop-by-hop header from rejection response");
                 continue;
             }
             let _append = header.append_header(name.clone(), value.clone());
         }
     }
-}
-
-/// Whether a filter-supplied rejection header must be withheld from the
-/// client: reserved internal headers and response hop-by-hop headers.
-fn is_dropped_rejection_header(name: &str) -> bool {
-    praxis_core::reserved_headers::is_reserved(name)
-        || praxis_core::reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS
-            .iter()
-            .any(|hop| name.eq_ignore_ascii_case(hop))
 }
 
 // -----------------------------------------------------------------------------

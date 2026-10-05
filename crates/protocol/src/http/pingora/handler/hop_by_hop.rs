@@ -1,250 +1,55 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Shared hop-by-hop header stripping logic ([RFC 9110]).
+//! Hop-by-hop stripping adapters over [`praxis_core::next_hop_headers`].
 //!
-//! Both request and response paths need to remove hop-by-hop headers
-//! before forwarding. This module provides the common implementation;
-//! callers supply the static header list appropriate for their direction.
-//!
-//! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
+//! Pingora request/response types implement [`HopByHopTarget`] and
+//! [`RemoveHeader`]; header-map call sites delegate to the shared core module.
 
 use http::HeaderMap;
-use tracing::debug;
-
-// -----------------------------------------------------------------------------
-// Hop-by-hop Header Lists
-// -----------------------------------------------------------------------------
+use pingora_http::{RequestHeader, ResponseHeader};
+use praxis_core::next_hop_headers::{
+    HopByHopTarget, StripHopByHopOptions, UpgradePreserve, strip_hop_by_hop, strip_reserved,
+};
 
 /// [RFC 9110] hop-by-hop headers for upstream requests.
-///
-/// The canonical shared set (includes `proxy-authorization`, a request-only
-/// credential header), defined once in `praxis-core` so the sub-request and
-/// protocol paths cannot drift.
-///
-/// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 pub(crate) const REQUEST_HOP_BY_HOP: &[&str] = praxis_core::reserved_headers::HOP_BY_HOP_HEADERS;
 
 /// [RFC 9110] hop-by-hop headers for upstream responses.
-///
-/// The canonical response set ([`REQUEST_HOP_BY_HOP`] minus
-/// `proxy-authorization`, a request-only credential header), defined once in
-/// `praxis-core` so the sub-request and protocol paths cannot drift.
-///
-/// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 pub(crate) const RESPONSE_HOP_BY_HOP: &[&str] = praxis_core::reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS;
 
-// -----------------------------------------------------------------------------
-// WebSocket Upgrade Detection
-// -----------------------------------------------------------------------------
+pub(crate) use praxis_core::next_hop_headers::has_websocket_upgrade;
 
-/// Whether `Upgrade` and `Connection` should be preserved.
-///
-/// Returns `true` when a header name is `upgrade` or `connection`
-/// and the request is a `WebSocket` upgrade. Only `WebSocket` upgrades
-/// are preserved; other upgrade types (notably `h2c`) are stripped
-/// to prevent h2c smuggling attacks that bypass proxy access
-/// controls.
-pub(crate) fn preserve_for_upgrade(name: &str, is_websocket_upgrade: bool) -> bool {
-    is_websocket_upgrade && (name == "upgrade" || name == "connection")
-}
-
-/// Whether the `Upgrade` header value indicates a `WebSocket` upgrade.
-///
-/// Returns `true` only when the value is exactly `websocket`
-/// (case-insensitive per [RFC 6455 Section 4.1]). Mixed values
-/// like `h2c, websocket` are rejected because they could allow
-/// the upstream to negotiate a non-WebSocket protocol.
-///
-/// [RFC 6455 Section 4.1]: https://datatracker.ietf.org/doc/html/rfc6455#section-4.1
-pub(crate) fn is_websocket_upgrade(value: &str) -> bool {
-    value.trim().eq_ignore_ascii_case("websocket")
-}
-
-/// Whether a header map's `Upgrade` header indicates a `WebSocket` upgrade.
-///
-/// Returns `true` only when there is exactly one `Upgrade` header whose
-/// value is exactly `websocket` (via [`is_websocket_upgrade`]). Zero
-/// headers, or two or more `Upgrade` headers, yield `false` so the strip
-/// path removes them.
-///
-/// Reading only the first value (e.g. via [`HeaderMap::get`]) would let a
-/// client smuggle a second protocol past the WebSocket check: a request
-/// carrying `Upgrade: websocket` followed by `Upgrade: h2c` would be seen
-/// as a clean WebSocket upgrade, and [`preserve_for_upgrade`] would then
-/// forward the entire multi-valued `Upgrade` header (including the `h2c`
-/// token) to the backend, defeating the h2c-smuggling protection.
-pub(crate) fn has_websocket_upgrade(headers: &HeaderMap) -> bool {
-    let mut values = headers.get_all(http::header::UPGRADE).iter();
-    match (values.next(), values.next()) {
-        // Exactly one Upgrade header; value must be exactly `websocket`.
-        (Some(value), None) => value.to_str().is_ok_and(is_websocket_upgrade),
-        // Zero, or two or more Upgrade headers: not a clean WebSocket
-        // upgrade, so let the caller strip every Upgrade value.
-        _ => false,
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Chunked Framing Detection
-// -----------------------------------------------------------------------------
-
-/// Whether a message's headers declare chunked transfer framing.
-///
-/// Mirrors Pingora's framing detection (`is_chunked_encoding_from_headers`):
-/// the last `Transfer-Encoding` header value's last comma-separated token
-/// must be `chunked` ([RFC 9112 Section 6.1]).
-///
-/// [RFC 9112 Section 6.1]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.1
-pub(crate) fn declares_chunked_framing(headers: &HeaderMap) -> bool {
-    // Operate on raw bytes, not to_str(): Pingora's detection accepts
-    // obs-text (0x80-0xFF) header bytes, and a value it frames as chunked
-    // must not read as non-chunked here, or the body would be dropped.
-    headers
-        .get_all(http::header::TRANSFER_ENCODING)
-        .iter()
-        .next_back()
-        .and_then(|value| value.as_bytes().rsplit(|&b| b == b',').next())
-        .is_some_and(|token| trim_ascii(token).eq_ignore_ascii_case(b"chunked"))
-}
-
-/// Trim ASCII whitespace from both ends of a byte slice.
-fn trim_ascii(bytes: &[u8]) -> &[u8] {
-    let start = bytes
-        .iter()
-        .position(|b| !b.is_ascii_whitespace())
-        .unwrap_or(bytes.len());
-    let end = bytes
-        .iter()
-        .rposition(|b| !b.is_ascii_whitespace())
-        .map_or(start, |i| i + 1);
-    bytes.get(start..end).unwrap_or(&[])
-}
-
-/// Whether chunked framing must be re-established after hop-by-hop stripping.
-///
-/// `Transfer-Encoding` is nominally hop-by-hop, but it is also the header
-/// Pingora's body writers key on to frame the next hop's body
-/// (`init_body_writer_comm`: chunked beats `Content-Length`; with neither,
-/// requests are framed as zero-length and responses fall back to
-/// close-delimited). Stripping it without re-framing silently drops chunked
-/// request bodies and breaks response keep-alive, so callers re-insert a
-/// normalized `chunked` value whenever the original message declared chunked
-/// framing and no `Content-Length` replaced it. The next hop's writer
-/// re-frames the already-dechunked stream; H2 legs remove the header again
-/// before sending.
-pub(crate) fn should_restore_chunked_framing(headers: &HeaderMap, was_chunked: bool) -> bool {
-    was_chunked && !headers.contains_key(http::header::CONTENT_LENGTH)
-}
-
-// -----------------------------------------------------------------------------
-// Header Stripping
-// -----------------------------------------------------------------------------
-
-/// Snapshot `Connection` header values before they are removed.
-///
-/// Call this before stripping hop-by-hop headers, then pass the
-/// result to [`strip_connection_tokens`].
-///
-/// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
-pub(crate) fn snapshot_connection_values(headers: &HeaderMap) -> Vec<http::HeaderValue> {
-    headers.get_all("connection").iter().cloned().collect()
-}
-
-/// Remove headers declared in `Connection` tokens that are not in
-/// the static hop-by-hop list (those are already removed by the caller)
-/// and are not proxy-owned or essential
-/// (see [`is_connection_token_protected`](praxis_core::reserved_headers::is_connection_token_protected)).
-///
-/// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
-pub(crate) fn strip_connection_tokens<R: RemoveHeader>(
-    msg: &mut R,
-    values: &[http::HeaderValue],
-    static_list: &[&str],
-) {
-    for val in values {
-        for trimmed in praxis_core::reserved_headers::connection_tokens(val) {
-            if static_list.iter().any(|h| trimmed.eq_ignore_ascii_case(h)) {
-                continue;
-            }
-            if praxis_core::reserved_headers::is_connection_token_protected(trimmed) {
-                debug!(
-                    header = trimmed,
-                    "refusing to strip proxy-owned or essential header named in Connection token"
-                );
-                continue;
-            }
-            msg.remove_header_by_name(trimmed);
-        }
-    }
-}
-
-/// Strip static hop-by-hop headers and headers nominated by `Connection`
-/// from a standalone [`HeaderMap`].
-///
-/// Terminal responses are created outside Pingora's normal upstream response
-/// path, so they use this utility before downstream commitment.
+/// Strip hop-by-hop headers on a standalone [`HeaderMap`] (terminal responses).
 pub(crate) fn strip_hop_by_hop_header_map(headers: &mut HeaderMap, static_list: &[&str]) {
-    let connection_values = snapshot_connection_values(headers);
-    for name in static_list {
-        headers.remove(*name);
-    }
-    for value in &connection_values {
-        for token in praxis_core::reserved_headers::connection_tokens(value) {
-            if !static_list.iter().any(|name| token.eq_ignore_ascii_case(name))
-                && !praxis_core::reserved_headers::is_connection_token_protected(token)
-            {
-                headers.remove(token);
-            }
-        }
-    }
+    strip_hop_by_hop(
+        headers,
+        StripHopByHopOptions {
+            static_headers: static_list,
+            upgrade: UpgradePreserve::None,
+            restore_chunked_framing: false,
+            suppress_chunked_restore_on_websocket: false,
+        },
+    );
 }
 
-/// Remove reserved internal (`x-praxis-*` / `x-ext-*`) headers from a raw
-/// header map.
-///
-/// The upstream-response path strips these via
-/// [`RemoveHeader::strip_reserved_internal`], but a filter-produced terminal or
-/// streaming-terminal response carries an `http::HeaderMap` directly. Without
-/// this the "reserved internal headers must never reach the client" invariant
-/// held on the upstream path but not on the terminal paths.
+/// Strip reserved internal headers from a client-bound [`HeaderMap`].
 pub(crate) fn strip_reserved_internal_header_map(headers: &mut HeaderMap) {
-    let to_remove: Vec<http::HeaderName> = headers
-        .keys()
-        .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()))
-        .cloned()
-        .collect();
-
-    for name in &to_remove {
-        headers.remove(name);
-    }
-
-    if !to_remove.is_empty() {
-        debug!(
-            count = to_remove.len(),
-            direction = "response",
-            "stripped reserved internal headers from client-bound response"
-        );
-    }
+    strip_reserved(headers);
 }
-
-// -----------------------------------------------------------------------------
-// Trait Abstraction
-// -----------------------------------------------------------------------------
 
 /// Trait abstracting header removal for both request and response types.
 pub(crate) trait RemoveHeader {
-    /// direction i.e. request or response
+    /// Request or response direction label for logging.
     const DIRECTION: &'static str;
 
-    /// Return all headers
+    /// Return all headers.
     fn headers(&self) -> &HeaderMap;
+
     /// Remove a header by name, discarding the value.
     fn remove_header_by_name(&mut self, name: &str);
 
     /// Strip reserved internal headers before forwarding to upstream.
-    /// Remove proxy-internal routing metadata that should not leak to
-    /// backends and that may echo back from backends.
     fn strip_reserved_internal(&mut self) {
         let to_remove: Vec<http::HeaderName> = self
             .headers()
@@ -252,13 +57,11 @@ pub(crate) trait RemoveHeader {
             .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()))
             .cloned()
             .collect();
-
         for name in &to_remove {
             self.remove_header_by_name(name.as_str());
         }
-
         if !to_remove.is_empty() {
-            debug!(
+            tracing::debug!(
                 count = to_remove.len(),
                 direction = Self::DIRECTION,
                 "stripped reserved internal headers"
@@ -267,7 +70,7 @@ pub(crate) trait RemoveHeader {
     }
 }
 
-impl RemoveHeader for pingora_http::RequestHeader {
+impl RemoveHeader for RequestHeader {
     const DIRECTION: &'static str = "request";
 
     fn headers(&self) -> &HeaderMap {
@@ -279,7 +82,7 @@ impl RemoveHeader for pingora_http::RequestHeader {
     }
 }
 
-impl RemoveHeader for pingora_http::ResponseHeader {
+impl RemoveHeader for ResponseHeader {
     const DIRECTION: &'static str = "response";
 
     fn headers(&self) -> &HeaderMap {
@@ -291,303 +94,36 @@ impl RemoveHeader for pingora_http::ResponseHeader {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------------------
+/// Local wrapper so [`HopByHopTarget`] can be implemented for Pingora types.
+pub(crate) struct RequestHop<'a>(pub &'a mut RequestHeader);
 
-#[cfg(test)]
-#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(clippy::unwrap_used, reason = "tests")]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_hop_by_hop_matches_canonical_core_set() {
-        assert_eq!(
-            REQUEST_HOP_BY_HOP,
-            praxis_core::reserved_headers::HOP_BY_HOP_HEADERS,
-            "request hop-by-hop list must be the canonical core set"
-        );
+impl HopByHopTarget for RequestHop<'_> {
+    fn headers(&self) -> &HeaderMap {
+        &self.0.headers
     }
 
-    #[test]
-    fn response_hop_by_hop_matches_canonical_core_set() {
-        assert_eq!(
-            RESPONSE_HOP_BY_HOP,
-            praxis_core::reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS,
-            "response hop-by-hop list must be the canonical core set"
-        );
+    fn remove_by_name(&mut self, name: &str) {
+        drop(self.0.remove_header(name));
     }
 
-    #[test]
-    fn strip_reserved_internal_header_map_removes_reserved_keeps_others() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-praxis-route", http::HeaderValue::from_static("internal-cluster"));
-        headers.insert("x-ext-protocol-foo", http::HeaderValue::from_static("meta"));
-        headers.insert("content-type", http::HeaderValue::from_static("text/plain"));
+    fn insert_transfer_encoding_chunked(&mut self) {
+        drop(self.0.insert_header(http::header::TRANSFER_ENCODING, "chunked"));
+    }
+}
 
-        strip_reserved_internal_header_map(&mut headers);
+/// Local wrapper so [`HopByHopTarget`] can be implemented for Pingora types.
+pub(crate) struct ResponseHop<'a>(pub &'a mut ResponseHeader);
 
-        assert!(
-            !headers.contains_key("x-praxis-route"),
-            "reserved x-praxis-* header must be stripped from a terminal response"
-        );
-        assert!(
-            !headers.contains_key("x-ext-protocol-foo"),
-            "reserved x-ext-* header must be stripped from a terminal response"
-        );
-        assert_eq!(
-            headers.get("content-type").map(http::HeaderValue::as_bytes),
-            Some(b"text/plain".as_slice()),
-            "non-reserved headers must be preserved"
-        );
+impl HopByHopTarget for ResponseHop<'_> {
+    fn headers(&self) -> &HeaderMap {
+        &self.0.headers
     }
 
-    #[test]
-    fn strip_reserved_internal_header_map_cleans_response_trailers() {
-        let mut trailers = HeaderMap::new();
-        trailers.insert("x-praxis-foo", http::HeaderValue::from_static("leak"));
-        trailers.insert("x-ext-agent-x", http::HeaderValue::from_static("leak"));
-        trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
-
-        strip_reserved_internal_header_map(&mut trailers);
-
-        assert_eq!(trailers.len(), 1, "only the non-reserved trailer must remain");
-        assert_eq!(
-            trailers.get("grpc-status").map(http::HeaderValue::as_bytes),
-            Some(b"0".as_slice()),
-            "grpc-status trailer must be preserved"
-        );
+    fn remove_by_name(&mut self, name: &str) {
+        drop(self.0.remove_header(name));
     }
 
-    #[test]
-    fn declares_chunked_framing_matches_plain_and_compound() {
-        let mut plain = HeaderMap::new();
-        plain.insert(
-            http::header::TRANSFER_ENCODING,
-            http::HeaderValue::from_static("chunked"),
-        );
-        assert!(declares_chunked_framing(&plain));
-
-        let mut compound = HeaderMap::new();
-        compound.insert(
-            http::header::TRANSFER_ENCODING,
-            http::HeaderValue::from_static("gzip, chunked"),
-        );
-        assert!(declares_chunked_framing(&compound));
-    }
-
-    #[test]
-    fn declares_chunked_framing_rejects_non_chunked() {
-        let mut gzip = HeaderMap::new();
-        gzip.insert(http::header::TRANSFER_ENCODING, http::HeaderValue::from_static("gzip"));
-        assert!(!declares_chunked_framing(&gzip));
-
-        assert!(!declares_chunked_framing(&HeaderMap::new()));
-    }
-
-    #[test]
-    fn declares_chunked_framing_handles_obs_text_bytes() {
-        let mut obs = HeaderMap::new();
-        obs.insert(
-            http::header::TRANSFER_ENCODING,
-            http::HeaderValue::from_bytes(b"\xa0x, chunked").unwrap(),
-        );
-        assert!(
-            declares_chunked_framing(&obs),
-            "obs-text in an earlier token must not hide the trailing chunked token"
-        );
-    }
-
-    #[test]
-    fn websocket_lowercase_is_upgrade() {
-        assert!(
-            is_websocket_upgrade("websocket"),
-            "lowercase 'websocket' should be recognized"
-        );
-    }
-
-    #[test]
-    fn websocket_uppercase_is_upgrade() {
-        assert!(
-            is_websocket_upgrade("WEBSOCKET"),
-            "uppercase 'WEBSOCKET' should be recognized"
-        );
-    }
-
-    #[test]
-    fn websocket_mixed_case_is_upgrade() {
-        assert!(
-            is_websocket_upgrade("WebSocket"),
-            "mixed-case 'WebSocket' should be recognized per RFC 6455"
-        );
-    }
-
-    #[test]
-    fn websocket_with_whitespace_is_upgrade() {
-        assert!(
-            is_websocket_upgrade("  websocket  "),
-            "whitespace-padded 'websocket' should be recognized"
-        );
-    }
-
-    #[test]
-    fn h2c_is_not_websocket_upgrade() {
-        assert!(
-            !is_websocket_upgrade("h2c"),
-            "h2c upgrade must be rejected to prevent smuggling"
-        );
-    }
-
-    #[test]
-    fn mixed_h2c_websocket_is_not_upgrade() {
-        assert!(
-            !is_websocket_upgrade("h2c, websocket"),
-            "mixed upgrade values must be rejected"
-        );
-    }
-
-    #[test]
-    fn empty_value_is_not_upgrade() {
-        assert!(
-            !is_websocket_upgrade(""),
-            "empty upgrade value should not be recognized"
-        );
-    }
-
-    #[test]
-    fn arbitrary_protocol_is_not_upgrade() {
-        assert!(
-            !is_websocket_upgrade("SMTP"),
-            "arbitrary protocol should not be recognized"
-        );
-    }
-
-    #[test]
-    fn has_websocket_upgrade_case_insensitive() {
-        let mut headers = HeaderMap::new();
-        headers.insert("upgrade", "WebSocket".parse().unwrap());
-        assert!(
-            has_websocket_upgrade(&headers),
-            "should detect mixed-case WebSocket in header map"
-        );
-    }
-
-    #[test]
-    fn has_websocket_upgrade_missing_header() {
-        let headers = HeaderMap::new();
-        assert!(
-            !has_websocket_upgrade(&headers),
-            "should return false when upgrade header is missing"
-        );
-    }
-
-    #[test]
-    fn has_websocket_upgrade_non_websocket() {
-        let mut headers = HeaderMap::new();
-        headers.insert("upgrade", "h2c".parse().unwrap());
-        assert!(
-            !has_websocket_upgrade(&headers),
-            "should return false for non-websocket upgrade"
-        );
-    }
-
-    #[test]
-    fn duplicate_upgrade_headers_are_not_websocket() {
-        let mut headers = HeaderMap::new();
-        headers.append("upgrade", "websocket".parse().unwrap());
-        headers.append("upgrade", "h2c".parse().unwrap());
-        assert!(
-            !has_websocket_upgrade(&headers),
-            "duplicate Upgrade headers must not be recognized as a WebSocket upgrade (h2c smuggling)"
-        );
-    }
-
-    #[test]
-    fn duplicate_upgrade_headers_websocket_first_or_last() {
-        let mut headers = HeaderMap::new();
-        headers.append("upgrade", "h2c".parse().unwrap());
-        headers.append("upgrade", "websocket".parse().unwrap());
-        assert!(
-            !has_websocket_upgrade(&headers),
-            "duplicate Upgrade headers must not be recognized regardless of order"
-        );
-    }
-
-    #[test]
-    fn strip_removes_custom_but_keeps_proxy_owned_and_essential() {
-        let mut rec = Recorder {
-            removed: vec![],
-            headers: HeaderMap::new(),
-        };
-        let values = vec![http::HeaderValue::from_static(
-            "x-app-state, x-forwarded-for, forwarded, x-praxis-route, host, content-length",
-        )];
-        strip_connection_tokens(&mut rec, &values, REQUEST_HOP_BY_HOP);
-        assert!(
-            rec.removed.contains(&"x-app-state".to_owned()),
-            "custom header should be stripped"
-        );
-        for protected in [
-            "x-forwarded-for",
-            "forwarded",
-            "x-praxis-route",
-            "host",
-            "content-length",
-        ] {
-            assert!(
-                !rec.removed.iter().any(|h| h == protected),
-                "{protected} must not be strippable via a Connection token"
-            );
-        }
-    }
-
-    #[test]
-    fn connection_token_survives_obs_text_sibling() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            http::header::CONNECTION,
-            http::HeaderValue::from_bytes(b"x-backend-internal, \x80").unwrap(),
-        );
-        let mut recorder = Recorder {
-            removed: Vec::new(),
-            headers: headers.clone(),
-        };
-        let values = snapshot_connection_values(&headers);
-        strip_connection_tokens(&mut recorder, &values, REQUEST_HOP_BY_HOP);
-        assert_eq!(
-            recorder.removed,
-            ["x-backend-internal"],
-            "a non-UTF-8 sibling token must not keep a nominated header"
-        );
-
-        headers.insert("x-backend-internal", http::HeaderValue::from_static("secret"));
-        strip_hop_by_hop_header_map(&mut headers, RESPONSE_HOP_BY_HOP);
-        assert!(
-            !headers.contains_key("x-backend-internal"),
-            "terminal responses must strip the nominated header too"
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // Test Utilities
-    // -------------------------------------------------------------------------
-
-    /// Minimal [`RemoveHeader`] double recording removals.
-    struct Recorder {
-        removed: Vec<String>,
-        headers: HeaderMap,
-    }
-
-    impl RemoveHeader for Recorder {
-        const DIRECTION: &'static str = "request";
-
-        fn headers(&self) -> &HeaderMap {
-            &self.headers
-        }
-
-        fn remove_header_by_name(&mut self, name: &str) {
-            self.removed.push(name.to_ascii_lowercase());
-        }
+    fn insert_transfer_encoding_chunked(&mut self) {
+        drop(self.0.insert_header(http::header::TRANSFER_ENCODING, "chunked"));
     }
 }
