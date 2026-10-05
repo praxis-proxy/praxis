@@ -191,9 +191,9 @@ praxis-protocol                 Protocol adapters
 │           ├── hop_by_hop           Hop-by-hop header stripping (RFC 9110)
 │           ├── no_body              Handler without body filter hooks
 │           ├── normalize            Request header normalization
-│           ├── reserved_headers     Reserved internal header utilities
 │           ├── with_body            Handler with body filter hooks
 │           ├── request_filter/      Pipeline execution on request
+│           │   ├── request_utils    Reserved header rejection and request utilities
 │           │   ├── stream_buffer    Pre-read logic for StreamBuffer mode
 │           │   └── validation       Host header and Max-Forwards validation
 │           ├── request_body_filter  Body chunk processing (request)
