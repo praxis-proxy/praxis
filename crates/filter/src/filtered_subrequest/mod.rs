@@ -393,6 +393,7 @@ impl FilteredSubrequestExecutor {
     /// fails and a response-body filter synthesizes a buffered completion body,
     /// that body is checked against `max_buffered_response_bytes` after the
     /// filter returns; the filter must bound its own temporary output.
+    #[expect(clippy::too_many_arguments, reason = "callout limits and resources are explicit")]
     #[must_use]
     pub fn for_callout_with_limits(
         client: praxis_core::subrequest::SubRequestClient,
