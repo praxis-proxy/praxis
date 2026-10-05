@@ -1472,12 +1472,88 @@ impl HeaderSource for EffectiveHeaders<'_, '_> {
     }
 
     fn contains(&self, name: &HeaderName) -> Result<bool, ConditionError> {
-        match self.overlay_state(name)? {
-            TrustedHeaderState::Removed => Ok(false),
-            TrustedHeaderState::Value(_) => Ok(true),
-            TrustedHeaderState::Absent => self.0.request.contains(name).map_err(|e| match e {}),
+        let ctx = self.0;
+        // Same last-writer-wins order as `overlay_state`, but values are
+        // compared as bytes so one that isn't text still counts as present.
+        if let Some(present) = pending_presence(ctx, name)? {
+            return Ok(present);
+        }
+        match trusted_presence(ctx.trusted_mutations(), name)? {
+            Some(present) => Ok(present),
+            None => ctx.request.contains(name).map_err(|e| match e {}),
         }
     }
+}
+
+/// Whether this pass's grouped pending queues leave `name` present.
+///
+/// `None` means no queue mentioned it, so the trusted log decides.
+fn pending_presence(ctx: &HttpFilterContext<'_>, name: &HeaderName) -> Result<Option<bool>, ConditionError> {
+    let set = find_last_set_bytes(&ctx.request_headers_to_set, name);
+    let extras = ctx
+        .extra_request_headers
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case(name.as_str()))
+        .map(|(_, v)| v.as_bytes());
+    let mut values = set.into_iter().chain(extras).peekable();
+    if values.peek().is_some() {
+        return require_unique_bytes(values, name).map(Some);
+    }
+    let removed = ctx.request_headers_to_remove.iter().any(|n| n == name);
+    Ok(removed.then_some(false))
+}
+
+/// Raw bytes of the last pending `Set` for `name`, if any.
+fn find_last_set_bytes<'v>(
+    headers_to_set: &'v [(HeaderName, http::header::HeaderValue)],
+    name: &HeaderName,
+) -> Option<&'v [u8]> {
+    headers_to_set
+        .iter()
+        .rev()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v.as_bytes())
+}
+
+/// Whether the ordered trusted log leaves `name` present.
+///
+/// `None` means no mutation mentioned it, so the original request decides.
+fn trusted_presence<'m>(
+    mutations: impl Iterator<Item = &'m TrustedHeaderMutation>,
+    name: &HeaderName,
+) -> Result<Option<bool>, ConditionError> {
+    let mut values: Vec<&'m [u8]> = Vec::new();
+    let mut touched = false;
+    for mutation in mutations.filter(|m| m.matches_header(name)) {
+        touched = true;
+        match mutation {
+            TrustedHeaderMutation::Remove(_) => values.clear(),
+            TrustedHeaderMutation::Set(_, v) => {
+                values.clear();
+                values.push(v.as_bytes());
+            },
+            TrustedHeaderMutation::Add(_, v) => values.push(v.as_bytes()),
+        }
+    }
+    if !touched {
+        return Ok(None);
+    }
+    require_unique_bytes(values.into_iter(), name).map(Some)
+}
+
+/// Whether any value remains, failing closed when the remaining values
+/// disagree, just like the text lookup does.
+fn require_unique_bytes<V: PartialEq>(
+    mut values: impl Iterator<Item = V>,
+    name: &HeaderName,
+) -> Result<bool, ConditionError> {
+    let Some(first) = values.next() else {
+        return Ok(false);
+    };
+    if values.any(|v| v != first) {
+        return Err(ambiguous(name));
+    }
+    Ok(true)
 }
 
 /// Build an [`ConditionError::AmbiguousHeader`] for `name`.
@@ -2781,6 +2857,45 @@ content-length: 0
         assert!(
             effective_contains(&ctx, "x-model").unwrap(),
             "a header queued this pass should be present"
+        );
+    }
+
+    #[test]
+    fn effective_headers_contains_mutated_value_that_is_not_text() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let opaque = || http::HeaderValue::from_bytes("José".as_bytes()).unwrap();
+        ctx.request_headers_to_set.push(("x-user".parse().unwrap(), opaque()));
+        ctx.prior_pre_read_mutations
+            .push(TrustedHeaderMutation::Set("x-owner".parse().unwrap(), opaque()));
+        assert!(
+            effective_value(&ctx, "x-user").is_err(),
+            "a non-text pending value has no text form"
+        );
+        assert!(
+            effective_contains(&ctx, "x-user").unwrap(),
+            "a non-text value queued this pass is still present"
+        );
+        assert!(
+            effective_contains(&ctx, "x-owner").unwrap(),
+            "a non-text trusted Set from a prior pass is still present"
+        );
+    }
+
+    #[test]
+    fn effective_headers_contains_pending_ambiguity_fails_closed() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.request_headers_to_set
+            .push(("x-gate".parse().unwrap(), "a".parse().unwrap()));
+        ctx.extra_request_headers
+            .push((Cow::Borrowed("x-gate"), "b".to_owned()));
+        assert!(
+            matches!(
+                effective_contains(&ctx, "x-gate"),
+                Err(ConditionError::AmbiguousHeader { .. })
+            ),
+            "distinct pending values stay ambiguous for presence"
         );
     }
 
