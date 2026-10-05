@@ -302,7 +302,8 @@ fn validate_management_listener_addresses(
         && addresses_overlap(admin, metrics)
     {
         return Err(ProxyError::Config(
-            "admin.address and admin.metrics_address must not overlap".to_owned(),
+            "admin.address and admin.metrics_address must not overlap; configure distinct ports or non-overlapping IP addresses"
+                .to_owned(),
         ));
     }
 
@@ -322,7 +323,7 @@ fn validate_management_listener_addresses(
         for (listener, listener_address) in &listener_addresses {
             if addresses_overlap(management_address, *listener_address) {
                 return Err(ProxyError::Config(format!(
-                    "{field} overlaps listener '{}' address '{}'",
+                    "{field} overlaps listener '{}' address '{}'; configure distinct ports or non-overlapping IP addresses",
                     listener.name, listener.address
                 )));
             }
@@ -754,6 +755,11 @@ filter_chains:
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("must not overlap"), "got: {err}");
+        assert!(
+            err.to_string()
+                .contains("configure distinct ports or non-overlapping IP addresses"),
+            "overlap error should include a remediation hint: {err}"
+        );
     }
 
     #[test]
@@ -795,6 +801,11 @@ filter_chains:
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("overlaps listener 'web'"), "got: {err}");
+        assert!(
+            err.to_string()
+                .contains("configure distinct ports or non-overlapping IP addresses"),
+            "overlap error should include a remediation hint: {err}"
+        );
     }
 
     #[test]
