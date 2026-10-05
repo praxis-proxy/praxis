@@ -23,7 +23,7 @@ mod request_utils;
 mod stream_buffer;
 /// Terminal response delivery (buffered and streaming).
 mod terminal_responses;
-/// Host header validation and Max-Forwards handling.
+/// Max-Forwards handling for TRACE and OPTIONS.
 mod validation;
 
 pub(in crate::http) use pipeline::execute;

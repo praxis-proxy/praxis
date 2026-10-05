@@ -9,12 +9,12 @@
 use http::Uri;
 use pingora_http::RequestHeader;
 use praxis_core::next_hop_headers::{StripHopByHopOptions, UpgradePreserve, strip_hop_by_hop_target};
-use praxis_filter::has_dot_dot_traversal;
 use tracing::debug;
 
 use super::{
     super::context::PingoraRequestCtx,
     hop_by_hop::{REQUEST_HOP_BY_HOP, RequestHop},
+    path_traversal::has_dot_dot_traversal,
 };
 
 // -----------------------------------------------------------------------------
