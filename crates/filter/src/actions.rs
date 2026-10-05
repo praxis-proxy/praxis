@@ -27,6 +27,16 @@ pub trait StreamingResponseBody: Send + 'static {
     /// owned completion lifecycle exactly once before returning it.
     async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError>;
 
+    /// Tighten the maximum size of one chunk returned by [`next_chunk`](Self::next_chunk).
+    ///
+    /// Call before the first pull. Returns `false` when this body cannot
+    /// enforce the limit, so callers requiring it must fail closed. A
+    /// successful call never loosens an earlier limit. This bounds chunks
+    /// handed to the caller, not temporary allocations inside the source.
+    fn try_cap_chunk_bytes(&mut self, _limit: usize) -> bool {
+        false
+    }
+
     /// Suppress the unread body for HEAD, 204, or 304 delivery.
     ///
     /// Implementations cancel their underlying source while still running
@@ -594,6 +604,12 @@ mod tests {
         async fn cancel(&mut self) {
             self.0 = None;
         }
+    }
+
+    #[test]
+    fn unrelated_stream_body_cannot_claim_chunk_ceiling_support() {
+        let mut body: Box<dyn StreamingResponseBody> = Box::new(SingleChunkStreamBody(None));
+        assert!(!body.try_cap_chunk_bytes(4), "an unsupported body must fail closed");
     }
 
     // -------------------------------------------------------------------------

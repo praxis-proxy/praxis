@@ -38,7 +38,7 @@ pub struct StreamBodySuppressed;
 #[derive(Debug, thiserror::Error)]
 #[error("filtered_subrequest: streaming response exceeds configured body limit ({limit} bytes)")]
 pub struct CalloutResponseTooLarge {
-    /// Configured maximum response bytes for the callout.
+    /// Configured cumulative or per-chunk response byte ceiling.
     pub limit: usize,
 }
 
@@ -401,6 +401,8 @@ pub(crate) struct CalloutStreamingBody {
     emitted_bytes: usize,
     /// Response byte ceiling for the logical stream.
     max_response_bytes: usize,
+    /// Optional per-chunk ceiling tightened by the caller before its first pull.
+    max_chunk_bytes: Option<usize>,
     /// Whether the terminal `None` has been reached.
     finished: bool,
 }
@@ -415,6 +417,7 @@ impl CalloutStreamingBody {
             deferred_error: None,
             emitted_bytes: 0,
             max_response_bytes,
+            max_chunk_bytes: None,
             finished: false,
         }
     }
@@ -447,6 +450,11 @@ impl CalloutStreamingBody {
     /// Add `chunk` to the emitted-byte total, rejecting a counter overflow or a
     /// breach of the response ceiling.
     fn account(&mut self, chunk: Bytes) -> Result<Option<Bytes>, FilterError> {
+        if let Some(limit) = self.max_chunk_bytes
+            && chunk.len() > limit
+        {
+            return Err(Box::new(CalloutResponseTooLarge { limit }));
+        }
         let total = self
             .emitted_bytes
             .checked_add(chunk.len())
@@ -489,6 +497,11 @@ impl CalloutStreamingBody {
 
 #[async_trait]
 impl StreamingResponseBody for CalloutStreamingBody {
+    fn try_cap_chunk_bytes(&mut self, limit: usize) -> bool {
+        self.max_chunk_bytes = Some(self.max_chunk_bytes.map_or(limit, |current| current.min(limit)));
+        true
+    }
+
     async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
         loop {
             if let Some(chunk) = self.pending.pop_front() {
@@ -580,6 +593,7 @@ mod tests {
             deferred_error: None,
             emitted_bytes: 0,
             max_response_bytes: 4,
+            max_chunk_bytes: None,
             finished: false,
         };
 

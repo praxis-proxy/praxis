@@ -2624,10 +2624,66 @@ async fn run_streaming_yields_upstream_chunks_for_clean_eof() {
         crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
     };
 
+    assert!(
+        body.try_cap_chunk_bytes(5),
+        "callout streams support a per-chunk ceiling"
+    );
+
     let payload = drain(&mut body).await.expect("streaming body should drain cleanly");
     backend.abort();
 
     assert_eq!(payload, b"hello", "the upstream chunk must be delivered on a clean EOF");
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn callout_chunk_ceiling_withholds_oversized_inner_chunk() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = streaming_executor(32);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+    assert!(body.try_cap_chunk_bytes(8), "the callout must accept a chunk limit");
+    assert!(body.try_cap_chunk_bytes(4), "a later call must tighten the limit");
+    let error = body
+        .next_chunk()
+        .await
+        .expect_err("the five-byte chunk must be withheld");
+    assert_eq!(
+        error
+            .downcast_ref::<crate::CalloutResponseTooLarge>()
+            .map(|too_large| too_large.limit),
+        Some(4),
+        "the typed error must report the tighter per-chunk ceiling"
+    );
+    assert!(
+        body.next_chunk().await.unwrap().is_none(),
+        "no later chunk may escape after breach"
+    );
+    body.cancel().await;
+    backend.abort();
 }
 
 #[tokio::test]
