@@ -46,6 +46,8 @@ pub mod kv;
 pub mod logging;
 /// Process-wide memory pressure monitoring.
 pub mod memory;
+/// Hop-by-hop and reserved-header stripping for the next HTTP hop.
+pub mod next_hop_headers;
 /// Reserved internal header prefixes for proxy-internal metadata.
 pub mod reserved_headers;
 /// Shared retry budget and per-cluster active-request tracking.
