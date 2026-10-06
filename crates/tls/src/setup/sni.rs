@@ -121,12 +121,13 @@ impl ResolvesServerCert for SniCertResolver {
 /// If no entry has `default: true`, unmatched SNI is rejected
 /// (the resolver returns `None`).
 ///
-/// # Errors
-///
-/// Returns an error if certificate loading fails or if duplicate server names are registered.
 /// Loads each certificate, then hands the `(server_name, cert)` pairs to a
 /// single-label [`SniMatcher`]. The function is externally available when
 /// `bench-utils` exposes the module.
+///
+/// # Errors
+///
+/// Returns an error if certificate loading fails or if duplicate server names are registered.
 #[cfg_attr(
     not(feature = "bench-utils"),
     expect(unreachable_pub, reason = "private without bench-utils")
