@@ -4,7 +4,6 @@
 //! Proxy startup and configuration test utilities for integration tests.
 
 use std::{
-    collections::HashMap,
     fmt,
     path::PathBuf,
     sync::Arc,
@@ -15,7 +14,7 @@ use std::{
 use arc_swap::ArcSwap;
 use pingora_core::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
 use praxis_core::{
-    config::{Config, Listener, ProtocolKind},
+    config::{Config, ExpandedFilterChains, Listener, ProtocolKind},
     health::{HealthRegistry, build_health_registry},
     server::RuntimeOptions,
 };
@@ -144,28 +143,11 @@ fn resolve_praxis_bin_path() -> PathBuf {
 /// [`FilterPipeline`]: praxis_filter::FilterPipeline
 /// [`FilterEntry`]: praxis_core::config::FilterEntry
 fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &FilterRegistry) -> Arc<FilterPipeline> {
-    let chains_by_name: HashMap<&str, &_> = config.filter_chains.iter().map(|c| (c.name.as_str(), c)).collect();
-    // Resolve named references (branch chains, outbound bindings) against
-    // *expanded* entries so they inherit chain-level conditions like the
-    // listener path below, mirroring the server's
-    // `resolve_pipelines_with_composition`. `expanded_by_name` outlives the
-    // `chains` slices it backs.
-    let expanded_by_name: HashMap<&str, Vec<praxis_core::config::FilterEntry>> = chains_by_name
-        .iter()
-        .map(|(name, c)| (*name, c.expanded_entries()))
-        .collect();
-    let chains: HashMap<&str, &[praxis_core::config::FilterEntry]> = expanded_by_name
-        .iter()
-        .map(|(name, entries)| (*name, entries.as_slice()))
-        .collect();
-
-    let mut entries = Vec::new();
-    for chain_name in &listener.filter_chains {
-        let chain = chains_by_name
-            .get(chain_name.as_str())
-            .unwrap_or_else(|| panic!("unknown filter chain: {chain_name}"));
-        entries.extend(chain.expanded_entries());
-    }
+    let expanded_chains = ExpandedFilterChains::new(&config.filter_chains);
+    let chains = expanded_chains.as_slices();
+    let mut entries = expanded_chains
+        .for_listener(listener)
+        .unwrap_or_else(|err| panic!("{err}"));
 
     let mut pipeline =
         FilterPipeline::build_with_chains(&mut entries, registry, &chains, &config.insecure_options).unwrap();

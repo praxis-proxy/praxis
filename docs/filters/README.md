@@ -212,8 +212,14 @@ conditions (effective = chain AND filter). Above,
 **and** the method is `POST`, while `headers` runs on any
 `/api/` request. A request-phase condition gates both a
 filter's request and response hooks, so the inherited
-condition scopes the whole chain — request-body promotion
-and response tagging alike — to matching traffic.
+condition skips every hook in the chain (request-body
+promotion and response tagging alike) for non-matching
+traffic. Listener-wide effects are not gated: a
+`StreamBuffer` body filter in a gated chain still buffers
+and size-limits every request (or response) body on the
+listener, and `compression` still applies to every eligible
+response. In this example, `json_body_field` pre-reads even
+`/health` request bodies to end of stream before forwarding.
 
 Chain-level conditions get the same well-formedness and
 metadata validation as per-filter conditions and behave

@@ -24,7 +24,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use praxis_core::{
     circuit::CircuitBreakerConfig,
-    config::{Config, DEFAULT_SUBREQUEST_POOL_SIZE},
+    config::{Config, DEFAULT_SUBREQUEST_POOL_SIZE, ExpandedFilterChains},
     subrequest::{SubRequestClient, SubRequestConnector, SubRequestConnectorOptions},
 };
 use praxis_filter::{FilterPipeline, FilterRegistry};
@@ -179,38 +179,11 @@ pub(crate) fn resolve_pipelines_with_composition(
     composition: &PipelineComposition,
 ) -> Result<ListenerPipelines, Box<dyn std::error::Error + Send + Sync>> {
     let registry = runtime_registry(registry, subrequest_client);
-    let chains_by_name: HashMap<&str, &_> = config
-        .filter_chains
-        .iter()
-        .map(|chain| (chain.name.as_str(), chain))
-        .collect();
-    // Resolve named references (from branch chains and outbound/subrequest
-    // bindings) against *expanded* entries so they inherit chain-level
-    // conditions exactly like the listener path below. `build_filters` moves
-    // each entry's `conditions` into the `PipelineFilter` via `mem::take`, so
-    // only request-phase conditions flow through — never body hooks, which
-    // branch children still do not run. `expanded_by_name` is declared first so
-    // it outlives every `build_with_chains` borrow of `chains`.
-    let expanded_by_name: HashMap<&str, Vec<praxis_core::config::FilterEntry>> = chains_by_name
-        .iter()
-        .map(|(name, chain)| (*name, chain.expanded_entries()))
-        .collect();
-    let chains: HashMap<&str, &[praxis_core::config::FilterEntry]> = expanded_by_name
-        .iter()
-        .map(|(name, entries)| (*name, entries.as_slice()))
-        .collect();
+    let expanded_chains = ExpandedFilterChains::new(&config.filter_chains);
+    let chains = expanded_chains.as_slices();
     let mut pipelines = HashMap::with_capacity(config.listeners.len());
     for listener in &config.listeners {
-        let mut entries = Vec::new();
-        for chain_name in &listener.filter_chains {
-            let chain = chains_by_name.get(chain_name.as_str()).ok_or_else(|| {
-                let lname = &listener.name;
-                format!("unknown chain '{chain_name}' for listener '{lname}'")
-            })?;
-            // Clone each entry with the chain's `conditions` prepended, so every
-            // expanded filter inherits the chain-level gate (chain AND filter).
-            entries.extend(chain.expanded_entries());
-        }
+        let mut entries = expanded_chains.for_listener(listener)?;
 
         validate_terminal_position(&entries, &listener.name)?;
 
@@ -666,6 +639,88 @@ filter_chains:
         .unwrap();
 
         assert_eq!(ran.load(Ordering::SeqCst), 1, "the pipeline validator must run once");
+    }
+
+    #[test]
+    fn resolve_pipelines_rejects_conditional_security_from_chain() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [guarded]
+filter_chains:
+  - name: guarded
+    conditions:
+      - when:
+          path_prefix: "/api"
+    filters:
+      - filter: ip_acl
+        allow: ["10.0.0.0/8"]
+"#,
+        )
+        .unwrap();
+        let result = resolve_pipelines(
+            &config,
+            &FilterRegistry::with_builtins(),
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("security filter 'ip_acl'") && err.contains("request conditions"),
+            "inherited conditions must trigger the conditional-security check: {err}"
+        );
+    }
+
+    #[cfg(feature = "upstream-binding")]
+    #[test]
+    fn resolve_pipelines_rejects_chain_bound_gate_before_binding_router() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [early, routing]
+filter_chains:
+  - name: early
+    conditions:
+      - when:
+          bound_upstream:
+            application_provider: openai
+    filters:
+      - filter: request_id
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            http:
+              application_provider: openai
+            endpoints: ["10.0.0.1:80"]
+"#,
+        )
+        .unwrap();
+        let result = resolve_pipelines(
+            &config,
+            &FilterRegistry::with_builtins(),
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("filter 'request_id' requires a bound logical upstream")
+                && err.contains("no preceding filter is guaranteed to bind one"),
+            "inherited bound_upstream gates must trigger the binding-order check: {err}"
+        );
     }
 
     #[test]

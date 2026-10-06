@@ -6,9 +6,11 @@
 # conditions using AND semantics: the chain condition is evaluated first, then
 # the filter's own conditions (effective = chain AND filter).
 #
-# A request-phase condition gates both a filter's request and response hooks, so
-# the inherited condition scopes the whole chain — request-body promotion and
-# response tagging alike — to matching traffic.
+# A request-phase condition skips request and response hooks for non-matching
+# traffic, including request-body promotion and response tagging. Body mode is
+# listener-wide: json_body_field still pre-reads and size-limits every request
+# body on this listener (including /health) to end of stream before forwarding.
+# A compression filter in a gated chain would also affect every eligible response.
 #
 # Here the `api-enrichment` chain applies only to `/api/` requests:
 #   - `json_body_field` promotes the JSON body's `model` field to an `X-Model`

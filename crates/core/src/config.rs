@@ -22,6 +22,7 @@ mod branch_chain;
 mod chain_ref;
 mod cluster;
 mod condition;
+mod expanded_chains;
 mod filters;
 mod insecure_options;
 mod listener;
@@ -50,6 +51,7 @@ pub use cluster::{
 pub use condition::{
     ApplicationMatch, Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch, SelectedUpstreamMatch,
 };
+pub use expanded_chains::ExpandedFilterChains;
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use insecure_options::{InsecureFlag, InsecureOptions, SkipPipelineChecks};
 pub use listener::{Listener, ListenerTls, ProtocolKind};
