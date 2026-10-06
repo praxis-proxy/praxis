@@ -5501,6 +5501,51 @@ async fn a_body_repeating_a_key_is_rejected_before_structured_policy_runs() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_body_without_a_model_that_repeats_a_key_is_rejected() {
+    let (_dir, path) = write_llm_route_config();
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            require_model: false,
+            ..Default::default()
+        },
+    );
+
+    for body in [r#"{"messages":[],"messages":[]}"#, r#"{"model":"gpt-4o","model":null}"#] {
+        let action = dispatch_inference_as(&filter, "alice", body).await;
+        let FilterAction::Reject(rejection) = action else {
+            panic!("body {body} repeats a key and must be rejected even without a usable model; got {action:?}");
+        };
+        assert!(
+            has_header(&rejection, "x-policy-violation", "llm.duplicate_key"),
+            "a first-wins backend could read a model last-wins parsing misses in body {body}; got {:?}",
+            rejection.headers,
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unclassified_envelope_that_repeats_a_key_is_rejected_as_a_duplicate() {
+    let (_dir, path) = write_llm_and_tool_config();
+    let filter = build_filter(path);
+
+    for body in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","model":"m","model":"m"}"#,
+    ] {
+        let action = dispatch_inference_as(&filter, "alice", body).await;
+        let FilterAction::Reject(rejection) = action else {
+            panic!("body {body} repeats a key and must be rejected; got {action:?}");
+        };
+        assert!(
+            has_header(&rejection, "x-policy-violation", "llm.duplicate_key"),
+            "the duplicate check runs before envelope and ambiguity handling for body {body}; got {:?}",
+            rejection.headers,
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_malformed_body_is_not_reported_as_a_duplicate_key() {
     let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
     let filter = build_filter(path);

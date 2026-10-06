@@ -142,7 +142,7 @@
 //! | Inference request deny | Plain HTTP response with an OpenAI-compatible error envelope and `X-Policy-Violation`. |
 //! | Inference response deny | The response body is replaced; the committed status and headers cannot change. |
 //! | Oversized inference request | HTTP 413 with violation code `llm.body_too_large`. |
-//! | Inference request repeating a JSON object key | HTTP 400 with violation code `llm.duplicate_key`. |
+//! | Request body repeating a JSON object key, on a policy with `llm:` routes and no `mcp.method` | HTTP 400 with violation code `llm.duplicate_key`. |
 //!
 //! Any violation carrying a `proto_error_code` overrides `-32001` on the
 //! wire, and its `details` map is merged into `error.data`; the pending

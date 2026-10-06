@@ -134,9 +134,11 @@ enum GatedIdentity {
 /// For rule syntax, engine types, and absent-value behavior, see
 /// [Structured request input] in the policy engine docs.
 ///
-/// A body that repeats a key within one JSON object, at any depth,
+/// On a policy with `llm:` routes, any request body without `mcp.method`
+/// metadata that repeats a key within one JSON object, at any depth,
 /// receives HTTP 400 with violation code `llm.duplicate_key` before any
 /// authorization rule runs, since backends disagree on which copy wins.
+/// This covers bodies with no `model` and unclaimed JSON-RPC envelopes too.
 /// The response names neither the key nor any value. A body that is not
 /// valid JSON is not refused for being malformed: it carries no usable
 /// `model`, so it is handled like any other body without one.
@@ -144,10 +146,12 @@ enum GatedIdentity {
 /// The CMF prompt text that APL steps and scanners read is projected from
 /// `system`, Responses `instructions`, `messages[].content`, legacy
 /// `prompt`, and `input`. For Responses and embeddings `input`, only text
-/// counts: a string, string items, and `input_text`, `text`, or
-/// `output_text` parts of message items. Function-call arguments and
-/// outputs, custom-tool outputs, and MCP-call arguments and outputs also
-/// contribute text. Token-ID arrays and images are skipped.
+/// counts: a string, string items, and `input_text`, `text`,
+/// `output_text`, `reasoning_text`, or `summary_text` parts. Message items
+/// contribute their `content`. Every other item type, including tool calls,
+/// tool outputs, and reasoning, contributes its `arguments`, `input`,
+/// `output`, `text`, `content`, and `summary`. Token-ID arrays, images, and
+/// files are skipped.
 ///
 /// `body_access: read_write` enables the JSON-RPC re-serialization
 /// round-trip so APL field mutators (`redact()`, `assign()`) rewrite
@@ -1632,10 +1636,10 @@ fn oversized_body_rejection() -> Rejection {
         .with_body(llm_error_envelope_bytes_within(Some(&violation), usize::MAX))
 }
 
-/// Build an HTTP 400 rejection for an inference request that repeats a
-/// JSON object key. The body names neither the key nor any value.
+/// Build an HTTP 400 rejection for a request body that repeats a JSON
+/// object key. The body names neither the key nor any value.
 fn duplicate_key_rejection() -> Rejection {
-    let violation = PluginViolation::new("llm.duplicate_key", "inference request body repeats a JSON object key");
+    let violation = PluginViolation::new("llm.duplicate_key", "request body repeats a JSON object key");
     Rejection::status(400)
         .with_header(VIOLATION_HEADER, violation.code.clone())
         .with_header("Content-Type", "application/json")
@@ -1832,7 +1836,7 @@ impl HttpFilter for PolicyFilter {
             else {
                 tracing::debug!(
                     target: "policy.filter",
-                    "inference request body repeats a JSON object key; denying (fail-closed)",
+                    "request body repeats a JSON object key; denying (fail-closed)",
                 );
                 return Ok(FilterAction::Reject(duplicate_key_rejection()));
             };

@@ -22,7 +22,11 @@ const MAX_MODEL_BYTES: usize = 256;
 const BOOLEAN_PARAMS: &[&str] = &["stream"];
 
 /// Content part types that carry prompt text in an `input` item.
-const INPUT_TEXT_TYPES: &[&str] = &["input_text", "text", "output_text"];
+const INPUT_TEXT_TYPES: &[&str] = &["input_text", "text", "output_text", "reasoning_text", "summary_text"];
+
+/// Fields of a non-message `input` item (tool calls, tool outputs,
+/// reasoning) that carry text, in projection order.
+const INPUT_ITEM_TEXT_FIELDS: &[&str] = &["arguments", "input", "output", "text", "content", "summary"];
 
 /// Maximum nesting depth followed into content parts (e.g. a `tool_result`
 /// block whose `content` is itself an array of parts).
@@ -220,35 +224,33 @@ fn push_input_text(parts: &mut Vec<ContentPart>, input: &serde_json::Value) {
 }
 
 /// Append message or tool-history text from one `input` item.
+///
+/// Every non-message item type is scanned, so a tool call or output of a
+/// type not named here still reaches prompt rules and scanners.
 fn push_input_item_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value) {
-    let fields: &[&str] = match item.get("type").and_then(serde_json::Value::as_str) {
-        Some("function_call") => &["arguments"],
-        Some("function_call_output" | "custom_tool_call_output") => &["output"],
-        Some("mcp_call") => &["arguments", "output"],
-        Some("message") | None => return push_input_message_text(parts, item),
-        Some(_) => return,
+    let fields = match item.get("type").and_then(serde_json::Value::as_str) {
+        Some("message") | None => &["content"][..],
+        Some(_) => INPUT_ITEM_TEXT_FIELDS,
     };
     for value in fields.iter().filter_map(|field| item.get(field)) {
-        push_text(parts, value);
+        push_input_parts_text(parts, value);
     }
 }
 
-/// Append text content from a Responses message, skipping image and file parts.
-fn push_input_message_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value) {
-    match item.get("content") {
-        Some(content @ serde_json::Value::String(_)) => push_text(parts, content),
-        Some(serde_json::Value::Array(content)) => {
-            for part in content {
-                let text_part = match part.get("type") {
-                    Some(kind) => kind.as_str().is_some_and(|kind| INPUT_TEXT_TYPES.contains(&kind)),
-                    None => true,
-                };
-                if text_part {
-                    push_object_text(parts, part, 1);
-                }
-            }
-        },
-        _ => {},
+/// Append text from a string or a content-part array, skipping image and file parts.
+fn push_input_parts_text(parts: &mut Vec<ContentPart>, value: &serde_json::Value) {
+    let serde_json::Value::Array(content) = value else {
+        return push_text(parts, value);
+    };
+    for part in content {
+        let text_part = match part.get("type") {
+            Some(kind) => kind.as_str().is_some_and(|kind| INPUT_TEXT_TYPES.contains(&kind)),
+            None => true,
+        };
+        if text_part {
+            push_text(parts, part);
+            push_object_text(parts, part, 1);
+        }
     }
 }
 
@@ -544,7 +546,10 @@ mod tests {
     #[test]
     fn duplicate_model_keys_are_rejected() {
         assert!(
-            try_request(r#"{"model":"gpt-4o-mini","model":"gpt-4o"}"#).is_err(),
+            matches!(
+                try_request(r#"{"model":"gpt-4o-mini","model":"gpt-4o"}"#),
+                Err(DuplicateKey)
+            ),
             "backends disagree on which copy wins, so policy cannot know which model it judges",
         );
     }
@@ -552,10 +557,12 @@ mod tests {
     #[test]
     fn duplicate_top_level_tools_are_rejected() {
         assert!(
-            try_request(
-                r#"{"model":"m","tools":[{"type":"function","function":{"name":"transfer_funds"}}],"tools":[]}"#
-            )
-            .is_err(),
+            matches!(
+                try_request(
+                    r#"{"model":"m","tools":[{"type":"function","function":{"name":"transfer_funds"}}],"tools":[]}"#
+                ),
+                Err(DuplicateKey)
+            ),
             "a second `tools` could hide the first from policy while the backend acts on it",
         );
     }
@@ -563,10 +570,12 @@ mod tests {
     #[test]
     fn a_duplicate_nested_key_is_rejected() {
         assert!(
-            try_request(
-                r#"{"model":"m","tools":[{"type":"function","function":{"name":"lookup","name":"transfer_funds"}}]}"#
-            )
-            .is_err(),
+            matches!(
+                try_request(
+                    r#"{"model":"m","tools":[{"type":"function","function":{"name":"lookup","name":"transfer_funds"}}]}"#
+                ),
+                Err(DuplicateKey)
+            ),
             "a repeated key deep inside `tools` is as ambiguous as one at the top",
         );
     }
@@ -580,7 +589,7 @@ mod tests {
     #[test]
     fn a_duplicate_is_found_after_escape_decoding() {
         assert!(
-            try_request(r#"{"model":"m","mod\u0065l":"other"}"#).is_err(),
+            matches!(try_request(r#"{"model":"m","mod\u0065l":"other"}"#), Err(DuplicateKey)),
             "an escaped spelling names the same key once decoded",
         );
     }
@@ -595,11 +604,9 @@ mod tests {
             r#"{"model":"m","model""#,
             r#"{"model":"m","model":"n"} trailing"#,
         ] {
-            let parsed = try_request(body);
-            assert!(parsed.is_ok(), "body {body} is malformed, not a duplicate");
             assert!(
-                parsed.unwrap().into_value().is_null(),
-                "body {body} must yield a null document"
+                try_request(body).is_ok_and(|parsed| parsed.into_value().is_null()),
+                "body {body} is malformed, not a duplicate, so it must yield a null document",
             );
         }
     }
@@ -631,11 +638,10 @@ mod tests {
     fn nesting_past_the_recursion_limit_stays_malformed() {
         let depth = 129;
         let body = format!(r#"{{"model":"m","deep":{}{}}}"#, "[".repeat(depth), "]".repeat(depth));
-        let parsed = try_request(&body);
-        assert!(parsed.is_ok(), "deep nesting is not a duplicate");
         assert!(
-            parsed.unwrap().into_value().is_null(),
-            "serde_json's recursion limit still applies, so the body is malformed",
+            try_request(&body).is_ok_and(|parsed| parsed.into_value().is_null()),
+            "deep nesting is not a duplicate, and serde_json's recursion limit still applies, \
+             so the body is malformed",
         );
 
         let depth = 100;
@@ -929,6 +935,39 @@ mod tests {
     }
 
     #[test]
+    fn unlisted_tool_history_items_are_projected() {
+        let parsed = request(
+            r#"{"model":"m","input":[
+                 {"type":"local_shell_call_output","call_id":"c1","output":"shell"},
+                 {"type":"custom_tool_call","call_id":"c2","name":"run","input":"custom"},
+                 {"type":"reasoning","id":"r1",
+                  "summary":[{"type":"summary_text","text":"summary"}],
+                  "content":[{"type":"reasoning_text","text":"reasoning"}]},
+                 {"type":"future_tool_output","output":"unknown"}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["shell", "custom", "reasoning", "summary", "unknown"],
+            "an item type outside the known set must not hide its text from scanners",
+        );
+    }
+
+    #[test]
+    fn non_text_parts_of_tool_outputs_are_skipped() {
+        let parsed = request(
+            r#"{"model":"m","input":[
+                 {"type":"function_call_output","call_id":"c1","output":[
+                     {"type":"input_text","text":"kept"},
+                     {"type":"input_image","text":"dropped","image_url":"http://x/y.png"}]}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["kept"],
+            "tool outputs filter part types the same way message content does",
+        );
+    }
+
+    #[test]
     fn mcp_call_arguments_and_outputs_are_projected() {
         let parsed = request(
             r#"{"model":"m","input":[
@@ -1093,6 +1132,67 @@ mod tests {
             response_message(&response(r#"{"model":"m"}"#)).role,
             Role::Assistant
         ));
+    }
+
+    mod properties {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        proptest! {
+            #[test]
+            fn strict_parse_matches_serde_json_without_duplicates(value in json_value()) {
+                let body = serde_json::to_string(&value).unwrap();
+                let reference: serde_json::Value = serde_json::from_str(&body).unwrap();
+                prop_assert!(
+                    try_request(&body).is_ok_and(|parsed| parsed.into_value() == reference),
+                    "body {} must parse as serde_json parses it",
+                    body,
+                );
+            }
+
+            #[test]
+            fn a_repeated_key_is_always_rejected(
+                key in "[a-z]{1,8}",
+                first in json_value(),
+                second in json_value(),
+                outer in json_value(),
+            ) {
+                let key = serde_json::to_string(&key).unwrap();
+                let body = format!(
+                    r#"{{"model":"m","outer":{},"nested":[{{{key}:{},{key}:{}}}]}}"#,
+                    serde_json::to_string(&outer).unwrap(),
+                    serde_json::to_string(&first).unwrap(),
+                    serde_json::to_string(&second).unwrap(),
+                );
+                prop_assert!(
+                    matches!(try_request(&body), Err(DuplicateKey)),
+                    "body {} repeats a key and must be rejected",
+                    body,
+                );
+            }
+        }
+
+        /// Arbitrary JSON documents with unique keys per object.
+        fn json_value() -> impl Strategy<Value = serde_json::Value> {
+            let leaf = prop_oneof![
+                Just(serde_json::Value::Null),
+                any::<bool>().prop_map(serde_json::Value::Bool),
+                any::<i64>().prop_map(serde_json::Value::from),
+                any::<u64>().prop_map(serde_json::Value::from),
+                any::<f64>()
+                    .prop_filter("finite", |n| n.is_finite())
+                    .prop_map(serde_json::Value::from),
+                any::<String>().prop_map(serde_json::Value::String),
+            ];
+            leaf.prop_recursive(4, 32, 6, |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..6).prop_map(serde_json::Value::Array),
+                    prop::collection::btree_map(any::<String>(), inner, 0..6)
+                        .prop_map(|map| serde_json::Value::Object(map.into_iter().collect())),
+                ]
+            })
+        }
     }
 
     // -----------------------------------------------------------------------
