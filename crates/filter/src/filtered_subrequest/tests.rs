@@ -2624,11 +2624,6 @@ async fn run_streaming_yields_upstream_chunks_for_clean_eof() {
         crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
     };
 
-    assert!(
-        body.try_cap_chunk_bytes(5),
-        "callout streams support a per-chunk ceiling"
-    );
-
     let payload = drain(&mut body).await.expect("streaming body should drain cleanly");
     backend.abort();
 
@@ -2637,7 +2632,7 @@ async fn run_streaming_yields_upstream_chunks_for_clean_eof() {
 
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
-async fn callout_chunk_ceiling_withholds_oversized_inner_chunk() {
+async fn streaming_transport_overflow_returns_typed_callout_error() {
     use std::{
         sync::Arc,
         time::{Duration, Instant},
@@ -2647,7 +2642,9 @@ async fn callout_chunk_ceiling_withholds_oversized_inner_chunk() {
         spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
     let registry = callout_registry();
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
-    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let mut pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+    pipeline.apply_body_limits(None, Some(4), false).unwrap();
+    let pipeline = Arc::new(pipeline);
     let executor = streaming_executor(32);
     let request = crate::SubRequest {
         method: http::Method::GET,
@@ -2665,18 +2662,16 @@ async fn callout_chunk_ceiling_withholds_oversized_inner_chunk() {
         crate::CalloutResponse::Streaming { body, .. } => body,
         crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
     };
-    assert!(body.try_cap_chunk_bytes(8), "the callout must accept a chunk limit");
-    assert!(body.try_cap_chunk_bytes(4), "a later call must tighten the limit");
     let error = body
         .next_chunk()
         .await
-        .expect_err("the five-byte chunk must be withheld");
+        .expect_err("the transport must reject a response above its four-byte ceiling");
     assert_eq!(
         error
             .downcast_ref::<crate::CalloutResponseTooLarge>()
             .map(|too_large| too_large.limit),
         Some(4),
-        "the typed error must report the tighter per-chunk ceiling"
+        "the typed error must report the transport ceiling"
     );
     assert!(
         body.next_chunk().await.unwrap().is_none(),

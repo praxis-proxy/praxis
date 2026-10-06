@@ -38,7 +38,7 @@ pub struct StreamBodySuppressed;
 #[derive(Debug, thiserror::Error)]
 #[error("filtered_subrequest: streaming response exceeds configured body limit ({limit} bytes)")]
 pub struct CalloutResponseTooLarge {
-    /// Configured cumulative or per-chunk response byte ceiling.
+    /// Configured cumulative response byte ceiling.
     pub limit: usize,
 }
 
@@ -54,6 +54,8 @@ pub(crate) struct FilteredStreamingBody {
     deferred_completion_output: Option<Bytes>,
     /// Per-callback local output waiting to be pulled downstream.
     pending_chunks: VecDeque<Bytes>,
+    /// Transport byte ceiling that ended this stream, when it overflowed.
+    transport_overflow_limit: Option<usize>,
 }
 
 impl FilteredStreamingBody {
@@ -65,6 +67,7 @@ impl FilteredStreamingBody {
             finished: false,
             deferred_completion_output: None,
             pending_chunks: VecDeque::new(),
+            transport_overflow_limit: None,
         }
     }
 
@@ -236,6 +239,9 @@ impl FilteredStreamingBody {
         &mut self,
         e: praxis_core::subrequest::SubRequestError,
     ) -> Result<Option<Bytes>, FilterError> {
+        if let praxis_core::subrequest::SubRequestError::ResponseTooLarge { limit, .. } = &e {
+            self.transport_overflow_limit = Some(*limit);
+        }
         if let Some(upstream_body) = self.upstream.take() {
             (*upstream_body).cancel().await;
         }
@@ -401,8 +407,6 @@ pub(crate) struct CalloutStreamingBody {
     emitted_bytes: usize,
     /// Response byte ceiling for the logical stream.
     max_response_bytes: usize,
-    /// Optional per-chunk ceiling tightened by the caller before its first pull.
-    max_chunk_bytes: Option<usize>,
     /// Whether the terminal `None` has been reached.
     finished: bool,
 }
@@ -417,7 +421,6 @@ impl CalloutStreamingBody {
             deferred_error: None,
             emitted_bytes: 0,
             max_response_bytes,
-            max_chunk_bytes: None,
             finished: false,
         }
     }
@@ -450,11 +453,6 @@ impl CalloutStreamingBody {
     /// Add `chunk` to the emitted-byte total, rejecting a counter overflow or a
     /// breach of the response ceiling.
     fn account(&mut self, chunk: Bytes) -> Result<Option<Bytes>, FilterError> {
-        if let Some(limit) = self.max_chunk_bytes
-            && chunk.len() > limit
-        {
-            return Err(Box::new(CalloutResponseTooLarge { limit }));
-        }
         let total = self
             .emitted_bytes
             .checked_add(chunk.len())
@@ -475,6 +473,7 @@ impl CalloutStreamingBody {
     /// Consume the inner body at EOF, queueing completion output or recording an
     /// unhandled termination to surface after buffered chunks drain.
     fn drain_completion(&mut self) -> Result<(), FilterError> {
+        let transport_overflow_limit = self.inner.as_ref().and_then(|inner| inner.transport_overflow_limit);
         let (continuation, completion_output) = self
             .inner
             .take()
@@ -484,8 +483,12 @@ impl CalloutStreamingBody {
         self.held_extensions = Some(completion.extensions);
         if let Some(termination) = completion.termination.as_ref().filter(|t| !t.is_handled()) {
             let cause = termination.cause();
-            self.deferred_error =
-                Some(format!("filtered_subrequest: unhandled upstream stream termination: {cause:?}").into());
+            self.deferred_error = Some(match transport_overflow_limit {
+                Some(limit) if cause == StreamTerminationCause::ResponseTooLarge => {
+                    Box::new(CalloutResponseTooLarge { limit })
+                },
+                _ => format!("filtered_subrequest: unhandled upstream stream termination: {cause:?}").into(),
+            });
             return Ok(());
         }
         self.pending.extend(completion.pending_chunks);
@@ -497,11 +500,6 @@ impl CalloutStreamingBody {
 
 #[async_trait]
 impl StreamingResponseBody for CalloutStreamingBody {
-    fn try_cap_chunk_bytes(&mut self, limit: usize) -> bool {
-        self.max_chunk_bytes = Some(self.max_chunk_bytes.map_or(limit, |current| current.min(limit)));
-        true
-    }
-
     async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
         loop {
             if let Some(chunk) = self.pending.pop_front() {
@@ -593,7 +591,6 @@ mod tests {
             deferred_error: None,
             emitted_bytes: 0,
             max_response_bytes: 4,
-            max_chunk_bytes: None,
             finished: false,
         };
 
