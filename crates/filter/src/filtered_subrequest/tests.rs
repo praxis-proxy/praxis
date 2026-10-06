@@ -412,6 +412,20 @@ fn response_sanitization_strips_hop_by_hop_and_internal_headers() {
 }
 
 #[test]
+fn subresponse_sanitization_does_not_restore_chunked_te() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::TRANSFER_ENCODING,
+        http::HeaderValue::from_static("chunked"),
+    );
+    super::sanitize::sanitize_subresponse_headers(&mut headers);
+    assert!(
+        !headers.contains_key(http::header::TRANSFER_ENCODING),
+        "nested sub-response hop strip must not re-insert chunked TE (unlike upstream client-bound strip)"
+    );
+}
+
+#[test]
 fn destination_host_is_synthesized_without_overwriting_step_override() {
     let mut generated = HeaderMap::new();
     super::sanitize::ensure_destination_host(&mut generated, "model.example:443").unwrap();

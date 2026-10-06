@@ -8,12 +8,13 @@
 
 use http::Uri;
 use pingora_http::RequestHeader;
+use praxis_core::next_hop_headers::{StripHopByHopOptions, UpgradePreserve, strip_hop_by_hop_target};
 use praxis_filter::has_dot_dot_traversal;
 use tracing::debug;
 
 use super::{
     super::context::PingoraRequestCtx,
-    hop_by_hop::{self, REQUEST_HOP_BY_HOP},
+    hop_by_hop::{REQUEST_HOP_BY_HOP, RequestHop},
 };
 
 // -----------------------------------------------------------------------------
@@ -31,24 +32,17 @@ use super::{
 ///
 /// [RFC 6455]: https://datatracker.ietf.org/doc/html/rfc6455
 pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
-    let is_ws = is_upgrade && hop_by_hop::has_websocket_upgrade(&req.headers);
-    let conn_values = hop_by_hop::snapshot_connection_values(&req.headers);
-    let was_chunked = hop_by_hop::declares_chunked_framing(&req.headers);
-
-    for name in REQUEST_HOP_BY_HOP {
-        if hop_by_hop::preserve_for_upgrade(name, is_ws) {
-            continue;
-        }
-        let _remove = req.remove_header(*name);
-    }
-    hop_by_hop::strip_connection_tokens(req, &conn_values, REQUEST_HOP_BY_HOP);
-    if hop_by_hop::should_restore_chunked_framing(&req.headers, was_chunked) {
-        let _insert = req.insert_header(http::header::TRANSFER_ENCODING, "chunked");
-    }
-
-    if is_upgrade && !is_ws {
-        debug!("stripping non-WebSocket upgrade headers to prevent h2c smuggling");
-    }
+    strip_hop_by_hop_target(
+        &mut RequestHop(req),
+        StripHopByHopOptions {
+            static_headers: REQUEST_HOP_BY_HOP,
+            upgrade: UpgradePreserve::IfUpgradeRequest {
+                is_upgrade_request: is_upgrade,
+            },
+            restore_chunked_framing: true,
+            suppress_chunked_restore_on_websocket: false,
+        },
+    );
 }
 
 /// Re-add `te: trailers` to an HTTP/2 upstream request when the downstream
