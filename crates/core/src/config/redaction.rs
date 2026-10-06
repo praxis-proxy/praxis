@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Redaction of credential-bearing condition headers in operator views.
+//! Redaction of sensitive condition headers in operator views.
 
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ use super::{Condition, ResponseCondition};
 /// Substrings that mark a header name as credential-bearing (case-insensitive).
 const SENSITIVE_HEADER_SUBSTRINGS: &[&str] = &["token", "secret", "key", "auth", "password", "credential"];
 
-/// Well-known credential-bearing headers without relying on substring matches.
+/// Well-known headers with credential or sensitive session values.
 const CREDENTIAL_HEADER_NAMES: &[&str] = &[
     "authorization",
     "cookie",
@@ -23,13 +23,14 @@ const CREDENTIAL_HEADER_NAMES: &[&str] = &[
     "x-amz-security-token",
     "x-api-key",
     "x-auth-token",
+    "x-session-id",
 ];
 
 // -----------------------------------------------------------------------------
 // Credential Header Classification
 // -----------------------------------------------------------------------------
 
-/// Whether a header name is treated as credential-bearing in operator views.
+/// Whether a header name is treated as carrying sensitive values in operator views.
 ///
 /// Matches well-known names and sensitive substrings case-insensitively.
 #[must_use]
@@ -43,7 +44,7 @@ pub fn is_credential_header_name(name: &str) -> bool {
 // Condition Redaction
 // -----------------------------------------------------------------------------
 
-/// Replace credential-bearing header matcher values in request conditions.
+/// Replace sensitive header matcher values in request conditions.
 pub fn redact_condition_headers(conditions: &mut [Condition]) {
     for condition in conditions {
         let (Condition::When(matcher) | Condition::Unless(matcher)) = condition;
@@ -51,7 +52,7 @@ pub fn redact_condition_headers(conditions: &mut [Condition]) {
     }
 }
 
-/// Replace credential-bearing header matcher values in response conditions.
+/// Replace sensitive header matcher values in response conditions.
 pub fn redact_response_condition_headers(conditions: &mut [ResponseCondition]) {
     for condition in conditions {
         let (ResponseCondition::When(matcher) | ResponseCondition::Unless(matcher)) = condition;
@@ -63,7 +64,7 @@ pub fn redact_response_condition_headers(conditions: &mut [ResponseCondition]) {
 // Private Utilities
 // -----------------------------------------------------------------------------
 
-/// Replace credential-bearing values in one header matcher map.
+/// Replace sensitive values in one header matcher map.
 fn redact_header_matcher(headers: Option<&mut HashMap<String, String>>) {
     let Some(headers) = headers else {
         return;

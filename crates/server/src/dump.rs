@@ -95,7 +95,7 @@ pub(crate) struct ResolvedFilterDump {
 ///
 /// Known sensitive values are redacted before inclusion in the dump:
 /// credential-injection literals, the field names in `SENSITIVE_FIELD_NAMES`,
-/// and credential-bearing header values. Redaction is name-based and
+/// and sensitive header values. Redaction is name-based and
 /// best-effort — it cannot cover every custom secret field, so dump output
 /// should still be reviewed before sharing.
 ///
@@ -245,10 +245,10 @@ fn redact_sensitive_keys(value: &mut serde_yaml::Value) {
 }
 
 /// Redact the `value` entry of a mapping when its sibling `name` entry names a
-/// credential-bearing header (case-insensitive).
+/// sensitive header (case-insensitive).
 ///
-/// A header carries a credential when its name exactly matches a well-known
-/// credential header (e.g. `cookie`, which contains no telltale substring) or
+/// A header may carry a sensitive value when its name exactly matches a
+/// well-known name (e.g. `cookie` or `x-session-id`) or
 /// when it contains a sensitive substring (`token`, `secret`, `key`, `auth`,
 /// `password`, `credential`). The substring rule catches the many vendor
 /// header names (`X-Vault-Token`, `X-Functions-Key`, `X-Gitlab-Token`, …) that
@@ -617,6 +617,7 @@ filter_chains:
       - when:
           headers:
             authorization: "Bearer chain-secret-token"
+            x-session-id: "session-identifier-secret"
             x-tenant: "acme"
     filters:
       - filter: request_id
@@ -789,6 +790,10 @@ filter_chains:
         assert!(
             !yaml.contains("chain-secret-token"),
             "a credential in a chain-level condition header matcher must be redacted: {yaml}"
+        );
+        assert!(
+            !yaml.contains("session-identifier-secret"),
+            "a session identifier in a condition header matcher must be redacted: {yaml}"
         );
         assert!(
             !yaml.contains("filter-secret-key"),

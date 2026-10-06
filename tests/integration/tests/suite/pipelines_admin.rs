@@ -181,6 +181,7 @@ filter_chains:
           - unless:
               headers:
                 X-Api-Key: filter-secret
+                X-Session-Id: session-identifier-secret
                 X-Environment: prod
         response_conditions:
           - when:
@@ -223,6 +224,10 @@ filter_chains:
     assert_eq!(gated["conditions"][0]["when"]["headers"]["Authorization"], "[REDACTED]");
     assert_eq!(gated["conditions"][0]["when"]["headers"]["X-Tenant"], "acme");
     assert_eq!(gated["conditions"][1]["unless"]["headers"]["X-Api-Key"], "[REDACTED]");
+    assert_eq!(
+        gated["conditions"][1]["unless"]["headers"]["X-Session-Id"],
+        "[REDACTED]"
+    );
     assert_eq!(gated["conditions"][1]["unless"]["headers"]["X-Environment"], "prod");
     assert_eq!(
         gated["response_conditions"][0]["when"]["headers"]["Set-Cookie"],
@@ -242,7 +247,13 @@ filter_chains:
     let (status, aggregate) = get_pipelines_json(&admin_addr, "/api/pipelines");
     assert_eq!(status, 200, "aggregate pipeline view should succeed");
     let aggregate_body = aggregate.to_string();
-    for secret in ["chain-secret", "filter-secret", "response-secret", "branch-secret"] {
+    for secret in [
+        "chain-secret",
+        "filter-secret",
+        "session-identifier-secret",
+        "response-secret",
+        "branch-secret",
+    ] {
         assert!(
             !aggregate_body.contains(secret),
             "aggregate pipeline view exposed a credential fixture"

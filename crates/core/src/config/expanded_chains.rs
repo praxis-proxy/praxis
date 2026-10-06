@@ -66,8 +66,7 @@ impl<'chains> ExpandedFilterChains<'chains> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::indexing_slicing,
     reason = "tests use unwrap and indexing for brevity"
