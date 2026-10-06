@@ -80,7 +80,7 @@ impl BodyBuffer {
 
     /// Consume the buffer and return the complete body.
     pub fn freeze(self) -> Bytes {
-        Bytes::from(self.bytes)
+        Bytes::from(self.bytes.into_boxed_slice())
     }
 }
 

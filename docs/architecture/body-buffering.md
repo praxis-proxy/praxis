@@ -134,8 +134,9 @@ size of an incoming chunk's backing allocation:
   returns `BodyBufferOverflow` if the new payload would
   exceed `max_bytes`. It releases the incoming `Bytes`
   owner after copying.
-- `freeze()` transfers the accumulated allocation into a
-  single `Bytes` without copying the payload again.
+- `freeze()` discards spare capacity before returning a
+  single `Bytes`. Shrinking may copy the payload if the
+  allocator cannot resize the allocation in place.
 
 The handler creates a `BodyBuffer` lazily on the
 first chunk and stores it in the request context
