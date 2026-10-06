@@ -6,7 +6,7 @@
 use std::sync::{Arc, Mutex};
 
 use praxis_core::{
-    config::Config,
+    config::{Config, ProtocolKind},
     health::{HealthRegistry, build_health_registry},
 };
 use praxis_filter::FilterRegistry;
@@ -45,8 +45,10 @@ use crate::{
 /// # Errors
 ///
 /// Returns an error if the new config fails validation or pipeline
-/// construction, or if it changes the protocol of a listener whose
-/// handler is already bound (that change takes effect only on restart).
+/// construction, if it changes the protocol of a listener whose handler
+/// is already bound (that change takes effect only on restart), if its
+/// grouped TCP listeners are inconsistent, or if it changes or removes a
+/// bound TCP listener's startup-captured settings.
 /// The running server is unaffected.
 #[expect(
     clippy::too_many_arguments,
@@ -69,18 +71,18 @@ pub(crate) fn reload_pipelines(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
-    if let Err(err) = praxis_core::logging::validate_log_overrides(new_config) {
-        error!(error = %err, "config reload failed: invalid log_overrides");
-        return Err(err.into());
-    }
-
-    if let Err(err) = praxis_core::logging::validate_logging(new_config) {
-        error!(error = %err, "config reload failed: invalid logging config");
-        return Err(err.into());
-    }
-
     if let Err(err) = reject_protocol_changes(new_config, live) {
         error!(error = %err, "config reload failed: listener protocol changed; requires restart");
+        return Err(err);
+    }
+
+    if let Err(err) = praxis_protocol::tcp::validate_tcp_groups(new_config) {
+        error!(error = %err, "config reload failed: inconsistent TCP listener group");
+        return Err(err.into());
+    }
+
+    if let Err(err) = reject_tcp_group_changes(new_config, old_config) {
+        error!(error = %err, "config reload failed: TCP listener topology changed; requires restart");
         return Err(err);
     }
 
@@ -198,6 +200,58 @@ fn reject_protocol_changes(
     let name = &listener.name;
     let requested = listener.protocol;
     Err(format!("listener '{name}' protocol changed from {bound:?} to {requested:?}; a bound handler cannot switch protocols without a restart").into())
+}
+
+/// Reject reloads that change what a bound TCP listener captured at startup.
+///
+/// A TCP listener group's Pingora service captures its upstream, cluster,
+/// timeouts, and `allow_private_upstreams` by value when it is built, and
+/// reads the pipeline slot of the group's first listener only. Changing
+/// the group key of a bound TCP listener, removing one, or flipping
+/// `allow_private_upstreams` while TCP listeners exist would be silently
+/// ignored (or leave a group reading a slot no longer swapped), so the
+/// whole reload is rejected. Listeners new to this reload are not bound and
+/// are not compared.
+fn reject_tcp_group_changes(
+    new_config: &Config,
+    old_config: &Config,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut old_tcp = old_config
+        .listeners
+        .iter()
+        .filter(|listener| listener.protocol == ProtocolKind::Tcp)
+        .peekable();
+    if old_tcp.peek().is_some()
+        && old_config.insecure_options.allow_private_upstreams != new_config.insecure_options.allow_private_upstreams
+    {
+        return Err("allow_private_upstreams is captured by TCP listeners at startup; requires restart".into());
+    }
+    for old in old_tcp {
+        let name = &old.name;
+        let Some(new) = new_config.listeners.iter().find(|listener| listener.name == old.name) else {
+            return Err(format!("TCP listener '{name}' removed; TCP listener topology requires a restart").into());
+        };
+        if new.protocol != ProtocolKind::Tcp {
+            continue;
+        }
+        if tcp_group_key(old) != tcp_group_key(new) {
+            return Err(format!("TCP listener '{name}' changed upstream/cluster/timeouts; requires restart").into());
+        }
+    }
+    Ok(())
+}
+
+/// Borrowed TCP group key: `(upstream, cluster, session_timeout_ms, max_duration_secs)`.
+type TcpGroupKeyRef<'cfg> = (Option<&'cfg str>, Option<&'cfg str>, Option<u64>, Option<u64>);
+
+/// The startup-captured settings that place a TCP listener in its group.
+fn tcp_group_key(listener: &praxis_core::config::Listener) -> TcpGroupKeyRef<'_> {
+    (
+        listener.upstream.as_deref(),
+        listener.cluster.as_deref(),
+        listener.tcp_session_timeout_ms,
+        listener.tcp_max_duration_secs,
+    )
 }
 
 // -----------------------------------------------------------------------------
@@ -391,7 +445,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use praxis_core::config::{InsecureOptions, ProtocolKind, SkipPipelineChecks};
+    use praxis_core::config::{InsecureOptions, SkipPipelineChecks};
     use praxis_filter::{CircuitBreakerFilter, FilterFactory, PipelineExtension, RequestExtensions};
 
     use super::*;
@@ -590,6 +644,134 @@ filter_chains:
             meta.load().get("web").unwrap().protocol,
             ProtocolKind::Tcp,
             "meta must report the protocol the bound socket honors"
+        );
+    }
+
+    #[test]
+    fn tcp_group_with_divergent_filter_chains_rejects_reload() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(tcp_group_config("tcp_lb", "tcp_lb", "db_pool", false));
+        let db1_ptr = Arc::as_ptr(&live.get("db1").unwrap().load());
+        let db2_ptr = Arc::as_ptr(&live.get("db2").unwrap().load());
+
+        let new_config = tcp_group_config("tcp_lb", "tcp_lb_alt", "db_pool", false);
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        assert!(result.is_err(), "grouped TCP listeners must keep identical chains");
+        assert_eq!(
+            Arc::as_ptr(&live.get("db1").unwrap().load()),
+            db1_ptr,
+            "db1 slot must be untouched"
+        );
+        assert_eq!(
+            Arc::as_ptr(&live.get("db2").unwrap().load()),
+            db2_ptr,
+            "db2 slot must be untouched"
+        );
+    }
+
+    #[test]
+    fn tcp_listener_cluster_change_rejects_reload() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(tcp_group_config("tcp_lb", "tcp_lb", "db_pool", false));
+        let db1_ptr = Arc::as_ptr(&live.get("db1").unwrap().load());
+
+        let new_config = tcp_group_config("tcp_lb", "tcp_lb", "db_pool_alt", false);
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        assert!(
+            result.is_err(),
+            "a bound TCP listener's group key is captured at startup"
+        );
+        assert_eq!(
+            Arc::as_ptr(&live.get("db1").unwrap().load()),
+            db1_ptr,
+            "rejected reload must not swap the slot"
+        );
+    }
+
+    #[test]
+    fn tcp_listener_removal_rejects_reload() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(tcp_group_config("tcp_lb", "tcp_lb", "db_pool", false));
+
+        let new_config = tcp_web_config();
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        assert!(
+            result.is_err(),
+            "removing a bound TCP listener cannot be applied without a restart"
+        );
+    }
+
+    #[test]
+    fn tcp_filter_chain_content_change_is_applied() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(tcp_group_config("tcp_lb", "tcp_lb", "db_pool", false));
+        let db1_ptr = Arc::as_ptr(&live.get("db1").unwrap().load());
+
+        let new_config = tcp_group_config("tcp_lb_alt", "tcp_lb_alt", "db_pool", false);
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        assert!(result.is_ok(), "consistent chain edits must reload: {result:?}");
+        assert_ne!(
+            Arc::as_ptr(&live.get("db1").unwrap().load()),
+            db1_ptr,
+            "the group leader slot must be swapped"
+        );
+    }
+
+    #[test]
+    fn allow_private_upstreams_flip_with_tcp_listener_rejects_reload() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(tcp_group_config("tcp_lb", "tcp_lb", "db_pool", false));
+
+        let new_config = tcp_group_config("tcp_lb", "tcp_lb", "db_pool", true);
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        assert!(
+            result.is_err(),
+            "allow_private_upstreams is captured by TCP listeners at startup"
         );
     }
 
@@ -2079,6 +2261,82 @@ filter_chains:
 "#,
         )
         .unwrap()
+    }
+
+    /// Two grouped TCP listeners `db1`/`db2` with the given chains and cluster.
+    ///
+    /// `flip_private` toggles `allow_private_upstreams` off (it is on by
+    /// default here so the private test endpoints validate).
+    fn tcp_group_config(chain_a: &str, chain_b: &str, cluster: &str, flip_private: bool) -> Config {
+        let allow_private_upstreams = !flip_private;
+        Config::from_yaml(&format!(
+            r#"
+listeners:
+  - name: db1
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    cluster: {cluster}
+    filter_chains: [{chain_a}]
+  - name: db2
+    address: "127.0.0.1:5433"
+    protocol: tcp
+    cluster: {cluster}
+    filter_chains: [{chain_b}]
+clusters:
+  - name: db_pool
+    endpoints:
+      - "10.0.0.1:5432"
+  - name: db_pool_alt
+    endpoints:
+      - "10.0.0.2:5432"
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: {allow_private_upstreams}
+filter_chains:
+  - name: tcp_lb
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: {cluster}
+            endpoints:
+              - "10.0.0.1:5432"
+  - name: tcp_lb_alt
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: {cluster}
+            endpoints:
+              - "10.0.0.3:5432"
+"#
+        ))
+        .unwrap()
+    }
+
+    /// Run [`reload_pipelines`] with empty runtime resources.
+    #[expect(clippy::too_many_arguments, reason = "mirrors reload_pipelines")]
+    fn reload_tcp(
+        new_config: &Config,
+        old_config: &Config,
+        registry: &FilterRegistry,
+        live: &ListenerPipelines,
+        meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
+        cluster_meta: &praxis_protocol::http::pingora::health::ClusterMetaStore,
+        shutdown: &Arc<Mutex<CancellationToken>>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        reload_pipelines(
+            new_config,
+            old_config,
+            registry,
+            live,
+            meta,
+            cluster_meta,
+            shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+            &PipelineComposition::default(),
+        )
     }
 
     fn health_checked_config() -> Config {

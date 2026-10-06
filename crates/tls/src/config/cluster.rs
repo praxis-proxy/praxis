@@ -121,6 +121,9 @@ impl ClusterTls {
         }
         if let Some(cert) = &self.client_cert {
             cert.validate()?;
+            if !cert.server_names.is_empty() || cert.default {
+                return Err(TlsError::ClusterClientCertSelectors);
+            }
         }
         Ok(())
     }
@@ -182,6 +185,36 @@ mod tests {
         let cert = tls.client_cert.unwrap();
         assert_eq!(cert.cert_path, tmp.cert, "client cert_path mismatch");
         assert_eq!(cert.key_path, tmp.key, "client key_path mismatch");
+    }
+
+    #[test]
+    fn cluster_client_cert_rejects_listener_only_fields() {
+        let tmp = temp_cert_key();
+        let pair = CertKeyPair {
+            cert_path: tmp.cert.clone(),
+            default: false,
+            key_path: tmp.key.clone(),
+            server_names: Vec::new(),
+        };
+        let with_names = ClusterTls {
+            client_cert: Some(CertKeyPair {
+                server_names: vec!["api.example.com".to_owned()],
+                ..pair.clone()
+            }),
+            ..ClusterTls::default()
+        };
+        let with_default = ClusterTls {
+            client_cert: Some(CertKeyPair { default: true, ..pair }),
+            ..ClusterTls::default()
+        };
+        assert!(
+            matches!(with_names.validate(), Err(TlsError::ClusterClientCertSelectors)),
+            "server_names on a cluster client_cert should be rejected"
+        );
+        assert!(
+            matches!(with_default.validate(), Err(TlsError::ClusterClientCertSelectors)),
+            "default on a cluster client_cert should be rejected"
+        );
     }
 
     #[test]

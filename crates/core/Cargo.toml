@@ -7,8 +7,7 @@ authors.workspace = true
 description = "Configuration, error types, and server factory for Praxis"
 license.workspace = true
 repository.workspace = true
-readme = "../../README.md"
-publish = true
+readme.workspace = true
 
 [lib]
 name = "praxis_core"
@@ -21,6 +20,7 @@ workspace = true
 # Off by default; experimental. The filter crate's `upstream-binding` turns it on.
 upstream-binding = []
 spiffe = ["praxis-tls/spiffe"]
+test-support = []
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
@@ -56,6 +56,7 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 
 [dev-dependencies]
+loom = { workspace = true }
 serde_json = { workspace = true }
 h2 = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }

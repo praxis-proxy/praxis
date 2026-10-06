@@ -71,7 +71,11 @@ with `make fips-host-facts`, which prints what the process the suites run as
 actually sees (the kernel flag, the crypto policy, the providers OpenSSL
 loads, whether MD5 is refused) into the log next to the results, and fails
 right there when `PRAXIS_FIPS_HOST` is declared on a container that is not
-in FIPS mode.
+in FIPS mode. The resilience suite's throughput floors are scaled down for
+this run (`PRAXIS_TEST_THROUGHPUT_SCALE`, set from the Makefile's
+`FIPS_HOST_THROUGHPUT_SCALE`, 0.5 by default): the floors are sized for
+GitHub's hosted runners, and the host is there to prove FIPS behavior, not
+speed.
 
 **The raw TLS probes.** `tests/utils/src/tls_probe.rs` builds `ClientHello`
 records that offer exactly what a test names (ChaCha20 only, X25519 only,

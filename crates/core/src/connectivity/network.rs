@@ -5,6 +5,8 @@
 
 use std::net::IpAddr;
 
+use super::classification::{classify_ip, classify_without_nat64};
+
 // -----------------------------------------------------------------------------
 // IP Normalization
 // -----------------------------------------------------------------------------
@@ -47,6 +49,17 @@ pub fn normalize_mapped_ipv4(ip: IpAddr) -> IpAddr {
 /// targets, protecting against DNS rebinding and SSRF attacks where
 /// a DNS name resolves to an internal IP at runtime.
 ///
+/// This composes the specific private-ish categories it has always covered
+/// (sharing the classification tables behind [`classify_ip`]) and is
+/// deliberately **narrower** than [`IpClassification::is_non_public`] (it does
+/// not flag multicast, documentation, benchmarking, or other special-use
+/// ranges). Unlike [`classify_ip`], it does **not** unwrap NAT64
+/// (`64:ff9b::/96`) wrappers, preserving its historical result set for
+/// `allow_private_upstreams`.
+///
+/// [`classify_ip`]: super::classify_ip
+/// [`IpClassification::is_non_public`]: super::IpClassification::is_non_public
+///
 /// Covered ranges:
 /// - IPv4 loopback (`127.0.0.0/8`)
 /// - IPv4 private / RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
@@ -57,7 +70,7 @@ pub fn normalize_mapped_ipv4(ip: IpAddr) -> IpAddr {
 /// - IPv6 unspecified (`::`)
 /// - IPv6 link-local (`fe80::/10`)
 /// - IPv6 unique local (`fc00::/7`)
-/// - IPv4-mapped IPv6 variants of all above
+/// - IPv4-mapped IPv6 variants (`::ffff:A.B.C.D`) of all the above
 ///
 /// ```
 /// use std::net::IpAddr;
@@ -81,28 +94,29 @@ pub fn normalize_mapped_ipv4(ip: IpAddr) -> IpAddr {
 /// assert!(!is_private_ip(&"2001:db8::1".parse().unwrap()));
 /// ```
 pub fn is_private_ip(ip: &IpAddr) -> bool {
-    let normalized = normalize_mapped_ipv4(*ip);
-    match normalized {
-        IpAddr::V4(v4) => {
-            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.octets()[0] == 0 || is_cgnat(v4)
-        },
-        IpAddr::V6(v6) => {
-            let seg0 = v6.segments()[0];
-            // `::` is included for the same reason config-time validation
-            // flags it (`is_ssrf_sensitive`): connect(2) to the unspecified
-            // address is routed to loopback, so it reaches exactly the
-            // services the loopback check exists to block.
-            v6.is_loopback() || v6.is_unspecified() || (seg0 & 0xFFC0) == 0xFE80 || (seg0 & 0xFE00) == 0xFC00
-        },
-    }
+    let class = classify_without_nat64(ip);
+    class.is_loopback()
+        || class.is_private_network()
+        || class.is_link_local()
+        || class.is_shared_address_space()
+        || class.is_this_host()
+        || class.is_unspecified()
 }
 
-/// Returns `true` if the IPv4 address is in the CGNAT/shared address
-/// space (`100.64.0.0/10`, [RFC 6598]).
+/// Like [`is_private_ip`] but classifies through NAT64 (`64:ff9b::/96`)
+/// wrappers, for the upstream DNS gate.
 ///
-/// [RFC 6598]: https://datatracker.ietf.org/doc/html/rfc6598
-fn is_cgnat(v4: std::net::Ipv4Addr) -> bool {
-    u32::from(v4) & 0xFFC0_0000 == 0x6440_0000 // 100.64.0.0/10
+/// On a DNS64 network a public name that resolves to a private IPv4 address
+/// is synthesized as `64:ff9b::a.b.c.d`; unwrapping it keeps the runtime
+/// rebinding check from being bypassed that way.
+pub fn is_private_upstream_ip(ip: &IpAddr) -> bool {
+    let class = classify_ip(ip);
+    class.is_loopback()
+        || class.is_private_network()
+        || class.is_link_local()
+        || class.is_shared_address_space()
+        || class.is_this_host()
+        || class.is_unspecified()
 }
 
 // -----------------------------------------------------------------------------
@@ -542,6 +556,38 @@ mod tests {
         assert!(
             !is_private_ip(&"::ffff:8.8.8.8".parse().unwrap()),
             "mapped 8.8.8.8 is public"
+        );
+    }
+
+    #[test]
+    fn is_private_upstream_ip_unwraps_nat64() {
+        assert!(
+            is_private_upstream_ip(&"64:ff9b::a00:1".parse().unwrap()),
+            "NAT64-wrapped 10.0.0.1 is private for the upstream gate"
+        );
+        assert!(
+            is_private_upstream_ip(&"64:ff9b::127.0.0.1".parse().unwrap()),
+            "NAT64-wrapped loopback is private for the upstream gate"
+        );
+        assert!(
+            !is_private_upstream_ip(&"64:ff9b::8.8.8.8".parse().unwrap()),
+            "NAT64-wrapped public address is not private"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_does_not_unwrap_nat64() {
+        assert!(
+            !is_private_ip(&"64:ff9b::10.0.0.1".parse().unwrap()),
+            "NAT64 wrappers are not unwrapped here, preserving the legacy result set"
+        );
+        assert!(
+            !is_private_ip(&"64:ff9b::127.0.0.1".parse().unwrap()),
+            "NAT64-wrapped loopback is not flagged by is_private_ip"
+        );
+        assert!(
+            !is_private_ip(&"64:ff9b::8.8.8.8".parse().unwrap()),
+            "NAT64-wrapped public address is not private"
         );
     }
 

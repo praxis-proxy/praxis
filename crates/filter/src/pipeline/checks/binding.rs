@@ -2490,7 +2490,7 @@ mod tests {
         branch.condition = Some(crate::pipeline::branch::ResolvedBranchCondition {
             filter_name: Arc::from("classifier"),
             key: Arc::from("route"),
-            value: Arc::from("direct"),
+            matcher: praxis_core::config::ResultMatch::Exact("direct".to_owned()),
         });
         let mut host = named_noop_filter("classifier", vec![]);
         host.branches = vec![branch];
@@ -2628,7 +2628,7 @@ mod tests {
             condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
                 filter_name: Arc::from("router"),
                 key: Arc::from("retry"),
-                value: Arc::from("yes"),
+                matcher: praxis_core::config::ResultMatch::Exact("yes".to_owned()),
             }),
             filters: vec![],
             max_iterations: Some(1),

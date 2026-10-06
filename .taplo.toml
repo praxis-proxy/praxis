@@ -7,3 +7,8 @@ exclude = ["target/**"]
 reorder_keys = false
 reorder_arrays = false
 column_width = 100
+# Match the hand-formatted style: 4-space indent, and leave each array's
+# one-line or one-per-line layout as the author wrote it.
+indent_string = "    "
+array_auto_expand = false
+array_auto_collapse = false

@@ -2235,9 +2235,9 @@ dependencies = [
 
 [[package]]
 name = "lazy_static"
-version = "1.5.0"
+version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "left-right"
@@ -2702,6 +2702,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "object"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "oid-registry"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2779,9 +2788,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0142c63252a9e054e68a4c61a5778f7b14f576274d593f8ce883d191a099682"
+checksum = "6cdb0b1b267eb9db3331b434ed9ddab10d50e280a9adf9d13e5233e2002b61b5"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -2792,9 +2801,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-http"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5683015d09e2df236ef005b17f6f196f0d5f6313c4fa43a7b6a53b52776e4331"
+checksum = "ee2c3625b8aa04209f7e01e513bc8044da9687fa38a9eacf59628ca5f3b87300"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2805,11 +2814,12 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-otlp"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9966929966d17620d7c316c643ba62631826e10021409357772d5eea84f62c35"
+checksum = "699a67345e21962a231955b9059a157e428b219fa5df8efe11f08346fb23a344"
 dependencies = [
  "http",
+ "httpdate",
  "opentelemetry",
  "opentelemetry-http",
  "opentelemetry-proto",
@@ -2824,9 +2834,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry-proto"
-version = "0.32.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56d658ba1faf63f7b9c492cfbe6e0ec365440a16132d3270c1065f7b33f1b638"
+checksum = "25da1ac11a0aeccf38d7f77ee0348715adaf8340f65ad46c94a02c6b20e2f65d"
 dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
@@ -2837,9 +2847,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry_sdk"
-version = "0.32.1"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b59f80e1ac4d5ff7a2db8fb6c80badb7f0f3f858211fba08dd9aaec750894f9"
+checksum = "cb39533d9d1c912123efd7d41d7e0c29d16917b60ce15b4c8d87cb1af7f67520"
 dependencies = [
  "futures-channel",
  "futures-executor",
@@ -3239,7 +3249,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "async-trait",
  "cargo_metadata",
@@ -3281,13 +3291,14 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-core"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "bytes",
  "chrono",
  "dashmap",
  "h2",
  "http",
+ "loom",
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
@@ -3314,7 +3325,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-filter"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3356,7 +3367,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-protocol"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3387,7 +3398,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-tls"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "arc-swap",
  "notify",
@@ -3409,7 +3420,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-test-utils"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3417,6 +3428,7 @@ dependencies = [
  "futures",
  "h2",
  "http",
+ "nix",
  "openssl",
  "praxis-proxy",
  "praxis-proxy-core",
@@ -3437,7 +3449,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-benches"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "criterion",
  "dhat",
@@ -3455,7 +3467,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-conformance"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "h2",
  "http",
@@ -3468,7 +3480,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-integration"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3501,7 +3513,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-resilience"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3510,13 +3522,14 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
  "praxis-test-utils",
+ "serde_json",
  "tokio",
  "yaml_serde",
 ]
 
 [[package]]
 name = "praxis-tests-schema"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3531,7 +3544,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-security"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-filter",
@@ -4526,9 +4539,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with"
-version = "3.23.0"
+version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "935177bb8c0cd8ca1a4e6d1a2ac8988bea69cab4f9d3a31311e012ad27868ea4"
+checksum = "df9adc193c780ef8f159aee8b61e2d5801aaa555e6eb0947fe45530ec506296f"
 dependencies = [
  "base64 0.23.1",
  "bs58",
@@ -4547,9 +4560,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with_macros"
-version = "3.23.0"
+version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d607aa01a3cb0ad757d6fd216136910db3c97b102fe686585689615a02dbcdc"
+checksum = "3e17bbc68e28663bbbb90df47e058aa7eda4fb445b89fe70457bb94fbccf6e49"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -5021,9 +5034,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-rustls"
-version = "0.26.5"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
+checksum = "c9cc2678c2cdd569ef8215e2afd7954ada2ae20b4fdd2c5fe6139a3b02d105db"
 dependencies = [
  "rustls",
  "tokio",
@@ -5236,9 +5249,9 @@ dependencies = [
 
 [[package]]
 name = "tracing-opentelemetry"
-version = "0.33.0"
+version = "0.34.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adbc64cba7137545b8044cb1fe9814f7aacf3c6b5f9b45be8bb5db538befdb26"
+checksum = "0a904802a1b902f43638b677ff2a650847e3b4404101b6c586d648e8c1e3e8fe"
 dependencies = [
  "js-sys",
  "opentelemetry",
@@ -5920,14 +5933,14 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.7.1"
+version = "0.7.3"
 dependencies = [
  "base64 0.23.1",
  "chrono",
  "clap",
  "flate2",
  "nix",
- "object 0.39.1",
+ "object 0.40.0",
  "openssl",
  "plotters",
  "praxis-proxy",
@@ -5947,9 +5960,9 @@ dependencies = [
 
 [[package]]
 name = "xxhash-rust"
-version = "0.8.18"
+version = "0.8.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aee1b19627c7c60102ab80d3a9cbe18de90bfe03bfa6c3715447681f0e8c8af6"
+checksum = "550a2b930b62486a393c52d5c3b84bff264b28aa437ed64694d31e93b1757af7"
 
 [[package]]
 name = "yaml_serde"
@@ -5993,9 +6006,9 @@ dependencies = [
 
 [[package]]
 name = "yoke-derive"
-version = "0.8.3"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33811428bee40dbceb6d545e95754741d17a6aef9a4849f0fd62e2ba4f412a78"
+checksum = "ec8ebde2db3681e8c9980cc27822030e68752690ddfa9473e739aeb4dbde6d71"
 dependencies = [
  "proc-macro2",
  "quote",

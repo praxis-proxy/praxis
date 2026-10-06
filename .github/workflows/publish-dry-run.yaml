@@ -3,6 +3,13 @@ name: Publish Dry Run
 # ------------------------------------------------------------------------------
 # Workflow Settings
 # ------------------------------------------------------------------------------
+#
+# Shared from praxis-proxy/conventions (publish-dry-run.yaml).
+#
+# On main the workspace version is already published, so a full verify would
+# build dependent crates against the older published siblings and fail. Skip
+# the per-crate build here; the release pipeline (which bumps the version
+# first) runs the full verification.
 
 on:
   push:
@@ -11,36 +18,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
-
 permissions: {}
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  # ----------------------------------------------------------------------------
-  # Verify crates can be packaged and published
-  # ----------------------------------------------------------------------------
-
   publish-dry-run:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
-
-      - name: Publish dry run
-        # On main the workspace version is already published, so a full verify
-        # would build dependent crates against the older published siblings and
-        # fail. Skip the per-crate build here; the release pipeline (which bumps
-        # the version first) runs the full verification.
-        run: make publish-dry-run PUBLISH_DRY_RUN_FLAGS=--no-verify
+    uses: praxis-proxy/conventions/.github/workflows/publish-dry-run.yaml@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+    with:
+      make-args: PUBLISH_DRY_RUN_FLAGS=--no-verify

@@ -13,6 +13,8 @@ Sets `ctx.cluster` for downstream filters but does not pick an endpoint or forwa
 
 Longest prefix wins. Routes without `host` match any host. Header restrictions use AND semantics with case-sensitive matching.
 
+Header restrictions see the request as earlier filters in the pipeline left it: a header they set or added matches by its new value, and one they removed no longer matches, so a classifier can promote a fact to an `x-praxis-*` header and route on it. A routed header that earlier filters gave two different values fails the request instead of routing on a guess. `host` is always read from the request as received.
+
 ## Configuration
 
 | Field | Type | Required | Description |
@@ -23,7 +25,7 @@ Longest prefix wins. Routes without `host` match any host. Header restrictions u
 | `routes[].path` | string | no | Exact path to match. Exactly one of `path` or `path_prefix` must be set. |
 | `routes[].path_prefix` | string | no | Path prefix to match; the longest matching prefix wins. Exactly one of `path` or `path_prefix` must be set. |
 | `routes[].cluster` | string | yes | Name of the cluster to route matched requests to. |
-| `routes[].headers` | object<string, string> | no | Request headers to match. All specified headers must be present with matching values (AND semantics, case-sensitive). |
+| `routes[].headers` | object<string, string> | no | Request headers to match. All specified headers must be present with matching values (AND semantics, case-sensitive). Headers that earlier filters in the pipeline set, added, or removed are matched as those filters left them. |
 | `routes[].host` | string | no | Host to match. If set, the route only applies to this host. |
 | `routes[].json_aliases` | JsonAlias[] | no | Not implemented. Setting this is rejected at startup. Only present under the experimental `router-json-aliases` feature. |
 | `routes[].json_aliases[].field` | string | yes | Request JSON field whose string value is compared with `pattern`. |
@@ -40,7 +42,7 @@ Longest prefix wins. Routes without `host` match any host. Header restrictions u
 | `routes[].retry_policy.backoff.max_interval_ms` | integer | yes | Maximum capped interval in milliseconds. |
 | `routes[].retry_policy.configured` | bool | no | Whether this policy came from operator configuration rather than the built-in legacy default. Endpoint reselection on retry is enabled only for configured policies; the legacy default preserves the historical retry-same-endpoint semantics. |
 | `routes[].retry_policy.retry_budget` | RetryBudgetConfig | no | Token-bucket retry budget. |
-| `routes[].retry_policy.retry_budget.percent` | number | yes | Maximum retries as a percentage of active requests (0.0..=100.0). |
+| `routes[].retry_policy.retry_budget.percent` | number | yes | Caps accumulated retry tokens (burst) at this percentage of in-flight requests (0.0..=100.0); the sustained rate is `min_retries_per_second`. |
 | `routes[].retry_policy.retry_budget.min_retries_per_second` | integer | no | Floor on tokens per second even at low traffic. |
 | `routes[].retry_policy.retry_body_limit_bytes` | integer | no | Max request body size eligible for replay (bytes). Defaults to 64 `KiB`. |
 | `routes[].retry_policy.allow_non_idempotent` | bool | no | Allow retries for non-idempotent methods (POST/PATCH) when true. |

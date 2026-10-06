@@ -1,0 +1,140 @@
+# Branch Result Matchers (contains, not, any_of)
+#
+# Builds a deny-by-default JSON-RPC allowlist out of
+# branch result matchers. The json_rpc filter records
+# each call's kind and method as filter results, and four
+# branches on it run in order:
+#
+#   1. `not: request` on kind turns away anything that
+#      isn't a JSON-RPC request with a 400. `not` also
+#      fires when the filter recorded no kind at all, so
+#      a request with no JSON-RPC body is turned away too.
+#   2. `contains: health` on method tags health checks
+#      (health, health_check) with X-Health-Check, then
+#      keeps going (rejoin: next).
+#   3. `any_of` on method lets the listed methods through
+#      by skipping ahead to the router.
+#   4. A branch with no condition answers everything that
+#      got this far with a 403.
+#
+# The allowlist plus the unconditional deny is what makes
+# this fail closed. A deny branch that matches bad names
+# (say `contains: admin`) only fires on a method it can
+# see, and json_rpc records no method for a name with
+# control characters in it. The unconditional deny needs
+# no value to fire: an unlisted method and a method
+# json_rpc couldn't record both end up there.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/branching/result-matchers.yaml
+#
+# Exercise:
+#   # Health check: tagged with X-Health-Check and forwarded
+#   curl -X POST http://localhost:8080/ \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","method":"health","id":1}'
+#
+#   # Unlisted method: 403
+#   curl -X POST http://localhost:8080/ \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","method":"admin_reset","id":2}'
+#
+#   # Method json_rpc can't record (control character): 403
+#   curl -X POST http://localhost:8080/ \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","method":"admin\u0001reset","id":3}'
+#
+#   # Notification (no id), or no JSON-RPC body: 400
+#   curl -X POST http://localhost:8080/ \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","method":"ping"}'
+#   curl http://localhost:8080/
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      # Records `kind` (request, notification, ...) and
+      # `method` as filter results for the branches below
+      - filter: json_rpc
+        max_body_bytes: 65536 # 64 KiB
+        branch_chains:
+          # Anything but a request: notifications, responses,
+          # and bodies that aren't JSON-RPC (no kind at all)
+          - name: reject_non_requests
+            on_result:
+              filter: json_rpc
+              key: kind
+              result:
+                not: request
+            rejoin: terminal
+            chains:
+              - name: not_a_request
+                filters:
+                  - filter: static_response
+                    status: 400
+                    body: "expected a JSON-RPC request"
+
+          # Health checks, tagged so the backend can answer
+          # them cheaply; rejoin: next moves on to the
+          # allowlist, which still has to let them through
+          - name: tag_health_checks
+            on_result:
+              filter: json_rpc
+              key: method
+              result:
+                contains: health
+            rejoin: next
+            chains:
+              - name: health_tag
+                filters:
+                  - filter: headers
+                    request_add:
+                      - name: X-Health-Check
+                        value: "true"
+
+          # The allowlist: a listed method skips ahead to
+          # the router, past the deny below. The rejoin does
+          # all the work, so the chain has nothing to run
+          - name: allow_listed_methods
+            on_result:
+              filter: json_rpc
+              key: method
+              result:
+                any_of: [ping, echo, health, health_check]
+            rejoin: routing
+            chains:
+              - name: allowed
+                filters: []
+
+          # No on_result, so it fires for everything that
+          # got this far: unlisted methods, and methods
+          # json_rpc couldn't record
+          - name: deny_everything_else
+            rejoin: terminal
+            chains:
+              - name: method_not_allowed
+                filters:
+                  - filter: static_response
+                    status: 403
+                    body: "method not allowed"
+
+      # Named target for the allowlist's skip-to rejoin
+      - filter: router
+        name: routing
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

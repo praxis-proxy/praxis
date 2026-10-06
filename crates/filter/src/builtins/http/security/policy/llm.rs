@@ -24,6 +24,10 @@ const BOOLEAN_PARAMS: &[&str] = &["stream"];
 /// Content part types that carry prompt text in an `input` item.
 const INPUT_TEXT_TYPES: &[&str] = &["input_text", "text", "output_text"];
 
+/// Maximum nesting depth followed into content parts (e.g. a `tool_result`
+/// block whose `content` is itself an array of parts).
+const MAX_CONTENT_DEPTH: u8 = 4;
+
 // -----------------------------------------------------------------------------
 // Request side
 // -----------------------------------------------------------------------------
@@ -123,6 +127,7 @@ impl ParsedLlmRequest {
                 if let Some(content) = message.get("content") {
                     push_text(&mut parts, content);
                 }
+                push_call_arguments(&mut parts, message);
             }
         }
 
@@ -131,7 +136,7 @@ impl ParsedLlmRequest {
         }
 
         // Responses and embeddings carry the prompt in `input`.
-        if let Some(input) = self.0.get("input") {
+        if let Some(input) = self.0.get("input").filter(|_| self.0.get("messages").is_none()) {
             push_input_text(&mut parts, input);
         }
 
@@ -166,6 +171,16 @@ fn normalize_param(name: &str, value: &serde_json::Value) -> serde_json::Value {
 
 /// Append text from a string or multimodal content array.
 fn push_text(parts: &mut Vec<ContentPart>, value: &serde_json::Value) {
+    push_text_at(parts, value, 0);
+}
+
+/// Append text from `value`, following nested content parts up to
+/// [`MAX_CONTENT_DEPTH`] levels deep.
+fn push_text_at(parts: &mut Vec<ContentPart>, value: &serde_json::Value, depth: u8) {
+    if depth > MAX_CONTENT_DEPTH {
+        return;
+    }
+    let next = depth.saturating_add(1);
     match value {
         serde_json::Value::String(text) => {
             if !text.is_empty() {
@@ -175,12 +190,8 @@ fn push_text(parts: &mut Vec<ContentPart>, value: &serde_json::Value) {
         serde_json::Value::Array(items) => {
             for item in items {
                 match item {
-                    serde_json::Value::String(_) => push_text(parts, item),
-                    serde_json::Value::Object(_) => {
-                        if let Some(text) = item.get("text") {
-                            push_text(parts, text);
-                        }
-                    },
+                    serde_json::Value::String(_) => push_text_at(parts, item, next),
+                    serde_json::Value::Object(_) => push_object_text(parts, item, next),
                     _ => {},
                 }
             }
@@ -191,7 +202,7 @@ fn push_text(parts: &mut Vec<ContentPart>, value: &serde_json::Value) {
 
 /// Append text from a Responses or embeddings `input`.
 ///
-/// Token-ID arrays, non-message items and non-text parts are skipped.
+/// Token-ID arrays and non-text content parts are skipped.
 fn push_input_text(parts: &mut Vec<ContentPart>, input: &serde_json::Value) {
     match input {
         serde_json::Value::String(_) => push_text(parts, input),
@@ -210,7 +221,16 @@ fn push_input_text(parts: &mut Vec<ContentPart>, input: &serde_json::Value) {
 
 /// Append text from one message item of an `input` array.
 fn push_input_item_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value) {
-    if item.get("type").is_some_and(|kind| kind.as_str() != Some("message")) {
+    let tool_field = match item.get("type").and_then(serde_json::Value::as_str) {
+        Some("function_call") => Some("arguments"),
+        Some("function_call_output") => Some("output"),
+        Some("message") | None => None,
+        Some(_) => return,
+    };
+    if let Some(field) = tool_field {
+        if let Some(value) = item.get(field) {
+            push_text(parts, value);
+        }
         return;
     }
     match item.get("content") {
@@ -221,12 +241,38 @@ fn push_input_item_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value) 
                     Some(kind) => kind.as_str().is_some_and(|kind| INPUT_TEXT_TYPES.contains(&kind)),
                     None => true,
                 };
-                if let Some(text @ serde_json::Value::String(_)) = part.get("text").filter(|_| text_part) {
-                    push_text(parts, text);
+                if text_part {
+                    push_object_text(parts, part, 1);
                 }
             }
         },
         _ => {},
+    }
+}
+
+/// Append the `text` and nested `content` of one content-part object
+/// (e.g. an Anthropic `tool_result` block carrying its own parts).
+fn push_object_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value, depth: u8) {
+    if let Some(text) = item.get("text") {
+        push_text_at(parts, text, depth);
+    }
+    if let Some(content) = item.get("content") {
+        push_text_at(parts, content, depth);
+    }
+}
+
+/// Append tool-call arguments carried by one chat message
+/// (`tool_calls[].function.arguments` and legacy `function_call.arguments`).
+fn push_call_arguments(parts: &mut Vec<ContentPart>, message: &serde_json::Value) {
+    if let Some(calls) = message.get("tool_calls").and_then(serde_json::Value::as_array) {
+        for call in calls {
+            if let Some(arguments) = call.get("function").and_then(|function| function.get("arguments")) {
+                push_text(parts, arguments);
+            }
+        }
+    }
+    if let Some(arguments) = message.get("function_call").and_then(|call| call.get("arguments")) {
+        push_text(parts, arguments);
     }
 }
 
@@ -753,6 +799,61 @@ mod tests {
     }
 
     #[test]
+    fn builds_content_from_nested_tool_result_parts() {
+        let parsed = request(
+            r#"{"model":"claude","messages":[{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"tool says hi"}]}]}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["tool says hi"],
+            "nested tool_result text must reach the scanner",
+        );
+    }
+
+    #[test]
+    fn builds_content_from_tool_call_arguments() {
+        let parsed = request(
+            r#"{"model":"gpt-4o","messages":[{"role":"assistant","content":null,
+                "tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\"q\":1}"}}]},
+                {"role":"assistant","function_call":{"name":"g","arguments":"legacy"}}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec![r#"{"q":1}"#, "legacy"],
+            "tool-call arguments must reach the scanner",
+        );
+    }
+
+    #[test]
+    fn builds_content_from_responses_api_input_items() {
+        let parsed = request(
+            r#"{"model":"gpt-4o","input":[{"role":"user","content":[{"type":"input_text","text":"hello"}]},
+                {"type":"function_call_output","call_id":"c1","output":"result"}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["hello", "result"],
+            "Responses API input items must reach the scanner",
+        );
+    }
+
+    #[test]
+    fn content_depth_is_bounded() {
+        let parsed = request(
+            r#"{"model":"m","messages":[{"role":"user","content":[{"content":[{"content":[{"content":
+                [{"content":[{"content":[{"text":"too deep"}]}]}]}]}]}]}]}"#,
+        );
+        assert!(parsed.content().is_empty(), "parts beyond the depth cap are not walked");
+    }
+
+    #[test]
+    fn embeddings_array_input_is_projected() {
+        let parsed = request(r#"{"model":"text-embedding-3-small","input":["a","b"]}"#);
+        assert_eq!(texts(&parsed.content()), vec!["a", "b"]);
+    }
+
+    #[test]
     fn embeddings_string_input_is_projected() {
         let parsed = request(r#"{"model":"text-embedding-3-small","input":"hello"}"#);
         assert_eq!(parsed.model(), Some("text-embedding-3-small"));
@@ -795,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn non_message_input_items_are_skipped() {
+    fn function_call_input_items_are_projected() {
         let parsed = request(
             r#"{"model":"m","input":[
                  {"type":"function_call","call_id":"c1","name":"f","arguments":"{\"q\":\"x\"}"},
@@ -804,8 +905,8 @@ mod tests {
         );
         assert_eq!(
             texts(&parsed.content()),
-            vec!["next"],
-            "only message items carry prompt text",
+            vec![r#"{"q":"x"}"#, "result", "next"],
+            "function inputs and outputs are part of the context the policy scans",
         );
     }
 

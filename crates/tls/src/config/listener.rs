@@ -238,16 +238,7 @@ impl ListenerTls {
             validate_multi_cert_defaults(&self.certificates)?;
         }
 
-        if let Some(ca) = &self.client_ca {
-            ca.validate()?;
-        }
-
-        if self.client_cert_mode != ClientCertMode::None && self.client_ca.is_none() {
-            return Err(TlsError::MissingClientCa {
-                mode: self.client_cert_mode,
-            });
-        }
-
+        self.validate_client_auth()?;
         self.validate_trusted_spiffe_ids()?;
 
         if self.hot_reload == Some(true) && self.certificates.len() > 1 {
@@ -261,6 +252,28 @@ impl ListenerTls {
             if self.min_version == Some(TlsVersion::Tls13) && suites.iter().any(CipherSuiteId::is_tls12) {
                 return Err(TlsError::Tls12SuiteWithTls13Only);
             }
+        }
+
+        Ok(())
+    }
+
+    /// Validate that `client_ca` and `client_cert_mode` are set together.
+    ///
+    /// A mode other than `none` needs a CA to verify against, and a CA under
+    /// mode `none` would be silently ignored, so both mismatches are rejected.
+    fn validate_client_auth(&self) -> Result<(), TlsError> {
+        if let Some(ca) = &self.client_ca {
+            ca.validate()?;
+        }
+
+        if self.client_cert_mode != ClientCertMode::None && self.client_ca.is_none() {
+            return Err(TlsError::MissingClientCa {
+                mode: self.client_cert_mode,
+            });
+        }
+
+        if self.client_cert_mode == ClientCertMode::None && self.client_ca.is_some() {
+            return Err(TlsError::ClientCaWithoutMode);
         }
 
         Ok(())
@@ -523,6 +536,24 @@ mod tests {
             ..ListenerTls::new_validated(&tmp.cert, &tmp.key).unwrap()
         };
         assert!(tls.validate().is_ok(), "mode=none should not require client_ca");
+    }
+
+    #[test]
+    fn client_ca_without_client_cert_mode_rejected() -> Result<(), TlsError> {
+        let tmp = temp_cert_key();
+        let tls = ListenerTls {
+            client_ca: Some(CaConfig {
+                ca_path: tmp.cert.clone(),
+                crl_paths: Vec::new(),
+            }),
+            client_cert_mode: ClientCertMode::None,
+            ..ListenerTls::new_validated(&tmp.cert, &tmp.key)?
+        };
+        assert!(
+            matches!(tls.validate(), Err(TlsError::ClientCaWithoutMode)),
+            "client_ca without client_cert_mode should be rejected"
+        );
+        Ok(())
     }
 
     /// Build a validated listener with the given mode + allowlist over a real CA.

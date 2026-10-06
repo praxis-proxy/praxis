@@ -13,13 +13,17 @@ use super::{cli::Args, compare, proxy, report, resolve};
 // -----------------------------------------------------------------------------
 
 /// Run all selected benchmarks and emit the report.
+///
+/// The report covers every scenario that completed. When any scenario failed
+/// the process still exits non-zero afterwards, so a partial run is never
+/// mistaken for a good one.
 pub(crate) async fn run_benchmarks(args: Args) {
     let proxy_names = resolve::resolve_proxy_names(&args.proxies);
     let workloads = resolve::resolve_workloads(&args);
     let scenarios = resolve::build_scenarios(&args, &workloads);
     let praxis_image = resolve_praxis_image(&args);
 
-    let all_results = run_all_scenarios(&proxy_names, &scenarios, &args, &praxis_image).await;
+    let (all_results, failures) = run_all_scenarios(&proxy_names, &scenarios, &args, &praxis_image).await;
 
     if all_results.is_empty() {
         eprintln!("all benchmark scenarios failed; no results collected");
@@ -30,6 +34,15 @@ pub(crate) async fn run_benchmarks(args: Args) {
     let output_path = resolve_output_path(args.output);
     report::write_report(&bench_report, &output_path, args.format);
     println!("Report written to {output_path}");
+
+    if !failures.is_empty() {
+        eprintln!(
+            "{} benchmark scenario(s) failed: {}",
+            failures.len(),
+            failures.join(", ")
+        );
+        std::process::exit(1);
+    }
 }
 
 /// Resolve the Praxis Docker image: use the override if provided,
@@ -45,13 +58,17 @@ fn resolve_praxis_image(args: &Args) -> String {
 }
 
 /// Execute all scenarios across all proxies.
+///
+/// Returns the results that completed and a `proxy/scenario` label for each
+/// run that failed, so the caller can report what it has and still fail.
 async fn run_all_scenarios(
     proxy_names: &[String],
     scenarios: &[praxis_proxy_benchmarks::scenario::Scenario],
     args: &Args,
     praxis_image: &str,
-) -> Vec<ScenarioResults> {
+) -> (Vec<ScenarioResults>, Vec<String>) {
     let mut all_results = Vec::new();
+    let mut failures = Vec::new();
     for proxy_name in proxy_names {
         let proxy_cfg = proxy::build_proxy_config(proxy_name, args, praxis_image);
         for scenario in scenarios {
@@ -65,11 +82,12 @@ async fn run_all_scenarios(
                 Ok(results) => all_results.push(results),
                 Err(e) => {
                     tracing::error!(proxy = proxy_name.as_str(), scenario = scenario.name.as_str(), error = %e, "benchmark failed");
+                    failures.push(format!("{proxy_name}/{}", scenario.name));
                 },
             }
         }
     }
-    all_results
+    (all_results, failures)
 }
 
 /// Assemble the final [`BenchmarkReport`] from collected results.

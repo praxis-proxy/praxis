@@ -46,6 +46,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [named-chain-ref.yaml](configs/branching/named-chain-ref.yaml) | A branch references a top-level chain by name instead of defining filters inline |
 | [nested-branches.yaml](configs/branching/nested-branches.yaml) | Branch filters that themselves contain branches, forming a multi-level decision tree |
 | [reentrance.yaml](configs/branching/reentrance.yaml) | Loops back to a named filter up to N times |
+| [result-matchers.yaml](configs/branching/result-matchers.yaml) | Builds a deny-by-default JSON-RPC allowlist out of branch result matchers |
 | [unconditional-branch.yaml](configs/branching/unconditional-branch.yaml) | Always runs a utility chain before continuing the main pipeline |
 
 ### Observability
@@ -78,6 +79,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | ------ | ------------- |
 | [admin-interface.yaml](configs/operations/admin-interface.yaml) | Exposes an admin endpoint for operational health checks, readiness probes, and Prometheus metrics |
 | [container-default.yaml](configs/operations/container-default.yaml) | Default config for containerized deployments |
+| [file-descriptor-limits.yaml](configs/operations/file-descriptor-limits.yaml) | Size and protect the proxy's open file descriptor budget: pin the process limit, shed requests with 503 before descriptors run out, and close idle keep-alive clients and pooled upstream connections so they cannot pin descriptors |
 | [hot-reload.yaml](configs/operations/hot-reload.yaml) | Filter pipelines are swapped atomically at runtime when the config file changes |
 | [log-overrides.yaml](configs/operations/log-overrides.yaml) | Use `runtime.log_overrides` to raise or lower log verbosity for specific modules without flooding output from every subsystem |
 | [max-connections.yaml](configs/operations/max-connections.yaml) | HTTP listeners return 503 with Retry-After: 1. TCP listeners close the socket immediately |
@@ -111,6 +113,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [grpc-condition.yaml](configs/pipeline/grpc-condition.yaml) | The `grpc` condition predicate gates a filter on whether the request carries gRPC, classified from the `content-type` header alone (`application/grpc`, `application/grpc+proto`, `application/grpc+json`, or any other `application/grpc+<codec>`) |
 | [iterative-request-router-circuit-breaker.yaml](configs/pipeline/iterative-request-router-circuit-breaker.yaml) | Demonstrates circuit breaker integration with the iterative request router |
 | [iterative-request-router-sequence.yaml](configs/pipeline/iterative-request-router-sequence.yaml) | Demonstrates sequential sub-request execution where each step completes before the next begins |
+| [route-on-promoted-header.yaml](configs/pipeline/route-on-promoted-header.yaml) | Classify a request in an early filter, promote the result to a reserved `x-praxis-*` header, and route on that header |
 | [selected-upstream-conditions.yaml](configs/pipeline/selected-upstream-conditions.yaml) | Gate a filter on the application metadata the load balancer publishes when it selects an upstream |
 
 ### Protocols
@@ -148,6 +151,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | ------ | ------------- |
 | [basic-auth.yaml](configs/security/basic-auth.yaml) | Authenticate requests using HTTP Basic Authentication (RFC 7617) |
 | [cors.yaml](configs/security/cors.yaml) | Spec-compliant CORS filter with preflight handling, origin validation, and credential support |
+| [credential-injection-env-vars.yaml](configs/security/credential-injection-env-vars.yaml) | Injects per-service API credentials read from environment variables, so no secret is written into the config |
 | [credential-injection.yaml](configs/security/credential-injection.yaml) | Injects per-cluster API credentials into upstream requests |
 | [csrf.yaml](configs/security/csrf.yaml) | Cross-site request forgery protection via origin validation |
 | [downstream-read-timeout.yaml](configs/security/downstream-read-timeout.yaml) | Protects against slow client attacks by limiting how long the proxy waits for data from downstream clients |
@@ -156,6 +160,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests that match header or body inspection rules |
 | [ip-acl.yaml](configs/security/ip-acl.yaml) | Allow or deny requests by source IP/CIDR |
 | [peer-identity-trust.yaml](configs/security/peer-identity-trust.yaml) | Validates downstream mTLS peer identity against a set of trusted peers |
+| [policy-api-key.yaml](configs/security/policy-api-key.yaml) | Authenticates generic HTTP traffic with API keys using the Praxis Policy Engine |
 | [policy-assertions.yaml](configs/security/policy-assertions.yaml) | Projects policy-derived identity into request headers and removes credentials that should not reach the upstream |
 | [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the Praxis Policy Engine |
 | [policy-llm.yaml](configs/security/policy-llm.yaml) | Authorizes body-addressed inference requests against `llm:` policy routes |
@@ -165,6 +170,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 
 | File | Description |
 | ------ | ------------- |
+| [authority-from-endpoint.yaml](configs/traffic-management/authority-from-endpoint.yaml) | Sends each upstream request's Host header as the address of the endpoint the load balancer picked, so one cluster can front endpoints that answer to different hostnames |
 | [authority-override.yaml](configs/traffic-management/authority-override.yaml) | Demonstrates overriding the HTTP Host header sent to a specific upstream cluster, including requests received over HTTP/2 |
 | [basic-reverse-proxy.yaml](configs/traffic-management/basic-reverse-proxy.yaml) | Minimal config: one listener, one upstream, default filter chain |
 | [bound-upstream-condition.yaml](configs/traffic-management/bound-upstream-condition.yaml) | Gates a filter on the logical upstream the router bound for the request |
@@ -186,6 +192,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [path-based-routing.yaml](configs/traffic-management/path-based-routing.yaml) | Routes by URL path prefix |
 | [priority-lb.yaml](configs/traffic-management/priority-lb.yaml) | Defines primary and failover endpoint tiers |
 | [random.yaml](configs/traffic-management/random.yaml) | Selects an upstream endpoint at random, weighted by endpoint weight |
+| [rate-limiting-shadow.yaml](configs/traffic-management/rate-limiting-shadow.yaml) | Observe a rate limit before enforcing it |
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
 | [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Automatically retries failed upstream requests with exponential backoff and a token-bucket budget to prevent retry storms |
@@ -196,6 +203,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [sticky-sessions.yaml](configs/traffic-management/sticky-sessions.yaml) | Pins clients to a specific backend across requests |
 | [subset-lb.yaml](configs/traffic-management/subset-lb.yaml) | Filters endpoints by metadata labels and applies an inner strategy within the matching subset |
 | [timeout.yaml](configs/traffic-management/timeout.yaml) | Returns 504 if the upstream takes longer than timeout_ms to respond |
+| [trusted-private-endpoints.yaml](configs/traffic-management/trusted-private-endpoints.yaml) | Lets one hostname endpoint resolve into private space, such as a Kubernetes Service name resolving to its ClusterIP |
 | [weighted-load-balancing.yaml](configs/traffic-management/weighted-load-balancing.yaml) | Traffic split proportional to per-endpoint weights |
 | [zone-aware.yaml](configs/traffic-management/zone-aware.yaml) | Prefers same-zone endpoints to reduce cross-zone network costs and latency |
 

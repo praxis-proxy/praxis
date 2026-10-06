@@ -127,6 +127,43 @@ fn connection_token_survives_obs_text_sibling() {
 }
 
 // -----------------------------------------------------------------------------
+// subrequest_uri
+// -----------------------------------------------------------------------------
+
+#[test]
+fn subrequest_uri_rejects_absolute_and_traversal_paths() -> Result<(), crate::FilterError> {
+    let current = http::Uri::try_from("/original")?;
+    for path in [
+        "http://evil/x",
+        "//evil",
+        "/a/../b",
+        "/a/..?q=1",
+        "/a/%2e%2E/b",
+        "relative",
+    ] {
+        assert!(
+            super::sanitize::subrequest_uri(Some(&path.to_owned()), &current).is_err(),
+            "rewritten path {path:?} must fail closed"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn subrequest_uri_accepts_origin_form_path() -> Result<(), crate::FilterError> {
+    let current = http::Uri::try_from("/original")?;
+    let uri = super::sanitize::subrequest_uri(Some(&"/ok?x=1".to_owned()), &current)?;
+    assert_eq!(
+        uri.path(),
+        "/ok",
+        "origin-form rewrite should become the sub-request path"
+    );
+    let unchanged = super::sanitize::subrequest_uri(None, &current)?;
+    assert_eq!(unchanged, current, "without a rewrite the current URI is reused");
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
 // strip_reserved_headers
 // -----------------------------------------------------------------------------
 
@@ -556,6 +593,42 @@ async fn build_peer_derives_sni_from_hostname_address() {
 }
 
 #[tokio::test]
+async fn build_peer_names_an_ip_address_by_its_ip() {
+    let tls: praxis_tls::ClusterTls = serde_yaml::from_str("verify: true").unwrap();
+    let cached = praxis_tls::CachedClusterTls::try_from_config(&tls).unwrap();
+    let upstream = praxis_core::connectivity::Upstream {
+        address: std::sync::Arc::from("[::1]:9443"),
+        connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: Some(cached),
+        authority: None,
+    };
+
+    let peer = super::transport::build_peer(&upstream, false).await.unwrap();
+    assert_eq!(peer.sni, "::1", "an IP address must be verified against its IP SAN");
+}
+
+#[tokio::test]
+async fn build_peer_refuses_a_tls_peer_with_no_server_name() {
+    let tls: praxis_tls::ClusterTls = serde_yaml::from_str("verify: true").unwrap();
+    let mut cached = praxis_tls::CachedClusterTls::try_from_config(&tls).unwrap();
+    cached.set_sni("");
+    let upstream = praxis_core::connectivity::Upstream {
+        address: std::sync::Arc::from("127.0.0.1:9443"),
+        connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: Some(cached),
+        authority: None,
+    };
+
+    let err = super::transport::build_peer(&upstream, false)
+        .await
+        .expect_err("a TLS peer with an empty name must not be built");
+    assert!(
+        matches!(err, super::transport::PeerError::MissingServerName(_)),
+        "expected MissingServerName, got: {err}"
+    );
+}
+
+#[tokio::test]
 async fn build_peer_rejects_hostname_resolving_to_private_address() {
     let upstream = praxis_core::connectivity::Upstream {
         address: std::sync::Arc::from("localhost:9444"),
@@ -570,7 +643,9 @@ async fn build_peer_rejects_hostname_resolving_to_private_address() {
     assert!(
         matches!(
             err,
-            praxis_core::connectivity::peer::AddressResolutionError::PrivateAddress { .. }
+            super::transport::PeerError::Resolve(
+                praxis_core::connectivity::peer::AddressResolutionError::PrivateAddress { .. }
+            )
         ),
         "expected PrivateAddress, got: {err}"
     );
@@ -1252,7 +1327,11 @@ fn into_parent_extensions_restores_parent_upstream_scope() {
         headers: HeaderMap::new(),
         status: http::StatusCode::OK,
     };
-    let extensions = nested_upstream_extensions();
+    let mut extensions = nested_upstream_extensions();
+    extensions.insert(crate::context::StreamReadTimeoutCap::new(
+        std::time::Duration::from_secs(1),
+    ));
+    extensions.insert(crate::context::StreamDeadlineCap::new(std::time::Instant::now()));
 
     let continuation = super::continuation::FilteredSubrequestContinuation {
         pipeline,
@@ -1277,6 +1356,14 @@ fn into_parent_extensions_restores_parent_upstream_scope() {
 
     let extensions = continuation.into_parent_extensions();
     assert_parent_upstream_scope(&extensions);
+    assert!(
+        extensions.get::<crate::context::StreamReadTimeoutCap>().is_none(),
+        "the per-read timeout cap must not escape the completed sub-request"
+    );
+    assert!(
+        extensions.get::<crate::context::StreamDeadlineCap>().is_none(),
+        "the absolute stream deadline must not escape the completed sub-request"
+    );
 }
 
 #[cfg(feature = "upstream-binding")]
@@ -1295,7 +1382,11 @@ fn into_completion_restores_parent_upstream_scope() {
         headers: HeaderMap::new(),
         status: http::StatusCode::OK,
     };
-    let extensions = nested_upstream_extensions();
+    let mut extensions = nested_upstream_extensions();
+    extensions.insert(crate::context::StreamReadTimeoutCap::new(
+        std::time::Duration::from_secs(1),
+    ));
+    extensions.insert(crate::context::StreamDeadlineCap::new(std::time::Instant::now()));
 
     let continuation = super::continuation::FilteredSubrequestContinuation {
         pipeline,
@@ -1320,6 +1411,20 @@ fn into_completion_restores_parent_upstream_scope() {
 
     let completion = continuation.into_completion();
     assert_parent_upstream_scope(&completion.extensions);
+    assert!(
+        completion
+            .extensions
+            .get::<crate::context::StreamReadTimeoutCap>()
+            .is_none(),
+        "the per-read timeout cap must not escape completion"
+    );
+    assert!(
+        completion
+            .extensions
+            .get::<crate::context::StreamDeadlineCap>()
+            .is_none(),
+        "the absolute stream deadline must not escape completion"
+    );
 }
 
 #[cfg(feature = "upstream-binding")]

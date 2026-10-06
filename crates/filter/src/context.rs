@@ -42,10 +42,16 @@ use crate::{extensions::BoundUpstreamFrozen, pipeline::catalog::ClusterApplicati
 /// can still be overwritten past this limit.
 const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
 
+/// Maximum byte length of a `filter_metadata` key.
+const MAX_METADATA_KEY_LEN: usize = 64; // 64 B
+
+/// Maximum byte length of a `filter_metadata` value.
+const MAX_METADATA_VALUE_LEN: usize = 256; // 256 B
+
 /// Maximum entries allowed in the general `filter_metadata` map.
 ///
-/// Individual keys and values are already size-bounded (64 / 256
-/// bytes), but without an entry count cap a filter chain could
+/// Individual keys and values are already size-bounded
+/// ([`MAX_METADATA_KEY_LEN`] / [`MAX_METADATA_VALUE_LEN`] bytes), but without an entry count cap a filter chain could
 /// insert thousands of unique keys per request.
 const MAX_METADATA_ENTRIES: usize = 128;
 
@@ -542,7 +548,27 @@ pub struct HttpFilterContext<'a> {
 /// `ctx.upstream` later does not change that snapshot, so filters store
 /// leftover budget here and the streaming executor copies it onto the
 /// active read timer.
-struct StreamReadTimeoutCap(Duration);
+pub(crate) struct StreamReadTimeoutCap(Duration);
+
+impl StreamReadTimeoutCap {
+    /// Construct a leftover per-read timeout marker.
+    pub(crate) const fn new(timeout: Duration) -> Self {
+        Self(timeout)
+    }
+}
+
+/// Absolute stream deadline requested during a response-body filter pass.
+///
+/// Stored in [`RequestExtensions`] so the streaming executor can copy the
+/// cap onto the live [`SubResponseBody`](praxis_core::subrequest::SubResponseBody).
+pub(crate) struct StreamDeadlineCap(Instant);
+
+impl StreamDeadlineCap {
+    /// Construct a leftover absolute stream deadline marker.
+    pub(crate) const fn new(deadline: Instant) -> Self {
+        Self(deadline)
+    }
+}
 
 impl HttpFilterContext<'_> {
     /// Selected cluster name, if any.
@@ -570,7 +596,7 @@ impl HttpFilterContext<'_> {
             .extensions
             .get::<StreamReadTimeoutCap>()
             .map_or(timeout, |existing| existing.0.min(timeout));
-        self.extensions.insert(StreamReadTimeoutCap(next));
+        self.extensions.insert(StreamReadTimeoutCap::new(next));
     }
 
     /// Leftover per-read timeout requested during this body-filter pass.
@@ -581,6 +607,35 @@ impl HttpFilterContext<'_> {
     /// Take leftover per-read timeout so the streaming executor can apply it.
     pub(crate) fn take_stream_read_timeout_cap(&mut self) -> Option<Duration> {
         self.extensions.remove::<StreamReadTimeoutCap>().map(|cap| cap.0)
+    }
+
+    /// Tighten the live streaming body's absolute deadline.
+    ///
+    /// Unlike [`cap_stream_read_timeout`](Self::cap_stream_read_timeout), this
+    /// publishes a monotonic cutoff that the transport checks before each
+    /// upstream read. Downstream backpressure can delay the next poll without
+    /// extending the deadline.
+    ///
+    /// Only the filtered sub-request streaming executor reads this cap, so it
+    /// does not bound a normally proxied upstream response.
+    ///
+    /// A tighter existing deadline is left in place.
+    pub fn cap_stream_deadline(&mut self, deadline: Instant) {
+        let next = self
+            .extensions
+            .get::<StreamDeadlineCap>()
+            .map_or(deadline, |existing| existing.0.min(deadline));
+        self.extensions.insert(StreamDeadlineCap::new(next));
+    }
+
+    /// Absolute stream deadline requested during this body-filter pass.
+    pub fn stream_deadline_cap(&self) -> Option<Instant> {
+        self.extensions.get::<StreamDeadlineCap>().map(|cap| cap.0)
+    }
+
+    /// Take the absolute stream deadline so the streaming executor can apply it.
+    pub(crate) fn take_stream_deadline_cap(&mut self) -> Option<Instant> {
+        self.extensions.remove::<StreamDeadlineCap>().map(|cap| cap.0)
     }
 
     /// Opaque application protocol of the cluster selected for this exchange.
@@ -995,12 +1050,21 @@ impl HttpFilterContext<'_> {
     pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
         let key = key.into();
         let value = value.into();
-        if key.is_empty() || key.len() > 64 {
-            tracing::warn!(key_len = key.len(), "metadata key rejected (must be 1-64 bytes)");
+        if key.is_empty() || key.len() > MAX_METADATA_KEY_LEN {
+            tracing::warn!(
+                key_len = key.len(),
+                limit = MAX_METADATA_KEY_LEN,
+                "metadata key rejected (must be 1..=limit bytes)"
+            );
             return;
         }
-        if value.len() > 256 {
-            tracing::warn!(key = %key, value_len = value.len(), "metadata value rejected (max 256 bytes)");
+        if value.len() > MAX_METADATA_VALUE_LEN {
+            tracing::warn!(
+                key = %key,
+                value_len = value.len(),
+                limit = MAX_METADATA_VALUE_LEN,
+                "metadata value rejected (exceeds limit)"
+            );
             return;
         }
         if !self.filter_metadata.contains_key(&key) && self.filter_metadata.len() >= MAX_METADATA_ENTRIES {
@@ -1563,6 +1627,45 @@ mod tests {
             ctx.stream_read_timeout_cap(),
             Some(Duration::from_millis(100)),
             "a tighter existing leftover cap must not be relaxed"
+        );
+    }
+
+    #[test]
+    fn cap_stream_deadline_tightens_absolute_cutoff() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let later = Instant::now() + Duration::from_secs(30);
+        let sooner = Instant::now() + Duration::from_secs(1);
+        ctx.cap_stream_deadline(later);
+        ctx.cap_stream_deadline(sooner);
+        assert_eq!(
+            ctx.stream_deadline_cap(),
+            Some(sooner),
+            "leftover deadline must recap the live body, not a detached peer copy"
+        );
+        assert_eq!(
+            ctx.take_stream_deadline_cap(),
+            Some(sooner),
+            "the streaming executor must be able to take the deadline cap"
+        );
+        assert!(
+            ctx.stream_deadline_cap().is_none(),
+            "taking the deadline cap must not leave it in request extensions"
+        );
+    }
+
+    #[test]
+    fn cap_stream_deadline_keeps_a_tighter_existing_cutoff() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let sooner = Instant::now() + Duration::from_millis(100);
+        let later = Instant::now() + Duration::from_secs(1);
+        ctx.cap_stream_deadline(sooner);
+        ctx.cap_stream_deadline(later);
+        assert_eq!(
+            ctx.stream_deadline_cap(),
+            Some(sooner),
+            "a tighter existing deadline must not be relaxed"
         );
     }
 

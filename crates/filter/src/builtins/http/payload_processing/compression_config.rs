@@ -22,6 +22,12 @@ pub(crate) const DEFAULT_CONTENT_TYPES: &[&str] = &[
     "application/wasm",
 ];
 
+/// Media types that are never compressed, regardless of `content_types`.
+///
+/// Encoders hold output until their internal block fills or the stream
+/// ends, which would stall Server-Sent Events delivery.
+const NEVER_COMPRESS_TYPES: &[&str] = &["text/event-stream"];
+
 // -----------------------------------------------------------------------------
 // CompressionConfig
 // -----------------------------------------------------------------------------
@@ -162,6 +168,14 @@ impl CompressionConfig {
     /// response based on Content-Type, Content-Length, and existing
     /// Content-Encoding.
     ///
+    /// Responses are never compressed when they are Server-Sent Events
+    /// (`text/event-stream`), carry `Cache-Control: no-transform`
+    /// ([RFC 9111 Section 5.2.2.6]), or are partial content with a
+    /// `Content-Range` header ([RFC 9110 Section 14.4]).
+    ///
+    /// [RFC 9111 Section 5.2.2.6]: https://datatracker.ietf.org/doc/html/rfc9111#section-5.2.2.6
+    /// [RFC 9110 Section 14.4]: https://datatracker.ietf.org/doc/html/rfc9110#section-14.4
+    ///
     /// ```
     /// use http::HeaderMap;
     /// use praxis_filter::CompressionConfig;
@@ -179,14 +193,14 @@ impl CompressionConfig {
     /// assert!(!config.should_compress(&small));
     /// ```
     pub fn should_compress(&self, headers: &http::HeaderMap) -> bool {
-        if self.is_already_compressed(headers) {
+        if self.is_already_compressed(headers) || is_partial_content(headers) || has_no_transform(headers) {
             return false;
         }
 
         if !headers
             .get(http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
-            .is_some_and(|ct| self.matches_content_type(ct))
+            .is_some_and(|ct| !is_never_compressed_type(ct) && self.matches_content_type(ct))
         {
             return false;
         }
@@ -198,6 +212,35 @@ impl CompressionConfig {
 
         self.exceeds_min_size(content_length)
     }
+}
+
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+/// Returns `true` if the Content-Type media type is in
+/// [`NEVER_COMPRESS_TYPES`].
+fn is_never_compressed_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .is_some_and(|media| NEVER_COMPRESS_TYPES.iter().any(|t| media.eq_ignore_ascii_case(t)))
+}
+
+/// Returns `true` if any `Cache-Control` directive is `no-transform`.
+fn has_no_transform(headers: &http::HeaderMap) -> bool {
+    headers
+        .get_all(http::header::CACHE_CONTROL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .any(|d| d.trim().eq_ignore_ascii_case("no-transform"))
+}
+
+/// Returns `true` if the response is a byte range (`Content-Range`).
+fn is_partial_content(headers: &http::HeaderMap) -> bool {
+    headers.contains_key(http::header::CONTENT_RANGE)
 }
 
 // -----------------------------------------------------------------------------
@@ -389,5 +432,57 @@ mod tests {
             config.should_compress(&headers),
             "chunked response with compressible type should compress"
         );
+    }
+
+    #[test]
+    fn should_not_compress_event_stream() -> Result<(), Box<dyn std::error::Error>> {
+        let config = CompressionConfig::default();
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::CONTENT_TYPE, "text/event-stream; charset=utf-8".parse()?);
+        assert!(!config.should_compress(&headers), "SSE should never be compressed");
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_compress_event_stream_when_listed() -> Result<(), Box<dyn std::error::Error>> {
+        let config = CompressionConfig {
+            content_types: vec!["text/event-stream".to_owned()],
+            ..CompressionConfig::default()
+        };
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::CONTENT_TYPE, "Text/Event-Stream".parse()?);
+        assert!(
+            !config.should_compress(&headers),
+            "explicit content_types must not re-enable SSE compression"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_compress_no_transform() -> Result<(), Box<dyn std::error::Error>> {
+        let config = CompressionConfig::default();
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::CONTENT_TYPE, "text/html".parse()?);
+        headers.insert(http::header::CONTENT_LENGTH, "1024".parse()?);
+        headers.insert(http::header::CACHE_CONTROL, "public, No-Transform".parse()?);
+        assert!(
+            !config.should_compress(&headers),
+            "Cache-Control no-transform should disable compression"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_not_compress_partial_content() -> Result<(), Box<dyn std::error::Error>> {
+        let config = CompressionConfig::default();
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::CONTENT_TYPE, "text/plain".parse()?);
+        headers.insert(http::header::CONTENT_LENGTH, "2048".parse()?);
+        headers.insert(http::header::CONTENT_RANGE, "bytes 0-2047/10000".parse()?);
+        assert!(
+            !config.should_compress(&headers),
+            "Content-Range responses should not be compressed"
+        );
+        Ok(())
     }
 }

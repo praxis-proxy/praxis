@@ -25,8 +25,9 @@ ambiguous configuration:
   [Admin DNS Rebinding](#admin-dns-rebinding)).
 - `unsafe_code = "deny"` in workspace lints; no unsafe
   Rust in the Praxis codebase.
-- Rustls for TLS (no OpenSSL, no C FFI in the TLS
-  path).
+- Rustls protocol state machine for TLS;
+  cryptography via the system OpenSSL
+  (rustls-openssl provider).
 - TLS certificate and key paths reject directory
   traversal (`..`).
 - Health check targets reject loopback, link-local,
@@ -35,10 +36,37 @@ ambiguous configuration:
   reserved addresses are refused at connection time on
   both the TCP and HTTP data planes, so a DNS record
   that rebinds after startup cannot steer traffic to
-  loopback, RFC 1918, or `169.254.169.254`. Set
-  `insecure_options.allow_private_upstreams` when
-  upstream DNS names legitimately resolve into private
-  space.
+  loopback, RFC 1918, or `169.254.169.254`. When an
+  HTTP cluster's endpoint hostname legitimately resolves
+  into private space, such as a Kubernetes Service name
+  resolving to its ClusterIP, list that host in the
+  inline `load_balancer` cluster's
+  `trusted_private_endpoints`. It relaxes only
+  the listed host, and only to RFC 1918 and IPv6
+  unique-local addresses, and skips the load-time
+  hostname check that refuses names such as
+  `*.cluster.local`. Proxied requests to loopback,
+  link-local, and cloud metadata stay refused at
+  connect time unless `allow_private_upstreams` is
+  set. Health probes do not run this connect-time
+  check. Listing a host trusts
+  whoever controls its DNS with those ranges. On
+  Kubernetes, edit rights on the Service or its
+  Endpoints are control of its DNS. Write the endpoint
+  address as a fully qualified name with a trailing dot,
+  such as `model.tenant.svc.cluster.local.:8000`, so
+  resolver search domains cannot substitute another name.
+  The list entry needs no dot, since matching ignores
+  it, and derived SNI drops it. Without the dot, the
+  owner of a namespace named `svc` can answer through
+  the search list. An ExternalName Service lets its
+  owner point the name at another host. TLS hostname
+  verification is what makes listing a tenant-owned
+  name safe: keep `verify` on, pin the CA, and let SNI
+  be the listed name. Add an egress NetworkPolicy to
+  bound what the proxy can reach.
+  Prefer this over `insecure_options.allow_private_upstreams`,
+  which lifts the check for every upstream.
 - Policy engine outbound calls (JWKS, token exchange,
   CIBA backchannel) share the proxy's sub-request
   connector. Private DNS answers (loopback, RFC 1918,
@@ -132,6 +160,16 @@ relying on the bind address.
   `crl_paths` to the `client_ca` block. CRL paths
   reject directory traversal (`..`). See
   [tls.md](tls.md) for configuration details.
+- CRL and client CA files reload only on listeners
+  with exactly one certificate and `hot_reload` not
+  set to `false`. Every other listener needs a
+  restart to pick up a new CRL.
+- For upstream TLS, set `tls.sni` to the name on the
+  backend certificate, especially for a hostname
+  behind a load balancer. With
+  `authority: { from: endpoint }` and no `tls.sni`,
+  each endpoint is verified against its own hostname,
+  or an IP endpoint against the certificate's IP SAN.
 
 ## Access Control
 
@@ -163,7 +201,11 @@ relying on the bind address.
   duplicate slashes (`//`), or percent-decode the
   path before matching, and it forwards the path to
   the upstream verbatim (this is deliberate — see the
-  `%2f`/`//` passthrough behavior). A request such as
+  `%2f`/`//` passthrough behavior). The one exception:
+  requests whose path has a `..` segment (including
+  `%2e%2e`) are rejected with 400 before any filter
+  runs, so `/public/../admin` cannot match a `/public`
+  route and reach `/admin` upstream. A request such as
   `//admin` or `/%2e/admin` will therefore *not* match
   a `path_prefix: /admin` gate, yet an upstream that
   normalizes the path may still treat it as `/admin`.
@@ -180,6 +222,13 @@ relying on the bind address.
   to a process RSS ceiling. When exceeded, the proxy
   rejects new requests with 503 to prevent OOM. See
   [configuration.md](configuration.md) for details.
+- **File descriptors**: Praxis raises its open file
+  limit at startup and sheds requests with 503 before
+  descriptors run out. Set
+  `downstream_keepalive_timeout_ms` on listeners so idle
+  clients cannot pin descriptors, and see
+  [capacity-planning.md](capacity-planning.md) for
+  sizing the limit and raising the hard limit.
 - **Payload size**: Set `body_limits.max_request_bytes`
   and `body_limits.max_response_bytes` to bound
   buffered payload sizes. Requests exceeding the
@@ -216,6 +265,15 @@ in development:
 - **`verify: false`** on upstream TLS: Disables
   certificate verification. Acceptable only for
   local development with self-signed certs.
+- **`allow_tls_without_sni`**: Lets a verifying TLS
+  cluster run with neither `tls.sni` nor
+  `authority: { from: endpoint }`. The certificate is
+  then checked against the cluster's fixed
+  `authority` if set, else the client's `Host`
+  header, so a client picks which name the backend
+  must prove. When that is not a hostname, the
+  endpoint address is used instead. Set `tls.sni`
+  instead of enabling this.
 - **Binding to `0.0.0.0`**: Exposes the listener on
   all interfaces. Use specific addresses in
   production.

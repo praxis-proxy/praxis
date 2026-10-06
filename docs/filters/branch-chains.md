@@ -122,8 +122,10 @@ startup. See
 
 [names]: ../architecture/pipeline-concepts.md#the-two-meanings-of-name
 
-**`on_result.result`** is the expected value. In the
-Rust code, this field is called `value` but is
+**`on_result.result`** is the expected value: a plain
+value matches exactly, or an operator matches a
+family of values (see [Result Matchers](#result-matchers)).
+In the Rust code, this field is called `value` but is
 serialized as `result` in YAML for readability.
 
 **`on_result.key`** defaults to `"status"`. Override
@@ -137,6 +139,51 @@ and always fire.
 order; the first match with a non-`next` rejoin wins.
 Up to 16 branches per filter.
 
+### Result Matchers
+
+A plain `result:` matches one exact value. When a
+filter reports a family of values (a guardrail that
+answers `safe` or `unsafe01` through `unsafe13`, or a
+severity of `0`, `2`, `4`, or `6`), use a single-key
+mapping that names an operator instead:
+
+```yaml
+on_result:
+  filter: content_check            # any filter that writes a verdict
+  key: verdict
+  result: safe                     # exact match
+  # result: { contains: unsafe }   # the value contains this text
+  # result: { not: safe }          # any other value, or no value at all
+  # result: { any_of: [2, 4, 6] }  # equals one of these values
+```
+
+| Form | Fires when | Fires with no value |
+|------|-----------|---------------------|
+| `result: <value>` | the value equals it | no |
+| `contains: <text>` | the value contains the text | no |
+| `not: <value>` | the value is anything else | **yes** |
+| `any_of: [<value>, ...]` | the value equals one entry | no |
+
+`not` is the one that fires when the filter wrote no
+value for the key. That's deliberate: a deny branch
+written as `not: safe` must not let a request through
+just because the guardrail gave no verdict. It replaces
+the older two-branch pattern (a `result: safe` branch
+that skips ahead past an unconditional deny branch),
+which fails closed the same way. If a missing value
+should let the request through instead, list the bad
+values with `contains` or `any_of`; those never fire
+without a value.
+
+Every value follows the same rules as a plain
+`result:`: it can't be empty, it's at most 256 bytes,
+and it uses ASCII letters, digits, `_`, and `-`.
+Matching is case-sensitive. Unquoted numbers and
+booleans are read as their plain text (`0`, `true`);
+quote anything YAML would rewrite, like `"007"`.
+
+See `examples/configs/branching/result-matchers.yaml`.
+
 ### Rejoin Points
 
 After a branch's filters execute, the pipeline
@@ -145,7 +192,7 @@ resumes at the rejoin point:
 | Rejoin value | Behavior |
 |-------------|----------|
 | `next` (default) | Continue with the filter after the branch point |
-| `terminal` or `client` | Stop the pipeline. In an ordinary routing pipeline, a branch can select a cluster via `router` + `load_balancer` and forward upstream. A binding-enabled pipeline must publish its request-scoped binding from a top-level router instead; branch routers are rejected. Otherwise the branch must produce the response (e.g. a `static_response` filter); a terminal branch that neither selects a cluster nor produces a response fails closed with a 500. |
+| `terminal` or `client` | Stop the pipeline. In an ordinary routing pipeline, a branch can select a cluster via `router` + `load_balancer` and forward upstream. A binding-enabled pipeline must publish its request-scoped binding from a top-level router instead; branch routers are rejected. Otherwise the branch must produce the response (e.g. a `static_response` filter); a terminal branch that neither selects an upstream itself nor produces a response fails closed with a 500 (a cluster or upstream chosen before the branch does not count). A nested terminal branch must always produce a response; selecting an upstream there fails closed with a 500. |
 | `<filter_name>` (forward) | Skip to the named filter (must be after the branch point) |
 | `<filter_name>` (backward) | Re-enter at the named filter; requires `max_iterations` |
 
@@ -409,7 +456,10 @@ request.
 **Nested control flow**: `SkipTo` and `ReEnter` from
 nested branches (branches within branches) are
 discarded. Only `Terminal` and `Reject` propagate
-upward from nested branches.
+upward from nested branches. A nested `terminal`
+branch must produce a response: selecting an
+upstream inside a nested terminal branch fails
+closed with a 500.
 
 **Same-type result sharing**: two instances of the
 same filter type in a pipeline share the same

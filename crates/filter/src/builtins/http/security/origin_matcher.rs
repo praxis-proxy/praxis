@@ -111,7 +111,10 @@ pub(crate) fn build_origin_matcher(origins: &[String]) -> OriginMatcher {
 /// Check if `origin` matches any wildcard subdomain entry.
 ///
 /// Only single-level subdomains match: `https://app.example.com`
-/// matches but `https://a.b.example.com` does not.
+/// matches but `https://a.b.example.com` does not. The subdomain label
+/// must be a non-empty run of ASCII letters, digits, and hyphens, so
+/// userinfo (`https://evil@x.example.com`) and other separators never
+/// match.
 fn match_wildcard_subdomain(origin: &str, suffixes: &[(String, String)]) -> bool {
     let Some((scheme, rest)) = origin.split_once("://") else {
         return false;
@@ -121,6 +124,46 @@ fn match_wildcard_subdomain(origin: &str, suffixes: &[(String, String)]) -> bool
             return false;
         }
         let subdomain = rest.get(..rest.len() - suffix.len()).unwrap_or_default();
-        !subdomain.contains('.')
+        !subdomain.is_empty() && subdomain.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
     })
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::build_origin_matcher;
+
+    #[test]
+    fn wildcard_accepts_alphanumeric_and_hyphen_labels() {
+        let matcher = build_origin_matcher(&["https://*.trusted.example".to_owned()]);
+        assert!(
+            matcher.is_allowed("https://api.trusted.example"),
+            "alphanumeric label should match"
+        );
+        assert!(
+            matcher.is_allowed("https://a-b.trusted.example"),
+            "hyphenated label should match"
+        );
+    }
+
+    #[test]
+    fn wildcard_rejects_userinfo_in_label() {
+        let matcher = build_origin_matcher(&["https://*.trusted.example".to_owned()]);
+        assert!(
+            !matcher.is_allowed("https://evil@x.trusted.example"),
+            "userinfo must not satisfy the wildcard label"
+        );
+    }
+
+    #[test]
+    fn wildcard_rejects_underscore_in_label() {
+        let matcher = build_origin_matcher(&["https://*.trusted.example".to_owned()]);
+        assert!(
+            !matcher.is_allowed("https://a_b.trusted.example"),
+            "underscore is not a valid label character"
+        );
+    }
 }

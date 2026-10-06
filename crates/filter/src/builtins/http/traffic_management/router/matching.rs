@@ -5,21 +5,100 @@
 
 use std::collections::HashMap;
 
-use http::HeaderMap;
+use http::{HeaderMap, header::HeaderName};
 use praxis_core::config::{PathMatch, Route};
 
 use super::ResolvedRoute;
+use crate::{FilterError, HttpFilterContext, context::PendingHeaderResult};
+
+// -----------------------------------------------------------------------------
+// Route Header Sources
+// -----------------------------------------------------------------------------
+
+/// Where route `headers` predicates read request header values from.
+pub(super) trait RouteHeaderSource {
+    /// Whether any effective value of `name` equals `expected`.
+    fn has_value(&self, name: &str, expected: &str) -> bool;
+}
+
+impl RouteHeaderSource for HeaderMap {
+    fn has_value(&self, name: &str, expected: &str) -> bool {
+        self.get_all(name)
+            .iter()
+            .any(|v| v.to_str().ok().is_some_and(|v| v == expected))
+    }
+}
+
+/// The request headers as received, overlaid with what earlier filters in
+/// the same phase set, added, or removed on the names routes match on.
+///
+/// Those mutations sit in the context's pending queues until the protocol
+/// layer applies them after the pipeline, so reading the request alone would
+/// route on the client's value rather than the one the upstream receives.
+pub(super) struct PendingRouteHeaders<'req> {
+    /// Pending state of each routed header name an earlier filter touched.
+    pending: Vec<(&'req HeaderName, PendingHeaderResult)>,
+
+    /// The request headers as received.
+    request: &'req HeaderMap,
+}
+
+impl<'req> PendingRouteHeaders<'req> {
+    /// Resolve each routed header name in `names` against the pending header
+    /// mutations in `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] when a routed header has more than one distinct
+    /// pending value (or a non-text one): picking one would route on a guess.
+    ///
+    /// [`FilterError`]: crate::FilterError
+    pub(super) fn resolve(names: &'req [HeaderName], ctx: &'req HttpFilterContext<'_>) -> Result<Self, FilterError> {
+        let mut pending = Vec::new();
+        for name in names {
+            let state = ctx
+                .pending_header_value(name)
+                .map_err(|e| -> FilterError { format!("router: {e}").into() })?;
+            if state != PendingHeaderResult::Absent {
+                pending.push((name, state));
+            }
+        }
+        Ok(Self {
+            pending,
+            request: &ctx.request.headers,
+        })
+    }
+}
+
+impl RouteHeaderSource for PendingRouteHeaders<'_> {
+    fn has_value(&self, name: &str, expected: &str) -> bool {
+        let pending = self
+            .pending
+            .iter()
+            .find(|(pending_name, _)| pending_name.as_str().eq_ignore_ascii_case(name));
+        match pending.map(|(_, state)| state) {
+            Some(PendingHeaderResult::Value(value)) => value == expected,
+            Some(PendingHeaderResult::Removed) => false,
+            Some(PendingHeaderResult::Absent) | None => self.request.has_value(name, expected),
+        }
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Route Matching
 // -----------------------------------------------------------------------------
 
 /// Check whether a resolved route matches the request path, host, and headers.
-pub(super) fn route_matches_request(
+///
+/// The request host has its port and any trailing root dot
+/// (`a.example.com.`) stripped before matching, so a fully
+/// qualified host cannot bypass a host-constrained route. A route
+/// host written with a root dot is compared without it as well.
+pub(super) fn route_matches_request<S: RouteHeaderSource>(
     resolved: &ResolvedRoute,
     path: &str,
     host: Option<&str>,
-    req_headers: &HeaderMap,
+    req_headers: &S,
     multi_level_subdomain: bool,
 ) -> bool {
     let route = &resolved.route;
@@ -38,6 +117,7 @@ pub(super) fn route_matches_request(
     let host_ok = match &route.host {
         Some(h) => host.is_some_and(|req_host| {
             let req_host = strip_port(req_host);
+            let req_host = req_host.strip_suffix('.').unwrap_or(req_host);
             host_matches(h, resolved.wildcard_suffix.as_deref(), req_host, multi_level_subdomain)
         }),
         None => true,
@@ -109,7 +189,7 @@ fn host_matches(pattern: &str, wildcard_suffix: Option<&str>, host: &str, multi_
         let subdomain = host.get(..host.len() - suffix.len()).unwrap_or_default();
         !subdomain.is_empty() && (multi_level || !subdomain.contains('.'))
     } else {
-        host.eq_ignore_ascii_case(pattern)
+        host.eq_ignore_ascii_case(pattern.strip_suffix('.').unwrap_or(pattern))
     }
 }
 
@@ -118,16 +198,11 @@ fn host_matches(pattern: &str, wildcard_suffix: Option<&str>, host: &str, multi_
 // -----------------------------------------------------------------------------
 
 /// Returns `true` if the request headers satisfy all route header constraints.
-fn headers_match(required: Option<&HashMap<String, String>>, actual: &HeaderMap) -> bool {
+fn headers_match<S: RouteHeaderSource>(required: Option<&HashMap<String, String>>, actual: &S) -> bool {
     let Some(required) = required else {
         return true;
     };
-    required.iter().all(|(key, val)| {
-        actual
-            .get_all(key.as_str())
-            .iter()
-            .any(|v| v.to_str().ok().is_some_and(|v| v == val))
-    })
+    required.iter().all(|(key, val)| actual.has_value(key, val))
 }
 
 use crate::builtins::http::traffic_management::strip_port;

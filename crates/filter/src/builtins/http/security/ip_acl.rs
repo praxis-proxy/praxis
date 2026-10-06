@@ -104,15 +104,13 @@ impl IpAclFilter {
             .map_err(|e| -> FilterError { format!("ip_acl: {e}").into() })?;
 
         if !allow.is_empty() && !deny.is_empty() {
-            return Err(
-                "ip_acl: both allow and deny lists configured; deny list is ignored when allow list is present".into(),
-            );
+            return Err("ip_acl: 'allow' and 'deny' are mutually exclusive; set only one".into());
         }
 
         Ok(Box::new(Self { allow, deny }))
     }
 
-    /// Check `ip` against allow/deny lists. Allow takes precedence.
+    /// Check `ip` against the configured allow or deny list.
     fn is_allowed(&self, ip: &IpAddr) -> bool {
         if !self.allow.is_empty() {
             return self.allow.iter().any(|r| r.contains(ip));
@@ -237,7 +235,7 @@ deny: ["0.0.0.0/0"]
         .unwrap();
         let err = IpAclFilter::from_config(&yaml).err().expect("should fail");
         assert!(
-            err.to_string().contains("both allow and deny"),
+            err.to_string().contains("mutually exclusive"),
             "should reject both allow and deny: {err}"
         );
     }

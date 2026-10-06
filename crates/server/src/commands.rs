@@ -52,25 +52,23 @@ pub(crate) fn load_and_validate_for_cli(
 /// Validate a parsed configuration by building filter pipelines.
 ///
 /// Runs the full validation suite that server startup performs:
-/// - Validates log override module paths and levels
-/// - Validates logging configuration (targets, format, output paths)
 /// - Instantiates filter factories from the registry
 /// - Resolves and expands filter chains
 /// - Applies ordering and body-limit checks to pipelines
+/// - Checks that grouped TCP listeners agree on chains and connection limits
 ///
 /// This catches semantic errors (undefined chains, invalid filter configs,
 /// incompatible filter ordering) that pure schema validation cannot detect.
-/// If this function succeeds, the configuration is safe to use for server
+/// It does not load TLS certificates or bind sockets, so missing or
+/// unreadable certificate files and address conflicts are only detected at
 /// startup.
 ///
 /// # Errors
 ///
-/// Returns an error if any validation step fails: invalid log configuration,
-/// unknown filter types, undefined chain references, or filter instantiation
-/// errors.
+/// Returns an error if any validation step fails: unknown filter types,
+/// undefined chain references, filter instantiation errors, or inconsistent
+/// TCP listener groups.
 pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    praxis_core::logging::validate_log_overrides(config)?;
-    praxis_core::logging::validate_logging(config)?;
     let registry = praxis::build_full_registry();
     if praxis_tls::provider::required()
         && let Some(reason) = praxis::fips_blocker(&registry)
@@ -89,6 +87,7 @@ pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn
         &session_stores,
         &subrequest_client,
     )?;
+    praxis_protocol::tcp::validate_tcp_groups(config)?;
     Ok(())
 }
 
@@ -132,6 +131,8 @@ fn default_config_source() -> String {
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
 
     #[test]
@@ -185,9 +186,10 @@ mod tests {
     }
 
     #[test]
-    fn validate_catches_invalid_log_overrides() {
-        let config = Config::from_yaml(
-            r#"
+    fn load_and_validate_for_cli_rejects_invalid_log_overrides() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(
+            br#"
 runtime:
   log_overrides:
     "invalid module": "info"
@@ -202,9 +204,8 @@ filter_chains:
 "#,
         )
         .unwrap();
-        let result = validate_config_for_startup(&config);
-        assert!(result.is_err(), "invalid log overrides should fail validation");
-        let err = result.err().unwrap().to_string();
+        let path = file.path().to_str().unwrap();
+        let err = load_and_validate_for_cli(Some(path)).unwrap_err().to_string();
         assert!(
             err.contains("invalid module path 'invalid module'"),
             "error should mention invalid module path: {err}"

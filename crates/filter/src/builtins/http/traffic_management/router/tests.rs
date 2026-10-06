@@ -3,9 +3,9 @@
 
 //! Tests for the router filter.
 
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
-use http::{HeaderMap, HeaderValue};
+use http::{HeaderMap, HeaderValue, header::HeaderName};
 use praxis_core::config::{PathMatch, Route};
 
 #[cfg(feature = "router-json-aliases")]
@@ -174,6 +174,64 @@ fn from_config_empty_routes_rejected() {
         err.to_string().contains("empty"),
         "an empty route table can match nothing and must be rejected, got: {err}"
     );
+}
+
+#[test]
+fn from_config_rejects_invalid_header_key() -> Result<(), serde_yaml::Error> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("routes:\n  - path_prefix: /\n    headers:\n      \"bad key\": v\n    cluster: a\n")?;
+    assert!(
+        RouterFilter::from_config(&yaml).is_err(),
+        "header key with a space should be rejected"
+    );
+    Ok(())
+}
+
+#[test]
+fn from_config_rejects_host_with_port() -> Result<(), serde_yaml::Error> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("routes:\n  - path_prefix: /\n    host: \"a.com:8080\"\n    cluster: a\n")?;
+    assert!(
+        RouterFilter::from_config(&yaml).is_err(),
+        "route host with a port can never match and should be rejected"
+    );
+    Ok(())
+}
+
+#[test]
+fn from_config_rejects_bracketed_ipv6_host_with_port() -> Result<(), serde_yaml::Error> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("routes:\n  - path_prefix: /\n    host: \"[::1]:8080\"\n    cluster: a\n")?;
+    assert!(
+        RouterFilter::from_config(&yaml).is_err(),
+        "bracketed IPv6 route host with a port can never match and should be rejected"
+    );
+    Ok(())
+}
+
+#[test]
+fn from_config_rejects_inner_wildcard_host() -> Result<(), serde_yaml::Error> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str("routes:\n  - path_prefix: /\n    host: \"a.*.com\"\n    cluster: a\n")?;
+    assert!(
+        RouterFilter::from_config(&yaml).is_err(),
+        "non-leading wildcard host should be rejected"
+    );
+    Ok(())
+}
+
+#[test]
+fn from_config_accepts_wildcard_and_ipv6_hosts() -> Result<(), crate::FilterError> {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "routes:\n  - path_prefix: /\n    host: \"*.example.com\"\n    cluster: a\n  - path_prefix: /v6\n    host: \"[::1]\"\n    cluster: b\n",
+    )?;
+    let filter = RouterFilter::from_config(&yaml)?;
+    assert_eq!(
+        filter.name(),
+        "router",
+        "leading wildcard and IPv6 hosts should be accepted"
+    );
+    Ok(())
 }
 
 #[test]
@@ -611,6 +669,175 @@ async fn on_request_combined_host_and_path() {
         ctx2.cluster.as_deref(),
         Some("default"),
         "missing host should select default"
+    );
+}
+
+#[tokio::test]
+async fn on_request_matches_header_set_by_earlier_filter() {
+    let router = make_router(vec![
+        header_route(&[("x-tier", "gold")], "gold"),
+        prefix_route("/", "standard"),
+    ]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.request_headers_to_set
+        .push((HeaderName::from_static("x-tier"), HeaderValue::from_static("gold")));
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("gold"),
+        "a header set by an earlier filter in the phase should select its route"
+    );
+}
+
+#[tokio::test]
+async fn on_request_matches_header_added_by_earlier_filter() {
+    let router = make_router(vec![
+        header_route(&[("x-praxis-tier", "gold")], "gold"),
+        prefix_route("/", "standard"),
+    ]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extra_request_headers
+        .push((Cow::Borrowed("x-praxis-tier"), "gold".to_owned()));
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("gold"),
+        "a header promoted through extra_request_headers should select its route"
+    );
+}
+
+#[tokio::test]
+async fn on_request_pending_header_name_matches_case_insensitively() {
+    let router = make_router(vec![
+        header_route(&[("X-Tier", "gold")], "gold"),
+        prefix_route("/", "standard"),
+    ]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extra_request_headers
+        .push((Cow::Borrowed("x-TIER"), "gold".to_owned()));
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("gold"),
+        "header names should match pending mutations regardless of case"
+    );
+}
+
+#[tokio::test]
+async fn on_request_ignores_header_removed_by_earlier_filter() {
+    let router = make_router(vec![
+        header_route(&[("x-tier", "gold")], "gold"),
+        prefix_route("/", "standard"),
+    ]);
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("x-tier", HeaderValue::from_static("gold"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.request_headers_to_remove.push(HeaderName::from_static("x-tier"));
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("standard"),
+        "a client header removed by an earlier filter must not match"
+    );
+}
+
+#[tokio::test]
+async fn on_request_pending_forwarded_for_overrides_client_value() {
+    let router = make_router(vec![
+        header_route(&[("x-forwarded-for", "10.0.0.1")], "spoofed"),
+        header_route(&[("x-forwarded-for", "192.0.2.10")], "trusted"),
+        prefix_route("/", "default"),
+    ]);
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert("x-forwarded-for", HeaderValue::from_static("10.0.0.1"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extra_request_headers
+        .push((Cow::Borrowed("X-Forwarded-For"), "192.0.2.10".to_owned()));
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("trusted"),
+        "the value an earlier filter writes should replace the client-supplied one"
+    );
+}
+
+#[tokio::test]
+async fn on_request_untouched_header_keeps_multi_value_matching() {
+    let router = make_router(vec![
+        header_route(&[("x-tier", "gold"), ("x-model", "model-alpha-1")], "gold-alpha"),
+        prefix_route("/", "standard"),
+    ]);
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.append("x-model", HeaderValue::from_static("model-alpha-2"));
+    req.headers.append("x-model", HeaderValue::from_static("model-alpha-1"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.request_headers_to_set
+        .push((HeaderName::from_static("x-tier"), HeaderValue::from_static("gold")));
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("gold-alpha"),
+        "a header no filter touched should still match any of its client values"
+    );
+}
+
+#[tokio::test]
+async fn on_request_rejects_ambiguous_pending_header() {
+    let router = make_router(vec![
+        header_route(&[("x-tier", "gold")], "gold"),
+        prefix_route("/", "standard"),
+    ]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extra_request_headers
+        .push((Cow::Borrowed("x-tier"), "gold".to_owned()));
+    ctx.extra_request_headers
+        .push((Cow::Borrowed("x-tier"), "silver".to_owned()));
+
+    let err = router.on_request(&mut ctx).await.unwrap_err();
+
+    assert!(
+        err.to_string().contains("ambiguous"),
+        "two distinct pending values for a routed header should fail the request: {err}"
+    );
+    assert!(ctx.cluster.is_none(), "an ambiguous header must not select a cluster");
+}
+
+#[tokio::test]
+async fn on_request_ignores_ambiguity_in_headers_no_route_matches_on() {
+    let router = make_router(vec![
+        header_route(&[("x-tier", "gold")], "gold"),
+        prefix_route("/", "standard"),
+    ]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extra_request_headers
+        .push((Cow::Borrowed("x-other"), "one".to_owned()));
+    ctx.extra_request_headers
+        .push((Cow::Borrowed("x-other"), "two".to_owned()));
+
+    drop(router.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("standard"),
+        "pending headers no route matches on should not affect routing"
     );
 }
 
@@ -1297,6 +1524,60 @@ fn wildcard_host_matches_subdomain() {
         &*route.route.cluster, "wildcard",
         "*.example.com should match api.example.com"
     );
+}
+
+#[test]
+fn host_with_root_dot_matches() -> Result<(), crate::FilterError> {
+    let router = make_router(vec![host_route("a.example.com", "exact")]);
+    let route = router
+        .match_route("/", Some("a.example.com."), &HeaderMap::new())
+        .ok_or("root-dot host should match")?;
+    assert_eq!(
+        &*route.route.cluster, "exact",
+        "a.example.com. should match host a.example.com"
+    );
+    Ok(())
+}
+
+#[test]
+fn host_with_root_dot_and_port_matches() -> Result<(), crate::FilterError> {
+    let router = make_router(vec![host_route("a.example.com", "exact")]);
+    let route = router
+        .match_route("/", Some("a.example.com.:8080"), &HeaderMap::new())
+        .ok_or("root-dot host with port should match")?;
+    assert_eq!(
+        &*route.route.cluster, "exact",
+        "a.example.com.:8080 should match host a.example.com"
+    );
+    Ok(())
+}
+
+#[test]
+fn root_dot_route_host_still_matches() -> Result<(), crate::FilterError> {
+    let router = make_router(vec![host_route("a.example.com.", "exact")]);
+    for req_host in ["a.example.com.", "a.example.com"] {
+        let route = router
+            .match_route("/", Some(req_host), &HeaderMap::new())
+            .ok_or("root-dot route host should match")?;
+        assert_eq!(
+            &*route.route.cluster, "exact",
+            "{req_host} should match route host a.example.com."
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn wildcard_host_with_root_dot_matches() -> Result<(), crate::FilterError> {
+    let router = make_router(vec![host_route("*.example.com", "wildcard")]);
+    let route = router
+        .match_route("/", Some("x.example.com."), &HeaderMap::new())
+        .ok_or("root-dot host should match wildcard")?;
+    assert_eq!(
+        &*route.route.cluster, "wildcard",
+        "x.example.com. should match *.example.com"
+    );
+    Ok(())
 }
 
 #[test]
@@ -2211,6 +2492,19 @@ fn json_alias_max_bytes_at_upper_bound_passes_bounds_check() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
+/// Build a catch-all prefix route constrained to `host`.
+fn host_route(host: &str, cluster: &str) -> Route {
+    Route {
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: Some(host.to_owned()),
+        headers: None,
+        cluster: cluster.into(),
+        retry_policy: None,
+    }
+}
+
 fn make_router(routes: Vec<Route>) -> RouterFilter {
     #[cfg_attr(
         not(feature = "upstream-binding"),
@@ -2259,6 +2553,18 @@ fn prefix_route(prefix: &str, cluster: &str) -> Route {
         headers: None,
         cluster: cluster.into(),
         retry_policy: None,
+    }
+}
+
+fn header_route(headers: &[(&str, &str)], cluster: &str) -> Route {
+    Route {
+        headers: Some(
+            headers
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect(),
+        ),
+        ..prefix_route("/", cluster)
     }
 }
 

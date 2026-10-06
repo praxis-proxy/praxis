@@ -12,17 +12,28 @@ accepted work. New issues are automatically labeled
 incoming issues regularly (typically daily) to assess
 scope, validity, and priority.
 
-To accept an issue, assign it to a milestone. Milestone
-assignment signals that the issue is understood, scoped,
-and planned for work. A GitHub Actions workflow
-automatically swaps the label to `triage/accepted` when
-a milestone is set. Removing an issue from its milestone
-reverts it to `triage/needs-triage`.
+To accept an issue, a reviewer or maintainer (a member
+of `project-leadership`, `core-maintainers`, or
+`core-reviewers`) gives it a milestone and adds it to a
+project board. Together these signal that the issue is
+understood, scoped, and planned for work. Setting the
+milestone swaps the label to `triage/accepted`, and the
+label stays even if the milestone is later removed.
+
+Only reviewers and maintainers triage. If anyone else
+self-assigns an un-triaged issue, or gives it a
+milestone or a project board, the issue triage workflow
+(shared from `praxis-proxy/conventions`) resets it:
+assignees, milestone, and boards are removed and the
+issue goes back to `triage/needs-triage`. Once an issue
+is triaged, contributors may self-assign it unless its
+priority is Urgent or High; those stay
+maintainer-assigned.
 
 | Label | Meaning |
 | --- | --- |
 | `triage/needs-triage` | Awaiting reviewer review |
-| `triage/accepted` | Assigned to a milestone; accepted for work |
+| `triage/accepted` | Given a milestone by a reviewer; accepted for work |
 
 ## Milestones
 

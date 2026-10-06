@@ -118,7 +118,9 @@ struct RouterRouteConfigRaw {
     cluster: Arc<str>,
 
     /// Request headers to match. All specified headers must be present
-    /// with matching values (AND semantics, case-sensitive).
+    /// with matching values (AND semantics, case-sensitive). Headers that
+    /// earlier filters in the pipeline set, added, or removed are matched as
+    /// those filters left them.
     #[serde(default)]
     headers: Option<HashMap<String, String>>,
 

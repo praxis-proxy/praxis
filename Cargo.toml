@@ -26,12 +26,13 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.1"
+version = "0.7.3"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Shane Utt <shaneutt@linux.com>"]
 license = "Apache-2.0"
 repository = "https://github.com/praxis-proxy/praxis"
+readme = "README.md"
 
 [workspace.dependencies]
 arc-swap = "1.9.2"
@@ -51,15 +52,16 @@ flate2 = { version = "1.1.10", default-features = false, features = ["zlib-ng"] 
 h2 = "0.4.19"
 http = "1.5.0"
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
+loom = "0.7.2"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
-nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
+nix = { version = "0.31.3", default-features = false, features = ["process", "resource", "signal", "user"] }
 notify = "8.2.0"
-object = { version = "0.39.1", default-features = false, features = ["read_core", "elf", "std"] }
-opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
-opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["gen-tonic", "trace"] }
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
+opentelemetry = { version = "0.33.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
+opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
 pingora-core = { version = "0.10.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
 pingora-http = { version = "0.10.0", package = "quixotic-plecostomus-http" }
@@ -80,15 +82,15 @@ quote = "1.0.47"
 # crates keep `policy-engine` in their own defaults, so the standard test run is
 # unchanged, and `--no-default-features` gives the FIPS build's feature set.
 praxis = { path = "crates/server", package = "praxis-proxy", default-features = false }
-praxis-core = { version = "0.7.1", path = "crates/core", package = "praxis-proxy-core" }
+praxis-core = { version = "0.7.3", path = "crates/core", package = "praxis-proxy-core" }
 # default-features = false: the filter crate's own default (`policy-engine`)
 # must not leak in through this dependency edge, or a build that turns the
 # policy engine off at the binary (`--no-default-features`, the FIPS build)
 # would still link it. The `praxis-proxy` binary's default feature set forwards
 # `policy-engine` explicitly, so the standard build is unchanged.
-praxis-filter = { version = "0.7.1", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
-praxis-protocol = { version = "0.7.1", path = "crates/protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.7.1", path = "crates/tls", package = "praxis-proxy-tls" }
+praxis-filter = { version = "0.7.3", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
+praxis-protocol = { version = "0.7.3", path = "crates/protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.7.3", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 praxis-proxy-benchmarks = "0.2.2"
 # System OpenSSL bindings, the same crate the rustls provider below uses; never
@@ -122,7 +124,7 @@ tempfile = "3.27.0"
 # a second provider into every test binary and let `ClientConfig::builder()`
 # pick it silently when nothing is installed; the Pingora fork depends on it
 # the same way.
-tokio-rustls = { version = "0.26.5", default-features = false, features = ["logging", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["logging", "tls12"] }
 tokio-tungstenite = "0.30.0"
 thiserror = "2.0.21"
 tikv-jemallocator = "0.7.0"
@@ -133,7 +135,7 @@ tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
-tracing-opentelemetry = "0.33.0"
+tracing-opentelemetry = "0.34.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "registry"] }
 url = "2.5.8"
 zeroize = "1.9.0"
@@ -153,6 +155,10 @@ lto = false
 
 [profile.dev.package."*"]
 opt-level = 2
+# Line tables keep file:line in backtraces through dependencies; full
+# debuginfo for every dependency mostly costs link time and target/ space.
+# Workspace crates keep full debuginfo for the debugger.
+debug = "line-tables-only"
 
 [workspace.lints.rust]
 # `coverage` is set by cargo-llvm-cov; declare it so `#[cfg(coverage)]` gates

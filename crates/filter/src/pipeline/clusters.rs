@@ -252,7 +252,7 @@ mod tests {
         ResolvedBranchCondition {
             filter_name: Arc::from("classifier"),
             key: Arc::from("kind"),
-            value: Arc::from("premium"),
+            matcher: praxis_core::config::ResultMatch::Exact("premium".to_owned()),
         }
     }
 

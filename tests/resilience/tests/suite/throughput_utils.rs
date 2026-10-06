@@ -23,6 +23,15 @@ pub(crate) const DEFAULT_TOTAL: usize = 2000;
 /// Default concurrency level (number of worker threads).
 pub(crate) const DEFAULT_CONCURRENCY: usize = 8;
 
+/// Environment variable that scales every throughput floor.
+///
+/// The floors are sized for GitHub's hosted runners. A slower host (the FIPS
+/// host runs the whole suite as the FIPS build inside the toolchain
+/// container) sets this below 1 so the throughput tests still prove a working
+/// proxy without asserting hosted-runner speed. Latency ceilings are not
+/// scaled.
+pub(crate) const THROUGHPUT_SCALE_VAR: &str = "PRAXIS_TEST_THROUGHPUT_SCALE";
+
 // -----------------------------------------------------------------------------
 // Configuration
 // -----------------------------------------------------------------------------
@@ -187,14 +196,25 @@ pub(crate) fn compute_percentile(sorted: &[Duration], p: f64) -> Duration {
 // -----------------------------------------------------------------------------
 
 /// Assert baseline performance expectations.
+///
+/// `min_throughput` is multiplied by [`THROUGHPUT_SCALE_VAR`] when it is set.
 pub(crate) fn assert_performance(result: &BenchResult, min_throughput: f64, max_p99_ms: f64) {
+    let scale = throughput_scale();
+    let min_throughput = min_throughput * scale;
     let throughput = result.total_requests as f64 / result.elapsed.as_secs_f64();
     let p99 = compute_percentile(&result.latencies, 99.0);
     let p99_ms = p99.as_secs_f64() * 1000.0;
 
+    // Say when the floor was scaled, so a failure on a slower host is not read
+    // against the number written in the test.
+    let scaled = if (scale - 1.0).abs() < f64::EPSILON {
+        String::new()
+    } else {
+        format!(" ({THROUGHPUT_SCALE_VAR}={scale})")
+    };
     assert!(
         throughput >= min_throughput,
-        "{}: throughput {throughput:.0} req/s below minimum {min_throughput:.0} req/s",
+        "{}: throughput {throughput:.0} req/s below minimum {min_throughput:.0} req/s{scaled}",
         result.label,
     );
     assert!(
@@ -202,6 +222,24 @@ pub(crate) fn assert_performance(result: &BenchResult, min_throughput: f64, max_
         "{}: p99 latency {p99_ms:.1}ms exceeds maximum {max_p99_ms:.1}ms",
         result.label,
     );
+}
+
+/// The throughput floor multiplier from [`THROUGHPUT_SCALE_VAR`], 1 when unset.
+fn throughput_scale() -> f64 {
+    parse_throughput_scale(std::env::var(THROUGHPUT_SCALE_VAR).ok().as_deref())
+}
+
+/// Parse a throughput scale, which must be a positive number.
+fn parse_throughput_scale(value: Option<&str>) -> f64 {
+    let Some(value) = value else {
+        return 1.0;
+    };
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
+        .unwrap_or_else(|| panic!("{THROUGHPUT_SCALE_VAR} must be a positive number, got {value:?}"))
 }
 
 /// Print a human-readable benchmark report to stderr.
@@ -236,4 +274,35 @@ pub(crate) fn report_results(result: &BenchResult) {
 pub(crate) fn run_get_benchmark(config: &BenchConfig, addr: &str, path: &str) -> BenchResult {
     let path = path.to_owned();
     run_benchmark(config, addr, move |a| http_get(a, &path, None))
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::parse_throughput_scale;
+
+    #[test]
+    fn an_unset_scale_leaves_the_floors_alone() {
+        assert!((parse_throughput_scale(None) - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_scale_applies_as_given() {
+        assert!((parse_throughput_scale(Some(" 0.5 ")) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a positive number")]
+    fn a_non_numeric_scale_is_rejected() {
+        parse_throughput_scale(Some("fast"));
+    }
+
+    #[test]
+    #[should_panic(expected = "must be a positive number")]
+    fn a_zero_scale_is_rejected() {
+        parse_throughput_scale(Some("0"));
+    }
 }

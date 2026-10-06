@@ -132,6 +132,7 @@ mod tests {
             address: "127.0.0.1:8080".to_owned(),
             protocol,
             cluster: None,
+            downstream_keepalive_timeout_ms: None,
             downstream_read_timeout_ms: None,
             filter_chains: vec![],
             max_connections: None,

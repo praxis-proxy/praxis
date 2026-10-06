@@ -76,6 +76,7 @@ mod server_options;
 /// Span attribute recording for request tracing.
 mod span_util;
 
+#[cfg(any(test, feature = "test-support"))]
 pub use upstream_peer::{UpstreamRetryGateRelease, arm_upstream_retry_gate, lock_upstream_retry_gate_tests};
 pub use with_body::PingoraHttpHandler;
 
@@ -106,6 +107,7 @@ pub use with_body::PingoraHttpHandler;
 ///     name: "http".into(),
 ///     address: "127.0.0.1:8080".into(),
 ///     cluster: None,
+///     downstream_keepalive_timeout_ms: None,
 ///     downstream_read_timeout_ms: None,
 ///     filter_chains: vec![],
 ///     max_connections: None,
@@ -131,6 +133,9 @@ pub fn load_http_handler(
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
 ) -> Result<(), praxis_core::ProxyError> {
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
+    let downstream_keepalive_timeout_secs = listener
+        .downstream_keepalive_timeout_ms
+        .map(|millis| millis.div_ceil(1_000));
     let connection_semaphore = listener
         .max_connections
         .map(|max| Arc::new(Semaphore::new(max as usize)));
@@ -141,6 +146,7 @@ pub fn load_http_handler(
     let handler = PingoraHttpHandler::new(
         pipeline,
         downstream_read_timeout,
+        downstream_keepalive_timeout_secs,
         connection_semaphore,
         // `from_shared` keeps the label as a refcounted `Arc<str>`: the
         // handler clones it per connection, and an owned `String` label

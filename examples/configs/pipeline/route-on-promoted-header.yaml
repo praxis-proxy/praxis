@@ -1,0 +1,64 @@
+# Route on a Promoted Header
+#
+# Classify a request in an early filter, promote the result to a reserved
+# `x-praxis-*` header, and route on that header. Here the `headers` filter
+# tags writes (POST, PUT, PATCH, DELETE) with `x-praxis-traffic: write`,
+# the router sends tagged requests to the primary, and everything else
+# falls through to the read replica. The router cannot match on the method
+# itself, so the classifier turns that fact into a header it can match.
+#
+# The reserved prefix is what makes this safe. Praxis rejects requests
+# that carry an `x-praxis-*` header (400) and strips those headers from
+# requests sent upstream, so only the classifier can set this one: a client
+# that sends `x-praxis-traffic: write` on a GET is turned away instead of
+# reaching the primary. With an ordinary header name, any client could pick
+# its own route.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/route-on-promoted-header.yaml
+#
+# Exercise:
+#   curl -s http://localhost:8080/orders
+#   # -> replica
+#   curl -s -X POST -d '{}' http://localhost:8080/orders
+#   # -> primary
+#   curl -s -o /dev/null -w '%{http_code}\n' -H "x-praxis-traffic: write" http://localhost:8080/orders
+#   # -> 400 (clients cannot send reserved headers)
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        conditions:
+          - when:
+              methods: ["POST", "PUT", "PATCH", "DELETE"]
+        request_set:
+          - name: "x-praxis-traffic"
+            value: "write"
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            headers:
+              x-praxis-traffic: "write"
+            cluster: primary
+          - path_prefix: "/"
+            cluster: replica
+
+      - filter: load_balancer
+        clusters:
+          - name: primary
+            endpoints:
+              - "127.0.0.1:3000"
+          - name: replica
+            endpoints:
+              - "127.0.0.1:3001"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

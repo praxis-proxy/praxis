@@ -7,6 +7,7 @@ mod endpoint;
 mod health_check;
 mod load_balancer_strategy;
 mod retry_policy;
+mod upstream_authority;
 
 use std::{fmt, sync::Arc};
 
@@ -22,6 +23,7 @@ pub use retry_policy::{
     RetryPolicy,
 };
 use serde::{Deserialize, Serialize};
+pub use upstream_authority::{AuthoritySource, UpstreamAuthority};
 
 use crate::errors::ProxyError;
 
@@ -88,14 +90,38 @@ pub struct ClusterHttpOptions {
     /// upstream instead of forwarding the downstream value. The
     /// downstream HTTP/2 `:authority` pseudo-header is never forwarded
     /// upstream; on an HTTP/2 upstream leg Pingora rebuilds
-    /// `:authority` from this `Host` value. TLS SNI remains
-    /// independent — configure `tls.sni` separately when needed.
+    /// `:authority` from this `Host` value.
     ///
-    /// Must be a valid HTTP authority: a hostname with an optional
+    /// A plain string is a fixed authority sent on every request. It
+    /// must be a valid HTTP authority: a hostname with an optional
     /// port, or a bracketed IPv6 address with an optional port. URI
-    /// schemes, paths, userinfo, and fragments are rejected.
+    /// schemes, paths, userinfo, and fragments are rejected. When
+    /// `tls.sni` is unset, the upstream TLS SNI defaults to this host
+    /// (port stripped) rather than the client `Host` header.
+    ///
+    /// `{ from: endpoint }` sends the address of the endpoint selected
+    /// for each attempt instead, so one cluster can front endpoints
+    /// with different hostnames. The port is left out when it is the
+    /// scheme default (80, or 443 with `tls`), and a retry to another
+    /// endpoint sends that endpoint's address. Without `tls.sni`, the
+    /// TLS SNI follows the endpoint too rather than copying the
+    /// downstream `Host`; an IP endpoint is verified against its
+    /// certificate's IP SAN.
+    ///
+    /// ```
+    /// # use praxis_core::config::Cluster;
+    /// let yaml = r#"
+    /// name: "mixed"
+    /// endpoints: ["api-a.example.com:443", "api-b.example.com:443"]
+    /// http:
+    ///   authority: { from: endpoint }
+    /// tls: {}
+    /// "#;
+    /// let cluster: Cluster = serde_yaml::from_str(yaml).unwrap();
+    /// assert!(cluster.http.authority.unwrap().follows_endpoint());
+    /// ```
     #[serde(default)]
-    pub authority: Option<Arc<str>>,
+    pub authority: Option<UpstreamAuthority>,
 
     /// Opaque application protocol the upstream cluster expects.
     ///
@@ -175,7 +201,7 @@ pub struct Cluster {
     /// block entirely.
     ///
     /// ```
-    /// # use praxis_core::config::Cluster;
+    /// # use praxis_core::config::{Cluster, UpstreamAuthority};
     /// let yaml = r#"
     /// name: "api"
     /// endpoints: ["10.0.0.1:443"]
@@ -185,7 +211,10 @@ pub struct Cluster {
     ///   sni: "api.example.com"
     /// "#;
     /// let cluster: Cluster = serde_yaml::from_str(yaml).unwrap();
-    /// assert_eq!(cluster.http.authority.as_deref(), Some("api.example.com"));
+    /// assert_eq!(
+    ///     cluster.http.authority,
+    ///     Some(UpstreamAuthority::from("api.example.com"))
+    /// );
     /// ```
     #[serde(default)]
     pub http: ClusterHttpOptions,
@@ -239,11 +268,10 @@ pub struct Cluster {
     /// Per-read timeout in milliseconds.
     ///
     /// Applies to each individual read operation on an
-    /// established upstream connection. A timeout fires a 502
-    /// response to the client. Use [`total_connection_timeout_ms`]
-    /// to bound the entire exchange instead.
-    ///
-    /// [`total_connection_timeout_ms`]: Cluster::total_connection_timeout_ms
+    /// established upstream connection. For HTTP, a timeout
+    /// before the response starts gets the client a 504; once
+    /// the response is streaming, the client connection is
+    /// closed with the body cut short.
     #[serde(default)]
     pub read_timeout_ms: Option<u64>,
 
@@ -256,19 +284,31 @@ pub struct Cluster {
     /// Total connection timeout in milliseconds (TCP + TLS).
     ///
     /// Bounds the combined TCP handshake and TLS negotiation.
-    /// When exceeded, the connection attempt fails with a 502
-    /// response. Prefer this over [`connection_timeout_ms`] for
-    /// TLS-enabled clusters where the handshake dominates latency.
+    /// When exceeded, the connection attempt fails; for HTTP, the
+    /// client gets a 504 once any retries are used up. Prefer
+    /// this over [`connection_timeout_ms`] for TLS-enabled
+    /// clusters where the handshake dominates latency.
     ///
     /// [`connection_timeout_ms`]: Cluster::connection_timeout_ms
     #[serde(default)]
     pub total_connection_timeout_ms: Option<u64>,
 
+    /// Endpoint hostnames allowed to resolve to RFC 1918 or IPv6 unique-local
+    /// addresses. Loopback, link-local, and cloud metadata stay refused.
+    /// Hostnames only, HTTP clusters only.
+    #[serde(default)]
+    pub trusted_private_endpoints: Vec<String>,
+
     /// Per-write timeout in milliseconds.
     ///
     /// Applies to each individual write operation on an
-    /// established upstream connection. A timeout fires a 502
-    /// response to the client.
+    /// established upstream connection. For HTTP, a timed-out
+    /// request body write stops the upload; the proxy then waits
+    /// for whatever response the upstream sends and answers 504
+    /// if none arrives. Pair it with [`read_timeout_ms`] so that
+    /// wait is bounded.
+    ///
+    /// [`read_timeout_ms`]: Cluster::read_timeout_ms
     #[serde(default)]
     pub write_timeout_ms: Option<u64>,
 
@@ -283,16 +323,21 @@ pub struct Cluster {
 impl Cluster {
     /// Validate the optional upstream HTTP authority override.
     ///
+    /// Only a fixed authority is checked here; `{ from: endpoint }`
+    /// sends endpoint addresses, which endpoint validation covers.
+    ///
     /// # Errors
     ///
-    /// Returns [`ProxyError::Config`] when the authority is not a
+    /// Returns [`ProxyError::Config`] when a fixed authority is not a
     /// supported hostname with an optional port or a bracketed IPv6
     /// address with an optional port.
     pub fn validate_authority(&self) -> Result<(), ProxyError> {
-        let Some(authority) = self.http.authority.as_deref() else {
-            return Ok(());
-        };
-        super::validate::cluster::validate_authority(authority, &self.name)
+        match &self.http.authority {
+            Some(UpstreamAuthority::Literal(authority)) => {
+                super::validate::cluster::validate_authority(authority, &self.name)
+            },
+            Some(UpstreamAuthority::Derived { .. }) | None => Ok(()),
+        }
     }
 
     /// Build a cluster with only a name and endpoints; all other
@@ -324,6 +369,7 @@ impl Cluster {
             read_timeout_ms: None,
             tls: None,
             total_connection_timeout_ms: None,
+            trusted_private_endpoints: Vec::new(),
             write_timeout_ms: None,
             retry_policy: None,
         }
@@ -421,6 +467,54 @@ write_timeout_ms: 10000
         assert_eq!(
             back.connection_timeout_ms, cluster.connection_timeout_ms,
             "timeout should roundtrip"
+        );
+    }
+
+    #[test]
+    fn endpoint_authority_roundtrips_via_serde() {
+        let cluster = Cluster {
+            http: ClusterHttpOptions {
+                authority: Some(UpstreamAuthority::Derived {
+                    from: AuthoritySource::Endpoint,
+                }),
+                ..ClusterHttpOptions::default()
+            },
+            ..Cluster::with_defaults("web", vec!["api.example.com:443".into()])
+        };
+        let value = serde_yaml::to_value(&cluster).unwrap();
+        let back: Cluster = serde_yaml::from_value(value).unwrap();
+        assert_eq!(back.http, cluster.http, "endpoint-derived authority should roundtrip");
+    }
+
+    #[test]
+    fn validate_authority_skips_endpoint_authority() {
+        let cluster: Cluster = serde_yaml::from_str(
+            r#"
+name: "web"
+endpoints: ["api.example.com:443"]
+http:
+  authority: { from: endpoint }
+"#,
+        )
+        .unwrap();
+        cluster
+            .validate_authority()
+            .expect("an endpoint-derived authority has no fixed value to validate");
+    }
+
+    #[test]
+    fn validate_authority_still_checks_a_fixed_authority() {
+        let cluster = Cluster {
+            http: ClusterHttpOptions {
+                authority: Some("api.example.com/v1".into()),
+                ..ClusterHttpOptions::default()
+            },
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
+        };
+        let err = cluster.validate_authority().unwrap_err();
+        assert!(
+            err.to_string().contains("not a valid HTTP authority"),
+            "a fixed authority must still be validated: {err}"
         );
     }
 

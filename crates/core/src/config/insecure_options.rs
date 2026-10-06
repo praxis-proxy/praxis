@@ -188,7 +188,9 @@ pub struct InsecureOptions {
     /// or cloud metadata addresses.
     pub allow_private_endpoints: bool,
 
-    /// Allow health checks to loopback/metadata addresses.
+    /// Allow health checks to loopback/metadata addresses. The probed
+    /// endpoints are cluster endpoints too, so they also need
+    /// `allow_private_endpoints`.
     pub allow_private_health_checks: bool,
 
     /// Allow upstream connections to resolve to private or reserved IP
@@ -201,7 +203,10 @@ pub struct InsecureOptions {
     /// substituted by a resolver, and are gated at config time by
     /// [`allow_private_endpoints`].
     ///
+    /// Prefer a cluster's [`trusted_private_endpoints`] to trust one hostname.
+    ///
     /// [`allow_private_endpoints`]: InsecureOptions::allow_private_endpoints
+    /// [`trusted_private_endpoints`]: crate::config::Cluster::trusted_private_endpoints
     pub allow_private_upstreams: bool,
 
     /// Allow admin endpoint on non-loopback addresses (`0.0.0.0`, LAN IPs, etc.).
@@ -216,7 +221,15 @@ pub struct InsecureOptions {
     /// validation error. Enabling it demotes the error to a warning.
     pub allow_tls_no_verify: bool,
 
-    /// Allow TLS without SNI hostname verification.
+    /// Allow upstream TLS verification on a cluster with neither `tls.sni`
+    /// nor `authority: { from: endpoint }`.
+    ///
+    /// The certificate is then verified against the cluster's fixed
+    /// `authority` if set, else the client's `Host` header, which the
+    /// client chooses. When that is not a hostname, the endpoint address
+    /// is used instead (a hostname, or an IP checked against the
+    /// certificate's IP SAN). IP endpoints don't need this flag under
+    /// `authority: { from: endpoint }`.
     pub allow_tls_without_sni: bool,
 
     /// Allow startup without `body_limits.max_request_bytes` or
@@ -307,7 +320,7 @@ impl InsecureOptions {
             allow_public_admin: "admin may bind non-loopback addresses",
             allow_root: "running as root (UID 0) allowed",
             allow_tls_no_verify: "upstream TLS certificate verification may be disabled",
-            allow_tls_without_sni: "TLS hostname verification weakened",
+            allow_tls_without_sni: "upstream TLS name may come from the client Host header",
             allow_unbounded_body: "body size ceiling relaxed",
             csrf_log_only: "CSRF violations logged, not rejected",
             skip_pipeline_validation: "pipeline errors demoted to warnings",

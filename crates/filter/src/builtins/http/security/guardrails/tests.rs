@@ -828,6 +828,135 @@ async fn reject_oversized_body_returns_413() {
 }
 
 // -----------------------------------------------------------------------------
+// Duplicate Header and JSON Escape Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn negated_header_rule_rejects_any_nonconforming_duplicate()
+-> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(vec![header_not_pattern("content-type", "^application/json$")?]);
+    let mut req = crate::test_utils::make_request(http::Method::POST, "/");
+    req.headers.append("content-type", "application/json".parse()?);
+    req.headers.append("content-type", "text/xml".parse()?);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await?;
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "one non-conforming duplicate must trigger a negated rule"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn negated_header_rule_passes_all_conforming_duplicates() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+{
+    let f = make_filter(vec![header_not_pattern("content-type", "^application/json$")?]);
+    let mut req = crate::test_utils::make_request(http::Method::POST, "/");
+    req.headers.append("content-type", "application/json".parse()?);
+    req.headers.append("content-type", "application/json".parse()?);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await?;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "all conforming duplicates should pass a negated rule"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn negated_header_rule_rejects_absent_header() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(vec![header_not_pattern("content-type", "^application/json$")?]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await?;
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "absent header should trigger a negated rule"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_unicode_escape_does_not_bypass_body_rule() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(vec![body_contains("drop table")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(br#"{"q":"drop\u0020table"}"#));
+    let action = f.on_request_body(&mut ctx, &mut body, true).await?;
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "escaped content must be matched after JSON decoding"
+    );
+    assert_result(&ctx.filter_results, "blocked");
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_escaped_object_key_is_inspected() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(vec![body_contains("drop table")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(br#"{"drop\u0020table":1}"#));
+    let action = f.on_request_body(&mut ctx, &mut body, true).await?;
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "escaped object keys must be matched after JSON decoding"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_json_body_with_backslash_unchanged() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(vec![body_contains("drop table")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(br"plain drop\u0020table text"));
+    let action = f.on_request_body(&mut ctx, &mut body, true).await?;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "non-JSON bodies are matched on raw text only"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn negated_body_rule_unaffected_by_json_decoding() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(vec![body_not_contains("required")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(br#"{"q":"required\u0020value"}"#));
+    let action = f.on_request_body(&mut ctx, &mut body, true).await?;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "negated body rules keep raw-text semantics"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_too_deep_to_inspect_fails_closed() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let f = make_filter(vec![body_contains("drop table")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let nested = format!("{}\"\\u0041\"{}", "[".repeat(200), "]".repeat(200));
+    let mut body = Some(Bytes::from(nested));
+    let action = f.on_request_body(&mut ctx, &mut body, true).await?;
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "JSON nested beyond the parser limit must fail closed"
+    );
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -866,6 +995,15 @@ fn header_pattern(name: &str, re: &str) -> CompiledRule {
         matcher: RuleMatcher::Pattern(Regex::new(re).unwrap()),
         negate: false,
     }
+}
+
+/// Build a negated header-pattern rule for testing.
+fn header_not_pattern(name: &str, re: &str) -> Result<CompiledRule, regex::Error> {
+    Ok(CompiledRule {
+        target: RuleTarget::Header(name.to_owned()),
+        matcher: RuleMatcher::Pattern(Regex::new(re)?),
+        negate: true,
+    })
 }
 
 /// Build a body-contains rule for testing.
@@ -914,6 +1052,7 @@ fn make_filter(rules: Vec<CompiledRule>) -> GuardrailsFilter {
         action: super::config::GuardrailsAction::Reject,
         needs_body,
         has_body_contains,
+        has_non_negated_body_rules: rules.iter().any(|r| matches!(r.target, RuleTarget::Body) && !r.negate),
         reject_oversized: false,
         rules,
     }
@@ -929,6 +1068,7 @@ fn make_flag_filter(rules: Vec<CompiledRule>) -> GuardrailsFilter {
         action: super::config::GuardrailsAction::Flag,
         needs_body,
         has_body_contains,
+        has_non_negated_body_rules: rules.iter().any(|r| matches!(r.target, RuleTarget::Body) && !r.negate),
         reject_oversized: false,
         rules,
     }
@@ -944,6 +1084,7 @@ fn make_oversized_filter(rules: Vec<CompiledRule>) -> GuardrailsFilter {
         action: super::config::GuardrailsAction::Reject,
         needs_body,
         has_body_contains,
+        has_non_negated_body_rules: rules.iter().any(|r| matches!(r.target, RuleTarget::Body) && !r.negate),
         reject_oversized: true,
         rules,
     }

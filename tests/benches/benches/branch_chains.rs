@@ -22,7 +22,7 @@ use std::{collections::HashMap, hint::black_box};
 
 use common::{bench_runtime, make_ctx, make_request};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, InsecureOptions};
+use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, InsecureOptions, ResultMatch};
 use praxis_filter::{FilterEntry, FilterPipeline, FilterRegistry, FilterResultSet, Request};
 
 // -----------------------------------------------------------------------------
@@ -185,7 +185,7 @@ fn build_pipeline_with_conditional_branches() -> FilterPipeline {
             let condition = BranchCondition {
                 filter: "grpc_detection".to_owned(),
                 key: "kind".to_owned(),
-                value: kind.to_owned(),
+                value: ResultMatch::Exact(kind.to_owned()),
             };
             branch(&format!("branch_{i}"), Some(condition), "X-Kind")
         })

@@ -83,9 +83,10 @@ struct RedirectConfig {
     /// Optional allowlist of permitted hostnames for `${host}` substitution.
     ///
     /// Supports exact matches and wildcard prefixes (`*.example.com`).
-    /// When set, host values not matching any entry leave `${host}` unexpanded
-    /// and log a warning. When absent or empty, any syntactically valid host
-    /// is accepted (character-level validation still applies).
+    /// When set, a host not matching any entry makes a `${host}` template
+    /// answer `400 Bad Request` (with a warning) instead of redirecting.
+    /// When absent or empty, any syntactically valid host is accepted
+    /// (character-level validation still applies).
     #[serde(default)]
     allowed_hosts: Vec<String>,
 
@@ -93,9 +94,12 @@ struct RedirectConfig {
     ///
     /// `${query}` expands to `?key=val` (with leading `?`) when a query string
     /// is present, or to an empty string when absent. `${host}` expands to the
-    /// request `Host` header value (port stripped). `${scheme}` expands to the
-    /// inferred scheme (`http` or `https`). Templates should use
-    /// `${path}${query}` without a literal `?` separator.
+    /// request `Host` header value, or the HTTP/2 `:authority` when `Host` is
+    /// absent (port stripped); when no usable host is available the filter
+    /// answers `400 Bad Request` rather than emit an unexpanded placeholder.
+    /// `${scheme}` expands to the inferred scheme (`http` or `https`).
+    /// Templates should use `${path}${query}` without a literal `?`
+    /// separator.
     location: String,
 
     /// HTTP redirect status code (301, 302, 307, or 308).
@@ -126,7 +130,10 @@ where
 /// The `location` template supports `${path}`, `${query}`, `${host}`, and
 /// `${scheme}` substitution from the original request. `${query}` includes
 /// the leading `?` when a query string is present, and expands to nothing
-/// when absent. `${host}` is the `Host` header with port stripped. `${scheme}`
+/// when absent. `${host}` is the `Host` header (or the HTTP/2 `:authority`
+/// when `Host` is absent) with port stripped; if the template uses `${host}`
+/// and the host is missing, not in `allowed_hosts`, or not a safe hostname,
+/// the filter answers `400 Bad Request` instead of redirecting. `${scheme}`
 /// is inferred from `X-Forwarded-Proto`, downstream TLS state, or the URI.
 ///
 /// # YAML configuration
@@ -174,6 +181,8 @@ pub struct RedirectFilter {
     location: String,
     /// HTTP redirect status code.
     status: RedirectStatus,
+    /// Whether `location` contains the `${host}` placeholder.
+    uses_host: bool,
 }
 
 impl RedirectFilter {
@@ -202,6 +211,7 @@ impl RedirectFilter {
             // config-stable patterns.
             allowed_hosts: cfg.allowed_hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
             status: cfg.status,
+            uses_host: cfg.location.contains("${host}"),
             location: cfg.location,
         }))
     }
@@ -215,26 +225,25 @@ impl HttpFilter for RedirectFilter {
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let uri = &ctx.request.uri;
-        let raw_host = ctx
+        let host = ctx
             .request
             .headers
             .get(http::header::HOST)
             .and_then(|v| v.to_str().ok())
-            .map(strip_port);
+            .or_else(|| uri.authority().map(http::uri::Authority::as_str))
+            .map(strip_port)
+            .filter(|h| {
+                let allowed = self.allowed_hosts.is_empty() || host_matches_allowlist(h, &self.allowed_hosts);
+                if !allowed {
+                    tracing::warn!(host = h, "redirect: host not in allowed_hosts");
+                }
+                allowed
+            });
 
-        let host = if let Some(h) = raw_host {
-            if !self.allowed_hosts.is_empty() && !host_matches_allowlist(h, &self.allowed_hosts) {
-                tracing::warn!(
-                    host = h,
-                    "redirect: host not in allowed_hosts, leaving placeholder unexpanded"
-                );
-                None
-            } else {
-                Some(h)
-            }
-        } else {
-            None
-        };
+        if self.uses_host && !host.is_some_and(is_valid_host_for_redirect) {
+            tracing::warn!(?host, "redirect: no usable host for ${{host}}, rejecting with 400");
+            return Ok(FilterAction::Reject(Rejection::status(400)));
+        }
 
         let scheme = infer_scheme(ctx);
         let location = expand_location(&self.location, uri.path(), uri.query(), host, scheme);
@@ -254,6 +263,8 @@ impl HttpFilter for RedirectFilter {
 /// The path is normalized before substitution to prevent open
 /// redirects via crafted paths like `//evil.com`. Normalization
 /// collapses double slashes and resolves `.`/`..` segments.
+/// Backslashes are then percent-encoded as `%5C`, because browsers
+/// treat `/\evil.com` like `//evil.com` (a scheme-relative URL).
 ///
 /// `${query}` includes the `?` prefix when a query string is present,
 /// and expands to an empty string when absent.
@@ -265,7 +276,8 @@ impl HttpFilter for RedirectFilter {
 /// characters are permitted; invalid values leave the `${host}`
 /// placeholder unexpanded.
 fn expand_location(template: &str, path: &str, query: Option<&str>, host: Option<&str>, scheme: &str) -> String {
-    let safe_path = crate::builtins::http::transformation::path_sanitize::normalize_rewritten_path(path);
+    let safe_path =
+        crate::builtins::http::transformation::path_sanitize::normalize_rewritten_path(path).replace('\\', "%5C");
     let mut result = template.replace("${path}", &safe_path);
     let query_with_prefix = query.map_or(String::new(), |q| format!("?{q}"));
     result = result.replace("${query}", &query_with_prefix);
@@ -498,6 +510,30 @@ mod tests {
     fn expand_location_traversal_in_path_normalized() {
         let result = expand_location("https://example.com${path}", "/a/../b", None, None, "http");
         assert_eq!(result, "https://example.com/b", "path traversal should be resolved");
+    }
+
+    #[test]
+    fn expand_location_encodes_leading_backslash() {
+        let result = expand_location("${path}", "/\\evil.com", None, None, "http");
+        assert_eq!(result, "/%5Cevil.com", "leading backslash should be percent-encoded");
+    }
+
+    #[test]
+    fn expand_location_encodes_double_backslash() {
+        let result = expand_location("${path}", "/\\\\evil.com", None, None, "http");
+        assert_eq!(result, "/%5C%5Cevil.com", "every backslash should be percent-encoded");
+    }
+
+    #[test]
+    fn expand_location_keeps_encoded_backslash() {
+        let result = expand_location("${path}", "/%5Cevil.com", None, None, "http");
+        assert_eq!(result, "/%5Cevil.com", "already-encoded backslash should be unchanged");
+    }
+
+    #[test]
+    fn expand_location_encodes_inner_backslash() {
+        let result = expand_location("${path}", "/a\\b", None, None, "http");
+        assert_eq!(result, "/a%5Cb", "inner backslash should be percent-encoded");
     }
 
     #[test]
@@ -1037,10 +1073,8 @@ mod tests {
         let action = filter.on_request(&mut ctx).await.unwrap();
         match action {
             FilterAction::Reject(r) => {
-                assert_eq!(
-                    r.headers[0].1, "https://${host}/page",
-                    "unlisted host should leave placeholder unexpanded"
-                );
+                assert_eq!(r.status, 400, "unlisted host should be rejected with 400");
+                assert!(r.headers.is_empty(), "400 rejection should carry no Location header");
             },
             _ => panic!("expected Reject"),
         }
@@ -1385,22 +1419,71 @@ location: "${scheme}://${host}/redirected${path}${query}""#,
     }
 
     #[tokio::test]
-    async fn on_request_no_host_header_leaves_host_placeholder() {
-        let yaml = serde_yaml::from_str::<serde_yaml::Value>(r#"location: "https://${host}/page""#).unwrap();
-        let filter = RedirectFilter::from_config(&yaml).unwrap();
+    async fn on_request_no_host_rejects_with_400() -> Result<(), FilterError> {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(r#"location: "https://${host}/page""#)?;
+        let filter = RedirectFilter::from_config(&yaml)?;
 
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
 
-        let action = filter.on_request(&mut ctx).await.unwrap();
-        match action {
-            FilterAction::Reject(r) => {
-                assert_eq!(
-                    r.headers[0].1, "https://${host}/page",
-                    "missing host header should leave placeholder"
-                );
-            },
-            _ => panic!("expected Reject"),
-        }
+        let action = filter.on_request(&mut ctx).await?;
+        assert!(
+            matches!(&action, FilterAction::Reject(r) if r.status == 400 && r.headers.is_empty()),
+            "missing host should reject with 400 and no Location"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn on_request_invalid_host_rejects_with_400() -> Result<(), FilterError> {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(r#"location: "https://${host}/page""#)?;
+        let filter = RedirectFilter::from_config(&yaml)?;
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert("host", http::HeaderValue::from_static("evil.com@x"));
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await?;
+        assert!(
+            matches!(&action, FilterAction::Reject(r) if r.status == 400 && r.headers.is_empty()),
+            "unsafe host should reject with 400 and no Location"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn on_request_missing_host_without_placeholder_still_redirects() -> Result<(), FilterError> {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(r#"location: "https://example.com${path}""#)?;
+        let filter = RedirectFilter::from_config(&yaml)?;
+
+        let req = crate::test_utils::make_request(http::Method::GET, "/x");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await?;
+        assert!(
+            matches!(&action, FilterAction::Reject(r) if r.status == 301),
+            "template without ${{host}} should redirect regardless of host"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn on_request_uses_h2_authority_when_host_absent() -> Result<(), FilterError> {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(r#"location: "https://${host}${path}""#)?;
+        let filter = RedirectFilter::from_config(&yaml)?;
+
+        let req = crate::test_utils::make_request(http::Method::GET, "https://example.com/x");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await?;
+        let FilterAction::Reject(r) = action else {
+            return Err("expected Reject".into());
+        };
+        assert_eq!(
+            r.headers.first().map(|(_, v)| v.as_str()),
+            Some("https://example.com/x"),
+            ":authority should fill ${{host}} when Host is absent"
+        );
+        Ok(())
     }
 }

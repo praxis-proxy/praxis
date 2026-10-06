@@ -19,6 +19,8 @@ use std::{
 use clap::Parser;
 use quote::ToTokens as _;
 
+use crate::paths::workspace_root;
+
 // -----------------------------------------------------------------------------
 // CLI Arguments
 // -----------------------------------------------------------------------------
@@ -2085,14 +2087,6 @@ fn append_unique_fields(target: &mut Vec<FieldInfo>, items: Vec<FieldInfo>) {
     }
 }
 
-/// Locate the workspace root directory.
-fn workspace_root() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
-    Path::new(&manifest_dir)
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_owned()
-}
 
 /// Extract the final component of a directory path as a string.
 fn dir_file_name(dir: &Path) -> String {

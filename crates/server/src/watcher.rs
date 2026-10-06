@@ -395,12 +395,17 @@ fn handle_reload(
 
 /// Path-based event filter for the config file watcher.
 ///
-/// When the config file is itself a symlink (Kubernetes `ConfigMap`
-/// mounts, release-symlink deployments), all directory events are
+/// When the config file is itself a symlink (a file symlink, or the
+/// Kubernetes `ConfigMap` `..data` layout), all directory events are
 /// accepted because symlink-target rotations produce events for
 /// intermediate paths (e.g. `..data`) that cannot be predicted at
 /// startup. The content-hash check in [`handle_reload`] prevents
 /// unnecessary pipeline rebuilds.
+///
+/// Release-symlink layouts where a *directory* on the config path is
+/// swapped (e.g. `/srv/current -> releases/v2`) are not detected: the
+/// watched directory is resolved once at startup, so such swaps need a
+/// restart.
 ///
 /// When the config is a regular file, events are filtered against
 /// both the original and canonical paths for cross-platform
@@ -492,7 +497,7 @@ fn setup_watcher(
 ) -> Result<RecommendedWatcher, notify::Error> {
     let filter = PathFilter::new(config_path, referenced);
     let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
-        Ok(event) if is_relevant_event(event.kind) && filter.matches(&event) => {
+        Ok(event) if should_trigger(&filter, &event) => {
             if tx.try_send(()).is_err() {
                 tracing::trace!("config watcher channel full, event coalesced by debounce");
             }
@@ -506,10 +511,31 @@ fn setup_watcher(
     // A referenced document commonly lives outside the main config's directory,
     // so one watch is not enough. Each directory is registered separately and
     // non-recursively, keeping the existing blast radius per directory.
+    // Only the main config's directory is mandatory: a referenced document
+    // whose directory cannot be watched must not disable hot reload for the
+    // main config as well.
+    let config_dir = watch_dir_for_path(config_path);
     for dir in watch_dirs {
-        watcher.watch(dir, RecursiveMode::NonRecursive)?;
+        if *dir == config_dir {
+            watcher.watch(dir, RecursiveMode::NonRecursive)?;
+        } else if let Err(err) = watcher.watch(dir, RecursiveMode::NonRecursive) {
+            tracing::warn!(
+                dir = %dir.display(),
+                error = %err,
+                "failed to watch referenced document directory; edits there will not trigger reload"
+            );
+        }
     }
     Ok(watcher)
+}
+
+/// Whether a notify event should trigger a reload.
+///
+/// A rescan event (inotify queue overflow) carries no paths and may hide
+/// an edit to a watched file, so it always triggers; the content-hash gate
+/// discards it when nothing changed.
+fn should_trigger(filter: &PathFilter, event: &notify::Event) -> bool {
+    event.need_rescan() || (is_relevant_event(event.kind) && filter.matches(event))
 }
 
 /// Drain pending events and sleep for the debounce window.
@@ -609,6 +635,32 @@ pub(crate) fn composite_hash(main: &str, referenced: &[PathBuf]) -> u64 {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rescan_event_triggers_without_paths() {
+        let filter = PathFilter::new(std::path::Path::new("/etc/praxis/config.yaml"), &[]);
+        let event = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        assert!(should_trigger(&filter, &event), "a rescan must trigger a reload check");
+    }
+
+    #[test]
+    fn unrelated_other_event_does_not_trigger() {
+        let filter = PathFilter::new(std::path::Path::new("/etc/praxis/config.yaml"), &[]);
+        let event = notify::Event::new(EventKind::Other);
+        assert!(!should_trigger(&filter, &event), "a plain other event is ignored");
+    }
+
+    #[test]
+    fn unwatchable_referenced_dir_does_not_fail_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.yaml");
+        std::fs::write(&config_path, "listeners: []\n").unwrap();
+        let missing = dir.path().join("missing").join("policy.yaml");
+        let watch_dirs = vec![watch_dir_for_path(&config_path), watch_dir_for_path(&missing)];
+        let (tx, _rx) = mpsc::channel(1);
+        let result = setup_watcher(tx, &watch_dirs, &config_path, std::slice::from_ref(&missing));
+        assert!(result.is_ok(), "a missing referenced dir must only warn");
+    }
 
     #[test]
     fn is_relevant_event_create() {
@@ -974,6 +1026,67 @@ mod tests {
             &PipelineComposition::default(),
         );
         assert!(recovered, "a subsequent valid config must reload");
+    }
+
+    #[test]
+    fn reload_rejects_invalid_log_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("praxis.yaml");
+        std::fs::write(&config_path, VALID_YAML).unwrap();
+
+        let mut config = Config::from_yaml(VALID_YAML).unwrap();
+        let registry = FilterRegistry::with_builtins();
+        let health_registry = Arc::new(std::collections::HashMap::new());
+        let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+        let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
+        let pipelines = crate::pipelines::resolve_pipelines(
+            &config,
+            &registry,
+            &health_registry,
+            &kv_stores,
+            &session_stores,
+            &subrequest_client,
+        )
+        .unwrap();
+        let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        );
+        let original_hash = composite_hash(VALID_YAML, &[]);
+        let mut hash = original_hash;
+
+        std::fs::write(
+            &config_path,
+            format!("{VALID_YAML}runtime:\n  log_overrides:\n    praxis_core: verbose\n"),
+        )
+        .unwrap();
+        let ok = handle_reload(
+            &config_path,
+            &[],
+            &mut config,
+            &mut hash,
+            &registry,
+            &pipelines,
+            &listener_meta,
+            &cluster_meta,
+            &health_shutdown,
+            &kv_stores,
+            &session_stores,
+            &subrequest_client,
+            None,
+            &PipelineComposition::default(),
+        );
+
+        assert!(!ok, "a config with an invalid log_overrides level must not reload");
+        assert!(
+            config.runtime.log_overrides.is_empty(),
+            "a rejected reload must leave the running config untouched"
+        );
+        assert_eq!(hash, original_hash, "a rejected reload must leave the hash untouched");
     }
 
     #[test]

@@ -46,9 +46,33 @@ pub struct Listener {
     ///
     /// When set, the TCP listener routes connections via a load
     /// balancer strategy across the named cluster's endpoints.
-    /// Mutually exclusive with `upstream`.
+    /// Mutually exclusive with `upstream`. Rejected on HTTP listeners.
     #[serde(default)]
     pub cluster: Option<String>,
+
+    /// How long an idle HTTP/1.x keep-alive client connection may wait
+    /// for its next request, in milliseconds, before it is closed.
+    ///
+    /// Only applies to `protocol: http` listeners. Without it, idle
+    /// keep-alive connections stay open until the client closes them,
+    /// each holding a file descriptor. Applied in whole seconds, rounded
+    /// up. HTTP/2 connections are not affected.
+    ///
+    /// ```
+    /// use praxis_core::config::Listener;
+    ///
+    /// let listener: Listener = serde_yaml::from_str(
+    ///     r#"
+    /// name: web
+    /// address: "0.0.0.0:8080"
+    /// downstream_keepalive_timeout_ms: 30000
+    /// "#,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(listener.downstream_keepalive_timeout_ms, Some(30_000));
+    /// ```
+    #[serde(default)]
+    pub downstream_keepalive_timeout_ms: Option<u64>,
 
     /// Downstream read timeout in milliseconds for HTTP listeners.
     ///
@@ -91,15 +115,16 @@ pub struct Listener {
     /// When set, the session is bounded by a hard deadline: active
     /// connections are terminated after this duration regardless of
     /// whether data is in flight. Only applies to `protocol: tcp`
-    /// listeners. Defaults to 300,000 ms (5 minutes) for TCP
-    /// listeners when not set.
+    /// listeners; rejected on HTTP listeners. Defaults to 300,000 ms
+    /// (5 minutes) for TCP listeners when not set.
     #[serde(default)]
     pub tcp_session_timeout_ms: Option<u64>,
 
     /// Maximum total session duration in seconds for TCP listeners.
     ///
     /// When set, the entire TCP session is capped at this duration
-    /// regardless of activity. Only applies to `protocol: tcp` listeners.
+    /// regardless of activity. Only applies to `protocol: tcp` listeners;
+    /// rejected on HTTP listeners.
     #[serde(default)]
     pub tcp_max_duration_secs: Option<u64>,
 
@@ -110,7 +135,7 @@ pub struct Listener {
     /// Upstream address for TCP listeners (e.g. "10.0.0.1:5432").
     ///
     /// Required for `protocol: tcp` unless `cluster` is set or filter
-    /// chains provide routing. Ignored for HTTP listeners. Mutually
+    /// chains provide routing. Rejected on HTTP listeners. Mutually
     /// exclusive with `cluster`.
     #[serde(default)]
     pub upstream: Option<String>,
@@ -371,6 +396,16 @@ downstream_read_timeout_ms: 5000
             listener.downstream_read_timeout_ms,
             Some(5000),
             "downstream read timeout should be 5000"
+        );
+    }
+
+    #[test]
+    fn downstream_keepalive_timeout_defaults_to_none() {
+        let yaml = "name: test\naddress: \"0.0.0.0:8080\"";
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            listener.downstream_keepalive_timeout_ms.is_none(),
+            "idle keep-alive connections are left open unless configured"
         );
     }
 

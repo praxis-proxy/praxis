@@ -12,11 +12,15 @@ use std::sync::Arc;
 
 use praxis_core::health::ClusterHealthState;
 
-use super::endpoint::WeightedEndpoint;
+use super::{endpoint::WeightedEndpoint, is_excluded};
 
 /// Size of the Maglev lookup table. Must be prime so the permutation
 /// visits every slot. `65537` is Google's default and keeps per-cluster
 /// memory at ~256 `KiB` (4 bytes per entry).
+///
+/// `praxis-core` caps `Σ weight` for maglev clusters at
+/// `MAX_MAGLEV_REPLICAS` (half this size, see
+/// `config/validate/cluster/load_balancer.rs`); keep the two in sync.
 const TABLE_SIZE: usize = 65_537;
 
 /// Seed mixed into the FNV-1a offset basis to derive the permutation
@@ -132,11 +136,6 @@ impl Maglev {
         }
         None
     }
-}
-
-/// Check if an address is in the exclusion set.
-fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
-    exclude.iter().any(|e| e.as_ref() == addr)
 }
 
 /// A weighted replica's Maglev permutation over the lookup table.

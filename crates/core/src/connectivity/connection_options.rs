@@ -5,7 +5,7 @@
 //!
 //! Derived from cluster-level settings in the config.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crate::config::{Cluster, UpstreamHttpVersion};
 
@@ -45,6 +45,9 @@ pub struct ConnectionOptions {
     /// Total connection timeout (TCP connect + TLS handshake).
     pub total_connection_timeout: Option<Duration>,
 
+    /// Normalized [`Cluster::trusted_private_endpoints`].
+    pub trusted_private_endpoints: Arc<[Box<str>]>,
+
     /// Write timeout.
     pub write_timeout: Option<Duration>,
 }
@@ -75,6 +78,11 @@ impl From<&Cluster> for ConnectionOptions {
             idle_timeout: cluster.idle_timeout_ms.map(Duration::from_millis),
             read_timeout: cluster.read_timeout_ms.map(Duration::from_millis),
             total_connection_timeout: cluster.total_connection_timeout_ms.map(Duration::from_millis),
+            trusted_private_endpoints: cluster
+                .trusted_private_endpoints
+                .iter()
+                .map(|host| Box::from(super::strip_root_dot(host)))
+                .collect(),
             write_timeout: cluster.write_timeout_ms.map(Duration::from_millis),
         }
     }

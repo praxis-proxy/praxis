@@ -99,3 +99,50 @@ fn dump_keeps_stdout_yaml_and_warns_on_stderr() {
     );
     serde_yaml::from_str::<serde_yaml::Value>(&stdout).expect("--dump stdout should stay valid YAML");
 }
+
+/// Two grouped TCP listeners whose `filter_chains` disagree.
+const INCONSISTENT_TCP_GROUP_CONFIG: &str = r#"
+listeners:
+  - name: db1
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    upstream: "203.0.113.10:5432"
+    filter_chains: [a]
+  - name: db2
+    address: "127.0.0.1:5433"
+    protocol: tcp
+    upstream: "203.0.113.10:5432"
+    filter_chains: [b]
+filter_chains:
+  - name: a
+    filters:
+      - filter: tcp_access_log
+  - name: b
+    filters:
+      - filter: tcp_access_log
+"#;
+
+#[test]
+fn validate_rejects_inconsistent_tcp_group() {
+    let mut config = tempfile::NamedTempFile::new().expect("temp config file");
+    config
+        .write_all(INCONSISTENT_TCP_GROUP_CONFIG.as_bytes())
+        .expect("temp config should be writable");
+    let output = Command::new(env!("CARGO_BIN_EXE_praxis"))
+        .arg("--validate")
+        .arg("-c")
+        .arg(config.path())
+        .env_remove("PRAXIS_REQUIRE_FIPS")
+        .env_remove("PRAXIS_LOG_FORMAT")
+        .output()
+        .expect("the praxis binary must run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "an inconsistent TCP group must fail --validate: {stderr}"
+    );
+    assert!(
+        stderr.contains("filter_chains"),
+        "the failure should name the inconsistent field: {stderr}"
+    );
+}

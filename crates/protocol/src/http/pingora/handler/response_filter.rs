@@ -277,9 +277,9 @@ fn write_back_response(
 /// matches the name map aborts the worker. Re-appending through
 /// [`append_header`] rebuilds both structures in lockstep.
 ///
-/// The upstream reason phrase is carried across the rebuild; it is not
-/// derived from the status line and would otherwise be reset to the
-/// canonical phrase for the status code.
+/// The upstream reason phrase and HTTP version are carried across the
+/// rebuild; neither is derived from the status line, and they would
+/// otherwise reset to the canonical phrase and HTTP/1.1 respectively.
 ///
 /// [`ResponseHeader`]: pingora_http::ResponseHeader
 /// [`HeaderMap`]: http::HeaderMap
@@ -294,6 +294,7 @@ fn write_headers_to_pingora(src: &http::HeaderMap, status: http::StatusCode, dst
     if let Some(reason) = reason {
         let _set = rebuilt.set_reason_phrase(Some(&reason));
     }
+    rebuilt.set_version(dst.version);
     *dst = rebuilt;
 }
 
@@ -741,5 +742,25 @@ mod tests {
             headers,
         });
         ctx
+    }
+
+    #[test]
+    fn write_headers_to_pingora_preserves_version() -> Result<(), Box<dyn std::error::Error>> {
+        let mut dst = pingora_http::ResponseHeader::build(200, None)?;
+        dst.set_version(http::Version::HTTP_2);
+        dst.append_header("b-header", "2")?;
+        dst.append_header("a-header", "1")?;
+        let mut src = http::HeaderMap::new();
+        src.insert("a-header", http::HeaderValue::from_static("1"));
+        src.insert("b-header", http::HeaderValue::from_static("2"));
+
+        write_headers_to_pingora(&src, http::StatusCode::OK, &mut dst);
+
+        assert_eq!(
+            dst.version,
+            http::Version::HTTP_2,
+            "rebuild must keep the upstream version"
+        );
+        Ok(())
     }
 }

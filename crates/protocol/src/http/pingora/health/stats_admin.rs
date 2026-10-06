@@ -57,6 +57,9 @@ struct StatsResponse {
     uptime_secs: u64,
     /// Build/runtime version identity.
     version: ProcessVersionInfo,
+    /// Open file descriptors against the process limit, where tracked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_descriptors: Option<FileDescriptorStatsView>,
     /// Documented schema gaps (not placeholder zeros).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     gaps: BTreeMap<&'static str, &'static str>,
@@ -64,6 +67,15 @@ struct StatsResponse {
     listeners: Vec<ListenerStatsView>,
     /// Per-cluster operational snapshots.
     clusters: Vec<ClusterStatsView>,
+}
+
+/// Process file descriptor usage.
+#[derive(Debug, Serialize)]
+struct FileDescriptorStatsView {
+    /// Descriptors open at the last sample.
+    open: u64,
+    /// Soft `RLIMIT_NOFILE` the process runs with.
+    limit: u64,
 }
 
 /// Per-listener operational counters.
@@ -186,6 +198,10 @@ fn build_stats_response(
     serde_json::to_vec(&StatsResponse {
         uptime_secs: state.started_at.elapsed().as_secs(),
         version: state.version.clone(),
+        file_descriptors: praxis_core::fd::usage().map(|usage| FileDescriptorStatsView {
+            open: usage.open,
+            limit: usage.limit,
+        }),
         gaps,
         listeners,
         clusters,
@@ -527,6 +543,21 @@ filter_chains:
         let resp = stats_response(None, &state, "GET");
         let json: serde_json::Value = serde_json::from_slice(resp.body()).expect("valid JSON");
         let _uptime = json["uptime_secs"].as_u64().expect("uptime should be u64");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stats_get_reports_file_descriptors_once_tracked() {
+        praxis_core::fd::init(1_048_576, false);
+        let resp = stats_response(None, &sample_state(), "GET");
+        let json: serde_json::Value = serde_json::from_slice(resp.body()).expect("valid JSON");
+        let limit = json["file_descriptors"]["limit"].as_u64();
+        let open = json["file_descriptors"]["open"].as_u64();
+        assert_eq!(limit, Some(1_048_576), "the tracked limit must be reported: {json}");
+        assert!(
+            open.is_some_and(|count| count >= 3),
+            "open descriptors must be reported: {json}"
+        );
     }
 
     #[test]

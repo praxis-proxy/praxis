@@ -21,8 +21,11 @@ updates:
     schedule:
       interval: "weekly"
     ignore:
-      # The builder image tracks the MSRV, not Dependabot; allow Alpine patch
-      # bumps but hold rust major/minor.
+      # The rust builder image tracks rust-toolchain.toml, not Dependabot, so
+      # hold rust major/minor. Dependabot also cannot move the `-alpineX.Y`
+      # suffix of a rust tag: when it bumps the runtime `alpine:` image, the
+      # builder tags in Containerfile and Containerfile.test have to follow
+      # by hand, and `make lint` fails until they do.
       - dependency-name: "rust"
         update-types:
           - "version-update:semver-major"
@@ -34,10 +37,10 @@ updates:
       default-days: 7
     schedule:
       interval: "weekly"
-
-  - package-ecosystem: "github-actions"
-    directory: ".github/actions/install-nightly-rust"
-    cooldown:
-      default-days: 7
-    schedule:
-      interval: "weekly"
+    groups:
+      # Dependabot sees codeql-action's init and analyze as separate
+      # dependencies, but analyze rejects a config written by a different
+      # init version, so a bump to only one of them always fails CodeQL.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"

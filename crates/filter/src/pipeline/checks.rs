@@ -2092,7 +2092,7 @@ mod tests {
             condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
                 filter_name: Arc::from("classifier"),
                 key: Arc::from("kind"),
-                value: Arc::from("premium"),
+                matcher: praxis_core::config::ResultMatch::Exact("premium".to_owned()),
             }),
             filters: branch_filters,
             max_iterations: None,
@@ -2230,7 +2230,7 @@ mod tests {
             condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
                 filter_name: Arc::from("classifier"),
                 key: Arc::from("kind"),
-                value: Arc::from("premium"),
+                matcher: praxis_core::config::ResultMatch::Exact("premium".to_owned()),
             }),
             filters: vec![lb_filter(&["deep"])],
             max_iterations: None,
@@ -2284,7 +2284,7 @@ mod tests {
             condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
                 filter_name: Arc::from("classifier"),
                 key: Arc::from("kind"),
-                value: Arc::from("premium"),
+                matcher: praxis_core::config::ResultMatch::Exact("premium".to_owned()),
             }),
             filters: vec![lb_filter(&["deep"])],
             max_iterations: None,
@@ -3266,7 +3266,7 @@ mod tests {
             condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
                 filter_name: Arc::from("classifier"),
                 key: Arc::from("kind"),
-                value: Arc::from("premium"),
+                matcher: praxis_core::config::ResultMatch::Exact("premium".to_owned()),
             }),
             filters,
             max_iterations: None,

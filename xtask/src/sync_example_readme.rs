@@ -11,6 +11,8 @@ use std::{
 
 use clap::Parser;
 
+use crate::paths::workspace_root;
+
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
@@ -349,14 +351,6 @@ fn split_at_marker(content: &str) -> (&str, &str) {
     }
 }
 
-/// Locate the workspace root directory.
-fn workspace_root() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set — run via `cargo xtask`");
-    Path::new(&manifest_dir)
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_owned()
-}
 
 // -----------------------------------------------------------------------------
 // Tests

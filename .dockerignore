@@ -1,22 +1,20 @@
-# Ignore build artifacts and generated files
-target/
+# Allowlist: the build context is only what the Containerfiles copy, so local
+# artifacts (target/, coverage output, editor files) never get sent.
+*
 
-# Ignore documentation
-.*
-docs/
-*.md
-LICENSE*
+# The locked workspace. Containerfile and Containerfile.fips both build from
+# all of it, and the FIPS report stage also runs xtask.
+!Cargo.toml
+!Cargo.lock
+!crates/
+!tests/
+!xtask/
 
-# Ignore fmt, lint and deny configs
-rustfmt.toml
-deny.toml
-
-# Ignore devtools. The test crates and xtask stay in the context: the FIPS
-# build (Containerfile.fips) resolves the whole locked workspace and runs
-# the compliance report with `cargo xtask fips`.
-Makefile
-benchmarks/
-
-# Ignore all examples except the default container config
-examples/
+# The default config baked into the images.
 !examples/configs/operations/container-default.yaml
+
+# Build output and test artifacts inside the allowed directories.
+**/target/
+**/*.db
+**/*.profraw
+**/mutants.out*/

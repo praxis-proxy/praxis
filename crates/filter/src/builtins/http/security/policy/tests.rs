@@ -245,6 +245,59 @@ global:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+/// API key the `identity/api-key` fixture resolves to subject `alice`.
+const TEST_API_KEY: &str = "sk-test-alice";
+
+/// `sha256:` digest of [`TEST_API_KEY`], the form the file directory indexes.
+const TEST_API_KEY_DIGEST: &str = "sha256:4d692786b022a5d5a48381dcaf1e5e346366feb5579a1d699de2991d153b05f9";
+
+/// Write a pure-L7 policy whose only identity resolver is `identity/api-key`,
+/// backed by a one-record file directory.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture, the YAML literal is the bulk; splitting it would obscure the shape under test"
+)]
+fn write_api_key_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let keys_path = dir.path().join("keys.yaml");
+    std::fs::write(
+        &keys_path,
+        format!("keys:\n  - hash: \"{TEST_API_KEY_DIGEST}\"\n    user: alice\n"),
+    )
+    .expect("write keys.yaml");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: api-keys
+    kind: identity/api-key
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      credential:
+        kind: header
+        name: Authorization
+      prefix: "Bearer sk-test-"
+      provider:
+        kind: file
+        path: "{keys}"
+        index: sha256
+      record_map:
+        subject:
+          id: user
+global:
+  authentication:
+    - api-keys
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+"#,
+        keys = keys_path.display()
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
 /// Write a policy document that declares BOTH a `global` HTTP policy (canonical
 /// `authentication:`/`authorization:` form, admitting only GET) AND an entity
 /// route (the `echo` tool). Derives the combined shape
@@ -823,7 +876,7 @@ fn build_filter(config_path: String) -> PolicyFilter {
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
     };
-    PolicyFilter::new(cfg).expect("filter should construct")
+    PolicyFilter::new(cfg, None).expect("filter should construct")
 }
 
 /// Body filter that records the authenticated subject visible at its position
@@ -1057,7 +1110,7 @@ fn rejects_zero_max_buffer_bytes() {
         max_buffer_bytes: 0,
         llm: super::config::LlmOptions::default(),
     };
-    let err = match PolicyFilter::new(cfg) {
+    let err = match PolicyFilter::new(cfg, None) {
         Ok(_) => panic!("zero max_buffer_bytes must be rejected"),
         Err(e) => e.to_string(),
     };
@@ -1076,7 +1129,7 @@ fn rejects_oversized_max_buffer_bytes() {
         max_buffer_bytes: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1,
         llm: super::config::LlmOptions::default(),
     };
-    let err = match PolicyFilter::new(cfg) {
+    let err = match PolicyFilter::new(cfg, None) {
         Ok(_) => panic!("oversized max_buffer_bytes must be rejected"),
         Err(e) => e.to_string(),
     };
@@ -1533,6 +1586,241 @@ async fn pure_l7_allow_publishes_authenticated_identity() {
     );
 }
 
+/// Run one pure-L7 request through the `identity/api-key` policy, with
+/// `authorization` as the `Authorization` header when present. Returns the
+/// reject status (`None` on Continue) and the published subject, so no
+/// key-derived value reaches an assertion message.
+async fn dispatch_api_key(authorization: Option<&str>) -> (Option<u16>, Option<String>) {
+    let (_dir, path) = write_api_key_config();
+    let filter = build_filter(path);
+    let mut req = make_request(Method::GET, "/");
+    if let Some(value) = authorization {
+        req.headers
+            .insert("Authorization", HeaderValue::from_str(value).expect("header value"));
+    }
+    let mut ctx = make_filter_context(&req);
+    let status = match filter.on_request(&mut ctx).await.expect("filter ran") {
+        FilterAction::Continue => None,
+        FilterAction::Reject(rej) => Some(rej.status),
+        _ => panic!("api-key dispatch must Continue or Reject"),
+    };
+    let subject = ctx
+        .extensions
+        .get::<AuthenticatedIdentity>()
+        .map(|id| id.subject_id().to_owned());
+    (status, subject)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_key_known_key_resolves_identity() {
+    let (status, subject) = dispatch_api_key(Some(&format!("Bearer {TEST_API_KEY}"))).await;
+    assert_eq!(status, None, "a known key must Continue");
+    assert_eq!(subject.as_deref(), Some("alice"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_key_unknown_key_is_rejected() {
+    let (status, subject) = dispatch_api_key(Some("Bearer sk-test-mallory")).await;
+    assert_eq!(status, Some(401), "an unknown key must be rejected 401");
+    assert_eq!(subject, None, "no identity is published on a rejection");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn api_key_missing_key_is_rejected() {
+    let (status, subject) = dispatch_api_key(None).await;
+    assert_eq!(status, Some(401), "a request with no key must be rejected 401");
+    assert_eq!(subject, None, "no identity is published on a rejection");
+}
+
+/// Write a pure-L7 JWT policy whose one authorization rule is `rule`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture, the YAML literal is the bulk; splitting it would obscure the shape under test"
+)]
+fn write_l7_rule_config(rule: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - {rule}
+  pdp:
+    - kind: cel
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Dispatch one GET as `alice` holding `roles` through a policy whose one rule is `rule`.
+async fn dispatch_with_roles(rule: &str, roles: &[&str]) -> FilterAction {
+    let (_dir, path) = write_l7_rule_config(rule);
+    let filter = build_filter(path);
+    let mut claims = standard_claims("alice");
+    claims["roles"] = json!(roles);
+    let token = mint_jwt(&claims);
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    filter.on_request(&mut ctx).await.expect("filter ran")
+}
+
+/// A dotted role gets no `role.<name>` alias, so the DSL form denies and
+/// membership must be tested against `subject.roles`.
+#[tokio::test(flavor = "multi_thread")]
+async fn dotted_role_matches_only_by_membership() {
+    let action = dispatch_with_roles(r#""require(role.admin.readonly)""#, &["admin.readonly"]).await;
+    assert!(
+        matches!(&action, FilterAction::Reject(_)),
+        "a dotted role must not satisfy require(role.<name>); got {action:?}"
+    );
+
+    let action = dispatch_with_roles(
+        r#"cel: { expr: "'admin.readonly' in subject.roles" }"#,
+        &["admin.readonly"],
+    )
+    .await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a dotted role must match by membership; got {action:?}"
+    );
+}
+
+/// `role.admin` must not match a subject holding only `admin.readonly`.
+#[tokio::test(flavor = "multi_thread")]
+async fn dotted_role_does_not_satisfy_its_prefix() {
+    let action = dispatch_with_roles(r#""require(role.admin)""#, &["admin.readonly"]).await;
+    assert!(
+        matches!(&action, FilterAction::Reject(_)),
+        "admin.readonly must not grant role.admin; got {action:?}"
+    );
+}
+
+/// Write a pure-L7 JWT policy decided by `data.authz.allow` over `modules`,
+/// each an inline Rego module.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture, the YAML literal is the bulk; splitting it would obscure the shape under test"
+)]
+fn write_opa_config(modules: &[&str]) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let modules = modules
+        .iter()
+        .map(|m| {
+            format!(
+                "        - |\n{}",
+                m.lines().map(|l| format!("          {l}\n")).collect::<String>()
+            )
+        })
+        .collect::<String>();
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - opa: {{ query: "data.authz.allow" }}
+  pdp:
+    - kind: opa
+      modules:
+{modules}"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Dispatch one GET as `subject` through an OPA policy over `modules`.
+async fn dispatch_opa_as(modules: &[&str], subject: &str) -> FilterAction {
+    let (_dir, path) = write_opa_config(modules);
+    let filter = build_filter(path);
+    let token = mint_jwt(&standard_claims(subject));
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    filter.on_request(&mut ctx).await.expect("filter ran")
+}
+
+/// A partial set built from several rule bodies unions every body.
+#[tokio::test(flavor = "multi_thread")]
+async fn opa_multi_body_partial_rule_unions_bodies() {
+    let module = r#"package authz
+default allow := false
+permitted contains "alice" if input.subject.id == "alice"
+permitted contains "bob" if input.subject.id == "bob"
+allow if input.subject.id in permitted"#;
+    for (subject, allowed) in [("alice", true), ("bob", true), ("carol", false)] {
+        let action = dispatch_opa_as(&[module], subject).await;
+        assert_eq!(
+            matches!(action, FilterAction::Continue),
+            allowed,
+            "{subject}: got {action:?}"
+        );
+    }
+}
+
+/// A function called through an aliased import resolves to the imported package.
+#[tokio::test(flavor = "multi_thread")]
+async fn opa_aliased_import_function_resolves() {
+    let lib = r#"package lib
+is_admin(id) if id == "alice""#;
+    let authz = "package authz
+import data.lib as l
+default allow := false
+allow if l.is_admin(input.subject.id)";
+    for (subject, allowed) in [("alice", true), ("bob", false)] {
+        let action = dispatch_opa_as(&[lib, authz], subject).await;
+        assert_eq!(
+            matches!(action, FilterAction::Continue),
+            allowed,
+            "{subject}: got {action:?}"
+        );
+    }
+}
+
 /// Entity-aware policies resolve identity in the body phase. That producer
 /// path must publish the extension before later body filters execute.
 #[tokio::test(flavor = "multi_thread")]
@@ -1835,7 +2123,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
     };
-    let filter = PolicyFilter::new(cfg).expect("filter should construct");
+    let filter = PolicyFilter::new(cfg, None).expect("filter should construct");
 
     let token = mint_jwt(&standard_claims("alice"));
     let mut req = make_request(Method::POST, "/");
@@ -2679,7 +2967,7 @@ async fn response_phase_without_request_identity_fails_closed() {
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
     };
-    let filter = PolicyFilter::new(cfg).expect("filter should construct");
+    let filter = PolicyFilter::new(cfg, None).expect("filter should construct");
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
@@ -2947,33 +3235,27 @@ fn try_build_filter(config_path: String) -> Result<PolicyFilter, crate::FilterEr
 
 /// Build a filter with the configured private-destination policy.
 ///
-/// Registers a shared connector first, so the transport these filters
-/// install takes the same path a server does instead of falling back to a
-/// private pool. Any registered connector will do here — the point is that
-/// one is registered at all — but the registration is a process-wide
-/// last-wins slot, so this holds the lock across the construction that reads
-/// it back rather than overwriting what a concurrent test is asserting on.
+/// Hands the filter a connector of its own, so the transport it installs
+/// takes the same path a server's does instead of falling back to a
+/// private pool.
 fn try_build_filter_allowing_private(
     config_path: String,
     allow_private_idp: bool,
 ) -> Result<PolicyFilter, crate::FilterError> {
-    let _guard = crate::policy_connector::REGISTRATION_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    crate::set_policy_subrequest_connector(&crate::test_support::connector(
-        praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE,
-        None,
-    ));
-    PolicyFilter::new(PolicyFilterConfig {
-        config_path,
-        allow_private_idp,
-        trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadOnly,
-        require_protocol_metadata: true,
-        init_timeout_secs: 30,
-        max_buffer_bytes: 10_485_760,
-        llm: super::config::LlmOptions::default(),
-    })
+    let connector = crate::test_support::connector(praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE, None);
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp,
+            trusted_private_endpoints: vec![],
+            body_access: super::config::BodyAccessMode::ReadOnly,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm: super::config::LlmOptions::default(),
+        },
+        Some(connector),
+    )
 }
 
 #[test]
@@ -3604,7 +3886,7 @@ routes:
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
     };
-    let err = PolicyFilter::new(cfg)
+    let err = PolicyFilter::new(cfg, None)
         .err()
         .expect("an unappliable response contract must refuse to start");
     let msg = err.to_string();
@@ -3961,16 +4243,19 @@ routes:
 
 /// Build a policy filter with custom inference options.
 fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) -> PolicyFilter {
-    PolicyFilter::new(PolicyFilterConfig {
-        config_path,
-        allow_private_idp: false,
-        trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadOnly,
-        require_protocol_metadata: true,
-        init_timeout_secs: 30,
-        max_buffer_bytes: 10_485_760,
-        llm,
-    })
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            body_access: super::config::BodyAccessMode::ReadOnly,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm,
+        },
+        None,
+    )
     .expect("filter should construct")
 }
 
@@ -4329,19 +4614,22 @@ fn the_inference_ceiling_defaults_to_the_json_rpc_one() {
 #[test]
 fn the_lower_ceiling_binds_when_both_apply() {
     let (_dir, path) = write_llm_route_config();
-    let filter = PolicyFilter::new(PolicyFilterConfig {
-        config_path: path,
-        allow_private_idp: false,
-        trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadWrite,
-        require_protocol_metadata: true,
-        init_timeout_secs: 30,
-        max_buffer_bytes: 10_485_760,
-        llm: super::config::LlmOptions {
-            max_request_bytes: 4096,
-            ..Default::default()
+    let filter = PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path: path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            body_access: super::config::BodyAccessMode::ReadWrite,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm: super::config::LlmOptions {
+                max_request_bytes: 4096,
+                ..Default::default()
+            },
         },
-    })
+        None,
+    )
     .expect("filter should construct");
 
     assert!(
@@ -4360,19 +4648,22 @@ fn rejects_an_out_of_range_inference_ceiling() {
         (praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1, "exceeds the maximum"),
     ] {
         let (_dir, path) = write_llm_route_config();
-        let err = PolicyFilter::new(PolicyFilterConfig {
-            config_path: path,
-            allow_private_idp: false,
-            trusted_private_endpoints: vec![],
-            body_access: super::config::BodyAccessMode::ReadOnly,
-            require_protocol_metadata: true,
-            init_timeout_secs: 30,
-            max_buffer_bytes: 10_485_760,
-            llm: super::config::LlmOptions {
-                max_request_bytes,
-                ..Default::default()
+        let err = PolicyFilter::new(
+            PolicyFilterConfig {
+                config_path: path,
+                allow_private_idp: false,
+                trusted_private_endpoints: vec![],
+                body_access: super::config::BodyAccessMode::ReadOnly,
+                require_protocol_metadata: true,
+                init_timeout_secs: 30,
+                max_buffer_bytes: 10_485_760,
+                llm: super::config::LlmOptions {
+                    max_request_bytes,
+                    ..Default::default()
+                },
             },
-        })
+            None,
+        )
         .err()
         .unwrap_or_else(|| panic!("{max_request_bytes} must be rejected"))
         .to_string();
@@ -4430,16 +4721,19 @@ async fn inference_request_without_a_token_is_rejected_by_identity() {
 
 /// Build a read-write inference policy filter.
 fn build_read_write_filter(config_path: String) -> PolicyFilter {
-    PolicyFilter::new(PolicyFilterConfig {
-        config_path,
-        allow_private_idp: false,
-        trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadWrite,
-        require_protocol_metadata: true,
-        init_timeout_secs: 30,
-        max_buffer_bytes: 10_485_760,
-        llm: super::config::LlmOptions::default(),
-    })
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            body_access: super::config::BodyAccessMode::ReadWrite,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm: super::config::LlmOptions::default(),
+        },
+        None,
+    )
     .expect("filter should construct")
 }
 
@@ -5293,4 +5587,642 @@ async fn an_ambiguous_body_is_rejected_before_structured_policy_runs() {
         "got {:?}",
         rejection.headers,
     );
+}
+
+// -----------------------------------------------------------------------------
+// Post-only entity routes
+// -----------------------------------------------------------------------------
+
+/// Write a policy with the standard JWT preamble and the supplied routes.
+fn write_entity_config_with_routes(routes: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+{routes}"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Write an `echo` tool route with only a `post_invocation` rule.
+fn write_tool_post_only_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      post_invocation:
+        - "authenticated: deny('results are withheld', 'result_withheld')"
+"#,
+    )
+}
+
+/// Write an `echo` tool route with only a `result:` field pipeline.
+fn write_tool_result_pipeline_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    result:
+      ssn: "str | mask(2)"
+"#,
+    )
+}
+
+/// A tool result long enough to hold a replacement deny envelope.
+const ROOMY_MCP_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok, and long enough that a replacement error envelope fits inside the committed content length without being trimmed"}]}}"#;
+
+#[test]
+fn a_post_only_tool_route_is_an_entity_route() {
+    let (_dir, path) = write_tool_post_only_config();
+    assert_eq!(
+        build_read_write_filter(path).derived_shape(),
+        (false, true),
+        "a route declaring only `post_invocation` registers the post hook alone; the response \
+         phase dispatches off `entity_routes`, so it has to be true or the hook never runs",
+    );
+}
+
+#[test]
+fn a_result_pipeline_alone_is_an_entity_route() {
+    let (_dir, path) = write_tool_result_pipeline_config();
+    assert_eq!(
+        build_read_write_filter(path).derived_shape(),
+        (false, true),
+        "a `result:` pipeline is a Post-phase declaration and opens the response half by itself",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_only_tool_route_dispatches_its_hook() {
+    let (_dir, path) = write_tool_post_only_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(request_body), true)
+        .await
+        .expect("request phase ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the route declares no request-phase rule, so the request half admits; got {action:?}",
+    );
+
+    let mut body = Some(bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()));
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+
+    let served = body.expect("response body");
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
+    assert_eq!(
+        parsed["error"]["data"]["violation"], "result_withheld",
+        "the post-phase deny must reach the wire; a body that still carries `result` means the \
+         hook never dispatched. got {served:?}",
+    );
+}
+
+/// Write a post-only `prompt:` route.
+fn write_prompt_post_only_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - prompt: summarize
+    authorization:
+      post_invocation:
+        - "authenticated: deny('prompts are withheld', 'prompt_withheld')"
+"#,
+    )
+}
+
+/// Write a post-only `resource:` route.
+fn write_resource_post_only_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - resource: "file:///data.csv"
+    authorization:
+      post_invocation:
+        - "authenticated: deny('resources are withheld', 'resource_withheld')"
+"#,
+    )
+}
+
+#[test]
+fn a_post_only_prompt_route_is_an_entity_route() {
+    let (_dir, path) = write_prompt_post_only_config();
+    assert_eq!(build_read_write_filter(path).derived_shape(), (false, true));
+}
+
+#[test]
+fn a_post_only_resource_route_is_an_entity_route() {
+    let (_dir, path) = write_resource_post_only_config();
+    assert_eq!(build_read_write_filter(path).derived_shape(), (false, true));
+}
+
+/// Run a post-only entity round trip and return the served response body.
+async fn post_only_round_trip(path: String, method: &str, name: &str, request_body: &'static [u8]) -> bytes::Bytes {
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", method);
+    ctx.set_metadata("mcp.name", name);
+    drop(
+        filter
+            .on_request_body(&mut ctx, &mut Some(bytes::Bytes::from_static(request_body)), true)
+            .await
+            .expect("request phase ran"),
+    );
+    let mut body = Some(bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()));
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+    body.expect("response body")
+}
+
+// Prompt and resource post hooks remain unsupported because response content
+// is currently projected only for `tools/call`.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_only_prompt_route_does_not_yet_dispatch() {
+    let (_dir, path) = write_prompt_post_only_config();
+    let served = post_only_round_trip(
+        path,
+        "prompts/get",
+        "summarize",
+        br#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"summarize"}}"#,
+    )
+    .await;
+    assert_eq!(
+        served,
+        bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()),
+        "a prompt response is passed through untouched because the post hook is never dispatched",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_only_resource_route_does_not_yet_dispatch() {
+    let (_dir, path) = write_resource_post_only_config();
+    let served = post_only_round_trip(
+        path,
+        "resources/read",
+        "file:///data.csv",
+        br#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///data.csv"}}"#,
+    )
+    .await;
+    assert_eq!(
+        served,
+        bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()),
+        "a resource response is passed through untouched because the post hook is never dispatched",
+    );
+}
+
+/// Write a route that declares both halves: a pre-phase rule only `bob`
+/// satisfies, and a post-phase deny.
+fn write_tool_both_phases_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "require(subject.id == 'bob')"
+      post_invocation:
+        - "authenticated: deny('results are withheld', 'result_withheld')"
+"#,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_route_declaring_both_phases_still_dispatches_the_pre_half() {
+    let (_dir, path) = write_tool_both_phases_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(request_body), true)
+        .await
+        .expect("request phase ran");
+
+    let FilterAction::Reject(rejection) = action else {
+        panic!("counting the post half toward `mcp_routes` must not cost the pre half; got {action:?}");
+    };
+    assert!(
+        String::from_utf8_lossy(&rejection.body.unwrap_or_default()).contains("-32001"),
+        "alice fails the pre-phase rule, so the request half denies before the response half matters",
+    );
+}
+
+/// The response body the `result:` pipeline addresses. `structuredContent` is
+/// taken verbatim as the value APL evaluates, so the pipeline's field is
+/// addressable without inferring it from a text block.
+const STRUCTURED_MCP_RESPONSE: &str =
+    r#"{"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"ssn":"123-45-6789","note":"kept"}}}"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_result_pipeline_alone_redacts_the_response() {
+    let (_dir, path) = write_tool_result_pipeline_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    drop(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request_body), true)
+            .await
+            .expect("request phase ran"),
+    );
+
+    let mut body = Some(bytes::Bytes::from_static(STRUCTURED_MCP_RESPONSE.as_bytes()));
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+
+    let served = String::from_utf8_lossy(&body.expect("response body")).into_owned();
+    assert!(
+        !served.contains("123-45-6789"),
+        "the `result:` pipeline is the only declaration on the route; it still has to mask the \
+         value on the way back. got {served}",
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Load-time warnings
+// -----------------------------------------------------------------------------
+
+/// Serialize capture tests because tracing's max-level hint is process-wide.
+static WARNING_CAPTURE: Mutex<()> = Mutex::new(());
+
+/// Capture load-time warnings emitted on the calling thread while `f` runs.
+fn capture_warnings(f: impl FnOnce()) -> String {
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("sink lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let _serialized = WARNING_CAPTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let sink = Sink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .with_ansi(false)
+        .finish();
+    tracing::subscriber::with_default(subscriber, f);
+    let bytes = sink.0.lock().expect("sink lock").clone();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[test]
+fn a_read_only_tool_response_policy_warns_that_the_rules_will_not_run() {
+    let (_dir, path) = write_tool_post_only_config();
+    let logs = capture_warnings(|| drop(build_filter(path)));
+    assert!(
+        logs.contains("response-phase `tool:` rules") && logs.contains("body_access: read_write"),
+        "a `read_only` filter must name the remedy for tool response rules; got {logs}",
+    );
+}
+
+#[test]
+fn a_read_write_tool_response_policy_does_not_warn() {
+    let (_dir, path) = write_tool_post_only_config();
+    let logs = capture_warnings(|| drop(build_read_write_filter(path)));
+    assert!(
+        !logs.contains("response-phase `tool:` rules"),
+        "`read_write` is the configuration the warning asks for; it must not fire. got {logs}",
+    );
+}
+
+#[test]
+fn a_prompt_response_policy_warns_that_read_write_is_not_the_fix() {
+    let (_dir, path) = write_prompt_post_only_config();
+    let logs = capture_warnings(|| drop(build_read_write_filter(path)));
+    assert!(
+        logs.contains("those rules never run") && logs.contains("does not change this"),
+        "a prompt response rule is undispatched under both body accesses, so the warning must \
+         not offer `read_write` as the remedy; got {logs}",
+    );
+}
+
+/// An `http:` route that only `bob` satisfies, beside a post-only `tool:`
+/// route. Classified `tools/call` traffic resolves to the tool route, so the
+/// `http:` route never authorizes it.
+fn write_http_route_beside_tool_route_config() -> (TempDir, String) {
+    write_entity_config_with_routes(
+        r#"routes:
+  - http:
+      path_prefix: /mcp
+    authorization:
+      pre_invocation:
+        - "require(subject.id == 'bob')"
+  - tool: echo
+    result:
+      ssn: "str | mask(2)"
+"#,
+    )
+}
+
+#[test]
+fn an_http_route_beside_entity_routes_is_refused_at_load() {
+    let (_dir, path) = write_http_route_beside_tool_route_config();
+    let yaml = std::fs::read_to_string(&path).expect("read policy");
+
+    let refusal = PolicyFilter::http_route_beside_entity_routes(&yaml, /* mcp_routes= */ true)
+        .expect("an authorizing `http:` route beside entity routes gates nothing");
+    assert!(
+        refusal.contains("`global` block"),
+        "the refusal has to name the remedy, or an operator has nowhere to go; got {refusal}",
+    );
+    assert_eq!(
+        PolicyFilter::http_route_beside_entity_routes(&yaml, /* mcp_routes= */ false),
+        None,
+        "with no entity routes the `http:` route is the only thing evaluating, so it is fine",
+    );
+}
+
+#[test]
+fn an_unreadable_policy_document_is_refused_rather_than_admitted() {
+    let refusal = PolicyFilter::http_route_beside_entity_routes("routes: [unclosed", /* mcp_routes= */ true)
+        .expect("an unreadable document means the contract is unchecked, so refuse");
+    assert!(
+        refusal.contains("could not re-read"),
+        "the refusal has to say the check could not run, not invent a finding; got {refusal}",
+    );
+}
+
+#[test]
+fn a_policy_with_no_routes_block_is_not_refused() {
+    assert_eq!(
+        PolicyFilter::http_route_beside_entity_routes("global:\n  authentication: []\n", /* mcp_routes= */ true),
+        None,
+        "no `routes:` key means no route to object to, which is a real answer, not a failure",
+    );
+}
+
+#[test]
+fn an_http_route_scoping_only_authentication_still_loads() {
+    let yaml = r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+  - http:
+      path_prefix: /mcp
+    authentication:
+      replace_inherited: true
+      steps:
+        - route-jwt
+"#;
+    assert_eq!(
+        PolicyFilter::http_route_beside_entity_routes(yaml, /* mcp_routes= */ true),
+        None,
+        "an `http:` route that only scopes authentication is a supported shape",
+    );
+}
+
+#[test]
+fn an_http_route_beside_entity_routes_fails_filter_construction() {
+    let (_dir, path) = write_http_route_beside_tool_route_config();
+    let cfg = PolicyFilterConfig {
+        config_path: path,
+        allow_private_idp: false,
+        trusted_private_endpoints: vec![],
+        body_access: super::config::BodyAccessMode::ReadWrite,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
+    };
+    let err = PolicyFilter::new(cfg, None).err().expect("construction must fail");
+    assert!(
+        format!("{err}").contains("declare `authorization:` alongside MCP entity routes"),
+        "the refusal has to reach the operator as a startup failure; got {err}",
+    );
+}
+
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_global_block_does_authorize_classified_mcp_traffic() {
+    let (_dir, path) = write_entity_config_with_global_authz(
+        r#"routes:
+  - tool: echo
+    result:
+      ssn: "str | mask(2)"
+"#,
+    );
+    let filter = build_read_write_filter(path);
+
+    let mut req = make_request(Method::POST, "/mcp");
+    let token = mint_jwt(&standard_claims("alice"));
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(request_body), true)
+        .await
+        .expect("request phase ran");
+
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "the `global` block is layered into every entity route, so it is the remedy the \
+         `http:`-route warning points at; got {action:?}",
+    );
+}
+
+/// Preamble variant that puts the rule in the `global` authorization block
+/// rather than on an `http:` route.
+fn write_entity_config_with_global_authz(routes: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(subject.id == 'bob')"
+{routes}"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+// -----------------------------------------------------------------------------
+// Sub-request connector handoff
+// -----------------------------------------------------------------------------
+
+#[test]
+fn a_registry_hands_its_connector_to_the_policy_filters_it_builds() {
+    let (_dir, path) = write_single_plugin_config();
+    let pool = crate::test_support::connector(8, None);
+    let mut registry = FilterRegistry::with_builtins();
+    registry.set_policy_connector(&pool);
+
+    let filter = registry
+        .build_policy(&policy_filter_config(&path))
+        .expect("filter should construct");
+
+    let held = filter
+        .transport()
+        .shared()
+        .expect("the registry's connector must reach the installed transport");
+    assert!(
+        std::ptr::eq(held.connector(), pool.connector()),
+        "policy calls must go through the runtime's pool, not a copy or a pool of their own"
+    );
+}
+
+#[test]
+fn a_registry_without_a_connector_leaves_policy_calls_a_pool_of_their_own() {
+    let (_dir, path) = write_single_plugin_config();
+
+    let filter = FilterRegistry::with_builtins()
+        .build_policy(&policy_filter_config(&path))
+        .expect("a policy filter must still build without a runtime connector");
+
+    assert!(
+        filter.transport().shared().is_none(),
+        "with no connector handed over, the transport falls back to a private pool"
+    );
+}
+
+#[test]
+fn two_runtimes_building_at_once_keep_their_own_policy_connectors() {
+    let (_dir, path) = write_single_plugin_config();
+    let shared = FilterRegistry::with_builtins();
+    let pools = [
+        crate::test_support::connector(8, None),
+        crate::test_support::connector(8, None),
+    ];
+
+    let filters = build_in_concurrent_runtimes(&shared, &pools, &policy_filter_config(&path));
+
+    assert_eq!(filters.len(), pools.len(), "every runtime must build its policy filter");
+    for (filter, pool) in filters.iter().zip(&pools) {
+        let held = filter
+            .transport()
+            .shared()
+            .expect("every runtime handed over a connector");
+        assert!(
+            std::ptr::eq(held.connector(), pool.connector()),
+            "each runtime's policy calls must use its own pool, even though both handed theirs over \
+             before either built"
+        );
+    }
+    assert!(
+        shared.policy_connector().is_none(),
+        "the registry both runtimes copied must not pick up either one's connector"
+    );
+}
+
+/// A `policy` filter config pointing at the policy document at `path`.
+fn policy_filter_config(path: &str) -> serde_yaml::Value {
+    serde_yaml::from_str(&format!("config_path: {path}")).expect("valid policy filter config")
+}
+
+/// Build one policy filter per connector, each on its own thread the way a
+/// runtime does: copy `shared`, hand the copy its connector, wait until every
+/// runtime has handed its connector over, then build.
+fn build_in_concurrent_runtimes(
+    shared: &FilterRegistry,
+    pools: &[praxis_core::subrequest::SubRequestConnector],
+    config: &serde_yaml::Value,
+) -> Vec<PolicyFilter> {
+    let barrier = std::sync::Barrier::new(pools.len());
+    std::thread::scope(|scope| {
+        let runtimes: Vec<_> = pools
+            .iter()
+            .map(|pool| {
+                let handed = &barrier;
+                scope.spawn(move || {
+                    let mut registry = shared.clone();
+                    registry.set_policy_connector(pool);
+                    handed.wait();
+                    registry
+                        .build_policy(config)
+                        .expect("each runtime's policy filter should construct")
+                })
+            })
+            .collect();
+        runtimes
+            .into_iter()
+            .map(|runtime| runtime.join().expect("a runtime must not panic"))
+            .collect()
+    })
 }

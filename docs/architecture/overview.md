@@ -195,6 +195,11 @@ by diffing old and new configs and logged as warnings.
 A protocol change on a bound listener is rejected as a
 reload failure, since its handler executes only filters
 of the protocol it was started with.
+Changes to a bound TCP listener's upstream, cluster or
+timeouts, its removal, and inconsistent TCP listener
+groups are also rejected. Pipelines are swapped one
+listener at a time, so two listeners may briefly run
+different generations during a swap.
 
 ## Related
 

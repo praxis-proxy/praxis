@@ -224,9 +224,11 @@ filter_chains:
         "before reload filter_count: {before}"
     );
 
-    guard.reload(&updated);
-
-    let (_, after) = get_pipelines_json(&admin_addr, "/api/pipelines?listener=web");
+    let after = guard.reload_until(
+        &updated,
+        || get_pipelines_json(&admin_addr, "/api/pipelines?listener=web").1,
+        |view| view["listener"]["filters"][0]["filter"] == "static_response",
+    );
     assert_eq!(
         after["listener"]["filters"][0]["filter"], "static_response",
         "after reload first filter: {after}"

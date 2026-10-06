@@ -1031,9 +1031,9 @@ fn matches_transition(
         transition.key.as_deref(),
         transition.value.as_deref(),
     ) {
-        (Some(filter_name), Some(key), Some(value)) => {
-            crate::matches_filter_result(filter_results, filter_name, key, value)
-        },
+        (Some(filter_name), Some(key), Some(value)) => filter_results
+            .get(filter_name)
+            .is_some_and(|results| results.matches(key, value)),
         (None, None, None) => true,
         _ => false,
     };

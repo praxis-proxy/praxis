@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Policy-engine HTTP over Praxis's shared sub-request connector.
+//! Policy-engine HTTP over the runtime's sub-request connector.
 //!
 //! Every address a destination answers with is checked against the policy
 //! egress rules, and the allowed ones are dialled by literal address, in
@@ -34,8 +34,6 @@ use praxis_core::{
     subrequest::{SubRequest, SubRequestClient, SubRequestConnector, SubRequestError, SubResponse},
 };
 
-use crate::policy_connector::shared_policy_connector;
-
 /// Isolates policy connections from cluster-specific TLS state.
 ///
 /// Pingora's reuse hash omits `options.ca`, so a distinct group key keeps
@@ -45,10 +43,10 @@ const POLICY_PEER_GROUP: u64 = 0x706F_6C69_6379_5F31; // "policy_1"
 /// Performs the policy engine's outbound HTTP over the proxy's connector.
 #[derive(Debug)]
 pub(super) struct PolicyHttpTransport {
-    /// Connector snapshot taken when this transport was constructed.
-    registered: Option<SubRequestConnector>,
+    /// The runtime's sub-request connector, handed over at construction.
+    shared: Option<SubRequestConnector>,
 
-    /// Built on first call from [`Self::registered`].
+    /// Built on first call from [`Self::shared`].
     client: OnceLock<SubRequestClient>,
 
     /// Built on first call made from the response-hook dispatch runtime. A
@@ -69,19 +67,15 @@ pub(super) struct PolicyHttpTransport {
 }
 
 impl PolicyHttpTransport {
-    /// Build a transport that refuses, or permits, non-public destinations.
-    pub(super) fn new(allow_private: bool, private_allowlist: Arc<HashSet<String>>) -> Self {
-        Self::with_connector(shared_policy_connector(), allow_private, private_allowlist)
-    }
-
-    /// Build a transport over `registered`, or over a private pool without one.
+    /// Build a transport over `shared`, or over a private pool without one,
+    /// that refuses or permits non-public destinations.
     pub(super) fn with_connector(
-        registered: Option<SubRequestConnector>,
+        shared: Option<SubRequestConnector>,
         allow_private: bool,
         private_allowlist: Arc<HashSet<String>>,
     ) -> Self {
         Self {
-            registered,
+            shared,
             client: OnceLock::new(),
             dispatch_client: OnceLock::new(),
             allow_private,
@@ -95,14 +89,20 @@ impl PolicyHttpTransport {
         if super::dispatch::on_dispatch_runtime() {
             return self.dispatch_client.get_or_init(|| {
                 let max_connections = self
-                    .registered
+                    .shared
                     .as_ref()
                     .and_then(SubRequestConnector::configured_max_connections);
                 let connector = SubRequestConnector::new(DEFAULT_SUBREQUEST_POOL_SIZE, max_connections);
                 SubRequestClient::with_max_response_bytes(connector, DEFAULT_MAX_RESPONSE_BYTES)
             });
         }
-        self.client.get_or_init(|| build_client(self.registered.clone()))
+        self.client.get_or_init(|| build_client(self.shared.clone()))
+    }
+
+    /// Test accessor for the connector this transport was handed, if any.
+    #[cfg(test)]
+    pub(super) fn shared(&self) -> Option<&SubRequestConnector> {
+        self.shared.as_ref()
     }
 
     /// Resolve the destination within `budget` and return the remaining time.
@@ -304,13 +304,15 @@ impl HttpTransport for PolicyHttpTransport {
 
 /// Build the client a transport dispatches through.
 ///
-/// Falls back to a private pool when the host registered nothing.
+/// Falls back to a private pool when the filter was built without the
+/// runtime's connector.
 fn build_client(shared: Option<SubRequestConnector>) -> SubRequestClient {
     let connector = shared.unwrap_or_else(|| {
         tracing::warn!(
             target: "policy.transport",
-            "policy: no shared sub-request connector registered, so policy calls use a second \
-             connection pool; call praxis_filter::set_policy_subrequest_connector before building pipelines"
+            "policy: built without the runtime's sub-request connector, so policy calls use a \
+             second connection pool; hand one to FilterRegistry::set_policy_connector \
+             before building pipelines"
         );
         SubRequestConnector::new(DEFAULT_SUBREQUEST_POOL_SIZE, None)
     });
@@ -392,7 +394,7 @@ impl Target {
         let host = authority.host();
         let dial_authority = format!("{host}:{}", checked_port(url, authority, tls)?);
 
-        if tls && peer_utils::is_ip_literal(host) {
+        if tls && peer_utils::is_ip_literal(host.strip_suffix('.').unwrap_or(host)) {
             return Err(invalid(format!(
                 "url '{url}' uses https with an IP literal, which carries no SNI for certificate verification"
             )));

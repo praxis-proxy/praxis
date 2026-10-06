@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-readme = "../../README.md"
+readme.workspace = true
 publish = false
 
 [lints]
@@ -43,4 +43,5 @@ futures = { workspace = true }
 tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true }
 
-[features]
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }

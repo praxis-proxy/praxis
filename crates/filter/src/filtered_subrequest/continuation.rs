@@ -20,7 +20,7 @@ use bytes::Bytes;
 use super::restore_parent_upstream_scope;
 use crate::{
     FilterPipeline, StreamTermination,
-    context::PendingStreamChunks,
+    context::{PendingStreamChunks, StreamDeadlineCap, StreamReadTimeoutCap},
     extensions::RequestExtensions,
     results::{FilterResultSet, RetainedFilterResults},
 };
@@ -131,14 +131,17 @@ impl FilteredSubrequestContinuation {
     ///
     /// Restores the parent's upstream scope, then removes the executor's own
     /// transient extension types (`RetainedFilterResults`,
-    /// `PendingStreamChunks`, `StreamTermination`). Caller-injected extension
-    /// types remain for the caller to strip before returning them to the
+    /// `PendingStreamChunks`, `StreamTermination`, `StreamReadTimeoutCap`,
+    /// `StreamDeadlineCap`). Caller-injected extension types remain for the
+    /// caller to strip before returning them to the
     /// parent request context.
     pub(crate) fn into_parent_extensions(mut self) -> RequestExtensions {
         restore_parent_upstream_scope(&mut self.extensions);
         self.extensions.remove::<PendingStreamChunks>();
         self.extensions.remove::<RetainedFilterResults>();
         self.extensions.remove::<StreamTermination>();
+        self.extensions.remove::<StreamReadTimeoutCap>();
+        self.extensions.remove::<StreamDeadlineCap>();
         self.extensions
     }
 
@@ -154,6 +157,8 @@ impl FilteredSubrequestContinuation {
             .remove::<PendingStreamChunks>()
             .map_or_else(VecDeque::new, PendingStreamChunks::into_chunks);
         let termination = self.extensions.remove::<StreamTermination>();
+        self.extensions.remove::<StreamReadTimeoutCap>();
+        self.extensions.remove::<StreamDeadlineCap>();
         let mut filter_results = self.extensions.remove::<RetainedFilterResults>().unwrap_or_default().0;
         filter_results.extend(self.filter_results);
         SubrequestCompletion {

@@ -5,6 +5,53 @@
 
 mod ops;
 
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+/// Queue `request_add` headers, appending to any value already
+/// present on the request or queued by `request_set`.
+///
+/// A header listed in `request_remove` is appended after the removal
+/// (or joined onto a queued `request_set` value), so the client's
+/// original value is not resurrected.
+fn queue_request_add(ctx: &mut HttpFilterContext<'_>, request_add: &[(http::header::HeaderName, String)]) {
+    for (name, value) in request_add {
+        trace!(header = %name, "adding request header");
+        if !stack_request_add(ctx, name, value) {
+            ctx.extra_request_headers
+                .push((Cow::Owned(name.to_string()), value.clone()));
+        }
+    }
+}
+
+/// Comma-join `value` onto a queued `request_set` value or the client's
+/// existing header. Returns `false` when the value must be appended as a
+/// separate header instead.
+fn stack_request_add(ctx: &mut HttpFilterContext<'_>, name: &http::header::HeaderName, value: &str) -> bool {
+    if let Some((_, queued)) = ctx.request_headers_to_set.iter_mut().rev().find(|(n, _)| n == name) {
+        return queued
+            .to_str()
+            .ok()
+            .and_then(|prev| http::header::HeaderValue::from_str(&format!("{prev},{value}")).ok())
+            .map(|combined| *queued = combined)
+            .is_some();
+    }
+
+    if ctx.request_headers_to_remove.iter().any(|n| n == name) {
+        return false;
+    }
+
+    let existing: Result<Vec<&str>, _> = ctx.request.headers.get_all(name).iter().map(|v| v.to_str()).collect();
+    let combined = existing
+        .ok()
+        .filter(|parts| !parts.is_empty())
+        .and_then(|parts| http::header::HeaderValue::from_str(&format!("{},{value}", parts.join(","))).ok());
+    combined
+        .map(|combined_val| ctx.request_headers_to_set.push((name.clone(), combined_val)))
+        .is_some()
+}
+
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
@@ -191,23 +238,7 @@ impl HttpFilter for HeaderFilter {
             ctx.request_headers_to_set.push((name.clone(), value.clone()));
         }
 
-        for (name, value) in &self.request_add {
-            trace!(header = %name, "adding request header");
-            let existing: Result<Vec<&str>, _> = ctx.request.headers.get_all(name).iter().map(|v| v.to_str()).collect();
-
-            if let Ok(parts) = existing
-                && !parts.is_empty()
-            {
-                let combined = format!("{},{value}", parts.join(","));
-                if let Ok(combined_val) = http::header::HeaderValue::from_str(&combined) {
-                    ctx.request_headers_to_set.push((name.clone(), combined_val));
-                    continue;
-                }
-            }
-
-            ctx.extra_request_headers
-                .push((Cow::Owned(name.to_string()), value.clone()));
-        }
+        queue_request_add(ctx, &self.request_add);
         Ok(FilterAction::Continue)
     }
 

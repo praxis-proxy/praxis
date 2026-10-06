@@ -31,8 +31,9 @@
 - **Rate limiting** - token bucket rate limiter with
   per-IP (IPv6 optionally grouped by prefix) and global
   modes, burst allowance, 429
-  responses with `Retry-After`, and `X-RateLimit-*`
-  headers
+  responses with `Retry-After`, `X-RateLimit-*`
+  headers, and a `shadow` mode that counts would-be
+  rejections without enforcing
 - **Active health checks** - HTTP and TCP health check
   probes with configurable thresholds; unhealthy hosts
   are automatically removed from load balancer rotation

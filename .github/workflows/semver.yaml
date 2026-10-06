@@ -3,58 +3,17 @@ name: SemVer
 # ------------------------------------------------------------------------------
 # Workflow Settings
 # ------------------------------------------------------------------------------
+#
+# Shared from praxis-proxy/conventions (semver.yaml).
 
 on:
-# NOTE: manual only until v1.x.x
-#
-#  push:
-#    branches: [main]
-#  pull_request:
-#    branches: [main]
+  # NOTE: manual only until v1.x.x
   workflow_dispatch:
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions: {}
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  # ----------------------------------------------------------------------------
-  # SemVer Compliance
-  # ----------------------------------------------------------------------------
-
   semver:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
-        with:
-          cache-suffix: semver
-
-      - name: Cache cargo-semver-checks
-        id: cache-semver
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-semver-checks
-          key: cargo-semver-checks-${{ runner.os }}
-
-      - name: Install cargo-semver-checks
-        if: steps.cache-semver.outputs.cache-hit != 'true'
-        # setup-rust's rust-cache also restores ~/.cargo/bin, so the binary may
-        # already be present when this step's own cache key misses. Install only
-        # when it is absent; otherwise cargo install aborts "binary exists".
-        run: command -v cargo-semver-checks > /dev/null || cargo install cargo-semver-checks --locked
-
-      - name: Check SemVer compliance
-        run: make semver
+    uses: praxis-proxy/conventions/.github/workflows/semver.yaml@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0

@@ -12,6 +12,7 @@ mod access_logging;
 mod admin_interface;
 mod all_examples_validate;
 mod api_key_filter;
+mod authority_from_endpoint;
 mod authority_override;
 mod basic_reverse_proxy;
 #[cfg(feature = "iterative-request-router")]
@@ -23,10 +24,13 @@ mod circuit_breaker;
 mod cloud_events;
 mod conditional_filters;
 mod credential_injection;
+mod credential_injection_env_vars;
 mod csrf;
 mod default_config;
 mod endpoint_selector;
 mod errors_total;
+#[cfg(target_os = "linux")]
+mod file_descriptor_limits;
 mod grpc_access_log;
 mod grpc_condition;
 mod grpc_detection;
@@ -70,6 +74,8 @@ mod pipeline;
 #[cfg(feature = "policy-engine")]
 mod policy;
 #[cfg(feature = "policy-engine")]
+mod policy_api_key;
+#[cfg(feature = "policy-engine")]
 mod policy_assertions;
 #[cfg(feature = "policy-engine")]
 mod policy_http;
@@ -84,10 +90,12 @@ mod process_logging;
 mod protocol_examples;
 mod protocols;
 mod random;
+mod rate_limit_shadow;
 mod redirect;
 mod retry_policy;
 mod ring_hash;
 mod round_robin;
+mod route_on_promoted_header;
 mod route_templates;
 mod security_examples;
 mod selected_upstream_conditions;
@@ -105,6 +113,7 @@ mod trace_context;
 #[cfg(feature = "otel")]
 mod tracing_otlp;
 mod traffic_management_examples;
+mod trusted_private_endpoints;
 mod upstream_requests_total;
 mod url_rewriting;
 mod virtual_hosts;

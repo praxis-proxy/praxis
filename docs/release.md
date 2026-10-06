@@ -49,11 +49,13 @@ Tags follow the format `v<MAJOR>.<MINOR>.<PATCH>` (e.g.
 `v1.0.0-rc.1`), and must match
 `workspace.package.version`; the release workflow rejects
 mismatched tags. A pre-release tag cuts a pre-release
-draft. Push the tag to the repository:
+draft. Push the tag to `praxis-proxy/praxis` itself,
+not to a fork (`upstream` below is whichever remote
+points there):
 
 ```console
 git tag v0.1.0
-git push origin v0.1.0
+git push upstream v0.1.0
 ```
 
 The release runs in two phases
@@ -81,8 +83,9 @@ Phase 2 runs when a maintainer publishes the draft:
 
 7. Re-validate the tag against `Cargo.toml`, then
    publish the workspace to crates.io in one
-   dependency-ordered run (`cargo publish --workspace
-   --locked`)
+   dependency-ordered run (`make publish`, which skips
+   crates the index already has at this version, so a
+   partial or repeated publish is safe to run again)
 8. For a stable (non pre-release) release, advance the
    moving `:<major>.<minor>` and `:latest` container
    tags, and their `-fips` counterparts

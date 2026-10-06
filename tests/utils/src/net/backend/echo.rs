@@ -68,26 +68,47 @@ pub fn start_header_echo_backend() -> BackendGuard {
     spawn_tcp_server_with_shutdown(|mut stream| {
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let raw = read_until_headers_complete(&mut stream);
+        let _sent = write_http_response(&mut stream, &request_headers(&raw));
+    })
+}
 
-        let headers: String = raw
-            .lines()
-            .skip(1)
-            .take_while(|l| !l.is_empty())
-            .fold(String::new(), |mut acc, line| {
-                if !acc.is_empty() {
-                    acc.push('\n');
-                }
-                acc.push_str(line);
-                acc
-            });
-
-        let _sent = write_http_response(&mut stream, &headers);
+/// Start a backend that echoes request headers like
+/// [`start_header_echo_backend`], with `tag` as the first line of the
+/// body so a test can tell which of several backends answered.
+///
+/// Returns a [`BackendGuard`] that shuts down the listener
+/// thread when dropped.
+///
+/// # Panics
+///
+/// Panics if the server fails to bind or accept connections.
+pub fn start_tagged_header_echo_backend(tag: &str) -> BackendGuard {
+    let tag = tag.to_owned();
+    spawn_tcp_server_with_shutdown(move |mut stream| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let raw = read_until_headers_complete(&mut stream);
+        let _sent = write_http_response(&mut stream, &format!("{tag}\n{}", request_headers(&raw)));
     })
 }
 
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
+
+/// The header lines of a raw HTTP request, one per line, without the
+/// request line.
+fn request_headers(raw: &str) -> String {
+    raw.lines()
+        .skip(1)
+        .take_while(|l| !l.is_empty())
+        .fold(String::new(), |mut acc, line| {
+            if !acc.is_empty() {
+                acc.push('\n');
+            }
+            acc.push_str(line);
+            acc
+        })
+}
 
 /// Read a complete HTTP request body from a raw TCP stream.
 ///

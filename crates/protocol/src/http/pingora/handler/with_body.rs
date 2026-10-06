@@ -30,7 +30,7 @@ use super::{
     compression::{adjust_compression, configure_compression},
     connected_to_upstream, fail_to_proxy,
     health_util::{ended_by_client, record_passive_health},
-    hop_by_hop::RemoveHeader as _,
+    hop_by_hop::{self, RemoveHeader as _},
     logging_util::{logging_cleanup, maybe_emit_fallback_access_log},
     metrics_util::emit_request_metrics,
     request_body_filter, request_filter, response_body_filter, response_filter, response_trailer_filter,
@@ -65,6 +65,7 @@ use crate::http::pingora::{context::PingoraRequestCtx, metrics};
 ///     Arc::new(ArcSwap::from_pointee(pipeline)),
 ///     None,
 ///     None,
+///     None,
 ///     ::metrics::SharedString::const_str("http"),
 /// );
 /// ```
@@ -90,6 +91,10 @@ pub struct PingoraHttpHandler {
     /// Per-listener connection semaphore for max connections.
     connection_semaphore: Option<Arc<Semaphore>>,
 
+    /// Per-listener idle keep-alive timeout for HTTP/1.x clients, in
+    /// seconds.
+    downstream_keepalive_timeout_secs: Option<u64>,
+
     /// Per-listener downstream read timeout.
     downstream_read_timeout: Option<Duration>,
 
@@ -105,6 +110,7 @@ impl PingoraHttpHandler {
     pub(super) fn new(
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
+        downstream_keepalive_timeout_secs: Option<u64>,
         connection_semaphore: Option<Arc<Semaphore>>,
         listener_name: ::metrics::SharedString,
     ) -> Self {
@@ -112,6 +118,7 @@ impl PingoraHttpHandler {
         Self {
             compression,
             connection_semaphore,
+            downstream_keepalive_timeout_secs,
             downstream_read_timeout,
             listener_name,
             pipeline,
@@ -194,6 +201,12 @@ impl ProxyHttp for PingoraHttpHandler {
             return reject_503(session, "5", "memory pressure exceeded").await;
         }
 
+        let Some(fd_admission) = praxis_core::fd::try_admit() else {
+            metrics::record_overload_reject(metrics::OVERLOAD_REASON_FILE_DESCRIPTORS);
+            return reject_503(session, "1", "file descriptor limit nearly exhausted").await;
+        };
+        ctx.fd_admission = Some(fd_admission);
+
         let (exceeded, permit) = crate::connections::try_acquire_global();
         ctx._global_connection_permit = permit;
         if exceeded {
@@ -218,6 +231,14 @@ impl ProxyHttp for PingoraHttpHandler {
                 "applying downstream read timeout"
             );
             session.set_read_timeout(Some(timeout));
+        }
+
+        // Bound a keep-alive the client and protocol already allow, never turn one
+        // on: an HTTP/1.0 client without `Connection: keep-alive` must still be closed.
+        if let Some(secs) = self.downstream_keepalive_timeout_secs
+            && session.get_keepalive().is_some()
+        {
+            session.set_keepalive(Some(secs));
         }
 
         // Pingora parses Accept-Encoding after this hook, before request_filter.
@@ -274,6 +295,7 @@ impl ProxyHttp for PingoraHttpHandler {
     {
         let span = ctx.request_span.clone();
         let _entered = span.enter();
+        hop_by_hop::strip_reserved_internal_header_map(upstream_trailers);
         response_trailers::capture(upstream_trailers, ctx);
         Ok(())
     }
@@ -293,7 +315,9 @@ impl ProxyHttp for PingoraHttpHandler {
         }
         let span = ctx.request_span.clone();
         let _entered = span.enter();
-        Ok(response_trailer_filter::execute(&pipeline, upstream_trailers, ctx))
+        let produced = response_trailer_filter::execute(&pipeline, upstream_trailers, ctx);
+        hop_by_hop::strip_reserved_internal_header_map(upstream_trailers);
+        Ok(produced)
     }
 
     fn response_body_filter(
@@ -423,6 +447,7 @@ impl ProxyHttp for PingoraHttpHandler {
 
         let is_upgrade = session.is_upgrade_req();
         upstream_request::strip_hop_by_hop(upstream_request, is_upgrade);
+        upstream_request::restore_te_trailers(upstream_request, &session.req_header().headers);
         upstream_request.strip_reserved_internal();
         upstream_request::apply_authority_override(upstream_request, ctx)?;
         upstream_request::apply_rewritten_path(upstream_request, ctx)?;
@@ -449,6 +474,7 @@ impl ProxyHttp for PingoraHttpHandler {
         let pipeline = ctx.pipeline(&self.pipeline);
         let span = ctx.request_span.clone();
         let exchange_span = ctx.upstream_exchange_span.clone();
+        let upstream_ver = upstream_response.version;
         let result = response_filter::execute(&pipeline, upstream_response, ctx)
             .instrument(exchange_span)
             .instrument(span)
@@ -456,8 +482,8 @@ impl ProxyHttp for PingoraHttpHandler {
         if result.is_ok() {
             // RFC 9110 §7.6.3: the response Via received-protocol is the leg this
             // proxy received the response on — the upstream connection — not the
-            // downstream client's version.
-            let upstream_ver = upstream_response.version;
+            // downstream client's version, captured before filters can rebuild
+            // the header.
             via::append_response_via(upstream_response, upstream_ver);
             adjust_compression(session, upstream_response, pipeline.compression_config());
         }
@@ -482,6 +508,9 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
+        if let Some(fd_admission) = ctx.fd_admission.as_mut() {
+            fd_admission.connected(!reused);
+        }
         let span = ctx.request_span.clone();
         let _entered = span.enter();
         let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);

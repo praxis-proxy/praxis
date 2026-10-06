@@ -65,6 +65,7 @@ pub(in crate::config::validate) fn validate_clusters(
         cluster.validate_authority()?;
         application::validate_application_metadata(cluster)?;
         endpoints::validate_endpoints(cluster, insecure_options)?;
+        validate_endpoint_hosts(cluster)?;
         tls::validate_tls_settings(cluster, insecure_options)?;
         timeouts::validate_timeouts(cluster)?;
         validate_cluster_max_connections(cluster)?;
@@ -75,6 +76,43 @@ pub(in crate::config::validate) fn validate_clusters(
         health_check::validate_grpc_probe_transport(cluster)?;
         health_check::validate_health_check_ssrf(cluster, insecure_options)?;
         health_check::warn_tls_http_probe_mismatch(cluster);
+    }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Trusted Private Endpoints Validation
+// -----------------------------------------------------------------------------
+
+/// Each entry must be a hostname naming one of the cluster's endpoints.
+fn validate_endpoint_hosts(cluster: &crate::config::Cluster) -> Result<(), ProxyError> {
+    if cluster.trusted_private_endpoints.is_empty() {
+        return Ok(());
+    }
+    let context = format!("cluster '{}'", cluster.name);
+    crate::connectivity::validate_host_entries(&context, &cluster.trusted_private_endpoints)
+        .map_err(ProxyError::Config)?;
+    for entry in &cluster.trusted_private_endpoints {
+        let unbracketed = entry
+            .strip_prefix('[')
+            .and_then(|inner| inner.strip_suffix(']'))
+            .unwrap_or(entry);
+        let host = crate::connectivity::strip_root_dot(entry);
+        let fault = if unbracketed.parse::<std::net::IpAddr>().is_ok() {
+            // Literal endpoints are never resolved, so the entry could not match.
+            "is an IP address"
+        } else if host.is_empty() || host.ends_with('.') {
+            "is not a hostname"
+        } else if !cluster.endpoints.iter().any(|ep| {
+            crate::connectivity::strip_root_dot(health_check::extract_host(ep.address())).eq_ignore_ascii_case(host)
+        }) {
+            "matches no endpoint host"
+        } else {
+            continue;
+        };
+        return Err(ProxyError::Config(format!(
+            "{context}: trusted_private_endpoints entry {entry:?} {fault}"
+        )));
     }
     Ok(())
 }
@@ -224,6 +262,61 @@ clusters:
       authority: "api.example.com:8443"
 "#;
         Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn accept_cluster_with_endpoint_authority() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["api-a.example.com:443", "api-b.example.com:443"]
+    http:
+      authority: { from: endpoint }
+    tls: {}
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert!(
+            config.clusters[0]
+                .http
+                .authority
+                .as_ref()
+                .is_some_and(crate::config::UpstreamAuthority::follows_endpoint),
+            "authority should parse as the endpoint-derived form"
+        );
+    }
+
+    #[test]
+    fn reject_cluster_with_unknown_authority_source() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["10.0.0.1:80"]
+    http:
+      authority: { from: upstream }
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("upstream"),
+            "the unknown authority source should be named: {err}"
+        );
     }
 
     #[test]

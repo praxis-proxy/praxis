@@ -13,7 +13,7 @@ const MAX_ENTRIES_UPPER_BOUND: u64 = 200_000;
 // -----------------------------------------------------------------------------
 
 /// Session persistence mode: `cookie` injects cookies, `header` reads a request
-/// header, `learn` observes upstream response cookies or headers.
+/// header, `learn` observes the upstream `Set-Cookie` response header only.
 ///
 /// Uses `#[serde(tag = "type")]` so the YAML discriminator is `type: cookie`,
 /// `type: header`, or `type: learn`. Each variant carries only the fields
@@ -30,6 +30,10 @@ pub(crate) enum PersistenceConfig {
         cookie_attributes: CookieAttributes,
     },
     /// Request header value as session key.
+    ///
+    /// The key is client-chosen, so a client sending many distinct keys
+    /// can churn the store up to `max_entries` and evict other sessions.
+    /// That costs stickiness only, never correctness of routing.
     Header {
         /// Header name to read the session key from.
         header_name: String,

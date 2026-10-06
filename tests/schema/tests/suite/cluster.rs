@@ -570,8 +570,8 @@ clusters:
 "#;
     let config = Config::from_yaml(yaml).unwrap();
     assert_eq!(
-        config.clusters[0].http.authority.as_deref(),
-        Some("api.example.com"),
+        config.clusters[0].http.authority,
+        Some("api.example.com".into()),
         "authority should be parsed"
     );
 }
@@ -598,8 +598,8 @@ clusters:
 "#;
     let config = Config::from_yaml(yaml).unwrap();
     assert_eq!(
-        config.clusters[0].http.authority.as_deref(),
-        Some("api.example.com:8443"),
+        config.clusters[0].http.authority,
+        Some("api.example.com:8443".into()),
         "authority should be independent of SNI"
     );
     assert_eq!(
@@ -729,8 +729,8 @@ clusters:
     let value = serde_yaml::to_value(&config.clusters[0]).unwrap();
     let back: praxis_core::config::Cluster = serde_yaml::from_value(value).unwrap();
     assert_eq!(
-        back.http.authority.as_deref(),
-        Some("api.example.com"),
+        back.http.authority,
+        Some("api.example.com".into()),
         "authority should roundtrip through serde"
     );
 }
@@ -757,13 +757,93 @@ clusters:
 "#;
     let config = Config::from_yaml(yaml).unwrap();
     assert_eq!(
-        config.clusters[0].http.authority.as_deref(),
-        Some("api.example.com"),
+        config.clusters[0].http.authority,
+        Some("api.example.com".into()),
         "first cluster should have authority"
     );
     assert!(
         config.clusters[1].http.authority.is_none(),
         "second cluster should have no authority"
+    );
+}
+
+#[test]
+fn accept_inline_endpoint_authority_with_verified_tls() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "echo-api.example.com:443"
+              - "httpbin.example.org:443"
+            http:
+              authority: { from: endpoint }
+            tls: {}
+"#;
+    Config::from_yaml(yaml).expect("SNI follows each hostname endpoint, so verify needs no tls.sni");
+}
+
+#[test]
+fn accept_inline_endpoint_authority_with_ip_endpoint_and_verified_tls() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "echo-api.example.com:443"
+              - "203.0.113.7:443"
+            http:
+              authority: { from: endpoint }
+            tls: {}
+"#;
+    Config::from_yaml(yaml)
+        .expect("an IP endpoint is verified against its certificate's IP SAN, so verify needs no tls.sni");
+}
+
+#[test]
+fn reject_misspelled_authority_source_key() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+    http:
+      authority: { frm: endpoint }
+"#;
+    let err = Config::from_yaml(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("frm"),
+        "the misspelled key should be named: {err}"
     );
 }
 
@@ -786,4 +866,80 @@ clusters:
       consistent_hash: {}
 "#;
     Config::from_yaml(yaml).unwrap();
+}
+
+#[test]
+fn trusted_private_endpoints_are_validated() {
+    let cases: &[(&str, &str, Option<&str>)] = &[
+        ("model.tenant.svc:8000", "model.tenant.svc", None),
+        ("model.tenant.svc:8000", "MODEL.tenant.svc", None),
+        (
+            "model.tenant.svc.cluster.local.:8000",
+            "model.tenant.svc.cluster.local",
+            None,
+        ),
+        ("model.tenant.svc:8000", "model.tenant.svc.", None),
+        (
+            "model.tenant.svc:8000",
+            "other.tenant.svc",
+            Some("matches no endpoint host"),
+        ),
+        (
+            "model.tenant.svc:8000",
+            "model.tenant.svc:8000",
+            Some("unbracketed ':'"),
+        ),
+        ("10.96.0.10:8000", "10.96.0.10", Some("is an IP address")),
+        ("[fd12::1]:8000", "[fd12::1]", Some("is an IP address")),
+        ("model.tenant.svc:8000", ".", Some("is not a hostname")),
+        ("model.tenant.svc:8000", "model.tenant.svc..", Some("is not a hostname")),
+        ("model.tenant.svc:8000", "*.tenant.svc", Some("contains '*'")),
+    ];
+    for (endpoint, entry, want) in cases {
+        let yaml = format!(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: models
+    endpoints: ["{endpoint}"]
+    trusted_private_endpoints: ["{entry}"]
+"#
+        );
+        let got = Config::from_yaml(&yaml);
+        match want {
+            None => got.map(drop).expect("a listed endpoint hostname is accepted"),
+            Some(fragment) => {
+                let err = got.expect_err("must be rejected").to_string();
+                assert!(err.contains(fragment), "{entry:?}: {err}");
+            },
+        }
+    }
+}
+
+#[test]
+fn inline_cluster_trusted_private_endpoints_are_validated() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: load_balancer
+        clusters:
+          - name: models
+            endpoints: ["model.tenant.svc:8000"]
+            trusted_private_endpoints: ["other.tenant.svc"]
+"#;
+    let err = Config::from_yaml(yaml).unwrap_err();
+    assert!(err.to_string().contains("matches no endpoint host"), "got: {err}");
 }

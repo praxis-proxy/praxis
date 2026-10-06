@@ -159,6 +159,9 @@ fn run_startup_security_checks(config: &Config) -> Result<(), StartupError> {
     enforce_root_check(config)?;
     warn_insecure_options(config);
     init_runtime_limits(&config.runtime);
+    if let Some(limit) = crate::fd_limit::apply(config) {
+        praxis_core::fd::init(limit, config.runtime.shed_on_fd_pressure);
+    }
     warn_insecure_key_permissions(config);
     warn_insecure_log_file_permissions(config);
     Ok(())
@@ -534,7 +537,7 @@ fn build_server_state(
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
     spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);
-    spawn_housekeeping_tasks(&config.runtime, &subrequest_client);
+    spawn_housekeeping_tasks(&config.runtime, &subrequest_client, praxis_core::fd::usage().is_some());
 
     let state = ServerState {
         pipelines: Arc::new(pipelines),
@@ -788,11 +791,11 @@ fn spawn_health_check_tasks(
 
 /// Run the periodic loops `runtime` asks for on one shared dedicated runtime.
 ///
-/// Memory limits and the sub-request circuit breaker are startup-only
-/// settings, so their loops run for the life of the process and share one
-/// thread; nothing is spawned when the config asks for neither.
-fn spawn_housekeeping_tasks(runtime: &RuntimeConfig, client: &SubRequestClient) {
-    let loops = housekeeping_loops(runtime, client);
+/// Descriptor tracking, memory limits, and the sub-request circuit breaker
+/// are startup-only, so their loops run for the life of the process and share
+/// one thread; nothing is spawned when none of them is active.
+fn spawn_housekeeping_tasks(runtime: &RuntimeConfig, client: &SubRequestClient, track_fds: bool) {
+    let loops = housekeeping_loops(runtime, client, track_fds);
     if loops.is_empty() {
         return;
     }
@@ -805,11 +808,15 @@ fn spawn_housekeeping_tasks(runtime: &RuntimeConfig, client: &SubRequestClient) 
     });
 }
 
-/// The periodic loops `runtime` asks for: the memory pressure sampler when
-/// `max_memory_bytes` is set, the circuit breaker eviction when
+/// The periodic loops `runtime` asks for: the descriptor sampler when
+/// `track_fds` (the descriptor monitor is initialized), the memory pressure
+/// sampler when `max_memory_bytes` is set, the circuit breaker eviction when
 /// `subrequest_circuit_breaker` is.
-fn housekeeping_loops(runtime: &RuntimeConfig, client: &SubRequestClient) -> Vec<HousekeepingLoop> {
+fn housekeeping_loops(runtime: &RuntimeConfig, client: &SubRequestClient, track_fds: bool) -> Vec<HousekeepingLoop> {
     let mut loops = Vec::new();
+    if track_fds {
+        loops.push(fd_sampler_loop());
+    }
     if runtime.max_memory_bytes.is_some() {
         loops.push(memory_sampler_loop());
     }
@@ -817,6 +824,20 @@ fn housekeeping_loops(runtime: &RuntimeConfig, client: &SubRequestClient) -> Vec
         loops.push(circuit_eviction_loop(client.clone()));
     }
     loops
+}
+
+/// Keep the descriptor sample current, so the per-request check reads an
+/// atomic instead of `/proc`, and publish it as gauges.
+fn fd_sampler_loop() -> HousekeepingLoop {
+    Box::pin(async {
+        loop {
+            praxis_core::fd::refresh();
+            if let Some(usage) = praxis_core::fd::usage() {
+                praxis_protocol::http::pingora::metrics::set_process_fd_gauges(usage);
+            }
+            tokio::time::sleep(praxis_core::fd::sample_interval()).await;
+        }
+    })
 }
 
 /// Keep the memory pressure sample current, so the per-request check reads
@@ -1237,26 +1258,31 @@ filter_chains:
     fn housekeeping_loops_follow_the_runtime_config() {
         let client = SubRequestClient::new(crate::test_support::connector(1));
         assert!(
-            housekeeping_loops(&RuntimeConfig::default(), &client).is_empty(),
-            "neither limit configured means no housekeeping loop"
+            housekeeping_loops(&RuntimeConfig::default(), &client, false).is_empty(),
+            "no limit configured and no descriptor tracking means no housekeeping loop"
         );
         assert_eq!(
-            housekeeping_loops(&memory_limited_runtime(), &client).len(),
+            housekeeping_loops(&RuntimeConfig::default(), &client, true).len(),
+            1,
+            "descriptor tracking alone needs only its sampler"
+        );
+        assert_eq!(
+            housekeeping_loops(&memory_limited_runtime(), &client, false).len(),
             1,
             "a memory limit alone needs only the sampler"
         );
         assert_eq!(
-            housekeeping_loops(&fully_limited_runtime(), &client).len(),
-            2,
-            "a memory limit and a circuit breaker need the sampler and the eviction loop"
+            housekeeping_loops(&fully_limited_runtime(), &client, true).len(),
+            3,
+            "descriptors, memory, and a circuit breaker each need their own loop"
         );
     }
 
     #[test]
     fn housekeeping_tasks_spawn_without_panicking() {
         let client = SubRequestClient::new(crate::test_support::connector(1));
-        spawn_housekeeping_tasks(&RuntimeConfig::default(), &client);
-        spawn_housekeeping_tasks(&fully_limited_runtime(), &client);
+        spawn_housekeeping_tasks(&RuntimeConfig::default(), &client, false);
+        spawn_housekeeping_tasks(&fully_limited_runtime(), &client, true);
     }
 
     #[cfg(feature = "config-reload")]

@@ -69,7 +69,7 @@ pub(crate) struct PolicyFilterConfig {
     /// answer are rejected, so a private destination needs one of two opt-ins:
     /// `trusted_private_endpoints` to relax a specific host to the RFC 1918 and
     /// unique-local ranges, or this flag to relax every callout globally. Proxy
-    /// upstreams use `insecure_options.allow_private_endpoints` instead.
+    /// upstreams use cluster `trusted_private_endpoints` or `allow_private_upstreams`.
     #[serde(default)]
     pub allow_private_idp: bool,
 
@@ -234,73 +234,4 @@ pub(crate) enum BodyAccessMode {
     /// the downstream client see them. Costs one JSON parse +
     /// serialize per mutated request or response.
     ReadWrite,
-}
-
-/// Reject a `trusted_private_endpoints` entry that is not a bare host.
-///
-/// Entries match a URL host with the port excluded, so an entry that carries a
-/// port, scheme, path, userinfo, wildcard, or whitespace can never match and
-/// most likely hides a misconfiguration that would silently fail to pin. A
-/// bracketed IPv6 literal (`[fc00::1]`) is the one form allowed a colon,
-/// matching the bracketed host the URI parser produces. The error names the
-/// field and the offending entry so an operator can find it.
-pub(crate) fn validate_trusted_private_endpoints(entries: &[String]) -> Result<(), String> {
-    for entry in entries {
-        let fault = if entry.is_empty() {
-            "is empty"
-        } else if entry.contains(char::is_whitespace) {
-            "contains whitespace"
-        } else if entry.contains('/') {
-            "contains '/'"
-        } else if entry.contains('@') {
-            "contains '@'"
-        } else if entry.contains('*') {
-            "contains '*'"
-        } else if entry.contains(':') && !(entry.starts_with('[') && entry.ends_with(']')) {
-            "contains an unbracketed ':' (use [ipv6] for a literal, and no port)"
-        } else {
-            continue;
-        };
-        return Err(format!("policy: trusted_private_endpoints entry {entry:?} {fault}"));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-#[expect(clippy::expect_used, reason = "tests")]
-mod tests {
-    use super::validate_trusted_private_endpoints;
-
-    #[test]
-    fn a_bare_host_or_bracketed_ipv6_is_accepted() {
-        let ok = ["maas-api.svc".to_owned(), "10.0.0.1".to_owned(), "[fc00::1]".to_owned()];
-        assert!(
-            validate_trusted_private_endpoints(&ok).is_ok(),
-            "bare hosts and a bracketed IPv6 are valid"
-        );
-    }
-
-    #[test]
-    fn a_malformed_entry_is_rejected_naming_the_field_and_the_entry() {
-        // A port, an unbracketed IPv6, a bracketed IPv6 with a port, a scheme,
-        // a path, userinfo, a wildcard, whitespace, and an empty entry.
-        for bad in [
-            "host:8080",
-            "::1",
-            "[fc00::1]:80",
-            "http://x",
-            "a/b",
-            "u@h",
-            "wild*",
-            "has space",
-            "",
-        ] {
-            let err = validate_trusted_private_endpoints(&[bad.to_owned()]).expect_err("must reject");
-            assert!(
-                err.contains("trusted_private_endpoints"),
-                "error names the field: {err}"
-            );
-            assert!(err.contains(bad), "error names the offending entry: {err}");
-        }
-    }
 }

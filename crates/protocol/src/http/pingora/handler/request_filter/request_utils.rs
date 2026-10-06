@@ -9,7 +9,7 @@
 use pingora_proxy::Session;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 use praxis_filter::{FilterPipeline, Rejection};
-use tracing::warn;
+use tracing::{debug, warn};
 
 use super::super::{
     super::{context::PingoraRequestCtx, convert::request_header_from_session},
@@ -55,6 +55,41 @@ pub(super) fn reject_reserved_internal_headers(session: &Session) -> Option<Reje
         "rejecting request with client-supplied reserved internal headers"
     );
     Some(Rejection::status(400))
+}
+
+/// Reject requests whose `Transfer-Encoding` names any coding other than
+/// `chunked`.
+///
+/// Pingora only requires the final coding to be `chunked`, and the
+/// upstream hop-by-hop strip later re-inserts a bare `chunked`, silently
+/// discarding codings such as `gzip`. Praxis implements no transfer
+/// codings besides `chunked`, so per [RFC 9112 Section 6.1] the request
+/// is answered with `501 Not Implemented`.
+///
+/// [RFC 9112 Section 6.1]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.1
+pub(super) fn reject_unsupported_transfer_coding(session: &Session) -> Option<Rejection> {
+    if !has_unsupported_transfer_coding(&session.req_header().headers) {
+        return None;
+    }
+
+    debug!("rejecting request with unsupported transfer coding");
+    Some(Rejection::status(501))
+}
+
+/// Whether any `Transfer-Encoding` field value names a coding other than
+/// `chunked`.
+///
+/// Operates on raw bytes so that non-UTF-8 tokens count as unsupported
+/// rather than being skipped.
+fn has_unsupported_transfer_coding(headers: &http::HeaderMap) -> bool {
+    headers.get_all(http::header::TRANSFER_ENCODING).iter().any(|value| {
+        value
+            .as_bytes()
+            .split(|byte| *byte == b',')
+            .map(<[u8]>::trim_ascii)
+            .filter(|token| !token.is_empty())
+            .any(|token| !token.eq_ignore_ascii_case(b"chunked"))
+    })
 }
 
 /// Collapse the route label to a configured path template when one matches.
@@ -182,5 +217,61 @@ mod tests {
         let result = templated_route(&pipeline, &ctx, None);
 
         assert!(result.is_none(), "no snapshot should return None");
+    }
+
+    fn te_headers(values: &[&'static str]) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        for value in values {
+            headers.append(http::header::TRANSFER_ENCODING, http::HeaderValue::from_static(value));
+        }
+        headers
+    }
+
+    #[test]
+    fn transfer_coding_chunked_is_supported() {
+        assert!(
+            !has_unsupported_transfer_coding(&te_headers(&["chunked"])),
+            "plain chunked must be accepted"
+        );
+    }
+
+    #[test]
+    fn transfer_coding_chunked_is_case_insensitive() {
+        assert!(
+            !has_unsupported_transfer_coding(&te_headers(&["Chunked"])),
+            "transfer coding names are case-insensitive"
+        );
+    }
+
+    #[test]
+    fn transfer_coding_compound_value_is_unsupported() {
+        assert!(
+            has_unsupported_transfer_coding(&te_headers(&["gzip, chunked"])),
+            "gzip in a compound value must be rejected"
+        );
+    }
+
+    #[test]
+    fn transfer_coding_split_across_fields_is_unsupported() {
+        assert!(
+            has_unsupported_transfer_coding(&te_headers(&["gzip", "chunked"])),
+            "gzip in a separate field line must be rejected"
+        );
+    }
+
+    #[test]
+    fn transfer_coding_repeated_chunked_is_supported() {
+        assert!(
+            !has_unsupported_transfer_coding(&te_headers(&["chunked, chunked"])),
+            "repeated chunked is left to Pingora framing checks"
+        );
+    }
+
+    #[test]
+    fn transfer_coding_absent_is_supported() {
+        assert!(
+            !has_unsupported_transfer_coding(&http::HeaderMap::new()),
+            "no Transfer-Encoding must be accepted"
+        );
     }
 }

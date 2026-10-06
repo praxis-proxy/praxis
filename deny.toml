@@ -1,13 +1,23 @@
+# Only the platforms praxis builds for, so Windows-only crates don't show up
+# as duplicates or need license review.
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+]
+
 [advisories]
 unmaintained = "all"
+unsound = "all"
 maximum-db-staleness = "P30D"
 ignore = [
-    # rustls-pemfile 2.2.0: unmaintained (transitive via pingora fork)
+    # rustls-pemfile 2.2.0: unmaintained, pulled in by the pingora fork
+    # (quixotic-plecostomus-rustls) and rustls-native-certs 0.7. Drop once
+    # the fork parses PEM with rustls-pki-types instead.
     "RUSTSEC-2025-0134",
-    # NOTE: the unsound `lru` advisory RUSTSEC-2026-0253 is not listed
-    # here: `unmaintained = "all"` does not gate `unsound` advisories,
-    # so cargo-deny never flags it and an ignore would be unused. It is
-    # ignored in .cargo/audit.toml, where cargo-audit does warn on it.
 ]
 
 [licenses]
@@ -35,9 +45,10 @@ highlight = "all"
 # the Pingora fork's large subtree pulls its own versions of some common
 # crates (syn, hashbrown, getrandom, ...) that differ from praxis's other
 # transitive deps. Suppress the whole fork subtree rather than tracking
-# each ecosystem-wide duplicate. Re-evaluate on each Pingora fork sync.
+# each ecosystem-wide duplicate. No version on the crate, so a fork bump
+# cannot silently unmatch it. Re-evaluate on each Pingora fork sync.
 skip-tree = [
-    { crate = "quixotic-plecostomus-core@0.8", reason = "pingora fork transitive subtree pulls older shared crates than praxis" },
+    { crate = "quixotic-plecostomus-core", reason = "pingora fork transitive subtree pulls older shared crates than praxis" },
 ]
 
 [sources]

@@ -14,9 +14,10 @@ use tracing::{info, warn};
 /// Compare old and new configs, logging warnings for changes that
 /// require a process restart to take effect.
 pub(crate) fn log_restart_required_changes(old: &Config, new: &Config) {
-    // One shared name index serves all three listener detectors.
+    // One shared name index serves every listener detector.
     let old_by_name = listeners_by_name(old);
     detect_listener_topology_changes_with(old, new, &old_by_name);
+    detect_listener_setting_changes_with(new, &old_by_name);
     detect_compression_additions_with(old, new, &old_by_name);
     detect_tls_toggles_with(new, &old_by_name);
     detect_subrequest_max_connections_change(old, new);
@@ -59,7 +60,7 @@ fn detect_listener_topology_changes_with(old: &Config, new: &Config, old_by_name
     for name in old_names.difference(&new_names) {
         warn!(
             listener = %name,
-            "listener removed in config; requires restart to unbind"
+            "listener removed in config; it stays bound and keeps serving its previous pipeline (health checks for it are no longer updated) until restart"
         );
     }
 
@@ -73,6 +74,35 @@ fn detect_listener_topology_changes_with(old: &Config, new: &Config, old_by_name
                 new_address = %new_l.address,
                 "listener address changed; requires restart to rebind"
             );
+        }
+    }
+}
+
+/// Detect changes to listener settings the HTTP handler captures once at
+/// startup: connection limits and downstream timeouts.
+fn detect_listener_setting_changes_with(new: &Config, old_by_name: &ListenersByName<'_>) {
+    for new_l in &new.listeners {
+        let Some(old_l) = old_by_name.get(new_l.name.as_str()) else {
+            continue;
+        };
+        for (field, changed) in [
+            ("max_connections", old_l.max_connections != new_l.max_connections),
+            (
+                "downstream_keepalive_timeout_ms",
+                old_l.downstream_keepalive_timeout_ms != new_l.downstream_keepalive_timeout_ms,
+            ),
+            (
+                "downstream_read_timeout_ms",
+                old_l.downstream_read_timeout_ms != new_l.downstream_read_timeout_ms,
+            ),
+        ] {
+            if changed {
+                warn!(
+                    listener = %new_l.name,
+                    field,
+                    "listener setting changed; requires restart (applied when the listener starts)"
+                );
+            }
         }
     }
 }
@@ -251,6 +281,8 @@ fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
             global_queue_interval,
             max_connections,
             max_memory_bytes,
+            max_open_files,
+            shed_on_fd_pressure,
             subrequest_pool_size,
             threads,
             upstream_ca_file,
@@ -566,6 +598,51 @@ mod tests {
     }
 
     #[test]
+    fn runtime_max_open_files_change_warns() {
+        let old = config_with_runtime("");
+        let new = config_with_runtime("runtime:\n  max_open_files: 4096\n");
+        let warnings = capture_warnings(|| detect_startup_only_runtime_changes(&old, &new));
+        assert_eq!(warnings.len(), 1, "changed max_open_files should produce one warning");
+        assert!(
+            warnings[0].contains("requires restart"),
+            "the descriptor limit is set once at startup: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn listener_keepalive_timeout_change_warns() {
+        let old = config_with_listener_line("");
+        let new = config_with_listener_line("    downstream_keepalive_timeout_ms: 5000\n");
+        let warnings = capture_warnings(|| detect_listener_setting_changes_with(&new, &listeners_by_name(&old)));
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one changed listener setting, one warning: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("requires restart"),
+            "the timeout is applied when the listener starts: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn listener_limit_and_read_timeout_changes_warn() {
+        let old = config_with_listener_line("");
+        let new = config_with_listener_line("    max_connections: 10\n    downstream_read_timeout_ms: 5000\n");
+        let warnings = capture_warnings(|| detect_listener_setting_changes_with(&new, &listeners_by_name(&old)));
+        assert_eq!(warnings.len(), 2, "each changed setting warns: {warnings:?}");
+    }
+
+    #[test]
+    fn unchanged_listener_settings_do_not_warn() {
+        let config = config_with_listener_line("    downstream_keepalive_timeout_ms: 5000\n");
+        let warnings = capture_warnings(|| detect_listener_setting_changes_with(&config, &listeners_by_name(&config)));
+        assert!(warnings.is_empty(), "nothing changed: {warnings:?}");
+    }
+
+    #[test]
     fn runtime_log_overrides_change_does_not_warn() {
         let old = config_with_runtime("");
         let new = config_with_runtime("runtime:\n  log_overrides:\n    praxis_filter: debug\n");
@@ -747,6 +824,15 @@ mod tests {
             "listeners:\n  - name: web\n    address: \"127.0.0.1:8443\"\n    \
              filter_chains: [main]\n    tls:\n      certificates:\n        - cert_path: \"{cert}\"\n          \
              key_path: \"certs/key.pem\"\nfilter_chains:\n  - name: main\n    \
+             filters:\n      - filter: static_response\n        status: 200\n"
+        ))
+        .unwrap()
+    }
+
+    fn config_with_listener_line(line: &str) -> Config {
+        Config::from_yaml(&format!(
+            "listeners:\n  - name: web\n    address: \"127.0.0.1:8080\"\n{line}    \
+             filter_chains: [main]\nfilter_chains:\n  - name: main\n    \
              filters:\n      - filter: static_response\n        status: 200\n"
         ))
         .unwrap()

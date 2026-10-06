@@ -4,57 +4,17 @@ name: Mutation Testing
 # Workflow Settings
 # ------------------------------------------------------------------------------
 #
-# Coverage proves code executed; mutation testing proves the assertions
-# would notice if the code were wrong. Weekly because it rebuilds the
-# workspace once per mutant.
+# Shared from praxis-proxy/conventions (mutants.yaml).
 
 on:
   schedule:
     - cron: "17 4 * * 1"
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}
-  cancel-in-progress: true
-
 permissions: {}
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  # ----------------------------------------------------------------------------
-  # Mutants
-  # ----------------------------------------------------------------------------
-
   mutants:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@f636950733882cf65b15cdc3efab570158feea4a # v0.1.0
-        with:
-          cache-suffix: mutants
-
-      - name: Cache cargo-mutants
-        id: cache-mutants
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-mutants
-          key: cargo-mutants-${{ runner.os }}
-
-      - name: Install cargo-mutants
-        if: steps.cache-mutants.outputs.cache-hit != 'true'
-        # setup-rust's rust-cache also restores ~/.cargo/bin, so the binary may
-        # already be present when this step's own cache key misses. Install only
-        # when it is absent; otherwise cargo install aborts "binary exists".
-        run: command -v cargo-mutants > /dev/null || cargo install cargo-mutants --locked
-
-      - name: Run mutation testing
-        run: make mutants
+    uses: praxis-proxy/conventions/.github/workflows/mutants.yaml@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0

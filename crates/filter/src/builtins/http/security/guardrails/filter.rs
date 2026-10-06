@@ -18,11 +18,22 @@ use crate::{
 };
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Maximum JSON string leaves (keys and values) inspected per body.
+const MAX_JSON_LEAVES: usize = 10_000; // inspection cap
+
+// -----------------------------------------------------------------------------
 // GuardrailsFilter
 // -----------------------------------------------------------------------------
 
 /// Rejects requests matching string, regex, or PII rules against headers
 /// and/or body content.
+///
+/// Body rules match the raw body text. Non-negated body rules are also
+/// evaluated against decoded JSON object keys and string values, so JSON
+/// escapes (`\u0020`) cannot hide blocked content.
 ///
 /// # YAML configuration
 ///
@@ -80,6 +91,12 @@ pub struct GuardrailsFilter {
 
     /// Whether any body rule is a `Contains` match (pre-computed at init).
     pub(super) has_body_contains: bool,
+
+    /// Whether any body rule is not negated (pre-computed at init).
+    ///
+    /// Gates the decoded JSON pass: only non-negated rules can be evaded
+    /// by escaping, since escaping a required pattern already fails closed.
+    pub(super) has_non_negated_body_rules: bool,
 
     /// Reject bodies exceeding the inspection buffer limit.
     pub(super) reject_oversized: bool,
@@ -148,6 +165,7 @@ impl GuardrailsFilter {
             action: cfg.action,
             needs_body,
             has_body_contains,
+            has_non_negated_body_rules: has_non_negated_body_rules(&rules),
             reject_oversized: cfg.reject_oversized,
             rules,
         }))
@@ -194,6 +212,81 @@ impl GuardrailsFilter {
             }
         }
         false
+    }
+
+    /// Check non-negated body rules against decoded JSON string leaves.
+    ///
+    /// Raw-text matching misses content hidden behind JSON escapes
+    /// (`drop\u0020table`), which the upstream decodes. Only runs when the
+    /// body contains a backslash and parses as JSON. A body whose nesting
+    /// exceeds the parser's recursion limit, or whose leaf count exceeds
+    /// [`MAX_JSON_LEAVES`], cannot be fully inspected and fails closed.
+    fn check_json_body(&self, text: &str) -> bool {
+        if !self.has_non_negated_body_rules || !text.contains('\\') {
+            return false;
+        }
+        match serde_json::from_str::<serde_json::Value>(text) {
+            Ok(value) => self.check_json_leaves(&value),
+            Err(e) if e.to_string().starts_with("recursion limit exceeded") => {
+                tracing::info!("guardrails: JSON body too deeply nested to inspect; failing closed");
+                true
+            },
+            Err(_) => false,
+        }
+    }
+
+    /// Walk `root` iteratively, evaluating non-negated body rules against
+    /// every object key and string value.
+    fn check_json_leaves(&self, root: &serde_json::Value) -> bool {
+        let mut budget = MAX_JSON_LEAVES;
+        let mut stack = vec![root];
+        while let Some(value) = stack.pop() {
+            let leaves: Vec<&str> = match value {
+                serde_json::Value::String(text) => vec![text.as_str()],
+                serde_json::Value::Array(items) => {
+                    stack.extend(items);
+                    Vec::new()
+                },
+                serde_json::Value::Object(map) => {
+                    stack.extend(map.values());
+                    map.keys().map(String::as_str).collect()
+                },
+                serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => Vec::new(),
+            };
+            for leaf in leaves {
+                let Some(remaining) = budget.checked_sub(1) else {
+                    tracing::info!(
+                        limit = MAX_JSON_LEAVES,
+                        "guardrails: JSON body exceeds leaf inspection cap; failing closed"
+                    );
+                    return true;
+                };
+                budget = remaining;
+                if self.json_leaf_triggered(leaf) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Evaluate non-negated body rules against one decoded JSON string.
+    fn json_leaf_triggered(&self, leaf: &str) -> bool {
+        let lower = self.has_body_contains.then(|| leaf.to_lowercase());
+        self.rules
+            .iter()
+            .filter(|rule| matches!(rule.target, RuleTarget::Body) && !rule.negate)
+            .any(|rule| {
+                let eval = rule.eval(leaf, lower.as_deref());
+                if eval.matched {
+                    tracing::info!(
+                        negate = false,
+                        pii_kind = ?eval.pii_kind,
+                        "guardrails: body rule triggered on decoded JSON value"
+                    );
+                }
+                eval.matched
+            })
     }
 }
 
@@ -264,7 +357,7 @@ impl HttpFilter for GuardrailsFilter {
             write_result(ctx, "blocked");
             return Ok(self.blocked_action());
         };
-        if self.check_body(text) {
+        if self.check_body(text) || self.check_json_body(text) {
             write_result(ctx, "blocked");
             return Ok(self.blocked_action());
         }
@@ -302,7 +395,7 @@ fn header_rule_triggered(rule: &CompiledRule, header_name: &str, ctx: &HttpFilte
     }
 
     let rule_matches = if rule.negate {
-        is_rule_match.is_none()
+        !all_header_values_match(rule, header_name, ctx)
     } else {
         is_rule_match.is_some()
     };
@@ -344,6 +437,22 @@ fn scan_header_values(
             ev.matched.then_some(ev)
         });
     (is_rule_match, undecodable)
+}
+
+/// Whether the header is present and every one of its values matches `rule`.
+///
+/// A negated rule requires *all* values to conform: a single conforming
+/// duplicate line must not hide a non-conforming one.
+fn all_header_values_match(rule: &CompiledRule, header_name: &str, ctx: &HttpFilterContext<'_>) -> bool {
+    let mut values = ctx.request.headers.get_all(header_name).iter().peekable();
+    values.peek().is_some() && values.all(|val| rule.eval(&String::from_utf8_lossy(val.as_bytes()), None).matched)
+}
+
+/// Whether any body-targeted rule in `rules` is not negated.
+fn has_non_negated_body_rules(rules: &[CompiledRule]) -> bool {
+    rules
+        .iter()
+        .any(|rule| matches!(rule.target, RuleTarget::Body) && !rule.negate)
 }
 
 /// Write a guardrails status result to the filter context.

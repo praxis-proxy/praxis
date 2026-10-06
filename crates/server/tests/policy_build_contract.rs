@@ -5,16 +5,10 @@
 
 //! Build-level guarantees about the policy engine.
 //!
-//! This is a dedicated per-crate test binary, not an inline `#[cfg(test)]`
-//! module or a case in the shared `tests/integration` suite. It has to be:
-//! both guarantees below only hold when these tests are compiled against this
-//! crate, with its own feature resolution, and run in their own process.
-//!
-//! The registration case lives in its own test binary because the connector
-//! slot is process-wide and last-wins: the lib unit tests resolve pipelines
-//! concurrently, and any of their registrations would clobber the one asserted
-//! on here. The manifest case is deliberately ungated so feature unification
-//! cannot mask it.
+//! Per-crate tests rather than cases in the shared `tests/integration` suite:
+//! they only hold when compiled against this crate, with its own feature
+//! resolution. The manifest case is deliberately ungated so feature
+//! unification cannot mask it.
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -24,10 +18,14 @@
 /// feature declaration rather than a `cfg` derived from it.
 const MANIFEST: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
 
-/// Minimal valid config. It carries no `policy` filter on purpose: the
-/// connector registration is unconditional, so it must happen for any config.
+/// Config whose sub-request client admits one exchange at a time, with a
+/// `policy` filter that gives up on initializing after two seconds, well
+/// inside the five the JWKS fetch itself waits. `{policy}` stands for the path
+/// of the policy document.
 #[cfg(feature = "policy-engine")]
 const CONFIG: &str = r#"
+runtime:
+  subrequest_max_connections: 1
 listeners:
   - name: web
     address: "127.0.0.1:8080"
@@ -35,6 +33,10 @@ listeners:
 filter_chains:
   - name: main
     filters:
+      - filter: policy
+        config_path: "{policy}"
+        allow_private_idp: true
+        init_timeout_secs: 2
       - filter: router
         routes:
           - path_prefix: "/"
@@ -43,6 +45,37 @@ filter_chains:
         clusters:
           - name: backend
             endpoints: ["10.0.0.1:80"]
+"#;
+
+/// Policy document whose JWT issuer fetches its JWKS while the filter is
+/// constructed, from a loopback port nothing listens on. The fetch fails at
+/// once unless it has to wait for admission, and a failed fetch at boot is
+/// recoverable, so the filter still builds.
+#[cfg(feature = "policy-engine")]
+const POLICY: &str = r#"
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    on_error: fail
+    capabilities:
+      - perform_http
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://issuer.test"
+          audiences: ["praxis"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "http://127.0.0.1:1/jwks.json"
+            insecure_http: true
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
 "#;
 
 // -----------------------------------------------------------------------------
@@ -56,38 +89,26 @@ filter_chains:
 )]
 #[cfg(feature = "policy-engine")]
 #[test]
-fn resolving_pipelines_registers_the_proxy_pool_for_policy_calls() {
-    use std::{collections::HashMap, sync::Arc};
-
-    use praxis::{build_subrequest_client, resolve_pipelines};
-    use praxis_core::config::Config;
-    use praxis_filter::{FilterRegistry, SessionStoreRegistry, registered_policy_subrequest_connector};
-
+fn resolved_policy_filters_call_out_through_the_runtime_connector() {
     // Calls resolve_pipelines directly, so it misses main()'s provider install.
     praxis::install_crypto_provider();
+    let dir = tempfile::TempDir::new().expect("create a tempdir");
+    let config = runtime_config(&dir);
+    let client = praxis::build_subrequest_client(&config);
 
-    let config = Config::from_yaml(CONFIG).expect("the test config must parse");
-    let client = build_subrequest_client(&config);
-
-    resolve_pipelines(
-        &config,
-        &FilterRegistry::with_builtins(),
-        &Arc::new(HashMap::new()),
-        &praxis_core::kv::KvStoreRegistry::new(),
-        &Arc::new(SessionStoreRegistry::new()),
-        &client,
-    )
-    .expect("the test config must resolve into pipelines");
-
-    let registered = registered_policy_subrequest_connector().expect(
-        "resolve_pipelines must register the sub-request connector; gating that call on the \
-         server's own `policy-engine` feature misses every build where feature unification turned \
-         the filter on, and policy calls then silently open a second connection pool",
+    let permit = hold_the_only_admission_permit(&client);
+    let err = resolve(&config, &client).expect_err(
+        "with the runtime's only admission permit held, the policy filter's JWKS fetch must wait \
+         for it until initialization times out; a filter built over a pool of its own fetches \
+         without waiting and the pipelines resolve",
     );
     assert!(
-        std::ptr::eq(registered.connector(), client.connector().connector()),
-        "policy calls must share the proxy's keepalive pool, not a pool of their own"
+        err.contains("timed out"),
+        "the policy filter must stall on the runtime's admission limit; got: {err}"
     );
+
+    drop(permit);
+    resolve(&config, &client).expect("with the permit released, the same config must resolve");
 }
 
 #[expect(
@@ -125,4 +146,47 @@ fn default_feature_declaration() -> Option<&'static str> {
         .take_while(|line| !line.trim_start().starts_with('['))
         .find_map(|line| line.trim().strip_prefix("default"))
         .and_then(|rest| rest.trim_start().strip_prefix('='))
+}
+
+/// Parse [`CONFIG`] with its `policy` filter pointed at [`POLICY`], written
+/// into `dir`.
+#[cfg(feature = "policy-engine")]
+#[expect(clippy::expect_used, reason = "test utility")]
+fn runtime_config(dir: &tempfile::TempDir) -> praxis_core::config::Config {
+    let policy = dir.path().join("policy.yaml");
+    std::fs::write(&policy, POLICY).expect("write the policy document");
+    let path = policy.to_str().expect("a UTF-8 tempdir path");
+    praxis_core::config::Config::from_yaml(&CONFIG.replace("{policy}", path)).expect("the test config must parse")
+}
+
+/// Take the one admission permit `client`'s connector hands out.
+#[cfg(feature = "policy-engine")]
+#[expect(clippy::expect_used, reason = "test utility")]
+fn hold_the_only_admission_permit(
+    client: &praxis_core::subrequest::SubRequestClient,
+) -> tokio::sync::OwnedSemaphorePermit {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("build a runtime to take the permit on")
+        .block_on(client.connector().acquire_permit())
+        .expect("the connector must enforce subrequest_max_connections")
+}
+
+/// Resolve `config`'s pipelines over `client` the way server startup does,
+/// keeping only the error text.
+#[cfg(feature = "policy-engine")]
+fn resolve(
+    config: &praxis_core::config::Config,
+    client: &praxis_core::subrequest::SubRequestClient,
+) -> Result<(), String> {
+    praxis::resolve_pipelines(
+        config,
+        &praxis_filter::FilterRegistry::with_builtins(),
+        &std::sync::Arc::new(std::collections::HashMap::new()),
+        &praxis_core::kv::KvStoreRegistry::new(),
+        &std::sync::Arc::new(praxis_filter::SessionStoreRegistry::new()),
+        client,
+    )
+    .map(drop)
+    .map_err(|err| err.to_string())
 }

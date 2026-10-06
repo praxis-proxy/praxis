@@ -7,7 +7,7 @@ authors.workspace = true
 description = "Cloud-native proxy server"
 license.workspace = true
 repository.workspace = true
-readme = "../../README.md"
+readme.workspace = true
 
 [lib]
 name = "praxis"
@@ -60,14 +60,15 @@ dev = ["basic-auth-filter"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter", "experimental"]
 cloud-events-filter = ["praxis-filter/cloud-events-filter", "experimental"]
 # Logical upstream binding (`bound_upstream` conditions, bound load balancers).
-# Off by default; experimental. Implied by the two features below.
+# Off by default; experimental. Implied by `iterative-request-router` and
+# `bound-upstream-request-body`.
 upstream-binding = ["praxis-filter/upstream-binding", "praxis-protocol/upstream-binding", "experimental"]
 # The `iterative_request_router` filter. Off by default; experimental.
-iterative-request-router = ["praxis-filter/iterative-request-router", "experimental"]
+iterative-request-router = ["praxis-filter/iterative-request-router", "upstream-binding", "experimental"]
 # The `router` filter's JSON-alias body-routing groundwork. Off by default; experimental.
 router-json-aliases = ["praxis-filter/router-json-aliases", "experimental"]
 # The bound-upstream request-body hook. Off by default; experimental.
-bound-upstream-request-body = ["praxis-filter/bound-upstream-request-body", "experimental"]
+bound-upstream-request-body = ["praxis-filter/bound-upstream-request-body", "upstream-binding", "experimental"]
 # The chain-binding registry extension API. Off by default; experimental.
 chain-binding = ["praxis-filter/chain-binding", "experimental"]
 # SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.

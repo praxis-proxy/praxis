@@ -312,8 +312,11 @@ fn hot_reload_rebinds_routes_and_catalog_without_restart() {
     let proxy = start_reloadable_proxy(&yaml);
 
     let before = http_send(proxy.addr(), &get("/openai/v1/responses", true));
-    proxy.reload(&yaml.replace("path_prefix: \"/openai/\"", "path_prefix: \"/provider/\""));
-    let moved = http_send(proxy.addr(), &get("/provider/v1/responses", true));
+    let moved = proxy.reload_until(
+        &yaml.replace("path_prefix: \"/openai/\"", "path_prefix: \"/provider/\""),
+        || http_send(proxy.addr(), &get("/provider/v1/responses", true)),
+        |moved| parse_body(moved) == "openai",
+    );
     let old = http_send(proxy.addr(), &get("/openai/v1/responses", true));
 
     assert_eq!(parse_body(&before), "openai", "the original route binds openai");

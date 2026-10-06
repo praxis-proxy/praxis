@@ -17,7 +17,13 @@ mod config;
 )]
 mod tests;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, LazyLock, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 use metrics::SharedString;
@@ -32,6 +38,16 @@ use crate::{
     actions::{FilterAction, Rejection},
     filter::{HttpFilter, HttpFilterContext},
 };
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Source of unique [`InstrumentedCircuitBreaker`] gauge-owner ids.
+static NEXT_GAUGE_OWNER: AtomicU64 = AtomicU64::new(1);
+
+/// Current gauge owner id per cluster name.
+static GAUGE_OWNERS: LazyLock<Mutex<HashMap<Arc<str>, u64>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
 // -----------------------------------------------------------------------------
 // ActiveCircuitToken
@@ -58,18 +74,31 @@ struct ActiveCircuitToken {
 /// the filter crate (where the Prometheus utilities live) without changing
 /// the shared state machine.
 struct InstrumentedCircuitBreaker {
+    /// Cluster name as the [`GAUGE_OWNERS`] key.
+    cluster_key: Arc<str>,
     /// Cluster name for the gauge label.
     cluster_name: SharedString,
     /// Core state machine.
     inner: CircuitBreaker,
+    /// Unique id claiming gauge ownership in [`GAUGE_OWNERS`].
+    owner_id: u64,
 }
 
 impl InstrumentedCircuitBreaker {
     /// Create a closed breaker and seed the open gauge at `0`.
+    ///
+    /// The new breaker becomes the gauge owner for its cluster, so a
+    /// breaker from a previous config generation that is dropped later
+    /// (when its last in-flight request finishes) cannot reset the gauge.
     fn new(cluster_name: &str, config: CoreCircuitBreakerConfig) -> Self {
+        let owner_id = NEXT_GAUGE_OWNER.fetch_add(1, Ordering::Relaxed);
+        let cluster_key: Arc<str> = Arc::from(cluster_name);
+        lock_gauge_owners().insert(Arc::clone(&cluster_key), owner_id);
         let breaker = Self {
+            cluster_key,
             cluster_name: SharedString::from(cluster_name.to_owned()),
             inner: CircuitBreaker::new(config),
+            owner_id,
         };
         crate::metrics::set_circuit_breaker_state(breaker.cluster_name.clone(), false);
         breaker
@@ -123,9 +152,21 @@ impl InstrumentedCircuitBreaker {
 impl Drop for InstrumentedCircuitBreaker {
     fn drop(&mut self) {
         // Hot reload drops the old breaker map; clear the gauge so removed
-        // clusters do not leave a stale open=1 series behind.
-        crate::metrics::set_circuit_breaker_state(self.cluster_name.clone(), false);
+        // clusters do not leave a stale open=1 series behind, but only if no
+        // newer breaker for the same cluster has taken over the gauge.
+        let released = {
+            let mut owners = lock_gauge_owners();
+            owners.get(&self.cluster_key) == Some(&self.owner_id) && owners.remove(&self.cluster_key).is_some()
+        };
+        if released {
+            crate::metrics::set_circuit_breaker_state(self.cluster_name.clone(), false);
+        }
     }
+}
+
+/// Lock [`GAUGE_OWNERS`], recovering the map if a holder panicked.
+fn lock_gauge_owners() -> std::sync::MutexGuard<'static, HashMap<Arc<str>, u64>> {
+    GAUGE_OWNERS.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Whether the gauge should report the breaker as open (includes half-open).
@@ -186,7 +227,8 @@ impl CircuitBreakerFilter {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any config field is
-    /// invalid (zero threshold, zero recovery window, zero half-open timeout).
+    /// invalid (zero threshold, zero recovery window, zero half-open timeout)
+    /// or a cluster name appears more than once.
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
@@ -205,6 +247,9 @@ impl CircuitBreakerFilter {
                 if value == 0 {
                     return Err(format!("circuit_breaker: cluster '{}': {field} must be > 0", cluster.name).into());
                 }
+            }
+            if breakers.contains_key(cluster.name.as_ref()) {
+                return Err(format!("circuit_breaker: duplicate cluster '{}'", cluster.name).into());
             }
             breakers.insert(
                 Arc::clone(&cluster.name),
