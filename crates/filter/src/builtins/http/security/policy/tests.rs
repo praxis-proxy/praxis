@@ -5469,11 +5469,8 @@ async fn post_only_round_trip(path: String, method: &str, name: &str, request_bo
     body.expect("response body")
 }
 
-// Prompt and resource post hooks remain unsupported because response content
-// is currently projected only for `tools/call`.
-
 #[tokio::test(flavor = "multi_thread")]
-async fn a_post_only_prompt_route_does_not_yet_dispatch() {
+async fn a_post_only_prompt_route_dispatches_its_hook() {
     let (_dir, path) = write_prompt_post_only_config();
     let served = post_only_round_trip(
         path,
@@ -5482,15 +5479,16 @@ async fn a_post_only_prompt_route_does_not_yet_dispatch() {
         br#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"summarize"}}"#,
     )
     .await;
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
     assert_eq!(
-        served,
-        bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()),
-        "a prompt response is passed through untouched because the post hook is never dispatched",
+        parsed["error"]["data"]["violation"], "prompt_withheld",
+        "the post-phase deny must reach the wire; a body that still carries `result` means the \
+         hook never dispatched. got {served:?}",
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_post_only_resource_route_does_not_yet_dispatch() {
+async fn a_post_only_resource_route_dispatches_its_hook() {
     let (_dir, path) = write_resource_post_only_config();
     let served = post_only_round_trip(
         path,
@@ -5499,10 +5497,11 @@ async fn a_post_only_resource_route_does_not_yet_dispatch() {
         br#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///data.csv"}}"#,
     )
     .await;
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
     assert_eq!(
-        served,
-        bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()),
-        "a resource response is passed through untouched because the post hook is never dispatched",
+        parsed["error"]["data"]["violation"], "resource_withheld",
+        "the post-phase deny must reach the wire; a body that still carries `result` means the \
+         hook never dispatched. got {served:?}",
     );
 }
 
@@ -5651,13 +5650,13 @@ fn a_read_write_tool_response_policy_does_not_warn() {
 }
 
 #[test]
-fn a_prompt_response_policy_warns_that_read_write_is_not_the_fix() {
+fn a_prompt_response_policy_does_not_warn() {
     let (_dir, path) = write_prompt_post_only_config();
     let logs = capture_warnings(|| drop(build_read_write_filter(path)));
     assert!(
-        logs.contains("those rules never run") && logs.contains("does not change this"),
-        "a prompt response rule is undispatched under both body accesses, so the warning must \
-         not offer `read_write` as the remedy; got {logs}",
+        !logs.contains("those rules never run"),
+        "prompt post hooks are dispatched now (attribute-only evaluation); the old warning \
+         must not fire. got {logs}",
     );
 }
 
