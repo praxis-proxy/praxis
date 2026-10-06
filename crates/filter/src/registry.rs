@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 #[cfg(feature = "iterative-request-router")]
 use praxis_core::config::InsecureOptions;
+use praxis_core::subrequest::SubRequestConnector;
 
 #[cfg(feature = "chain-binding")]
 use crate::binding::ChainBindingHttpFactory;
@@ -47,6 +48,7 @@ pub enum SecurityClass {
 // -----------------------------------------------------------------------------
 
 /// A filter factory paired with its [`SecurityClass`] metadata.
+#[derive(Clone)]
 struct FilterRegistration {
     /// The factory function that creates filter instances.
     factory: RegisteredFilterFactory,
@@ -57,6 +59,7 @@ struct FilterRegistration {
 
 /// A normal public factory or a built-in factory that also needs
 /// access to the registry currently resolving the pipeline.
+#[derive(Clone)]
 enum RegisteredFilterFactory {
     /// A public factory whose configuration is self-contained.
     Standard(FilterFactory),
@@ -69,6 +72,11 @@ enum RegisteredFilterFactory {
     /// construction time via a [`ChainBindingContext`].
     #[cfg(feature = "chain-binding")]
     ChainBinding(ChainBindingHttpFactory),
+
+    /// The built-in `policy` filter, which takes the registry's sub-request
+    /// connector at construction.
+    #[cfg(feature = "policy-engine")]
+    Policy,
 }
 
 /// Factory for a built-in HTTP filter that builds nested step pipelines as a
@@ -99,8 +107,11 @@ impl RegisteredFilterFactory {
         &self,
         config: &serde_yaml::Value,
         #[cfg_attr(
-            not(feature = "iterative-request-router"),
-            expect(unused_variables, reason = "registry is read only by the gated HttpWithRegistry arm")
+            not(any(feature = "iterative-request-router", feature = "policy-engine")),
+            expect(
+                unused_variables,
+                reason = "registry is read only by the gated HttpWithRegistry and Policy arms"
+            )
         )]
         registry: &FilterRegistry,
     ) -> Result<AnyFilter, FilterError> {
@@ -121,6 +132,10 @@ impl RegisteredFilterFactory {
                 "this filter binds an outbound subrequest chain and must be built via \
                  FilterPipeline::build_with_chains",
             )),
+            #[cfg(feature = "policy-engine")]
+            Self::Policy => registry
+                .build_policy(config)
+                .map(|filter| AnyFilter::Http(Box::new(filter))),
         }
     }
 
@@ -134,10 +149,14 @@ impl RegisteredFilterFactory {
         &self,
         config: &serde_yaml::Value,
         #[cfg_attr(
-            not(any(feature = "iterative-request-router", feature = "chain-binding")),
+            not(any(
+                feature = "iterative-request-router",
+                feature = "chain-binding",
+                feature = "policy-engine"
+            )),
             expect(
                 unused_variables,
-                reason = "ctx is read only by the gated HttpWithRegistry and ChainBinding arms"
+                reason = "ctx is read only by the gated HttpWithRegistry, ChainBinding, and Policy arms"
             )
         )]
         ctx: &ChainBindingContext<'_>,
@@ -148,6 +167,11 @@ impl RegisteredFilterFactory {
             Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, ctx)?)),
             #[cfg(feature = "chain-binding")]
             Self::ChainBinding(factory) => Ok(AnyFilter::Http(factory(config, ctx)?)),
+            #[cfg(feature = "policy-engine")]
+            Self::Policy => ctx
+                .registry()
+                .build_policy(config)
+                .map(|filter| AnyFilter::Http(Box::new(filter))),
         }
     }
 }
@@ -168,9 +192,13 @@ impl RegisteredFilterFactory {
 /// assert!(names.contains(&"request_id"));
 /// assert!(names.contains(&"router"));
 /// ```
+#[derive(Clone)]
 pub struct FilterRegistry {
     /// Maps filter names to their registrations (factory + metadata).
     filters: HashMap<String, FilterRegistration>,
+
+    /// Sub-request connector handed to `policy` filters at construction.
+    policy_connector: Option<SubRequestConnector>,
 }
 
 impl FilterRegistry {
@@ -180,7 +208,10 @@ impl FilterRegistry {
         let mut filters = HashMap::new();
         register_http_builtins(&mut filters);
         register_tcp_builtins(&mut filters);
-        Self { filters }
+        Self {
+            filters,
+            policy_connector: None,
+        }
     }
 
     /// Registers a custom filter factory with [`SecurityClass::Standard`].
@@ -469,6 +500,56 @@ impl FilterRegistry {
             .map(|(name, _)| name.as_str())
             .collect()
     }
+
+    /// The sub-request connector handed to [`set_policy_connector`], if any.
+    ///
+    /// [`set_policy_connector`]: Self::set_policy_connector
+    #[must_use]
+    pub fn policy_connector(&self) -> Option<&SubRequestConnector> {
+        self.policy_connector.as_ref()
+    }
+
+    /// Hands the sub-request `connector` to the `policy` filters this registry
+    /// builds, so their outbound calls (JWKS fetches, token exchanges) share
+    /// one runtime's keepalive pool, admission limit, and circuit breaker.
+    /// Without one, each policy filter opens a connection pool of its own.
+    ///
+    /// Set it on a registry that belongs to one runtime: runtimes sharing a
+    /// registry share its connector too. The Praxis server sets it on its own
+    /// copy of the registry each time it builds pipelines.
+    ///
+    /// Available whatever the features, so a host need not know whether
+    /// `policy-engine` was turned on through feature unification. Without it,
+    /// nothing reads the connector.
+    ///
+    /// ```
+    /// use praxis_core::subrequest::SubRequestConnector;
+    /// use praxis_filter::FilterRegistry;
+    /// praxis_tls::provider::install(); // required before any connector is built
+    ///
+    /// let connector = SubRequestConnector::new(64, None);
+    /// let mut registry = FilterRegistry::with_builtins();
+    /// registry.set_policy_connector(&connector);
+    ///
+    /// let held = registry
+    ///     .policy_connector()
+    ///     .expect("a connector was handed over");
+    /// assert!(std::ptr::eq(held.connector(), connector.connector()));
+    /// ```
+    pub fn set_policy_connector(&mut self, connector: &SubRequestConnector) {
+        self.policy_connector = Some(connector.clone());
+    }
+
+    /// Builds a `policy` filter over this registry's sub-request connector.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the config fails to parse or the filter
+    /// fails to construct.
+    #[cfg(feature = "policy-engine")]
+    pub(crate) fn build_policy(&self, config: &serde_yaml::Value) -> Result<crate::PolicyFilter, FilterError> {
+        crate::PolicyFilter::from_config_with_connector(config, self.policy_connector.clone())
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -494,7 +575,7 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http(filters, "compression", CompressionFilter::from_config);
     register_http_security(filters, "cors", CorsFilter::from_config);
     #[cfg(feature = "policy-engine")]
-    register_http_security(filters, "policy", crate::PolicyFilter::from_config);
+    register_http_policy(filters, "policy");
     register_http_security(filters, "csrf", CsrfFilter::from_config);
     register_http_security(filters, "credential_injection", CredentialInjectionFilter::from_config);
     register_http(
@@ -556,6 +637,21 @@ fn register_http_with_registry(
         FilterRegistration {
             factory: RegisteredFilterFactory::HttpWithRegistry(factory_fn),
             security_class: SecurityClass::Standard,
+        },
+    );
+    debug_assert!(prev.is_none(), "duplicate built-in filter name: '{name}'");
+}
+
+/// Registers the built-in `policy` filter under `name` with
+/// [`SecurityClass::Security`]. It takes the registry's sub-request connector
+/// at construction.
+#[cfg(feature = "policy-engine")]
+fn register_http_policy(filters: &mut HashMap<String, FilterRegistration>, name: &str) {
+    let prev = filters.insert(
+        name.to_owned(),
+        FilterRegistration {
+            factory: RegisteredFilterFactory::Policy,
+            security_class: SecurityClass::Security,
         },
     );
     debug_assert!(prev.is_none(), "duplicate built-in filter name: '{name}'");

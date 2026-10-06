@@ -23,6 +23,7 @@ use crate::{
     },
     connectivity::normalize_mapped_ipv4,
     errors::ProxyError,
+    logging::validate_log_override_entries,
 };
 
 // -----------------------------------------------------------------------------
@@ -121,6 +122,7 @@ impl Config {
         validate_subrequest_circuit_breaker(self.runtime.subrequest_circuit_breaker.as_ref())?;
         validate_global_queue_interval(self.runtime.global_queue_interval)?;
         validate_logging(&self.runtime.logging)?;
+        validate_log_override_entries(&self.runtime.log_overrides)?;
         Ok(())
     }
 }
@@ -1402,6 +1404,40 @@ filter_chains:
         assert!(
             err.to_string().contains("max_open_files"),
             "a negative descriptor limit must fail to parse: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_log_overrides_invalid_module_path() {
+        let err = Config::from_yaml(&runtime_yaml(r#"log_overrides: { "bad module": info }"#)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "config: invalid runtime.log_overrides: invalid module path 'bad module' (must be alphanumeric, '_', or '::')",
+            "from_yaml should reject a log_overrides module path that is not a Rust module path"
+        );
+    }
+
+    #[test]
+    fn reject_log_overrides_invalid_level() {
+        let err = Config::from_yaml(&runtime_yaml("log_overrides: { praxis_core: verbose }")).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "config: invalid runtime.log_overrides: invalid level 'verbose' for module 'praxis_core' \
+             (must be error, warn, info, debug, or trace)",
+            "from_yaml should reject a log_overrides level that is not a tracing level"
+        );
+    }
+
+    #[test]
+    fn accept_valid_log_overrides() {
+        let config = Config::from_yaml(&runtime_yaml(
+            r#"log_overrides: { "praxis_filter::pipeline": trace, praxis_protocol: DEBUG }"#,
+        ))
+        .unwrap();
+        assert_eq!(
+            config.runtime.log_overrides.len(),
+            2,
+            "valid module paths with case-insensitive levels should be accepted"
         );
     }
 

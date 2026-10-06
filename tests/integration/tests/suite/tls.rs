@@ -822,7 +822,7 @@ filter_chains:
 }
 
 #[test]
-fn sni_ip_address_leaves_sni_empty() {
+fn ip_endpoint_with_an_ip_client_host_dials_tls_with_verify_off() {
     let certs = TestCertificates::generate();
     let backend_port = start_tls_backend(&certs, "sni-ip-ok");
     let proxy_port = free_port();
@@ -857,12 +857,45 @@ filter_chains:
     let config = Config::from_yaml(&yaml).expect("valid YAML config");
     let proxy = start_proxy(&config);
 
-    let (status, body) = http_get(proxy.addr(), "/", None);
+    let (status, body) = http_get(proxy.addr(), "/", Some(&format!("127.0.0.1:{proxy_port}")));
     assert_eq!(
         status, 200,
-        "upstream TLS with IP address should return 200 (status-only: empty SNI not observable from client)"
+        "an IP Host gives no name, so the peer must name the IP endpoint itself instead of dialing with an empty name"
     );
     assert_eq!(body, "sni-ip-ok", "IP-based upstream should reach backend");
+}
+
+#[test]
+fn ip_endpoint_with_endpoint_authority_verifies_against_the_ip_san() {
+    let certs = TestCertificates::generate();
+    let backend_port = start_tls_backend(&certs, "ip-san-ok");
+    let yaml = ip_endpoint_authority_yaml(backend_port, &certs.ca_cert_path);
+
+    let config = Config::from_yaml(&yaml).expect("an IP endpoint with the endpoint authority needs no tls.sni");
+    let proxy = start_proxy(&config);
+
+    let (status, body) = http_get(proxy.addr(), "/", Some("client.example.com"));
+    assert_eq!(
+        status, 200,
+        "the backend certificate carries 127.0.0.1 as an IP SAN, so an IP endpoint must verify against it"
+    );
+    assert_eq!(body, "ip-san-ok", "the verified upstream should answer");
+}
+
+#[test]
+fn ip_endpoint_with_endpoint_authority_rejects_a_cert_without_the_ip_san() {
+    let certs = TestCertificates::generate_dns_only("upstream.test");
+    let backend_port = start_tls_backend(&certs, "should-not-reach");
+    let yaml = ip_endpoint_authority_yaml(backend_port, &certs.ca_cert_path);
+
+    let config = Config::from_yaml(&yaml).expect("valid YAML config");
+    let proxy = start_proxy(&config);
+
+    let (status, _) = http_get(proxy.addr(), "/", Some("upstream.test"));
+    assert_eq!(
+        status, 502,
+        "a certificate without the endpoint's IP SAN must fail verification, even when the client Host names it"
+    );
 }
 
 #[test]
@@ -2656,6 +2689,41 @@ insecure_options:
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// A plain listener in front of one verifying TLS cluster with a single
+/// `127.0.0.1` endpoint, `authority: { from: endpoint }`, no `tls.sni`, and
+/// the CA at `ca` trusted.
+fn ip_endpoint_authority_yaml(backend_port: u16, ca: &std::path::Path) -> String {
+    format!(
+        r#"
+listeners:
+  - name: plain
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+            http:
+              authority: {{ from: endpoint }}
+            tls:
+              ca:
+                ca_path: "{ca}"
+insecure_options:
+  allow_private_endpoints: true
+"#,
+        proxy_port = free_port(),
+        ca = ca.display(),
+    )
+}
 
 fn build_tls12_only_client(certs: &TestCertificates) -> Arc<rustls::ClientConfig> {
     let ca = rustls::pki_types::CertificateDer::from(certs.ca_cert_der.clone());

@@ -1099,8 +1099,9 @@ impl FilteredSubrequestExecutor {
                             },
                             Err(error) => {
                                 warn!(step = label, %error, status = 502_u16, "filtered sub-request buffered transport failure");
-                                // Peer construction failed (resolution/SSRF):
-                                // remember it and try the next validated address.
+                                // Peer construction failed (resolution, SSRF, or
+                                // no TLS name): remember it and try the next
+                                // validated address.
                                 attempt = Some((
                                     SubResponse { status: 502, headers: HeaderMap::new(), body: Bytes::new() },
                                     ResponseOrigin::Transport,

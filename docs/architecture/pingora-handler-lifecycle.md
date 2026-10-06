@@ -225,8 +225,9 @@ re-pin, and scrubbed on every child→parent return.
 
 Source: `request_filter/mod.rs`,
 `request_filter/validation.rs`,
-`request_filter/stream_buffer.rs`, `normalize.rs`,
-`reserved_headers.rs`
+`request_filter/stream_buffer.rs`,
+`request_filter/request_utils.rs`, `normalize.rs`;
+reserved prefixes: `crates/core/src/reserved_headers.rs`
 
 ### request_body_filter
 
@@ -322,7 +323,8 @@ upstream. Runs after Pingora connects to the backend.
    per RFC 9110 Section 7.6.3.
 
 Source: `upstream_request.rs`, `hop_by_hop.rs`,
-`reserved_headers.rs`, `via.rs`
+`via.rs`; reserved prefixes:
+`crates/core/src/reserved_headers.rs`
 
 ### fail_to_connect
 
@@ -545,7 +547,7 @@ Source: `context.rs` (`pin_pipeline`, `pipeline`)
 | `request_filter/validation.rs` | (sub) | Host, Max-Forwards |
 | `request_filter/stream_buffer.rs` | (sub) | body pre-read, TRACE |
 | `normalize.rs` | (sub) | obs-fold, duplicates |
-| `reserved_headers.rs` | (sub) | `x-praxis-*` check |
+| `request_filter/request_utils.rs` | (sub) | reserved header rejection |
 | `request_body_filter.rs` | `request_body_filter` | body chunks |
 | `upstream_peer.rs` | `upstream_peer` | DNS, TLS, peer |
 | `upstream_request.rs` | `upstream_request_filter` | hop-by-hop, path |

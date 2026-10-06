@@ -150,8 +150,9 @@ pub fn resolve_pipelines(
 /// hooks run again on every hot reload, so downstream extensions are never lost
 /// across a reload.
 ///
-/// Registers `subrequest_client`'s connector for the policy engine first, since
-/// a policy filter fetches JWKS while it is being constructed.
+/// Filters are built from a copy of `registry` that hands
+/// `subrequest_client`'s connector to policy filters, since a policy filter
+/// fetches JWKS while it is being constructed.
 ///
 /// # Errors
 ///
@@ -177,13 +178,7 @@ pub(crate) fn resolve_pipelines_with_composition(
     subrequest_client: &SubRequestClient,
     composition: &PipelineComposition,
 ) -> Result<ListenerPipelines, Box<dyn std::error::Error + Send + Sync>> {
-    // Before any pipeline is built: a policy filter fetches JWKS while it is
-    // being constructed below. This sits here rather than in the wrapper so
-    // the composition path registers too. Unconditional: the setter is a no-op
-    // without `policy-engine`, and gating it on this crate's own feature missed
-    // builds where a dependency turned the filter on through feature
-    // unification.
-    praxis_filter::set_policy_subrequest_connector(subrequest_client.connector());
+    let registry = runtime_registry(registry, subrequest_client);
     let chains: HashMap<&str, &[_]> = config
         .filter_chains
         .iter()
@@ -210,7 +205,7 @@ pub(crate) fn resolve_pipelines_with_composition(
         // appear absent.
         let entry_snapshot = entries.clone();
         let mut pipeline =
-            FilterPipeline::build_with_chains(&mut entries, registry, &chains, &config.insecure_options)?;
+            FilterPipeline::build_with_chains(&mut entries, &registry, &chains, &config.insecure_options)?;
         configure_pipeline(
             &mut pipeline,
             config,
@@ -255,6 +250,22 @@ pub(crate) fn resolve_pipelines_with_composition(
         .map(|listener| (listener.name.clone(), listener.protocol))
         .collect();
     Ok(ListenerPipelines::with_protocols(pipelines, protocols))
+}
+
+/// Copy `registry` for one runtime, handing `subrequest_client`'s connector to
+/// the policy filters it builds.
+///
+/// A policy filter needs the connector while it is constructed, too early for
+/// [`FilterPipeline::set_subrequest_client`]. The copy keeps runtimes that
+/// share a registry from picking up each other's connector. Unconditional:
+/// gating it on this crate's `policy-engine` feature would miss builds where
+/// a dependency turned the filter on through feature unification.
+///
+/// [`FilterPipeline::set_subrequest_client`]: praxis_filter::FilterPipeline::set_subrequest_client
+fn runtime_registry(registry: &FilterRegistry, subrequest_client: &SubRequestClient) -> FilterRegistry {
+    let mut runtime = registry.clone();
+    runtime.set_policy_connector(subrequest_client.connector());
+    runtime
 }
 
 /// Apply body limits, health registry, KV stores, pipeline extensions,
@@ -1191,6 +1202,35 @@ filter_chains:
             REQUEST_CONDITION | RESPONSE_CONDITION | BRANCH_CHAIN,
             "the validator must see request conditions, response conditions, and branch chains \
              on the flattened entries, not the husks left by build_with_chains"
+        );
+    }
+
+    #[test]
+    fn each_runtime_hands_its_own_connector_to_policy_filters() {
+        let shared = FilterRegistry::with_builtins();
+        let client_a = empty_subrequest_client();
+        let client_b = empty_subrequest_client();
+
+        let registry_a = runtime_registry(&shared, &client_a);
+        let registry_b = runtime_registry(&shared, &client_b);
+
+        let held_a = registry_a
+            .policy_connector()
+            .expect("runtime A's connector must be handed to its policy filters");
+        let held_b = registry_b
+            .policy_connector()
+            .expect("runtime B's connector must be handed to its policy filters");
+        assert!(
+            std::ptr::eq(held_a.connector(), client_a.connector().connector()),
+            "runtime A's policy filters must share runtime A's pool"
+        );
+        assert!(
+            std::ptr::eq(held_b.connector(), client_b.connector().connector()),
+            "runtime B's policy filters must share runtime B's pool"
+        );
+        assert!(
+            shared.policy_connector().is_none(),
+            "the caller's registry must not pick up either runtime's connector"
         );
     }
 

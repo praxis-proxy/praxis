@@ -105,7 +105,8 @@ pub struct ClusterHttpOptions {
     /// scheme default (80, or 443 with `tls`), and a retry to another
     /// endpoint sends that endpoint's address. Without `tls.sni`, the
     /// TLS SNI follows the endpoint too rather than copying the
-    /// downstream `Host`; an IP endpoint gets no SNI.
+    /// downstream `Host`; an IP endpoint is verified against its
+    /// certificate's IP SAN.
     ///
     /// ```
     /// # use praxis_core::config::Cluster;
@@ -333,7 +334,7 @@ impl Cluster {
     pub fn validate_authority(&self) -> Result<(), ProxyError> {
         match &self.http.authority {
             Some(UpstreamAuthority::Literal(authority)) => {
-                super::validate::cluster::validate_authority(authority, &self.name)
+                super::validate::cluster::authority::validate_authority(authority, &self.name)
             },
             Some(UpstreamAuthority::Derived { .. }) | None => Ok(()),
         }

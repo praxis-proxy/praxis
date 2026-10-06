@@ -1029,6 +1029,67 @@ mod tests {
     }
 
     #[test]
+    fn reload_rejects_invalid_log_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("praxis.yaml");
+        std::fs::write(&config_path, VALID_YAML).unwrap();
+
+        let mut config = Config::from_yaml(VALID_YAML).unwrap();
+        let registry = FilterRegistry::with_builtins();
+        let health_registry = Arc::new(std::collections::HashMap::new());
+        let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+        let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
+        let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
+        let pipelines = crate::pipelines::resolve_pipelines(
+            &config,
+            &registry,
+            &health_registry,
+            &kv_stores,
+            &session_stores,
+            &subrequest_client,
+        )
+        .unwrap();
+        let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        );
+        let original_hash = composite_hash(VALID_YAML, &[]);
+        let mut hash = original_hash;
+
+        std::fs::write(
+            &config_path,
+            format!("{VALID_YAML}runtime:\n  log_overrides:\n    praxis_core: verbose\n"),
+        )
+        .unwrap();
+        let ok = handle_reload(
+            &config_path,
+            &[],
+            &mut config,
+            &mut hash,
+            &registry,
+            &pipelines,
+            &listener_meta,
+            &cluster_meta,
+            &health_shutdown,
+            &kv_stores,
+            &session_stores,
+            &subrequest_client,
+            None,
+            &PipelineComposition::default(),
+        );
+
+        assert!(!ok, "a config with an invalid log_overrides level must not reload");
+        assert!(
+            config.runtime.log_overrides.is_empty(),
+            "a rejected reload must leave the running config untouched"
+        );
+        assert_eq!(hash, original_hash, "a rejected reload must leave the hash untouched");
+    }
+
+    #[test]
     fn startup_precheck_applies_an_edit_made_after_load() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("praxis.yaml");

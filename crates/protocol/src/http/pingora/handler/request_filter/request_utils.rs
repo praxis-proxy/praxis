@@ -43,7 +43,7 @@ pub(super) fn reject_reserved_internal_headers(session: &Session) -> Option<Reje
         .req_header()
         .headers
         .keys()
-        .filter(|name| super::super::reserved_headers::is_reserved_internal_header(name))
+        .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()))
         .count();
 
     if reserved_count == 0 {

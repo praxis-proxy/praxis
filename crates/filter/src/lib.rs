@@ -61,7 +61,6 @@ pub(crate) mod load_balancing;
 mod metrics;
 pub(crate) mod path_match;
 mod pipeline;
-mod policy_connector;
 mod registration;
 mod registry;
 mod results;
@@ -153,9 +152,6 @@ pub use pipeline::{
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
     subrequest::{IterationState, NextIterationBody},
 };
-#[cfg(feature = "policy-engine")]
-pub use policy_connector::registered_policy_subrequest_connector;
-pub use policy_connector::set_policy_subrequest_connector;
 pub use praxis_core::{
     config::{FailureMode, FilterEntry},
     subrequest::{StreamLimits, StreamingSubResponse, SubRequest, SubResponse, SubResponseBody},
