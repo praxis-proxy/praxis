@@ -78,6 +78,13 @@ routes:
               (!has(llm.request.tools) ||
               llm.request.tools.all(t, t.name != "transfer_funds"))
 
+  # The scalar `args` is CMF prompt text, separate from `llm.request`.
+  - llm: responses-prompt
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: "!args.contains('SECRET-MARKER')"
+
   - llm: "*"
     authorization:
       pre_invocation:

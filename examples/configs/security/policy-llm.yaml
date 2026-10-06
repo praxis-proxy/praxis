@@ -8,7 +8,7 @@
 # at `tests/integration/fixtures/llm-policy.yaml` provides a local example.
 # `tests/integration/fixtures/llm-request-policy.yaml` adds OPA and CEL
 # rules that read the parsed request body, such as its `tools`, as
-# `llm.request`.
+# `llm.request`. It also demonstrates a prompt rule over Responses tool history.
 #
 # Requires building with the `policy-engine` feature, which is off
 # by default:

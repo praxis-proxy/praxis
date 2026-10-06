@@ -21,7 +21,7 @@ OPA, CEL, and Cedar steps on `llm:` routes also read the parsed request body as 
 
 A body that repeats a key within one JSON object, at any depth, receives HTTP 400 with violation code `llm.duplicate_key` before any authorization rule runs, since backends disagree on which copy wins. The response names neither the key nor any value. A body that is not valid JSON is not refused for being malformed: it carries no usable `model`, so it is handled like any other body without one.
 
-The CMF prompt text that APL steps and scanners read is projected from `system`, Responses `instructions`, `messages[].content`, legacy `prompt`, and `input`. For Responses and embeddings `input`, only text counts: a string, string items, and `input_text`, `text`, or `output_text` parts of message items. Token-ID arrays, images, and tool outputs are skipped.
+The CMF prompt text that APL steps and scanners read is projected from `system`, Responses `instructions`, `messages[].content`, legacy `prompt`, and `input`. For Responses and embeddings `input`, only text counts: a string, string items, and `input_text`, `text`, or `output_text` parts of message items. Function-call arguments and outputs, custom-tool outputs, and MCP-call arguments and outputs also contribute text. Token-ID arrays and images are skipped.
 
 `body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also enables `cmf.llm_output` for non-streaming inference responses. APL field mutators do not rewrite inference bodies.
 

@@ -143,10 +143,11 @@ enum GatedIdentity {
 ///
 /// The CMF prompt text that APL steps and scanners read is projected from
 /// `system`, Responses `instructions`, `messages[].content`, legacy
-/// `prompt`, and `input`. For
-/// Responses and embeddings `input`, only text counts: a string, string
-/// items, and `input_text`, `text`, or `output_text` parts of message
-/// items. Token-ID arrays, images, and tool outputs are skipped.
+/// `prompt`, and `input`. For Responses and embeddings `input`, only text
+/// counts: a string, string items, and `input_text`, `text`, or
+/// `output_text` parts of message items. Function-call arguments and
+/// outputs, custom-tool outputs, and MCP-call arguments and outputs also
+/// contribute text. Token-ID arrays and images are skipped.
 ///
 /// `body_access: read_write` enables the JSON-RPC re-serialization
 /// round-trip so APL field mutators (`redact()`, `assign()`) rewrite

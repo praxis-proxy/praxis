@@ -219,20 +219,22 @@ fn push_input_text(parts: &mut Vec<ContentPart>, input: &serde_json::Value) {
     }
 }
 
-/// Append text from one message item of an `input` array.
+/// Append message or tool-history text from one `input` item.
 fn push_input_item_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value) {
-    let tool_field = match item.get("type").and_then(serde_json::Value::as_str) {
-        Some("function_call") => Some("arguments"),
-        Some("function_call_output") => Some("output"),
-        Some("message") | None => None,
+    let fields: &[&str] = match item.get("type").and_then(serde_json::Value::as_str) {
+        Some("function_call") => &["arguments"],
+        Some("function_call_output" | "custom_tool_call_output") => &["output"],
+        Some("mcp_call") => &["arguments", "output"],
+        Some("message") | None => return push_input_message_text(parts, item),
         Some(_) => return,
     };
-    if let Some(field) = tool_field {
-        if let Some(value) = item.get(field) {
-            push_text(parts, value);
-        }
-        return;
+    for value in fields.iter().filter_map(|field| item.get(field)) {
+        push_text(parts, value);
     }
+}
+
+/// Append text content from a Responses message, skipping image and file parts.
+fn push_input_message_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value) {
     match item.get("content") {
         Some(content @ serde_json::Value::String(_)) => push_text(parts, content),
         Some(serde_json::Value::Array(content)) => {
@@ -907,6 +909,38 @@ mod tests {
             texts(&parsed.content()),
             vec![r#"{"q":"x"}"#, "result", "next"],
             "function inputs and outputs are part of the context the policy scans",
+        );
+    }
+
+    #[test]
+    fn custom_tool_call_outputs_are_projected() {
+        let parsed = request(
+            r#"{"model":"m","input":[
+                 {"type":"custom_tool_call_output","call_id":"c1","output":"first"},
+                 {"type":"custom_tool_call_output","call_id":"c2","output":[
+                     {"type":"input_text","text":"second"},
+                     {"type":"input_image","image_url":"http://x/y.png"}]}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["first", "second"],
+            "custom-tool output text must reach prompt rules and scanners",
+        );
+    }
+
+    #[test]
+    fn mcp_call_arguments_and_outputs_are_projected() {
+        let parsed = request(
+            r#"{"model":"m","input":[
+                 {"role":"user","content":"before"},
+                 {"type":"mcp_call","id":"mcp1","name":"lookup","server_label":"server",
+                  "arguments":"{\"q\":\"query\"}","output":"result"},
+                 {"role":"user","content":"after"}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["before", r#"{"q":"query"}"#, "result", "after"],
+            "MCP arguments and output must reach prompt rules and scanners in context order",
         );
     }
 

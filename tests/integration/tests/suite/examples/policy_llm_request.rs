@@ -155,6 +155,21 @@ fn responses_body(tools: &[&str]) -> String {
     .to_string()
 }
 
+/// Responses tool history carrying `text` in each formerly skipped field.
+fn responses_tool_history(text: &str) -> [serde_json::Value; 3] {
+    [
+        serde_json::json!({"type": "custom_tool_call_output", "call_id": "c1", "output": text}),
+        serde_json::json!({
+            "type": "mcp_call", "id": "mcp1", "name": "lookup", "server_label": "server",
+            "arguments": "{}", "output": text,
+        }),
+        serde_json::json!({
+            "type": "mcp_call", "id": "mcp1", "name": "lookup", "server_label": "server",
+            "arguments": serde_json::json!({"q": text}).to_string(), "output": "result",
+        }),
+    ]
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -193,6 +208,21 @@ fn a_responses_request_is_authorized_on_its_input_and_forwarded_unchanged() {
 #[test]
 fn a_responses_request_with_a_forbidden_tool_is_denied_before_upstream() {
     assert_denied_unforwarded("/v1/responses", &responses_body(&["lookup", "transfer_funds"]));
+}
+
+#[test]
+fn responses_tool_history_is_subject_to_prompt_rules() {
+    for text in ["SECRET-MARKER", "permitted text"] {
+        for item in responses_tool_history(text) {
+            let body = serde_json::json!({"model": "responses-prompt", "input": [item]}).to_string();
+            if text == "SECRET-MARKER" {
+                let raw = assert_denied_unforwarded("/v1/responses", &body);
+                assert!(!raw.contains(text), "the denial must not echo tool history: {raw}");
+            } else {
+                assert_forwarded_unchanged("/v1/responses", &body);
+            }
+        }
+    }
 }
 
 #[test]
