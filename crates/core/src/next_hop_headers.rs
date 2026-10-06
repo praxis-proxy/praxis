@@ -280,8 +280,7 @@ fn strip_connection_tokens_target<T: HopByHopTarget>(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
     use crate::reserved_headers::HOP_BY_HOP_HEADERS;
