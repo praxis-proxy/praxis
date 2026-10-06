@@ -248,7 +248,7 @@ fn extract_enum_info_captures_internal_tag_and_doc() {
              enum P { Cookie { cookie_name: String }, Header { header_name: String } }",
     )
     .expect("parse enum");
-    let info = extract_enum_info(&item);
+    let info = extract_enum_info(&item, false);
     assert_eq!(info.tag.as_deref(), Some("type"));
     assert!(info.doc.contains("Session persistence mode"));
     assert_eq!(info.variants, vec!["cookie".to_owned(), "header".to_owned()]);
@@ -864,6 +864,55 @@ fn numeric_types_render_language_neutral() {
     assert_eq!(render_type(&i32_ty, &enums), "integer", "signed integers");
     let f64_ty: syn::Type = syn::parse_str("f64").unwrap();
     assert_eq!(render_type(&f64_ty, &enums), "number", "floats");
+}
+
+// -------------------------------------------------------------------------
+// Dispatch-enum rendering
+
+/// Build a two-variant dispatch `EnumInfo` backed by `serde_yaml::Value` payloads.
+fn make_dispatch_enum_info(variants: Vec<String>, is_manually_deserialized: bool) -> EnumInfo {
+    let value_ty: syn::Type = syn::parse_str("serde_yaml :: Value").unwrap();
+    let shapes = vec![
+        EnumVariantShape::Unnamed(Box::new(value_ty.clone())),
+        EnumVariantShape::Unnamed(Box::new(value_ty)),
+    ];
+    EnumInfo {
+        variants,
+        untagged: false,
+        tag: None,
+        doc: String::new(),
+        variant_shapes: shapes,
+        fields: vec![],
+        variant_docs: vec!["First variant doc.".to_owned(), "Second variant doc.".to_owned()],
+        is_manually_deserialized,
+    }
+}
+
+#[test]
+fn dispatch_enum_rows_manual_impl_converts_to_snake_case() {
+    let info = make_dispatch_enum_info(vec!["RegexReplace".to_owned(), "AddQueryParams".to_owned()], true);
+    let items = ModuleItems::new();
+    let mut out = Vec::new();
+    append_dispatch_enum_rows("operations[]", &info, &items, &mut out);
+
+    assert_eq!(out.len(), 2, "one row per variant");
+    assert_eq!(out[0].name, "operations[].regex_replace", "PascalCase → snake_case");
+    assert_eq!(out[0].type_str, "any", "serde_yaml::Value renders as 'any'");
+    assert_eq!(out[0].doc, "First variant doc.", "variant doc forwarded");
+    assert!(matches!(out[0].required, RequiredKind::OneOf), "must be OneOf");
+    assert_eq!(out[1].name, "operations[].add_query_params");
+}
+
+#[test]
+fn dispatch_enum_rows_derived_impl_uses_resolved_names() {
+    // Derived enum with rename_all = "snake_case" already resolved by extract_enum_info.
+    let info = make_dispatch_enum_info(vec!["fast_mode".to_owned(), "slow_mode".to_owned()], false);
+    let items = ModuleItems::new();
+    let mut out = Vec::new();
+    append_dispatch_enum_rows("ops[]", &info, &items, &mut out);
+
+    assert_eq!(out[0].name, "ops[].fast_mode", "already-resolved name used as-is");
+    assert_eq!(out[1].name, "ops[].slow_mode");
 }
 
 // -------------------------------------------------------------------------

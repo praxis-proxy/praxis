@@ -237,13 +237,12 @@ fn handle_list(registry: &KvStoreRegistry, store: &str) -> Response<Vec<u8>> {
 ///
 /// # Deprecation
 ///
-/// Prefer passing `kv_registry` to [`add_admin_endpoints_to_pingora_server`]
-/// instead. It creates a separate Pingora `Service` that binds to the
-/// same port via `SO_REUSEPORT`, causing non-deterministic connection
-/// routing that breaks health probes.
+/// Prefer passing the registry through [`AdminEndpointOptions`] and registering
+/// the API listener with [`add_admin_api_to_pingora_server`].
 ///
-/// [`add_admin_endpoints_to_pingora_server`]: crate::http::pingora::health::add_admin_endpoints_to_pingora_server
-#[deprecated(note = "pass KvStoreRegistry to add_admin_endpoints_to_pingora_server instead")]
+/// [`AdminEndpointOptions`]: crate::http::pingora::health::AdminEndpointOptions
+/// [`add_admin_api_to_pingora_server`]: crate::http::pingora::health::add_admin_api_to_pingora_server
+#[deprecated(note = "pass KvStoreRegistry through AdminEndpointOptions to add_admin_api_to_pingora_server")]
 pub fn add_kv_endpoint_to_pingora_server(server: &mut Server, admin_addr: &str, registry: KvStoreRegistry) {
     let kv = PingoraKvService {
         registry,

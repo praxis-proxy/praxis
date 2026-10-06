@@ -29,7 +29,7 @@ fn proxy_yaml(cluster: &str, proxy_port: u16, admin_port: u16, backend_port: u16
     format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 metrics:
 {templates}
 listeners:

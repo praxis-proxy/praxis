@@ -10,18 +10,21 @@ Logs structured access records for each request and response.
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `sample_rate` | number | no | Fraction of requests to log (0.0, 1.0]. Defaults to 1.0. |
-| `fields` | any[] | no | Scalar field tokens; replaces the default ten when present. |
+| `fields` | any[] | no | Scalar field tokens; replaces the default ten when present. Mutually exclusive with `template`. |
 | `request_headers` | string[] | no | Request header names allowed for `request_header.<name>` tokens. |
 | `response_headers` | string[] | no | Response header names allowed for `response_header.<name>` tokens. |
 | `conditions` | AccessLogEmitConditions | no | Emit-time conditions (AND across keys). |
 | `conditions.min_duration_ms` | integer | no |  |
 | `conditions.status_classes` | (`1xx` \| `2xx` \| `3xx` \| `4xx` \| `5xx`)[] | no |  |
 | `conditions.paths` | string[] | no |  |
+| `template` | string | no | Text template with `{field}` placeholders. The rendered string is logged as the `line` field of the `access` event, and `PRAXIS_LOG_FORMAT` still decides text or JSON output. Mutually exclusive with `fields`. |
 | `sink` | SinkConfig | no | Output sink: `{type: stdout}` or `{type: file, path: ...}`. Omitted means emit through the tracing subscriber. |
 | `sink.type` | `stdout` \| `file` | yes | Sink kind (`stdout` or `file`). |
 | `sink.path` | string | no | File path; required for `file`, rejected for `stdout`. |
 
-## Example
+## Examples
+
+### Example 1
 
 ```yaml
 filter: access_log
@@ -42,4 +45,13 @@ conditions:                   # optional emit-time gates (AND across keys)
 sink:                         # optional; default emits via the subscriber
   type: file                  # `stdout` or `file`
   path: /var/log/praxis/access.log  # required for `file`, rejected for `stdout`
+```
+
+### Example 2
+
+```yaml
+filter: access_log
+# Mutually exclusive with `fields`; quote client-controlled tokens.
+template: '{method} {path} [{status}] {duration_ms}ms ua="{request_header.user-agent}"'
+request_headers: [user-agent]
 ```

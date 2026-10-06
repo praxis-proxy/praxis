@@ -9,6 +9,7 @@ pub use test_utils::load_example_config;
 
 mod access_log_fields;
 mod access_log_file_sink;
+mod access_log_template;
 mod access_logging;
 mod admin_interface;
 mod all_examples_validate;

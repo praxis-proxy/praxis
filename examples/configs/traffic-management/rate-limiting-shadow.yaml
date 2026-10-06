@@ -8,7 +8,7 @@
 # Responses still carry the X-RateLimit-* headers, so a drained bucket
 # shows up as "X-RateLimit-Remaining: 0" on a 200. Would-be rejections
 # are counted in praxis_rate_limit_limited_total{shadow="true"} on the
-# admin /metrics endpoint and logged as shadow decisions. Remove
+# metrics listener and logged as shadow decisions. Remove
 # `shadow: true` to start enforcing.
 #
 # Usage:
@@ -17,7 +17,7 @@
 #   curl -s http://localhost:9901/metrics | grep rate_limit_limited
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9901"
 
 listeners:
   - name: web

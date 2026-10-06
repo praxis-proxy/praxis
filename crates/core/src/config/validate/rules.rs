@@ -5,6 +5,7 @@
 
 use std::{
     collections::HashSet,
+    net::SocketAddr,
     path::{Component, Path},
 };
 
@@ -15,7 +16,7 @@ use super::{
     cluster::validate_clusters,
     filter_chain::{validate_filter_chains, validate_selected_upstream_matchers},
     inline_clusters::{validate_inline_clusters, validate_tcp_listener_clusters},
-    listener::{validate_listener_names, validate_listeners},
+    listener::{addresses_overlap, validate_listener_names, validate_listeners},
 };
 use crate::{
     config::{
@@ -78,14 +79,37 @@ impl Config {
     /// let err = Config::from_yaml("listeners: []\n").unwrap_err();
     /// assert!(err.to_string().contains("at least one listener"));
     /// ```
+    #[expect(clippy::too_many_lines, reason = "top-level configuration validation sequence")]
     pub fn validate(&mut self) -> Result<(), ProxyError> {
         warn_active_insecure_options(&self.insecure_options);
         validate_listeners(&mut self.listeners)?;
         validate_listener_names(&self.listeners)?;
         validate_filter_chains(&self.filter_chains, &self.listeners)?;
         validate_branch_chains(&self.filter_chains)?;
-        validate_admin_address(self.admin.address.as_deref(), self.insecure_options.allow_public_admin)?;
-        warn_filter_duration_without_admin(self.metrics.filter_duration, self.admin.address.is_some());
+        let metrics_address = self
+            .admin
+            .metrics_address
+            .as_deref()
+            .map(|addr| parse_management_address("admin.metrics_address", addr))
+            .transpose()?;
+        if let Some(address) = metrics_address
+            && !normalize_mapped_ipv4(address.ip()).is_loopback()
+        {
+            warn!(
+                address = %address,
+                "health and metrics listener binds to a non-loopback address without authentication"
+            );
+        }
+        let admin_address = validate_admin_address(
+            "admin.address",
+            self.admin.address.as_deref(),
+            self.insecure_options.allow_public_admin,
+        )?;
+        validate_management_listener_addresses(admin_address, metrics_address, &self.listeners)?;
+        warn_filter_duration_without_metrics_endpoint(
+            self.metrics.filter_duration,
+            self.admin.metrics_address.is_some(),
+        );
 
         for listener in &self.listeners {
             if listener.protocol != ProtocolKind::Tcp && listener.filter_chains.is_empty() {
@@ -237,33 +261,98 @@ fn validate_cluster_names(clusters: &[crate::config::Cluster]) -> Result<(), Pro
 // Admin Address Validation
 // -----------------------------------------------------------------------------
 
-/// Reject admin addresses that bind outside loopback unless explicitly allowed.
-fn validate_admin_address(addr: Option<&str>, allow_public: bool) -> Result<(), ProxyError> {
-    let Some(addr) = addr else { return Ok(()) };
-    let socket_addr: std::net::SocketAddr = addr
-        .parse()
-        .map_err(|_parse_err| ProxyError::Config(format!("invalid admin_address '{addr}'")))?;
+/// Reject admin API addresses that bind outside loopback unless explicitly allowed.
+fn validate_admin_address(
+    field: &str,
+    addr: Option<&str>,
+    allow_public: bool,
+) -> Result<Option<SocketAddr>, ProxyError> {
+    let Some(addr) = addr else { return Ok(None) };
+    let socket_addr = parse_management_address(field, addr)?;
     if normalize_mapped_ipv4(socket_addr.ip()).is_loopback() {
-        return Ok(());
+        return Ok(Some(socket_addr));
     }
     if allow_public {
         warn!(
-            admin_address = %addr,
-            "admin endpoint binds to a non-loopback address; allowed by insecure_options.allow_public_admin"
+            address = %addr,
+            field,
+            "admin API binds to a non-loopback address; allowed by insecure_options.allow_public_admin"
         );
-        return Ok(());
+        return Ok(Some(socket_addr));
     }
     Err(ProxyError::Config(format!(
-        "admin endpoint '{addr}' must bind to a loopback address (127.0.0.1 or [::1]); \
+        "{field} '{addr}' must bind to a loopback address (127.0.0.1 or [::1]); \
          set insecure_options.allow_public_admin: true to allow non-loopback binding"
     )))
 }
 
-/// Warn when filter duration metrics are enabled but the admin endpoint is disabled.
-pub(super) fn warn_filter_duration_without_admin(filter_duration: bool, admin_enabled: bool) {
-    if filter_duration && !admin_enabled {
+/// Parse a management listener address without imposing a bind-interface policy.
+fn parse_management_address(field: &str, addr: &str) -> Result<SocketAddr, ProxyError> {
+    addr.parse()
+        .map_err(|_parse_err| ProxyError::Config(format!("invalid {field} '{addr}'")))
+}
+
+/// Reject management listeners that overlap each other or a data listener.
+fn validate_management_listener_addresses(
+    admin_address: Option<SocketAddr>,
+    metrics_address: Option<SocketAddr>,
+    listeners: &[crate::config::Listener],
+) -> Result<(), ProxyError> {
+    if let (Some(admin), Some(metrics)) = (admin_address, metrics_address)
+        && addresses_overlap(admin, metrics)
+    {
+        return Err(ProxyError::Config(
+            "admin.address and admin.metrics_address must not overlap; configure distinct ports or non-overlapping IP addresses"
+                .to_owned(),
+        ));
+    }
+
+    if admin_address.is_none() && metrics_address.is_none() {
+        return Ok(());
+    }
+
+    let listener_addresses = parse_listener_addresses(listeners)?;
+
+    for (field, management_address) in [
+        ("admin.address", admin_address),
+        ("admin.metrics_address", metrics_address),
+    ] {
+        let Some(management_address) = management_address else {
+            continue;
+        };
+        for (listener, listener_address) in &listener_addresses {
+            if addresses_overlap(management_address, *listener_address) {
+                return Err(ProxyError::Config(format!(
+                    "{field} overlaps listener '{}' address '{}'; configure distinct ports or non-overlapping IP addresses",
+                    listener.name, listener.address
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse each data-listener address once for management overlap checks.
+fn parse_listener_addresses(
+    listeners: &[crate::config::Listener],
+) -> Result<Vec<(&crate::config::Listener, SocketAddr)>, ProxyError> {
+    listeners
+        .iter()
+        .map(|listener| {
+            listener
+                .address
+                .parse::<SocketAddr>()
+                .map(|address| (listener, address))
+                .map_err(|_parse_err| ProxyError::Config(format!("invalid listener address '{}'", listener.address)))
+        })
+        .collect()
+}
+
+/// Warn when filter duration metrics are enabled without a metrics endpoint.
+pub(super) fn warn_filter_duration_without_metrics_endpoint(filter_duration: bool, metrics_enabled: bool) {
+    if filter_duration && !metrics_enabled {
         warn!(
-            "metrics.filter_duration is enabled but admin is disabled; \
+            "metrics.filter_duration is enabled but admin.metrics_address is unset; \
              filter duration metrics will be recorded but not scrapeable via /metrics"
         );
     }
@@ -588,7 +677,7 @@ filter_chains:
         status: 200
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(err.to_string().contains("invalid admin_address"), "got: {err}");
+        assert!(err.to_string().contains("invalid admin.address"), "got: {err}");
     }
 
     #[test]
@@ -608,6 +697,115 @@ filter_chains:
 "#;
         let config = Config::from_yaml(yaml).unwrap();
         assert_eq!(config.admin.address.as_deref(), Some("127.0.0.1:9901"));
+    }
+
+    #[test]
+    fn reject_invalid_metrics_address_with_its_config_key() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+admin:
+  metrics_address: "not-valid"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("invalid admin.metrics_address"), "got: {err}");
+    }
+
+    #[test]
+    fn accept_public_metrics_address_without_public_admin_override() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+admin:
+  metrics_address: "0.0.0.0:9902"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(config.admin.metrics_address.as_deref(), Some("0.0.0.0:9902"));
+    }
+
+    #[test]
+    fn reject_identical_admin_and_metrics_socket_addresses() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+admin:
+  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9901"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("must not overlap"), "got: {err}");
+        assert!(
+            err.to_string()
+                .contains("configure distinct ports or non-overlapping IP addresses"),
+            "overlap error should include a remediation hint: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_overlapping_wildcard_admin_and_metrics_addresses() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+admin:
+  address: "0.0.0.0:9901"
+  metrics_address: "127.0.0.1:9901"
+insecure_options:
+  allow_public_admin: true
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("must not overlap"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_management_listener_overlapping_data_listener() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+admin:
+  metrics_address: "127.0.0.1:8080"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("overlaps listener 'web'"), "got: {err}");
+        assert!(
+            err.to_string()
+                .contains("configure distinct ports or non-overlapping IP addresses"),
+            "overlap error should include a remediation hint: {err}"
+        );
     }
 
     #[test]

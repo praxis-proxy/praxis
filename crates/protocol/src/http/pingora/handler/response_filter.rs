@@ -79,11 +79,28 @@ pub(super) async fn execute(
     ctx.response_phase_done = true;
 
     let (result, filter_flagged_modification) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
+    let rewritten_is_bodyless = ctx
+        .request_snapshot
+        .as_ref()
+        .is_some_and(|request| praxis_filter::bodyless_response(resp.status, &request.method));
+    let is_connect_tunnel = ctx
+        .request_snapshot
+        .as_ref()
+        .is_some_and(|request| successful_connect_tunnel(&request.method, resp.status));
+    let restored_chunked_framing = matches!(
+        &result,
+        Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone)
+    ) && restore_http11_framing(
+        &mut resp,
+        ctx.client_http_version,
+        is_bodyless || rewritten_is_bodyless || is_connect_tunnel || is_upgrade_response,
+    );
     // A filter may rearrange the header name sequence without changing the
     // header count, so the count alone cannot decide whether the direct
     // write-back is safe. Re-fingerprint and treat any change to the name
     // sequence as a modification, independent of what filters self-reported.
     let headers_modified = filter_flagged_modification
+        || restored_chunked_framing
         || name_fingerprint_before.is_some_and(|before| header_name_fingerprint(&resp.headers) != before);
     // Upstream-supplied reserved internal headers were stripped before the
     // pipeline ran, but a response filter can add one afterwards; re-strip so
@@ -108,6 +125,36 @@ pub(super) async fn execute(
         });
     }
     handle_response_result(result, upstream_response, resp, headers_modified, is_bodyless, ctx)
+}
+
+/// A successful CONNECT switches to tunnel bytes instead of a response body.
+fn successful_connect_tunnel(method: &http::Method, status: http::StatusCode) -> bool {
+    method == http::Method::CONNECT && status.is_success()
+}
+
+/// Reframe a body rewritten by a filter so an HTTP/1.1 connection can persist
+/// under [RFC 9112 Section 6.3] and [RFC 9112 Section 9.3].
+///
+/// [RFC 9112 Section 6.3]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.3
+/// [RFC 9112 Section 9.3]: https://datatracker.ietf.org/doc/html/rfc9112#section-9.3
+fn restore_http11_framing(
+    resp: &mut praxis_filter::Response,
+    client_version: Option<http::Version>,
+    is_bodyless: bool,
+) -> bool {
+    if client_version != Some(http::Version::HTTP_11)
+        || is_bodyless
+        || resp.headers.contains_key(http::header::CONTENT_LENGTH)
+        || resp.headers.contains_key(http::header::TRANSFER_ENCODING)
+    {
+        return false;
+    }
+
+    let _old = resp.headers.insert(
+        http::header::TRANSFER_ENCODING,
+        http::HeaderValue::from_static("chunked"),
+    );
+    true
 }
 
 /// Run the response pipeline and capture the result plus header-modified flag.
@@ -359,6 +406,89 @@ mod tests {
     use praxis_filter::{FilterRegistry, Request};
 
     use super::*;
+
+    #[test]
+    fn removed_content_length_restores_only_http11_body_framing() {
+        for version in [http::Version::HTTP_10, http::Version::HTTP_2] {
+            let mut resp = praxis_filter::Response {
+                headers: http::HeaderMap::new(),
+                status: http::StatusCode::OK,
+            };
+            assert!(!restore_http11_framing(&mut resp, Some(version), false));
+            assert!(!resp.headers.contains_key(http::header::TRANSFER_ENCODING));
+        }
+
+        let mut resp = praxis_filter::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::OK,
+        };
+        assert!(restore_http11_framing(&mut resp, Some(http::Version::HTTP_11), false));
+        assert_eq!(resp.headers.get(http::header::TRANSFER_ENCODING).unwrap(), "chunked");
+    }
+
+    #[test]
+    fn removed_transfer_encoding_restores_http11_framing() {
+        let mut resp = praxis_filter::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::OK,
+        };
+        resp.headers.insert(
+            http::header::TRANSFER_ENCODING,
+            http::HeaderValue::from_static("chunked"),
+        );
+        resp.headers.remove(http::header::TRANSFER_ENCODING);
+        assert!(restore_http11_framing(&mut resp, Some(http::Version::HTTP_11), false));
+        assert_eq!(resp.headers.get(http::header::TRANSFER_ENCODING).unwrap(), "chunked");
+    }
+
+    #[test]
+    fn bodyless_responses_are_not_reframed() {
+        let mut resp = praxis_filter::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::OK,
+        };
+        assert!(!restore_http11_framing(&mut resp, Some(http::Version::HTTP_11), true));
+        assert!(!resp.headers.contains_key(http::header::TRANSFER_ENCODING));
+    }
+
+    #[test]
+    fn successful_connect_tunnel_is_not_reframed() {
+        let mut resp = praxis_filter::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::OK,
+        };
+        let is_connect_tunnel = successful_connect_tunnel(&http::Method::CONNECT, resp.status);
+        assert!(!successful_connect_tunnel(
+            &http::Method::CONNECT,
+            http::StatusCode::BAD_GATEWAY
+        ));
+        assert!(!successful_connect_tunnel(&http::Method::GET, resp.status));
+        assert!(!restore_http11_framing(
+            &mut resp,
+            Some(http::Version::HTTP_11),
+            is_connect_tunnel
+        ));
+        assert!(!resp.headers.contains_key(http::header::TRANSFER_ENCODING));
+    }
+
+    #[test]
+    fn existing_length_or_chunking_is_preserved() {
+        let mut resp = praxis_filter::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::OK,
+        };
+        resp.headers
+            .insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("2"));
+        assert!(!restore_http11_framing(&mut resp, Some(http::Version::HTTP_11), false));
+        assert!(!resp.headers.contains_key(http::header::TRANSFER_ENCODING));
+        resp.headers.remove(http::header::CONTENT_LENGTH);
+        resp.headers.insert(
+            http::header::TRANSFER_ENCODING,
+            http::HeaderValue::from_static("chunked"),
+        );
+        assert!(!restore_http11_framing(&mut resp, Some(http::Version::HTTP_11), false));
+        assert_eq!(resp.headers.get(http::header::TRANSFER_ENCODING).unwrap(), "chunked");
+    }
 
     #[tokio::test]
     async fn empty_pipeline_passes_through() {

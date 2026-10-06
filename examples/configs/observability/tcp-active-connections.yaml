@@ -2,18 +2,17 @@
 #
 # Prometheus gauge for TCP connections currently open per listener.
 # Incremented on accept and decremented when the session ends, including
-# early closes such as connect failures. Scraped via the admin /metrics
-# endpoint.
+# early closes such as connect failures. Scraped via the health/metrics listener.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/tcp-active-connections.yaml
 #
 # Exercise:
 #   echo "hi" | nc localhost 5432
-#   curl -s http://localhost:9901/metrics | grep tcp_active_connections
+#   curl -s http://localhost:9902/metrics | grep tcp_active_connections
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 insecure_options:
   allow_private_upstreams: true

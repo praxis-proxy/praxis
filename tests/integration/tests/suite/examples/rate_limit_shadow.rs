@@ -19,22 +19,22 @@ use praxis_test_utils::{
 fn rate_limiting_shadow_example_allows_everything_and_counts_would_be_rejections() {
     let backend = start_backend_with_shutdown("ok");
     let proxy_port = free_port();
-    let admin_port = free_port();
+    let metrics_port = free_port();
     let config = super::load_example_config(
         "traffic-management/rate-limiting-shadow.yaml",
         proxy_port,
         HashMap::from([
             ("127.0.0.1:8080", proxy_port),
             ("127.0.0.1:3000", backend.port()),
-            ("127.0.0.1:9901", admin_port),
+            ("127.0.0.1:9901", metrics_port),
         ]),
     );
 
     let _proxy = start_full_proxy(&config);
     let proxy = format!("127.0.0.1:{proxy_port}");
     wait_for_tcp(&proxy);
-    let admin = format!("127.0.0.1:{admin_port}");
-    wait_for_tcp(&admin);
+    let metrics = format!("127.0.0.1:{metrics_port}");
+    wait_for_tcp(&metrics);
 
     let mut drained = false;
     for i in 0..10 {
@@ -55,7 +55,7 @@ fn rate_limiting_shadow_example_allows_everything_and_counts_would_be_rejections
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut body = String::new();
     while std::time::Instant::now() < deadline {
-        let (status, scrape) = http_get(&admin, "/metrics", None);
+        let (status, scrape) = http_get(&metrics, "/metrics", None);
         assert_eq!(status, 200, "/metrics should return 200");
         body = scrape;
         if body.contains(series) {

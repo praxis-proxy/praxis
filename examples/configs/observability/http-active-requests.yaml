@@ -3,17 +3,17 @@
 # Prometheus gauge for HTTP requests currently in flight per listener.
 # Incremented on admission and decremented when the request context is
 # dropped, so client aborts and reset streams are accounted for. Scraped
-# via the admin /metrics endpoint.
+# via the metrics listener.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/http-active-requests.yaml
 #
 # Exercise:
 #   curl -s http://localhost:8080/
-#   curl -s http://localhost:9901/metrics | grep http_active_requests
+#   curl -s http://localhost:9902/metrics | grep http_active_requests
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 insecure_options:
   allow_private_endpoints: true

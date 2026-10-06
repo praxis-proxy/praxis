@@ -1,0 +1,43 @@
+# URL Rewriting — preserve_query_params_only
+#
+# Drop every query param except the ones listed (allowlist).
+# Unlike strip_query_params (denylist: remove these, keep the rest),
+# preserve_query_params_only keeps only what is explicitly listed.
+#
+# Note: parameter matching is &-delimited only. A backend that also treats ;
+# as a separator may see additional parameters inside a retained pair's value.
+# This filter is not a security gate for such backends.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/transformation/url-rewriting-preserve.yaml
+#   curl "http://localhost:8080/api?api-version=2024-01&user=alice&debug=1&trace=yes"
+#   # Request reaches backend as /api?api-version=2024-01&user=alice
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: url_rewrite
+        operations:
+          - preserve_query_params_only:
+              - api-version
+              - user
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

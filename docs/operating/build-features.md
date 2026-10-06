@@ -67,7 +67,7 @@ really is out of the build.
 | Feature | Default | Enables | Turn it off / on when |
 | ------- | ------- | ------- | --------------------- |
 | `config-reload` | on | Config-file and TLS-certificate hot-reload (filesystem watching). | Off for a static-config deployment: drops both watchers and the `notify`, `arc-swap`, and `tokio` dependencies they pull into the TLS crate. |
-| `admin-api` | on | The admin HTTP service: management API (`/api/*`), Prometheus `/metrics`, and `/healthy` + `/ready`. | Off when the proxy exposes no monitoring or management surface. The data path and background health checks are unaffected; only the HTTP endpoints go away. |
+| `admin-api` | on | The admin HTTP services: management API (`/api/*`) on `admin.address`, and `/healthy`, `/ready`, `/metrics` on `admin.metrics_address`. | Off when the proxy exposes no monitoring or management surface. The data path and background health checks are unaffected; only the HTTP endpoints go away. |
 | `otel` | off | OpenTelemetry / OTLP span export for traces. | On for distributed tracing. Pulls in a heavy `opentelemetry` + `tonic` dependency graph. |
 | `policy-engine` | on | The `policy` filter (Praxis Policy Engine: OPA-style route policy, JWT identity, token exchange). | Off for a deployment that does no policy-based authorization: it is the heaviest optional dependency, so dropping it is the largest single saving in build time and binary size. |
 | `basic-auth-filter` | off (experimental) | The `basic_auth` filter. | Dev and testing only. Slated for removal in favor of the policy engine ([praxis-proxy/policy]); prefer that for authentication. |
@@ -137,7 +137,8 @@ production` at startup. Do not run an experimental build in production.
 ## Notes
 
 - **Runtime still gates behavior.** Building with `admin-api` does not start
-  the admin endpoints; they bind only when `admin.address` is configured. A
+  the admin endpoints; they bind only when `admin.address` or
+  `admin.metrics_address` is configured. A
   listener's `hot_reload: true` key takes effect only when the binary was
   built with `config-reload`; otherwise the certificate is served statically
   and a startup warning is logged.

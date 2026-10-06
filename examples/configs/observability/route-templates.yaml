@@ -3,7 +3,7 @@
 # Collapses dynamic path segments in the Prometheus route label into stable
 # templates, so high-variety URLs share one series instead of widening
 # cardinality. More precise than a prefix route, still bounded. Scraped via
-# the admin /metrics endpoint.
+# the metrics listener.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/observability/route-templates.yaml
@@ -11,10 +11,10 @@
 # Exercise:
 #   curl -s http://localhost:8080/users/42/orders
 #   curl -s http://localhost:8080/users/99/orders
-#   curl -s http://localhost:9901/metrics | grep 'route="/users'
+#   curl -s http://localhost:9902/metrics | grep 'route="/users'
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 metrics:
   route_templates:

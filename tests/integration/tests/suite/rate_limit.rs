@@ -362,11 +362,11 @@ fn rate_limit_shadow_counts_would_be_rejections() {
     let backend_port_guard = start_backend_with_shutdown("ok");
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
-    let admin_port = free_port();
+    let metrics_port = free_port();
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{metrics_port}"
 listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
@@ -397,12 +397,12 @@ insecure_options:
     let _proxy = start_full_proxy(&config);
     let proxy = format!("127.0.0.1:{proxy_port}");
     wait_for_tcp(&proxy);
-    let admin = format!("127.0.0.1:{admin_port}");
-    wait_for_tcp(&admin);
+    let metrics = format!("127.0.0.1:{metrics_port}");
+    wait_for_tcp(&metrics);
 
     let series = "praxis_rate_limit_limited_total{shadow=\"true\"} ";
     let limited_total = || {
-        let (status, body) = http_get(&admin, "/metrics", None);
+        let (status, body) = http_get(&metrics, "/metrics", None);
         assert_eq!(status, 200, "/metrics should return 200");
         body.lines()
             .find_map(|line| line.strip_prefix(series))

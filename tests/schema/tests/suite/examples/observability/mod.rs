@@ -4,6 +4,7 @@
 //! Observability example configuration tests.
 
 mod access_log_fields;
+mod access_log_template;
 mod access_logging;
 #[cfg(feature = "cloud-events-filter")]
 mod cloud_events;

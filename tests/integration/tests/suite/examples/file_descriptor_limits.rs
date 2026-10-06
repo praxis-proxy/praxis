@@ -151,7 +151,7 @@ fn file_descriptor_limits_example_sheds_near_the_limit() {
 /// shutdown grace period, so stopping it does not wait out the default.
 fn example_yaml(port: u16, admin: u16, backend: u16, replacements: &[(&str, &str)]) -> String {
     let yaml = std::fs::read_to_string(example_config_path(EXAMPLE)).expect("read example");
-    let ports = HashMap::from([("127.0.0.1:9901", admin), ("127.0.0.1:3000", backend)]);
+    let ports = HashMap::from([("127.0.0.1:9902", admin), ("127.0.0.1:3000", backend)]);
     let mut patched = allow_loopback_endpoints(&patch_yaml(&yaml, port, &ports));
     for (from, to) in replacements {
         assert!(patched.contains(from), "the example must contain {from:?}");

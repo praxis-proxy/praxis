@@ -55,6 +55,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | ------ | ------------- |
 | [access-log-fields.yaml](configs/observability/access-log-fields.yaml) | Logs only server errors with a lean field set |
 | [access-log-file-sink.yaml](configs/observability/access-log-file-sink.yaml) | Writes NDJSON access log records directly to a file, bypassing the tracing subscriber |
+| [access-log-template.yaml](configs/observability/access-log-template.yaml) | Renders a configurable text line for each request |
 | [access-logging.yaml](configs/observability/access-logging.yaml) | Structured JSON logging with sampling; logs ~10% of requests. request_id ensures each log line has a correlation ID. access_log emits method, path, status, and timing |
 | [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after the upstream response completes |
 | [errors-total.yaml](configs/observability/errors-total.yaml) | Prometheus counter for proxy errors classified by cause, covering filter rejections, timeouts, unreachable upstreams and internal faults |
@@ -78,7 +79,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 
 | File | Description |
 | ------ | ------------- |
-| [admin-interface.yaml](configs/operations/admin-interface.yaml) | Exposes an admin endpoint for operational health checks, readiness probes, and Prometheus metrics |
+| [admin-interface.yaml](configs/operations/admin-interface.yaml) | Exposes separate admin API and health/metrics listeners |
 | [container-default.yaml](configs/operations/container-default.yaml) | Default config for containerized deployments |
 | [file-descriptor-limits.yaml](configs/operations/file-descriptor-limits.yaml) | Size and protect the proxy's open file descriptor budget: pin the process limit, shed requests with 503 before descriptors run out, and close idle keep-alive clients and pooled upstream connections so they cannot pin descriptors |
 | [hot-reload.yaml](configs/operations/hot-reload.yaml) | Filter pipelines are swapped atomically at runtime when the config file changes |
@@ -217,4 +218,5 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [grpc-status-errors.yaml](configs/transformation/grpc-status-errors.yaml) | Answers proxy-generated errors in the shape gRPC clients expect. gRPC carries a call's outcome in a `grpc-status` header on an HTTP 200, not in the HTTP status, so a client that meets Praxis's own 403 or 502 sees a bare transport failure with no usable status |
 | [header-manipulation.yaml](configs/transformation/header-manipulation.yaml) | Add, overwrite, and remove headers on requests and responses |
 | [path-rewriting.yaml](configs/transformation/path-rewriting.yaml) | Rewrite request paths before forwarding to upstream |
+| [url-rewriting-preserve.yaml](configs/transformation/url-rewriting-preserve.yaml) | Drop every query param except the ones listed (allowlist) |
 | [url-rewriting.yaml](configs/transformation/url-rewriting.yaml) | Regex-based path transformation and query string manipulation |

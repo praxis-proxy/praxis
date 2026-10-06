@@ -4,30 +4,34 @@
 #
 # Operations execute in declared order:
 #
-#   /v1/users?debug=true&trace=1
+#   /v1/users?api-version=2024-01&user=alice&debug=true
 #        |
 #        v
-#   +-------------------------+
-#   | regex_replace           |  /v1/users -> /v2/users
-#   +-------------------------+
+#   +------------------------------+
+#   | regex_replace                |  /v1/users -> /v2/users
+#   +------------------------------+
 #        |
 #        v
-#   +-------------------------+
-#   | strip_query_params      |  ?debug=true&trace=1 -> (empty)
-#   +-------------------------+
+#   +------------------------------+
+#   | preserve_query_params_only   |  keeps only api-version and user
+#   +------------------------------+
 #        |
 #        v
-#   +-------------------------+
-#   | add_query_params        |  -> ?source=gateway
-#   +-------------------------+
+#   +------------------------------+
+#   | add_query_params             |  appends source=gateway
+#   +------------------------------+
 #        |
 #        v
-#   /v2/users?source=gateway
+#   /v2/users?api-version=2024-01&user=alice&source=gateway
+#
+# preserve_query_params_only is an allowlist: keep only these params, drop
+# everything else. For targeted removal use strip_query_params (a denylist).
+# See url-rewriting-preserve.yaml for a focused preserve example.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/transformation/url-rewriting.yaml
-#   curl http://localhost:8080/v1/users?debug=true
-#   # Request reaches backend as /v2/users?source=gateway
+#   curl "http://localhost:8080/v1/users?api-version=2024-01&user=alice&debug=true"
+#   # Request reaches backend as /v2/users?api-version=2024-01&user=alice&source=gateway
 #
 # NOTE: The router checks rewritten_path before the original
 # URI, so "rewrite then route" pipelines work: place a rewrite
@@ -55,9 +59,9 @@ filter_chains:
           - regex_replace:
               pattern: "^/v1/(.*)"
               replacement: "/v2/$1"
-          - strip_query_params:
-              - debug
-              - trace
+          - preserve_query_params_only:
+              - api-version
+              - user
           - add_query_params:
               source: gateway
 

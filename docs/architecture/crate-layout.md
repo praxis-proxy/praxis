@@ -182,7 +182,7 @@ praxis-protocol                 Protocol adapters
 │       ├── health/             Active health checking
 │       │   ├── probe           HTTP and TCP health check probes
 │       │   ├── runner          Background health check runner
-│       │   └── service         Admin health-check service (/ready, /healthy)
+│       │   └── service         Admin API and health/metrics services
 │       ├── json                JSON HTTP response builder
 │       ├── kv                  KV store admin CRUD endpoints
 │       ├── listener            TCP/TLS listener setup
