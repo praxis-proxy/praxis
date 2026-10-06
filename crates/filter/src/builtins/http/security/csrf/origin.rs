@@ -1,48 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Origin extraction and matching logic for the CSRF filter.
+//! Origin extraction logic for the CSRF filter.
 
 use http::HeaderMap;
 
-use super::super::{
-    origin_matcher::{OriginMatcher, build_origin_matcher},
-    origin_normalize::normalize_origin,
-};
-
-// -----------------------------------------------------------------------------
-// TrustedOrigins
-// -----------------------------------------------------------------------------
-
-/// CSRF-specific wrapper around [`OriginMatcher`].
-///
-/// Exposes `is_trusted()` for CSRF semantics while
-/// delegating matching to the shared implementation.
-///
-/// [`OriginMatcher`]: super::super::origin_matcher::OriginMatcher
-pub(super) struct TrustedOrigins(OriginMatcher);
-
-impl TrustedOrigins {
-    /// Check whether `origin` is trusted.
-    pub(super) fn is_trusted(&self, origin: &str) -> bool {
-        self.0.is_allowed(origin)
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Builder
-// -----------------------------------------------------------------------------
-
-/// Build the [`TrustedOrigins`] from the configured origins list.
-///
-/// Configured origins are normalized so that default ports
-/// (`:443` for HTTPS, `:80` for HTTP) are stripped before
-/// insertion, ensuring [RFC 6454] equivalence.
-///
-/// [RFC 6454]: https://datatracker.ietf.org/doc/html/rfc6454
-pub(super) fn build_trusted_origins(origins: &[String]) -> TrustedOrigins {
-    TrustedOrigins(build_origin_matcher(origins))
-}
+use super::super::origin_normalize::normalize_origin;
 
 // -----------------------------------------------------------------------------
 // Origin Extraction

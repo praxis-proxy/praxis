@@ -350,6 +350,7 @@ impl FilterPipeline {
     ///             path_prefix: Some("/api".to_owned()),
     ///             methods: None,
     ///             headers: None,
+    ///             headers_present: None,
     ///             bound_upstream: None,
     ///             selected_upstream: None,
     ///         },

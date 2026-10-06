@@ -28,7 +28,6 @@ otel = [
 ]
 
 cloud-events-filter = [
-    "dep:chrono",
     "dep:url",
 ]
 
@@ -70,7 +69,7 @@ spiffe = []
 workspace = true
 
 [dependencies]
-chrono = { workspace = true, optional = true }
+chrono = { workspace = true }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
@@ -105,7 +104,6 @@ url = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-chrono = { workspace = true }
 jsonwebtoken = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }

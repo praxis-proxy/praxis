@@ -15,7 +15,7 @@ pub(crate) mod value_safety;
 pub use observability::CloudEventsFilter;
 pub use observability::{
     AccessLogFilter, RequestIdFilter, TraceContextFilter, access_record_already_emitted, bodyless_response,
-    emit_access_record, mark_access_record_emitted,
+    emit_access_record, mark_access_record_emitted, shutdown_access_log_sinks,
 };
 pub use payload_processing::{
     CompressionFilter, GrpcWebFilter, JsonBodyFieldFilter, JsonBodyFilter, JsonBodyOps, JsonRpcFilter,

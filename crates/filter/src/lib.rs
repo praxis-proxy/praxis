@@ -120,7 +120,7 @@ pub use builtins::{
     RedirectStatus, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry, StickySessionsFilter,
     access_record_already_emitted, bodyless_response, emit_access_record, encode_trailer_frame, has_dot_dot_traversal,
     http::payload_processing::compression_config::CompressionConfig, mark_access_record_emitted,
-    normalize_rewritten_path,
+    normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]
 pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
@@ -134,15 +134,15 @@ pub use credentials::{DeferredCredential, PendingCredentials};
 pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
-pub use extensions::{AuthenticatedIdentity, RequestExtensions};
+pub use extensions::{AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions};
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
     tcp_builtin,
 };
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use filtered_subrequest::{
-    CalloutOutcome, CalloutResponse, FilteredSubrequestExecutor, StagedUpstream, StagedUpstreamFallback,
-    SubrequestRuntime,
+    CalloutOutcome, CalloutResponse, CalloutResponseTooLarge, FilteredSubrequestExecutor, StagedUpstream,
+    StagedUpstreamFallback, StreamBodySuppressed, SubrequestRuntime,
 };
 pub use grpc_response::GrpcErrorMapping;
 #[cfg(feature = "upstream-binding")]

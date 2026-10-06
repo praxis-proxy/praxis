@@ -92,20 +92,22 @@ const REWRITE_FILTERS: &[&str] = &["path_rewrite", "url_rewrite"];
 // Error Checks
 // -----------------------------------------------------------------------------
 
-/// Reject request conditions whose `headers` key is not a valid HTTP header
-/// name.
+/// Reject request conditions whose `headers` key or `headers_present` entry is
+/// not a valid HTTP header name.
 ///
-/// Such a name can never equal a real request header, so the filter would be
-/// silently skipped forever, the same fail-open footgun this validation
+/// Such a name can never match a real request header, so the condition would
+/// silently decide the same way forever, the same footgun this validation
 /// exists to prevent. Failing at build turns it into a clear config error.
 pub(super) fn check_condition_header_names(filters: &[PipelineFilter], errors: &mut Vec<String>) {
     for pf in filters {
         for condition in &pf.conditions {
             let (Condition::When(m) | Condition::Unless(m)) = condition;
-            let Some(headers) = &m.headers else {
-                continue;
-            };
-            for name in headers.keys() {
+            let names = m
+                .headers
+                .iter()
+                .flat_map(std::collections::HashMap::keys)
+                .chain(m.headers_present.iter().flatten());
+            for name in names {
                 if http::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
                     errors.push(format!(
                         "filter '{}' has a condition with an invalid header name '{name}'",
@@ -1127,6 +1129,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         });
@@ -1151,6 +1154,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         });
@@ -1158,6 +1162,33 @@ mod tests {
         let mut errors = Vec::new();
         check_condition_header_names(&filters, &mut errors);
         assert!(errors.is_empty(), "valid header name should not error: {errors:?}");
+    }
+
+    #[test]
+    fn invalid_headers_present_name_rejected_at_build() {
+        let condition = Condition::Unless(ConditionMatch {
+            grpc: None,
+            path: None,
+            path_prefix: None,
+            methods: None,
+            headers: None,
+            headers_present: Some(vec!["x-model".to_owned(), "x model".to_owned()]),
+            bound_upstream: None,
+            selected_upstream: None,
+        });
+        let filters = vec![noop_filter_with_conditions("gated", vec![condition])];
+        let mut errors = Vec::new();
+        check_condition_header_names(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "only the invalid headers_present name should error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("invalid header name 'x model'"),
+            "error should name the invalid headers_present entry: {}",
+            errors[0]
+        );
     }
 
     #[test]
@@ -2673,6 +2704,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: Some(SelectedUpstreamMatch {
                 application_protocol: protocol.map(str::to_owned),
@@ -2723,6 +2755,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: Some(SelectedUpstreamMatch {
                 application_protocol: Some("openai_chat_completions".to_owned()),
@@ -2762,6 +2795,7 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         })];
@@ -2785,6 +2819,7 @@ mod tests {
             path_prefix: Some("/api".to_owned()),
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         });
@@ -3227,6 +3262,7 @@ mod tests {
             path_prefix: Some("/test".to_owned()),
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: None,
             selected_upstream: None,
         })
@@ -3360,6 +3396,7 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: None,
+            headers_present: None,
             bound_upstream: Some(praxis_core::config::ApplicationMatch {
                 application_protocol: protocol.map(str::to_owned),
                 application_provider: provider.map(str::to_owned),

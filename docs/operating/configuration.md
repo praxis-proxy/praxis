@@ -176,8 +176,9 @@ See [hot-reload.yaml] for an example.
 - `/api/pipelines` (GET) returns a JSON snapshot of every
   listener's resolved filter pipeline, including branch
   chains and rejoin targets — the runtime introspection
-  view of the pipeline configuration. Filter it with
-  `?listener=NAME`.
+  view of the pipeline configuration. Known sensitive
+  header matcher values, including session identifiers, are redacted.
+  Filter it with `?listener=NAME`.
 
 Any other path returns `404 NOT FOUND`. Useful for orchestrator
 health checks and monitoring without exposing them on

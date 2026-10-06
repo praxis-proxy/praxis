@@ -36,28 +36,10 @@
 //! semantics all need to line up). The two `entity_for_protocol_method*`
 //! functions are the closed switch — anything not listed falls
 //! through to the identity-only path.
-//!
-//! Inference requests use the body model as the `llm` entity name.
-
 use ppe::praxis_policy_core::cmf::constants::{
-    ENTITY_LLM, ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT,
-    HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_POST_FETCH, HOOK_CMF_RESOURCE_PRE_FETCH,
-    HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
+    ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL, HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE,
+    HOOK_CMF_RESOURCE_POST_FETCH, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
 };
-
-// -----------------------------------------------------------------------------
-// Inference
-// -----------------------------------------------------------------------------
-
-/// Return the inference request entity type and hook.
-pub(super) const fn llm_entity_pre() -> (&'static str, &'static str) {
-    (ENTITY_LLM, HOOK_CMF_LLM_INPUT)
-}
-
-/// Return the inference response entity type and hook.
-pub(super) const fn llm_entity_post() -> (&'static str, &'static str) {
-    (ENTITY_LLM, HOOK_CMF_LLM_OUTPUT)
-}
 
 // -----------------------------------------------------------------------------
 // Pre-phase

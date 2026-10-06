@@ -17,6 +17,10 @@ Pipeline composition patterns for organizing and reusing filter chains.
 
 **Inline vs Named Chains**: Filters can be defined inline (directly in a listener or branch) or as named top-level chains that are referenced by name.
 
+**Inherited Chain Conditions**: A chain's `conditions:` are inherited by
+every filter it contains (effective = chain AND filter). See
+`inherited-conditions.yaml`.
+
 ## Best Practices
 
 - Create reusable chains for common patterns (authentication, observability, routing)

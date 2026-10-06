@@ -38,8 +38,6 @@ mod normalize;
 mod request_body_filter;
 /// Request filter hook.
 mod request_filter;
-/// Reserved internal header utilities.
-mod reserved_headers;
 /// Response body filter hook.
 mod response_body_filter;
 /// Response filter hook.
@@ -876,10 +874,11 @@ mod tests {
         let mut released = false;
         let mut buf = Some(BodyBuffer::new(100));
         buf.as_mut().unwrap().push(Bytes::from_static(b"buffered")).unwrap();
+        buf.as_mut().unwrap().push(Bytes::from_static(b" data")).unwrap();
 
         body_util::release_stream_buffer(&mut body, true, &mut released, &mut buf, false);
         assert!(released);
-        assert_eq!(body.unwrap(), Bytes::from_static(b"buffered"));
+        assert_eq!(body.unwrap(), Bytes::from_static(b"buffered data"));
         assert!(buf.is_none());
     }
 

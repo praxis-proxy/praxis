@@ -427,6 +427,67 @@ fn untagged_wrapper_enum_types_render_wrapped_yaml_shapes() {
 }
 
 #[test]
+fn try_from_enum_expands_to_raw_struct_fields() {
+    // A non-untagged `try_from` enum deserializes through its raw struct, so
+    // its config surface is that struct's fields (a discriminator plus
+    // options), not the enum's Rust variant names.
+    let source = concat!(
+        "#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct MyConfig ",
+        "{ /// Output sink.\n #[serde(default)] sink: SinkConfig }",
+        "#[derive(Deserialize)] #[serde(try_from = \"RawSinkConfig\")] enum SinkConfig ",
+        "{ Stdout, File { path: String } }",
+        "#[derive(Deserialize)] #[serde(deny_unknown_fields)] struct RawSinkConfig ",
+        "{ /// Sink kind.\n #[serde(rename = \"type\")] kind: SinkKind, ",
+        "/// File path (file sink only).\n #[serde(default)] path: Option<String> }",
+        "#[derive(Deserialize)] #[serde(rename_all = \"lowercase\")] enum SinkKind { Stdout, File }",
+    );
+    let file: syn::File = syn::parse_str(source).unwrap();
+    let mut items = ModuleItems::new();
+    parse_file_items(&file, &mut items);
+    assert_eq!(
+        items.try_from_aliases.get("SinkConfig").map(String::as_str),
+        Some("RawSinkConfig"),
+        "a non-untagged try_from enum records an alias to its raw type"
+    );
+    assert!(
+        !items.enums.contains_key("SinkConfig"),
+        "an aliased try_from enum is not kept as a variant-rendering enum"
+    );
+
+    let filter = build_filter(&items, "test", Some("MyConfig"));
+    let field = |name: &str| filter.fields.iter().find(|f| f.name == name);
+    let sink_type = field("sink.type").expect("try_from enum expands to the raw struct's discriminator");
+    assert_eq!(sink_type.type_str, "`stdout` \\| `file`");
+    assert_eq!(sink_type.required, RequiredKind::Yes);
+    let sink_path = field("sink.path").expect("try_from enum exposes the raw struct's optional fields");
+    assert_eq!(sink_path.type_str, "string");
+    assert_eq!(sink_path.required, RequiredKind::No);
+}
+
+#[test]
+fn untagged_try_from_enum_still_renders_variants() {
+    // `try_from` combined with `untagged` (e.g. Endpoint) keeps rendering as
+    // the variant union; it must not be collapsed into its raw type.
+    let source = concat!(
+        "#[derive(Deserialize)] #[serde(try_from = \"EndpointRaw\", untagged)] enum Endpoint ",
+        "{ Simple(String), Weighted { address: String, weight: u32 } }",
+        "#[derive(Deserialize)] #[serde(untagged)] enum EndpointRaw ",
+        "{ Simple(String), Weighted { address: String, weight: u32 } }",
+    );
+    let file: syn::File = syn::parse_str(source).unwrap();
+    let mut items = ModuleItems::new();
+    parse_file_items(&file, &mut items);
+    assert!(
+        !items.try_from_aliases.contains_key("Endpoint"),
+        "an untagged try_from enum is not aliased to its raw type"
+    );
+    assert!(
+        items.enums.contains_key("Endpoint"),
+        "an untagged try_from enum is kept so its variants still render"
+    );
+}
+
+#[test]
 fn nested_config_fields_render_dotted_paths() {
     let source = "
             #[derive(Debug, Deserialize)]

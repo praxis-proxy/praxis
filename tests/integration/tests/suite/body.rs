@@ -210,6 +210,58 @@ fn body_buffer_mode_delivers_complete_body() {
 }
 
 #[test]
+fn preread_h2_tiny_data_frames_deliver_complete_body() {
+    let body_bytes = 64_usize; // 64 bytes
+    let backend = start_echo_backend();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend.port(), "preread_uppercase")).unwrap();
+    let registry = registry_with("preread_uppercase", || Box::new(PreReadUppercaseFilter));
+    let proxy = start_proxy_with_registry(&config, &registry);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let stream = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
+            let (mut client, connection) = h2::client::handshake(stream).await.unwrap();
+            tokio::spawn(async move {
+                drop(connection.await);
+            });
+
+            let request = http::Request::post("/echo")
+                .header("host", "localhost")
+                .header("content-length", body_bytes.to_string())
+                .body(())
+                .unwrap();
+            let (response, mut sender) = client.send_request(request, false).unwrap();
+            let mut expected = Vec::with_capacity(body_bytes);
+            for (index, byte) in (b'a'..=b'z').cycle().take(body_bytes).enumerate() {
+                expected.push(byte.to_ascii_uppercase());
+                sender
+                    .send_data(Bytes::from(vec![byte]), index.saturating_add(1) == body_bytes)
+                    .unwrap();
+                tokio::task::yield_now().await;
+            }
+
+            let response = response.await.unwrap();
+            assert_eq!(response.status(), 200, "buffered H2 upload should reach backend");
+            let mut body_stream = response.into_body();
+            let mut body = Vec::new();
+            while let Some(chunk) = body_stream.data().await {
+                let data = chunk.unwrap();
+                body.extend_from_slice(&data);
+                drop(body_stream.flow_control().release_capacity(data.len()));
+            }
+            assert_eq!(body, expected, "all tiny DATA payloads must arrive in order");
+        })
+        .await
+        .expect("buffered H2 exchange should complete within 10 seconds");
+    });
+}
+
+#[test]
 fn body_size_limit_returns_413() {
     let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();

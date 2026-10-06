@@ -2356,6 +2356,41 @@ impl crate::HttpFilter for BoundedCompletionFilter {
 // guardrail that blocks the final aggregated frame.
 struct RejectOnCompletionFilter;
 
+struct SuppressionProbeFilter(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for SuppressionProbeFilter {
+    fn name(&self) -> &'static str {
+        "test_suppression_probe"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    fn response_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadOnly
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        if end_of_stream {
+            self.0.store(
+                ctx.extensions.get::<crate::StreamBodySuppressed>().is_some(),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+        }
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::HttpFilter for RejectOnCompletionFilter {
     fn name(&self) -> &'static str {
@@ -2524,6 +2559,23 @@ fn streaming_executor(max_response_bytes: usize) -> crate::FilteredSubrequestExe
     crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, max_response_bytes, Duration::from_secs(5))
 }
 
+fn dual_limit_executor(buffered_bytes: usize, streaming_bytes: usize) -> crate::FilteredSubrequestExecutor {
+    use std::time::{Duration, Instant};
+
+    use praxis_core::subrequest::SubRequestClient;
+
+    let client = SubRequestClient::new(crate::test_support::connector(4, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    crate::FilteredSubrequestExecutor::for_callout_with_limits(
+        client,
+        downstream,
+        0,
+        buffered_bytes,
+        streaming_bytes,
+        Duration::from_secs(5),
+    )
+}
+
 // Drain a streaming body to completion, returning the concatenated payload.
 async fn drain(body: &mut Box<dyn crate::StreamingResponseBody>) -> Result<Vec<u8>, crate::FilterError> {
     let mut out = Vec::new();
@@ -2614,6 +2666,100 @@ async fn run_streaming_yields_upstream_chunks_for_clean_eof() {
     backend.abort();
 
     assert_eq!(payload, b"hello", "the upstream chunk must be delivered on a clean EOF");
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn streaming_transport_overflow_returns_typed_callout_error() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
+    let mut pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+    pipeline.apply_body_limits(None, Some(4), false).unwrap();
+    let pipeline = Arc::new(pipeline);
+    let executor = streaming_executor(32);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+    let error = body
+        .next_chunk()
+        .await
+        .expect_err("the transport must reject a response above its four-byte ceiling");
+    assert_eq!(
+        error
+            .downcast_ref::<crate::CalloutResponseTooLarge>()
+            .map(|too_large| too_large.limit),
+        Some(4),
+        "the typed error must report the transport ceiling"
+    );
+    assert!(
+        body.next_chunk().await.unwrap().is_none(),
+        "no later chunk may escape after breach"
+    );
+    body.cancel().await;
+    backend.abort();
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn callout_separate_limits_allow_stream_larger_than_buffered_cap() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nabcdefgh\r\n0\r\n\r\n").await;
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = dual_limit_executor(4, 8);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+
+    let mut body = match executor
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("the streaming callout must open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+    let payload = drain(&mut body).await.expect("the streaming cap permits eight bytes");
+    backend.abort();
+
+    assert_eq!(
+        payload, b"abcdefgh",
+        "the smaller buffered cap must not truncate a stream"
+    );
 }
 
 #[tokio::test]
@@ -2948,6 +3094,93 @@ async fn run_streaming_suppress_error_preserves_parent_extensions() {
 
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn suppressed_eos_is_visible_only_during_completion_hooks() {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let saw_suppression = Arc::new(AtomicBool::new(false));
+    let mut registry = callout_registry();
+    let witness = Arc::clone(&saw_suppression);
+    registry
+        .register(
+            "test_suppression_probe",
+            crate::FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(SuppressionProbeFilter(Arc::clone(&witness))))
+            })),
+        )
+        .unwrap();
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&routed_chain_yaml(addr, "- filter: test_suppression_probe")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = streaming_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let mut body = match executor
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("expected streaming response"),
+    };
+    body.suppress().await.unwrap();
+    let mut extensions = crate::RequestExtensions::default();
+    body.swap_extensions(&mut extensions);
+    backend.abort();
+    assert!(
+        saw_suppression.load(Ordering::SeqCst),
+        "suppressed EOS must expose its marker to response-body filters"
+    );
+    assert!(
+        extensions.get::<crate::StreamBodySuppressed>().is_none(),
+        "suppression marker must not escape the cancelled body's completion"
+    );
+
+    // An ordinary EOF runs the same completion callback without the marker.
+    let (normal_addr, normal_backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let mut normal_entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&routed_chain_yaml(normal_addr, "- filter: test_suppression_probe")).unwrap();
+    let normal_pipeline = Arc::new(crate::FilterPipeline::build(&mut normal_entries, &registry).unwrap());
+    let mut normal_body = match executor
+        .run(
+            &normal_pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap()
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("expected streaming response"),
+    };
+    while normal_body.next_chunk().await.unwrap().is_some() {}
+    normal_backend.abort();
+    assert!(
+        !saw_suppression.load(Ordering::SeqCst),
+        "ordinary EOS must not look like a suppressed body"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
 async fn streaming_response_body_context_inherits_parent_session_stores() {
     use std::{
         sync::{
@@ -3198,6 +3431,46 @@ async fn run_classified_one_byte_over_returns_typed_response_too_large() {
 
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn callout_separate_limits_reject_buffered_body_at_buffered_cap() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabcde").await;
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&buffered_chain_yaml(addr, "")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = dual_limit_executor(4, 8);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+
+    let outcome = executor
+        .run_classified(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("a buffered overflow must be classified");
+    backend.abort();
+
+    match outcome {
+        crate::CalloutOutcome::ResponseTooLarge { actual, limit } => {
+            assert_eq!(actual, Some(5), "the observed body size must be reported");
+            assert_eq!(limit, 4, "the buffered cap must win over the larger streaming cap");
+        },
+        crate::CalloutOutcome::Response(_) => panic!("the buffered body exceeds its four-byte cap"),
+    }
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
 async fn run_classified_real_upstream_502_is_not_response_too_large() {
     use std::{
         sync::Arc,
@@ -3433,7 +3706,7 @@ async fn abnormal_completion_body_is_bounded_by_max_response_bytes() {
 
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
-async fn abnormal_completion_over_ceiling_is_classified_too_large() {
+async fn abnormal_stream_completion_uses_buffered_ceiling() {
     use std::{
         sync::Arc,
         time::{Duration, Instant},
@@ -3445,7 +3718,7 @@ async fn abnormal_completion_over_ceiling_is_classified_too_large() {
         serde_yaml::from_str(&routed_chain_yaml(addr, "- filter: test_bounded_completion\n")).unwrap();
     let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
 
-    let executor = streaming_executor(4);
+    let executor = dual_limit_executor(4, 16);
     let request = crate::SubRequest {
         method: http::Method::GET,
         uri: http::Uri::from_static("/"),
@@ -3463,7 +3736,7 @@ async fn abnormal_completion_over_ceiling_is_classified_too_large() {
     match outcome {
         crate::CalloutOutcome::ResponseTooLarge { actual, limit } => {
             assert_eq!(actual, Some(8), "the flushed completion body size must be preserved");
-            assert_eq!(limit, 4, "the tripped ceiling must be preserved");
+            assert_eq!(limit, 4, "the buffered ceiling must apply to the completed fallback");
         },
         crate::CalloutOutcome::Response(_) => {
             panic!("an 8-byte completion body must breach the 4-byte ceiling")

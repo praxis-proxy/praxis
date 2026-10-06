@@ -54,6 +54,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | File | Description |
 | ------ | ------------- |
 | [access-log-fields.yaml](configs/observability/access-log-fields.yaml) | Logs only server errors with a lean field set |
+| [access-log-file-sink.yaml](configs/observability/access-log-file-sink.yaml) | Writes NDJSON access log records directly to a file, bypassing the tracing subscriber |
 | [access-logging.yaml](configs/observability/access-logging.yaml) | Structured JSON logging with sampling; logs ~10% of requests. request_id ensures each log line has a correlation ID. access_log emits method, path, status, and timing |
 | [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after the upstream response completes |
 | [errors-total.yaml](configs/observability/errors-total.yaml) | Prometheus counter for proxy errors classified by cause, covering filter rejections, timeouts, unreachable upstreams and internal faults |
@@ -111,6 +112,8 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [conditional-filters.yaml](configs/pipeline/conditional-filters.yaml) | Filters support `conditions` (request phase) and `response_conditions` (response phase) to gate execution |
 | [failure-mode.yaml](configs/pipeline/failure-mode.yaml) | Demonstrates open and closed failure handling for filters |
 | [grpc-condition.yaml](configs/pipeline/grpc-condition.yaml) | The `grpc` condition predicate gates a filter on whether the request carries gRPC, classified from the `content-type` header alone (`application/grpc`, `application/grpc+proto`, `application/grpc+json`, or any other `application/grpc+<codec>`) |
+| [header-presence-condition.yaml](configs/pipeline/header-presence-condition.yaml) | The `headers_present` condition predicate gates a filter on whether headers are present, whatever their values |
+| [inherited-conditions.yaml](configs/pipeline/inherited-conditions.yaml) | A named filter chain declares one `conditions:` block that every filter in the chain inherits |
 | [iterative-request-router-circuit-breaker.yaml](configs/pipeline/iterative-request-router-circuit-breaker.yaml) | Demonstrates circuit breaker integration with the iterative request router |
 | [iterative-request-router-sequence.yaml](configs/pipeline/iterative-request-router-sequence.yaml) | Demonstrates sequential sub-request execution where each step completes before the next begins |
 | [route-on-promoted-header.yaml](configs/pipeline/route-on-promoted-header.yaml) | Classify a request in an early filter, promote the result to a reserved `x-praxis-*` header, and route on that header |

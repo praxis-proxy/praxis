@@ -600,8 +600,11 @@ histogram_quantile(0.95,
 ## Access Logging
 
 Praxis uses the `access_log` filter for structured
-request/response logging. Logs are emitted via the
-`tracing` framework, not written to a separate file.
+request/response logging. By default each record is
+emitted through the `tracing` subscriber, alongside
+process logs. A `sink` can instead write records
+straight to stdout or a dedicated file — see
+[Output Sinks](#output-sinks).
 
 ### Enabling Access Logs
 
@@ -686,6 +689,40 @@ PRAXIS_LOG_FORMAT=json cargo run -p praxis-proxy
 
 The default format is human-readable text. Both
 formats include the same structured fields.
+
+### Output Sinks
+
+By default access records flow through the `tracing`
+subscriber, so they share formatting, level filtering,
+and destination with process logs. A `sink` detaches
+them onto a dedicated writer that always emits NDJSON
+(one JSON object per line), bypassing the subscriber and
+its INFO-level gate:
+
+```yaml
+- filter: access_log
+  sink:
+    type: file                         # `stdout` or `file`
+    path: /var/log/praxis/access.log   # required for `file`
+```
+
+Sinks are **best effort**. Each sink hands records to a
+background writer through a bounded queue (8192 records);
+once the queue is full — a slow or stalled disk, a burst
+faster than the writer drains — further records are
+dropped rather than blocking request handling, and a
+warning reports the running drop count. Use a sink for
+operational visibility, not as the system of record for
+audit-grade logging.
+
+`{type: stdout}` writes to the same stdout as the
+process logs, so the two interleave unless you send
+process logs elsewhere with `runtime.logging.output`
+(`stderr` or `file`) — see
+[Process Logging Destination](#process-logging-destination).
+`{type: file}` opens the path in append mode (no
+rotation); secure its permissions and rotate it
+externally.
 
 Warnings raised while the config is loaded and
 validated (active `insecure_options`, degraded upstream

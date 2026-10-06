@@ -4,7 +4,6 @@
 //! Proxy startup and configuration test utilities for integration tests.
 
 use std::{
-    collections::HashMap,
     fmt,
     path::PathBuf,
     sync::Arc,
@@ -15,7 +14,7 @@ use std::{
 use arc_swap::ArcSwap;
 use pingora_core::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
 use praxis_core::{
-    config::{Config, Listener, ProtocolKind},
+    config::{Config, ExpandedFilterChains, Listener, ProtocolKind},
     health::{HealthRegistry, build_health_registry},
     server::RuntimeOptions,
 };
@@ -144,22 +143,21 @@ fn resolve_praxis_bin_path() -> PathBuf {
 /// [`FilterPipeline`]: praxis_filter::FilterPipeline
 /// [`FilterEntry`]: praxis_core::config::FilterEntry
 fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &FilterRegistry) -> Arc<FilterPipeline> {
-    let chains: HashMap<&str, &[_]> = config
-        .filter_chains
-        .iter()
-        .map(|c| (c.name.as_str(), c.filters.as_slice()))
-        .collect();
-
-    let mut entries = Vec::new();
-    for chain_name in &listener.filter_chains {
-        let filters = chains
-            .get(chain_name.as_str())
-            .unwrap_or_else(|| panic!("unknown filter chain: {chain_name}"));
-        entries.extend_from_slice(filters);
-    }
+    let expanded_chains = ExpandedFilterChains::new(&config.filter_chains);
+    let chains = expanded_chains.as_slices();
+    let mut entries = expanded_chains
+        .for_listener(listener)
+        .unwrap_or_else(|err| panic!("{err}"));
 
     let mut pipeline =
         FilterPipeline::build_with_chains(&mut entries, registry, &chains, &config.insecure_options).unwrap();
+    configure_test_pipeline(&mut pipeline, config);
+    Arc::new(pipeline)
+}
+
+/// Apply the config's runtime settings to a freshly built pipeline, mirroring
+/// the server's `configure_pipeline`.
+fn configure_test_pipeline(pipeline: &mut FilterPipeline, config: &Config) {
     pipeline
         .apply_body_limits(
             config.body_limits.max_request_bytes,
@@ -171,10 +169,9 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
     pipeline.set_route_templates(Arc::new(praxis_core::config::RouteTemplates::compile(
         &config.metrics.route_templates,
     )));
-    // Mirrors `configure_pipeline` in the server: without it a hostname
-    // upstream is refused at connection time even when the config opts in.
+    // Without it a hostname upstream is refused at connection time even when
+    // the config opts in.
     pipeline.set_allow_private_upstreams(config.insecure_options.allow_private_upstreams);
-    Arc::new(pipeline)
 }
 
 /// Build the filter pipeline from the config using the

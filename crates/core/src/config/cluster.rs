@@ -334,7 +334,7 @@ impl Cluster {
     pub fn validate_authority(&self) -> Result<(), ProxyError> {
         match &self.http.authority {
             Some(UpstreamAuthority::Literal(authority)) => {
-                super::validate::cluster::validate_authority(authority, &self.name)
+                super::validate::cluster::authority::validate_authority(authority, &self.name)
             },
             Some(UpstreamAuthority::Derived { .. }) | None => Ok(()),
         }

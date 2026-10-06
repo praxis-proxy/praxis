@@ -66,6 +66,7 @@ fn build_config(args: &Args) -> Config {
         clusters: vec![],
         filter_chains: vec![FilterChainConfig {
             name: "echo".into(),
+            conditions: Vec::new(),
             filters: vec![entry],
         }],
         insecure_options: InsecureOptions::default(),

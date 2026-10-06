@@ -44,7 +44,7 @@ use crate::{
     pipelines::resolve_pipelines_with_composition,
     startup_checks::{
         enforce_root_check, fips_blocker, warn_insecure_key_permissions, warn_insecure_log_file_permissions,
-        warn_insecure_options,
+        warn_insecure_options, warn_insecure_sink_file_permissions,
     },
 };
 
@@ -164,6 +164,7 @@ fn run_startup_security_checks(config: &Config) -> Result<(), StartupError> {
     }
     warn_insecure_key_permissions(config);
     warn_insecure_log_file_permissions(config);
+    warn_insecure_sink_file_permissions(config);
     Ok(())
 }
 
@@ -344,8 +345,17 @@ pub fn try_run_server_with_composition(
     info!("starting server");
     server.run_until_shutdown();
     info!("server stopped");
+    // Request handling has stopped; give direct access-log sinks a brief,
+    // bounded window to flush records still queued for their writer threads
+    // before the process exits.
+    praxis_filter::shutdown_access_log_sinks(ACCESS_LOG_SINK_DRAIN_TIMEOUT);
     Ok(())
 }
+
+/// Bounded time [`try_run_server_with_composition`] waits for access-log sink
+/// writers to flush and exit at shutdown. Short so a stalled sink cannot hold
+/// the process open, matching the sinks' best-effort, drop-on-overflow contract.
+const ACCESS_LOG_SINK_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 // -----------------------------------------------------------------------------
 // Never-Returning Entry Points

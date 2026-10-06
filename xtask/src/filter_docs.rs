@@ -764,10 +764,7 @@ fn parse_file_items(file: &syn::File, out: &mut ModuleItems) {
             syn::Item::Enum(e)
                 if derives_deserialize(&e.attrs) || manual_deserialize.contains(&e.ident.to_string()) =>
             {
-                let info = extract_enum_info(e);
-                if !info.variants.is_empty() {
-                    out.enums.insert(e.ident.to_string(), info);
-                }
+                parse_enum(e, out);
             },
             _ => {},
         }
@@ -799,6 +796,52 @@ fn manual_deserialize_idents(file: &syn::File) -> BTreeSet<String> {
         }
     }
     out
+}
+
+/// Handle an enum item: record a `serde(try_from)` alias, or register the
+/// enum's YAML variants for nested rendering.
+///
+/// A non-untagged enum deserialized through `serde(try_from = "Raw...")`
+/// presents the raw struct's YAML shape (an object keyed by a discriminator),
+/// not its Rust variants, so it is recorded as an alias and resolved to that
+/// struct exactly like a `try_from` struct. An untagged enum keeps rendering as
+/// its variant union, since the variants themselves are the YAML alternatives.
+fn parse_enum(e: &syn::ItemEnum, out: &mut ModuleItems) {
+    if !has_serde_untagged(&e.attrs)
+        && let Some(raw_name) = serde_try_from(&e.attrs)
+    {
+        out.try_from_aliases.insert(e.ident.to_string(), raw_name);
+        return;
+    }
+    let info = extract_enum_info(e);
+    if !info.variants.is_empty() {
+        out.enums.insert(e.ident.to_string(), info);
+    }
+}
+
+/// Whether a `serde(...)` list carries `untagged`, tolerating other
+/// `key = "value"` entries (e.g. `try_from`) that precede it.
+///
+/// [`has_serde_attr`] stops at the first `key = value` it cannot consume, so it
+/// misses `untagged` in `#[serde(try_from = "...", untagged)]`; this consumes
+/// those values and keeps scanning.
+fn has_serde_untagged(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("serde") {
+            return false;
+        }
+        let mut found = false;
+        drop(attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("untagged") {
+                found = true;
+            } else if meta.input.peek(syn::Token![=]) {
+                let value = meta.value()?;
+                let _: syn::Expr = value.parse()?;
+            }
+            Ok(())
+        }));
+        found
+    })
 }
 
 /// Handle a struct item: check for config struct and filter doc comments.

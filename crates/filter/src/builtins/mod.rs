@@ -23,7 +23,7 @@ pub use http::{
     RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry, StaticResponseFilter, StickySessionsFilter,
     TimeoutFilter, TraceContextFilter, UrlRewriteFilter, access_record_already_emitted, bodyless_response,
     emit_access_record, encode_trailer_frame, has_dot_dot_traversal, mark_access_record_emitted,
-    normalize_rewritten_path,
+    normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]
 pub use http::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};

@@ -151,6 +151,24 @@ independent; a filter can have both. Branch
 conditions (`on_result`) are evaluated after the
 filter runs but before the pipeline advances.
 
+A named chain can also declare a chain-level
+`conditions:` block that every filter in the chain
+inherits. The chain condition is prepended to each
+filter's own request conditions (effective = chain
+AND filter), so a shared gate is written once instead
+of on every filter. Because request conditions gate a
+filter's response hook too, the inherited gate skips
+non-matching request and response hooks. Body mode is
+listener-wide: a `StreamBuffer` filter in a gated chain
+still buffers and size-limits every body on the listener.
+The example's `json_body_field` pre-reads `/health`
+request bodies to end of stream before forwarding, even
+though its hook is skipped. `compression` in a gated chain
+also applies to every eligible response. See
+[Inherited Chain Conditions](../filters/README.md#inherited-chain-conditions)
+and
+[`examples/configs/pipeline/inherited-conditions.yaml`](../../examples/configs/pipeline/inherited-conditions.yaml).
+
 ### Body-phase conditions in StreamBuffer mode
 
 Body-inspecting filters use `BodyMode::StreamBuffer`,

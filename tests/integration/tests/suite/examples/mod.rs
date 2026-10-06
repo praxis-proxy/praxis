@@ -8,6 +8,7 @@ mod test_utils;
 pub use test_utils::load_example_config;
 
 mod access_log_fields;
+mod access_log_file_sink;
 mod access_logging;
 mod admin_interface;
 mod all_examples_validate;
@@ -42,6 +43,7 @@ mod grpc_web;
 mod guardrails;
 mod guardrails_per_model;
 mod header_manipulation;
+mod header_presence_condition;
 mod health_checks;
 mod hostname_upstream;
 mod http_active_requests;

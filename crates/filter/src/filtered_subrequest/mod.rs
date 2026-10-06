@@ -68,7 +68,6 @@ use praxis_core::{
 };
 use tracing::{Instrument as _, warn};
 
-pub use self::types::{CalloutOutcome, CalloutResponse, StagedUpstream, StagedUpstreamFallback, SubrequestRuntime};
 use self::{
     context::{SubrequestRuntimeResources, build_sub_filter_context},
     sanitize::{
@@ -88,6 +87,10 @@ pub(crate) use self::{
 };
 #[cfg(feature = "iterative-request-router")]
 pub(crate) use self::{continuation::SubrequestCompletion, sanitize::normalize_response_status};
+pub use self::{
+    streaming::{CalloutResponseTooLarge, StreamBodySuppressed},
+    types::{CalloutOutcome, CalloutResponse, StagedUpstream, StagedUpstreamFallback, SubrequestRuntime},
+};
 #[cfg(feature = "chain-binding")]
 use crate::credentials::{PendingCredentials, ResolvedDestination};
 #[cfg(feature = "bound-upstream-request-body")]
@@ -310,8 +313,11 @@ pub struct FilteredSubrequestExecutor {
     depth: u8,
     /// Owned downstream request attributes.
     downstream: SubrequestRuntime,
-    /// Per-step buffered response ceiling.
+    /// Per-step buffered response ceiling, enforced by the transport before
+    /// the complete body is materialized.
     max_response_bytes: usize,
+    /// Cumulative emitted-byte ceiling for a streaming callout response.
+    max_stream_response_bytes: usize,
     /// Retained-state raw byte ceiling for stream chunk emission.
     max_state_bytes: usize,
     /// Per-step duration ceiling.
@@ -339,6 +345,7 @@ impl FilteredSubrequestExecutor {
             depth,
             downstream,
             max_response_bytes,
+            max_stream_response_bytes: max_response_bytes,
             max_state_bytes,
             step_timeout,
         }
@@ -365,17 +372,48 @@ impl FilteredSubrequestExecutor {
         max_response_bytes: usize,
         step_timeout: Duration,
     ) -> Self {
-        // A callout retains no state across sub-requests, so the response ceiling
-        // doubles as the stream-chunk emission ceiling.
-        Self::new(
-            Box::new(NoRetainedState),
+        Self::for_callout_with_limits(
             client,
-            depth,
             downstream,
+            depth,
             max_response_bytes,
             max_response_bytes,
             step_timeout,
         )
+    }
+
+    /// Build a callout with separate limits for buffered and streaming responses.
+    ///
+    /// `max_buffered_response_bytes` is passed to the buffered transport, which
+    /// stops reading before retaining a larger complete body. The selected
+    /// streaming mode instead limits cumulative emitted bytes to
+    /// `max_stream_response_bytes`. Pending chunks emitted by response filters
+    /// use the same streaming limit while they are retained. The nested
+    /// pipeline's response-body ceiling may tighten either limit. If a stream
+    /// fails and a response-body filter synthesizes a buffered completion body,
+    /// that body is checked against `max_buffered_response_bytes` after the
+    /// filter returns; the filter must bound its own temporary output.
+    #[expect(clippy::too_many_arguments, reason = "callout limits and resources are explicit")]
+    #[must_use]
+    pub fn for_callout_with_limits(
+        client: praxis_core::subrequest::SubRequestClient,
+        downstream: SubrequestRuntime,
+        depth: u8,
+        max_buffered_response_bytes: usize,
+        max_stream_response_bytes: usize,
+        step_timeout: Duration,
+    ) -> Self {
+        let mut executor = Self::new(
+            Box::new(NoRetainedState),
+            client,
+            depth,
+            downstream,
+            max_buffered_response_bytes,
+            max_stream_response_bytes,
+            step_timeout,
+        );
+        executor.max_stream_response_bytes = max_stream_response_bytes;
+        executor
     }
 
     /// Run `request` through `pipeline` as a filtered sub-request and return the
@@ -630,7 +668,7 @@ impl FilteredSubrequestExecutor {
                 response: outcome.response,
                 body: Box::new(CalloutStreamingBody::new(
                     FilteredStreamingBody::new(body, continuation),
-                    self.max_response_bytes,
+                    self.max_stream_response_bytes,
                 )),
             },
         }
@@ -1225,16 +1263,19 @@ impl FilteredSubrequestExecutor {
                     .into();
                 return Err(FilteredSubrequestError::capture(error, &mut filter_ctx));
             }
-            // Mirror the two buffered overflow sites: the effective ceiling is the
-            // smaller of `max_response_bytes` and the pipeline's response body mode.
+            // An abnormal streaming transport termination returns this
+            // synthesized completion body as a buffered response. Keep it
+            // under the buffered ceiling before returning it to the caller;
+            // the nested body mode may tighten that ceiling further.
             //
-            // Reachability invariant — today this collapses to `max_response_bytes`.
+            // Reachability invariant — today this collapses to the buffered
+            // response ceiling.
             // A `StreamBuffer` response mode is rejected before streaming is selected
             // (the guard at the top of the streaming arm), and a `SizeLimit` mode only
             // arises when no response-body filter runs — in which case nothing writes
             // `completion_body` and it stays empty. So the only mode under which a
             // completion body can exist is `Stream`, for which the utility returns
-            // exactly `max_response_bytes`. Routing through the shared utility keeps all
+            // exactly that ceiling. Routing through the shared utility keeps all
             // three sites uniform and correct-by-construction should that guard ever
             // be relaxed to admit a tighter response mode here.
             if let Some(limit) = response_body_overflow_limit(

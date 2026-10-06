@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Integration tests for response hooks of filters inside branch chains.
+//! Integration tests for filters inside branch chains.
 
 use praxis_core::config::Config;
-use praxis_test_utils::{free_port, http_send, parse_header, parse_status, start_backend_with_shutdown, start_proxy};
+use praxis_test_utils::{
+    free_port, http_send, parse_body, parse_header, parse_status, start_backend_with_shutdown,
+    start_header_echo_backend, start_proxy,
+};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -105,6 +108,47 @@ fn cors_in_branch_adds_allow_origin_header() {
 }
 
 #[test]
+fn named_branch_refs_inherit_conditions_at_runtime() {
+    let backend_guard = start_header_echo_backend();
+    let branch_refs = [
+        ("direct", "              - guarded"),
+        (
+            "nested",
+            r"              - name: inline_wrapper
+                filters:
+                  - filter: headers
+                    branch_chains:
+                      - name: inner
+                        chains:
+                          - guarded",
+        ),
+    ];
+
+    for (shape, branch_ref) in branch_refs {
+        let config = Config::from_yaml(&conditioned_named_branch_yaml(
+            free_port(),
+            backend_guard.port(),
+            branch_ref,
+        ))
+        .unwrap();
+        let proxy = start_proxy(&config);
+        for (path, should_add_header) in [("/api", true), ("/other", false)] {
+            let raw = http_send(
+                proxy.addr(),
+                &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+            );
+            assert_eq!(parse_status(&raw), 200, "{shape} branch should reach the backend");
+            let body = parse_body(&raw).to_ascii_lowercase();
+            assert_eq!(
+                body.contains("x-inherited: applied"),
+                should_add_header,
+                "{shape} branch must apply its inherited condition for {path}, got:\n{body}"
+            );
+        }
+    }
+}
+
+#[test]
 fn terminal_branch_response_headers_reach_the_client() {
     let backend_guard = start_backend_with_shutdown("ok");
     let backend_port = backend_guard.port();
@@ -193,6 +237,46 @@ filter_chains:
       - filter: load_balancer
         clusters:
           - name: "backend"
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
+
+/// Build a proxy whose branch child refers to the conditioned `guarded` chain.
+fn conditioned_named_branch_yaml(proxy_port: u16, backend_port: u16, branch_ref: &str) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: guarded
+    conditions:
+      - when:
+          path_prefix: "/api"
+    filters:
+      - filter: headers
+        request_add:
+          - name: X-Inherited
+            value: applied
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: outer
+            chains:
+{branch_ref}
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
 insecure_options:

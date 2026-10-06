@@ -28,7 +28,9 @@ use crate::{
         log_config_change_audit, log_restart_required_changes, warn_insecure_option_escalations,
         warn_stateful_filter_reset,
     },
-    startup_checks::{warn_insecure_key_permissions, warn_insecure_log_file_permissions},
+    startup_checks::{
+        warn_insecure_key_permissions, warn_insecure_log_file_permissions, warn_insecure_sink_file_permissions,
+    },
 };
 
 // -----------------------------------------------------------------------------
@@ -126,6 +128,7 @@ pub(crate) fn reload_pipelines(
     // about the insecurely-permissioned file it just brought live.
     warn_insecure_key_permissions(new_config);
     warn_insecure_log_file_permissions(new_config);
+    warn_insecure_sink_file_permissions(new_config);
 
     // Apply the log-level baseline while a failure can still abort the reload
     // cleanly. This is the last fallible step; it must run before the

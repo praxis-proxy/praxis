@@ -10,7 +10,10 @@
 
 use bytes::Bytes;
 use pingora_proxy::Session;
-use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection, StreamingTerminalResponse, TerminalResponse};
+use praxis_filter::{
+    BodyMode, ClientResponseHeadersCommitted, FilterAction, FilterPipeline, Rejection, StreamingTerminalResponse,
+    TerminalResponse,
+};
 use tracing::{debug, error, warn};
 
 use super::super::{
@@ -279,6 +282,11 @@ pub(super) async fn run_streaming_terminal_response(
         session.as_downstream_mut().shutdown().await;
         return;
     }
+    // The status is now fixed even if the first body pull fails. Give the
+    // streaming source this evidence before it runs its next step/filter.
+    streaming_body.swap_extensions(&mut ctx.extensions);
+    ctx.extensions.insert(ClientResponseHeadersCommitted);
+    streaming_body.swap_extensions(&mut ctx.extensions);
     session.as_downstream_mut().set_abort_on_close(false);
 
     loop {
@@ -367,6 +375,9 @@ async fn suppress_streaming_terminal_response(
     if let Err(e) = session.write_response_header(Box::new(header), true).await {
         debug!(error = %e, "failed to write suppressed streaming terminal response");
         session.as_downstream_mut().shutdown().await;
+    } else {
+        streaming_body.swap_extensions(&mut ctx.extensions);
+        ctx.extensions.insert(ClientResponseHeadersCommitted);
     }
 }
 

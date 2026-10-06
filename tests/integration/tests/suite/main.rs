@@ -97,6 +97,7 @@ mod selected_upstream_body_subrequests;
 mod selected_upstream_preset_endpoint;
 mod sni_router;
 mod stats_admin;
+mod stdout_sink;
 mod stream_buffer_adapter;
 mod stream_buffer_disconnect;
 mod streaming_terminal_response;

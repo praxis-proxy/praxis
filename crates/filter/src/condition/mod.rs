@@ -33,6 +33,13 @@ pub(crate) trait HeaderSource {
 
     /// Return the effective value of `name`, or `None` when it is absent.
     fn header(&self, name: &HeaderName) -> Result<Option<Cow<'_, str>>, Self::Error>;
+
+    /// Whether `name` is present, whatever its value.
+    ///
+    /// Unlike [`header`], a value that is not visible ASCII still counts.
+    ///
+    /// [`header`]: Self::header
+    fn contains(&self, name: &HeaderName) -> Result<bool, Self::Error>;
 }
 
 // -----------------------------------------------------------------------------

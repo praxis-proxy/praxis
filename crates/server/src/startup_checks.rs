@@ -296,6 +296,13 @@ pub(crate) fn warn_insecure_log_file_permissions(config: &Config) {
         return;
     };
 
+    warn_log_path_at(path);
+}
+
+/// Run the log-file permission check against `path`, checking its parent when
+/// the file does not exist yet.
+#[cfg(unix)]
+fn warn_log_path_at(path: &str) {
     let file_path = std::path::Path::new(path);
     let check_path = if file_path.exists() {
         file_path
@@ -308,6 +315,84 @@ pub(crate) fn warn_insecure_log_file_permissions(config: &Config) {
 /// No-op on non-Unix platforms.
 #[cfg(not(unix))]
 pub(crate) fn warn_insecure_log_file_permissions(_config: &Config) {}
+
+/// Warn when any `access_log` filter's file `sink.path` is group/world
+/// accessible or a symlink.
+///
+/// A file sink holds the same access records as `runtime.logging.file_path`, so
+/// it gets the same advisory checks. Sinks are configured inside filter entries
+/// (a raw `serde_yaml` value), so this walks every filter's config the way
+/// [`warn_insecure_key_permissions`] walks for inline client keys.
+#[cfg(unix)]
+pub(crate) fn warn_insecure_sink_file_permissions(config: &Config) {
+    for chain in &config.filter_chains {
+        for entry in &chain.filters {
+            warn_sink_paths_in_entry(entry);
+        }
+    }
+}
+
+/// Scan one filter entry's config for file-sink paths, recursing into inline
+/// branch-chain filters the way [`warn_client_cert_keys_in_entry`] does.
+#[cfg(unix)]
+fn warn_sink_paths_in_entry(entry: &praxis_core::config::FilterEntry) {
+    warn_sink_paths_in_value(&entry.config);
+    if let Some(branch_chains) = &entry.branch_chains {
+        for branch in branch_chains {
+            for chain_ref in &branch.chains {
+                if let praxis_core::config::ChainRef::Inline { filters, .. } = chain_ref {
+                    for nested in filters {
+                        warn_sink_paths_in_entry(nested);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Recursively scan a filter-config value for `sink: { type: file, path: ... }`
+/// and warn on insecure permissions or a symlinked destination.
+#[cfg(unix)]
+fn warn_sink_paths_in_value(value: &serde_yaml::Value) {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            if let Some(serde_yaml::Value::Mapping(sink)) = map.get("sink")
+                && let Some(serde_yaml::Value::String(path)) = sink.get("path")
+            {
+                warn_log_path_at(path);
+                warn_sink_path_symlink(path);
+            }
+            for (_, nested) in map {
+                warn_sink_paths_in_value(nested);
+            }
+        },
+        serde_yaml::Value::Sequence(seq) => {
+            for nested in seq {
+                warn_sink_paths_in_value(nested);
+            }
+        },
+        serde_yaml::Value::Null
+        | serde_yaml::Value::Bool(_)
+        | serde_yaml::Value::Number(_)
+        | serde_yaml::Value::String(_)
+        | serde_yaml::Value::Tagged(_) => {},
+    }
+}
+
+/// Warn when a sink path is a symlink, so records are not silently redirected.
+#[cfg(unix)]
+fn warn_sink_path_symlink(path: &str) {
+    let candidate = std::path::Path::new(path);
+    if candidate.is_symlink() {
+        let target = std::fs::canonicalize(candidate)
+            .map_or_else(|_| "unknown".to_owned(), |canonical| canonical.display().to_string());
+        tracing::warn!(path, target = %target, "access_log file sink path is a symlink");
+    }
+}
+
+/// No-op on non-Unix platforms.
+#[cfg(not(unix))]
+pub(crate) fn warn_insecure_sink_file_permissions(_config: &Config) {}
 
 /// Logs a warning when the server includes any experimental features.
 #[cfg(feature = "experimental")]
@@ -816,6 +901,97 @@ insecure_options:
         assert!(
             warnings.iter().any(|w| w.contains("symlink")),
             "symlink log path should warn at validate: {warnings:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    fn config_with_access_log_sink(sink_path: &str) -> Config {
+        Config::from_yaml(&format!(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: access_log
+        sink:
+          type: file
+          path: "{sink_path}"
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+insecure_options:
+  allow_private_endpoints: true
+"#
+        ))
+        .expect("access_log file-sink config should parse")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warn_sink_file_permissions_permissive_emits_warning() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let sink_path = dir.path().join("access.log");
+        std::fs::write(&sink_path, "log").expect("write log");
+        std::fs::set_permissions(&sink_path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let config = config_with_access_log_sink(sink_path.to_str().expect("sink"));
+        let warnings = capture_warnings(|| super::warn_insecure_sink_file_permissions(&config));
+        assert_eq!(warnings.len(), 1, "a permissive file sink should warn: {warnings:?}");
+        assert!(
+            warnings[0].contains("overly permissive"),
+            "warning should mention permissive permissions: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warn_sink_file_permissions_restrictive_emits_no_warning() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        let sink_path = dir.path().join("access.log");
+        std::fs::write(&sink_path, "log").expect("write log");
+        std::fs::set_permissions(&sink_path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        let config = config_with_access_log_sink(sink_path.to_str().expect("sink"));
+        let warnings = capture_warnings(|| super::warn_insecure_sink_file_permissions(&config));
+        assert!(
+            warnings.is_empty(),
+            "restrictive file sink should not warn: {warnings:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warn_sink_file_permissions_warns_on_symlink() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        let target = dir.path().join("real.log");
+        std::fs::write(&target, "log").expect("write log");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        let link = dir.path().join("access.log");
+        symlink(&target, &link).expect("symlink");
+
+        let config = config_with_access_log_sink(link.to_str().expect("sink"));
+        let warnings = capture_warnings(|| super::warn_insecure_sink_file_permissions(&config));
+        assert!(
+            warnings.iter().any(|w| w.contains("symlink")),
+            "a symlinked sink path should warn: {warnings:?}"
         );
     }
 
