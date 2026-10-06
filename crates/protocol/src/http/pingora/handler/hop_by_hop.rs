@@ -10,7 +10,7 @@
 use http::HeaderMap;
 use pingora_http::{RequestHeader, ResponseHeader};
 use praxis_core::next_hop_headers::{
-    HopByHopTarget, StripHopByHopOptions, UpgradePreserve, strip_hop_by_hop, strip_reserved,
+    HopByHopTarget, StripHopByHopOptions, UpgradePreserve, strip_hop_by_hop, strip_reserved, strip_reserved_target,
 };
 
 /// [RFC 9110] hop-by-hop headers for upstream requests.
@@ -37,62 +37,6 @@ pub(crate) fn strip_hop_by_hop_header_map(headers: &mut HeaderMap, static_list: 
 /// Strip reserved internal headers from a client-bound [`HeaderMap`].
 pub(crate) fn strip_reserved_internal_header_map(headers: &mut HeaderMap) {
     strip_reserved(headers);
-}
-
-/// Trait abstracting header removal for both request and response types.
-pub(crate) trait RemoveHeader {
-    /// Request or response direction label for logging.
-    const DIRECTION: &'static str;
-
-    /// Return all headers.
-    fn headers(&self) -> &HeaderMap;
-
-    /// Remove a header by name, discarding the value.
-    fn remove_header_by_name(&mut self, name: &str);
-
-    /// Strip reserved internal headers before forwarding to upstream.
-    fn strip_reserved_internal(&mut self) {
-        let to_remove: Vec<http::HeaderName> = self
-            .headers()
-            .keys()
-            .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()))
-            .cloned()
-            .collect();
-        for name in &to_remove {
-            self.remove_header_by_name(name.as_str());
-        }
-        if !to_remove.is_empty() {
-            tracing::debug!(
-                count = to_remove.len(),
-                direction = Self::DIRECTION,
-                "stripped reserved internal headers"
-            );
-        }
-    }
-}
-
-impl RemoveHeader for RequestHeader {
-    const DIRECTION: &'static str = "request";
-
-    fn headers(&self) -> &HeaderMap {
-        &self.headers
-    }
-
-    fn remove_header_by_name(&mut self, name: &str) {
-        drop(self.remove_header(name));
-    }
-}
-
-impl RemoveHeader for ResponseHeader {
-    const DIRECTION: &'static str = "response";
-
-    fn headers(&self) -> &HeaderMap {
-        &self.headers
-    }
-
-    fn remove_header_by_name(&mut self, name: &str) {
-        drop(self.remove_header(name));
-    }
 }
 
 /// Local wrapper so [`HopByHopTarget`] can be implemented for Pingora types.
@@ -126,5 +70,23 @@ impl HopByHopTarget for ResponseHop<'_> {
 
     fn insert_transfer_encoding_chunked(&mut self) {
         drop(self.0.insert_header(http::header::TRANSFER_ENCODING, "chunked"));
+    }
+}
+
+/// Strip reserved internal headers on Pingora request/response header types.
+pub(crate) trait RemoveHeader {
+    /// Strip reserved internal headers before forwarding to upstream or client.
+    fn strip_reserved_internal(&mut self);
+}
+
+impl RemoveHeader for RequestHeader {
+    fn strip_reserved_internal(&mut self) {
+        strip_reserved_target(&mut RequestHop(self));
+    }
+}
+
+impl RemoveHeader for ResponseHeader {
+    fn strip_reserved_internal(&mut self) {
+        strip_reserved_target(&mut ResponseHop(self));
     }
 }

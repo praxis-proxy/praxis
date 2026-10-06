@@ -126,21 +126,31 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap, options: StripHopByHopOptions<'
 }
 
 /// Remove all reserved internal headers (`x-praxis-*`, `x-ext-protocol-*`,
-/// `x-ext-agent-*`) from a header map.
-pub fn strip_reserved(headers: &mut HeaderMap) {
-    let to_remove: Vec<http::HeaderName> = headers
+/// `x-ext-agent-*`) using a Pingora-safe mutation surface.
+///
+/// Prefer this over [`strip_reserved`] when the target is not a plain
+/// [`HeaderMap`] (for example Pingora request/response headers).
+pub fn strip_reserved_target<T: HopByHopTarget>(target: &mut T) {
+    let to_remove: Vec<http::HeaderName> = target
+        .headers()
         .keys()
         .filter(|name| is_reserved(name.as_str()))
         .cloned()
         .collect();
 
     for name in &to_remove {
-        headers.remove(name);
+        target.remove_by_name(name.as_str());
     }
 
     if !to_remove.is_empty() {
         debug!(count = to_remove.len(), "stripped reserved internal headers");
     }
+}
+
+/// Remove all reserved internal headers (`x-praxis-*`, `x-ext-protocol-*`,
+/// `x-ext-agent-*`) from a header map.
+pub fn strip_reserved(headers: &mut HeaderMap) {
+    strip_reserved_target(headers);
 }
 
 /// Whether a filter-supplied client response header must be withheld:
