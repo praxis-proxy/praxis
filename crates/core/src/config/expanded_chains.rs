@@ -89,7 +89,8 @@ mod tests {
         assert_eq!(listener_entries[1].conditions.len(), 2);
         assert_eq!(guarded.conditions.len(), 2, "named references inherit the same gate");
         assert!(
-            matches!(&guarded.conditions[0], Condition::When(matcher) if matcher.path_prefix.as_deref() == Some("/api"))
+            matches!(&guarded.conditions[0], Condition::When(matcher) if matcher.path_prefix.as_deref() == Some("/api")),
+            "the inherited /api condition must precede the filter's own condition"
         );
         assert_eq!(
             config.filter_chains[1].filters[0].conditions.len(),
@@ -102,7 +103,7 @@ mod tests {
     // Test Utilities
     // -----------------------------------------------------------------------------
 
-    /// Listener with a plain chain followed by a conditioned chain.
+    /// Put a plain chain first so the test can verify listener and condition order.
     const CONDITIONED_CHAINS_YAML: &str = r#"
 listeners:
   - name: web
