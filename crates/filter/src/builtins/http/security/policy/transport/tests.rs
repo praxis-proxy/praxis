@@ -539,14 +539,16 @@ async fn the_refusal_reason_names_the_rule_that_was_broken() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn allowing_private_destinations_lets_a_loopback_idp_be_dialled() {
-    let (_reserved, closed) = crate::test_support::refusing_addr();
-    let err = transport(true)
-        .execute(HttpRequest::get(format!("http://{closed}/jwks")).timeout(Duration::from_secs(2)))
+    let backend = Backend::spawn(Reply::Keepalive(OK_RESPONSE));
+    let response = transport(true)
+        .execute(HttpRequest::get(backend.url("/jwks")).timeout(Duration::from_secs(2)))
         .await
-        .unwrap_err();
-    assert!(
-        matches!(err, HttpTransportError::Connect(_)),
-        "the dial must be attempted, not refused; got {err:?}"
+        .unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        backend.heads().len(),
+        1,
+        "the loopback backend must receive the request"
     );
 }
 
