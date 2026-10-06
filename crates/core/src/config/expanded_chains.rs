@@ -68,10 +68,8 @@ mod tests {
     use super::*;
     use crate::config::{Condition, Config};
 
-    #[test]
-    fn listener_and_named_refs_share_expanded_conditions() {
-        let config = Config::from_yaml(
-            r#"
+    /// Listener with a plain chain followed by a conditioned chain.
+    const CONDITIONED_CHAINS_YAML: &str = r#"
 listeners:
   - name: web
     address: "127.0.0.1:8080"
@@ -89,9 +87,11 @@ filter_chains:
         conditions:
           - when:
               methods: ["POST"]
-"#,
-        )
-        .unwrap();
+"#;
+
+    #[test]
+    fn listener_and_named_refs_share_expanded_conditions() {
+        let config = Config::from_yaml(CONDITIONED_CHAINS_YAML).unwrap();
         let expanded = ExpandedFilterChains::new(&config.filter_chains);
         let listener_entries = expanded.for_listener(&config.listeners[0]).unwrap();
         let named_entries = expanded.as_slices();
@@ -101,7 +101,9 @@ filter_chains:
         assert_eq!(listener_entries[0].filter_type, "request_id");
         assert_eq!(listener_entries[1].conditions.len(), 2);
         assert_eq!(guarded.conditions.len(), 2, "named references inherit the same gate");
-        assert!(matches!(&guarded.conditions[0], Condition::When(m) if m.path_prefix.as_deref() == Some("/api")));
+        assert!(
+            matches!(&guarded.conditions[0], Condition::When(matcher) if matcher.path_prefix.as_deref() == Some("/api"))
+        );
         assert_eq!(
             config.filter_chains[1].filters[0].conditions.len(),
             1,

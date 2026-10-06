@@ -218,7 +218,7 @@ filter_chains:
     wait_for_tcp(&admin_addr);
 
     let (status, json) = get_pipelines_json(&admin_addr, "/api/pipelines?listener=web");
-    assert_eq!(status, 200, "per-listener pipeline view should succeed: {json}");
+    assert_eq!(status, 200, "per-listener pipeline view should succeed");
     let gated = &json["listener"]["filters"][0];
     assert_eq!(gated["conditions"][0]["when"]["headers"]["Authorization"], "[REDACTED]");
     assert_eq!(gated["conditions"][0]["when"]["headers"]["X-Tenant"], "acme");
@@ -240,11 +240,12 @@ filter_chains:
     assert_eq!(branch_filter["conditions"][0]["when"]["headers"]["X-Branch"], "enabled");
 
     let (status, aggregate) = get_pipelines_json(&admin_addr, "/api/pipelines");
-    assert_eq!(status, 200, "aggregate pipeline view should succeed: {aggregate}");
+    assert_eq!(status, 200, "aggregate pipeline view should succeed");
+    let aggregate_body = aggregate.to_string();
     for secret in ["chain-secret", "filter-secret", "response-secret", "branch-secret"] {
         assert!(
-            !aggregate.to_string().contains(secret),
-            "aggregate view exposed {secret}: {aggregate}"
+            !aggregate_body.contains(secret),
+            "aggregate pipeline view exposed a credential fixture"
         );
     }
 }
