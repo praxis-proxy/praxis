@@ -3,7 +3,10 @@
 
 //! Admin health-check HTTP service.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use async_trait::async_trait;
 use http::Response;
@@ -18,7 +21,7 @@ use pingora_core::{
 };
 use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
 use tokio::time::Duration;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::{admin_host, listener_meta::ListenerMetaStore, log_level_admin, pipelines_admin, stats_admin};
 use crate::http::pingora::{json::json_response, kv::dispatch_kv_request, metrics};
@@ -209,6 +212,9 @@ pub fn add_health_endpoint_to_pingora_server(
 }
 
 /// Add the health and metrics listener with live pipeline readiness.
+///
+/// This does not install the Prometheus recorder or its upkeep service; use it
+/// when the caller already manages that lifecycle.
 pub fn add_health_endpoint_to_pingora_server_with_pipelines(
     server: &mut Server,
     metrics_addr: &str,
@@ -276,10 +282,13 @@ pub struct PingoraAdminService {
 
     /// Optional `/api/stats` snapshot state.
     stats: Option<stats_admin::StatsAdminState>,
+
+    /// Whether a legacy health or metrics route warning has been emitted.
+    legacy_probe_warning_logged: AtomicBool,
 }
 
 impl PingoraAdminService {
-    /// Create a combined admin service.
+    /// Create an admin API service.
     ///
     /// `kv_registry` enables `/api/kv/*` endpoints when `Some`.
     /// `pipelines` enables `GET /api/pipelines` when `Some`.
@@ -299,6 +308,7 @@ impl PingoraAdminService {
             log_level,
             require_loopback_host: false,
             stats,
+            legacy_probe_warning_logged: AtomicBool::new(false),
         }
     }
 
@@ -359,6 +369,12 @@ impl PingoraAdminService {
 
         None
     }
+
+    /// Emit one migration warning if an old health or metrics path hits this listener.
+    fn should_warn_for_legacy_probe(&self, path: &str) -> bool {
+        matches!(path, "/healthy" | "/ready" | "/metrics")
+            && !self.legacy_probe_warning_logged.swap(true, Ordering::Relaxed)
+    }
 }
 
 #[async_trait]
@@ -382,44 +398,21 @@ impl ServeHttp for PingoraAdminService {
             return resp;
         }
 
+        if self.should_warn_for_legacy_probe(&path) {
+            warn!(
+                path = %path,
+                "health and metrics endpoints moved to admin.metrics_address; update probes and scrapers"
+            );
+        }
+
         json_response(404, br#"{"error":"not found"}"#)
     }
 }
 
-/// Add the admin API listener to a Pingora server.
-///
-/// Installs the global Prometheus recorder and its upkeep service, then binds
-/// a [`PingoraAdminService`] to `admin_addr`, exposing only `/api/*` routes.
-///
-/// When `admin_addr` is a loopback address, requests whose `Host` is not
-/// loopback are rejected (see [`PingoraAdminService::require_loopback_host`]).
-/// A non-loopback bind skips the check because operators may reach it by DNS
-/// name.
-///
-/// ```ignore
-/// use pingora_core::server::Server;
-/// use praxis_protocol::http::pingora::health::{
-///     AdminEndpointOptions, add_admin_endpoints_to_pingora_server,
-/// };
-///
-/// let mut server = Server::new(None).unwrap();
-/// server.bootstrap();
-/// add_admin_endpoints_to_pingora_server(
-///     &mut server,
-///     "127.0.0.1:9090",
-///     AdminEndpointOptions::default(),
-/// );
-/// ```
-pub fn add_admin_endpoints_to_pingora_server(server: &mut Server, admin_addr: &str, options: AdminEndpointOptions) {
-    add_admin_endpoints_to_pingora_server_with_recorder(
-        server,
-        admin_addr,
-        options,
-        install_prometheus_admin_recorder(),
-    );
-}
-
 /// Bind only the `/api/*` admin listener without installing a metrics recorder.
+///
+/// When `admin_addr` is loopback, requests with a non-loopback `Host` are
+/// rejected. Register recorder upkeep separately if `/api/stats` is enabled.
 pub fn add_admin_api_to_pingora_server(server: &mut Server, admin_addr: &str, options: AdminEndpointOptions) {
     bind_admin_api_to_pingora_server(server, admin_addr, options);
 }
@@ -505,30 +498,19 @@ impl BackgroundService for PrometheusUpkeepService {
 ///
 /// The concrete exporter handle stays private so applications cannot create a
 /// second lifecycle for the recorder. Pass this value to
-/// [`add_admin_endpoints_to_pingora_server_with_recorder`].
+/// [`add_prometheus_upkeep_to_pingora_server`].
 pub struct PrometheusAdminRecorder {
     /// Exporter handle shared by metrics rendering and recorder upkeep.
     handle: metrics_exporter_prometheus::PrometheusHandle,
 }
 
-/// Install the admin Prometheus recorder before startup instrumentation runs.
+/// Install the Prometheus recorder before startup instrumentation runs.
+/// Register its upkeep service with [`add_prometheus_upkeep_to_pingora_server`].
 #[must_use]
 pub fn install_prometheus_admin_recorder() -> PrometheusAdminRecorder {
     PrometheusAdminRecorder {
         handle: metrics::install_prometheus_recorder().clone(),
     }
-}
-
-/// Add admin endpoints using an already-installed Prometheus recorder.
-/// The recorder upkeep service is registered once alongside the API listener.
-pub fn add_admin_endpoints_to_pingora_server_with_recorder(
-    server: &mut Server,
-    admin_addr: &str,
-    options: AdminEndpointOptions,
-    recorder: PrometheusAdminRecorder,
-) {
-    add_prometheus_upkeep_to_pingora_server(server, recorder);
-    bind_admin_api_to_pingora_server(server, admin_addr, options);
 }
 
 /// Register recorder upkeep after installing the recorder before startup
@@ -678,10 +660,7 @@ fn prometheus_response() -> Response<Vec<u8>> {
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use std::{
-        collections::HashMap,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use std::{collections::HashMap, sync::atomic::AtomicUsize};
 
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
     use tokio::sync::Notify;
@@ -1137,6 +1116,24 @@ mod tests {
         assert!(
             !svc.require_loopback_host,
             "PingoraAdminService::new must not change behaviour for embedders"
+        );
+    }
+
+    #[test]
+    fn legacy_probe_warning_is_once_per_admin_service() {
+        for path in ["/healthy", "/ready", "/metrics"] {
+            let svc = PingoraAdminService::new(None, None, None, None, None, false);
+            assert!(svc.should_warn_for_legacy_probe(path), "first {path} should warn");
+            assert!(
+                !svc.should_warn_for_legacy_probe(path),
+                "repeated {path} should not warn"
+            );
+        }
+
+        let svc = PingoraAdminService::new(None, None, None, None, None, false);
+        assert!(
+            !svc.should_warn_for_legacy_probe("/api/stats"),
+            "API paths should not warn"
         );
     }
 

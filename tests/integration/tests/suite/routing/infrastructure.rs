@@ -25,7 +25,7 @@ fn health_endpoints() {
     let backend_port_guard = start_backend_with_shutdown("ok");
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
-    let admin_port = free_port();
+    let metrics_port = free_port();
 
     let yaml = format!(
         r#"
@@ -34,7 +34,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [routing]
 admin:
-  metrics_address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{metrics_port}"
 filter_chains:
   - name: routing
     filters:
@@ -68,19 +68,19 @@ insecure_options:
     std::thread::spawn(move || {
         server.run_forever();
     });
-    wait_for_tcp(&format!("127.0.0.1:{admin_port}"));
+    wait_for_tcp(&format!("127.0.0.1:{metrics_port}"));
 
-    let admin_addr = format!("127.0.0.1:{admin_port}");
-    let (status, body) = http_get(&admin_addr, "/ready", None);
+    let metrics_addr = format!("127.0.0.1:{metrics_port}");
+    let (status, body) = http_get(&metrics_addr, "/ready", None);
     assert_eq!(status, 200, "/ready endpoint should return 200");
     assert!(body.contains("ok"), "/ready body should contain 'ok', got: {body}");
 
-    let (status, body) = http_get(&admin_addr, "/healthy", None);
+    let (status, body) = http_get(&metrics_addr, "/healthy", None);
     assert_eq!(status, 200, "/healthy endpoint should return 200");
     assert!(body.contains("ok"), "/healthy body should contain 'ok', got: {body}");
 
-    let (status, _) = http_get(&admin_addr, "/unknown", None);
-    assert_eq!(status, 404, "unknown admin path should return 404");
+    let (status, _) = http_get(&metrics_addr, "/unknown", None);
+    assert_eq!(status, 404, "unknown metrics path should return 404");
 }
 
 #[test]

@@ -680,6 +680,19 @@ mod tests {
     }
 
     #[test]
+    fn metrics_address_change_warns() {
+        let old = config_with_runtime("");
+        let new = config_with_runtime("admin:\n  metrics_address: \"127.0.0.1:9902\"\n");
+        let warnings = capture_warnings(|| detect_admin_changes(&old, &new));
+        assert_eq!(warnings.len(), 1, "changed metrics address should produce one warning");
+        assert!(
+            warnings[0].contains("admin configuration changed"),
+            "warning should mention the admin change: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
     fn admin_unchanged_no_warning() {
         let config = config_with_runtime("admin:\n  address: \"127.0.0.1:9901\"\n");
         let warnings = capture_warnings(|| detect_admin_changes(&config, &config));

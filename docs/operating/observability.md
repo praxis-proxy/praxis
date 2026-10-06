@@ -492,6 +492,17 @@ scrape_configs:
           - "127.0.0.1:9902"
 ```
 
+When Prometheus scrapes pod IPs, bind the metrics listener to a non-loopback
+interface. This listener does not require `insecure_options.allow_public_admin`;
+that setting applies only to the admin API listener:
+
+```yaml
+admin:
+  metrics_address: "0.0.0.0:9902"
+```
+
+Restrict access to the metrics port with network controls.
+
 For Kubernetes deployments with multiple replicas,
 use service discovery:
 

@@ -189,6 +189,12 @@ to loopback unless `insecure_options.allow_public_admin` is enabled; the
 health and metrics listener can bind to any interface, so restrict access with
 network controls when it is not bound to loopback.
 
+**Migration:** Existing deployments that sent `/healthy`, `/ready`, or
+`/metrics` to `admin.address` must configure `admin.metrics_address` and move
+those probes and scrapes to that listener. The container health check now uses
+`http://127.0.0.1:9902/healthy`; update custom health checks from port 9901 to
+the configured metrics port.
+
 ```yaml
 admin:
   address: "127.0.0.1:9901"

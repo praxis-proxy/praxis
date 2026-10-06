@@ -86,8 +86,21 @@ fn loopback_metrics_listener_rejects_rebound_host_on_every_route() {
         let (status, _) = admin_request(&metrics, "GET", path, Some("localhost"));
         assert_ne!(status, 421, "loopback Host must pass the guard for {path}");
     }
-    let (status, _) = admin_request(&metrics, "GET", "/api/stats", Some("localhost"));
-    assert_eq!(status, 404, "health/metrics listener must not expose the admin API");
+    for (method, path) in [
+        ("GET", "/api/stats"),
+        ("GET", "/api/pipelines"),
+        ("GET", "/api/kv/store/key"),
+        ("PUT", "/api/kv/store/key"),
+        ("DELETE", "/api/kv/store/key"),
+        ("PUT", "/api/log-level"),
+    ] {
+        let (status, body) = admin_request(&metrics, method, path, Some("localhost"));
+        assert_eq!(status, 404, "{method} {path} must not be exposed on metrics: {body}");
+        assert_eq!(
+            body, r#"{"error":"not found"}"#,
+            "{method} {path} must use the metrics listener's not-found response"
+        );
+    }
 }
 
 #[test]

@@ -37,8 +37,7 @@ pub(in crate::http::pingora) use service::escape_json_string;
 #[cfg(feature = "admin-api")]
 pub use service::{
     AdminEndpointOptions, PingoraAdminService, PingoraHealthService, PrometheusAdminRecorder,
-    add_admin_api_to_pingora_server, add_admin_endpoints_to_pingora_server,
-    add_admin_endpoints_to_pingora_server_with_recorder, add_health_endpoint_to_pingora_server,
+    add_admin_api_to_pingora_server, add_health_endpoint_to_pingora_server,
     add_health_endpoint_to_pingora_server_with_pipelines, add_prometheus_upkeep_to_pingora_server,
     install_prometheus_admin_recorder,
 };
