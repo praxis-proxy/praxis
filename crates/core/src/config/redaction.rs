@@ -7,6 +7,10 @@ use std::collections::HashMap;
 
 use super::{Condition, ResponseCondition};
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
 /// Substrings that mark a header name as credential-bearing (case-insensitive).
 const SENSITIVE_HEADER_SUBSTRINGS: &[&str] = &["token", "secret", "key", "auth", "password", "credential"];
 
@@ -21,6 +25,10 @@ const CREDENTIAL_HEADER_NAMES: &[&str] = &[
     "x-auth-token",
 ];
 
+// -----------------------------------------------------------------------------
+// Credential Header Classification
+// -----------------------------------------------------------------------------
+
 /// Whether a header name is treated as credential-bearing in operator views.
 ///
 /// Matches well-known names and sensitive substrings case-insensitively.
@@ -30,6 +38,10 @@ pub fn is_credential_header_name(name: &str) -> bool {
     CREDENTIAL_HEADER_NAMES.contains(&name.as_str())
         || SENSITIVE_HEADER_SUBSTRINGS.iter().any(|frag| name.contains(frag))
 }
+
+// -----------------------------------------------------------------------------
+// Condition Redaction
+// -----------------------------------------------------------------------------
 
 /// Replace credential-bearing header matcher values in request conditions.
 pub fn redact_condition_headers(conditions: &mut [Condition]) {
@@ -47,6 +59,10 @@ pub fn redact_response_condition_headers(conditions: &mut [ResponseCondition]) {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Private Utilities
+// -----------------------------------------------------------------------------
+
 /// Replace credential-bearing values in one header matcher map.
 fn redact_header_matcher(headers: Option<&mut HashMap<String, String>>) {
     let Some(headers) = headers else {
@@ -63,6 +79,10 @@ fn redact_header_matcher(headers: Option<&mut HashMap<String, String>>) {
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

@@ -7,6 +7,10 @@ use std::collections::HashMap;
 
 use super::{FilterChainConfig, FilterEntry, Listener};
 
+// -----------------------------------------------------------------------------
+// Expanded Filter Chains
+// -----------------------------------------------------------------------------
+
 /// Named chains with chain-level conditions inherited by every filter entry.
 ///
 /// Use [`Self::for_listener`] for the listener's direct filters and
@@ -57,6 +61,10 @@ impl<'chains> ExpandedFilterChains<'chains> {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
@@ -67,27 +75,6 @@ impl<'chains> ExpandedFilterChains<'chains> {
 mod tests {
     use super::*;
     use crate::config::{Condition, Config};
-
-    /// Listener with a plain chain followed by a conditioned chain.
-    const CONDITIONED_CHAINS_YAML: &str = r#"
-listeners:
-  - name: web
-    address: "127.0.0.1:8080"
-    filter_chains: [plain, guarded]
-filter_chains:
-  - name: plain
-    filters:
-      - filter: request_id
-  - name: guarded
-    conditions:
-      - when:
-          path_prefix: "/api"
-    filters:
-      - filter: headers
-        conditions:
-          - when:
-              methods: ["POST"]
-"#;
 
     #[test]
     fn listener_and_named_refs_share_expanded_conditions() {
@@ -110,4 +97,29 @@ filter_chains:
             "source remains unchanged"
         );
     }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// Listener with a plain chain followed by a conditioned chain.
+    const CONDITIONED_CHAINS_YAML: &str = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [plain, guarded]
+filter_chains:
+  - name: plain
+    filters:
+      - filter: request_id
+  - name: guarded
+    conditions:
+      - when:
+          path_prefix: "/api"
+    filters:
+      - filter: headers
+        conditions:
+          - when:
+              methods: ["POST"]
+"#;
 }
