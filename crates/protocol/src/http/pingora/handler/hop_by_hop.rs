@@ -3,8 +3,9 @@
 
 //! Hop-by-hop stripping adapters over [`praxis_core::next_hop_headers`].
 //!
-//! Pingora request/response types implement [`HopByHopTarget`] and
-//! [`RemoveHeader`]; header-map call sites delegate to the shared core module.
+//! Pingora request/response types implement [`praxis_core::next_hop_headers::HopByHopTarget`] and
+//! [`crate::http::pingora::handler::hop_by_hop::RemoveHeader`]; header-map call sites delegate to
+//! the shared core module.
 
 use http::HeaderMap;
 use pingora_http::{RequestHeader, ResponseHeader};

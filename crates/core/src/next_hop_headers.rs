@@ -39,8 +39,8 @@ pub enum UpgradePreserve {
 /// Controls how [`strip_hop_by_hop`] removes connection-scoped headers.
 #[derive(Clone, Copy, Debug)]
 pub struct StripHopByHopOptions<'list> {
-    /// Static hop-by-hop set ([`reserved_headers::HOP_BY_HOP_HEADERS`] or
-    /// [`reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS`]).
+    /// Static hop-by-hop set ([`crate::reserved_headers::HOP_BY_HOP_HEADERS`] or
+    /// [`crate::reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS`]).
     pub static_headers: &'list [&'list str],
     /// WebSocket preserve policy for `upgrade` / `connection`.
     pub upgrade: UpgradePreserve,
