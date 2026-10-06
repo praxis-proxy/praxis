@@ -131,6 +131,9 @@ mod tests {
     // Constants
     // -----------------------------------------------------------------------------
 
+    /// Buffer limit for fragmentation coverage.
+    const BUFFER_LIMIT_BYTES: usize = 1_048_576; // 1 MiB
+
     /// Payload size for fragmentation coverage.
     const PAYLOAD_BYTES: usize = 65_536; // 64 KiB
 
@@ -205,7 +208,7 @@ mod tests {
         let payload = vec![b'x'; PAYLOAD_BYTES];
 
         for chunk_bytes in [PAYLOAD_BYTES, 1024, 64, 1] {
-            let mut buf = BodyBuffer::new(PAYLOAD_BYTES);
+            let mut buf = BodyBuffer::new(BUFFER_LIMIT_BYTES);
             for chunk in payload.chunks(chunk_bytes) {
                 buf.push(Bytes::copy_from_slice(chunk)).unwrap();
             }
