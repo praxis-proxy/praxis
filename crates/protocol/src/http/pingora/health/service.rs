@@ -16,7 +16,7 @@ use pingora_core::{
         listening::Service,
     },
 };
-use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
+use praxis_core::{RuntimeReadiness, health::HealthRegistry, kv::KvStoreRegistry};
 use tokio::time::Duration;
 use tracing::{error, info};
 
@@ -188,6 +188,9 @@ pub struct AdminEndpointOptions {
     /// Runtime stats snapshot state for `/api/stats`.
     pub stats: Option<stats_admin::StatsAdminState>,
 
+    /// Aggregate readiness of process-lifetime runtime services.
+    pub runtime_readiness: Option<RuntimeReadiness>,
+
     /// When `true`, include per-cluster detail in `/ready`.
     pub verbose: bool,
 }
@@ -219,6 +222,9 @@ pub struct PingoraAdminService {
     /// Optional `/api/stats` snapshot state.
     stats: Option<stats_admin::StatsAdminState>,
 
+    /// Aggregate readiness of process-lifetime runtime services.
+    runtime_readiness: Option<RuntimeReadiness>,
+
     /// When `true`, include per-cluster detail in `/ready` responses.
     verbose: bool,
 }
@@ -244,8 +250,16 @@ impl PingoraAdminService {
             log_level,
             require_loopback_host: false,
             stats,
+            runtime_readiness: None,
             verbose,
         }
+    }
+
+    /// Include process-lifetime runtime services in `/ready`.
+    #[must_use]
+    pub fn runtime_readiness(mut self, readiness: RuntimeReadiness) -> Self {
+        self.runtime_readiness = Some(readiness);
+        self
     }
 
     /// Answer only requests whose `Host` names loopback (off by default).
@@ -271,7 +285,11 @@ impl PingoraAdminService {
             },
             None => self.health_registry.clone(),
         };
-        compute_ready_response(registry.as_ref(), self.verbose)
+        compute_admin_ready_response(
+            registry.as_ref(),
+            self.verbose,
+            self.runtime_readiness.as_ref().is_none_or(RuntimeReadiness::is_ready),
+        )
     }
 
     /// Dispatch `/api/*` admin routes when configured.
@@ -478,20 +496,24 @@ pub fn add_admin_endpoints_to_pingora_server_with_recorder(
     options: AdminEndpointOptions,
     recorder: PrometheusAdminRecorder,
 ) {
-    let verbose = options.verbose;
+    let AdminEndpointOptions {
+        health_registry,
+        kv_registry,
+        pipelines,
+        log_level,
+        stats,
+        runtime_readiness,
+        verbose,
+    } = options;
     let require_loopback_host = admin_host::is_loopback_host(admin_addr);
     let handle = recorder.handle;
     let upkeep = PrometheusUpkeepService { handle };
     server.add_service(background_service("Prometheus upkeep", upkeep));
-    let admin = PingoraAdminService::new(
-        options.health_registry,
-        options.kv_registry,
-        options.pipelines,
-        options.log_level,
-        options.stats,
-        verbose,
-    )
-    .require_loopback_host(require_loopback_host);
+    let mut admin = PingoraAdminService::new(health_registry, kv_registry, pipelines, log_level, stats, verbose)
+        .require_loopback_host(require_loopback_host);
+    if let Some(readiness) = runtime_readiness {
+        admin = admin.runtime_readiness(readiness);
+    }
     let mut service = Service::new("admin".to_owned(), admin);
     service.add_tcp(admin_addr);
     info!(address = %admin_addr, verbose, require_loopback_host, "admin endpoints enabled (health + metrics + kv + pipelines + log-level + stats)");
@@ -523,6 +545,22 @@ fn compute_ready_response(registry: Option<&HealthRegistry>, verbose: bool) -> (
 
     let body = format_ready_body(status_str, &agg);
     (status_code, body)
+}
+
+/// Build the combined admin `/ready` response, including runtime-service
+/// initialization before checking upstream health.
+fn compute_admin_ready_response(
+    registry: Option<&HealthRegistry>,
+    verbose: bool,
+    runtime_services_ready: bool,
+) -> (u16, String) {
+    if !runtime_services_ready {
+        return (
+            503,
+            r#"{"status":"initializing","runtime_services":"pending"}"#.to_owned(),
+        );
+    }
+    compute_ready_response(registry, verbose)
 }
 
 // -----------------------------------------------------------------------------
@@ -700,6 +738,25 @@ mod tests {
             200,
             "/ready must resolve from live pipelines, not the frozen startup snapshot"
         );
+    }
+
+    #[test]
+    fn admin_ready_returns_503_while_runtime_services_initialize() {
+        let (status, body) = compute_admin_ready_response(None, false, false);
+
+        assert_eq!(status, 503, "pending runtime services must keep admin readiness false");
+        assert!(
+            body.contains("initializing"),
+            "response should explain the startup state"
+        );
+    }
+
+    #[test]
+    fn admin_ready_checks_upstream_health_after_runtime_services_initialize() {
+        let (status, body) = compute_admin_ready_response(None, false, true);
+
+        assert_eq!(status, 200, "ready runtime services should defer to upstream health");
+        assert!(body.contains("ok"), "response should preserve the normal ready body");
     }
 
     #[tokio::test(start_paused = true)]

@@ -21,7 +21,7 @@ The admin listener exposes these endpoints:
 | Path | Purpose |
 | ----------- | ----------------------------------------- |
 | `/healthy` | Liveness probe - returns `200` once the server is accepting connections |
-| `/ready` | Readiness probe - returns cluster health status; `503` when any cluster has zero healthy endpoints |
+| `/ready` | Readiness probe - returns `503` during runtime-service initialization or when any cluster has zero healthy endpoints |
 | `/metrics` | Prometheus text exposition format |
 | `/api/log-level` | Runtime process log level overlays (`PUT` / `GET` / `HEAD` / `DELETE`) |
 

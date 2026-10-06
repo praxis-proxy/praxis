@@ -25,6 +25,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use praxis_core::{
     circuit::CircuitBreakerConfig,
     config::{Config, DEFAULT_SUBREQUEST_POOL_SIZE, ExpandedFilterChains},
+    health::{HealthRegistry, build_health_registry},
     subrequest::{SubRequestClient, SubRequestConnector, SubRequestConnectorOptions},
 };
 use praxis_filter::{FilterPipeline, FilterRegistry};
@@ -100,6 +101,48 @@ pub fn build_subrequest_client(config: &Config) -> SubRequestClient {
 // Pipeline Resolution
 // -----------------------------------------------------------------------------
 
+/// Complete, unpublished pipeline candidate shared by startup and reload.
+pub(crate) struct PipelineCandidate {
+    /// Health registry configured into the candidate pipelines.
+    pub(crate) health_registry: HealthRegistry,
+    /// Candidate listener pipelines.
+    pub(crate) pipelines: ListenerPipelines,
+}
+
+/// Resolve a complete pipeline candidate without publishing it.
+///
+/// Startup, reload, and offline validation call this boundary with their
+/// mode-appropriate shared registries and sub-request client. It creates the
+/// candidate health registry and applies the same downstream extensions and
+/// validators in every mode.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "candidate wiring passes shared server registries"
+)]
+pub(crate) fn resolve_pipeline_candidate(
+    config: &Config,
+    registry: &FilterRegistry,
+    kv_stores: &praxis_core::kv::KvStoreRegistry,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
+    subrequest_client: &SubRequestClient,
+    composition: &PipelineComposition,
+) -> Result<PipelineCandidate, Box<dyn std::error::Error + Send + Sync>> {
+    let health_registry = build_health_registry(&config.clusters);
+    let pipelines = resolve_pipelines_with_composition(
+        config,
+        registry,
+        &health_registry,
+        kv_stores,
+        session_stores,
+        subrequest_client,
+        composition,
+    )?;
+    Ok(PipelineCandidate {
+        health_registry,
+        pipelines,
+    })
+}
+
 /// Build a [`FilterPipeline`] for each listener by resolving named chains.
 ///
 /// This is the config-to-runtime bridge used by the CLI validate/dump path and
@@ -119,7 +162,7 @@ pub fn build_subrequest_client(config: &Config) -> SubRequestClient {
 pub fn resolve_pipelines(
     config: &Config,
     registry: &FilterRegistry,
-    health_registry: &praxis_core::health::HealthRegistry,
+    health_registry: &HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &SubRequestClient,
@@ -172,7 +215,7 @@ pub fn resolve_pipelines(
 pub(crate) fn resolve_pipelines_with_composition(
     config: &Config,
     registry: &FilterRegistry,
-    health_registry: &praxis_core::health::HealthRegistry,
+    health_registry: &HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &SubRequestClient,
@@ -264,7 +307,7 @@ fn runtime_registry(registry: &FilterRegistry, subrequest_client: &SubRequestCli
 fn configure_pipeline(
     pipeline: &mut FilterPipeline,
     config: &Config,
-    health_registry: &praxis_core::health::HealthRegistry,
+    health_registry: &HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &SubRequestClient,
@@ -380,7 +423,6 @@ fn validate_pipeline(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use praxis_core::health::HealthRegistry;
     use praxis_filter::{PipelineExtension, RequestExtensions};
 
     use super::*;
@@ -608,7 +650,7 @@ filter_chains:
 
         let ran = Arc::new(AtomicUsize::new(0));
         let ran_in_validator = Arc::clone(&ran);
-        let (_registry_factory, composition) = ServerComposition::standard()
+        let composition = ServerComposition::standard()
             .add_pipeline_validator(move |ctx| {
                 let entries = ctx.entries();
                 assert_eq!(entries.len(), 2, "two filters expanded from the chain");
@@ -625,7 +667,8 @@ filter_chains:
                 ran_in_validator.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             })
-            .into_parts();
+            .into_parts()
+            .pipeline;
 
         resolve_pipelines_with_composition(
             &config,
@@ -1184,13 +1227,14 @@ filter_chains:
         let registry = FilterRegistry::with_builtins();
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_in_factory = Arc::clone(&calls);
-        let (_registry_factory, composition) = ServerComposition::standard()
+        let composition = ServerComposition::standard()
             .add_pipeline_extension_factory(move |_ctx| {
                 calls_in_factory.fetch_add(1, Ordering::SeqCst);
                 let ext: Box<dyn PipelineExtension> = Box::new(Marker(9));
                 Ok(ext)
             })
-            .into_parts();
+            .into_parts()
+            .pipeline;
 
         let pipelines = resolve_pipelines_with_composition(
             &config,
@@ -1225,9 +1269,10 @@ filter_chains:
     fn composition_factory_error_rejects_pipeline_build() {
         let config = valid_config();
         let registry = FilterRegistry::with_builtins();
-        let (_registry_factory, composition) = ServerComposition::standard()
+        let composition = ServerComposition::standard()
             .add_pipeline_extension_factory(|_ctx| Err(CompositionError::new("factory refused")))
-            .into_parts();
+            .into_parts()
+            .pipeline;
 
         let result = resolve_pipelines_with_composition(
             &config,
@@ -1252,9 +1297,10 @@ filter_chains:
     fn composition_validator_error_rejects_pipeline_build() {
         let config = valid_config();
         let registry = FilterRegistry::with_builtins();
-        let (_registry_factory, composition) = ServerComposition::standard()
+        let composition = ServerComposition::standard()
             .add_pipeline_validator(|_ctx| Err(CompositionError::new("validator refused")))
-            .into_parts();
+            .into_parts()
+            .pipeline;
 
         let result = resolve_pipelines_with_composition(
             &config,
@@ -1281,14 +1327,15 @@ filter_chains:
         let registry = FilterRegistry::with_builtins();
         let observed = Arc::new(AtomicUsize::new(0));
         let observed_in_validator = Arc::clone(&observed);
-        let (_registry_factory, composition) = ServerComposition::standard()
+        let composition = ServerComposition::standard()
             .add_pipeline_validator(move |ctx| {
                 observed_in_validator.store(ctx.entries().len(), Ordering::SeqCst);
                 assert_eq!(ctx.pipeline().len(), ctx.entries().len());
                 assert_eq!(ctx.listener().name, "web");
                 Ok(())
             })
-            .into_parts();
+            .into_parts()
+            .pipeline;
 
         resolve_pipelines_with_composition(
             &config,
@@ -1317,7 +1364,7 @@ filter_chains:
         let registry = FilterRegistry::with_builtins();
         let seen = Arc::new(AtomicUsize::new(0));
         let seen_in_validator = Arc::clone(&seen);
-        let (_registry_factory, composition) = ServerComposition::standard()
+        let composition = ServerComposition::standard()
             .add_pipeline_validator(move |ctx| {
                 let mut bits = 0;
                 for entry in ctx.entries() {
@@ -1334,7 +1381,8 @@ filter_chains:
                 seen_in_validator.store(bits, Ordering::SeqCst);
                 Ok(())
             })
-            .into_parts();
+            .into_parts()
+            .pipeline;
 
         resolve_pipelines_with_composition(
             &config,

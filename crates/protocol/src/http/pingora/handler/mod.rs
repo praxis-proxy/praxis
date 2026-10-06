@@ -16,8 +16,12 @@
 use std::{sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
-use pingora_core::{Result, server::Server, services::listening::Service};
-use pingora_proxy::http_proxy;
+use pingora_core::{
+    Result,
+    server::{Server, configuration::ServerConf},
+    services::listening::Service,
+};
+use pingora_proxy::{HttpProxy, http_proxy};
 use praxis_filter::FilterPipeline;
 use tokio::sync::Semaphore;
 use tracing::debug;
@@ -130,6 +134,31 @@ pub fn load_http_handler(
     pipeline: Arc<ArcSwap<FilterPipeline>>,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
 ) -> Result<(), praxis_core::ProxyError> {
+    let service = build_http_service(&server.configuration, listener, pipeline, cert_watcher_shutdowns)?;
+    server.add_service(service);
+    Ok(())
+}
+
+/// Load an HTTP handler as a client-facing service on the Praxis runtime.
+pub(crate) fn load_http_handler_on_runtime(
+    server: &mut praxis_core::PingoraServerRuntime,
+    listener: &praxis_core::config::Listener,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+) -> Result<(), praxis_core::ProxyError> {
+    let configuration = Arc::clone(&server.server_mut().configuration);
+    let service = build_http_service(&configuration, listener, pipeline, cert_watcher_shutdowns)?;
+    server.add_proxy_service(service);
+    Ok(())
+}
+
+/// Create a configured HTTP proxy service for one listener.
+fn build_http_service(
+    configuration: &Arc<ServerConf>,
+    listener: &praxis_core::config::Listener,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+) -> Result<Service<HttpProxy<PingoraHttpHandler>>, praxis_core::ProxyError> {
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
     let downstream_keepalive_timeout_secs = listener
         .downstream_keepalive_timeout_ms
@@ -151,31 +180,15 @@ pub fn load_http_handler(
         // would deep-copy on every clone.
         ::metrics::SharedString::from_shared(Arc::from(listener.name.as_str())),
     );
-    wire_service(server, listener, handler, cert_watcher_shutdowns)?;
-    Ok(())
-}
-
-/// Create a Pingora HTTP proxy service, bind the listener, and add it to the server.
-fn wire_service<H>(
-    server: &mut Server,
-    listener: &praxis_core::config::Listener,
-    handler: H,
-    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
-) -> Result<(), praxis_core::ProxyError>
-where
-    H: pingora_proxy::ProxyHttp + Send + Sync + 'static,
-    H::CTX: Send + Sync,
-{
     let service_name = format!("http-proxy:{name}", name = listener.name);
-    let mut proxy = http_proxy(&server.configuration, handler);
+    let mut proxy = http_proxy(configuration, handler);
     proxy.server_options = Some(server_options::h2c_server_options());
     proxy.h2_options = Some(server_options::h2_server_options());
     let mut service = Service::new(service_name, proxy);
     if let Some(tx) = super::listener::add_listener(&mut service, listener)? {
         cert_watcher_shutdowns.push(tx);
     }
-    server.add_service(service);
-    Ok(())
+    Ok(service)
 }
 
 // -----------------------------------------------------------------------------

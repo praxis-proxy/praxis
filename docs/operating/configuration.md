@@ -158,11 +158,13 @@ See [hot-reload.yaml] for an example.
 
 - `/healthy` returns `200 OK` with `{"status":"ok"}`
   once the server is accepting connections (liveness).
-- `/ready` returns per-cluster health status with
-  healthy/unhealthy/total counts when active health
-  checks are configured; it returns `503 SERVICE UNAVAILABLE` when any
-  cluster has zero healthy endpoints. Without health
-  checks, `/ready` returns `{"status":"ok"}`.
+- `/ready` returns `503 SERVICE UNAVAILABLE` while a
+  composed runtime service is initializing. It then returns
+  per-cluster health status with healthy/unhealthy/total
+  counts when active health checks are configured, and `503`
+  when any cluster has zero healthy endpoints. Without health
+  checks, `/ready` returns `{"status":"ok"}` after runtime
+  initialization completes.
 - `/metrics` returns Prometheus text exposition format
   with HTTP request metrics (`praxis_http_requests_total`,
   `praxis_http_request_duration_seconds`). When

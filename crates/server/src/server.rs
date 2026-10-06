@@ -7,9 +7,10 @@
 //! registration to the blocking run call. Entry points expose progressively more
 //! control: [`try_run_server`] uses built-in filters, [`try_run_server_with_registry`]
 //! lets you inject custom filters, and [`try_run_server_with_composition`] exposes the
-//! full composition API for downstream pipeline extensions and validators. Each returns
-//! once the server has shut down so the caller's tracing guard can flush; the
-//! `run_server*` counterparts exit the process instead.
+//! full composition API for downstream pipeline extensions, validators, and
+//! runtime services. Each returns once the server has shut down so the caller's
+//! tracing guard can flush; the `run_server*` counterparts exit the process
+//! instead.
 
 use std::{
     path::PathBuf,
@@ -21,7 +22,7 @@ use std::{
 use praxis_core::{
     PingoraServerRuntime,
     config::{Config, ConfigFile, LogOutput, ProtocolKind, RuntimeConfig},
-    health::{HealthRegistry, build_health_registry},
+    health::HealthRegistry,
     logging::LogLevelState,
     subrequest::SubRequestClient,
 };
@@ -40,8 +41,8 @@ use crate::startup_checks::warn_experimental_features;
 #[cfg(not(feature = "policy-engine"))]
 use crate::startup_checks::warn_policy_filter_without_feature;
 use crate::{
-    composition::{PipelineComposition, RegistryContext, ServerComposition},
-    pipelines::resolve_pipelines_with_composition,
+    composition::{PipelineComposition, RegistryContext, RuntimeServiceRegistration, ServerComposition},
+    pipelines::resolve_pipeline_candidate,
     startup_checks::{
         enforce_root_check, fips_blocker, warn_insecure_key_permissions, warn_insecure_log_file_permissions,
         warn_insecure_options, warn_insecure_sink_file_permissions,
@@ -198,6 +199,39 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 /// Error that stops the server from starting.
 pub type StartupError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Validate a parsed configuration with the standard server composition.
+///
+/// This builds the same registry and listener pipelines as serving startup but
+/// performs no serving-runtime work. In particular, runtime services are not
+/// installed or started.
+///
+/// # Errors
+///
+/// Returns an error for invalid logging configuration, registry construction,
+/// pipeline resolution, extension factories, validators, or FIPS policy.
+pub fn validate_config(config: &Config) -> Result<(), StartupError> {
+    validate_config_with_composition(config, ServerComposition::standard())
+}
+
+/// Validate a parsed configuration with a downstream [`ServerComposition`].
+///
+/// Serving startup, reload, `--validate`, and `--dump` use the same composition
+/// inputs and pipeline-resolution rules. This offline path deliberately does
+/// not install runtime services or perform serving-runtime I/O.
+///
+/// # Errors
+///
+/// Returns the same candidate-construction errors that would prevent serving
+/// startup, plus invalid logging configuration.
+pub fn validate_config_with_composition(config: &Config, composition: ServerComposition) -> Result<(), StartupError> {
+    try_install_crypto_provider()?;
+    praxis_core::logging::validate_log_overrides(config)?;
+    praxis_core::logging::validate_logging(config)?;
+    let _candidate = resolve_composition_candidate(config, composition)?;
+    praxis_protocol::tcp::validate_tcp_groups(config)?;
+    Ok(())
+}
+
 /// Standard server entry point with built-in filters only.
 ///
 /// This convenience wrapper builds pipelines from the built-in filter registry and runs the
@@ -262,8 +296,9 @@ pub fn try_run_server_with_registry(
 /// lifecycle; [`try_run_server`] and [`try_run_server_with_registry`] are thin
 /// convenience wrappers over it. The composition describes how the downstream
 /// filter registry is built, which pipeline extensions are attached to each
-/// per-listener pipeline, and which read-only validators gate pipeline
-/// construction. The same composition is carried into the hot-reload watcher so
+/// per-listener pipeline, which read-only validators gate pipeline construction,
+/// and which process-lifetime services must become ready before proxy listeners
+/// start. The reload-durable portion is carried into the hot-reload watcher so
 /// downstream extensions and validators are re-applied on every reload.
 ///
 /// Assumes tracing is already initialized. Blocks until the server shuts
@@ -293,7 +328,6 @@ pub fn try_run_server_with_registry(
 /// [`with_bootstrap_logging`]: praxis_core::logging::with_bootstrap_logging
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
-#[expect(clippy::too_many_lines, reason = "startup sequence with feature-gated steps")]
 pub fn try_run_server_with_composition(
     config: Config,
     composition: ServerComposition,
@@ -319,21 +353,14 @@ pub fn try_run_server_with_composition(
         .as_ref()
         .map(|_| praxis_protocol::http::pingora::health::install_prometheus_admin_recorder());
 
-    let health_registry = build_health_registry(&config.clusters);
-    let (state, registry) = build_server_state(&config, composition, &health_registry, log_level)?;
+    let (mut state, registry) = build_server_state(&config, composition, log_level)?;
 
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
     let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines)?;
     #[cfg(feature = "admin-api")]
-    register_admin_endpoints(
-        &mut server,
-        &config,
-        health_registry,
-        &state,
-        prometheus_recorder,
-        stats_started_at,
-    );
+    register_admin_endpoints(&mut server, &config, &state, prometheus_recorder, stats_started_at);
+    register_runtime_services(&mut server, std::mem::take(&mut state.runtime_services));
 
     #[cfg(feature = "config-reload")]
     let _watcher = spawn_watcher(config_file, config, registry, state);
@@ -455,8 +482,8 @@ fn exit_with(outcome: Result<(), StartupError>) -> ! {
 
 /// State built during server initialization and shared with the file watcher for hot reload.
 ///
-/// This struct holds everything the hot-reload watcher needs to rebuild pipelines and swap them
-/// atomically without restarting the server: the current pipeline set, health registries,
+/// This struct holds everything the hot-reload watcher needs to rebuild and replace pipelines
+/// without restarting the server: the current pipeline set, health registries,
 /// KV/session stores (preserved across reloads so filter state survives), and the downstream
 /// composition that tells the watcher how to rebuild pipelines on each config change.
 #[cfg_attr(
@@ -472,6 +499,10 @@ struct ServerState {
 
     /// Hot-swappable cluster metadata for admin `/api/stats`.
     cluster_meta: praxis_protocol::http::pingora::health::ClusterMetaStore,
+
+    /// Health registry configured into the live startup pipelines.
+    #[cfg(feature = "admin-api")]
+    health_registry: HealthRegistry,
 
     /// KV store registry.
     kv_stores: praxis_core::kv::KvStoreRegistry,
@@ -490,35 +521,41 @@ struct ServerState {
 
     /// Downstream pipeline extensions and validators, re-applied on reload.
     pipeline_composition: PipelineComposition,
+
+    /// Downstream process-lifetime tasks installed on the serving runtime.
+    runtime_services: Vec<RuntimeServiceRegistration>,
 }
 
-/// Build filter pipelines, health checks, and registries.
-///
-/// Returns the assembled [`ServerState`] together with the [`FilterRegistry`]
-/// built from the composition. The registry is handed to the caller so it can
-/// be carried into the reload watcher (which rebuilds pipelines from the same
-/// registry).
-#[expect(
-    clippy::too_many_lines,
-    reason = "pipeline resolution, health spawn, and state assembly"
-)]
-fn build_server_state(
+/// Fully resolved composition candidate shared by serving and offline modes.
+struct CompositionCandidate {
+    /// Resolved filter pipelines per listener.
+    pipelines: ListenerPipelines,
+    /// Health registry configured into the candidate pipelines.
+    health_registry: HealthRegistry,
+    /// KV store registry configured into every pipeline.
+    kv_stores: praxis_core::kv::KvStoreRegistry,
+    /// Session store registry configured into every pipeline.
+    session_stores: Arc<praxis_filter::SessionStoreRegistry>,
+    /// Shared sub-request client configured into every pipeline.
+    subrequest_client: SubRequestClient,
+    /// Downstream registry retained for reload.
+    registry: FilterRegistry,
+    /// Reload-durable extension factories and validators.
+    pipeline_composition: PipelineComposition,
+    /// Serving-runtime tasks, deliberately ignored by offline validation.
+    runtime_services: Vec<RuntimeServiceRegistration>,
+}
+
+/// Resolve a composition into a complete pipeline candidate without starting
+/// process-lifetime work or publishing anything.
+fn resolve_composition_candidate(
     config: &Config,
     composition: ServerComposition,
-    health_registry: &HealthRegistry,
-    log_level: Option<Arc<LogLevelState>>,
-) -> Result<(ServerState, FilterRegistry), StartupError> {
-    info!("building filter pipelines");
+) -> Result<CompositionCandidate, StartupError> {
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-
-    // Shared with the CLI --validate/--dump path (commands.rs) so both build an
-    // identical connector, including the circuit breaker (issue #994).
     let subrequest_client = crate::pipelines::build_subrequest_client(config);
-
-    // Build the downstream registry once, from immutable server context, then
-    // reuse it across reloads. The factory is synchronous and side-effect-free.
-    let (registry_factory, pipeline_composition) = composition.into_parts();
-    let registry = registry_factory(&RegistryContext::new(&subrequest_client))?;
+    let composition = composition.into_parts();
+    let registry = (composition.registry_factory)(&RegistryContext::new(&subrequest_client))?;
     #[cfg(not(feature = "policy-engine"))]
     warn_policy_filter_without_feature(&registry);
     if praxis_tls::provider::required()
@@ -528,15 +565,40 @@ fn build_server_state(
     }
 
     let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
-    let pipelines = resolve_pipelines_with_composition(
+    let pipeline_candidate = resolve_pipeline_candidate(
         config,
         &registry,
-        health_registry,
         &kv_stores,
         &session_stores,
         &subrequest_client,
-        &pipeline_composition,
+        &composition.pipeline,
     )?;
+
+    Ok(CompositionCandidate {
+        pipelines: pipeline_candidate.pipelines,
+        health_registry: pipeline_candidate.health_registry,
+        kv_stores,
+        session_stores,
+        subrequest_client,
+        registry,
+        pipeline_composition: composition.pipeline,
+        runtime_services: composition.runtime_services,
+    })
+}
+
+/// Build filter pipelines, health checks, and registries.
+///
+/// Returns the assembled [`ServerState`] together with the [`FilterRegistry`]
+/// built from the composition. The registry is handed to the caller so it can
+/// be carried into the reload watcher (which rebuilds pipelines from the same
+/// registry).
+fn build_server_state(
+    config: &Config,
+    composition: ServerComposition,
+    log_level: Option<Arc<LogLevelState>>,
+) -> Result<(ServerState, FilterRegistry), StartupError> {
+    info!("building filter pipelines");
+    let candidate = resolve_composition_candidate(config, composition)?;
 
     let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
         praxis_protocol::http::pingora::health::listener_meta_from_config(config),
@@ -546,22 +608,37 @@ fn build_server_state(
     );
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-    spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);
-    spawn_housekeeping_tasks(&config.runtime, &subrequest_client, praxis_core::fd::usage().is_some());
+    spawn_health_check_tasks(config, Arc::clone(&candidate.health_registry), &health_shutdown);
+    spawn_housekeeping_tasks(
+        &config.runtime,
+        &candidate.subrequest_client,
+        praxis_core::fd::usage().is_some(),
+    );
 
     let state = ServerState {
-        pipelines: Arc::new(pipelines),
+        pipelines: Arc::new(candidate.pipelines),
         listener_meta,
         cluster_meta,
-        kv_stores,
-        session_stores,
-        subrequest_client,
+        #[cfg(feature = "admin-api")]
+        health_registry: candidate.health_registry,
+        kv_stores: candidate.kv_stores,
+        session_stores: candidate.session_stores,
+        subrequest_client: candidate.subrequest_client,
         health_shutdown,
         log_level,
-        pipeline_composition,
+        pipeline_composition: candidate.pipeline_composition,
+        runtime_services: candidate.runtime_services,
     };
 
-    Ok((state, registry))
+    Ok((state, candidate.registry))
+}
+
+/// Install downstream process-lifetime tasks without exposing the mutable
+/// Pingora runtime through the public composition API.
+fn register_runtime_services(server: &mut PingoraServerRuntime, services: Vec<RuntimeServiceRegistration>) {
+    for registration in services {
+        server.add_runtime_service(registration.name(), registration.service());
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -670,21 +747,16 @@ fn watcher_params(
 
 /// Register admin/health endpoints with the Pingora server.
 #[cfg(feature = "admin-api")]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "admin wiring needs registry, meta stores, and metrics"
-)]
 fn register_admin_endpoints(
     server: &mut PingoraServerRuntime,
     config: &Config,
-    health_registry: HealthRegistry,
     state: &ServerState,
     prometheus_recorder: Option<praxis_protocol::http::pingora::health::PrometheusAdminRecorder>,
     stats_started_at: std::time::Instant,
 ) {
     if let (Some(admin_addr), Some(prometheus_recorder)) = (&config.admin.address, prometheus_recorder) {
         let options = praxis_protocol::http::pingora::health::AdminEndpointOptions {
-            health_registry: Some(health_registry),
+            health_registry: Some(Arc::clone(&state.health_registry)),
             kv_registry: Some(state.kv_stores.clone()),
             pipelines: Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
             log_level: state.log_level.clone(),
@@ -694,6 +766,7 @@ fn register_admin_endpoints(
                 listener_meta: Arc::clone(&state.listener_meta),
                 cluster_meta: Arc::clone(&state.cluster_meta),
             }),
+            runtime_readiness: Some(server.runtime_readiness()),
             verbose: config.admin.verbose,
         };
 
@@ -940,9 +1013,26 @@ pub fn report_fatal(err: &dyn std::fmt::Display, log_output: LogOutput) -> std::
     reason = "tests"
 )]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use praxis_core::health::build_health_registry;
     use tracing_subscriber::Layer as _;
 
     use super::*;
+
+    struct CountingRuntimeService {
+        runs: Arc<AtomicUsize>,
+    }
+
+    impl praxis_core::RuntimeService for CountingRuntimeService {
+        fn run(self: Arc<Self>, context: praxis_core::RuntimeServiceContext) -> praxis_core::RuntimeServiceFuture {
+            Box::pin(async move {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                let (_shutdown, ready) = context.into_parts();
+                ready.notify_ready();
+            })
+        }
+    }
 
     #[test]
     fn root_uid_without_override_returns_error() {
@@ -1036,7 +1126,7 @@ mod tests {
         praxis_tls::provider::install();
         let config = minimal_config("static_response");
         let composition = ServerComposition::with_registry_factory(|_| Err("registry unavailable".into()));
-        let err = build_server_state(&config, composition, &build_health_registry(&config.clusters), None)
+        let err = build_server_state(&config, composition, None)
             .err()
             .expect("a failing registry factory should be returned, not exit");
         assert!(
@@ -1049,17 +1139,58 @@ mod tests {
     fn build_server_state_returns_pipeline_error() {
         praxis_tls::provider::install();
         let config = minimal_config("no_such_filter");
-        let err = build_server_state(
-            &config,
-            ServerComposition::standard(),
-            &build_health_registry(&config.clusters),
-            None,
-        )
-        .err()
-        .expect("an unknown filter should be returned, not exit");
+        let err = build_server_state(&config, ServerComposition::standard(), None)
+            .err()
+            .expect("an unknown filter should be returned, not exit");
         assert!(
             err.to_string().contains("no_such_filter"),
             "pipeline error should name the filter: {err}"
+        );
+    }
+
+    #[test]
+    fn offline_validation_uses_composition_without_starting_runtime_services() {
+        let validators = Arc::new(AtomicUsize::new(0));
+        let validator_calls = Arc::clone(&validators);
+        let service_runs = Arc::new(AtomicUsize::new(0));
+        let composition = ServerComposition::standard()
+            .add_pipeline_validator(move |_ctx| {
+                validator_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .add_runtime_service(
+                "test-runtime-service",
+                CountingRuntimeService {
+                    runs: Arc::clone(&service_runs),
+                },
+            );
+        let config = minimal_config("static_response");
+
+        validate_config_with_composition(&config, composition).expect("offline candidate should validate");
+
+        assert_eq!(
+            validators.load(Ordering::SeqCst),
+            1,
+            "validator should inspect the candidate"
+        );
+        assert_eq!(
+            service_runs.load(Ordering::SeqCst),
+            0,
+            "offline validation must not run services"
+        );
+    }
+
+    #[test]
+    fn offline_validation_returns_registry_factory_error() {
+        let config = minimal_config("static_response");
+        let composition = ServerComposition::with_registry_factory(|_| Err("offline registry unavailable".into()));
+
+        let error = validate_config_with_composition(&config, composition)
+            .expect_err("registry construction failure should reject offline validation");
+
+        assert!(
+            error.to_string().contains("offline registry unavailable"),
+            "factory error should propagate: {error}"
         );
     }
 
@@ -1073,13 +1204,8 @@ mod tests {
         std::fs::write(&key_path, "fake-key").expect("write key");
         std::fs::write(&cert_path, "fake-cert").expect("write cert");
         let config = config_with_tls(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
-        let (state, _registry) = build_server_state(
-            &config,
-            ServerComposition::standard(),
-            &build_health_registry(&config.clusters),
-            None,
-        )
-        .expect("pipelines should build");
+        let (state, _registry) =
+            build_server_state(&config, ServerComposition::standard(), None).expect("pipelines should build");
         let mut server = PingoraServerRuntime::new(&config);
         let err = register_protocols(&mut server, &config, &state.pipelines)
             .err()
@@ -1110,7 +1236,7 @@ mod tests {
     fn report_fatal_logs_through_tracing_and_fails() {
         use tracing_subscriber::layer::SubscriberExt as _;
 
-        let errors = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let errors = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&errors);
         let layer = tracing_subscriber::filter::filter_fn(|metadata| *metadata.level() == tracing::Level::ERROR);
         let subscriber = tracing_subscriber::registry().with(CountLayer(counter).with_filter(layer));
@@ -1122,7 +1248,7 @@ mod tests {
             "fatal report should fail the process"
         );
         assert_eq!(
-            errors.load(std::sync::atomic::Ordering::Relaxed),
+            errors.load(Ordering::Relaxed),
             1,
             "fatal error should be logged through tracing once"
         );
@@ -1368,11 +1494,11 @@ filter_chains:
     // -------------------------------------------------------------------------
 
     /// Layer counting the events it sees.
-    struct CountLayer(Arc<std::sync::atomic::AtomicUsize>);
+    struct CountLayer(Arc<AtomicUsize>);
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountLayer {
         fn on_event(&self, _event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
-            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.0.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -1444,9 +1570,7 @@ filter_chains:
     #[cfg(feature = "config-reload")]
     fn startup_state(config: &Config) -> (ServerState, FilterRegistry) {
         praxis_tls::provider::install();
-        let health_registry = build_health_registry(&config.clusters);
-        build_server_state(config, ServerComposition::standard(), &health_registry, None)
-            .expect("server state should build")
+        build_server_state(config, ServerComposition::standard(), None).expect("server state should build")
     }
 
     #[cfg(unix)]
