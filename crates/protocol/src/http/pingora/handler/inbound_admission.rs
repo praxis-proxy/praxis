@@ -23,6 +23,8 @@ const SINGLE_VALUE_HEADERS: &[http::header::HeaderName] = &[http::header::CONTEN
 const OBS_FOLD_REJECT_HEADERS: &[http::header::HeaderName] = &[http::header::HOST, http::header::CONTENT_LENGTH];
 
 /// Mutable request surface used for admission (Pingora session or plain [`HeaderMap`]).
+///
+/// [`HeaderMap`]: http::HeaderMap
 trait AdmissionRequest {
     /// Downstream HTTP version.
     fn version(&self) -> http::Version;
@@ -375,6 +377,8 @@ mod tests {
     use super::*;
 
     /// Admission over a [`HeaderMap`] for unit tests.
+    ///
+    /// [`HeaderMap`]: http::HeaderMap
     struct HeaderMapAdmission<'a> {
         /// Downstream HTTP version.
         version: http::Version,
