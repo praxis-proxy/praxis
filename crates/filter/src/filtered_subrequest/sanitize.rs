@@ -8,7 +8,10 @@
 //! into transition-visible responses.
 
 use http::HeaderMap;
-use praxis_core::reserved_headers::{HOP_BY_HOP_HEADERS, RESPONSE_HOP_BY_HOP_HEADERS};
+use praxis_core::{
+    next_hop_headers::{StripHopByHopOptions, UpgradePreserve, strip_hop_by_hop, strip_reserved},
+    reserved_headers::{HOP_BY_HOP_HEADERS, RESPONSE_HOP_BY_HOP_HEADERS},
+};
 
 use crate::{FilterError, HttpFilterContext, SubResponse, actions::Rejection, has_dot_dot_traversal};
 
@@ -21,14 +24,7 @@ use crate::{FilterError, HttpFilterContext, SubResponse, actions::Rejection, has
 ///
 /// [`is_reserved`]: praxis_core::reserved_headers::is_reserved
 pub(crate) fn strip_reserved_headers(headers: &mut HeaderMap) {
-    let to_remove: Vec<http::header::HeaderName> = headers
-        .keys()
-        .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()))
-        .cloned()
-        .collect();
-    for name in to_remove {
-        headers.remove(&name);
-    }
+    strip_reserved(headers);
 }
 
 /// Apply request mutations emitted across the header and body filter
@@ -116,7 +112,15 @@ pub(super) fn strip_request_framing_headers(headers: &mut HeaderMap) {
 
 /// Apply the same forwarding boundary as the normal upstream path.
 pub(super) fn sanitize_subrequest_headers(headers: &mut HeaderMap) {
-    strip_hop_by_hop_headers(headers, HOP_BY_HOP_HEADERS);
+    strip_hop_by_hop(
+        headers,
+        StripHopByHopOptions {
+            static_headers: HOP_BY_HOP_HEADERS,
+            upgrade: UpgradePreserve::None,
+            restore_chunked_framing: false,
+            suppress_chunked_restore_on_websocket: false,
+        },
+    );
     strip_reserved_headers(headers);
     strip_request_framing_headers(headers);
 }
@@ -146,29 +150,16 @@ pub(super) fn set_authority_host(headers: &mut HeaderMap, authority: &str) -> Re
 
 /// Remove connection-scoped and proxy-internal response metadata.
 pub(super) fn sanitize_subresponse_headers(headers: &mut HeaderMap) {
-    strip_hop_by_hop_headers(headers, RESPONSE_HOP_BY_HOP_HEADERS);
+    strip_hop_by_hop(
+        headers,
+        StripHopByHopOptions {
+            static_headers: RESPONSE_HOP_BY_HOP_HEADERS,
+            upgrade: UpgradePreserve::None,
+            restore_chunked_framing: false,
+            suppress_chunked_restore_on_websocket: false,
+        },
+    );
     strip_reserved_headers(headers);
-}
-
-/// Remove the static hop-by-hop set and headers named by `Connection`.
-fn strip_hop_by_hop_headers(headers: &mut HeaderMap, static_headers: &[&str]) {
-    let connection_values: Vec<_> = headers.get_all(http::header::CONNECTION).iter().cloned().collect();
-    for name in static_headers {
-        headers.remove(*name);
-    }
-    for value in &connection_values {
-        for token in praxis_core::reserved_headers::connection_tokens(value) {
-            // A client-supplied Connection token must not delete headers the
-            // proxy owns (x-forwarded-*, Forwarded, x-praxis-*) or that are
-            // essential to routing/framing (Host, Content-Length); otherwise a
-            // filtered sub-request could be stripped of its authority and trust
-            // headers. Mirrors the main upstream path.
-            if praxis_core::reserved_headers::is_connection_token_protected(token) {
-                continue;
-            }
-            headers.remove(token);
-        }
-    }
 }
 
 /// Whether a fully buffered nested body exceeds its pipeline mode's

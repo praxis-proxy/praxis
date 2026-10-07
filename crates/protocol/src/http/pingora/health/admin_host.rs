@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! DNS rebinding defence for a loopback-bound admin listener.
+//! DNS rebinding defense for loopback-bound admin and health/metrics listeners.
 //!
 //! A page the operator visits can rebind its own DNS name to `127.0.0.1`,
 //! after which the browser treats the unauthenticated admin API as
 //! same-origin. Such requests still carry the attacker's name in `Host`, so a
-//! loopback-bound admin listener only answers requests that name loopback.
+//! loopback-bound management listener only answers requests that name loopback.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -45,7 +45,7 @@ pub(crate) fn reject_non_loopback_host(req: &RequestHeader) -> Option<Response<V
         return None;
     }
 
-    debug!(host = ?req.headers.get(HOST), path = %req.uri.path(), "admin request rejected: non-loopback Host");
+    debug!(host = ?req.headers.get(HOST), path = %req.uri.path(), "management request rejected: non-loopback Host");
     Some(json_response(421, br#"{"error":"misdirected request"}"#))
 }
 

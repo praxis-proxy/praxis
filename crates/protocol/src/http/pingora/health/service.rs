@@ -3,7 +3,10 @@
 
 //! Admin health-check HTTP service.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use async_trait::async_trait;
 use http::Response;
@@ -18,7 +21,7 @@ use pingora_core::{
 };
 use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
 use tokio::time::Duration;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::{admin_host, listener_meta::ListenerMetaStore, log_level_admin, pipelines_admin, stats_admin};
 use crate::http::pingora::{json::json_response, kv::dispatch_kv_request, metrics};
@@ -91,8 +94,14 @@ pub struct PingoraHealthService {
     /// Shared health registry for per-cluster status reporting.
     registry: Option<HealthRegistry>,
 
+    /// Live pipelines + metadata used to resolve `/ready` after reloads.
+    pipelines: Option<pipelines_admin::PipelinesAdminState>,
+
     /// When `true`, include per-cluster detail in `/ready` responses.
     verbose: bool,
+
+    /// When `true`, reject requests whose `Host` is not loopback.
+    require_loopback_host: bool,
 }
 
 impl PingoraHealthService {
@@ -108,7 +117,29 @@ impl PingoraHealthService {
     /// assert_eq!(svc.ready_response().0, 200);
     /// ```
     pub fn new(registry: Option<HealthRegistry>, verbose: bool) -> Self {
-        Self { registry, verbose }
+        Self {
+            registry,
+            pipelines: None,
+            verbose,
+            require_loopback_host: false,
+        }
+    }
+
+    /// Resolve readiness against current pipelines after a config reload.
+    fn with_live_pipelines(mut self, pipelines: Arc<crate::ListenerPipelines>, meta: ListenerMetaStore) -> Self {
+        self.pipelines = Some(pipelines_admin::PipelinesAdminState { pipelines, meta });
+        self
+    }
+
+    /// Answer only requests whose `Host` names loopback (off by default).
+    ///
+    /// Enable this when the service is bound to a loopback address, so a web
+    /// page that rebinds its DNS name to `127.0.0.1` cannot reach the metrics endpoints
+    /// through the operator's browser. Rejected requests get `421`.
+    #[must_use]
+    pub fn require_loopback_host(mut self, enabled: bool) -> Self {
+        self.require_loopback_host = enabled;
+        self
     }
 
     /// Build the `/ready` response status and body.
@@ -127,13 +158,29 @@ impl PingoraHealthService {
     /// assert!(body.contains("ok"));
     /// ```
     pub fn ready_response(&self) -> (u16, String) {
-        compute_ready_response(self.registry.as_ref(), self.verbose)
+        // Resolve the health registry from the live pipelines (post-reload)
+        // rather than the startup snapshot, exactly as /api/stats does, so
+        // /ready reflects current endpoint health after a config reload
+        // instead of health frozen at the first reload.
+        let registry = match self.pipelines.as_ref() {
+            Some(state) => stats_admin::resolve_health_registry(self.registry.as_ref(), Some(state), &state.meta),
+            None => self.registry.clone(),
+        };
+        compute_ready_response(registry.as_ref(), self.verbose)
     }
 }
 
 #[async_trait]
 impl ServeHttp for PingoraHealthService {
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
+        let req = http_session.req_header();
+
+        if self.require_loopback_host
+            && let Some(resp) = admin_host::reject_non_loopback_host(req)
+        {
+            return resp;
+        }
+
         let path = http_session.req_header().uri.path().to_owned();
 
         match path.as_str() {
@@ -148,32 +195,54 @@ impl ServeHttp for PingoraHealthService {
     }
 }
 
-/// Backward-compatible alias for [`add_admin_endpoints_to_pingora_server`].
+/// Add the health and metrics listener to a Pingora server.
+///
+/// Installs the Prometheus recorder and registers its upkeep service. Use
+/// [`add_health_endpoint_to_pingora_server_with_pipelines`] when the caller
+/// already owns that lifecycle.
 pub fn add_health_endpoint_to_pingora_server(
     server: &mut Server,
-    admin_addr: &str,
+    metrics_addr: &str,
     registry: Option<HealthRegistry>,
     verbose: bool,
 ) {
-    add_admin_endpoints_to_pingora_server(
-        server,
-        admin_addr,
-        AdminEndpointOptions {
-            health_registry: registry,
-            verbose,
-            ..AdminEndpointOptions::default()
-        },
-    );
+    let recorder = install_prometheus_admin_recorder();
+    add_prometheus_upkeep_to_pingora_server(server, recorder);
+    add_health_endpoint_to_pingora_server_with_pipelines(server, metrics_addr, registry, verbose, None);
+}
+
+/// Add the health and metrics listener with live pipeline readiness.
+///
+/// This does not install the Prometheus recorder or its upkeep service; use it
+/// when the caller already manages that lifecycle.
+pub fn add_health_endpoint_to_pingora_server_with_pipelines(
+    server: &mut Server,
+    metrics_addr: &str,
+    registry: Option<HealthRegistry>,
+    verbose: bool,
+    pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+) {
+    let require_loopback_host = admin_host::is_loopback_host(metrics_addr);
+    let health = PingoraHealthService::new(registry, verbose).require_loopback_host(require_loopback_host);
+    let health = match pipelines {
+        Some((pipelines, meta)) => health.with_live_pipelines(pipelines, meta),
+        None => health,
+    };
+
+    let mut service = Service::new("metrics".to_owned(), health);
+    service.add_tcp(metrics_addr);
+    info!(address = %metrics_addr, verbose, "metrics endpoints enabled (health + metrics)");
+    server.add_service(service);
 }
 
 // -----------------------------------------------------------------------------
 // PingoraAdminService
 // -----------------------------------------------------------------------------
 
-/// Optional registries and flags for [`add_admin_endpoints_to_pingora_server`].
+/// Optional state for the `/api/*` admin endpoints.
 #[derive(Default)]
 pub struct AdminEndpointOptions {
-    /// Shared health registry for `/ready` cluster status.
+    /// Shared health registry used by `/api/stats`.
     pub health_registry: Option<HealthRegistry>,
 
     /// Shared KV stores for `/api/kv/*`.
@@ -188,16 +257,11 @@ pub struct AdminEndpointOptions {
     /// Runtime stats snapshot state for `/api/stats`.
     pub stats: Option<stats_admin::StatsAdminState>,
 
-    /// When `true`, include per-cluster detail in `/ready`.
+    /// Retained for API compatibility; readiness is served by the metrics listener.
     pub verbose: bool,
 }
 
-/// Combined admin service that routes health, metrics, and KV endpoints
-/// through a single Pingora [`Service`].
-///
-/// Eliminates the port contention bug where separate services binding to
-/// the same admin port via `SO_REUSEPORT` caused non-deterministic
-/// connection routing (health probes hitting the KV service and getting 404).
+/// Admin API service that routes `/api/*` endpoints through a Pingora [`Service`].
 ///
 /// [`Service`]: pingora_core::services::listening::Service
 pub struct PingoraAdminService {
@@ -219,12 +283,12 @@ pub struct PingoraAdminService {
     /// Optional `/api/stats` snapshot state.
     stats: Option<stats_admin::StatsAdminState>,
 
-    /// When `true`, include per-cluster detail in `/ready` responses.
-    verbose: bool,
+    /// Whether a legacy health or metrics route warning has been emitted.
+    legacy_probe_warning_logged: AtomicBool,
 }
 
 impl PingoraAdminService {
-    /// Create a combined admin service.
+    /// Create an admin API service.
     ///
     /// `kv_registry` enables `/api/kv/*` endpoints when `Some`.
     /// `pipelines` enables `GET /api/pipelines` when `Some`.
@@ -235,7 +299,7 @@ impl PingoraAdminService {
         pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
         log_level: Option<Arc<praxis_core::logging::LogLevelState>>,
         stats: Option<stats_admin::StatsAdminState>,
-        verbose: bool,
+        _verbose: bool,
     ) -> Self {
         Self {
             health_registry,
@@ -244,7 +308,7 @@ impl PingoraAdminService {
             log_level,
             require_loopback_host: false,
             stats,
-            verbose,
+            legacy_probe_warning_logged: AtomicBool::new(false),
         }
     }
 
@@ -257,21 +321,6 @@ impl PingoraAdminService {
     pub fn require_loopback_host(mut self, enabled: bool) -> Self {
         self.require_loopback_host = enabled;
         self
-    }
-
-    /// Build the `/ready` response status and body.
-    fn ready_response(&self) -> (u16, String) {
-        // Resolve the health registry from the live pipelines (post-reload)
-        // rather than the startup snapshot, exactly as /api/stats does, so
-        // /ready reflects current endpoint health after a config reload
-        // instead of health frozen at the first reload.
-        let registry = match self.pipelines.as_ref() {
-            Some(state) => {
-                stats_admin::resolve_health_registry(self.health_registry.as_ref(), Some(state), &state.meta)
-            },
-            None => self.health_registry.clone(),
-        };
-        compute_ready_response(registry.as_ref(), self.verbose)
     }
 
     /// Dispatch `/api/*` admin routes when configured.
@@ -320,6 +369,12 @@ impl PingoraAdminService {
 
         None
     }
+
+    /// Emit one migration warning if an old health or metrics path hits this listener.
+    fn should_warn_for_legacy_probe(&self, path: &str) -> bool {
+        matches!(path, "/healthy" | "/ready" | "/metrics")
+            && !self.legacy_probe_warning_logged.swap(true, Ordering::Relaxed)
+    }
 }
 
 #[async_trait]
@@ -343,52 +398,42 @@ impl ServeHttp for PingoraAdminService {
             return resp;
         }
 
-        match path.as_str() {
-            "/healthy" => json_response(200, br#"{"status":"ok"}"#),
-            "/metrics" => prometheus_response(),
-            "/ready" => {
-                let (status, body) = self.ready_response();
-                json_response(status, body.as_bytes())
-            },
-            _ => json_response(404, br#"{"error":"not found"}"#),
+        if self.should_warn_for_legacy_probe(&path) {
+            warn!(
+                path = %path,
+                "health and metrics endpoints moved to admin.metrics_address; update probes and scrapers"
+            );
         }
+
+        json_response(404, br#"{"error":"not found"}"#)
     }
 }
 
-/// Add admin endpoints to a Pingora server.
+/// Bind only the `/api/*` admin listener without installing a metrics recorder.
 ///
-/// Installs the global Prometheus metrics recorder and binds a
-/// [`PingoraAdminService`] to `admin_addr`, exposing `/ready`,
-/// `/healthy`, `/metrics`, (when `kv_registry` is `Some`)
-/// `/api/kv/*`, and (when `pipelines` is `Some`) `GET /api/pipelines`
-/// on a single port.
-///
-/// When `admin_addr` is a loopback address, requests whose `Host` is not
-/// loopback are rejected (see [`PingoraAdminService::require_loopback_host`]).
-/// A non-loopback bind skips the check because operators may reach it by DNS
-/// name.
-///
-/// ```ignore
-/// use pingora_core::server::Server;
-/// use praxis_protocol::http::pingora::health::{
-///     AdminEndpointOptions, add_admin_endpoints_to_pingora_server,
-/// };
-///
-/// let mut server = Server::new(None).unwrap();
-/// server.bootstrap();
-/// add_admin_endpoints_to_pingora_server(
-///     &mut server,
-///     "127.0.0.1:9090",
-///     AdminEndpointOptions::default(),
-/// );
-/// ```
-pub fn add_admin_endpoints_to_pingora_server(server: &mut Server, admin_addr: &str, options: AdminEndpointOptions) {
-    add_admin_endpoints_to_pingora_server_with_recorder(
-        server,
-        admin_addr,
-        options,
-        install_prometheus_admin_recorder(),
-    );
+/// When `admin_addr` is loopback, requests with a non-loopback `Host` are
+/// rejected. Register recorder upkeep separately if `/api/stats` is enabled.
+pub fn add_admin_api_to_pingora_server(server: &mut Server, admin_addr: &str, options: AdminEndpointOptions) {
+    bind_admin_api_to_pingora_server(server, admin_addr, options);
+}
+
+/// Construct and register the API service without changing recorder lifecycle.
+fn bind_admin_api_to_pingora_server(server: &mut Server, admin_addr: &str, options: AdminEndpointOptions) {
+    let verbose = options.verbose;
+    let require_loopback_host = admin_host::is_loopback_host(admin_addr);
+    let admin = PingoraAdminService::new(
+        options.health_registry,
+        options.kv_registry,
+        options.pipelines,
+        options.log_level,
+        options.stats,
+        verbose,
+    )
+    .require_loopback_host(require_loopback_host);
+    let mut service = Service::new("admin".to_owned(), admin);
+    service.add_tcp(admin_addr);
+    info!(address = %admin_addr, verbose, require_loopback_host, "admin endpoints enabled (kv + pipelines + log-level + stats)");
+    server.add_service(service);
 }
 
 // -----------------------------------------------------------------------------
@@ -449,17 +494,18 @@ impl BackgroundService for PrometheusUpkeepService {
 // Metrics (PrometheusAdminRecorder)
 // -----------------------------------------------------------------------------
 
-/// Recorder installed for the combined admin endpoint.
+/// Recorder used by `/metrics` and `/api/stats`, with managed upkeep.
 ///
 /// The concrete exporter handle stays private so applications cannot create a
 /// second lifecycle for the recorder. Pass this value to
-/// [`add_admin_endpoints_to_pingora_server_with_recorder`].
+/// [`add_prometheus_upkeep_to_pingora_server`].
 pub struct PrometheusAdminRecorder {
     /// Exporter handle shared by metrics rendering and recorder upkeep.
     handle: metrics_exporter_prometheus::PrometheusHandle,
 }
 
-/// Install the admin Prometheus recorder before startup instrumentation runs.
+/// Install the Prometheus recorder before startup instrumentation runs.
+/// Register its upkeep service with [`add_prometheus_upkeep_to_pingora_server`].
 #[must_use]
 pub fn install_prometheus_admin_recorder() -> PrometheusAdminRecorder {
     PrometheusAdminRecorder {
@@ -467,35 +513,12 @@ pub fn install_prometheus_admin_recorder() -> PrometheusAdminRecorder {
     }
 }
 
-/// Add admin endpoints using an already-installed Prometheus recorder.
-///
-/// This entry point lets applications install the recorder before
-/// startup instrumentation begins while keeping `/metrics` and upkeep on the
-/// same handle.
-pub fn add_admin_endpoints_to_pingora_server_with_recorder(
-    server: &mut Server,
-    admin_addr: &str,
-    options: AdminEndpointOptions,
-    recorder: PrometheusAdminRecorder,
-) {
-    let verbose = options.verbose;
-    let require_loopback_host = admin_host::is_loopback_host(admin_addr);
+/// Register recorder upkeep after installing the recorder before startup
+/// instrumentation begins.
+pub fn add_prometheus_upkeep_to_pingora_server(server: &mut Server, recorder: PrometheusAdminRecorder) {
     let handle = recorder.handle;
     let upkeep = PrometheusUpkeepService { handle };
     server.add_service(background_service("Prometheus upkeep", upkeep));
-    let admin = PingoraAdminService::new(
-        options.health_registry,
-        options.kv_registry,
-        options.pipelines,
-        options.log_level,
-        options.stats,
-        verbose,
-    )
-    .require_loopback_host(require_loopback_host);
-    let mut service = Service::new("admin".to_owned(), admin);
-    service.add_tcp(admin_addr);
-    info!(address = %admin_addr, verbose, require_loopback_host, "admin endpoints enabled (health + metrics + kv + pipelines + log-level + stats)");
-    server.add_service(service);
 }
 
 // -----------------------------------------------------------------------------
@@ -504,7 +527,7 @@ pub fn add_admin_endpoints_to_pingora_server_with_recorder(
 
 /// Build the `/ready` response status and body from a health registry.
 ///
-/// Shared by [`PingoraHealthService`] and [`PingoraAdminService`].
+/// Used by [`PingoraHealthService`] to build a `/ready` response.
 fn compute_ready_response(registry: Option<&HealthRegistry>, verbose: bool) -> (u16, String) {
     let Some(registry) = registry else {
         return (200, r#"{"status":"ok"}"#.to_owned());
@@ -637,10 +660,7 @@ fn prometheus_response() -> Response<Vec<u8>> {
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use std::{
-        collections::HashMap,
-        sync::atomic::{AtomicUsize, Ordering},
-    };
+    use std::{collections::HashMap, sync::atomic::AtomicUsize};
 
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
     use tokio::sync::Notify;
@@ -685,7 +705,7 @@ mod tests {
         entry.endpoints()[0].mark_unhealthy();
         let degraded: HealthRegistry = Arc::new([(Arc::from("backend"), Arc::new(entry))].into_iter().collect());
 
-        let stale = PingoraAdminService::new(Some(Arc::clone(&degraded)), None, None, None, None, false);
+        let stale = PingoraHealthService::new(Some(Arc::clone(&degraded)), false);
         assert_eq!(
             stale.ready_response().0,
             503,
@@ -694,7 +714,7 @@ mod tests {
 
         let pipelines = Arc::new(crate::ListenerPipelines::new(HashMap::new()));
         let meta = new_listener_meta_store(HashMap::new());
-        let live = PingoraAdminService::new(Some(degraded), None, Some((pipelines, meta)), None, None, false);
+        let live = PingoraHealthService::new(Some(degraded), false).with_live_pipelines(pipelines, meta);
         assert_eq!(
             live.ready_response().0,
             200,
@@ -1038,17 +1058,40 @@ mod tests {
 
         let healthy = serve(&svc, b"GET /healthy HTTP/1.1\r\nHost: localhost:9901\r\n\r\n").await;
         assert_eq!(
-            healthy.body(),
-            br#"{"status":"ok"}"#,
-            "/healthy semantics are unchanged for loopback Hosts"
+            healthy.status().as_u16(),
+            404,
+            "health routes are not exposed on the admin API listener"
         );
     }
 
     #[tokio::test]
     async fn loopback_bound_admin_serves_http10_request_without_host() {
         let (svc, _registry) = kv_admin(true);
-        let resp = serve(&svc, b"GET /healthy HTTP/1.0\r\n\r\n").await;
-        assert_eq!(resp.status().as_u16(), 200, "a Host-less HTTP/1.0 probe must be served");
+        let resp = serve(&svc, b"GET /api/stats HTTP/1.0\r\n\r\n").await;
+        assert_eq!(
+            resp.status().as_u16(),
+            404,
+            "a Host-less HTTP/1.0 admin request must be served"
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_bound_health_listener_guards_all_routes_and_only_serves_health_routes() {
+        let svc = PingoraHealthService::new(None, false).require_loopback_host(true);
+
+        for path in ["/healthy", "/ready", "/metrics"] {
+            let rebound = format!("GET {path} HTTP/1.1\r\nHost: attacker.example\r\n\r\n");
+            assert_eq!(serve(&svc, rebound.as_bytes()).await.status().as_u16(), 421, "{path}");
+            let loopback = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+            assert_ne!(serve(&svc, loopback.as_bytes()).await.status().as_u16(), 404, "{path}");
+        }
+
+        let admin_route = serve(&svc, b"GET /api/stats HTTP/1.1\r\nHost: localhost\r\n\r\n").await;
+        assert_eq!(
+            admin_route.status().as_u16(),
+            404,
+            "the health listener must not serve admin API routes"
+        );
     }
 
     #[tokio::test]
@@ -1076,6 +1119,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_probe_warning_is_once_per_admin_service() {
+        for path in ["/healthy", "/ready", "/metrics"] {
+            let svc = PingoraAdminService::new(None, None, None, None, None, false);
+            assert!(svc.should_warn_for_legacy_probe(path), "first {path} should warn");
+            assert!(
+                !svc.should_warn_for_legacy_probe(path),
+                "repeated {path} should not warn"
+            );
+        }
+
+        let svc = PingoraAdminService::new(None, None, None, None, None, false);
+        assert!(
+            !svc.should_warn_for_legacy_probe("/api/stats"),
+            "API paths should not warn"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -1090,7 +1151,7 @@ mod tests {
     }
 
     /// Serve one raw HTTP request through `svc` over an in-memory stream.
-    async fn serve(svc: &PingoraAdminService, raw: &[u8]) -> Response<Vec<u8>> {
+    async fn serve<S: ServeHttp + Sync>(svc: &S, raw: &[u8]) -> Response<Vec<u8>> {
         use tokio::io::AsyncWriteExt as _;
 
         let (mut client, server) = tokio::io::duplex(65_536); // 64 KiB

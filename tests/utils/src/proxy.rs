@@ -280,9 +280,17 @@ fn build_pingora_server(config: &Config, registry: &FilterRegistry) -> pingora_c
     drop(cert_shutdowns);
 
     if let Some(admin_addr) = &config.admin.address {
-        praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server(
+        praxis_protocol::http::pingora::health::add_admin_api_to_pingora_server(
             &mut server,
             admin_addr,
+            praxis_protocol::http::pingora::health::AdminEndpointOptions::default(),
+        );
+    }
+
+    if let Some(metrics_addr) = &config.admin.metrics_address {
+        praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server(
+            &mut server,
+            metrics_addr,
             None,
             config.admin.verbose,
         );
@@ -424,8 +432,21 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
             .expect("TCP protocol registration should succeed in test");
     }
 
+    let recorder = (config.admin.address.is_some() || config.admin.metrics_address.is_some())
+        .then(praxis_protocol::http::pingora::health::install_prometheus_admin_recorder);
+
+    if let Some(metrics_addr) = &config.admin.metrics_address {
+        praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server_with_pipelines(
+            runtime.server_mut(),
+            metrics_addr,
+            Some(Arc::clone(&health_registry)),
+            config.admin.verbose,
+            Some((Arc::clone(&pipelines), Arc::clone(&listener_meta))),
+        );
+    }
+
     if let Some(admin_addr) = &config.admin.address {
-        praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
+        praxis_protocol::http::pingora::health::add_admin_api_to_pingora_server(
             runtime.server_mut(),
             admin_addr,
             praxis_protocol::http::pingora::health::AdminEndpointOptions {
@@ -442,6 +463,10 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
                 verbose: config.admin.verbose,
             },
         );
+    }
+
+    if let Some(recorder) = recorder {
+        praxis_protocol::http::pingora::health::add_prometheus_upkeep_to_pingora_server(runtime.server_mut(), recorder);
     }
 
     spawn_test_health_checks(config, &health_registry);

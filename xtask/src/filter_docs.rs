@@ -267,6 +267,15 @@ struct EnumInfo {
     variant_shapes: Vec<EnumVariantShape>,
     /// Named fields from struct-like variants.
     fields: Vec<RawField>,
+    /// Doc comment per variant, in the same order as `variants`.
+    variant_docs: Vec<String>,
+    /// `true` when `Deserialize` was written by hand rather than derived.
+    ///
+    /// Derived impls encode `rename_all`/`rename` into `variants` at parse
+    /// time, so dispatch rows can use those names directly. Hand-written impls
+    /// have no serde attributes on the enum, so variant names arrive as
+    /// `PascalCase` and must be converted to `snake_case` at render time.
+    is_manually_deserialized: bool,
 }
 
 /// Source shape for one enum variant.
@@ -761,10 +770,12 @@ fn parse_file_items(file: &syn::File, out: &mut ModuleItems) {
     for item in &file.items {
         match item {
             syn::Item::Struct(s) => parse_struct(s, out),
-            syn::Item::Enum(e)
-                if derives_deserialize(&e.attrs) || manual_deserialize.contains(&e.ident.to_string()) =>
-            {
-                parse_enum(e, out);
+            syn::Item::Enum(e) => {
+                let is_derived = derives_deserialize(&e.attrs);
+                let is_manual = !is_derived && manual_deserialize.contains(&e.ident.to_string());
+                if is_derived || is_manual {
+                    parse_enum(e, out, is_manual);
+                }
             },
             _ => {},
         }
@@ -806,14 +817,14 @@ fn manual_deserialize_idents(file: &syn::File) -> BTreeSet<String> {
 /// not its Rust variants, so it is recorded as an alias and resolved to that
 /// struct exactly like a `try_from` struct. An untagged enum keeps rendering as
 /// its variant union, since the variants themselves are the YAML alternatives.
-fn parse_enum(e: &syn::ItemEnum, out: &mut ModuleItems) {
+fn parse_enum(e: &syn::ItemEnum, out: &mut ModuleItems, is_manually_deserialized: bool) {
     if !has_serde_untagged(&e.attrs)
         && let Some(raw_name) = serde_try_from(&e.attrs)
     {
         out.try_from_aliases.insert(e.ident.to_string(), raw_name);
         return;
     }
-    let info = extract_enum_info(e);
+    let info = extract_enum_info(e, is_manually_deserialized);
     if !info.variants.is_empty() {
         out.enums.insert(e.ident.to_string(), info);
     }
@@ -969,6 +980,91 @@ fn append_rendered_fields(
     }
 }
 
+/// Return `true` for externally-tagged enums where each element in a
+/// collection represents a distinct YAML key (a "dispatch" enum).
+///
+/// `is_collection` is true when the field's outer type is `Vec`; dispatch
+/// expansion only applies in list context so single-field enums like
+/// `LoadBalancerStrategy` are not affected.
+fn is_dispatch_enum(info: &EnumInfo, is_collection: bool) -> bool {
+    is_collection
+        && !info.untagged
+        && info.tag.is_none()
+        && info.fields.is_empty()
+        && info.variant_shapes.iter().any(|s| !matches!(s, EnumVariantShape::Unit))
+}
+
+/// Emit one table row per variant for a collection dispatch enum.
+///
+/// For derived enums, `info.variants` already holds the resolved YAML names
+/// (after `rename_all`/`rename` processing), so they are used directly.
+/// For hand-written `Deserialize` impls, no serde attributes are present, so
+/// variant names arrive as `PascalCase` and are converted to `snake_case` here.
+/// Each row is marked `OneOf` because every list element must supply exactly
+/// one variant key.
+fn append_dispatch_enum_rows(prefix: &str, info: &EnumInfo, items: &ModuleItems, out: &mut Vec<FieldInfo>) {
+    for ((variant, shape), doc) in info
+        .variants
+        .iter()
+        .zip(info.variant_shapes.iter())
+        .zip(info.variant_docs.iter())
+    {
+        let yaml_name = if info.is_manually_deserialized {
+            to_snake_case(variant)
+        } else {
+            variant.clone()
+        };
+        let type_str = match shape {
+            EnumVariantShape::Unnamed(ty) => render_type(ty, &items.enums),
+            EnumVariantShape::Unit => "`null`".to_owned(),
+            EnumVariantShape::Named => "object".to_owned(),
+        };
+        out.push(FieldInfo {
+            name: field_path(prefix, &yaml_name),
+            type_str,
+            doc: first_paragraph(doc),
+            required: RequiredKind::OneOf,
+        });
+    }
+}
+
+/// Expand a nested enum into documentation rows.
+///
+/// Tagged enums with named struct-like fields emit sub-field rows through the
+/// existing path. Collection dispatch enums — where every list element names
+/// exactly one variant key — need a separate path so that `is_collection`
+/// guards against expanding single-field enums that happen to have non-unit
+/// variants (e.g. `LoadBalancerStrategy`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "all parameters are distinct and needed for the three-way dispatch"
+)]
+fn append_nested_enum_fields(
+    prefix: &str,
+    type_name: String,
+    info: &EnumInfo,
+    is_collection: bool,
+    items: &ModuleItems,
+    stack: &mut Vec<String>,
+    out: &mut Vec<FieldInfo>,
+) {
+    if !info.fields.is_empty() {
+        if let Some(tag) = &info.tag {
+            out.push(FieldInfo {
+                name: field_path(prefix, tag),
+                type_str: tagged_enum_type_str(&info.variants),
+                doc: first_paragraph(&info.doc),
+                required: RequiredKind::Yes,
+            });
+        }
+        stack.push(type_name);
+        append_rendered_fields(prefix, &info.fields, items, stack, out);
+        stack.pop();
+    } else if is_dispatch_enum(info, is_collection) {
+        append_dispatch_enum_rows(prefix, info, items, out);
+    }
+}
+
 /// Append nested rows for a field type when its shape is known.
 fn append_nested_fields(
     prefix: &str,
@@ -983,26 +1079,14 @@ fn append_nested_fields(
     if stack.iter().any(|name| name == &type_name) {
         return;
     }
-
     let type_name = items.resolve_alias(&type_name).to_owned();
+    let is_collection = is_sequence_type(ty);
     if let Some(config) = items.structs.get(&type_name) {
         stack.push(type_name);
         append_rendered_fields(prefix, &config.fields, items, stack, out);
         stack.pop();
-    } else if let Some(info) = items.enums.get(&type_name)
-        && !info.fields.is_empty()
-    {
-        if let Some(tag) = &info.tag {
-            out.push(FieldInfo {
-                name: field_path(prefix, tag),
-                type_str: tagged_enum_type_str(&info.variants),
-                doc: first_paragraph(&info.doc),
-                required: RequiredKind::Yes,
-            });
-        }
-        stack.push(type_name);
-        append_rendered_fields(prefix, &info.fields, items, stack, out);
-        stack.pop();
+    } else if let Some(info) = items.enums.get(&type_name) {
+        append_nested_enum_fields(prefix, type_name, info, is_collection, items, stack, out);
     }
 }
 
@@ -1206,7 +1290,7 @@ fn serde_lit_value(attr: &syn::Attribute, name: &str) -> Option<String> {
 }
 
 /// Extract enum metadata, applying serde rename rules where present.
-fn extract_enum_info(e: &syn::ItemEnum) -> EnumInfo {
+fn extract_enum_info(e: &syn::ItemEnum, is_manually_deserialized: bool) -> EnumInfo {
     let rename_all = detect_rename_all(&e.attrs);
     let untagged = has_serde_attr(&e.attrs, "untagged");
     let tag = e.attrs.iter().find_map(|attr| serde_lit_value(attr, "tag"));
@@ -1223,6 +1307,7 @@ fn extract_enum_info(e: &syn::ItemEnum) -> EnumInfo {
         .collect();
     let variant_shapes = e.variants.iter().map(enum_variant_shape).collect();
     let fields = collect_enum_variant_fields(e);
+    let variant_docs = e.variants.iter().map(|v| extract_doc_comment(&v.attrs)).collect();
 
     EnumInfo {
         variants,
@@ -1231,6 +1316,8 @@ fn extract_enum_info(e: &syn::ItemEnum) -> EnumInfo {
         doc,
         variant_shapes,
         fields,
+        variant_docs,
+        is_manually_deserialized,
     }
 }
 

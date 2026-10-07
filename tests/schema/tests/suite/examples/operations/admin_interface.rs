@@ -21,6 +21,11 @@ fn admin_interface_parses() {
         Some("127.0.0.1:9901".to_owned()),
         "admin address should be 127.0.0.1:9901"
     );
+    assert_eq!(
+        config.admin.metrics_address,
+        Some("127.0.0.1:9902".to_owned()),
+        "metrics address should be 127.0.0.1:9902"
+    );
     assert!(config.admin.verbose, "admin verbose should be true");
     assert!(
         config.metrics.filter_duration,

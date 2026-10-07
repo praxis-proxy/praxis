@@ -23,7 +23,7 @@ fn errors_total_example_counts_unreachable_upstreams() {
         HashMap::from([
             ("127.0.0.1:8080", proxy_port),
             ("127.0.0.1:3000", backend.port()),
-            ("127.0.0.1:9901", admin_port),
+            ("127.0.0.1:9902", admin_port),
         ]),
     );
 
@@ -63,7 +63,7 @@ fn errors_total_example_forwards_traffic() {
         HashMap::from([
             ("127.0.0.1:8080", proxy_port),
             ("127.0.0.1:3000", backend.port()),
-            ("127.0.0.1:9901", admin_port),
+            ("127.0.0.1:9902", admin_port),
         ]),
     );
 

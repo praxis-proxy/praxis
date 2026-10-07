@@ -220,7 +220,7 @@ failures use.
 
 ## Admin Health Endpoints
 
-The admin listener exposes two health endpoints for
+The health/metrics listener exposes two health endpoints for
 orchestrator integration (Kubernetes, load balancers,
 monitoring).
 
@@ -232,7 +232,7 @@ not check upstream health - it confirms the proxy
 process is alive.
 
 ```console
-curl http://127.0.0.1:9901/healthy
+curl http://127.0.0.1:9902/healthy
 ```
 
 ```json
@@ -246,7 +246,7 @@ checks are configured. Returns `503` when any cluster
 has zero healthy endpoints.
 
 ```console
-curl http://127.0.0.1:9901/ready
+curl http://127.0.0.1:9902/ready
 ```
 
 Without health checks configured:
@@ -293,7 +293,7 @@ cluster names to avoid leaking internal topology. Set
 
 ```yaml
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
   verbose: true
 ```
 
@@ -379,7 +379,7 @@ listeners:
       - main
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9902"
 
 clusters:
   - name: api

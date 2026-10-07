@@ -22,9 +22,20 @@ pub fn http_send(addr: &str, request: &str) -> String {
     let mut stream = tcp_connect(addr);
 
     stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stream.write_all(request.as_bytes()).unwrap();
+    http_send_on_connection(&mut stream, request)
+}
 
-    read_full_response(&mut stream)
+/// Send a request on an existing HTTP/1.1 connection and read one response.
+///
+/// The caller can use the same stream again after the response's framing is
+/// complete, which lets tests verify that a proxy keeps the connection usable.
+///
+/// # Panics
+///
+/// Panics if writing the request fails.
+pub fn http_send_on_connection(stream: &mut TcpStream, request: &str) -> String {
+    stream.write_all(request.as_bytes()).unwrap();
+    read_full_response(stream)
 }
 
 /// Read a complete HTTP/1.1 response from `stream`, returning the raw bytes

@@ -25,7 +25,7 @@ fn tcp_connection_duration_histogram_emitted_after_connection_close() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 
 insecure_options:
   allow_private_upstreams: true
@@ -80,7 +80,7 @@ fn tcp_connection_duration_uses_correct_listener_label() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 
 insecure_options:
   allow_private_upstreams: true
@@ -131,7 +131,7 @@ fn tcp_connection_duration_records_connect_failure_reason() {
     let yaml = format!(
         r#"
 admin:
-  address: "127.0.0.1:{admin_port}"
+  metrics_address: "127.0.0.1:{admin_port}"
 
 insecure_options:
   allow_private_upstreams: true

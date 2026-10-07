@@ -13,9 +13,9 @@
 //! [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
 
 use pingora_http::ResponseHeader;
-use tracing::debug;
+use praxis_core::next_hop_headers::{StripHopByHopOptions, UpgradePreserve, strip_hop_by_hop_target};
 
-use super::hop_by_hop::{self, RESPONSE_HOP_BY_HOP};
+use super::hop_by_hop::{RESPONSE_HOP_BY_HOP, ResponseHop};
 
 // -----------------------------------------------------------------------------
 // Hop-by-hop Header Stripping (Response)
@@ -46,24 +46,17 @@ use super::hop_by_hop::{self, RESPONSE_HOP_BY_HOP};
 ///
 /// [RFC 6455]: https://datatracker.ietf.org/doc/html/rfc6455
 pub(crate) fn strip_hop_by_hop_response(resp: &mut ResponseHeader, is_upgrade_response: bool) {
-    let is_ws = is_upgrade_response && hop_by_hop::has_websocket_upgrade(&resp.headers);
-    let conn_values = hop_by_hop::snapshot_connection_values(&resp.headers);
-    let was_chunked = hop_by_hop::declares_chunked_framing(&resp.headers);
-
-    for name in RESPONSE_HOP_BY_HOP {
-        if hop_by_hop::preserve_for_upgrade(name, is_ws) {
-            continue;
-        }
-        let _remove = resp.remove_header(*name);
-    }
-    hop_by_hop::strip_connection_tokens(resp, &conn_values, RESPONSE_HOP_BY_HOP);
-    if !is_ws && hop_by_hop::should_restore_chunked_framing(&resp.headers, was_chunked) {
-        let _insert = resp.insert_header(http::header::TRANSFER_ENCODING, "chunked");
-    }
-
-    if is_upgrade_response && !is_ws {
-        debug!("stripping non-WebSocket upgrade headers from 101 response");
-    }
+    strip_hop_by_hop_target(
+        &mut ResponseHop(resp),
+        StripHopByHopOptions {
+            static_headers: RESPONSE_HOP_BY_HOP,
+            upgrade: UpgradePreserve::If101 {
+                is_101: is_upgrade_response,
+            },
+            restore_chunked_framing: true,
+            suppress_chunked_restore_on_websocket: true,
+        },
+    );
 }
 
 // -----------------------------------------------------------------------------

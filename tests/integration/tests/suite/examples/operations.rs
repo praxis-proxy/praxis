@@ -25,7 +25,7 @@ fn container_default() {
     let config = super::load_example_config(
         "operations/container-default.yaml",
         proxy_port,
-        HashMap::from([("0.0.0.0:9901", admin_port)]),
+        HashMap::from([("127.0.0.1:9902", admin_port)]),
     );
     let proxy = start_proxy(&config);
 
