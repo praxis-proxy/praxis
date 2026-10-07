@@ -5,7 +5,8 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, parse_status, simple_proxy_yaml, start_backend_with_shutdown, start_proxy,
+    free_port, free_port_v6, h2c_get_authority_only, http_send, ipv6_available, parse_status, simple_proxy_yaml,
+    start_backend_with_shutdown, start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -159,6 +160,71 @@ fn extremely_long_host_header_rejected() {
     assert!(
         status == 400 || status == 431 || status == 200,
         "extremely long Host should be rejected or handled safely (got {status})"
+    );
+}
+
+#[test]
+fn h2_authority_without_host_header_accepted() {
+    let backend_port_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let authority = format!("localhost:{proxy_port}");
+    let (status, body) = h2c_get_authority_only(proxy.addr(), "/", &authority);
+
+    assert_eq!(
+        status, 200,
+        "HTTP/2 request with :authority and no Host field must be admitted; body: {body}"
+    );
+}
+
+#[test]
+fn ipv6_literal_host_on_ipv6_listener_accepted() {
+    if !ipv6_available() {
+        eprintln!("SKIPPED: IPv6 loopback not available");
+        return;
+    }
+
+    let backend_port_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port_v6();
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "[::1]:{proxy_port}"
+    filter_chains:
+      - main
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let host = format!("[::1]:{proxy_port}");
+    let request = format!("GET / HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    let raw = http_send(proxy.addr(), &request);
+    let status = parse_status(&raw);
+
+    assert_eq!(
+        status, 200,
+        "bracketed IPv6 literal Host on the proxy listener must be accepted"
     );
 }
 

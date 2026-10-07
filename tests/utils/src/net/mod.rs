@@ -20,7 +20,8 @@ pub use backend::{
     start_websocket_echo_backend,
 };
 pub use http_client::{
-    GrpcCallResult, h2c_get, h2c_get_absolute, h2c_grpc_call, http_delete, http_get, http_get_retry, http_get_v6,
+    GrpcCallResult, h2c_get, h2c_get_absolute, h2c_get_authority_only, h2c_grpc_call, http_delete, http_get,
+    http_get_retry, http_get_v6,
     http_post, http_put_json, http_send, http_send_on_connection, json_post, parse_body, parse_header,
     parse_header_all, parse_status,
 };

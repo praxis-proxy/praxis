@@ -374,6 +374,52 @@ async fn grpc_call(addr: &str, path: &str, extra_headers: &[(&str, &str)]) -> Gr
     }
 }
 
+/// Send an h2c GET with `:authority` from the request URI and no `host` header field.
+///
+/// Origin-form HTTP/2 requests carry the target in `:authority`; they must not
+/// require a separate `Host` header for admission on the proxy path.
+///
+/// # Panics
+///
+/// Panics if the TCP connection, H2 handshake, or response read fails.
+pub fn h2c_get_authority_only(addr: &str, path: &str, authority: &str) -> (u16, String) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime for h2c");
+
+    rt.block_on(async {
+        let tcp = tokio::net::TcpStream::connect(addr).await.expect("TCP connect for h2c");
+
+        let (mut client, h2_conn) = h2::client::handshake(tcp).await.expect("h2c handshake");
+        tokio::spawn(async move {
+            let _result = h2_conn.await;
+        });
+
+        let uri = http::Uri::builder()
+            .scheme("http")
+            .authority(authority)
+            .path_and_query(path)
+            .build()
+            .expect("build h2 authority URI");
+        let request = http::Request::get(uri).body(()).expect("build h2c request");
+
+        let (response_fut, _) = client.send_request(request, true).expect("send h2c request");
+        let response = response_fut.await.expect("h2c response");
+        let status = response.status().as_u16();
+        let mut body_stream = response.into_body();
+
+        let mut body = Vec::new();
+        while let Some(chunk) = body_stream.data().await {
+            let data = chunk.expect("h2c body chunk");
+            body.extend_from_slice(&data);
+            drop(body_stream.flow_control().release_capacity(data.len()));
+        }
+
+        (status, String::from_utf8_lossy(&body).into_owned())
+    })
+}
+
 /// Send an h2c GET whose request URI is absolute (explicit `:scheme` and
 /// `:authority` pseudo-headers) and return `(status, body)`.
 ///
