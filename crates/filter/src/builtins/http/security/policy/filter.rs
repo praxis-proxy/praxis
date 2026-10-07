@@ -134,6 +134,11 @@ enum GatedIdentity {
 /// For rule syntax, engine types, and absent-value behavior, see
 /// [Structured request input] in the policy engine docs.
 ///
+/// The configured policy receives the full parsed inference request. Treat
+/// policy documents and custom plugins as trusted: a rule or an explicit
+/// outbound call can disclose fields it reads. Review policy authorship and
+/// outbound endpoints before enabling structured request input.
+///
 /// On a policy with `llm:` routes, any request body without `mcp.method`
 /// metadata that repeats a key within one JSON object, at any depth,
 /// receives HTTP 400 with violation code `llm.duplicate_key` before any

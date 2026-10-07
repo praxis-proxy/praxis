@@ -5,7 +5,9 @@
 
 use std::{
     collections::HashMap,
-    time::{SystemTime, UNIX_EPOCH},
+    io::{Read as _, Write as _},
+    net::{Shutdown, TcpStream},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use praxis_core::config::Config;
@@ -254,6 +256,54 @@ fn a_denial_does_not_echo_request_content() {
         );
         assert!(!raw.contains("SECRET-MARKER"), "raw response:\n{raw}");
     }
+}
+
+#[test]
+fn a_disconnected_inference_body_does_not_reach_upstream_or_affect_the_next_request() {
+    let backend = start_probe_backend();
+    let proxy_port = free_port();
+    let proxy = start_proxy(&load_example(proxy_port, backend.port(), None));
+    let token = mint_fixture_jwt("agent");
+
+    let mut stream = TcpStream::connect(proxy.addr()).expect("connect to proxy");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    let partial_request = format!(
+        "POST /v1/chat/completions HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Authorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: 100000\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {{\"model\":\"chat-cel\"",
+    );
+    stream
+        .write_all(partial_request.as_bytes())
+        .expect("send partial request body");
+    stream
+        .shutdown(Shutdown::Write)
+        .expect("disconnect during body buffering");
+    let mut response = Vec::new();
+    let _read = stream.read_to_end(&mut response);
+    drop(stream);
+
+    let allowed = post_json(
+        proxy.addr(),
+        "/v1/chat/completions",
+        &chat_body("chat-cel", &["lookup"]),
+    );
+    assert_eq!(
+        parse_status(&allowed),
+        200,
+        "the next request must be admitted: {allowed}"
+    );
+    assert_eq!(
+        parse_body(&allowed),
+        FIRST_HIT,
+        "the canceled request must not consume the backend's first response",
+    );
 }
 
 #[test]
