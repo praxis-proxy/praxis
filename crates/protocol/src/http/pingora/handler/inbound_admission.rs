@@ -22,145 +22,55 @@ const SINGLE_VALUE_HEADERS: &[http::header::HeaderName] = &[http::header::CONTEN
 /// Headers where obs-fold is a security risk and must be rejected.
 const OBS_FOLD_REJECT_HEADERS: &[http::header::HeaderName] = &[http::header::HOST, http::header::CONTENT_LENGTH];
 
-/// View of an inbound request used for admission checks.
-#[cfg(test)]
-pub(in crate::http) struct InboundAdmission<'a> {
-    /// HTTP version of the downstream request.
-    pub version: http::Version,
+/// Mutable request surface used for admission (Pingora session or plain [`HeaderMap`]).
+trait AdmissionRequest {
+    /// Downstream HTTP version.
+    fn version(&self) -> http::Version;
 
-    /// Raw request path (no dot-segment resolution).
-    pub path: &'a str,
+    /// Request headers (read-only view).
+    fn headers(&self) -> &http::HeaderMap;
 
-    /// Request headers; may be canonicalized on success.
-    pub headers: &'a mut http::HeaderMap,
+    /// Replace all values of a header with a single field value.
+    fn set_header(&mut self, name: http::header::HeaderName, value: http::HeaderValue);
+}
+
+/// Admission over a Pingora [`Session`] (production path).
+struct SessionAdmission<'a> {
+    /// Downstream session whose request header is admitted.
+    session: &'a mut Session,
+}
+
+impl AdmissionRequest for SessionAdmission<'_> {
+    fn version(&self) -> http::Version {
+        self.session.req_header().version
+    }
+
+    fn headers(&self) -> &http::HeaderMap {
+        &self.session.req_header().headers
+    }
+
+    fn set_header(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
+        let _remove = self.session.req_header_mut().remove_header(name.as_str());
+        let _insert = self.session.req_header_mut().insert_header(name, value);
+    }
+}
+
+/// Run admission on a Pingora session before the request-phase pipeline.
+pub(in crate::http) fn admit_inbound_session(session: &mut Session) -> Option<Rejection> {
+    let path = session.req_header().uri.path().to_owned();
+    admit_inbound(&path, &mut SessionAdmission { session })
 }
 
 /// Admit an inbound request, or return the first rejection.
 ///
 /// `None` means the request may enter the filter pipeline (headers may have
 /// been mutated in place).
-#[cfg(test)]
-pub(in crate::http) fn admit_inbound(req: &mut InboundAdmission<'_>) -> Option<Rejection> {
-    reject_unsupported_transfer_coding(req.headers)
-        .or_else(|| validate_host_header(req.version, req.headers))
-        .or_else(|| reject_dot_dot_path(req.path))
-        .or_else(|| normalize_request_headers(req.version, req.headers))
-        .or_else(|| reject_reserved_client_headers(req.headers))
-}
-
-/// Run admission on a Pingora session before the request-phase pipeline.
-pub(in crate::http) fn admit_inbound_session(session: &mut Session) -> Option<Rejection> {
-    if let Some(rejection) = reject_unsupported_transfer_coding(&session.req_header().headers) {
-        return Some(rejection);
-    }
-    if let Some(rejection) = apply_host_check_session(session, read_host_check(session)) {
-        return Some(rejection);
-    }
-    if let Some(rejection) = reject_dot_dot_path(session.req_header().uri.path()) {
-        return Some(rejection);
-    }
-    if let Some(rejection) = normalize_request_headers_session(session) {
-        return Some(rejection);
-    }
-    reject_reserved_client_headers(&session.req_header().headers)
-}
-
-/// Classify the session's `Host` header values without mutating the request.
-fn read_host_check(session: &Session) -> HostCheck {
-    let req = session.req_header();
-    check_host_values(req.version, &req.headers.get_all(http::header::HOST))
-}
-
-/// Apply a [`HostCheck`] outcome to the session, collapsing duplicates when needed.
-fn apply_host_check_session(session: &mut Session, check: HostCheck) -> Option<Rejection> {
-    match check {
-        HostCheck::Valid => None,
-        HostCheck::Reject(rejection) => Some(rejection),
-        HostCheck::Canonicalize(canonical) => {
-            debug!("canonicalizing duplicate identical Host headers");
-            let _remove = session.req_header_mut().remove_header("host");
-            let _insert = session.req_header_mut().insert_header(http::header::HOST, canonical);
-            None
-        },
-    }
-}
-
-/// Normalize request headers on a Pingora session before the filter pipeline.
-fn normalize_request_headers_session(session: &mut Session) -> Option<Rejection> {
-    if let Some(r) = reject_conflicting_single_value_headers_session(session) {
-        return Some(r);
-    }
-    if let Some(r) = reject_dual_content_length_transfer_encoding(&session.req_header().headers) {
-        return Some(r);
-    }
-    handle_obs_fold_session(session)
-}
-
-/// Collapse identical duplicate single-value headers or reject conflicting values.
-fn reject_conflicting_single_value_headers_session(session: &mut Session) -> Option<Rejection> {
-    for header_name in SINGLE_VALUE_HEADERS {
-        let mut values = session.req_header().headers.get_all(header_name).iter();
-        let Some(first) = values.next() else {
-            continue;
-        };
-        let first_bytes = first.as_bytes();
-        let mut saw_duplicate = false;
-        for value in values {
-            saw_duplicate = true;
-            if value.as_bytes() != first_bytes {
-                debug!(header = %header_name, "rejecting request with conflicting duplicate header");
-                return Some(Rejection::status(400));
-            }
-        }
-        if !saw_duplicate {
-            continue;
-        }
-
-        debug!(header = %header_name, "canonicalizing duplicate identical header");
-        let canonical = first.clone();
-        let _remove = session.req_header_mut().remove_header(header_name.as_str());
-        let _insert = session.req_header_mut().insert_header(header_name.clone(), canonical);
-    }
-
-    None
-}
-
-/// Reject or unfold obsolete line folding in HTTP/1.x request headers.
-fn handle_obs_fold_session(session: &mut Session) -> Option<Rejection> {
-    let version = session.req_header().version;
-    if !matches!(
-        version,
-        http::Version::HTTP_09 | http::Version::HTTP_10 | http::Version::HTTP_11
-    ) {
-        return None;
-    }
-
-    for name in OBS_FOLD_REJECT_HEADERS {
-        if let Some(value) = session.req_header().headers.get(name)
-            && contains_obs_fold(value.as_bytes())
-        {
-            debug!(header = %name, "rejecting request with obs-fold in security-sensitive header");
-            return Some(Rejection::status(400));
-        }
-    }
-
-    let headers_snapshot: Vec<(http::header::HeaderName, http::header::HeaderValue)> = session
-        .req_header()
-        .headers
-        .iter()
-        .filter(|(name, value)| !OBS_FOLD_REJECT_HEADERS.contains(name) && contains_obs_fold(value.as_bytes()))
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect();
-
-    for (name, value) in headers_snapshot {
-        let unfolded = unfold_obs_fold(value.as_bytes());
-        if let Ok(new_value) = http::header::HeaderValue::from_bytes(&unfolded) {
-            debug!(header = %name, "replacing obs-fold with single SP");
-            let _insert = session.req_header_mut().insert_header(name, new_value);
-        }
-    }
-
-    None
+fn admit_inbound(path: &str, request: &mut impl AdmissionRequest) -> Option<Rejection> {
+    reject_unsupported_transfer_coding(request.headers())
+        .or_else(|| validate_host_header(request))
+        .or_else(|| reject_dot_dot_path(path))
+        .or_else(|| normalize_request_headers(request))
+        .or_else(|| reject_reserved_client_headers(request.headers()))
 }
 
 // -----------------------------------------------------------------------------
@@ -193,23 +103,21 @@ fn has_unsupported_transfer_coding(headers: &http::HeaderMap) -> bool {
 // Host
 // -----------------------------------------------------------------------------
 
-/// Validate and canonicalize the `Host` header on a [`HeaderMap`].
-#[cfg(test)]
-fn validate_host_header(version: http::Version, headers: &mut http::HeaderMap) -> Option<Rejection> {
-    let hosts = headers.get_all(http::header::HOST);
-    apply_host_check_map(headers, check_host_values(version, &hosts))
+/// Validate and canonicalize the `Host` header.
+fn validate_host_header(request: &mut impl AdmissionRequest) -> Option<Rejection> {
+    let version = request.version();
+    let hosts = request.headers().get_all(http::header::HOST);
+    apply_host_check(request, check_host_values(version, &hosts))
 }
 
-/// Apply a [`HostCheck`] outcome to a [`HeaderMap`].
-#[cfg(test)]
-fn apply_host_check_map(headers: &mut http::HeaderMap, check: HostCheck) -> Option<Rejection> {
+/// Apply a [`HostCheck`] outcome.
+fn apply_host_check(request: &mut impl AdmissionRequest, check: HostCheck) -> Option<Rejection> {
     match check {
         HostCheck::Valid => None,
         HostCheck::Reject(rejection) => Some(rejection),
         HostCheck::Canonicalize(canonical) => {
             debug!("canonicalizing duplicate identical Host headers");
-            headers.remove(http::header::HOST);
-            headers.insert(http::header::HOST, canonical);
+            request.set_header(http::header::HOST, canonical);
             None
         },
     }
@@ -225,7 +133,7 @@ enum HostCheck {
     Reject(Rejection),
 }
 
-/// Pure validation of `Host` header values, independent of [`Session`].
+/// Pure validation of `Host` header values.
 fn check_host_values(version: http::Version, hosts: &http::header::GetAll<'_, http::HeaderValue>) -> HostCheck {
     let mut iter = hosts.iter();
 
@@ -315,23 +223,21 @@ fn reject_dot_dot_path(path: &str) -> Option<Rejection> {
 // Header normalization
 // -----------------------------------------------------------------------------
 
-/// Normalize request headers on a [`HeaderMap`] before the filter pipeline.
-#[cfg(test)]
-fn normalize_request_headers(version: http::Version, headers: &mut http::HeaderMap) -> Option<Rejection> {
-    if let Some(r) = reject_conflicting_single_value_headers(headers) {
+/// Normalize request headers before the filter pipeline.
+fn normalize_request_headers(request: &mut impl AdmissionRequest) -> Option<Rejection> {
+    if let Some(r) = reject_conflicting_single_value_headers(request) {
         return Some(r);
     }
-    if let Some(r) = reject_dual_content_length_transfer_encoding(headers) {
+    if let Some(r) = reject_dual_content_length_transfer_encoding(request.headers()) {
         return Some(r);
     }
-    handle_obs_fold(version, headers)
+    handle_obs_fold(request)
 }
 
 /// Collapse identical duplicate single-value headers or reject conflicting values.
-#[cfg(test)]
-fn reject_conflicting_single_value_headers(headers: &mut http::HeaderMap) -> Option<Rejection> {
+fn reject_conflicting_single_value_headers(request: &mut impl AdmissionRequest) -> Option<Rejection> {
     for header_name in SINGLE_VALUE_HEADERS {
-        let mut values = headers.get_all(header_name).iter();
+        let mut values = request.headers().get_all(header_name).iter();
         let Some(first) = values.next() else {
             continue;
         };
@@ -349,9 +255,7 @@ fn reject_conflicting_single_value_headers(headers: &mut http::HeaderMap) -> Opt
         }
 
         debug!(header = %header_name, "canonicalizing duplicate identical header");
-        let canonical = first.clone();
-        headers.remove(header_name);
-        headers.insert(header_name.clone(), canonical);
+        request.set_header(header_name.clone(), first.clone());
     }
 
     None
@@ -396,18 +300,17 @@ fn unfold_obs_fold(value: &[u8]) -> Vec<u8> {
     result
 }
 
-/// Reject or unfold obsolete line folding in HTTP/1.x headers on a [`HeaderMap`].
-#[cfg(test)]
-fn handle_obs_fold(version: http::Version, headers: &mut http::HeaderMap) -> Option<Rejection> {
+/// Reject or unfold obsolete line folding in HTTP/1.x request headers.
+fn handle_obs_fold(request: &mut impl AdmissionRequest) -> Option<Rejection> {
     if !matches!(
-        version,
+        request.version(),
         http::Version::HTTP_09 | http::Version::HTTP_10 | http::Version::HTTP_11
     ) {
         return None;
     }
 
     for name in OBS_FOLD_REJECT_HEADERS {
-        if let Some(value) = headers.get(name)
+        if let Some(value) = request.headers().get(name)
             && contains_obs_fold(value.as_bytes())
         {
             debug!(header = %name, "rejecting request with obs-fold in security-sensitive header");
@@ -415,7 +318,8 @@ fn handle_obs_fold(version: http::Version, headers: &mut http::HeaderMap) -> Opt
         }
     }
 
-    let headers_snapshot: Vec<(http::header::HeaderName, http::header::HeaderValue)> = headers
+    let headers_snapshot: Vec<(http::header::HeaderName, http::header::HeaderValue)> = request
+        .headers()
         .iter()
         .filter(|(name, value)| !OBS_FOLD_REJECT_HEADERS.contains(name) && contains_obs_fold(value.as_bytes()))
         .map(|(name, value)| (name.clone(), value.clone()))
@@ -425,7 +329,7 @@ fn handle_obs_fold(version: http::Version, headers: &mut http::HeaderMap) -> Opt
         let unfolded = unfold_obs_fold(value.as_bytes());
         if let Ok(new_value) = http::header::HeaderValue::from_bytes(&unfolded) {
             debug!(header = %name, "replacing obs-fold with single SP");
-            headers.insert(name, new_value);
+            request.set_header(name, new_value);
         }
     }
 
@@ -464,8 +368,32 @@ fn reject_reserved_client_headers(headers: &http::HeaderMap) -> Option<Rejection
 mod tests {
     use super::*;
 
+    /// Admission over a [`HeaderMap`] for unit tests.
+    struct HeaderMapAdmission<'a> {
+        /// Downstream HTTP version.
+        version: http::Version,
+
+        /// Request headers to validate and canonicalize.
+        headers: &'a mut http::HeaderMap,
+    }
+
+    impl AdmissionRequest for HeaderMapAdmission<'_> {
+        fn version(&self) -> http::Version {
+            self.version
+        }
+
+        fn headers(&self) -> &http::HeaderMap {
+            self.headers
+        }
+
+        fn set_header(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
+            self.headers.remove(&name);
+            self.headers.insert(name, value);
+        }
+    }
+
     fn admit(version: http::Version, path: &str, headers: &mut http::HeaderMap) -> Option<Rejection> {
-        admit_inbound(&mut InboundAdmission { version, path, headers })
+        admit_inbound(path, &mut HeaderMapAdmission { version, headers })
     }
 
     fn te_headers(values: &[&'static str]) -> http::HeaderMap {
@@ -474,6 +402,21 @@ mod tests {
             headers.append(http::header::TRANSFER_ENCODING, http::HeaderValue::from_static(value));
         }
         headers
+    }
+
+    async fn session_for(raw: &str) -> Session {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut client, server) = tokio::io::duplex(1_048_576);
+        client.write_all(raw.as_bytes()).await.unwrap();
+        let mut session = Session::new_h1(Box::new(server));
+        let read = session.read_request().await.unwrap();
+        assert!(read, "the session must parse the request header");
+        session
+    }
+
+    fn admit_session(session: &mut Session) -> Option<Rejection> {
+        admit_inbound_session(session)
     }
 
     #[test]
@@ -580,6 +523,57 @@ mod tests {
         assert!(
             admit(http::Version::HTTP_11, "/", &mut headers).is_some_and(|r| r.status == 400),
             "CL and TE together must reject"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_unsupported_transfer_coding_before_host() {
+        let mut session = session_for("GET / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n").await;
+
+        assert_eq!(
+            admit_session(&mut session).map(|r| r.status),
+            Some(501),
+            "unsupported transfer coding must reject before missing Host is checked"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_host_canonicalized_before_conflicting_content_length() {
+        let mut session = session_for("GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n").await;
+        let req = session.req_header_mut();
+        let _duplicate_host = req.append_header("host".to_owned(), "example.com".to_owned());
+        let _conflicting_cl = req.append_header("content-length".to_owned(), "6".to_owned());
+
+        assert_eq!(
+            admit_session(&mut session).map(|r| r.status),
+            Some(400),
+            "conflicting Content-Length must reject after Host canonicalization"
+        );
+        assert_eq!(
+            session.req_header().headers.get_all(http::header::HOST).iter().count(),
+            1,
+            "duplicate Host must be collapsed on the session path"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_reserved_headers_checked_last() {
+        let mut session =
+            session_for("GET / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip, chunked\r\nx-praxis-test: 1\r\n\r\n")
+                .await;
+
+        assert_eq!(
+            admit_session(&mut session).map(|r| r.status),
+            Some(501),
+            "transfer coding must win over reserved header when both are present"
+        );
+
+        let mut session = session_for("GET / HTTP/1.1\r\nHost: x\r\nx-praxis-test: 1\r\n\r\n").await;
+
+        assert_eq!(
+            admit_session(&mut session).map(|r| r.status),
+            Some(400),
+            "reserved header rejects only after earlier checks pass"
         );
     }
 }
