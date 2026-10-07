@@ -27,6 +27,9 @@ trait AdmissionRequest {
     /// Downstream HTTP version.
     fn version(&self) -> http::Version;
 
+    /// Request path (no dot-segment resolution).
+    fn path(&self) -> &str;
+
     /// Request headers (read-only view).
     fn headers(&self) -> &http::HeaderMap;
 
@@ -45,6 +48,10 @@ impl AdmissionRequest for SessionAdmission<'_> {
         self.session.req_header().version
     }
 
+    fn path(&self) -> &str {
+        self.session.req_header().uri.path()
+    }
+
     fn headers(&self) -> &http::HeaderMap {
         &self.session.req_header().headers
     }
@@ -57,18 +64,17 @@ impl AdmissionRequest for SessionAdmission<'_> {
 
 /// Run admission on a Pingora session before the request-phase pipeline.
 pub(in crate::http) fn admit_inbound_session(session: &mut Session) -> Option<Rejection> {
-    let path = session.req_header().uri.path().to_owned();
-    admit_inbound(&path, &mut SessionAdmission { session })
+    admit_inbound(&mut SessionAdmission { session })
 }
 
 /// Admit an inbound request, or return the first rejection.
 ///
 /// `None` means the request may enter the filter pipeline (headers may have
 /// been mutated in place).
-fn admit_inbound(path: &str, request: &mut impl AdmissionRequest) -> Option<Rejection> {
+fn admit_inbound(request: &mut impl AdmissionRequest) -> Option<Rejection> {
     reject_unsupported_transfer_coding(request.headers())
         .or_else(|| validate_host_header(request))
-        .or_else(|| reject_dot_dot_path(path))
+        .or_else(|| reject_dot_dot_path(request.path()))
         .or_else(|| normalize_request_headers(request))
         .or_else(|| reject_reserved_client_headers(request.headers()))
 }
@@ -373,6 +379,9 @@ mod tests {
         /// Downstream HTTP version.
         version: http::Version,
 
+        /// Request path under test.
+        path: &'a str,
+
         /// Request headers to validate and canonicalize.
         headers: &'a mut http::HeaderMap,
     }
@@ -380,6 +389,10 @@ mod tests {
     impl AdmissionRequest for HeaderMapAdmission<'_> {
         fn version(&self) -> http::Version {
             self.version
+        }
+
+        fn path(&self) -> &str {
+            self.path
         }
 
         fn headers(&self) -> &http::HeaderMap {
@@ -393,7 +406,7 @@ mod tests {
     }
 
     fn admit(version: http::Version, path: &str, headers: &mut http::HeaderMap) -> Option<Rejection> {
-        admit_inbound(path, &mut HeaderMapAdmission { version, headers })
+        admit_inbound(&mut HeaderMapAdmission { version, path, headers })
     }
 
     fn te_headers(values: &[&'static str]) -> http::HeaderMap {
