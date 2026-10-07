@@ -120,12 +120,14 @@ pub fn any_installed() -> bool {
 
 /// What the process knows about FIPS at startup.
 ///
-/// Two independent signals, reported separately so a log line says which one
-/// is missing: the kernel's FIPS mode, which on Red Hat Enterprise Linux is
-/// what activates the validated OpenSSL provider and the system crypto
-/// policy, and the installed rustls provider's own view of whether every
-/// primitive it offers is FIPS approved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Three independent signals, reported separately so a log line says which
+/// one is missing: the installed rustls provider's own view of whether every
+/// primitive it offers is FIPS approved (on the OpenSSL-backed provider this
+/// reflects `EVP_default_properties_is_fips_enabled`, the system's effective
+/// FIPS property, queried through the provider's safe API), the kernel's
+/// FIPS mode from `/proc/sys/crypto/fips_enabled`, and the system crypto
+/// policy from `/etc/crypto-policies/config`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Status {
     /// Name of the compiled-in provider.
     pub name: &'static str,
@@ -133,17 +135,26 @@ pub struct Status {
     /// [`installed`].
     pub installed: bool,
     /// Whether the installed provider reports every cipher suite, key exchange
-    /// and signature algorithm as FIPS approved (rustls' `CryptoProvider::fips`).
-    /// `false` when the compiled-in provider is not installed.
+    /// and signature algorithm as FIPS approved (rustls'
+    /// `CryptoProvider::fips`). On the OpenSSL-backed provider this reflects
+    /// `EVP_default_properties_is_fips_enabled`, the host's effective FIPS
+    /// property, queried through the provider's safe API. `false` when the
+    /// compiled-in provider is not installed.
     pub provider_fips: bool,
     /// Whether the kernel is in FIPS mode, from `/proc/sys/crypto/fips_enabled`.
     /// `None` where that file does not exist (a non-Linux host, or a container
     /// without `/proc` mounted).
     pub kernel_fips: Option<bool>,
+    /// The active system crypto policy from `/etc/crypto-policies/config`,
+    /// or `None` on platforms without crypto-policies support.
+    pub crypto_policy: Option<String>,
 }
 
 /// Path of the kernel's FIPS mode flag.
 const KERNEL_FIPS_FLAG: &str = "/proc/sys/crypto/fips_enabled";
+
+/// Path of the system crypto policy configuration.
+const CRYPTO_POLICIES_CONFIG: &str = "/etc/crypto-policies/config";
 
 /// Environment variable that makes FIPS mode a hard requirement.
 ///
@@ -175,29 +186,50 @@ fn is_negative(value: &std::ffi::OsStr) -> bool {
 
 impl Status {
     /// Why the process is not in FIPS mode, one reason per missing signal.
-    /// Empty when both signals are present.
+    /// Empty when all signals are present.
     #[must_use]
-    pub fn unmet(&self) -> Vec<&'static str> {
+    pub fn unmet(&self) -> Vec<String> {
         let mut reasons = Vec::new();
         if !self.installed {
-            reasons.push("the OpenSSL provider is not the installed crypto provider");
+            reasons.push("the OpenSSL provider is not the installed crypto provider".into());
         } else if !self.provider_fips {
-            reasons
-                .push("the OpenSSL provider does not report FIPS-approved algorithms (is the fips provider active?)");
+            reasons.push(
+                "the OpenSSL provider does not report FIPS-approved algorithms (is the fips provider active?)".into(),
+            );
         }
+        self.push_kernel_reason(&mut reasons);
+        self.push_crypto_policy_reason(&mut reasons);
+        reasons
+    }
+
+    /// Append the kernel FIPS flag reason, if unmet.
+    fn push_kernel_reason(&self, reasons: &mut Vec<String>) {
         match self.kernel_fips {
             Some(true) => {},
-            Some(false) => reasons.push("the kernel is not in FIPS mode (/proc/sys/crypto/fips_enabled is 0)"),
-            None => reasons.push("the kernel FIPS flag cannot be read (/proc/sys/crypto/fips_enabled)"),
+            Some(false) => reasons.push("the kernel is not in FIPS mode (/proc/sys/crypto/fips_enabled is 0)".into()),
+            None => reasons.push("the kernel FIPS flag cannot be read (/proc/sys/crypto/fips_enabled)".into()),
         }
-        reasons
+    }
+
+    /// Append the crypto policy reason, if unmet.
+    fn push_crypto_policy_reason(&self, reasons: &mut Vec<String>) {
+        match &self.crypto_policy {
+            Some(policy) if is_fips_policy(policy) => {},
+            Some(policy) => reasons.push(format!(
+                "the system crypto policy is {policy:?}, not FIPS (/etc/crypto-policies/config)"
+            )),
+            None => {
+                reasons.push("the system crypto policy cannot be read (/etc/crypto-policies/config is absent)".into());
+            },
+        }
     }
 }
 
 /// Read the process's FIPS status.
 ///
-/// Reads the kernel flag on every call; it is cheap and cannot change once the
-/// system has booted, so callers may cache it or not as they like.
+/// Reads the kernel flag and the system crypto policy on every call; both
+/// are cheap and cannot change once the system has booted, so callers may
+/// cache the result or not as they like.
 ///
 /// ```
 /// praxis_tls::provider::install();
@@ -214,6 +246,7 @@ pub fn status() -> Status {
         kernel_fips: std::fs::read_to_string(KERNEL_FIPS_FLAG)
             .ok()
             .and_then(|contents| kernel_fips_from(&contents)),
+        crypto_policy: system_crypto_policy(),
     }
 }
 
@@ -228,6 +261,27 @@ fn kernel_fips_from(contents: &str) -> Option<bool> {
         "0" => Some(false),
         _ => None,
     }
+}
+
+/// The active system crypto policy, or `None` on platforms without
+/// crypto-policies support.
+fn system_crypto_policy() -> Option<String> {
+    let contents = std::fs::read_to_string(CRYPTO_POLICIES_CONFIG).ok()?;
+    crypto_policy_from(&contents)
+}
+
+/// The first non-comment, non-blank line from a crypto-policies config.
+fn crypto_policy_from(contents: &str) -> Option<String> {
+    contents
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_owned)
+}
+
+/// Whether the base policy name (before the first `:`) is exactly `FIPS`.
+fn is_fips_policy(policy: &str) -> bool {
+    policy.split(':').next() == Some("FIPS")
 }
 
 /// Fail closed when the deployment requires FIPS mode and a TLS config would
@@ -305,24 +359,27 @@ mod tests {
         }
     }
 
-    /// A status with both signals present.
-    const SATISFIED: Status = Status {
-        name: "openssl",
-        installed: true,
-        provider_fips: true,
-        kernel_fips: Some(true),
-    };
+    /// A status with all signals present and positive.
+    fn satisfied() -> Status {
+        Status {
+            name: "openssl",
+            installed: true,
+            provider_fips: true,
+            kernel_fips: Some(true),
+            crypto_policy: Some("FIPS".to_owned()),
+        }
+    }
 
     #[test]
-    fn unmet_is_empty_when_both_signals_are_present() {
-        assert!(SATISFIED.unmet().is_empty());
+    fn unmet_is_empty_when_all_signals_are_present() {
+        assert!(satisfied().unmet().is_empty());
     }
 
     #[test]
     fn unmet_names_a_kernel_that_is_not_in_fips_mode() {
         let kernel_off = Status {
             kernel_fips: Some(false),
-            ..SATISFIED
+            ..satisfied()
         };
         let reasons = kernel_off.unmet();
         assert_eq!(reasons.len(), 1);
@@ -337,7 +394,7 @@ mod tests {
     fn unmet_names_a_provider_that_is_not_fips() {
         let provider_off = Status {
             provider_fips: false,
-            ..SATISFIED
+            ..satisfied()
         };
         assert!(
             provider_off
@@ -348,21 +405,73 @@ mod tests {
     }
 
     #[test]
-    fn unmet_reports_a_missing_provider_and_an_unreadable_flag_separately() {
+    fn unmet_names_a_non_fips_crypto_policy() {
+        let default_policy = Status {
+            crypto_policy: Some("DEFAULT".to_owned()),
+            ..satisfied()
+        };
+        let reasons = default_policy.unmet();
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons.first().is_some_and(|reason| reason.contains("crypto policy")));
+    }
+
+    #[test]
+    fn unmet_names_a_missing_crypto_policy() {
+        let no_policy = Status {
+            crypto_policy: None,
+            ..satisfied()
+        };
+        let reasons = no_policy.unmet();
+        assert_eq!(reasons.len(), 1);
+        assert!(
+            reasons
+                .first()
+                .is_some_and(|reason| reason.contains("crypto policy") && reason.contains("absent"))
+        );
+    }
+
+    #[test]
+    fn unmet_reports_every_missing_signal_separately() {
         let nothing = Status {
+            name: "openssl",
             installed: false,
             provider_fips: false,
             kernel_fips: None,
-            ..SATISFIED
+            crypto_policy: None,
         };
         let reasons = nothing.unmet();
-        assert_eq!(reasons.len(), 2);
+        assert_eq!(reasons.len(), 3, "provider, kernel, and policy: {reasons:?}");
         assert!(
             reasons
                 .first()
                 .is_some_and(|reason| reason.contains("not the installed crypto provider"))
         );
         assert!(reasons.get(1).is_some_and(|reason| reason.contains("cannot be read")));
+        assert!(reasons.get(2).is_some_and(|reason| reason.contains("crypto policy")));
+    }
+
+    #[test]
+    fn crypto_policy_parser_extracts_the_first_real_line() {
+        assert_eq!(crypto_policy_from("# comment\n\nFIPS\n").as_deref(), Some("FIPS"));
+        assert_eq!(crypto_policy_from("FIPS:OSPP\n").as_deref(), Some("FIPS:OSPP"));
+        assert_eq!(crypto_policy_from("DEFAULT\n").as_deref(), Some("DEFAULT"));
+        assert_eq!(crypto_policy_from(""), None);
+        assert_eq!(crypto_policy_from("# only comments\n"), None);
+    }
+
+    #[test]
+    fn fips_policy_variants_are_accepted() {
+        assert!(is_fips_policy("FIPS"));
+        assert!(is_fips_policy("FIPS:OSPP"));
+    }
+
+    #[test]
+    fn fips_policy_lookalikes_are_rejected() {
+        assert!(!is_fips_policy("FIPSXYZ"));
+        assert!(!is_fips_policy("FIPS-DRAFT"));
+        assert!(!is_fips_policy("fips"));
+        assert!(!is_fips_policy("DEFAULT:FIPS"));
+        assert!(!is_fips_policy("DEFAULT"));
     }
 
     #[test]
@@ -371,14 +480,16 @@ mod tests {
         let status = status();
         assert_eq!(status.name, "openssl");
         assert!(status.installed);
-        // Whether the provider is FIPS depends on the host's OpenSSL state, so
-        // only pin it to what rustls itself says.
         let expected = CryptoProvider::get_default().expect("installed above").fips();
         assert_eq!(status.provider_fips, expected);
-        // The kernel flag is host-dependent too; on Linux it is readable and
-        // one of the two known values.
         if cfg!(target_os = "linux") && std::path::Path::new(KERNEL_FIPS_FLAG).exists() {
             assert!(status.kernel_fips.is_some(), "the kernel flag must parse on Linux");
+        }
+        if std::path::Path::new(CRYPTO_POLICIES_CONFIG).exists() {
+            assert!(
+                status.crypto_policy.is_some(),
+                "the crypto policy must parse when the file exists"
+            );
         }
     }
 }

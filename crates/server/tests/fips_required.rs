@@ -87,7 +87,9 @@ fn require_fips_fails_closed_unless_the_host_is_in_fips_mode() {
             "the refusal must name the variable and say FIPS mode is not in effect, got: {stderr}"
         );
         assert!(
-            stderr.contains("kernel is not in FIPS mode") || stderr.contains("OpenSSL provider"),
+            stderr.contains("kernel is not in FIPS mode")
+                || stderr.contains("OpenSSL provider")
+                || stderr.contains("crypto policy"),
             "the refusal must say which signal is missing, got: {stderr}"
         );
     }
