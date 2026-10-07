@@ -1083,7 +1083,7 @@ impl Backend {
         self.heads.lock().unwrap().clone()
     }
 
-    /// Return the number of recorded request heads.
+    /// Keep count-only assertions from cloning every recorded request head.
     fn head_count(&self) -> usize {
         self.heads.lock().unwrap().len()
     }
