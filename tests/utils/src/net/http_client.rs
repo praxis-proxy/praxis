@@ -261,8 +261,16 @@ fn h2c_exchange(addr: &str, request: http::Request<()>) -> (u16, String) {
 /// Send an h2c (HTTP/2 cleartext, prior-knowledge) GET and return `(status, body)`.
 ///
 /// Connects via plain TCP and performs the HTTP/2 handshake directly
-/// (no upgrade from HTTP/1.1). The `host` parameter sets both the
-/// `:authority` pseudo-header and the `host` header.
+/// (no upgrade from HTTP/1.1). Builds an origin-form request for `path`
+/// and sets the `Host` header to `host` (default `localhost`).
+///
+/// The h2 encoder derives `:authority` from the URI authority component,
+/// not from `Host`. This helper does not place an authority on the URI, so
+/// it does not control `:authority`. Per [RFC 9113], `:authority` and `Host`
+/// are distinct; use [`h2c_get_authority_only`] or [`h2c_get_absolute`] when
+/// a test must send a specific `:authority`.
+///
+/// [RFC 9113]: https://datatracker.ietf.org/doc/html/rfc9113
 ///
 /// # Panics
 ///
@@ -381,10 +389,13 @@ async fn grpc_call(addr: &str, path: &str, extra_headers: &[(&str, &str)]) -> Gr
     }
 }
 
-/// Send an h2c GET with `:authority` from the request URI and no `host` header field.
+/// Send an h2c GET whose URI carries `authority` and has no `Host` header field.
 ///
-/// Origin-form HTTP/2 requests carry the target in `:authority`; they must not
-/// require a separate `Host` header for admission on the proxy path.
+/// Builds `http://{authority}{path}` so the encoder emits `:authority` from the
+/// URI. Use this instead of [`h2c_get`] when a test must exercise HTTP/2
+/// authority without relying on `Host` (see [RFC 9113]).
+///
+/// [RFC 9113]: https://datatracker.ietf.org/doc/html/rfc9113
 ///
 /// # Panics
 ///
@@ -402,6 +413,9 @@ pub fn h2c_get_authority_only(addr: &str, path: &str, authority: &str) -> (u16, 
 
 /// Send an h2c GET whose request URI is absolute (explicit `:scheme` and
 /// `:authority` pseudo-headers) and return `(status, body)`.
+///
+/// Like [`h2c_get_authority_only`], the authority comes from the URI rather
+/// than a `Host` header field.
 ///
 /// # Panics
 ///
