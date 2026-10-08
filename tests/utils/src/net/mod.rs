@@ -24,7 +24,9 @@ pub use http_client::{
     http_get_retry, http_get_v6, http_post, http_put_json, http_send, http_send_on_connection, json_post, parse_body,
     parse_header, parse_header_all, parse_status,
 };
-pub use port::{PortGuard, bind_unique_port, free_port, free_port_guard, free_port_v6, ipv6_available};
+pub use port::{
+    PortGuard, bind_unique_port, bind_unique_port_on, free_port, free_port_guard, free_port_v6, ipv6_available,
+};
 pub use postgres::{PostgresGuard, start_postgres};
 pub use tls::{
     ClientCert, TestCertificates, ensure_crypto_provider, https_get, parse_cert_chain_and_key, start_mtls_backend,

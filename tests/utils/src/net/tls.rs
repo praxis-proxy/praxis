@@ -740,8 +740,7 @@ pub fn start_tls_backend_from_pem(cert_pem: &[u8], key_pem: &[u8], body: &str) -
     let acceptor = build_tls_acceptor(cert_pem, key_pem);
     let body = body.to_owned();
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind TLS backend");
-    let port = listener.local_addr().expect("TLS backend port").port();
+    let (listener, port) = crate::net::port::bind_unique_port();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -778,8 +777,7 @@ pub fn start_mtls_backend(certs: &TestCertificates, body: &str) -> u16 {
     let acceptor = build_mtls_acceptor(certs);
     let body = body.to_owned();
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind mTLS backend");
-    let port = listener.local_addr().expect("mTLS backend port").port();
+    let (listener, port) = crate::net::port::bind_unique_port();
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -874,8 +872,7 @@ async fn handle_tls_http(mut stream: tokio_rustls::server::TlsStream<tokio::net:
 ///
 /// Panics if binding to the loopback address fails.
 pub fn start_tcp_echo_backend() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind echo backend");
-    let port = listener.local_addr().expect("echo backend port").port();
+    let (listener, port) = crate::net::port::bind_unique_port();
 
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
@@ -914,8 +911,7 @@ fn handle_echo(mut stream: TcpStream) {
 ///
 /// Panics if binding to the loopback address fails.
 pub fn start_tcp_tagged_backend(tag: &str) -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind tagged backend");
-    let port = listener.local_addr().expect("tagged backend port").port();
+    let (listener, port) = crate::net::port::bind_unique_port();
     let tag = tag.to_owned();
 
     std::thread::spawn(move || {
