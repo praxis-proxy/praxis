@@ -1,132 +1,155 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Connection lifecycle attack-vector tests.
+//! Connection reuse, pipelined framing, and truncation after response commitment.
 
-use std::io::{Read as _, Write as _};
+use std::{
+    io::{Read as _, Write as _},
+    sync::mpsc,
+};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_body, parse_header, parse_status, simple_proxy_yaml, start_backend,
-    start_keepalive_poison_backend, start_mid_response_drop_backend, start_proxy,
+    free_port, parse_body, parse_header, parse_status, read_http_request, simple_proxy_yaml, spawn_raw_http_backend,
+    start_full_proxy, start_keepalive_poison_backend, start_proxy, start_uri_echo_backend, wait_for_tcp,
 };
 
-// -----------------------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------------------
+use super::test_utils::{IO_TIMEOUT, connect, read_closed, send_text, status_lines};
 
 #[test]
-fn keepalive_poisoning_does_not_leak_to_client() {
-    let backend = start_keepalive_poison_backend();
-    let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, backend.port());
-    let config = Config::from_yaml(&yaml).unwrap();
+fn keepalive_poisoning_does_not_leak_to_later_requests() {
+    let (backend, log) = start_keepalive_poison_backend();
+    let config = Config::from_yaml(&simple_proxy_yaml(free_port(), backend.port())).unwrap();
     let proxy = start_proxy(&config);
+    for path in ["/first", "/later"] {
+        let raw = send_text(
+            proxy.addr(),
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
+        );
+        assert_eq!(parse_status(&raw), 200, "each request must get a legitimate response");
+        assert_eq!(
+            parse_body(&raw),
+            "safe",
+            "later request must not consume forged response"
+        );
+        assert!(
+            parse_header(&raw, "x-poisoned").is_none(),
+            "forged header must not cross requests"
+        );
+        assert_eq!(status_lines(&raw), 1, "exactly one response belongs to each request");
+    }
+    let requests = log.lock().unwrap();
+    let first = requests
+        .iter()
+        .find(|entry| entry.3 == "/first")
+        .map(|entry| entry.0)
+        .expect("backend must receive first request");
+    let later = requests
+        .iter()
+        .find(|entry| entry.3 == "/later")
+        .map(|entry| (entry.0, entry.1))
+        .expect("backend must receive later request");
+    drop(requests);
+    assert_ne!(
+        first, later.0,
+        "poisoned upstream connection must not return to the pool"
+    );
+    assert_eq!(later.1, 1, "later request must start a fresh backend connection");
+}
 
-    let raw = http_send(
+#[test]
+fn http11_pipelining_drops_overread_without_mixing_responses() {
+    let backend = start_uri_echo_backend();
+    let config = Config::from_yaml(&simple_proxy_yaml(free_port(), backend.port())).unwrap();
+    let proxy = start_proxy(&config);
+    let raw = send_text(
         proxy.addr(),
-        "GET / HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Connection: close\r\n\
-         \r\n",
+        "GET /a HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\nGET /b HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
     );
-    let status = parse_status(&raw);
-
-    assert!(
-        status == 200 || status == 502 || status == 0,
-        "keep-alive poison upstream must be handled safely (got {status})"
-    );
-    assert_ne!(status, 500, "must not crash with 500");
-
-    let poisoned = parse_header(&raw, "x-poisoned");
-    assert!(
-        poisoned.is_none(),
-        "forged second upstream response must not reach the client: {raw}"
-    );
-
-    if status == 200 {
-        let body = parse_body(&raw);
-        assert!(
-            !body.contains("poison"),
-            "poison body must not be appended to the client response: {body}"
-        );
-    }
+    assert_eq!(parse_status(&raw), 200, "first pipelined request must succeed");
+    assert_eq!(parse_body(&raw), "/a", "disabled pipelining must not append or swap /b");
+    assert_eq!(status_lines(&raw), 1, "overread must close after exactly one response");
 }
 
 #[test]
-fn http11_pipelining_responses_do_not_mix() {
-    let backend_port = start_backend("pipe-ok");
-    let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, backend_port);
-    let config = Config::from_yaml(&yaml).unwrap();
-    let proxy = start_proxy(&config);
-
-    let mut stream = std::net::TcpStream::connect(proxy.addr()).unwrap();
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(std::time::Duration::from_secs(5)))
-        .unwrap();
-
-    // Two requests pipelined on one connection.
-    let pipeline = "GET /a HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Connection: keep-alive\r\n\
-         \r\n\
-         GET /b HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Connection: close\r\n\
-         \r\n";
-    stream.write_all(pipeline.as_bytes()).unwrap();
-
-    let mut buf = Vec::new();
-    let mut tmp = [0_u8; 4096];
-    loop {
-        match stream.read(&mut tmp) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => buf.extend_from_slice(&tmp[..n]),
-        }
-        if buf.windows(4).filter(|w| *w == b"\r\n\r\n").count() >= 2 || buf.len() > 16_384 {
-            break;
-        }
-    }
-    let raw = String::from_utf8_lossy(&buf);
-
-    // Count distinct HTTP/1.1 status lines; they must not interleave mid-message.
-    let status_lines: Vec<_> = raw
-        .lines()
-        .filter(|l| l.starts_with("HTTP/1."))
-        .collect();
-    assert!(
-        !status_lines.is_empty(),
-        "pipelined requests must produce at least one response"
+fn premature_backend_close_truncates_committed_body_and_does_not_poison_recovery() {
+    let (release, released) = mpsc::channel();
+    let (port, worker) = spawn_raw_http_backend(move |mut stream| {
+        stream.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+        stream.set_write_timeout(Some(IO_TIMEOUT)).unwrap();
+        read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 131072\r\nConnection: keep-alive\r\n\r\n")
+            .unwrap();
+        stream.write_all(&vec![b'x'; 65_536]).unwrap();
+        released
+            .recv_timeout(IO_TIMEOUT)
+            .expect("client must observe committed response before backend close");
+    });
+    let healthy = praxis_test_utils::start_backend_with_shutdown("recovered");
+    let mut yaml = simple_proxy_yaml(free_port(), healthy.port());
+    yaml = yaml.replace(
+        "routes:\n",
+        "routes:\n          - path_prefix: \"/truncated\"\n            cluster: broken\n",
     );
-    for line in &status_lines {
-        assert!(
-            line.starts_with("HTTP/1.1 ") || line.starts_with("HTTP/1.0 "),
-            "status lines must stay on message boundaries, got {line}"
-        );
-    }
-
-    // Bodies (if present) should not contain mixed status framing.
-    assert!(
-        !raw.contains("HTTP/1.1 200 OKHTTP/1.1"),
-        "responses must not be concatenated without separators: {raw}"
+    yaml = yaml.replace(
+        "clusters:\n",
+        &format!("clusters:\n          - name: broken\n            endpoints: [\"127.0.0.1:{port}\"]\n"),
     );
-}
-
-#[test]
-fn premature_backend_close_mid_response_returns_502() {
-    let backend_port = start_mid_response_drop_backend();
-    let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, backend_port);
-    let config = Config::from_yaml(&yaml).unwrap();
-    let proxy = start_proxy(&config);
-
-    let (status, _) = http_get(proxy.addr(), "/", None);
+    let proxy = start_full_proxy(&Config::from_yaml(&yaml).unwrap());
+    wait_for_tcp(proxy.addr());
+    let mut stream = connect(proxy.addr());
+    stream
+        .write_all(b"GET /truncated HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut observed = Vec::new();
+    while observed
+        .windows(4)
+        .position(|bytes| bytes == b"\r\n\r\n")
+        .is_none_or(|end| observed.len() < end + 4 + 65_536)
+    {
+        let mut buffer = [0_u8; 512];
+        let count = stream.read(&mut buffer).expect("committed response before timeout");
+        assert_ne!(count, 0, "backend must remain open until body is observed");
+        observed.extend_from_slice(&buffer[..count]);
+        assert!(observed.len() < 131_072, "fixture response must remain small");
+    }
+    release.send(()).unwrap();
+    observed.extend_from_slice(&read_closed(&mut stream));
+    worker.join().expect("truncated backend must finish");
+    let raw = String::from_utf8(observed).unwrap();
     assert_eq!(
-        status, 502,
-        "backend dropping mid-response should produce 502 (got {status})"
+        parse_status(&raw),
+        200,
+        "already committed status cannot be replaced with 502"
+    );
+    assert_eq!(
+        parse_header(&raw, "content-length").as_deref(),
+        Some("131072"),
+        "declared size must exceed actual body"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "x".repeat(65_536),
+        "upstream EOF must truncate rather than fabricate a complete body"
+    );
+    assert_eq!(
+        status_lines(&raw),
+        1,
+        "no error status may be appended to the committed body"
+    );
+    let recovered = send_text(
+        proxy.addr(),
+        "GET /healthy HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&recovered),
+        200,
+        "independent request must recover after truncation"
+    );
+    assert_eq!(
+        parse_body(&recovered),
+        "recovered",
+        "failed upstream must not contaminate healthy response"
     );
 }

@@ -9,7 +9,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -212,75 +212,23 @@ pub fn start_malicious_response_header_backend(malformed_header: Vec<u8>) -> Bac
     })
 }
 
-/// Start a backend that sends the given raw HTTP response bytes
-/// after reading request headers.
-///
-/// # Panics
-///
-/// Panics if the server fails to bind or accept connections.
-pub fn start_raw_response_backend(response: Vec<u8>) -> BackendGuard {
-    spawn_tcp_server_with_shutdown(move |mut stream| {
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let _headers = read_until_headers_complete(&mut stream);
-        let _sent = stream.write_all(&response);
-    })
-}
-
-/// Start a backend that writes a partial response (status +
-/// `Content-Length`) then drops the connection before finishing
-/// headers or body. Used for mid-response failure tests.
-///
-/// # Panics
-///
-/// Panics if the server fails to bind or accept connections.
-pub fn start_mid_response_drop_backend() -> u16 {
-    spawn_tcp_server(|mut stream| {
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let mut buf = [0_u8; 4096];
-        let _bytes = stream.read(&mut buf);
-        let _sent = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n");
-        let _flushed = stream.flush();
-        drop(stream);
-    })
-}
-
 /// Start a backend that answers with `Connection: keep-alive` and then
 /// appends a second forged response on the same socket. Used to verify
 /// the proxy does not forward keep-alive poisoning to the client.
+/// Returns the shutdown guard and connection/request log.
 ///
 /// # Panics
 ///
 /// Panics if the server fails to bind or accept connections.
-pub fn start_keepalive_poison_backend() -> BackendGuard {
-    spawn_tcp_server_with_shutdown(|mut stream| {
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let _headers = read_until_headers_complete(&mut stream);
-
-        let body = b"safe";
-        let mut response = Vec::new();
-        response.extend_from_slice(
-            format!(
-                "HTTP/1.1 200 OK\r\n\
-                 Content-Length: {}\r\n\
-                 Connection: keep-alive\r\n\
-                 Keep-Alive: timeout=300\r\n\
-                 \r\n",
-                body.len()
-            )
-            .as_bytes(),
-        );
-        response.extend_from_slice(body);
-        // Extra bytes that would become a second response if the proxy
-        // blindly reused or forwarded the upstream connection framing.
-        response.extend_from_slice(
-            b"HTTP/1.1 200 OK\r\n\
-              Content-Length: 6\r\n\
-              X-Poisoned: true\r\n\
-              \r\n\
-              poison",
-        );
-        let _sent = stream.write_all(&response);
-    })
+pub fn start_keepalive_poison_backend() -> (BackendGuard, ReusedConnectionLog) {
+    let log: ReusedConnectionLog = Arc::new(Mutex::new(Vec::new()));
+    let requests = Arc::clone(&log);
+    let connections = Arc::new(AtomicUsize::new(0));
+    let guard = spawn_tcp_server_with_shutdown(move |stream| {
+        let connection = connections.fetch_add(1, Ordering::Relaxed);
+        serve_poisoned_connection(stream, connection, &requests);
+    });
+    (guard, log)
 }
 
 /// Start a backend that returns a `Content-Encoding: gzip` body.
@@ -311,7 +259,7 @@ pub fn start_gzip_encoded_backend(gzip_body: Vec<u8>) -> BackendGuard {
     })
 }
 
-/// Shared request log for [`start_reused_connection_kill_backend`]:
+/// Shared backend request log:
 /// `(connection_number, request_number_within_connection, method, path)`.
 pub type ReusedConnectionLog = Arc<Mutex<Vec<(usize, usize, String, String)>>>;
 
@@ -331,7 +279,7 @@ pub type ReusedConnectionLog = Arc<Mutex<Vec<(usize, usize, String, String)>>>;
 pub fn start_reused_connection_kill_backend() -> (BackendGuard, ReusedConnectionLog) {
     let log: ReusedConnectionLog = Arc::new(Mutex::new(Vec::new()));
     let log_handle = Arc::clone(&log);
-    let connection_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let connection_counter = Arc::new(AtomicUsize::new(0));
 
     let guard = spawn_tcp_server_with_shutdown(move |stream| {
         let connection_num = connection_counter.fetch_add(1, Ordering::Relaxed);
@@ -339,6 +287,34 @@ pub fn start_reused_connection_kill_backend() -> (BackendGuard, ReusedConnection
     });
 
     (guard, log_handle)
+}
+
+/// Keep a poisoned connection open and record every request it actually receives.
+fn serve_poisoned_connection(mut stream: TcpStream, connection: usize, log: &ReusedConnectionLog) {
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    let headers = read_until_headers_complete(&mut stream);
+    record_poison_request(log, connection, 1, &headers);
+    stream
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\nsafe\
+          HTTP/1.1 200 OK\r\nContent-Length: 6\r\nX-Poisoned: true\r\n\r\npoison",
+        )
+        .expect("write poisoned response");
+    // Retain the socket so a later request can expose unsafe pool reuse.
+    let follow_up = read_until_headers_complete(&mut stream);
+    if !follow_up.is_empty() {
+        record_poison_request(log, connection, 2, &follow_up);
+        let _sent = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nsafe");
+    }
+}
+
+/// Record the request path and connection identity before emitting fixture bytes.
+fn record_poison_request(log: &ReusedConnectionLog, connection: usize, request: usize, headers: &str) {
+    let mut line = headers.lines().next().unwrap_or("").split_whitespace();
+    let method = line.next().unwrap_or("").to_owned();
+    let path = line.next().unwrap_or("").to_owned();
+    log.lock().unwrap().push((connection, request, method, path));
 }
 
 /// Serve the first request on `stream` with keep-alive, then read and
