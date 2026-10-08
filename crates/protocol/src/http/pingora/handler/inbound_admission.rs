@@ -436,28 +436,240 @@ mod tests {
         admit_inbound_session(session)
     }
 
+    // -------------------------------------------------------------------------
+    // Transfer-Encoding
+    // -------------------------------------------------------------------------
+
     #[test]
     fn transfer_coding_chunked_is_supported() {
-        assert!(!has_unsupported_transfer_coding(&te_headers(&["chunked"])));
+        assert!(
+            !has_unsupported_transfer_coding(&te_headers(&["chunked"])),
+            "plain chunked must be accepted"
+        );
     }
 
     #[test]
-    fn transfer_coding_gzip_is_unsupported() {
-        assert!(has_unsupported_transfer_coding(&te_headers(&["gzip, chunked"])));
+    fn transfer_coding_chunked_is_case_insensitive() {
+        assert!(
+            !has_unsupported_transfer_coding(&te_headers(&["Chunked"])),
+            "transfer coding names are case-insensitive"
+        );
     }
+
+    #[test]
+    fn transfer_coding_compound_value_is_unsupported() {
+        assert!(
+            has_unsupported_transfer_coding(&te_headers(&["gzip, chunked"])),
+            "gzip in a compound value must be rejected"
+        );
+    }
+
+    #[test]
+    fn transfer_coding_split_across_fields_is_unsupported() {
+        assert!(
+            has_unsupported_transfer_coding(&te_headers(&["gzip", "chunked"])),
+            "gzip in a separate field line must be rejected"
+        );
+    }
+
+    #[test]
+    fn transfer_coding_repeated_chunked_is_supported() {
+        assert!(
+            !has_unsupported_transfer_coding(&te_headers(&["chunked, chunked"])),
+            "repeated chunked is left to Pingora framing checks"
+        );
+    }
+
+    #[test]
+    fn transfer_coding_absent_is_supported() {
+        assert!(
+            !has_unsupported_transfer_coding(&http::HeaderMap::new()),
+            "no Transfer-Encoding must be accepted"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Host header validation
+    // -------------------------------------------------------------------------
+
+    fn single_host_check(value: &'static str) -> HostCheck {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, http::HeaderValue::from_static(value));
+        check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST))
+    }
+
+    #[test]
+    fn missing_host_http11_rejected() {
+        let headers = http::HeaderMap::new();
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Reject(_)),
+            "HTTP/1.1 without Host must be rejected"
+        );
+    }
+
+    #[test]
+    fn missing_host_http10_allowed() {
+        let headers = http::HeaderMap::new();
+        let result = check_host_values(http::Version::HTTP_10, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Valid),
+            "HTTP/1.0 without Host should be allowed"
+        );
+    }
+
+    #[test]
+    fn missing_host_http2_allowed() {
+        let headers = http::HeaderMap::new();
+        let result = check_host_values(http::Version::HTTP_2, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Valid),
+            "HTTP/2 without Host should be allowed"
+        );
+    }
+
+    #[test]
+    fn single_valid_host_accepted() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "example.com".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Valid),
+            "single valid Host should be accepted"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_host_rejected() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "   ".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Reject(_)),
+            "whitespace-only Host must be rejected"
+        );
+    }
+
+    #[test]
+    fn empty_host_rejected() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(matches!(result, HostCheck::Reject(_)), "empty Host must be rejected");
+    }
+
+    #[test]
+    fn conflicting_duplicate_hosts_rejected() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(http::header::HOST, "a.example.com".parse().unwrap());
+        headers.append(http::header::HOST, "b.example.com".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Reject(_)),
+            "conflicting Host headers must be rejected"
+        );
+    }
+
+    #[test]
+    fn three_hosts_third_conflicts_rejected() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(http::header::HOST, "same.com".parse().unwrap());
+        headers.append(http::header::HOST, "same.com".parse().unwrap());
+        headers.append(http::header::HOST, "different.com".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Reject(_)),
+            "third conflicting Host must be rejected"
+        );
+    }
+
+    #[test]
+    fn identical_duplicate_hosts_canonicalized() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(http::header::HOST, "example.com".parse().unwrap());
+        headers.append(http::header::HOST, "example.com".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(&result, HostCheck::Canonicalize(v) if v.as_bytes() == b"example.com"),
+            "identical duplicate Hosts should be canonicalized"
+        );
+    }
+
+    #[test]
+    fn malformed_host_grammar_rejected() {
+        for value in ["a b", "h/p", "h:abc", "h:99999", "h:+80", "user@h", "[::1]x", "a[::1]"] {
+            assert!(
+                matches!(single_host_check(value), HostCheck::Reject(_)),
+                "malformed Host {value:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn well_formed_host_grammar_accepted() {
+        for value in [
+            "example.com",
+            "example.com.",
+            "example.com:443",
+            "example.com:",
+            "[::1]",
+            "[::1]:8080",
+            "localhost",
+        ] {
+            assert!(
+                matches!(single_host_check(value), HostCheck::Valid),
+                "well-formed Host {value:?} must be accepted"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Request path validation
+    // -------------------------------------------------------------------------
 
     #[test]
     fn dot_dot_path_rejected() {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(http::header::HOST, "x".parse().unwrap());
         assert!(
-            admit(http::Version::HTTP_11, "/a/../b", &mut headers).is_some_and(|r| r.status == 400),
+            reject_dot_dot_path("/a/../b").is_some_and(|r| r.status == 400),
             "dot-dot segment should be rejected with 400"
         );
     }
 
     #[test]
-    fn missing_host_http11_rejected() {
+    fn encoded_dot_dot_path_rejected() {
+        assert!(
+            reject_dot_dot_path("/a/%2e%2e/b").is_some_and(|r| r.status == 400),
+            "percent-encoded dot-dot segment should be rejected with 400"
+        );
+    }
+
+    #[test]
+    fn route_escape_path_rejected() {
+        assert!(
+            reject_dot_dot_path("/public/../admin").is_some(),
+            "path escaping a prefix route should be rejected"
+        );
+    }
+
+    #[test]
+    fn plain_and_double_slash_paths_accepted() {
+        assert!(
+            reject_dot_dot_path("/a/b..c/d").is_none(),
+            "dots inside a segment are allowed"
+        );
+        assert!(
+            reject_dot_dot_path("//etc/passwd").is_none(),
+            "double slash is left to routing"
+        );
+        assert!(reject_dot_dot_path("/a/./b").is_none(), "single-dot segment is allowed");
+    }
+
+    // -------------------------------------------------------------------------
+    // Admission (end-to-end on HeaderMap)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn missing_host_http11_rejected_via_admit() {
         let mut headers = http::HeaderMap::new();
         assert!(matches!(
             admit(http::Version::HTTP_11, "/", &mut headers),
@@ -510,24 +722,204 @@ mod tests {
         );
     }
 
+    // -------------------------------------------------------------------------
+    // obs-fold (RFC 9112 Section 5.2)
+    // -------------------------------------------------------------------------
+
     #[test]
     fn contains_obs_fold_detects_crlf_sp() {
-        assert!(contains_obs_fold(b"value\r\n continuation"));
+        assert!(
+            contains_obs_fold(b"value\r\n continuation"),
+            "CRLF followed by SP is obs-fold"
+        );
+    }
+
+    #[test]
+    fn contains_obs_fold_detects_crlf_htab() {
+        assert!(
+            contains_obs_fold(b"value\r\n\tcontinuation"),
+            "CRLF followed by HTAB is obs-fold"
+        );
+    }
+
+    #[test]
+    fn contains_obs_fold_ignores_bare_crlf() {
+        assert!(
+            !contains_obs_fold(b"value\r\nno-fold"),
+            "CRLF without following whitespace is not obs-fold"
+        );
+    }
+
+    #[test]
+    fn contains_obs_fold_false_for_normal_value() {
+        assert!(
+            !contains_obs_fold(b"plain header value"),
+            "normal value has no obs-fold"
+        );
+    }
+
+    #[test]
+    fn contains_obs_fold_false_for_empty() {
+        assert!(!contains_obs_fold(b""), "empty value has no obs-fold");
+    }
+
+    #[test]
+    fn contains_obs_fold_false_for_trailing_crlf() {
+        assert!(
+            !contains_obs_fold(b"value\r\n"),
+            "trailing CRLF without whitespace is not obs-fold"
+        );
     }
 
     #[test]
     fn unfold_replaces_crlf_sp_with_single_sp() {
-        assert_eq!(unfold_obs_fold(b"value\r\n continuation"), b"value continuation");
+        let input = b"value\r\n continuation";
+        let result = unfold_obs_fold(input);
+        assert_eq!(result, b"value continuation", "obs-fold should become single SP");
     }
 
     #[test]
-    fn malformed_host_grammar_rejected() {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(http::header::HOST, "a b".parse().unwrap());
-        assert!(
-            admit(http::Version::HTTP_11, "/", &mut headers).is_some_and(|r| r.status == 400),
-            "malformed Host must reject"
+    fn unfold_replaces_crlf_htab_with_single_sp() {
+        let input = b"value\r\n\tcontinuation";
+        let result = unfold_obs_fold(input);
+        assert_eq!(result, b"value continuation", "CRLF+HTAB should become single SP");
+    }
+
+    #[test]
+    fn unfold_collapses_multiple_whitespace_after_fold() {
+        let input = b"value\r\n   continuation";
+        let result = unfold_obs_fold(input);
+        assert_eq!(
+            result, b"value continuation",
+            "obs-fold with extra whitespace should collapse to single SP"
         );
+    }
+
+    #[test]
+    fn unfold_handles_multiple_folds() {
+        let input = b"a\r\n b\r\n c";
+        let result = unfold_obs_fold(input);
+        assert_eq!(result, b"a b c", "multiple obs-folds should each become single SP");
+    }
+
+    #[test]
+    fn unfold_preserves_normal_value() {
+        let input = b"plain value";
+        let result = unfold_obs_fold(input);
+        assert_eq!(result, b"plain value", "value without obs-fold should be unchanged");
+    }
+
+    #[test]
+    fn unfold_preserves_empty() {
+        let result = unfold_obs_fold(b"");
+        assert!(result.is_empty(), "empty input should produce empty output");
+    }
+
+    #[test]
+    fn contains_obs_fold_single_crlf_sp() {
+        assert!(
+            contains_obs_fold(b"\r\n value"),
+            "CRLF+SP at the very start of the value is obs-fold"
+        );
+    }
+
+    #[test]
+    fn contains_obs_fold_multiple_folds() {
+        assert!(
+            contains_obs_fold(b"a\r\n b\r\n c"),
+            "value with multiple obs-fold sequences should be detected"
+        );
+    }
+
+    #[test]
+    fn contains_obs_fold_only_cr_no_lf() {
+        assert!(
+            !contains_obs_fold(b"value\r continuation"),
+            "bare CR followed by space is not obs-fold"
+        );
+    }
+
+    #[test]
+    fn contains_obs_fold_only_lf_sp() {
+        assert!(
+            !contains_obs_fold(b"value\n continuation"),
+            "bare LF followed by space is not obs-fold"
+        );
+    }
+
+    #[test]
+    fn unfold_at_start_of_value() {
+        let result = unfold_obs_fold(b"\r\n continuation");
+        assert_eq!(
+            result, b" continuation",
+            "obs-fold at the very start should become single SP"
+        );
+    }
+
+    #[test]
+    fn unfold_consecutive_folds() {
+        let result = unfold_obs_fold(b"a\r\n \r\n b");
+        assert_eq!(
+            result, b"a  b",
+            "two back-to-back obs-folds should each become single SP"
+        );
+    }
+
+    #[test]
+    fn unfold_mixed_whitespace_after_fold() {
+        let result = unfold_obs_fold(b"val\r\n\t  rest");
+        assert_eq!(
+            result, b"val rest",
+            "CRLF followed by tab then spaces should collapse to single SP"
+        );
+    }
+
+    #[test]
+    fn unfold_preserves_internal_crlf_without_continuation() {
+        let result = unfold_obs_fold(b"before\r\nafter");
+        assert_eq!(
+            result, b"before\r\nafter",
+            "bare CRLF without following whitespace should be kept as-is"
+        );
+    }
+
+    #[test]
+    fn unfold_single_byte_values() {
+        assert_eq!(unfold_obs_fold(b"x"), b"x", "single byte input unchanged");
+        assert_eq!(unfold_obs_fold(b"ab"), b"ab", "two byte input unchanged");
+    }
+
+    #[test]
+    fn identical_duplicate_content_type_is_canonicalized() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "x".parse().unwrap());
+        headers.append(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
+        headers.append(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
+
+        let rejection = admit(http::Version::HTTP_11, "/", &mut headers);
+        assert!(rejection.is_none(), "identical duplicates must not reject");
+        let count = headers.get_all(http::header::CONTENT_TYPE).iter().count();
+        assert_eq!(count, 1, "identical duplicates must collapse to one value");
+    }
+
+    #[test]
+    fn content_length_alone_passes_normalization() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "x".parse().unwrap());
+        headers.insert(http::header::CONTENT_LENGTH, "5".parse().unwrap());
+
+        let rejection = admit(http::Version::HTTP_11, "/", &mut headers);
+        assert!(rejection.is_none(), "Content-Length alone must pass");
+    }
+
+    #[test]
+    fn clean_requests_pass_normalization() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "x".parse().unwrap());
+        headers.insert(http::header::CONTENT_TYPE, "text/plain".parse().unwrap());
+
+        let rejection = admit(http::Version::HTTP_11, "/", &mut headers);
+        assert!(rejection.is_none(), "well-formed requests must pass");
     }
 
     #[test]
@@ -540,6 +932,19 @@ mod tests {
         assert!(
             admit(http::Version::HTTP_11, "/", &mut headers).is_some_and(|r| r.status == 400),
             "CL and TE together must reject"
+        );
+    }
+
+    #[tokio::test]
+    async fn conflicting_third_host_value_rejected() {
+        let mut session = session_for("GET / HTTP/1.1\r\nHost: one.example\r\n\r\n").await;
+        session.req_header_mut().append_header("host", "one.example").unwrap();
+        session.req_header_mut().append_header("host", "two.example").unwrap();
+
+        let rejection = admit_session(&mut session);
+        assert!(
+            rejection.is_some_and(|r| r.status == 400),
+            "a conflicting third Host value must reject with 400"
         );
     }
 
