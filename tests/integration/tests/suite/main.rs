@@ -110,6 +110,7 @@ mod tcp_connections_total;
 mod tcp_edge_cases;
 mod tcp_load_balancer;
 mod tls;
+mod tls_handshake_logging;
 mod trace_context_propagation;
 mod upstream_http2;
 mod upstream_requests_total;
