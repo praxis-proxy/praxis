@@ -239,6 +239,7 @@ pub fn start_keepalive_poison_backend() -> (BackendGuard, ReusedConnectionLog) {
 pub fn start_gzip_encoded_backend(gzip_body: Vec<u8>) -> BackendGuard {
     spawn_tcp_server_with_shutdown(move |mut stream| {
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
         let _headers = read_until_headers_complete(&mut stream);
 
         let mut response = Vec::new();
@@ -255,7 +256,7 @@ pub fn start_gzip_encoded_backend(gzip_body: Vec<u8>) -> BackendGuard {
             .as_bytes(),
         );
         response.extend_from_slice(&gzip_body);
-        let _sent = stream.write_all(&response);
+        stream.write_all(&response).expect("write fixture response");
     })
 }
 
