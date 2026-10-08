@@ -5,7 +5,8 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, parse_body, parse_status, start_backend, start_proxy, start_uri_echo_backend,
+    free_port, parse_body, parse_status, simple_proxy_yaml, start_backend_with_shutdown, start_proxy,
+    start_uri_echo_backend,
 };
 
 // -----------------------------------------------------------------------------
@@ -14,21 +15,21 @@ use praxis_test_utils::{
 
 #[test]
 fn fragment_identifier_does_not_influence_routing() {
-    let allowed = start_backend("allowed");
-    let denied = start_backend("denied");
+    let allowed = start_backend_with_shutdown("allowed");
+    let denied = start_backend_with_shutdown("denied");
     let proxy_port = free_port();
-    let yaml = two_route_yaml(proxy_port, allowed, denied);
+    let yaml = two_route_yaml(proxy_port, allowed.port(), denied.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let without = http_send(
+    let without = super::test_utils::send_text(
         proxy.addr(),
         "GET /allowed/resource HTTP/1.1\r\n\
          Host: localhost\r\n\
          Connection: close\r\n\
          \r\n",
     );
-    let with_fragment = http_send(
+    let with_fragment = super::test_utils::send_text(
         proxy.addr(),
         "GET /allowed/resource#/denied/secret HTTP/1.1\r\n\
          Host: localhost\r\n\
@@ -36,108 +37,86 @@ fn fragment_identifier_does_not_influence_routing() {
          \r\n",
     );
 
-    let status_a = parse_status(&without);
-    let status_b = parse_status(&with_fragment);
-
-    // Fragment is not sent by browsers over the wire normally; if accepted,
-    // routing must still match `/allowed` and not divert to `/denied`.
-    if status_b == 200 {
-        let body = parse_body(&with_fragment);
-        assert_eq!(
-            body, "allowed",
-            "fragment must not change routing away from /allowed (body={body})"
-        );
-    } else {
-        assert!(
-            status_b == 400 || status_b == 0 || status_b == status_a,
-            "fragment URI must be rejected or match non-fragment routing (got {status_b})"
-        );
-    }
+    assert_eq!(parse_status(&without), 200, "unmodified route must succeed");
+    assert_eq!(parse_body(&without), "allowed", "positive control must select /allowed");
+    assert_eq!(
+        parse_status(&with_fragment),
+        200,
+        "fragment target must retain its route"
+    );
+    assert_eq!(
+        parse_body(&with_fragment),
+        "allowed",
+        "fragment must not route to /denied"
+    );
 }
 
 #[test]
 fn null_byte_in_query_string_handled_safely() {
     let backend = start_uri_echo_backend();
     let proxy_port = free_port();
-    let yaml = simple_catch_all_yaml(proxy_port, backend.port());
+    let yaml = simple_proxy_yaml(proxy_port, backend.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
+    let raw = super::test_utils::send_text(
         proxy.addr(),
         "GET /search?q=hello%00world HTTP/1.1\r\n\
          Host: localhost\r\n\
          Connection: close\r\n\
          \r\n",
     );
-    let status = parse_status(&raw);
-
-    assert!(
-        status == 200 || status == 400 || status == 0,
-        "null byte in query must be accepted or cleanly rejected (got {status})"
+    assert_eq!(parse_status(&raw), 200, "escaped NUL is a valid query octet");
+    assert_eq!(
+        parse_body(&raw),
+        "/search?q=hello%00world",
+        "query must not be decoded, truncated or re-encoded"
     );
-    assert_ne!(status, 500, "must not crash with 500");
 }
 
 #[test]
 fn double_encoded_path_segments_do_not_bypass_matching() {
-    let allowed = start_backend("allowed");
-    let denied = start_backend("denied");
+    let allowed = start_uri_echo_backend();
+    let denied = start_backend_with_shutdown("denied");
     let proxy_port = free_port();
-    let yaml = two_route_yaml(proxy_port, allowed, denied);
+    let yaml = two_route_yaml(proxy_port, allowed.port(), denied.port());
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    // `%252e%252e` decodes once to `%2e%2e`, not `..`. Must not reach /denied
-    // by traversing out of /allowed.
-    let raw = http_send(
+    let raw = super::test_utils::send_text(
         proxy.addr(),
         "GET /allowed/%252e%252e/%252e%252e/denied/secret HTTP/1.1\r\n\
          Host: localhost\r\n\
          Connection: close\r\n\
          \r\n",
     );
-    let status = parse_status(&raw);
-    let body = parse_body(&raw);
-
-    assert_ne!(status, 500, "double-encoded path must not crash");
-    if status == 200 {
-        assert_ne!(
-            body, "denied",
-            "double-encoded traversal must not bypass path matching into /denied"
-        );
-    }
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "double-encoded path must reach its configured route"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "/allowed/%252e%252e/%252e%252e/denied/secret",
+        "double encoding must not redirect to /denied"
+    );
+    let control = super::test_utils::send_text(
+        proxy.addr(),
+        "GET /denied/secret HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&control), 200, "the alternate route must be reachable");
+    assert_eq!(
+        parse_body(&control),
+        "denied",
+        "the route markers must be distinguishable"
+    );
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Test Utilities
 // -----------------------------------------------------------------------------
 
-fn simple_catch_all_yaml(proxy_port: u16, backend_port: u16) -> String {
-    format!(
-        r#"
-listeners:
-  - name: default
-    address: "127.0.0.1:{proxy_port}"
-    filter_chains: [main]
-filter_chains:
-  - name: main
-    filters:
-      - filter: router
-        routes:
-          - path_prefix: "/"
-            cluster: backend
-      - filter: load_balancer
-        clusters:
-          - name: backend
-            endpoints:
-              - "127.0.0.1:{backend_port}"
-insecure_options:
-  allow_private_endpoints: true
-"#
-    )
-}
-
+/// Build distinguishable routes for URI matching assertions.
 fn two_route_yaml(proxy_port: u16, allowed_port: u16, denied_port: u16) -> String {
     format!(
         r#"

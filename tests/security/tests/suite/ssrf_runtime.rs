@@ -20,7 +20,7 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_status, start_backend, start_full_proxy, start_tcp_tagged_backend,
+    free_port, http_get, parse_body, parse_status, start_backend, start_full_proxy, start_tcp_tagged_backend,
     wait_for_tcp,
 };
 
@@ -204,35 +204,37 @@ fn http_proxy_allows_hostname_upstream_with_override() {
 }
 
 #[test]
-fn absolute_form_to_metadata_endpoint_does_not_ssrf() {
-    let backend_port = start_backend("ok");
+fn absolute_form_authority_cannot_override_configured_backend() {
+    let target = std::net::TcpListener::bind("127.0.0.1:0").expect("bind forbidden target");
+    target.set_nonblocking(true).unwrap();
+    let target_addr = target.local_addr().unwrap();
+    let backend = praxis_test_utils::start_backend_with_shutdown("configured-backend");
     let proxy_port = free_port();
-    let yaml = http_hostname_upstream_yaml(proxy_port, backend_port, true);
-    let config = Config::from_yaml(&yaml).unwrap();
+    let config = Config::from_yaml(&http_hostname_upstream_yaml(proxy_port, backend.port(), true)).unwrap();
     let _proxy = start_full_proxy(&config);
-    wait_for_tcp(&format!("127.0.0.1:{proxy_port}"));
-
-    // Absolute-form targeting cloud metadata must not open 169.254.169.254.
-    let raw = http_send(
-        &format!("127.0.0.1:{proxy_port}"),
-        "GET http://169.254.169.254/latest/meta-data/ HTTP/1.1\r\n\
-         Host: 169.254.169.254\r\n\
-         Connection: close\r\n\
-         \r\n",
+    let proxy_addr = format!("127.0.0.1:{proxy_port}");
+    wait_for_tcp(&proxy_addr);
+    let request = format!(
+        "GET http://{target_addr}/latest/meta-data/ HTTP/1.1\r\nHost: {target_addr}\r\nConnection: close\r\n\r\n"
     );
-    let status = parse_status(&raw);
-
-    assert!(
-        status == 400 || status == 502 || status == 200 || status == 0,
-        "absolute-form metadata SSRF must be handled safely (got {status})"
+    let raw = super::test_utils::send_text(&proxy_addr, &request);
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "valid absolute-form request must use configured routing"
     );
-    assert_ne!(status, 500, "must not crash with 500");
-
-    // If anything is returned as 200, it must be the configured backend, not metadata.
-    if status == 200 {
-        assert!(
-            raw.contains("ok"),
-            "must not return cloud-metadata content for absolute-form SSRF attempt"
-        );
-    }
+    assert_eq!(
+        parse_body(&raw),
+        "configured-backend",
+        "client authority must not select an upstream"
+    );
+    let error = target
+        .accept()
+        .expect_err("forbidden target must receive no connection")
+        .kind();
+    assert_eq!(
+        error,
+        std::io::ErrorKind::WouldBlock,
+        "no SSRF connection should be queued"
+    );
 }
