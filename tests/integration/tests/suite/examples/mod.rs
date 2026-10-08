@@ -9,6 +9,8 @@ pub use test_utils::load_example_config;
 
 mod access_log_fields;
 mod access_log_file_sink;
+#[cfg(feature = "access-log-syslog")]
+mod access_log_syslog;
 mod access_log_template;
 mod access_logging;
 mod admin_interface;

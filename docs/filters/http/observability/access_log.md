@@ -18,9 +18,12 @@ Logs structured access records for each request and response.
 | `conditions.status_classes` | (`1xx` \| `2xx` \| `3xx` \| `4xx` \| `5xx`)[] | no |  |
 | `conditions.paths` | string[] | no |  |
 | `template` | string | no | Text template with `{field}` placeholders. The rendered string is logged as the `line` field of the `access` event, and `PRAXIS_LOG_FORMAT` still decides text or JSON output. Mutually exclusive with `fields`. |
-| `sink` | SinkConfig | no | Output sink: `{type: stdout}` or `{type: file, path: ...}`. Omitted means emit through the tracing subscriber. |
-| `sink.type` | `stdout` \| `file` | yes | Sink kind (`stdout` or `file`). |
-| `sink.path` | string | no | File path; required for `file`, rejected for `stdout`. |
+| `sink` | SinkConfig | no | Output sink: `{type: stdout}`, `{type: file, path: ...}`, or (with the `access-log-syslog` feature) `{type: syslog, ...}`. Omitted means emit through the tracing subscriber. |
+| `sink.type` | `stdout` \| `file` \| `syslog` | yes | Sink kind (`stdout`, `file`, or `syslog` with the `access-log-syslog` feature). |
+| `sink.path` | string | no | File path; required for `file`, rejected for `stdout`. Doubles as the local socket path override for `syslog` + `transport: unix`. |
+| `sink.transport` | `unix` \| `udp` \| `tcp` | no | Syslog transport. Only valid for `type: syslog`; defaults to `unix`. |
+| `sink.address` | string | no | Remote `host:port` for `syslog` with `transport: udp`/`tcp`. |
+| `sink.facility` | `kern` \| `user` \| `mail` \| `daemon` \| `auth` \| `syslog` \| `lpr` \| `news` \| `uucp` \| `cron` \| `authpriv` \| `ftp` \| `local0` \| `local1` \| `local2` \| `local3` \| `local4` \| `local5` \| `local6` \| `local7` | no | Syslog facility. Only valid for `type: syslog`; defaults to `user`. |
 
 ## Examples
 

@@ -438,8 +438,7 @@ pub(crate) fn spawn_tcp_server_on_with_shutdown(
     ip: IpAddr,
     handler: impl Fn(TcpStream) + Send + Clone + 'static,
 ) -> BackendGuard {
-    let listener = TcpListener::bind((ip, 0)).expect("bind backend");
-    let port = listener.local_addr().expect("backend address").port();
+    let (listener, port) = crate::net::port::bind_unique_port_on(ip);
     serve_with_shutdown(listener, ip, port, handler)
 }
 

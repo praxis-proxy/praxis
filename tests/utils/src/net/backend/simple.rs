@@ -5,7 +5,7 @@
 
 use std::{
     io::{Read as _, Write as _},
-    net::{IpAddr, TcpListener, TcpStream},
+    net::{IpAddr, TcpStream},
     time::Duration,
 };
 
@@ -319,8 +319,7 @@ impl RoutedBackend {
 ///
 /// Panics if binding to `[::1]:0` fails.
 pub fn start_backend_v6(body: &str) -> u16 {
-    let listener = TcpListener::bind("[::1]:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = crate::net::port::bind_unique_port_on(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST));
     let body = body.to_owned();
 
     std::thread::spawn(move || {
