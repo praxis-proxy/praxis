@@ -32,8 +32,10 @@ mod connected_to_upstream;
 mod fail_to_proxy;
 /// Shared hop-by-hop header stripping logic.
 mod hop_by_hop;
-/// Request header normalization (duplicate headers, obs-fold).
-mod normalize;
+/// Pre-pipeline inbound request admission.
+mod inbound_admission;
+/// Path dot-dot traversal detection.
+mod path_traversal;
 /// Request body filter hook.
 mod request_body_filter;
 /// Request filter hook.

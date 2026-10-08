@@ -13,7 +13,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-use super::RetryPolicy;
+use super::{HedgePolicy, RetryPolicy};
 
 // -----------------------------------------------------------------------------
 // PathMatch
@@ -232,6 +232,14 @@ pub struct Route {
     /// cluster fields where present. List fields replace entirely.
     #[serde(default)]
     pub retry_policy: Option<RetryPolicy>,
+
+    /// Optional per-route hedged-request policy.
+    ///
+    /// When set, this route races the request across healthy endpoints in
+    /// `cluster` and returns the first successful response. Absent means
+    /// one upstream attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hedge_policy: Option<HedgePolicy>,
 }
 
 /// Raw deserialization target for [`Route`].
@@ -268,6 +276,14 @@ struct RouteRaw {
     /// Optional per-route retry policy override.
     #[serde(default)]
     retry_policy: Option<RetryPolicy>,
+
+    /// Optional per-route hedged-request policy.
+    ///
+    /// When set, this route races the request across healthy endpoints in
+    /// `cluster` and returns the first successful response. Absent means
+    /// one upstream attempt.
+    #[serde(default)]
+    hedge_policy: Option<HedgePolicy>,
 }
 
 impl Route {
@@ -315,6 +331,7 @@ impl TryFrom<RouteRaw> for Route {
             headers: raw.headers,
             host: raw.host,
             retry_policy: raw.retry_policy,
+            hedge_policy: raw.hedge_policy,
         };
         route.validate_semantics()?;
         Ok(route)
@@ -530,12 +547,33 @@ retry_policy:
             headers: None,
             host: None,
             retry_policy: None,
+            hedge_policy: None,
         };
         let yaml = serde_yaml::to_string(&route).unwrap();
         assert!(
             yaml.contains("path_prefix: /api"),
             "serialization keeps the flattened path key: {yaml}"
         );
+    }
+
+    #[test]
+    fn route_parses_hedge_policy() {
+        let route: Route = serde_yaml::from_str(
+            r#"
+path_prefix: "/"
+cluster: backend
+hedge_policy:
+  initial_requests: 1
+  max_attempts: 2
+  per_try_timeout_ms: 25
+  budget_percent: 10
+"#,
+        )
+        .unwrap();
+        let policy = route.hedge_policy.expect("hedge policy is set");
+        assert_eq!(policy.initial_requests(), 1, "initial attempts include the primary");
+        assert_eq!(policy.max_attempts(), 2, "one hedge copy is allowed");
+        assert_eq!(policy.per_try_timeout_ms(), Some(25), "the trigger delay is kept");
     }
 
     #[test]

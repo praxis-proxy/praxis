@@ -38,6 +38,8 @@ pub mod fd;
 pub mod grpc;
 /// Shared health state types for active health checking.
 pub mod health;
+/// Hedge-copy admission budget.
+pub mod hedge;
 /// Per-instance request ID generation.
 pub mod id;
 /// Key-value store trait and registry.
@@ -58,6 +60,11 @@ pub mod server;
 pub mod subrequest;
 /// Wall-clock time abstraction for filters.
 pub mod time;
+/// W3C trace-context extraction and injection when the `otel` feature is enabled.
+#[cfg(feature = "otel")]
+pub mod trace_context;
+/// Shared W3C `tracestate` validation and normalization.
+pub mod trace_state;
 
 pub use errors::ProxyError;
 pub use logging::TracingGuard;

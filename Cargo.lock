@@ -3388,6 +3388,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "yaml_serde",
 ]
@@ -3486,6 +3487,7 @@ dependencies = [
  "h2",
  "http",
  "openssl",
+ "opentelemetry",
  "opentelemetry-proto",
  "praxis-proxy",
  "praxis-proxy-core",
@@ -3504,6 +3506,8 @@ dependencies = [
  "tokio-tungstenite",
  "tonic",
  "tonic-prost",
+ "tracing",
+ "tracing-opentelemetry",
  "yaml_serde",
 ]
 

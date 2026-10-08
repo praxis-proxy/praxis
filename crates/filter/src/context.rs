@@ -500,6 +500,12 @@ pub struct HttpFilterContext<'a> {
     /// Optional route-level retry policy override (merged by the load balancer).
     pub route_retry_policy: Option<Arc<praxis_core::config::RetryPolicy>>,
 
+    /// Per-route hedge policy. `None` means one upstream attempt.
+    ///
+    /// The `Arc` is the route's policy, so every request on the route
+    /// shares one hedge budget.
+    pub hedge_policy: Option<Arc<praxis_core::config::HedgePolicy>>,
+
     /// Shared cluster retry state (budget + active-request counter).
     pub cluster_retry_state: Option<Arc<praxis_core::retry::ClusterRetryState>>,
 

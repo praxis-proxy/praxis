@@ -138,6 +138,9 @@ struct ResolvedRoute {
     wildcard_suffix: Option<String>,
     /// The route's retry policy, pre-wrapped in an `Arc` at build time.
     retry_policy: Option<Arc<praxis_core::config::RetryPolicy>>,
+
+    /// The route's hedge policy, pre-wrapped so every request shares its budget.
+    hedge_policy: Option<Arc<praxis_core::config::HedgePolicy>>,
 }
 
 impl RouterFilter {
@@ -160,6 +163,7 @@ impl RouterFilter {
     ///         headers: None,
     ///         cluster: "default".into(),
     ///         retry_policy: None,
+    ///         hedge_policy: None,
     ///     },
     ///     Route {
     ///         path_match: PathMatch::Prefix {
@@ -169,6 +173,7 @@ impl RouterFilter {
     ///         headers: None,
     ///         cluster: "api".into(),
     ///         retry_policy: None,
+    ///         hedge_policy: None,
     ///     },
     /// ])
     /// .unwrap();
@@ -331,6 +336,7 @@ impl RouterFilter {
         ctx.metrics_route = Some(resolved.metrics_label.clone());
         ctx.cluster = Some(Arc::clone(&resolved.route.cluster));
         ctx.route_retry_policy = resolved.retry_policy.as_ref().map(Arc::clone);
+        ctx.hedge_policy = resolved.hedge_policy.as_ref().map(Arc::clone);
         FilterAction::Continue
     }
 }
@@ -515,11 +521,13 @@ fn resolve_routes(routes: Vec<RouterRouteConfig>) -> Vec<ResolvedRoute> {
                 format!(".{lower}")
             });
             let retry_policy = route.retry_policy.clone().map(Arc::new);
+            let hedge_policy = route.hedge_policy.clone().map(Arc::new);
             ResolvedRoute {
                 route,
                 metrics_label,
                 wildcard_suffix,
                 retry_policy,
+                hedge_policy,
             }
         })
         .collect()

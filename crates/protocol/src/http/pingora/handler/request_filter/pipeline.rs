@@ -28,10 +28,7 @@ use super::{
     body_handling::{selected_upstream_body_limit, store_adapted_request_body, store_canonical_request_body},
     error_handling::handle_pre_read_io_error,
     header_mutations::{apply_pending_header_mutations, apply_pre_read_mutations},
-    request_utils::{
-        create_request_span, reject_reserved_internal_headers, reject_unsupported_transfer_coding,
-        snapshot_for_early_exit, templated_route,
-    },
+    request_utils::{create_request_span, snapshot_for_early_exit, templated_route},
     stream_buffer::PreReadError,
     terminal_responses::{run_streaming_terminal_response, run_terminal_response},
 };
@@ -95,7 +92,7 @@ pub(in crate::http) async fn execute(
     // Stale upstream-contact state from a prior keep-alive request is cleared in
     // early_request_filter (the first per-request hook), before any rejection
     // path, so it cannot leak into this request's passive-health attribution.
-    if let Some(rejection) = first_request_rejection(session) {
+    if let Some(rejection) = super::super::inbound_admission::admit_inbound_session(session) {
         snapshot_for_early_exit(session, ctx);
         send_rejection_for(session, rejection, ctx).await;
         return Ok(true);
@@ -240,16 +237,6 @@ pub(in crate::http) async fn execute(
     }
 }
 
-/// Return the first framing, `Host`, path, header-normalization, or
-/// reserved-header rejection for the request, in that order.
-fn first_request_rejection(session: &mut Session) -> Option<Rejection> {
-    reject_unsupported_transfer_coding(session)
-        .or_else(|| super::validation::validate_host_header(session))
-        .or_else(|| super::validation::validate_request_path(session))
-        .or_else(|| super::super::normalize::normalize_request_headers(session))
-        .or_else(|| reject_reserved_internal_headers(session))
-}
-
 // -----------------------------------------------------------------------------
 // Request-Phase Pipeline
 // -----------------------------------------------------------------------------
@@ -280,6 +267,7 @@ async fn run_pipeline(
         attempted_endpoints,
         retry_policy,
         route_retry_policy,
+        hedge_policy,
         cluster_retry_state,
         cluster_retry_state_released,
         endpoint_reselector,
@@ -389,6 +377,7 @@ async fn run_pipeline(
             filter_ctx.attempted_endpoints,
             filter_ctx.retry_policy,
             filter_ctx.route_retry_policy,
+            filter_ctx.hedge_policy,
             filter_ctx.cluster_retry_state,
             filter_ctx.cluster_retry_state_released,
             filter_ctx.endpoint_reselector,
@@ -458,6 +447,7 @@ async fn run_pipeline(
             ctx.attempted_endpoints = attempted_endpoints;
             ctx.retry_policy = retry_policy;
             ctx.route_retry_policy = route_retry_policy;
+            ctx.hedge_policy = hedge_policy;
             if let Some(CanonicalRequestBody(body)) = canonical_body {
                 store_canonical_request_body(ctx, body);
             }
