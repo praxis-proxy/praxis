@@ -66,5 +66,6 @@ mod request_smuggling;
 mod response_injection;
 mod ssrf_runtime;
 mod ssrf_validation;
+mod test_utils;
 mod tls_attack;
 mod url_encoding;

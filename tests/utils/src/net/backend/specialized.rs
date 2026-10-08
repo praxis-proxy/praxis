@@ -196,6 +196,7 @@ pub fn start_stateful_backend(responses: Vec<(u16, String)>) -> BackendGuard {
 pub fn start_malicious_response_header_backend(malformed_header: Vec<u8>) -> BackendGuard {
     spawn_tcp_server_with_shutdown(move |mut stream| {
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
         let _headers = read_until_headers_complete(&mut stream);
 
         let body = b"ok";
@@ -205,15 +206,9 @@ pub fn start_malicious_response_header_backend(malformed_header: Vec<u8>) -> Bac
         if !malformed_header.ends_with(b"\r\n") {
             response.extend_from_slice(b"\r\n");
         }
-        response.extend_from_slice(
-            format!(
-                "Content-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            )
-            .as_bytes(),
-        );
+        response.extend_from_slice(format!("Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).as_bytes());
         response.extend_from_slice(body);
-        let _sent = stream.write_all(&response);
+        stream.write_all(&response).expect("write fixture response");
     })
 }
 
