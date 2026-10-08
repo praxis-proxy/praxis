@@ -134,6 +134,9 @@ pub struct FilterPipeline {
     /// Per-cluster session stores for sticky session affinity, preserved across reloads.
     session_stores: Option<Arc<crate::SessionStoreRegistry>>,
 
+    /// Slow-start ramp state, preserved across reloads.
+    slow_start_registry: Option<Arc<crate::SlowStartRegistry>>,
+
     /// Shared sub-request client for iterative sub-requests.
     subrequest_client: Option<praxis_core::subrequest::SubRequestClient>,
 
@@ -568,6 +571,17 @@ impl FilterPipeline {
     pub fn set_session_stores(&mut self, stores: Arc<crate::SessionStoreRegistry>) {
         self.visit_nested_pipelines(&mut |pipeline| pipeline.set_session_stores(Arc::clone(&stores)));
         self.session_stores = Some(stores);
+    }
+
+    /// The shared slow-start registry, if set.
+    pub fn slow_start_registry(&self) -> Option<&Arc<crate::SlowStartRegistry>> {
+        self.slow_start_registry.as_ref()
+    }
+
+    /// Set the shared [`crate::SlowStartRegistry`] for this pipeline.
+    pub fn set_slow_start_registry(&mut self, registry: Arc<crate::SlowStartRegistry>) {
+        self.visit_nested_pipelines(&mut |pipeline| pipeline.set_slow_start_registry(Arc::clone(&registry)));
+        self.slow_start_registry = Some(registry);
     }
 
     /// The shared sub-request client, if set.

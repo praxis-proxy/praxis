@@ -67,6 +67,9 @@ upstream-binding = ["praxis-filter/upstream-binding", "praxis-protocol/upstream-
 iterative-request-router = ["praxis-filter/iterative-request-router", "upstream-binding", "experimental"]
 # The `router` filter's JSON-alias body-routing groundwork. Off by default; experimental.
 router-json-aliases = ["praxis-filter/router-json-aliases", "experimental"]
+# Per-cluster slow start. Off by default; experimental. Selection does not
+# read the ramp yet; the feature only accepts and stores the config.
+slow-start = ["praxis-filter/slow-start", "experimental"]
 # The bound-upstream request-body hook. Off by default; experimental.
 bound-upstream-request-body = ["praxis-filter/bound-upstream-request-body", "upstream-binding", "experimental"]
 # The chain-binding registry extension API. Off by default; experimental.

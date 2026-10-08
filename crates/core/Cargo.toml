@@ -19,6 +19,9 @@ workspace = true
 # Config support for logical upstream binding (`bound_upstream` conditions).
 # Off by default; experimental. The filter crate's `upstream-binding` turns it on.
 upstream-binding = []
+# Per-cluster `slow_start`. Off by default; experimental. Selection does not
+# read the ramp yet. Without this feature the field is an unknown key.
+slow-start = []
 spiffe = ["praxis-tls/spiffe"]
 test-support = []
 otel = [

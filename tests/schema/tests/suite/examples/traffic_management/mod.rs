@@ -9,6 +9,7 @@ mod least_connections;
 mod path_based_routing;
 mod round_robin;
 mod session_affinity;
+mod slow_start;
 mod static_response;
 mod sticky_sessions;
 mod timeout;

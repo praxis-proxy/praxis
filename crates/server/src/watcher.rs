@@ -68,6 +68,9 @@ pub(crate) struct WatcherParams {
     /// Session store registry, preserved across reloads.
     pub(crate) session_stores: Arc<praxis_filter::SessionStoreRegistry>,
 
+    /// Slow-start ramp registry, preserved across reloads.
+    pub(crate) slow_start_registry: Arc<praxis_filter::SlowStartRegistry>,
+
     /// Live pipeline storage, swapped atomically on reload.
     pub(crate) pipelines: Arc<ListenerPipelines>,
 
@@ -213,6 +216,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: WatcherParams) {
         &params.health_shutdown,
         &params.kv_stores,
         &params.session_stores,
+        &params.slow_start_registry,
         &params.subrequest_client,
         params.log_level.as_ref(),
         &params.pipeline_composition,
@@ -262,6 +266,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: WatcherParams) {
             &params.health_shutdown,
             &params.kv_stores,
             &params.session_stores,
+            &params.slow_start_registry,
             &params.subrequest_client,
             params.log_level.as_ref(),
             &params.pipeline_composition,
@@ -316,6 +321,7 @@ fn handle_reload(
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
+    slow_start_registry: &Arc<praxis_filter::SlowStartRegistry>,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
     log_level: Option<&Arc<praxis_core::logging::LogLevelState>>,
     composition: &PipelineComposition,
@@ -371,6 +377,7 @@ fn handle_reload(
         health_shutdown,
         kv_stores,
         session_stores,
+        slow_start_registry,
         subrequest_client,
         log_level,
         composition,
@@ -963,6 +970,7 @@ mod tests {
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
         let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
+        let slow_start_registry = Arc::new(praxis_filter::SlowStartRegistry::new());
         let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = crate::pipelines::resolve_pipelines(
             &config,
@@ -997,6 +1005,7 @@ mod tests {
             &health_shutdown,
             &kv_stores,
             &session_stores,
+            &slow_start_registry,
             &subrequest_client,
             None,
             &PipelineComposition::default(),
@@ -1021,6 +1030,7 @@ mod tests {
             &health_shutdown,
             &kv_stores,
             &session_stores,
+            &slow_start_registry,
             &subrequest_client,
             None,
             &PipelineComposition::default(),
@@ -1039,6 +1049,7 @@ mod tests {
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
         let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
+        let slow_start_registry = Arc::new(praxis_filter::SlowStartRegistry::new());
         let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = crate::pipelines::resolve_pipelines(
             &config,
@@ -1076,6 +1087,7 @@ mod tests {
             &health_shutdown,
             &kv_stores,
             &session_stores,
+            &slow_start_registry,
             &subrequest_client,
             None,
             &PipelineComposition::default(),
@@ -1158,6 +1170,7 @@ mod tests {
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
+            slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
             pipelines,
             referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
@@ -1213,6 +1226,7 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
+            slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
             pipelines: Arc::clone(&pipelines),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -1275,6 +1289,7 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
+            slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
             pipelines: Arc::clone(&pipelines),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -1366,6 +1381,7 @@ mod tests {
             initial_config: config.clone(),
             kv_stores,
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
+            slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
             pipelines,
             referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
@@ -1441,6 +1457,7 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
+            slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
             pipelines: Arc::clone(&pipelines),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -1517,6 +1534,7 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
+            slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
             pipelines: Arc::clone(&pipelines),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -1592,6 +1610,7 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
+            slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
             pipelines: Arc::clone(&pipelines),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -1759,6 +1778,7 @@ mod tests {
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
+            slow_start_registry: Arc::new(praxis_filter::SlowStartRegistry::new()),
             pipelines: Arc::clone(&pipelines),
             referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
@@ -1830,6 +1850,7 @@ mod tests {
         let registry = FilterRegistry::with_builtins();
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
         let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
+        let slow_start_registry = Arc::new(praxis_filter::SlowStartRegistry::new());
         let subrequest_client = praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8));
         let pipelines = crate::pipelines::resolve_pipelines(
             &config,
@@ -1861,6 +1882,7 @@ mod tests {
             &Arc::new(Mutex::new(CancellationToken::new())),
             &kv_stores,
             &session_stores,
+            &slow_start_registry,
             &subrequest_client,
             None,
             &PipelineComposition::default(),

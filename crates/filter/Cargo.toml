@@ -47,6 +47,11 @@ iterative-request-router = ["upstream-binding"]
 # experimental and not yet wired into request routing.
 router-json-aliases = []
 
+# Per-cluster slow start. Off by default; experimental. The config field is
+# accepted only with this feature, and load-balancer selection does not read
+# the ramp yet.
+slow-start = ["praxis-core/slow-start"]
+
 # The once-per-request bound-upstream request-body hook
 # (`HttpFilter::on_bound_upstream_request_body`), run at the logical-binding
 # barrier. Off by default; experimental. No in-tree filter uses it yet.

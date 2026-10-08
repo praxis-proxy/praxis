@@ -775,7 +775,7 @@ by category:
 | Directory | Contents |
 | ----------- | ---------- |
 | `branching` | Branch chains: conditional skip, terminal, reentrance, cross-chain |
-| `traffic-management` | Router, load balancing, timeouts, redirects, rate limiting, static responses, P2C, canary, circuit breaker, health checks, gRPC detection |
+| `traffic-management` | Router, load balancing, slow start, timeouts, redirects, rate limiting, static responses, P2C, canary, circuit breaker, health checks, gRPC detection |
 | `payload-processing` | Compression, JSON Pointer rewrite, JSON field extraction, stream buffering, size limits |
 | `security` | CORS, CSRF, IP ACL, guardrails, policy (feature-gated), forwarded headers, downstream read timeout |
 | `observability` | Access logs, request IDs, TCP access logs |
@@ -809,6 +809,24 @@ plaintext, so a top-level cluster's data-path settings
 `load_balancer_strategy`, `trusted_private_endpoints`)
 have no effect at all. Configure
 those on the inline load-balancer cluster instead.
+
+## Slow Start
+
+Optional per-cluster `slow_start` names a window and an
+aggression curve. It requires the `slow-start` Cargo
+feature, which is off by default and experimental.
+Without that feature the key is rejected as an unknown
+field.
+
+Endpoints present the first time the proxy observes the
+cluster keep their configured weight. An address added
+later, and an endpoint that becomes healthy again, ramp
+from zero. Hash strategies ignore the ramp. Load-balancer
+selection does not read this ramp yet: the setting is
+accepted and stored, and a follow-up applies it while
+choosing an endpoint. See
+[Slow Start](load-balancing.md#slow-start) and
+[slow-start.yaml](../../examples/configs/traffic-management/slow-start.yaml).
 
 ## Failure Mode
 

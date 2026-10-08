@@ -72,6 +72,9 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 | `clusters[].retry_policy.retry_budget.min_retries_per_second` | integer | no | Floor on tokens per second even at low traffic. |
 | `clusters[].retry_policy.retry_body_limit_bytes` | integer | no | Max request body size eligible for replay (bytes). Defaults to 64 `KiB`. |
 | `clusters[].retry_policy.allow_non_idempotent` | bool | no | Allow retries for non-idempotent methods (POST/PATCH) when true. |
+| `clusters[].slow_start` | SlowStartConfig | no | Ramp newly added and newly recovered endpoints up to their configured weight. Requires the `slow-start` Cargo feature, which is off by default. Load-balancer selection does not read this ramp yet: the setting is accepted and stored, and a follow-up applies it while choosing an endpoint. Omit it to give every eligible endpoint its configured weight immediately. See [`SlowStartConfig`]. |
+| `clusters[].slow_start.window_ms` | integer | yes | Duration of the ramp, in milliseconds. Must be at least 1 and at most one hour. Over this span the endpoint's effective weight grows from 0 to its configured weight. |
+| `clusters[].slow_start.aggression` | number | no | Curve of the ramp. `1.0` (the default) is linear. Must be finite and in `(0, 100]`. |
 | `cluster_source` | `router` \| `bound_upstream` | no | Where the target cluster name comes from. `router` (the default) uses the cluster a preceding `router` selected. `bound_upstream` (needs the `upstream-binding` build feature) uses the request's logical binding, which lets a direct dispatch branch or an `iterative_request_router` step pick an endpoint with no router of its own; the bound cluster must be one of the clusters declared here, which startup validation checks. When an upstream was already selected, the filter does nothing. |
 
 ## Example

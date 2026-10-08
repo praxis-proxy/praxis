@@ -483,6 +483,7 @@ mod tests {
     }
 
     /// Build a [`FilterPipeline`] wrapping the given TCP filters.
+    #[expect(clippy::too_many_lines, reason = "the literal names every pipeline field")]
     fn make_tcp_pipeline(filters: Vec<Box<dyn TcpFilter>>) -> FilterPipeline {
         let filters: Vec<_> = filters
             .into_iter()
@@ -499,6 +500,7 @@ mod tests {
             id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
             kv_stores: None,
             session_stores: None,
+            slow_start_registry: None,
             subrequest_client: None,
             may_select_streaming_subrequest_response: false,
             trace_context_filter_indices: Vec::new(),

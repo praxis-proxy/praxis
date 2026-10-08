@@ -110,6 +110,7 @@ fn make_cluster(strategy: LoadBalancerStrategy, n: usize) -> Cluster {
         name: "bench".into(),
         read_timeout_ms: None,
         retry_policy: None,
+        slow_start: None,
         tls: None,
         total_connection_timeout_ms: None,
         trusted_private_endpoints: Vec::new(),

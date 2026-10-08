@@ -203,6 +203,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [ring-hash.yaml](configs/traffic-management/ring-hash.yaml) | Routes requests to a stable backend by hashing a configurable request header through a sorted virtual-node ring |
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy |
 | [session-affinity.yaml](configs/traffic-management/session-affinity.yaml) | Hashes a request header to pin a user's requests to one backend |
+| [slow-start.yaml](configs/traffic-management/slow-start.yaml) | Configure a slow-start window that load-balancer selection does not apply yet |
 | [static-response.yaml](configs/traffic-management/static-response.yaml) | Returns a fixed response without contacting any upstream |
 | [sticky-sessions.yaml](configs/traffic-management/sticky-sessions.yaml) | Pins clients to a specific backend across requests |
 | [subset-lb.yaml](configs/traffic-management/subset-lb.yaml) | Filters endpoints by metadata labels and applies an inner strategy within the matching subset |

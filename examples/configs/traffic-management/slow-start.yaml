@@ -1,0 +1,40 @@
+# Slow Start
+#
+# Configure a slow-start window that load-balancer selection
+# does not apply yet. Endpoints listed here are the baseline
+# and keep their configured weight.
+#
+# ⚠️  EXPERIMENTAL: This example uses the `slow-start` experimental feature.
+# Not recommended for production use. Build with --features slow-start.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features slow-start -- -c examples/configs/traffic-management/slow-start.yaml
+#   for i in $(seq 1 4); do curl -s http://localhost:8080/; echo; done
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy: round_robin
+            slow_start:
+              window_ms: 30000
+              aggression: 1.0
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

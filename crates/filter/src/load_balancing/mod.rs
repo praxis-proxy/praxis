@@ -15,6 +15,7 @@ pub(crate) mod priority;
 pub(crate) mod random;
 pub(crate) mod ring_hash;
 pub(crate) mod round_robin;
+pub(crate) mod slow_start;
 pub(crate) mod strategy;
 pub(crate) mod subset;
 pub(crate) mod zone_aware;

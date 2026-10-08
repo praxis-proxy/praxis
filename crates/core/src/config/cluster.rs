@@ -7,6 +7,7 @@ mod endpoint;
 mod health_check;
 mod load_balancer_strategy;
 mod retry_policy;
+mod slow_start;
 mod upstream_authority;
 
 use std::{fmt, sync::Arc};
@@ -23,6 +24,7 @@ pub use retry_policy::{
     RetryPolicy,
 };
 use serde::{Deserialize, Serialize};
+pub use slow_start::SlowStartConfig;
 pub use upstream_authority::{AuthoritySource, UpstreamAuthority};
 
 use crate::errors::ProxyError;
@@ -318,6 +320,17 @@ pub struct Cluster {
     /// retry behavior (3 attempts, idempotent methods, 64 `KiB` body).
     #[serde(default)]
     pub retry_policy: Option<RetryPolicy>,
+
+    /// Ramp newly added and newly recovered endpoints up to their configured weight.
+    ///
+    /// Requires the `slow-start` Cargo feature, which is off by default.
+    /// Load-balancer selection does not read this ramp yet: the setting is
+    /// accepted and stored, and a follow-up applies it while choosing an
+    /// endpoint. Omit it to give every eligible endpoint its configured weight
+    /// immediately. See [`SlowStartConfig`].
+    #[cfg(feature = "slow-start")]
+    #[serde(default)]
+    pub slow_start: Option<SlowStartConfig>,
 }
 
 impl Cluster {
@@ -372,6 +385,8 @@ impl Cluster {
             trusted_private_endpoints: Vec::new(),
             write_timeout_ms: None,
             retry_policy: None,
+            #[cfg(feature = "slow-start")]
+            slow_start: None,
         }
     }
 }

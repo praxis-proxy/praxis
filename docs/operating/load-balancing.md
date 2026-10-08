@@ -269,6 +269,42 @@ When an endpoint is marked unhealthy:
 Without health checks configured, all endpoints are
 always considered available.
 
+## Slow Start
+
+A cluster can name a slow-start window when the binary is
+built with the `slow-start` Cargo feature. That feature is
+off by default. Without it, `slow_start` is an unknown
+field. The ramp factor at a fraction `t` of the window is
+`t ^ (1 / aggression)`. Aggression `1.0` (the
+default) is linear. A value above 1 gives an
+endpoint more of its weight earlier. A value below
+1 holds it back until late in the window.
+
+```yaml
+clusters:
+  - name: backend
+    load_balancer_strategy: round_robin
+    slow_start:
+      window_ms: 30000
+      aggression: 1.0
+    endpoints:
+      - "10.0.0.1:8080"
+      - "10.0.0.2:8080"
+```
+
+`window_ms` is from 1 ms to one hour. `aggression`
+must be finite and in `(0, 100]`. Omit `slow_start`
+to keep every eligible endpoint at its configured
+weight.
+
+The window starts when an address appears that this
+process had not already counted in the cluster, and
+again when an endpoint returns from unhealthy to
+healthy. Endpoints present on the first observation
+stay at full weight. Weighted strategies do not
+read this ramp yet; a follow-up change applies it
+while selecting an endpoint.
+
 ## Panic Mode
 
 When every endpoint in a cluster is unhealthy, the

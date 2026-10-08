@@ -68,6 +68,7 @@ pub(in crate::config::validate) fn validate_clusters(
         if let Some(hc) = &cluster.health_check {
             health_check::validate_health_check(hc, &cluster.name)?;
         }
+        validate_cluster_slow_start(cluster)?;
         health_check::validate_grpc_probe_transport(cluster)?;
         health_check::validate_health_check_ssrf(cluster, insecure_options)?;
         health_check::warn_tls_http_probe_mismatch(cluster);
@@ -134,6 +135,57 @@ fn validate_cluster_max_connections(cluster: &crate::config::Cluster) -> Result<
         )));
     }
     Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Slow Start Validation
+// -----------------------------------------------------------------------------
+
+/// Largest aggression that still describes a ramp rather than a step.
+#[cfg(feature = "slow-start")]
+const MAX_SLOW_START_AGGRESSION: f64 = 100.0;
+
+/// Validate `slow_start` when the feature is on. The field does not exist otherwise.
+#[cfg(feature = "slow-start")]
+fn validate_cluster_slow_start(cluster: &crate::config::Cluster) -> Result<(), ProxyError> {
+    if let Some(slow_start) = cluster.slow_start {
+        return validate_slow_start(slow_start, &cluster.name);
+    }
+    Ok(())
+}
+
+/// No slow-start field to validate when the feature is off.
+#[cfg(not(feature = "slow-start"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the feature-on signature so the call site stays one line"
+)]
+fn validate_cluster_slow_start(_cluster: &crate::config::Cluster) -> Result<(), ProxyError> {
+    Ok(())
+}
+
+/// Reject a zero window, a window above the timeout ceiling, or an aggression
+/// outside `(0, 100]`.
+#[cfg(feature = "slow-start")]
+fn validate_slow_start(slow_start: crate::config::SlowStartConfig, cluster_name: &str) -> Result<(), ProxyError> {
+    if slow_start.window_ms == 0 {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': slow_start.window_ms must be >= 1 (omit slow_start to disable)"
+        )));
+    }
+    if slow_start.window_ms > MAX_TIMEOUT_MS {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': slow_start.window_ms ({}) exceeds maximum ({MAX_TIMEOUT_MS})",
+            slow_start.window_ms,
+        )));
+    }
+    let aggression = slow_start.aggression;
+    if aggression.is_finite() && aggression > 0.0 && aggression <= MAX_SLOW_START_AGGRESSION {
+        return Ok(());
+    }
+    Err(ProxyError::Config(format!(
+        "cluster '{cluster_name}': slow_start.aggression must be finite and in (0, {MAX_SLOW_START_AGGRESSION}]"
+    )))
 }
 
 // -----------------------------------------------------------------------------
@@ -495,6 +547,64 @@ filter_chains:
             err.to_string().contains("application_protocol"),
             "inline load-balancer cluster must reject an invalid application_protocol \
              (same validation as top-level clusters): {err}"
+        );
+    }
+
+    #[cfg(not(feature = "slow-start"))]
+    #[test]
+    fn slow_start_is_unknown_without_the_feature() {
+        let yaml = r#"
+name: api
+endpoints: ["10.0.0.1:80"]
+slow_start:
+  window_ms: 30000
+"#;
+        let err = serde_yaml::from_str::<Cluster>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("slow_start"),
+            "slow_start must be rejected when the feature is off: {err}"
+        );
+    }
+
+    #[cfg(feature = "slow-start")]
+    #[test]
+    fn accept_slow_start_linear_window() {
+        let mut cluster = Cluster::with_defaults("api", vec!["10.0.0.1:80".into()]);
+        cluster.slow_start = Some(crate::config::SlowStartConfig {
+            window_ms: 30_000,
+            aggression: 1.0,
+        });
+        validate_clusters(std::slice::from_ref(&cluster), &InsecureOptions::default())
+            .expect("a linear slow start window should be accepted");
+    }
+
+    #[cfg(feature = "slow-start")]
+    #[test]
+    fn reject_slow_start_zero_window() {
+        let mut cluster = Cluster::with_defaults("api", vec!["10.0.0.1:80".into()]);
+        cluster.slow_start = Some(crate::config::SlowStartConfig {
+            window_ms: 0,
+            aggression: 1.0,
+        });
+        let err = validate_clusters(std::slice::from_ref(&cluster), &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("window_ms"),
+            "zero window should be rejected: {err}"
+        );
+    }
+
+    #[cfg(feature = "slow-start")]
+    #[test]
+    fn reject_slow_start_non_positive_aggression() {
+        let mut cluster = Cluster::with_defaults("api", vec!["10.0.0.1:80".into()]);
+        cluster.slow_start = Some(crate::config::SlowStartConfig {
+            window_ms: 1_000,
+            aggression: 0.0,
+        });
+        let err = validate_clusters(std::slice::from_ref(&cluster), &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("aggression"),
+            "zero aggression should be rejected: {err}"
         );
     }
 

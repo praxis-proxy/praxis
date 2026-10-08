@@ -151,6 +151,7 @@ impl FilterPipeline {
             id_generator: Arc::clone(&id_generator),
             kv_stores: None,
             session_stores: None,
+            slow_start_registry: None,
             pipeline_extensions: Vec::new(),
             record_filter_duration_metrics: false,
             route_templates: Arc::default(),

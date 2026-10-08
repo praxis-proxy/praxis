@@ -475,6 +475,9 @@ struct ServerState {
     /// Session store registry, preserved across reloads.
     session_stores: Arc<praxis_filter::SessionStoreRegistry>,
 
+    /// Slow-start ramp registry, preserved across reloads.
+    slow_start_registry: Arc<praxis_filter::SlowStartRegistry>,
+
     /// Shared sub-request client for iterative sub-requests.
     subrequest_client: SubRequestClient,
 
@@ -524,12 +527,14 @@ fn build_server_state(
     }
 
     let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
+    let slow_start_registry = Arc::new(praxis_filter::SlowStartRegistry::new());
     let pipelines = resolve_pipelines_with_composition(
         config,
         &registry,
         health_registry,
         &kv_stores,
         &session_stores,
+        &slow_start_registry,
         &subrequest_client,
         &pipeline_composition,
     )?;
@@ -551,6 +556,7 @@ fn build_server_state(
         cluster_meta,
         kv_stores,
         session_stores,
+        slow_start_registry,
         subrequest_client,
         health_shutdown,
         log_level,
@@ -650,6 +656,7 @@ fn watcher_params(
         listener_meta: state.listener_meta,
         cluster_meta: state.cluster_meta,
         session_stores: state.session_stores,
+        slow_start_registry: state.slow_start_registry,
         pipelines: state.pipelines,
         referenced_files,
         registry: Arc::new(registry),

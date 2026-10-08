@@ -101,6 +101,7 @@ mod route_templates;
 mod security_examples;
 mod selected_upstream_conditions;
 mod session_affinity;
+mod slow_start;
 mod static_response;
 mod sticky_sessions;
 mod stream_buffer;
