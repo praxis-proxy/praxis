@@ -75,6 +75,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         attempted_endpoints: Vec::new(),
         retry_policy: None,
         route_retry_policy: None,
+        hedge_policy: None,
         cluster_retry_state: None,
         cluster_retry_state_released: false,
         endpoint_reselector: None,

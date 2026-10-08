@@ -11,13 +11,12 @@
 //!
 //! # Limitations
 //!
-//! This filter is pure header propagation with no `OTel` dependency: the
-//! `parent-id` it injects names a proxy hop that is **not exported as a
-//! span** anywhere, so tracing backends show the proxy as a missing node
-//! between client and upstream spans. Deployments exporting real proxy
-//! spans (the `otel` feature) should rely on span-context propagation
-//! there instead. New traces are always flagged sampled (`01`) because
-//! the filter cannot consult any sampler configuration.
+//! Without the Praxis `otel` feature, this filter performs header-only
+//! propagation: the `parent-id` it injects is synthetic and does not name an
+//! exported span. With `otel` compiled and an exporter configured, the HTTP
+//! protocol and sub-request clients replace that pending header at send time
+//! with the actual exported `CLIENT` span context. New header-only traces are
+//! flagged sampled (`01`) because this filter cannot consult a sampler.
 //!
 //! [W3C Trace Context]: https://www.w3.org/TR/trace-context/
 
@@ -139,7 +138,11 @@ struct ForwardedHopTraceparent {
     value: String,
 }
 
-/// Insert the stored hop `traceparent`, minting it once from [`TraceContext`].
+/// Insert the stored synthetic `traceparent`, minting it once from [`TraceContext`].
+///
+/// The final OTel-enabled protocol send hook replaces this value with the
+/// actual client span context. Keeping the mutation here preserves header-only
+/// filter behavior and sub-request correlation when `OTel` is unavailable.
 fn ensure_traceparent_header(ctx: &mut HttpFilterContext<'_>, tc: &TraceContext) {
     let hop = if let Some(existing) = ctx.extensions.get::<ForwardedHopTraceparent>() {
         existing.value.clone()

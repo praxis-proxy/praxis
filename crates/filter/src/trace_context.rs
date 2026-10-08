@@ -2,14 +2,18 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Request-scoped correlation ids for forwarded requests and sub-requests.
+//!
+//! Header-only propagation mints a synthetic hop ID. With Praxis OpenTelemetry
+//! instrumentation active, protocol and sub-request clients replace it at
+//! send time with the actual exported client span context.
 
 use http::{HeaderName, HeaderValue};
 use praxis_core::{
     id::IdGenerator,
     subrequest::{FrameworkHeaders, SubRequestError},
     time::TimeSource,
+    trace_state::parse_tracestate,
 };
-
 
 /// Header carrying the request correlation ID.
 pub(crate) const REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
@@ -52,7 +56,6 @@ const FALLBACK_TRACE_ID: &str = "00000000000000000000000000000001";
 
 /// W3C Trace Context section 2.2.2 forbids an all-zero span-id.
 const FALLBACK_SPAN_ID: &str = "0000000000000001";
-
 
 /// Request-scoped correlation ids. Outbound hops share the trace-id and mint a span-id.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -209,7 +212,6 @@ impl TraceContext {
     }
 }
 
-
 /// Trace-id and flags continued from a valid inbound `traceparent`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InboundTrace {
@@ -219,7 +221,6 @@ pub(crate) struct InboundTrace {
     /// Shared 32-hex trace-id.
     pub trace_id: String,
 }
-
 
 /// Generate a 16-hex span-id.
 #[must_use]
@@ -285,11 +286,6 @@ pub(crate) fn parse_traceparent(value: &str) -> Option<InboundTrace> {
 }
 
 /// Maximum `list-member`s in a W3C `tracestate` header.
-const MAX_TRACESTATE_MEMBERS: usize = 32;
-
-/// Combined `tracestate` size vendors SHOULD propagate.
-const MAX_TRACESTATE_LEN: usize = 512;
-
 /// W3C `traceparent` is a singleton: continue only with exactly one valid value.
 fn inbound_trace(headers: &http::HeaderMap) -> Option<InboundTrace> {
     let mut values = headers.get_all(&TRACEPARENT).iter();
@@ -312,129 +308,6 @@ fn combined_tracestate(headers: &http::HeaderMap) -> Option<String> {
     } else {
         parse_tracestate(&values.join(","))
     }
-}
-
-/// Parse W3C `tracestate` list-members. `None` if malformed, duplicated
-/// keys, or no members.
-///
-/// Empty and whitespace-only members are skipped, as [W3C Trace Context
-/// Section 3.3.1.1] requires: joining several `tracestate` fields, or a
-/// trailing comma, produces them.
-///
-/// [W3C Trace Context Section 3.3.1.1]: https://www.w3.org/TR/trace-context/#list
-fn parse_tracestate(combined: &str) -> Option<String> {
-    let mut members: Vec<(&str, &str)> = Vec::new();
-    for member in combined.split(',') {
-        let member = trim_ows(member);
-        if member.is_empty() {
-            continue;
-        }
-        let (key, value) = member.split_once('=')?;
-        let key = trim_ows(key);
-        let value = trim_ows(value);
-        if !is_valid_tracestate_key(key) || !is_valid_tracestate_value(value) {
-            return None;
-        }
-        if members.iter().any(|(existing, _)| *existing == key) {
-            return None;
-        }
-        members.push((key, value));
-        if members.len() > MAX_TRACESTATE_MEMBERS {
-            return None;
-        }
-    }
-    serialize_tracestate(&members)
-}
-
-/// Serialize validated members, dropping right-most entries to stay within 512 bytes.
-fn serialize_tracestate(members: &[(&str, &str)]) -> Option<String> {
-    let mut serialized = String::new();
-    for &(key, value) in members {
-        let extra = if serialized.is_empty() { 0 } else { 1 };
-        let candidate = serialized
-            .len()
-            .saturating_add(extra)
-            .saturating_add(key.len())
-            .saturating_add(1)
-            .saturating_add(value.len());
-        if candidate > MAX_TRACESTATE_LEN {
-            break;
-        }
-        if !serialized.is_empty() {
-            serialized.push(',');
-        }
-        serialized.push_str(key);
-        serialized.push('=');
-        serialized.push_str(value);
-    }
-    (!serialized.is_empty()).then_some(serialized)
-}
-
-/// Strip W3C OWS (`SP` / `HTAB`) from both ends of `value`.
-fn trim_ows(value: &str) -> &str {
-    value.trim_matches([' ', '\t'])
-}
-
-/// W3C Trace Context Level 2 `simple-key` / `tenant-key`.
-fn is_valid_tracestate_key(key: &str) -> bool {
-    match key.split_once('@') {
-        None => is_simple_tracestate_key(key),
-        Some((tenant_id, system_id)) => !system_id.contains('@') && is_tenant_id(tenant_id) && is_system_id(system_id),
-    }
-}
-
-/// `simple-key = lcalpha 0*255(lcalpha / DIGIT / "_" / "-" / "*" / "/")`.
-fn is_simple_tracestate_key(key: &str) -> bool {
-    let len = key.len();
-    if len == 0 || len > 256 {
-        return false;
-    }
-    let mut bytes = key.bytes();
-    bytes.next().is_some_and(is_lcalpha) && bytes.all(is_simple_keychar)
-}
-
-/// `tenant-id = (lcalpha / DIGIT) 0*240(lcalpha / DIGIT / "_" / "-" / "*" / "/")`.
-fn is_tenant_id(id: &str) -> bool {
-    let len = id.len();
-    if len == 0 || len > 241 {
-        return false;
-    }
-    let mut bytes = id.bytes();
-    bytes.next().is_some_and(|b| is_lcalpha(b) || b.is_ascii_digit()) && bytes.all(is_simple_keychar)
-}
-
-/// `system-id = lcalpha 0*13(lcalpha / DIGIT / "_" / "-" / "*" / "/")`.
-fn is_system_id(id: &str) -> bool {
-    let len = id.len();
-    if len == 0 || len > 14 {
-        return false;
-    }
-    let mut bytes = id.bytes();
-    bytes.next().is_some_and(is_lcalpha) && bytes.all(is_simple_keychar)
-}
-
-/// Subsequent `simple-key` / tenant / system identifier characters.
-fn is_simple_keychar(b: u8) -> bool {
-    is_lcalpha(b) || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'*' | b'/')
-}
-
-/// ASCII lowercase letter.
-fn is_lcalpha(b: u8) -> bool {
-    b.is_ascii_lowercase()
-}
-
-/// W3C `tracestate` value: up to 256 printable ASCII chars except `,` / `=`, not ending in space.
-fn is_valid_tracestate_value(value: &str) -> bool {
-    let len = value.len();
-    if len == 0 || len > 256 {
-        return false;
-    }
-    value.bytes().all(is_tracestate_value_byte) && !value.ends_with(' ')
-}
-
-/// Printable ASCII except comma and equals.
-fn is_tracestate_value_byte(b: u8) -> bool {
-    (0x20..=0x7E).contains(&b) && b != b',' && b != b'='
 }
 
 /// Initialize request-scoped correlation when the `trace_context` filter is configured.
@@ -469,7 +342,6 @@ fn span_id_from(trace_id: &str) -> String {
     }
     span_id.to_owned()
 }
-
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -776,21 +648,15 @@ mod tests {
 
     #[test]
     fn parse_tracestate_member_and_size_limits() {
-        let thirty_two: String = (0..MAX_TRACESTATE_MEMBERS)
-            .map(|i| format!("k{i:02}=v"))
-            .collect::<Vec<_>>()
-            .join(",");
+        let thirty_two: String = (0..32).map(|i| format!("k{i:02}=v")).collect::<Vec<_>>().join(",");
         assert!(parse_tracestate(&thirty_two).is_some());
-        let thirty_three: String = (0..=MAX_TRACESTATE_MEMBERS)
-            .map(|i| format!("k{i:02}=v"))
-            .collect::<Vec<_>>()
-            .join(",");
+        let thirty_three: String = (0..=32).map(|i| format!("k{i:02}=v")).collect::<Vec<_>>().join(",");
         assert!(parse_tracestate(&thirty_three).is_none());
 
         let first = format!("a={}", "x".repeat(254));
         let second = format!("b={}", "x".repeat(253));
         let exact = format!("{first},{second}");
-        assert_eq!(exact.len(), MAX_TRACESTATE_LEN);
+        assert_eq!(exact.len(), 512);
         assert_eq!(parse_tracestate(&exact).as_deref(), Some(exact.as_str()));
 
         let overflow = format!("{exact},c=d");

@@ -25,6 +25,7 @@ basic-auth-filter = [
 otel = [
     "dep:opentelemetry",
     "dep:tracing-opentelemetry",
+    "praxis-core/otel",
 ]
 
 cloud-events-filter = [

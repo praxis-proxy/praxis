@@ -198,6 +198,7 @@ pub(super) async fn pre_read_body(
         ctx.attempted_endpoints = filter_ctx.attempted_endpoints;
         ctx.retry_policy = filter_ctx.retry_policy;
         ctx.route_retry_policy = filter_ctx.route_retry_policy;
+        ctx.hedge_policy = filter_ctx.hedge_policy;
         ctx.cluster_retry_state = filter_ctx.cluster_retry_state;
         ctx.cluster_retry_state_released = filter_ctx.cluster_retry_state_released;
         ctx.endpoint_reselector = filter_ctx.endpoint_reselector;

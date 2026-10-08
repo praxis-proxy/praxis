@@ -1,12 +1,9 @@
 # Code of Conduct
 
-Praxis follows the
-[CNCF Code of Conduct][cncf-coc].
+Praxis follows the [CNCF Code of Conduct].
 
-To report an issue, contact the
-[project reviewers][reviewers] or the
-[CNCF Code of Conduct Committee][conduct-email].
+To report an issue, contact the [project members] or the [CNCF Code of Conduct Committee].
 
-[cncf-coc]: https://github.com/cncf/foundation/blob/main/code-of-conduct.md
-[reviewers]: MAINTAINERS.md
-[conduct-email]: mailto:conduct@cncf.io
+[CNCF Code of Conduct]: https://github.com/cncf/foundation/blob/main/code-of-conduct.md
+[project members]: MAINTAINERS.md
+[CNCF Code of Conduct Committee]: mailto:conduct@cncf.io

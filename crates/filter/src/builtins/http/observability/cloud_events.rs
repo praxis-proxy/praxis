@@ -19,6 +19,7 @@ use http::{
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use tokio::sync::Semaphore;
+use tracing::Instrument as _;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -445,7 +446,7 @@ impl CloudEventsFilter {
         // TODO(#1203): add a dedicated background/event pool if event bursts
         // contend with request-critical callouts.
         crate::metrics::record_cloud_events_attempt();
-        tokio::spawn(async move {
+        let delivery = async move {
             // Hold the permit until delivery completes so the semaphore bounds active
             // deliveries, not only task creation.
             let _permit = permit;
@@ -517,7 +518,14 @@ impl CloudEventsFilter {
                     );
                 },
             }
-        });
+        };
+        // Give detached delivery its own child span. Cloning the request span
+        // into this task keeps the SERVER span open until the best-effort
+        // delivery finishes, extending request latency in exported telemetry.
+        // This span is created while the request is current, so the callout
+        // remains linked to that request without retaining the SERVER span.
+        let delivery_span = tracing::info_span!("cloud_events.delivery");
+        tokio::spawn(delivery.instrument(delivery_span));
         true
     }
 

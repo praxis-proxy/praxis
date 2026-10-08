@@ -2824,6 +2824,20 @@ response_headers: [content-type]
         assert!(matches!(filter.sink, RuntimeSink::Tracing));
     }
 
+    /// Number of NDJSON records in `contents`, or `None` when any line is not
+    /// valid JSON yet. A flush can expose the start of the next line before
+    /// the rest of that line is written.
+    fn complete_ndjson_count(contents: &str) -> Option<usize> {
+        let mut count = 0_usize;
+        for line in contents.lines() {
+            if serde_json::from_str::<BTreeMap<String, String>>(line).is_err() {
+                return None;
+            }
+            count = count.saturating_add(1);
+        }
+        Some(count)
+    }
+
     /// Read a file, retrying briefly so a background writer thread has time to
     /// flush before the assertion runs.
     #[expect(clippy::disallowed_methods, reason = "sync sink tests poll with thread::sleep")]
@@ -2983,21 +2997,30 @@ response_headers: [content-type]
             handle.join().unwrap();
         }
 
-        // Every written line must be a complete, parseable NDJSON record.
+        // The writer thread flushes while this test reads the file, so a read can
+        // catch the tail of a line before its newline lands. That partial tail is
+        // not a torn record: keep polling until every line parses and the count
+        // matches. A real interleave stays unparseable and fails the assert below.
+        let expected = per_thread * 2;
         let mut lines = 0;
         for _ in 0..100 {
             let contents = std::fs::read_to_string(&log_path).unwrap_or_default();
-            lines = contents.lines().count();
+            if let Some(count) = complete_ndjson_count(&contents) {
+                lines = count;
+                if lines == expected {
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if lines != expected {
+            let contents = std::fs::read_to_string(&log_path).unwrap_or_default();
             for line in contents.lines() {
                 serde_json::from_str::<BTreeMap<String, String>>(line)
                     .unwrap_or_else(|e| panic!("line should be valid NDJSON ({e}): {line}"));
             }
-            if lines == per_thread * 2 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
         }
-        assert_eq!(lines, per_thread * 2, "all records from both filters should be written");
+        assert_eq!(lines, expected, "all records from both filters should be written");
     }
 
     #[test]

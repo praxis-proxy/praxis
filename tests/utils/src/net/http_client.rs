@@ -223,18 +223,12 @@ pub fn json_post(path: &str, body: &str) -> String {
 // H2C (HTTP/2 Cleartext) Client
 // -----------------------------------------------------------------------------
 
-/// Send an h2c (HTTP/2 cleartext, prior-knowledge) GET and return `(status, body)`.
-///
-/// Connects via plain TCP and performs the HTTP/2 handshake directly
-/// (no upgrade from HTTP/1.1). The `host` parameter sets both the
-/// `:authority` pseudo-header and the `host` header.
+/// Send `request` over a fresh h2c connection to `addr` and return `(status, body)`.
 ///
 /// # Panics
 ///
 /// Panics if the TCP connection, H2 handshake, or response read fails.
-pub fn h2c_get(addr: &str, path: &str, host: Option<&str>) -> (u16, String) {
-    let host_value = host.unwrap_or("localhost");
-
+fn h2c_exchange(addr: &str, request: http::Request<()>) -> (u16, String) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -247,11 +241,6 @@ pub fn h2c_get(addr: &str, path: &str, host: Option<&str>) -> (u16, String) {
         tokio::spawn(async move {
             let _result = h2_conn.await;
         });
-
-        let request = http::Request::get(path)
-            .header("host", host_value)
-            .body(())
-            .expect("build h2c request");
 
         let (response_fut, _) = client.send_request(request, true).expect("send h2c request");
         let response = response_fut.await.expect("h2c response");
@@ -267,6 +256,32 @@ pub fn h2c_get(addr: &str, path: &str, host: Option<&str>) -> (u16, String) {
 
         (status, String::from_utf8_lossy(&body).into_owned())
     })
+}
+
+/// Send an h2c (HTTP/2 cleartext, prior-knowledge) GET and return `(status, body)`.
+///
+/// Connects via plain TCP and performs the HTTP/2 handshake directly
+/// (no upgrade from HTTP/1.1). Builds an origin-form request for `path`
+/// and sets the `Host` header to `host` (default `localhost`).
+///
+/// The h2 encoder derives `:authority` from the URI authority component,
+/// not from `Host`. This helper does not place an authority on the URI, so
+/// it does not control `:authority`. Per [RFC 9113], `:authority` and `Host`
+/// are distinct; use [`h2c_get_authority_only`] or [`h2c_get_absolute`] when
+/// a test must send a specific `:authority`.
+///
+/// [RFC 9113]: https://datatracker.ietf.org/doc/html/rfc9113
+///
+/// # Panics
+///
+/// Panics if the TCP connection, H2 handshake, or response read fails.
+pub fn h2c_get(addr: &str, path: &str, host: Option<&str>) -> (u16, String) {
+    let host_value = host.unwrap_or("localhost");
+    let request = http::Request::get(path)
+        .header("host", host_value)
+        .body(())
+        .expect("build h2c request");
+    h2c_exchange(addr, request)
 }
 
 /// The outcome of an h2c gRPC call: response headers, plus whether the
@@ -374,42 +389,40 @@ async fn grpc_call(addr: &str, path: &str, extra_headers: &[(&str, &str)]) -> Gr
     }
 }
 
+/// Send an h2c GET whose URI carries `authority` and has no `Host` header field.
+///
+/// Builds `http://{authority}{path}` so the encoder emits `:authority` from the
+/// URI. Use this instead of [`h2c_get`] when a test must exercise HTTP/2
+/// authority without relying on `Host` (see [RFC 9113]).
+///
+/// [RFC 9113]: https://datatracker.ietf.org/doc/html/rfc9113
+///
+/// # Panics
+///
+/// Panics if the TCP connection, H2 handshake, or response read fails.
+pub fn h2c_get_authority_only(addr: &str, path: &str, authority: &str) -> (u16, String) {
+    let uri = http::Uri::builder()
+        .scheme("http")
+        .authority(authority)
+        .path_and_query(path)
+        .build()
+        .expect("build h2 authority URI");
+    let request = http::Request::get(uri).body(()).expect("build h2c request");
+    h2c_exchange(addr, request)
+}
+
 /// Send an h2c GET whose request URI is absolute (explicit `:scheme` and
 /// `:authority` pseudo-headers) and return `(status, body)`.
+///
+/// Like [`h2c_get_authority_only`], the authority comes from the URI rather
+/// than a `Host` header field.
 ///
 /// # Panics
 ///
 /// Panics if the connection, handshake, or exchange fails.
 pub fn h2c_get_absolute(addr: &str, absolute_uri: &str) -> (u16, String) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime for h2c");
-
-    rt.block_on(async {
-        let tcp = tokio::net::TcpStream::connect(addr).await.expect("TCP connect for h2c");
-
-        let (mut client, h2_conn) = h2::client::handshake(tcp).await.expect("h2c handshake");
-        tokio::spawn(async move {
-            let _result = h2_conn.await;
-        });
-
-        let request = http::Request::get(absolute_uri).body(()).expect("build h2c request");
-
-        let (response_fut, _) = client.send_request(request, true).expect("send h2c request");
-        let response = response_fut.await.expect("h2c response");
-        let status = response.status().as_u16();
-        let mut body_stream = response.into_body();
-
-        let mut body = Vec::new();
-        while let Some(chunk) = body_stream.data().await {
-            let data = chunk.expect("h2c body chunk");
-            body.extend_from_slice(&data);
-            drop(body_stream.flow_control().release_capacity(data.len()));
-        }
-
-        (status, String::from_utf8_lossy(&body).into_owned())
-    })
+    let request = http::Request::get(absolute_uri).body(()).expect("build h2c request");
+    h2c_exchange(addr, request)
 }
 
 // -----------------------------------------------------------------------------

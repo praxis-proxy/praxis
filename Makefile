@@ -764,8 +764,9 @@ lint-extra: check-prereqs-extra ## typos + taplo + shellcheck + actionlint
 generate-filter-docs: ## regenerate the per-filter docs under docs/filters/
 	cargo xtask generate-filter-docs
 
-mutants: ## mutation testing (cargo-mutants)
-	cargo mutants --workspace
+MUTANTS_ARGS ?=
+mutants: ## mutation testing (cargo-mutants; MUTANTS_ARGS selects shards/jobs)
+	cargo mutants --workspace $(MUTANTS_ARGS)
 
 semver: ## cargo semver-checks
 	cargo semver-checks

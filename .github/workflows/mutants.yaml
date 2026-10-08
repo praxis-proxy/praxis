@@ -4,7 +4,8 @@ name: Mutation Testing
 # Workflow Settings
 # ------------------------------------------------------------------------------
 #
-# Shared from praxis-proxy/conventions (mutants.yaml).
+# The full workspace has over 11,000 mutants. At about 20 seconds per mutant,
+# a serial run takes over 60 hours, beyond the shared workflow's two-hour limit.
 
 on:
   schedule:
@@ -13,8 +14,60 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Every mutant rebuilds a slightly changed crate; reuse compiler work.
+  CARGO_INCREMENTAL: "1"
+
 jobs:
   mutants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
     permissions:
       contents: read
-    uses: praxis-proxy/conventions/.github/workflows/mutants.yaml@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        shard: [
+          0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+          16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        ]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+        with:
+          cache-suffix: mutants
+
+      - name: Cache cargo-mutants
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-mutants
+          key: cargo-mutants-${{ runner.os }}-27.1.0
+
+      - name: Install cargo-mutants
+        run: |
+          if [ "$(cargo mutants --version 2>/dev/null)" != "cargo-mutants 27.1.0" ]; then
+            cargo install cargo-mutants --version 27.1.0 --locked --force
+          fi
+
+      - name: Run mutation testing
+        env:
+          MUTANTS_SHARD: ${{ matrix.shard }}
+        run: make mutants MUTANTS_ARGS="--shard ${MUTANTS_SHARD}/32 --sharding round-robin --jobs 2"
+
+      - name: Upload mutation results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out/
+          retention-days: 7

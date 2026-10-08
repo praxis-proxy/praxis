@@ -137,6 +137,14 @@ struct RouterRouteConfigRaw {
     /// Optional per-route retry policy override.
     #[serde(default)]
     retry_policy: Option<praxis_core::config::RetryPolicy>,
+
+    /// Optional per-route hedged-request policy.
+    ///
+    /// When set, this route races the request across healthy endpoints in
+    /// its cluster and returns the first successful response. Absent means
+    /// one upstream attempt.
+    #[serde(default)]
+    hedge_policy: Option<praxis_core::config::HedgePolicy>,
 }
 
 impl TryFrom<RouterRouteConfigRaw> for RouterRouteConfig {
@@ -149,6 +157,7 @@ impl TryFrom<RouterRouteConfigRaw> for RouterRouteConfig {
             headers: raw.headers,
             host: raw.host,
             retry_policy: raw.retry_policy,
+            hedge_policy: raw.hedge_policy,
         };
         route.validate_semantics()?;
         Ok(Self {

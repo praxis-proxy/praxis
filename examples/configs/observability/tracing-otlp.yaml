@@ -2,6 +2,9 @@
 #
 # Exports distributed tracing spans to an OpenTelemetry Collector via
 # OTLP/gRPC. Requires the `otel` feature at compile time.
+# HTTP requests export SERVER spans and each proxied or framework HTTP
+# attempt exports a CLIENT span. A valid inbound W3C traceparent parents the
+# server span; the outbound traceparent names the exported client span.
 #
 # The telemetry.otlp_endpoint field sets the collector address. If omitted,
 # the OTEL_EXPORTER_OTLP_ENDPOINT environment variable is used as a
