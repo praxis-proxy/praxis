@@ -50,9 +50,10 @@ Global `body_limits.max_request_bytes` / `body_limits.max_response_bytes`
 config limits force buffer mode for size enforcement even
 when no filter requests body access.
 
-The `on_response_body` hook is synchronous (not async)
-because Pingora's `response_body_filter` callback is `fn`,
-not `async fn`.
+The `on_response_body` hook is synchronous (not async):
+the `HttpFilter` trait declares it as a plain `fn`, even
+though Pingora's own `response_body_filter` callback is
+`async fn`.
 
 ## Filter Condition System
 
