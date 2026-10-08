@@ -30,7 +30,9 @@ Before tagging a release:
   working tree, run `cargo publish --workspace
   --dry-run --locked --allow-dirty` directly, since the
   make target takes no extra flags)
-- [ ] GitHub Release changelog is drafted (see below)
+- [ ] The `[Unreleased]` section of `CHANGELOG.md` is
+  rolled into the new version (see
+  [Changelog](#changelog))
 
 When the Tests, Tests (Integration), Conformance, Supply
 Chain, and Coverage workflows are not already green for
@@ -90,8 +92,9 @@ Phase 2 runs when a maintainer publishes the draft:
    moving `:<major>.<minor>` and `:latest` container
    tags, and their `-fips` counterparts
 
-Review and edit the draft notes, then publish the
-release from the GitHub UI. Publishing the release is
+Review and edit the draft notes (see
+[Changelog](#changelog)), then publish the release from
+the GitHub UI. Publishing the release is
 what performs the real crates.io publish (nothing
 reaches crates.io until you do), and it re-validates the
 tag against `Cargo.toml` before publishing. The crates
@@ -164,13 +167,29 @@ published, Phase 1 no longer rebuilds its images.
 
 ## Changelog
 
-Praxis uses [GitHub Releases][gh-releases] for
-changelogs. Each release is created through the GitHub
-UI after pushing a tag. Use GitHub's "Generate release
-notes" feature to auto-populate from merged PRs, then
-edit for clarity. There is no separate CHANGELOG file.
+Praxis keeps a hand-edited [`CHANGELOG.md`](../CHANGELOG.md)
+at the repository root under the org's [changelog
+convention][changelog-convention]: each PR with a
+user-visible change adds its entry under `[Unreleased]`,
+and a release rolls that section into a heading for the
+new version.
 
-[gh-releases]: https://github.com/praxis-proxy/praxis/releases
+Do the roll in the last commit before the tag. That
+isn't always the version bump, because PRs often merge
+after it. The new section covers everything merged since
+the previous tag, so check it against
+`git log --first-parent vPREV..<commit to tag>`, and if
+other PRs landed after the roll, move their
+`[Unreleased]` entries into the new version too.
+
+When you edit the release draft before publishing it,
+replace its generated "What's Changed" list with the new
+version's section from `CHANGELOG.md`. The generated
+"New Contributors" and "Full Changelog" lines can stay.
+The `skip/changelog` label only affects those generated
+notes, not `CHANGELOG.md`.
+
+[changelog-convention]: https://github.com/praxis-proxy/conventions/blob/main/docs/release.md#changelog
 
 ## Release Branches
 

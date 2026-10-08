@@ -126,6 +126,9 @@ Conventions" in `docs/developing/conventions.md`.
   bigger changes into a stack.
 - Every PR description says what the change does and why.
 
+One rule CI doesn't check: a PR with a user-visible change also adds its entry
+under `[Unreleased]` in `CHANGELOG.md`.
+
 ## Conventions
 
 See `docs/developing/conventions.md` for the full
