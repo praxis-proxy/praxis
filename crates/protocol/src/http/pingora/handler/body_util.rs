@@ -111,15 +111,17 @@ pub(super) fn suppress_stream_buffer_chunk(
 }
 
 /// Release the accumulated stream buffer on `FilterAction::Release`.
+/// Subsequent body hooks observe [`BodyMode::Stream`] after buffering ends.
 pub(super) fn release_stream_buffer(
     body: &mut Option<Bytes>,
-    is_stream_buffer: bool,
+    mode: &mut BodyMode,
     released: &mut bool,
     body_buffer: &mut Option<BodyBuffer>,
     end_of_stream: bool,
 ) {
-    if is_stream_buffer && !*released {
+    if matches!(*mode, BodyMode::StreamBuffer { .. }) && !*released {
         *released = true;
+        *mode = BodyMode::Stream;
         if !end_of_stream {
             *body = body_buffer.take().map(BodyBuffer::freeze);
         }
