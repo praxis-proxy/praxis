@@ -5826,6 +5826,10 @@ async fn a_post_only_prompt_route_dispatches_its_hook() {
         "the post-phase deny must reach the wire; a body that still carries `result` means the \
          hook never dispatched. got {served:?}",
     );
+    assert!(
+        parsed.get("result").is_none(),
+        "deny envelopes must not retain the upstream result",
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -5843,6 +5847,10 @@ async fn a_post_only_resource_route_dispatches_its_hook() {
         parsed["error"]["data"]["violation"], "resource_withheld",
         "the post-phase deny must reach the wire; a body that still carries `result` means the \
          hook never dispatched. got {served:?}",
+    );
+    assert!(
+        parsed.get("result").is_none(),
+        "deny envelopes must not retain the upstream result",
     );
 }
 
