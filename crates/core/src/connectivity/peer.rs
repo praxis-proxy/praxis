@@ -39,7 +39,10 @@ const MAX_DNS_ENTRIES: usize = 1_024;
 
 /// Maximum concurrent client-selected DNS lookups. Waiting for a slot is
 /// covered by the caller's URL deadline. A lookup keeps its slot after the
-/// caller times out until the blocking resolver actually finishes.
+/// caller times out until the blocking resolver actually finishes, so stalled
+/// lookups can starve other per-call callers; the trade-off and its operational
+/// guidance are documented on
+/// [`UrlResolutionPolicy::ClientPerCall`](crate::connectivity::UrlResolutionPolicy::ClientPerCall).
 const MAX_PER_CALL_DNS_LOOKUPS: usize = 64;
 
 /// How long a positive answer may be served past its TTL while re-resolution

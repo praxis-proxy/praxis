@@ -72,6 +72,20 @@ pub enum UrlResolutionPolicy {
     /// Reuse the bounded process-wide DNS cache for configured destinations.
     OperatorCached,
     /// Resolve a client-selected hostname for this call only.
+    ///
+    /// # Shared-pool limitation
+    ///
+    /// Every `ClientPerCall` lookup competes for one process-wide admission pool
+    /// (see `MAX_PER_CALL_DNS_LOOKUPS` in [`super::peer`]). A slot is held until
+    /// the blocking `getaddrinfo` returns, even after the calling request's
+    /// deadline has elapsed and it has stopped waiting. A client aiming many
+    /// calls at a nameserver that never answers can therefore pin every slot and
+    /// stall other per-call lookups until those blocking resolutions drain.
+    /// Releasing a slot before its lookup finishes would uncap the number of
+    /// in-flight blocking resolutions, which is the worse failure, so the bound
+    /// is deliberate. Operators who expose this policy to untrusted callers
+    /// should add caller-side rate limiting and watch per-call DNS saturation;
+    /// a stricter guarantee needs a resolver with a bounded per-lookup time.
     ClientPerCall,
 }
 
@@ -537,6 +551,51 @@ where
 ///
 /// Returns [`UrlTargetError`] for an invalid URL, DNS or policy rejection, or
 /// deadline expiry. Its display text does not include the input URL.
+///
+/// ```
+/// use std::time::{Duration, Instant};
+///
+/// use praxis_core::{
+///     connectivity::{UrlResolutionPolicy, prepare_url_target_with_policy},
+///     subrequest::SubRequest,
+/// };
+///
+/// tokio::runtime::Runtime::new()
+///     .expect("runtime")
+///     .block_on(async {
+///         // An IP literal skips DNS, so `ClientPerCall` prepares offline.
+///         let target = prepare_url_target_with_policy(
+///             "https://[::1]:8443/v1/models",
+///             Instant::now() + Duration::from_secs(5),
+///             |_addrs| Ok(()), // the caller's SSRF policy lives here
+///             UrlResolutionPolicy::ClientPerCall,
+///         )
+///         .await
+///         .expect("a literal target prepares without DNS");
+///         assert!(target.is_tls());
+///         assert_eq!(target.host_authority().to_str().unwrap(), "[::1]:8443");
+///         assert_eq!(target.sni(), "::1"); // SNI drops the brackets
+///
+///         // Binding overwrites the request's Host with the URL authority.
+///         let prepared = target.bind(SubRequest {
+///             method: http::Method::GET,
+///             uri: "/ignored".parse().unwrap(),
+///             headers: http::HeaderMap::new(),
+///             body: bytes::Bytes::new(),
+///         });
+///         assert_eq!(prepared.peers().count(), 1);
+///         assert_eq!(
+///             prepared
+///                 .request()
+///                 .headers
+///                 .get(http::header::HOST)
+///                 .unwrap()
+///                 .to_str()
+///                 .unwrap(),
+///             "[::1]:8443",
+///         );
+///     });
+/// ```
 pub async fn prepare_url_target_with_policy<F>(
     url: &str,
     deadline: std::time::Instant,
@@ -1069,6 +1128,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn policy_aware_preparation_wires_production_cache_bypass() {
+        // Exercises the production `prepare_url_target_with_policy` wiring (real
+        // SystemResolver / PerCallResolver), not an injected resolver. A reserved
+        // `.invalid` host (RFC 6761: never resolvable) seeded with a TEST-NET-3
+        // sentinel (RFC 5737: never returned by a real resolver) makes both arms
+        // deterministic regardless of the machine's DNS behavior.
+        let host = "production-wiring.praxis-test.invalid";
+        let sentinel: IpAddr = "203.0.113.7".parse().unwrap();
+        crate::connectivity::peer::seed_dns(host, &[sentinel]);
+        let url = format!("http://{host}:9/");
+
+        // OperatorCached reads the shared cache and returns the seeded answer.
+        let cached =
+            prepare_url_target_with_policy(&url, far_deadline(), |_| Ok(()), UrlResolutionPolicy::OperatorCached)
+                .await
+                .expect("cached policy reads the seeded answer");
+        assert!(
+            cached.addresses().iter().any(|addr| addr.ip() == sentinel),
+            "OperatorCached must return the seeded cache answer: {:?}",
+            cached.addresses()
+        );
+
+        // ClientPerCall bypasses the cache: it attempts a live lookup of an
+        // unresolvable host instead of reading the seeded sentinel. Whether that
+        // lookup fails (NXDOMAIN) or a hijacking resolver answers, it can never
+        // return the sentinel, so its absence proves the bypass.
+        let per_call =
+            prepare_url_target_with_policy(&url, far_deadline(), |_| Ok(()), UrlResolutionPolicy::ClientPerCall).await;
+        let leaked_sentinel = per_call
+            .as_ref()
+            .is_ok_and(|target| target.addresses().iter().any(|addr| addr.ip() == sentinel));
+        assert!(
+            !leaked_sentinel,
+            "ClientPerCall must bypass the cache and never return the seeded sentinel: {per_call:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn fake_resolver_counts_calls() {
         let fake = FakeResolver::ok(vec!["1.2.3.4".parse().unwrap()]);
         let ips = fake.resolve_host("h").await.unwrap();
@@ -1384,6 +1481,12 @@ mod tests {
             request,
             |addrs| {
                 seen.extend_from_slice(addrs);
+                // Poison the cache with a single bad answer AFTER the full set was
+                // resolved and validated. A correct implementation dials the
+                // already-frozen peers and never re-resolves, so the healthy
+                // 127.0.0.1 fallback still succeeds; a re-resolving one would see
+                // only ::1 here and fail.
+                crate::connectivity::peer::seed_dns(host, &["::1".parse().unwrap()]);
                 Ok(())
             },
             UrlResolutionPolicy::OperatorCached,
@@ -1396,7 +1499,7 @@ mod tests {
         assert_eq!(
             response.body.as_ref(),
             b"ok",
-            "healthy fallback must return the response body"
+            "frozen fallback must reach 127.0.0.1 even after the cache is poisoned mid-call"
         );
         assert_eq!(seen.len(), 2, "validation sees every address before either dial");
         assert_eq!(
@@ -1422,6 +1525,47 @@ mod tests {
         assert!(
             !captured.contains("wrong.example"),
             "URL authority must replace the caller's Host header: {captured}"
+        );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "exercises the all-peers-fail redaction end to end")]
+    async fn execute_url_all_addresses_fail_returns_redacted_connect_error() {
+        // Bind then drop to obtain a port nothing listens on, so every dial is
+        // refused immediately rather than hanging.
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let host = "url-all-fail.praxis-test.invalid";
+        // Both loopback interfaces are configured by default and refuse a closed
+        // port immediately; 127.0.0.2 would hang on macOS instead of refusing.
+        crate::connectivity::peer::seed_dns(host, &["127.0.0.1".parse().unwrap(), "::1".parse().unwrap()]);
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        let url = format!("http://{host}:{port}/?token=secret-url-token");
+        let err = Box::pin(client.execute_url(
+            &url,
+            get_request(),
+            |_| Ok(()),
+            UrlResolutionPolicy::OperatorCached,
+            Duration::from_secs(5),
+            1024,
+            None,
+        ))
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, UrlSubRequestError::Exchange(SubRequestError::Connect(_))),
+            "every address refusing must surface as a typed Connect error: {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "sub-request connect error: upstream connection failed",
+            "the all-addresses-fail error must carry the fixed, redacted connect text"
+        );
+        assert!(
+            !format!("{err:?}").contains("secret-url-token"),
+            "Debug of the all-addresses-fail error must not leak the URL query: {err:?}"
         );
     }
 
@@ -1676,6 +1820,60 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "end-to-end timing proof: validation spends the budget that I/O then cannot"
+    )]
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the synchronous validate hook intentionally burns real wall-clock budget"
+    )]
+    async fn execute_url_charges_validation_time_to_single_deadline() {
+        use tokio::io::AsyncReadExt as _;
+
+        // A backend that connects but never answers, so the only way the call can
+        // return is the overall deadline elapsing during the response wait.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let backend = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 1024];
+            drop(stream.read(&mut buf).await);
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        let url = format!("http://127.0.0.1:{port}/");
+        let started = Instant::now();
+        let result = Box::pin(client.execute_url(
+            &url,
+            get_request(),
+            |_| {
+                // Burn ~400ms of a 500ms budget before any dial. If the deadline
+                // restarted after preparation, the stalled response read would run
+                // the full 500ms and total ~900ms; the single clock keeps it short.
+                std::thread::sleep(Duration::from_millis(400));
+                Ok(())
+            },
+            UrlResolutionPolicy::ClientPerCall,
+            Duration::from_millis(500),
+            1024,
+            None,
+        ))
+        .await;
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(result, Err(UrlSubRequestError::DeadlineExceeded)),
+            "time spent validating must shrink the later exchange budget: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(850),
+            "the single deadline must span validation and I/O, not restart per stage: {elapsed:?}"
+        );
+        backend.abort();
+    }
+
+    #[tokio::test]
     async fn execute_url_rejects_framework_host_override() {
         let mut headers = crate::subrequest::FrameworkHeaders::new();
         headers
@@ -1699,6 +1897,34 @@ mod tests {
                 Err(UrlSubRequestError::Exchange(SubRequestError::InvalidRequest(_)))
             ),
             "framework headers must not override the URL Host authority: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_url_rejects_framework_host_removal() {
+        // A framework Host *removal* must be rejected exactly like an override:
+        // without this guard the bound URL authority would be stripped and the
+        // peer would receive a bare `IP:port` Host instead.
+        let mut headers = crate::subrequest::FrameworkHeaders::new();
+        headers.remove(http::header::HOST);
+        praxis_tls::provider::install();
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        let result = Box::pin(client.execute_url(
+            "http://127.0.0.1:9/",
+            get_request(),
+            |_| Ok(()),
+            UrlResolutionPolicy::ClientPerCall,
+            Duration::from_secs(1),
+            1024,
+            Some(&headers),
+        ))
+        .await;
+        assert!(
+            matches!(
+                result,
+                Err(UrlSubRequestError::Exchange(SubRequestError::InvalidRequest(_)))
+            ),
+            "framework headers must not remove the URL Host authority: {result:?}"
         );
     }
 
