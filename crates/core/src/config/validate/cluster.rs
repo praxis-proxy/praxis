@@ -58,6 +58,7 @@ pub(in crate::config::validate) fn validate_clusters(
         }
         super::validate_name_chars(&cluster.name, "cluster")?;
         cluster.validate_authority()?;
+        validate_base_path(cluster)?;
         application::validate_application_metadata(cluster)?;
         endpoints::validate_endpoints(cluster, insecure_options)?;
         validate_endpoint_hosts(cluster)?;
@@ -73,6 +74,49 @@ pub(in crate::config::validate) fn validate_clusters(
         health_check::warn_tls_http_probe_mismatch(cluster);
     }
     Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Base Path Validation
+// -----------------------------------------------------------------------------
+
+/// Longest accepted upstream base path.
+const MAX_BASE_PATH_LEN: usize = 1024;
+
+/// Validate the optional upstream base path.
+///
+/// Rejected rather than normalized, because every rejected form means the
+/// author intended something the prefix cannot express: a relative path, a
+/// path that escapes the prefix, or a query the upstream leg would drop.
+fn validate_base_path(cluster: &crate::config::Cluster) -> Result<(), ProxyError> {
+    let Some(raw) = cluster.http.base_path.as_deref() else {
+        return Ok(());
+    };
+    let context = format!("cluster '{}': http.base_path", cluster.name);
+    let fault = if raw.len() > MAX_BASE_PATH_LEN {
+        format!("is longer than {MAX_BASE_PATH_LEN} bytes")
+    } else if !raw.starts_with('/') {
+        "must start with '/'".to_owned()
+    } else if raw.starts_with("//") {
+        "must not start with '//'".to_owned()
+    } else if raw.contains("//") {
+        "must not contain an empty segment".to_owned()
+    } else if raw.split('/').any(|seg| seg == ".." || seg == ".") {
+        "must not contain a '.' or '..' segment".to_owned()
+    } else if raw.contains('?') || raw.contains('#') {
+        "must not contain a query or fragment".to_owned()
+    } else if raw.contains('%') {
+        // Allowing it would admit the encoded traversal the path check rejects.
+        "must not be percent-encoded".to_owned()
+    } else if !raw.bytes().all(|byte| byte.is_ascii_graphic()) {
+        "must be printable ASCII with no whitespace".to_owned()
+    } else if raw.parse::<http::uri::PathAndQuery>().is_err() {
+        // Caught here, or every request for the cluster fails in production.
+        "is not a valid URI path".to_owned()
+    } else {
+        return Ok(());
+    };
+    Err(ProxyError::Config(format!("{context} {raw:?} {fault}")))
 }
 
 // -----------------------------------------------------------------------------
@@ -501,6 +545,51 @@ filter_chains:
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    #[test]
+    fn accept_valid_base_paths() {
+        for raw in ["/grid-models/model-a", "/v1", "/a/b/c", "/models/a/", "/"] {
+            let failure = config_with_http_block(&format!("      base_path: {raw:?}")).err();
+            assert!(
+                failure.is_none(),
+                "base_path {raw:?} should be accepted, got: {failure:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_malformed_base_paths() {
+        let cases = [
+            ("models/a", "must start with '/'"),
+            ("//models/a", "must not start with '//'"),
+            ("/models//a", "must not contain an empty segment"),
+            ("/models/../a", "must not contain a '.' or '..' segment"),
+            ("/models/./a", "must not contain a '.' or '..' segment"),
+            ("/models/a?x=1", "must not contain a query or fragment"),
+            ("/models/a#frag", "must not contain a query or fragment"),
+            ("/models/ a", "must be printable ASCII with no whitespace"),
+            ("/models/\u{e9}", "must be printable ASCII with no whitespace"),
+            ("/models/%2e%2e/a", "must not be percent-encoded"),
+            ("/models/a%2fb", "must not be percent-encoded"),
+            ("/models/<a>", "is not a valid URI path"),
+        ];
+        for (raw, want) in cases {
+            let err = config_with_http_block(&format!("      base_path: {raw:?}"))
+                .expect_err(&format!("base_path {raw:?} should be rejected"));
+            let text = err.to_string();
+            assert!(
+                text.contains(want),
+                "base_path {raw:?} should be rejected for {want:?}, got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_overlong_base_path() {
+        let raw = format!("/{}", "a".repeat(super::MAX_BASE_PATH_LEN));
+        let err = config_with_http_block(&format!("      base_path: {raw:?}")).expect_err("should be rejected");
+        assert!(err.to_string().contains("is longer than"), "got: {err}");
+    }
 
     // Build a config with one cluster carrying the given `http:` block.
     fn config_with_http_block(http_block: &str) -> Result<Config, crate::errors::ProxyError> {

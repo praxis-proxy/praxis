@@ -1,0 +1,91 @@
+# Policy fixture for OPA and CEL rules over the parsed inference request.
+# Production deployments should replace the shared secret with RS256 and JWKS.
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["praxis-policy-example"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+  pdp:
+    - kind: cel
+    - kind: opa
+      modules:
+        - |
+          package llm
+
+          default allow := false
+
+          # A deny-list must cover every field the backend accepts.
+          # Chat Completions tools nest the name under `function`, and
+          # the legacy `functions` list carries it directly.
+          allow if {
+              input.llm.request
+              not forbidden_tool
+          }
+
+          forbidden_tool if {
+              some t in input.llm.request.tools
+              t.function.name == "transfer_funds"
+          }
+
+          forbidden_tool if {
+              some f in input.llm.request.functions
+              f.name == "transfer_funds"
+          }
+
+routes:
+  # Chat Completions, guarded in CEL. A deny-list must cover every field
+  # the backend accepts, so the legacy `functions` list is checked too.
+  - llm: chat-cel
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: >-
+              (!has(llm.request.tools) ||
+              llm.request.tools.all(t, t.function.name != "transfer_funds")) &&
+              (!has(llm.request.functions) ||
+              llm.request.functions.all(f, f.name != "transfer_funds"))
+
+  # Chat Completions, guarded in OPA.
+  - llm: chat-opa
+    authorization:
+      pre_invocation:
+        - opa:
+            query: data.llm.allow
+
+  # Responses: every `input` item is a user message, and no flat tool is forbidden.
+  - llm: responses-cel
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: >-
+              llm.request.input.all(i, i.role == "user") &&
+              (!has(llm.request.tools) ||
+              llm.request.tools.all(t, t.name != "transfer_funds"))
+
+  # The scalar `args` is CMF prompt text, separate from `llm.request`.
+  - llm: responses-prompt
+    authorization:
+      pre_invocation:
+        - cel:
+            expr: "!args.contains('SECRET-MARKER')"
+
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - "deny('model is not permitted', 'model_not_allowed')"

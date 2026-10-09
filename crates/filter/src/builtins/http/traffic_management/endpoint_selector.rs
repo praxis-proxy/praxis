@@ -400,6 +400,9 @@ impl HttpFilter for EndpointSelectorFilter {
         let upstream = Upstream {
             address: Arc::from(value.as_str()),
             authority: None,
+            // The preset address answers for the routed cluster, so it keeps
+            // that cluster's prefix.
+            base_path: ctx.upstream.as_ref().and_then(|existing| existing.base_path.clone()),
             connection: Arc::clone(&self.connection),
             tls: self.tls.clone(),
         };

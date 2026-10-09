@@ -9,6 +9,8 @@ pub use test_utils::load_example_config;
 
 mod access_log_fields;
 mod access_log_file_sink;
+#[cfg(feature = "access-log-syslog")]
+mod access_log_syslog;
 mod access_log_template;
 mod access_logging;
 mod admin_interface;
@@ -24,6 +26,7 @@ mod canary_routing;
 mod circuit_breaker;
 #[cfg(feature = "cloud-events-filter")]
 mod cloud_events;
+mod cluster_base_path;
 mod conditional_filters;
 mod credential_injection;
 mod credential_injection_env_vars;
@@ -86,6 +89,8 @@ mod policy_http;
 mod policy_jwks;
 #[cfg(feature = "policy-engine")]
 mod policy_llm;
+#[cfg(feature = "policy-engine")]
+mod policy_llm_request;
 mod priority_lb;
 mod process_logging;
 mod protocol_examples;

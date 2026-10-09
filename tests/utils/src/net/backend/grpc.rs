@@ -174,6 +174,9 @@ pub struct GrpcBackendGuard {
     /// `grpc-timeout` values seen on incoming requests, in arrival order.
     seen_timeouts: Arc<Mutex<Vec<String>>>,
 
+    /// `:path` pseudo-header values seen on incoming requests, in arrival order.
+    seen_paths: Arc<Mutex<Vec<String>>>,
+
     /// Shutdown signal sender.
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -209,6 +212,19 @@ impl GrpcBackendGuard {
     pub fn drain_seen_timeouts(&self) -> Vec<String> {
         std::mem::take(&mut *self.seen_timeouts.lock().expect("grpc backend lock"))
     }
+
+    /// The `:path` each request arrived with, in order.
+    ///
+    /// The upstream leg is HTTP/2, so this is the pseudo-header the proxy
+    /// actually sent, not a reconstruction of it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a serving task panicked while holding the lock.
+    #[must_use]
+    pub fn seen_paths(&self) -> Vec<String> {
+        self.seen_paths.lock().expect("grpc backend lock").clone()
+    }
 }
 
 impl Drop for GrpcBackendGuard {
@@ -239,22 +255,16 @@ pub fn start_grpc_backend(backend: GrpcBackend) -> GrpcBackendGuard {
     let backend = Arc::new(backend);
     let seen_timeouts = Arc::new(Mutex::new(Vec::new()));
     let server_timeouts = Arc::clone(&seen_timeouts);
+    let seen_paths = Arc::new(Mutex::new(Vec::new()));
+    let server_paths = Arc::clone(&seen_paths);
 
-    std::thread::spawn(move || {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime for grpc backend");
-        runtime.block_on(async move {
-            let addr: SocketAddr = ([127, 0, 0, 1], port).into();
-            let listener = TcpListener::bind(addr).await.expect("bind grpc backend");
-            debug!(port, "grpc backend listening");
-            let _ready = ready_tx.send(());
-            tokio::select! {
-                () = accept_loop(&listener, &backend, &server_timeouts) => {},
-                _ = shutdown_rx => debug!(port, "grpc backend shutting down"),
-            }
-        });
+    spawn_server(ServerTask {
+        port,
+        backend,
+        seen_timeouts: server_timeouts,
+        seen_paths: server_paths,
+        ready: ready_tx,
+        shutdown: shutdown_rx,
     });
 
     // Block until the listener is bound so a test cannot race the backend.
@@ -265,13 +275,55 @@ pub fn start_grpc_backend(backend: GrpcBackend) -> GrpcBackendGuard {
     GrpcBackendGuard {
         port,
         seen_timeouts,
+        seen_paths,
         shutdown: Some(shutdown_tx),
     }
 }
 
+/// Everything one backend thread needs to serve.
+struct ServerTask {
+    /// Port to bind.
+    port: u16,
+    /// Canned responses.
+    backend: Arc<GrpcBackend>,
+    /// Where arrival-order `grpc-timeout` values are recorded.
+    seen_timeouts: Arc<Mutex<Vec<String>>>,
+    /// Where arrival-order `:path` values are recorded.
+    seen_paths: Arc<Mutex<Vec<String>>>,
+    /// Signalled once the listener is bound.
+    ready: std::sync::mpsc::Sender<()>,
+    /// Resolves when the guard drops.
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+}
+
+/// Run one backend on its own thread and runtime.
+fn spawn_server(task: ServerTask) {
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime for grpc backend");
+        runtime.block_on(async move {
+            let addr: SocketAddr = ([127, 0, 0, 1], task.port).into();
+            let listener = TcpListener::bind(addr).await.expect("bind grpc backend");
+            debug!(port = task.port, "grpc backend listening");
+            let _ready = task.ready.send(());
+            tokio::select! {
+                () = accept_loop(&listener, &task.backend, &task.seen_timeouts, &task.seen_paths) => {},
+                _ = task.shutdown => debug!(port = task.port, "grpc backend shutting down"),
+            }
+        });
+    });
+}
+
 /// Accept h2c connections until the task is cancelled.
 #[expect(clippy::infinite_loop, reason = "server accept loop runs until task cancellation")]
-async fn accept_loop(listener: &TcpListener, backend: &Arc<GrpcBackend>, seen: &Arc<Mutex<Vec<String>>>) {
+async fn accept_loop(
+    listener: &TcpListener,
+    backend: &Arc<GrpcBackend>,
+    seen: &Arc<Mutex<Vec<String>>>,
+    paths: &Arc<Mutex<Vec<String>>>,
+) {
     loop {
         let Ok((stream, peer)) = listener.accept().await else {
             continue;
@@ -279,14 +331,20 @@ async fn accept_loop(listener: &TcpListener, backend: &Arc<GrpcBackend>, seen: &
         debug!(%peer, "grpc backend accepted connection");
         let backend = Arc::clone(backend);
         let seen = Arc::clone(seen);
+        let paths = Arc::clone(paths);
         tokio::spawn(async move {
-            serve_connection(stream, &backend, &seen).await;
+            serve_connection(stream, &backend, &seen, &paths).await;
         });
     }
 }
 
 /// Serve every stream on one h2c connection.
-async fn serve_connection(stream: tokio::net::TcpStream, backend: &GrpcBackend, seen: &Arc<Mutex<Vec<String>>>) {
+async fn serve_connection(
+    stream: tokio::net::TcpStream,
+    backend: &GrpcBackend,
+    seen: &Arc<Mutex<Vec<String>>>,
+    paths: &Arc<Mutex<Vec<String>>>,
+) {
     let Ok(mut connection) = h2::server::handshake(stream).await else {
         debug!("grpc backend h2 handshake failed");
         return;
@@ -299,6 +357,10 @@ async fn serve_connection(stream: tokio::net::TcpStream, backend: &GrpcBackend, 
             .unwrap_or_default()
             .to_owned();
         seen.lock().expect("grpc backend lock").push(timeout);
+        paths
+            .lock()
+            .expect("grpc backend lock")
+            .push(request.uri().path().to_owned());
         let backend = backend.clone();
         tokio::spawn(async move {
             serve_stream(request, respond, &backend).await;

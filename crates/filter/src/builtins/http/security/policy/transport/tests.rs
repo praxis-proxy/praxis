@@ -539,15 +539,13 @@ async fn the_refusal_reason_names_the_rule_that_was_broken() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn allowing_private_destinations_lets_a_loopback_idp_be_dialled() {
-    let (_reserved, closed) = crate::test_support::refusing_addr();
-    let err = transport(true)
-        .execute(HttpRequest::get(format!("http://{closed}/jwks")).timeout(Duration::from_secs(2)))
+    let backend = Backend::spawn(Reply::Keepalive(OK_RESPONSE));
+    let response = transport(true)
+        .execute(HttpRequest::get(backend.url("/jwks")).timeout(Duration::from_secs(2)))
         .await
-        .unwrap_err();
-    assert!(
-        matches!(err, HttpTransportError::Connect(_)),
-        "the dial must be attempted, not refused; got {err:?}"
-    );
+        .unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(backend.head_count(), 1, "the loopback backend must receive the request");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -674,7 +672,7 @@ async fn an_unreachable_address_fails_over_to_a_healthy_one() {
         .unwrap();
 
     assert_eq!(response.status, 200);
-    assert_eq!(backend.heads().len(), 1, "the healthy address served it once");
+    assert_eq!(backend.head_count(), 1, "the healthy address served it once");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -699,7 +697,7 @@ async fn a_delivered_request_is_never_retried_on_another_address() {
         err.may_have_reached_peer(),
         "a peer that read the request leaves an unknown outcome; got {err:?}"
     );
-    assert_eq!(read_then_closed.heads().len(), 1, "sent once");
+    assert_eq!(read_then_closed.head_count(), 1, "sent once");
     assert_eq!(
         untouched.connections(),
         0,
@@ -897,7 +895,7 @@ async fn a_failed_exchange_is_never_resent() {
             err.may_have_reached_peer(),
             "{method}: a peer that read the request leaves an unknown outcome; got {err:?}"
         );
-        assert_eq!(backend.heads().len(), 1, "{method}: the request was sent once");
+        assert_eq!(backend.head_count(), 1, "{method}: the request was sent once");
         assert_eq!(backend.connections(), 1, "{method}: one connection was opened");
     }
 }
@@ -925,7 +923,7 @@ async fn a_transport_that_was_never_handed_a_client_builds_its_own_and_dispatche
         transport.client.get().is_some(),
         "the first call must have built the client through client()"
     );
-    assert_eq!(backend.heads().len(), 1);
+    assert_eq!(backend.head_count(), 1);
 }
 
 #[test]
@@ -1022,7 +1020,7 @@ async fn a_pool_outlives_the_runtime_that_built_the_transport() {
         .await
         .unwrap();
     assert_eq!(response.status, 200);
-    assert_eq!(backend.heads().len(), 2, "both requests reached the backend");
+    assert_eq!(backend.head_count(), 2, "both requests reached the backend");
 }
 
 // -----------------------------------------------------------------------------
@@ -1083,6 +1081,11 @@ impl Backend {
     /// Return recorded request heads.
     fn heads(&self) -> Vec<String> {
         self.heads.lock().unwrap().clone()
+    }
+
+    /// Keep count-only assertions from cloning every recorded request head.
+    fn head_count(&self) -> usize {
+        self.heads.lock().unwrap().len()
     }
 
     /// Return the accepted connection count.

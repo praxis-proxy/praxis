@@ -209,8 +209,10 @@ The protocol layer bridges Pingora's body hook
 callbacks to the filter pipeline. Request and
 response paths follow the same pattern with one key
 difference: `on_request_body` is async,
-`on_response_body` is synchronous (Pingora API
-constraint).
+`on_response_body` is synchronous. Both Pingora hooks
+are async; the response side is synchronous because
+the `HttpFilter` trait declares `on_response_body` as
+a plain `fn`.
 
 ### Request Body Flow
 

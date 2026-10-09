@@ -198,8 +198,9 @@ Relevant file: `crates/filter/src/pipeline/http.rs`
 
 Response body filters run in **reverse order**,
 using the same `BodyMode` logic as request body
-processing. This phase is synchronous (a Pingora
-constraint).
+processing. This phase is synchronous:
+`on_response_body` is a plain `fn` on the `HttpFilter`
+trait, so response body filters cannot await.
 
 Filters that returned `BodyDone` during earlier
 chunks are skipped.

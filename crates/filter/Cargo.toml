@@ -16,6 +16,7 @@ name = "praxis_filter"
 default = ["policy-engine"]
 policy-engine = [
     "dep:ppe",
+    "dep:unicase",
     "tokio/rt-multi-thread",
 ]
 basic-auth-filter = [
@@ -61,6 +62,11 @@ chain-binding = []
 # default; experimental. Grouped with the server's `spiffe` feature.
 spiffe = []
 
+# The `access_log` filter's `sink: {type: syslog}` output (RFC 3164 over a unix
+# socket, UDP, or TCP). Off by default; experimental. Pulls in the `syslog`
+# crate, which is kept out of the default and FIPS builds.
+access-log-syslog = ["dep:syslog"]
+
 # This crate inherits the full workspace lint set. Unlike the other crates it
 # does NOT raise `unsafe_code` back to "forbid": the `json_ops::simd_scan` SIMD
 # intrinsics need unsafe, and their functions opt in with a reasoned
@@ -92,6 +98,7 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 smallvec = { workspace = true }
 serde_yaml = { workspace = true }
+syslog = { workspace = true, optional = true }
 # System OpenSSL for the password digest; see hash_password in basic_auth.
 openssl = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
@@ -101,6 +108,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true, optional = true }
+unicase = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 zeroize = { workspace = true }
 

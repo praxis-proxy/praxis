@@ -32,6 +32,9 @@ pub struct EndpointReselector {
     /// address when the authority follows the endpoint) instead of
     /// silently reverting to the downstream value.
     authority: AuthorityResolver,
+
+    /// Normalized upstream base path for this cluster, if any.
+    base_path: Option<Arc<str>>,
     /// Hash key captured at first selection (for consistent-hash).
     hash_key: Option<Arc<str>>,
     /// Resolved retry policy for this cluster.
@@ -52,6 +55,7 @@ impl EndpointReselector {
         opts: Arc<ConnectionOptions>,
         tls: Option<CachedClusterTls>,
         authority: AuthorityResolver,
+        base_path: Option<Arc<str>>,
         hash_key: Option<Arc<str>>,
         retry_policy: Arc<RetryPolicy>,
         retry_state: Arc<ClusterRetryState>,
@@ -61,6 +65,7 @@ impl EndpointReselector {
             opts,
             tls,
             authority,
+            base_path,
             hash_key,
             retry_policy,
             retry_state,
@@ -79,6 +84,7 @@ impl EndpointReselector {
         Upstream {
             address: addr,
             authority,
+            base_path: self.base_path.clone(),
             connection: Arc::clone(&self.opts),
             tls: self.tls.clone(),
         }

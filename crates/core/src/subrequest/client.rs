@@ -9,7 +9,7 @@
 //! header sanitization. Supports both buffered (collect full body)
 //! and streaming (chunk-by-chunk) response modes.
 
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
 use http::HeaderMap;
@@ -25,10 +25,14 @@ use super::{
         ensure_host_header, is_boundary_stripped, is_request_stripped, min_timeout, record_header_termination,
     },
     types::{
-        FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse, SubResponseBody,
+        FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse,
+        SubResponseBody, UrlSubRequestError,
     },
 };
-use crate::circuit::{CircuitCheck, PeerKey};
+use crate::{
+    circuit::{CircuitCheck, PeerKey},
+    connectivity::{UrlResolutionPolicy, UrlTargetError, prepare_url_target_with_policy},
+};
 
 // -----------------------------------------------------------------------------
 // SubRequestClient
@@ -46,6 +50,16 @@ const MAX_INTERIM_RESPONSES: u32 = 32;
 /// little must not pin limit-sized buffers per in-flight exchange.
 /// Doubling growth covers honest bodies past this cap.
 const EAGER_BODY_CAPACITY: usize = 131_072; // 128 KiB
+
+/// Maximum addresses dialed for a client-selected URL target.
+///
+/// A [`UrlResolutionPolicy::ClientPerCall`] address set comes from
+/// client-controlled DNS, which may return an arbitrarily long answer. The
+/// validation hook still inspects the complete set (in preparation), but
+/// fallback dials at most this many of them so a hostile answer cannot fan a
+/// single call out across unbounded connection attempts. Operator-configured
+/// targets ([`UrlResolutionPolicy::OperatorCached`]) are not capped.
+const MAX_CLIENT_SELECTED_DIALS: usize = 4;
 
 /// Hardened sub-request executor wrapping a shared connector.
 ///
@@ -111,6 +125,121 @@ impl SubRequestClient {
         }
     }
 
+    /// Execute a buffered request against an absolute HTTP(S) URL.
+    ///
+    /// The explicit `policy` selects cached DNS for operator-configured hosts
+    /// or a fresh per-call lookup for client-selected hosts. The `validate`
+    /// hook sees the complete normalized address set before any connection.
+    /// The URL authority replaces the request's `Host` and supplies TLS SNI.
+    /// The original request body is reused across address attempts. Another
+    /// address is tried after a connection failure or when a peer's circuit is
+    /// already open, before any request is sent to that peer.
+    ///
+    /// `timeout` is one overall budget for DNS, fallback attempts, and response
+    /// collection. Every dial but the last gets an equal share of the remaining
+    /// budget for its connect phase, so one unresponsive address cannot consume
+    /// the whole deadline before fallback; request and response I/O still use the
+    /// overall deadline. A [`UrlResolutionPolicy::ClientPerCall`] target dials at
+    /// most `MAX_CLIENT_SELECTED_DIALS` of its client-controlled addresses, even
+    /// though `validate` still inspects the complete set.
+    /// `max_response_bytes` is also capped by this client's ceiling.
+    /// For incremental response bodies, use policy-aware target preparation,
+    /// [`crate::connectivity::PreparedTarget::bind`], and [`Self::send_streaming`]
+    /// with appropriate [`StreamLimits`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UrlSubRequestError`]. Its display does not include the URL,
+    /// including any credential-bearing query string.
+    #[expect(clippy::too_many_arguments, reason = "explicit target policy, bounds, and metadata")]
+    #[expect(clippy::too_many_lines, reason = "single-deadline preparation and fallback loop")]
+    pub async fn execute_url<F>(
+        &self,
+        url: &str,
+        request: SubRequest,
+        validate: F,
+        policy: UrlResolutionPolicy,
+        timeout: Duration,
+        max_response_bytes: usize,
+        framework_headers: Option<&FrameworkHeaders>,
+    ) -> Result<SubResponse, UrlSubRequestError>
+    where
+        F: FnOnce(&[SocketAddr]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send,
+    {
+        // Framework metadata is applied after the request's headers by the
+        // existing executor. A URL request must never lose or replace its
+        // authority at that stage.
+        if framework_headers.is_some_and(|headers| {
+            headers.iter().any(|(name, _)| name == http::header::HOST)
+                || headers.removals().any(|name| name == http::header::HOST)
+        }) {
+            return Err(UrlSubRequestError::Exchange(SubRequestError::InvalidRequest(
+                "framework headers cannot change a URL target's Host".to_owned(),
+            )));
+        }
+        let deadline = tokio::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or(UrlSubRequestError::DeadlineExceeded)?;
+        let target = prepare_url_target_with_policy(url, deadline.into_std(), validate, policy)
+            .await
+            .map_err(|err| match err {
+                UrlTargetError::DeadlineExceeded => UrlSubRequestError::DeadlineExceeded,
+                other @ (UrlTargetError::InvalidTarget(_)
+                | UrlTargetError::Resolve(_)
+                | UrlTargetError::PolicyRejected(_)) => UrlSubRequestError::Target(other),
+            })?;
+        let prepared = target.bind(request);
+        // The validation hook already inspected the COMPLETE resolved set during
+        // preparation. The dial cap below only bounds how many of those
+        // addresses fallback will connect to, never what policy validated.
+        let max_dials = match policy {
+            UrlResolutionPolicy::ClientPerCall => prepared.addresses().len().min(MAX_CLIENT_SELECTED_DIALS),
+            UrlResolutionPolicy::OperatorCached => prepared.addresses().len(),
+        };
+        let mut last_peer_error = None;
+        for index in 0..max_dials {
+            let Some(peer) = prepared.peer_at(index) else { break };
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(UrlSubRequestError::DeadlineExceeded);
+            }
+            // Every attempt but the last gets an equal share of the remaining
+            // budget for its connect phase, so one blackholed address cannot
+            // burn the whole deadline. Request and response I/O still use the
+            // full overall deadline (see `execute_with_connect_cap`).
+            let attempts_left = max_dials.saturating_sub(index);
+            let connect_cap = connect_attempt_cap(remaining, attempts_left);
+            match Box::pin(self.execute_with_connect_cap(
+                &peer,
+                prepared.request(),
+                max_response_bytes,
+                remaining,
+                connect_cap,
+                framework_headers,
+            ))
+            .await
+            {
+                Ok(response) => return Ok(response),
+                // A per-attempt connect-cap timeout surfaces as `Connect` while
+                // the overall deadline survives, so it falls back like any other
+                // connection failure.
+                Err(err @ (SubRequestError::Connect(_) | SubRequestError::CircuitOpen { .. })) => {
+                    last_peer_error = Some(redact_url_exchange_error(err));
+                },
+                Err(SubRequestError::DeadlineExceeded) => return Err(UrlSubRequestError::DeadlineExceeded),
+                Err(err) => return Err(UrlSubRequestError::Exchange(redact_url_exchange_error(err))),
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(UrlSubRequestError::DeadlineExceeded);
+        }
+        // Preparation rejects an empty address set, so the final error came
+        // from a frozen peer, never a missing attempt.
+        Err(UrlSubRequestError::Exchange(last_peer_error.unwrap_or_else(|| {
+            SubRequestError::Connect("prepared URL target has no peers".to_owned())
+        })))
+    }
+
     /// Access the underlying connector for direct pool operations.
     pub fn connector(&self) -> &SubRequestConnector {
         &self.connector
@@ -132,11 +261,16 @@ impl SubRequestClient {
     /// headers, circuit guard, and admission permit. Both `execute()`
     /// and `send_streaming()` call this, then diverge.
     #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "connect cap threads the per-attempt budget through the shared transport path"
+    )]
     async fn open_exchange<'conn>(
         &'conn self,
         peer: &HttpPeer,
         request: &SubRequest,
         timeout: Duration,
+        connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
         #[cfg(feature = "otel")]
@@ -145,7 +279,14 @@ impl SubRequestClient {
         let client_span = Span::none();
 
         let result = self
-            .open_exchange_inner(peer, request, timeout, framework_headers, &client_span)
+            .open_exchange_inner(
+                peer,
+                request,
+                timeout,
+                connect_attempt_cap,
+                framework_headers,
+                &client_span,
+            )
             .instrument(client_span.clone())
             .await;
         if result.is_err() && !client_span.is_disabled() {
@@ -167,6 +308,7 @@ impl SubRequestClient {
         peer: &HttpPeer,
         request: &SubRequest,
         timeout: Duration,
+        connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
         client_span: &Span,
     ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
@@ -258,24 +400,30 @@ impl SubRequestClient {
         // ---------------------------------------------------------------------
         // 5. Connect + I/O
         // ---------------------------------------------------------------------
-        let connect_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if connect_budget.is_zero() {
+        let overall_connect_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if overall_connect_budget.is_zero() {
             return Err(SubRequestError::DeadlineExceeded);
         }
+        // An optional per-attempt cap bounds only this connect phase; everything
+        // after a successful connect still runs against the overall deadline.
+        let connect_budget = connect_attempt_cap.map_or(overall_connect_budget, |cap| cap.min(overall_connect_budget));
 
         let (mut session, reused) = tokio::time::timeout(
             connect_budget,
             Box::pin(self.connector.connector().get_http_session(&bounded_peer)),
         )
         .await
-        .map_err(|_elapsed| SubRequestError::DeadlineExceeded)?
+        .map_err(|_elapsed| connect_timeout_error(deadline))?
         .map_err(|err| SubRequestError::Connect(err.to_string()))?;
 
         debug!(
             peer = %bounded_peer.address(),
             reused,
             method = %request.method,
-            uri = %request.uri,
+            // Path only: a URL-mode query string can carry a credential, so the
+            // query is never logged, but the path keeps explicit-peer sub-requests
+            // (health checks, AI callouts) debuggable.
+            path = request.uri.path(),
             "sub-request: connected"
         );
 
@@ -438,7 +586,11 @@ impl SubRequestClient {
         limits: StreamLimits,
         framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<StreamingSubResponse, SubRequestError> {
-        let mut exchange = self.open_exchange(peer, request, timeout, framework_headers).await?;
+        // Streaming uses no per-attempt connect cap: its header `timeout` already
+        // bounds the whole connect-plus-header phase.
+        let mut exchange = self
+            .open_exchange(peer, request, timeout, None, framework_headers)
+            .await?;
 
         // Hold the circuit guard until the header-time outcome is known.
         // Finalizing success here (before the completion check below) would
@@ -551,10 +703,13 @@ impl SubRequestClient {
     /// or deadline expiry.
     #[expect(
         clippy::too_many_arguments,
-        reason = "framework_headers is the typed metadata injection point"
+        reason = "stable public buffered-execution signature with framework metadata"
     )]
-    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
-    #[expect(clippy::too_many_lines, reason = "inline body collection loop")]
+    #[expect(
+        clippy::large_stack_frames,
+        clippy::large_futures,
+        reason = "Pingora session types are large; leaving the delegation unboxed preserves downstream future-size expectations and avoids a per-call heap allocation"
+    )]
     pub async fn execute(
         &self,
         peer: &HttpPeer,
@@ -563,7 +718,34 @@ impl SubRequestClient {
         timeout: Duration,
         framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<SubResponse, SubRequestError> {
-        let exchange = self.open_exchange(peer, request, timeout, framework_headers).await;
+        self.execute_with_connect_cap(peer, request, max_response_bytes, timeout, None, framework_headers)
+            .await
+    }
+
+    /// Buffered execution with an optional per-attempt connect cap.
+    ///
+    /// `connect_attempt_cap` bounds only the connection phase; a `None` cap lets
+    /// it use the whole deadline, so [`Self::execute`] is unchanged. URL fallback
+    /// passes a share of the remaining budget so one unresponsive address cannot
+    /// consume the whole deadline before the next address is tried.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "connect cap is URL fallback's per-attempt budget alongside framework metadata"
+    )]
+    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
+    #[expect(clippy::too_many_lines, reason = "inline body collection loop")]
+    async fn execute_with_connect_cap(
+        &self,
+        peer: &HttpPeer,
+        request: &SubRequest,
+        max_response_bytes: usize,
+        timeout: Duration,
+        connect_attempt_cap: Option<Duration>,
+        framework_headers: Option<&FrameworkHeaders>,
+    ) -> Result<SubResponse, SubRequestError> {
+        let exchange = self
+            .open_exchange(peer, request, timeout, connect_attempt_cap, framework_headers)
+            .await;
 
         let RawExchange {
             mut session,
@@ -724,6 +906,49 @@ pub(super) fn record_subrequest_client_error(client_span: &Span, error_type: &'s
 /// Return the bounded `error.type` value for an HTTP error status.
 fn subrequest_client_status_error_type(status: u16) -> Option<String> {
     (status >= 400).then(|| status.to_string())
+}
+
+/// The per-attempt connect budget for a URL fallback dial: an equal share of
+/// the remaining deadline for every attempt but the last. The last attempt
+/// returns `None` (its connect may use everything that is left), as does a
+/// degenerate zero/overflowing count, which falls back to the overall deadline.
+fn connect_attempt_cap(remaining: Duration, attempts_left: usize) -> Option<Duration> {
+    if attempts_left <= 1 {
+        return None;
+    }
+    u32::try_from(attempts_left)
+        .ok()
+        .and_then(|count| remaining.checked_div(count))
+}
+
+/// Classify a connect-phase timeout. Once the overall deadline has elapsed the
+/// whole call is done; otherwise the per-attempt cap fired, which URL fallback
+/// treats as a retryable connection failure and tries the next address.
+fn connect_timeout_error(deadline: tokio::time::Instant) -> SubRequestError {
+    if tokio::time::Instant::now() >= deadline {
+        SubRequestError::DeadlineExceeded
+    } else {
+        SubRequestError::Connect("connection attempt exceeded its per-attempt budget".to_owned())
+    }
+}
+
+/// Pingora transport diagnostics may include raw response header bytes. URL
+/// execution must not return those bytes because upstreams can reflect a
+/// credential-bearing query in a malformed response. Keep the error category
+/// while replacing untrusted free-form messages with fixed text.
+fn redact_url_exchange_error(error: SubRequestError) -> SubRequestError {
+    match error {
+        SubRequestError::InvalidRequest(_) => {
+            SubRequestError::InvalidRequest("URL request could not be sent".to_owned())
+        },
+        SubRequestError::Connect(_) => SubRequestError::Connect("upstream connection failed".to_owned()),
+        SubRequestError::Io(_) => SubRequestError::Io("upstream exchange failed".to_owned()),
+        other @ (SubRequestError::AdmissionTimeout { .. }
+        | SubRequestError::DeadlineExceeded
+        | SubRequestError::StreamIdleTimeout { .. }
+        | SubRequestError::CircuitOpen { .. }
+        | SubRequestError::ResponseTooLarge { .. }) => other,
+    }
 }
 
 /// Tear down an abnormally terminated header exchange: drop the circuit

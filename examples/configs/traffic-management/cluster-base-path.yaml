@@ -1,0 +1,69 @@
+# Per-Cluster Upstream Base Path
+#
+# Prepends a path to the upstream request for the cluster the load balancer
+# selected, so one gateway can front several upstreams that each serve the
+# same API under their own prefix.
+#
+# Both models below answer the same client path, /v1/completions. Which
+# prefix the upstream needs follows from the cluster selected for the
+# request, so nothing before selection can know it: model-a receives
+# /grid-models/model-a/v1/completions and model-b receives
+# /grid-models/model-b/v1/completions.
+#
+# The prefix applies to the upstream leg only. Route matching, access logs
+# and anything else reading the request path still see the path the client
+# sent. A trailing slash on base_path is stripped and a bare "/" is treated
+# as unset, so the join never doubles a slash.
+#
+# base_path is a routing convenience, not an isolation boundary. Do not rely
+# on it to confine a request to a subtree: the proxy forwards a percent-encoded
+# separator verbatim, and an upstream that decodes it before resolving dot
+# segments can leave the prefix.
+#
+# Not applied to a health check probe, which builds its own request, so
+# health_check.path is always the full upstream path. Not applied on the
+# response, so an upstream Location or Link header still carries the prefix.
+#
+# A target that names a path is prefixed: origin-form, absolute-form, and a
+# query-only target, which is anchored at the root first. An asterisk-form or
+# CONNECT target names no resource and is sent unchanged.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/cluster-base-path.yaml
+#
+#   curl -H "X-Model: model-a" http://localhost:8080/v1/completions
+#   curl -H "X-Model: model-b" http://localhost:8080/v1/completions
+
+listeners:
+  - name: default
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            headers:
+              X-Model: "model-a"
+            cluster: model-a
+          - path_prefix: "/"
+            headers:
+              X-Model: "model-b"
+            cluster: model-b
+      - filter: load_balancer
+        clusters:
+          - name: model-a
+            endpoints:
+              - "127.0.0.1:9000"
+            http:
+              base_path: "/grid-models/model-a"
+          - name: model-b
+            endpoints:
+              - "127.0.0.1:9001"
+            http:
+              base_path: "/grid-models/model-b"
+
+insecure_options:
+  allow_private_endpoints: true

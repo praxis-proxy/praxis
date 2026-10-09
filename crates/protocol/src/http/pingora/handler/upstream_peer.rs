@@ -498,6 +498,7 @@ mod tests {
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -547,6 +548,7 @@ mod tests {
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8080"),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         };
@@ -564,6 +566,7 @@ mod tests {
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -589,6 +592,7 @@ mod tests {
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -869,6 +873,7 @@ mod tests {
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -1010,6 +1015,7 @@ clusters:
         Upstream {
             address: Arc::from(address),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         }
@@ -1086,6 +1092,7 @@ clusters:
         Upstream {
             address: Arc::from(address),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         }

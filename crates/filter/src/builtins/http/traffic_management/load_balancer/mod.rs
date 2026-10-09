@@ -325,11 +325,16 @@ impl HttpFilter for LoadBalancerFilter {
             debug!("upstream already set, skipping LB selection");
             // A preset upstream (endpoint_selector) still serves the routed
             // cluster, so `selected_upstream` conditions must see its metadata.
-            let application = ctx
-                .cluster
-                .as_deref()
-                .and_then(|name| self.clusters.get(name))
-                .map(|entry| (entry.application_protocol.clone(), entry.application_provider.clone()));
+            let entry = ctx.cluster.as_deref().and_then(|name| self.clusters.get(name));
+            let application =
+                entry.map(|entry| (entry.application_protocol.clone(), entry.application_provider.clone()));
+            // The preset address answers for the routed cluster, so it is
+            // reached under that cluster's base path.
+            if let Some(base_path) = entry.and_then(|entry| entry.base_path.clone())
+                && let Some(upstream) = ctx.upstream.as_mut()
+            {
+                upstream.base_path = Some(base_path);
+            }
             if let Some((protocol, provider)) = application {
                 ctx.publish_selected_application(protocol, provider);
             }

@@ -806,6 +806,7 @@ async fn on_request_publishes_selected_application_for_preset_upstream() {
     ctx.upstream = Some(praxis_core::connectivity::Upstream {
         address: Arc::from("10.0.0.7:8000"),
         authority: None,
+        base_path: None,
         connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: None,
     });
@@ -1274,6 +1275,7 @@ async fn bound_upstream_source_with_existing_upstream_preserves_context() {
     ctx.upstream = Some(praxis_core::connectivity::Upstream {
         address: Arc::from("127.0.0.1:9090"),
         authority: None,
+        base_path: None,
         connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: None,
     });

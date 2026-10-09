@@ -61,8 +61,12 @@ pub(super) fn apply_request_header_mutations(headers: &mut HeaderMap, ctx: &Http
 ///
 /// Returns [`FilterError`] when the rewritten path is not a valid
 /// origin-form path.
-pub(super) fn subrequest_uri(rewritten_path: Option<&String>, current: &http::Uri) -> Result<http::Uri, FilterError> {
-    rewritten_path.map_or_else(
+pub(super) fn subrequest_uri(
+    rewritten_path: Option<&String>,
+    current: &http::Uri,
+    base_path: Option<&str>,
+) -> Result<http::Uri, FilterError> {
+    let uri = rewritten_path.map_or_else(
         || Ok(current.clone()),
         |path| {
             Some(path.as_str())
@@ -74,7 +78,39 @@ pub(super) fn subrequest_uri(rewritten_path: Option<&String>, current: &http::Ur
                     format!("filtered_subrequest: invalid rewritten sub-request path: {path:?}").into()
                 })
         },
-    )
+    )?;
+    // After the checks, so a prefix cannot hide a rejected traversal.
+    match base_path {
+        Some(base) => prefix_uri_path(uri, base),
+        None => Ok(uri),
+    }
+}
+
+/// Prepend the selected cluster's base path to a sub-request URI.
+///
+/// The sub-request leg has no raw request target to prefix, so this rebuilds
+/// the path-and-query component and leaves everything else as it was.
+///
+/// # Errors
+///
+/// Returns [`FilterError`] if the prefixed path is not a valid URI path.
+fn prefix_uri_path(uri: http::Uri, base: &str) -> Result<http::Uri, FilterError> {
+    // Only an origin-form target names a path to prefix (RFC 9112 3.2).
+    let Some(path_and_query) = uri.path_and_query().map(http::uri::PathAndQuery::as_str) else {
+        return Ok(uri);
+    };
+    if !path_and_query.starts_with('/') {
+        return Ok(uri);
+    }
+    let prefixed =
+        http::uri::PathAndQuery::try_from(format!("{base}{path_and_query}")).map_err(|error| -> FilterError {
+            format!("filtered_subrequest: base path {base:?} produced an invalid path: {error}").into()
+        })?;
+    let mut parts = uri.into_parts();
+    parts.path_and_query = Some(prefixed);
+    http::Uri::from_parts(parts).map_err(|error| -> FilterError {
+        format!("filtered_subrequest: could not apply base path {base:?}: {error}").into()
+    })
 }
 
 /// Apply body pre-read mutations to the request snapshot that header

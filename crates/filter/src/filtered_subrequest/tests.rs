@@ -142,7 +142,7 @@ fn subrequest_uri_rejects_absolute_and_traversal_paths() -> Result<(), crate::Fi
         "relative",
     ] {
         assert!(
-            super::sanitize::subrequest_uri(Some(&path.to_owned()), &current).is_err(),
+            super::sanitize::subrequest_uri(Some(&path.to_owned()), &current, None).is_err(),
             "rewritten path {path:?} must fail closed"
         );
     }
@@ -150,15 +150,50 @@ fn subrequest_uri_rejects_absolute_and_traversal_paths() -> Result<(), crate::Fi
 }
 
 #[test]
+fn subrequest_uri_applies_the_cluster_base_path() -> Result<(), crate::FilterError> {
+    let current: http::Uri = "/v1/completions".parse().expect("parse current uri");
+
+    let uri = super::sanitize::subrequest_uri(None, &current, Some("/grid-models/model-a"))?;
+    assert_eq!(
+        uri.path(),
+        "/grid-models/model-a/v1/completions",
+        "an outbound sub-request should reach the prefixed upstream path"
+    );
+
+    let rewritten = super::sanitize::subrequest_uri(
+        Some(&"/v2/completions?stream=true".to_owned()),
+        &current,
+        Some("/grid-models/model-a"),
+    )?;
+    assert_eq!(
+        rewritten.path_and_query().map(http::uri::PathAndQuery::as_str),
+        Some("/grid-models/model-a/v2/completions?stream=true"),
+        "the prefix should land on the rewritten path and keep its query"
+    );
+    Ok(())
+}
+
+#[test]
+fn subrequest_uri_rejects_traversal_before_applying_a_base_path() {
+    let current: http::Uri = "/v1".parse().expect("parse current uri");
+
+    assert!(
+        super::sanitize::subrequest_uri(Some(&"/a/../admin".to_owned()), &current, Some("/grid-models/model-a"))
+            .is_err(),
+        "a prefix must not be able to hide a traversal the checks reject"
+    );
+}
+
+#[test]
 fn subrequest_uri_accepts_origin_form_path() -> Result<(), crate::FilterError> {
     let current = http::Uri::try_from("/original")?;
-    let uri = super::sanitize::subrequest_uri(Some(&"/ok?x=1".to_owned()), &current)?;
+    let uri = super::sanitize::subrequest_uri(Some(&"/ok?x=1".to_owned()), &current, None)?;
     assert_eq!(
         uri.path(),
         "/ok",
         "origin-form rewrite should become the sub-request path"
     );
-    let unchanged = super::sanitize::subrequest_uri(None, &current)?;
+    let unchanged = super::sanitize::subrequest_uri(None, &current, None)?;
     assert_eq!(unchanged, current, "without a rewrite the current URI is reused");
     Ok(())
 }
@@ -585,6 +620,7 @@ async fn build_peer_applies_tls_with_explicit_sni() {
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
         authority: None,
+        base_path: None,
     };
 
     let peer = super::transport::build_peer(&upstream, false).await.unwrap();
@@ -600,6 +636,7 @@ async fn build_peer_derives_sni_from_hostname_address() {
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
         authority: None,
+        base_path: None,
     };
 
     let peer = super::transport::build_peer(&upstream, true).await.unwrap();
@@ -615,6 +652,7 @@ async fn build_peer_names_an_ip_address_by_its_ip() {
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
         authority: None,
+        base_path: None,
     };
 
     let peer = super::transport::build_peer(&upstream, false).await.unwrap();
@@ -631,6 +669,7 @@ async fn build_peer_refuses_a_tls_peer_with_no_server_name() {
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
         authority: None,
+        base_path: None,
     };
 
     let err = super::transport::build_peer(&upstream, false)
@@ -649,6 +688,7 @@ async fn build_peer_rejects_hostname_resolving_to_private_address() {
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: None,
         authority: None,
+        base_path: None,
     };
 
     let err = super::transport::build_peer(&upstream, false)
@@ -754,6 +794,7 @@ async fn run_falls_back_to_next_staged_address_on_connection_refusal() {
     let staged = super::StagedUpstream(praxis_core::connectivity::Upstream {
         address: Arc::from(dead.to_string().as_str()),
         authority: None,
+        base_path: None,
         connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: None,
     });
@@ -911,6 +952,7 @@ impl crate::HttpFilter for UpstreamHijackFilter {
         ctx.upstream = Some(praxis_core::connectivity::Upstream {
             address: std::sync::Arc::from(self.redirect_to.to_string().as_str()),
             authority: None,
+            base_path: None,
             connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -942,6 +984,7 @@ impl crate::HttpFilter for SelectedUpstreamRejectFilter {
         ctx.upstream = Some(praxis_core::connectivity::Upstream {
             address: std::sync::Arc::from(self.upstream_addr.to_string().as_str()),
             authority: None,
+            base_path: None,
             connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -987,6 +1030,7 @@ impl crate::HttpFilter for SelectedUpstreamExpandFilter {
         ctx.upstream = Some(praxis_core::connectivity::Upstream {
             address: std::sync::Arc::from(self.upstream_addr.to_string().as_str()),
             authority: None,
+            base_path: None,
             connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -1039,6 +1083,7 @@ impl crate::HttpFilter for SelectedProviderRecorderFilter {
         ctx.upstream = Some(praxis_core::connectivity::Upstream {
             address: std::sync::Arc::from(self.upstream_addr.to_string().as_str()),
             authority: None,
+            base_path: None,
             connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -1163,6 +1208,7 @@ async fn staged_upstream_clears_discarded_selection_metadata() {
     let staged = super::StagedUpstream(praxis_core::connectivity::Upstream {
         address: Arc::from(addr.to_string().as_str()),
         authority: None,
+        base_path: None,
         connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: None,
     });
@@ -1779,6 +1825,7 @@ async fn run_re_pins_staged_upstream_over_chain_filter_rewrite() {
     let staged = super::StagedUpstream(praxis_core::connectivity::Upstream {
         address: Arc::from(staged_addr.to_string().as_str()),
         authority: None,
+        base_path: None,
         connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: None,
     });
@@ -2797,6 +2844,7 @@ async fn run_streaming_falls_back_to_next_staged_address_on_connection_refusal()
     let staged = super::StagedUpstream(praxis_core::connectivity::Upstream {
         address: Arc::from(dead.to_string().as_str()),
         authority: None,
+        base_path: None,
         connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: None,
     });
@@ -3909,6 +3957,7 @@ impl crate::HttpFilter for SelectedUpstreamBodyHijackFilter {
         ctx.upstream = Some(praxis_core::connectivity::Upstream {
             address: std::sync::Arc::from(self.redirect_to.to_string().as_str()),
             authority: None,
+            base_path: None,
             connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -3953,6 +4002,7 @@ impl crate::HttpFilter for SelectedUpstreamStateExpandFilter {
         ctx.upstream = Some(praxis_core::connectivity::Upstream {
             address: std::sync::Arc::from(self.upstream_addr.to_string().as_str()),
             authority: None,
+            base_path: None,
             connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -4033,6 +4083,7 @@ async fn selected_upstream_phase_re_pins_staged_upstream_over_body_filter_rewrit
     let staged = super::StagedUpstream(praxis_core::connectivity::Upstream {
         address: Arc::from(staged_addr.to_string().as_str()),
         authority: None,
+        base_path: None,
         connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: None,
     });

@@ -96,7 +96,27 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &PingoraRequest
     let Some(new_path) = ctx.rewritten_path.as_deref() else {
         return Ok(());
     };
+    let uri = validated_rewritten_uri(new_path)?;
 
+    debug!(rewritten_path = %new_path, "applying path rewrite to upstream request");
+    // Only the path: a bare origin form would drop an HTTP/2 authority.
+    let mut parts = req.uri.clone().into_parts();
+    parts.path_and_query = uri.path_and_query().cloned();
+    let rebuilt = Uri::from_parts(parts).map_err(|e| {
+        pingora_core::Error::because(
+            pingora_core::ErrorType::InvalidHTTPHeader,
+            format!("request target is not valid with rewritten path {new_path}"),
+            e,
+        )
+        .into_down()
+    })?;
+    req.set_uri(rebuilt);
+    Ok(())
+}
+
+/// Parse a filter-produced path, refusing anything that is not an origin form
+/// this proxy may forward.
+fn validated_rewritten_uri(new_path: &str) -> pingora_core::Result<Uri> {
     if !new_path.starts_with('/') || new_path.starts_with("//") {
         return Err(pingora_core::Error::explain(
             pingora_core::ErrorType::InternalError,
@@ -125,9 +145,149 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &PingoraRequest
         ));
     }
 
-    debug!(rewritten_path = %new_path, "applying path rewrite to upstream request");
-    req.set_uri(uri);
+    Ok(uri)
+}
+
+// -----------------------------------------------------------------------------
+// Upstream Base Path
+// -----------------------------------------------------------------------------
+
+/// Prepend the selected cluster's base path to the upstream request path.
+///
+/// Runs after the path rewrite, so the prefix lands on whatever path the
+/// pipeline decided rather than on the path the rewrite replaced.
+///
+/// Which half of the request carries the target decides how it is rebuilt. A
+/// URI carrying an authority is the HTTP/2 shape, and rebuilding it through
+/// the raw target would drop that authority, leaving an h2 upstream leg with
+/// no `Host` and no `:authority` to send. Everything else is prefixed on the
+/// raw target, which keeps a path that is not valid UTF-8 byte-exact instead
+/// of forwarding the URI's lossy rendering of it.
+///
+/// Pingora clones the downstream header for every attempt, so this cannot
+/// stack a second prefix on a retry, and a client path that already looks
+/// like the prefix is still prefixed.
+///
+/// # Errors
+///
+/// Returns a Pingora error if the prefixed target is not a valid
+/// request-target, which leaves the original target intact.
+///
+/// Every error here is sourced `Downstream`. This runs after the upstream peer
+/// is resolved, so an error sourced anywhere else is counted by passive health
+/// against the endpoint rather than against the request that caused it.
+pub(crate) fn apply_base_path(req: &mut RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
+    let Some(base) = ctx.upstream_for_retry.as_ref().and_then(|u| u.base_path.as_deref()) else {
+        return Ok(());
+    };
+
+    // An authority on the URI is the HTTP/2 shape, which the raw target
+    // cannot express.
+    if req.uri.authority().is_some() {
+        let prefixed = prefixed_uri(&req.uri, base)?;
+        debug!(base_path = %base, "applying upstream base path");
+        req.set_uri(prefixed);
+        return Ok(());
+    }
+
+    let target = match prefixed_raw_target(req.raw_path(), base, &req.method) {
+        PrefixedTarget::Target(target) => target,
+        PrefixedTarget::NoResource => return Ok(()),
+        PrefixedTarget::Unprefixable => {
+            // Forwarding it unprefixed would reach the upstream root.
+            return Err(pingora_core::Error::explain(
+                pingora_core::ErrorType::InvalidHTTPHeader,
+                "request target cannot carry the cluster's base path",
+            )
+            .into_down());
+        },
+    };
+    req.set_raw_path(&target).map_err(|e| {
+        // What is left is a client path the prefix pushes past the limit.
+        pingora_core::Error::because(
+            pingora_core::ErrorType::InvalidHTTPHeader,
+            format!("request target is not valid with base path {base} prepended"),
+            e,
+        )
+        .into_down()
+    })?;
+
+    debug!(base_path = %base, "applying upstream base path");
     Ok(())
+}
+
+/// Rebuild `uri` with `base` prepended to its path, keeping scheme and authority.
+fn prefixed_uri(uri: &Uri, base: &str) -> pingora_core::Result<Uri> {
+    let path_and_query = uri.path_and_query().map_or("/", http::uri::PathAndQuery::as_str);
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(
+        http::uri::PathAndQuery::try_from(format!("{base}{path_and_query}")).map_err(|e| {
+            pingora_core::Error::because(
+                pingora_core::ErrorType::InvalidHTTPHeader,
+                format!("request path is not valid with base path {base} prepended"),
+                e,
+            )
+            .into_down()
+        })?,
+    );
+    Uri::from_parts(parts).map_err(|e| {
+        pingora_core::Error::because(
+            pingora_core::ErrorType::InvalidHTTPHeader,
+            format!("request target is not valid with base path {base} prepended"),
+            e,
+        )
+        .into_down()
+    })
+}
+
+/// What prefixing a raw request target produced.
+enum PrefixedTarget {
+    /// The prefixed target.
+    Target(Vec<u8>),
+    /// The form names no resource, so there is nothing to prefix.
+    NoResource,
+    /// The form names a resource the prefix cannot be applied to.
+    Unprefixable,
+}
+
+/// Prefix a raw request target.
+///
+/// Absolute-form is split with Pingora's own classifier rather than a second
+/// one: a parser with its own idea of where the authority ends would prefix
+/// bytes the proxy layer never validated as a path.
+fn prefixed_raw_target(raw: &[u8], base: &str, method: &http::Method) -> PrefixedTarget {
+    // Neither names a resource a path prefix can describe.
+    if raw == b"*" || raw.is_empty() || method == http::Method::CONNECT {
+        return PrefixedTarget::NoResource;
+    }
+    if raw.starts_with(b"/") {
+        return PrefixedTarget::Target([base.as_bytes(), raw].concat());
+    }
+    // A query-only target has no path; anchor it at the root before prefixing.
+    if raw.starts_with(b"?") {
+        return PrefixedTarget::Target([base.as_bytes(), b"/", raw].concat());
+    }
+    match pingora_http::authority::raw_target_authority(raw) {
+        pingora_http::authority::RawTargetAuthority::Absolute {
+            scheme,
+            authority,
+            path_and_query,
+        } => {
+            let mut target = Vec::with_capacity(raw.len() + base.len() + 4);
+            target.extend_from_slice(scheme);
+            target.extend_from_slice(b"://");
+            target.extend_from_slice(authority);
+            target.extend_from_slice(base.as_bytes());
+            if path_and_query.is_empty() || !path_and_query.starts_with(b"/") {
+                target.push(b'/');
+            }
+            target.extend_from_slice(path_and_query);
+            PrefixedTarget::Target(target)
+        },
+        // Names a resource, so skipping would send the upstream root.
+        pingora_http::authority::RawTargetAuthority::None
+        | pingora_http::authority::RawTargetAuthority::AmbiguousAuthority => PrefixedTarget::Unprefixable,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1041,6 +1201,7 @@ mod tests {
         ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
             address: Arc::from("10.0.0.1:443"),
             authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            base_path: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -1061,6 +1222,7 @@ mod tests {
         ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
             address: Arc::from("10.0.0.1:8443"),
             authority: Some(http::header::HeaderValue::from_static("api.example.com:8443")),
+            base_path: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -1081,6 +1243,7 @@ mod tests {
         ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
             address: Arc::from("10.0.0.1:443"),
             authority: None,
+            base_path: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -1115,6 +1278,7 @@ mod tests {
         ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
             address: Arc::from("10.0.0.1:443"),
             authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            base_path: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -1136,6 +1300,7 @@ mod tests {
         ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
             address: Arc::from("10.0.0.1:443"),
             authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            base_path: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -1163,6 +1328,7 @@ mod tests {
         ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
             address: Arc::from("10.0.0.1:443"),
             authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            base_path: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });
@@ -1336,6 +1502,335 @@ mod tests {
                 b"canonical"
             )])),
             "canonical body is reseeded when adaptation did not run"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Base Path
+    // -------------------------------------------------------------------------
+
+    /// Longest request target `http::Uri` accepts.
+    const MAX_URI_TARGET: usize = 65_534;
+
+    fn ctx_with_base_path(base: Option<&str>) -> PingoraRequestCtx {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: None,
+            base_path: base.map(Arc::from),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+        ctx
+    }
+
+    /// Build a request whose target is `target` exactly as the wire parser
+    /// would store it, including the non-origin forms `RequestHeader::build`
+    /// normalizes away.
+    fn request_with_raw_target(method: &str, target: &[u8]) -> RequestHeader {
+        let mut req = RequestHeader::build(method, b"/", None).unwrap();
+        req.set_raw_path(target).unwrap();
+        req
+    }
+
+    #[test]
+    fn apply_base_path_prefixes_origin_form_target() {
+        let mut req = request_with_raw_target("GET", b"/v1/completions");
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.raw_path(),
+            b"/grid-models/model-a/v1/completions",
+            "base path should be prepended to the upstream target"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_preserves_query() {
+        let mut req = request_with_raw_target("GET", b"/v1/models?limit=2&page=1");
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.raw_path(),
+            b"/grid-models/model-a/v1/models?limit=2&page=1",
+            "query should survive the prefix"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_noop_when_unset() {
+        let mut req = request_with_raw_target("GET", b"/v1/completions");
+        let ctx = ctx_with_base_path(None);
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.raw_path(),
+            b"/v1/completions",
+            "a cluster with no base path must not change the target"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_prefixes_a_path_that_already_looks_like_the_base() {
+        let mut req = request_with_raw_target("GET", b"/v1/chat/completions");
+        let ctx = ctx_with_base_path(Some("/v1"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        // Pingora clones the downstream header per attempt, so a path that
+        // already starts with the prefix is the client's, not a replay. An
+        // idempotence guard here would silently drop the prefix.
+        assert_eq!(
+            req.raw_path(),
+            b"/v1/v1/chat/completions",
+            "a client path resembling the prefix must still be prefixed"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_prefixes_root_path() {
+        let mut req = request_with_raw_target("GET", b"/");
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.raw_path(),
+            b"/grid-models/model-a/",
+            "the root path should land on the prefix"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_prefixes_a_non_utf8_target_byte_exactly() {
+        let mut req = request_with_raw_target("GET", b"/caf\xe9/users");
+        assert!(
+            !req.raw_path_is_utf8(),
+            "test setup: the raw target should not be valid UTF-8"
+        );
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        // Prefixing the raw target keeps the original bytes. Going through the
+        // URI would forward its lossy replacement characters instead, which
+        // name a different resource.
+        assert_eq!(
+            req.raw_path(),
+            b"/grid-models/model-a/caf\xe9/users",
+            "a non-UTF-8 target should be prefixed byte-exactly"
+        );
+        assert!(
+            !req.raw_path_is_utf8(),
+            "the target should still be reported as non-UTF-8"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_refuses_a_target_the_prefix_pushes_past_the_limit() {
+        // Pingora admits a header far larger than `http::Uri` accepts as a
+        // target, so a client path just under that cap plus the prefix is a
+        // reachable failure, not a theoretical one. The original target must
+        // survive, and the error is the client's rather than the proxy's.
+        let base = "/grid-models/model-a";
+        let mut target = Vec::with_capacity(MAX_URI_TARGET);
+        target.push(b'/');
+        target.resize(MAX_URI_TARGET, b'a');
+        let mut req = request_with_raw_target("GET", &target);
+        let ctx = ctx_with_base_path(Some(base));
+
+        let err = apply_base_path(&mut req, &ctx).expect_err("the prefixed target should be refused");
+
+        assert_eq!(
+            req.raw_path(),
+            target.as_slice(),
+            "a refused prefix must leave the original target intact"
+        );
+        assert_eq!(
+            err.esource,
+            pingora_core::ErrorSource::Downstream,
+            "an over-long client path is the client's error, not the proxy's"
+        );
+    }
+
+    #[test]
+    fn every_base_path_error_is_sourced_downstream() {
+        // This runs after the upstream peer is resolved, so an error sourced
+        // anywhere else is charged by passive health to the endpoint instead
+        // of to the request. One site missing `into_down` ejects a healthy
+        // endpoint on a client-shaped request.
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        // The raw-target branch: a client path the prefix pushes past the cap.
+        let mut over_long = Vec::with_capacity(MAX_URI_TARGET);
+        over_long.push(b'/');
+        over_long.resize(MAX_URI_TARGET, b'a');
+        let mut raw_target = request_with_raw_target("GET", &over_long);
+        let raw_err = apply_base_path(&mut raw_target, &ctx).expect_err("the raw target should be refused");
+
+        // The authority branch: an authority with no scheme, which is the h2
+        // plain CONNECT shape, makes `Uri::from_parts` return SchemeMissing.
+        let mut authority_only = request_with_raw_target("GET", b"/");
+        authority_only.set_uri("api.example.com:443".parse::<Uri>().unwrap());
+        assert!(
+            authority_only.uri.authority().is_some() && authority_only.uri.scheme().is_none(),
+            "test setup: the URI should carry an authority and no scheme"
+        );
+        let authority_err =
+            apply_base_path(&mut authority_only, &ctx).expect_err("an authority with no scheme cannot be rebuilt");
+
+        for (label, err) in [("raw target", &raw_err), ("authority branch", &authority_err)] {
+            assert_eq!(
+                err.esource,
+                pingora_core::ErrorSource::Downstream,
+                "{label}: every error this function returns must be the client's, not the endpoint's"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_base_path_refuses_a_target_that_cannot_carry_the_prefix() {
+        // An opaque target classifies as neither origin, query-only nor
+        // absolute form, so there is nowhere to put the prefix. Forwarding it
+        // unprefixed would reach the upstream root, which is the resource the
+        // prefix exists to keep a request out of.
+        let mut req = request_with_raw_target("GET", b"sip:user@host");
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        let err = apply_base_path(&mut req, &ctx).expect_err("an unprefixable target should be refused");
+
+        assert_eq!(req.raw_path(), b"sip:user@host", "a refused target is left intact");
+        assert_eq!(
+            err.esource,
+            pingora_core::ErrorSource::Downstream,
+            "the target is the client's, so the refusal is too"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_leaves_a_connect_target_alone() {
+        // A CONNECT target is a tunnel destination, not a resource, so it is
+        // sent unchanged rather than refused.
+        let mut req = request_with_raw_target("CONNECT", b"api.example.com:443");
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.raw_path(),
+            b"api.example.com:443",
+            "the tunnel destination must survive untouched"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_skips_asterisk_form() {
+        let mut req = request_with_raw_target("OPTIONS", b"*");
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.raw_path(),
+            b"*",
+            "an asterisk-form target names no resource to prefix"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_skips_the_authority_form_connect_target() {
+        // The URI for an authority-form target carries path "/", so guarding on
+        // the URI path would prefix it and `set_raw_path` would then destroy the
+        // tunnel destination.
+        let mut req = request_with_raw_target("CONNECT", b"api.example.com:443");
+        assert_eq!(req.uri.path(), "/", "test setup: the URI is rooted, not empty");
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.raw_path(),
+            b"api.example.com:443",
+            "the CONNECT tunnel destination must survive untouched"
+        );
+    }
+
+    #[test]
+    fn apply_rewritten_path_keeps_the_authority_of_an_h2_target() {
+        // Same shape as the base path: a rewrite that replaced the whole URI
+        // would strip the only authority an h2 upstream leg has.
+        let mut req = request_with_raw_target("GET", b"/api/v1/users");
+        req.set_uri("https://api.example.com/api/v1/users".parse::<Uri>().unwrap());
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.rewritten_path = Some("/users".to_owned());
+
+        apply_rewritten_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.uri.authority().map(http::uri::Authority::as_str),
+            Some("api.example.com"),
+            "the rewrite must keep the h2 authority"
+        );
+        assert_eq!(req.uri.path(), "/users", "and still rewrite the path");
+    }
+
+    #[test]
+    fn apply_base_path_keeps_the_authority_of_an_h2_target() {
+        // An h2 client sends `:authority` and no Host, so the URI is the only
+        // authority the upstream leg has. Rebuilding through the raw target
+        // would drop it and every request to an `http.version: h2` cluster
+        // would fail with "no authority for H2 upstream request".
+        let mut req = request_with_raw_target("GET", b"/v1/completions");
+        req.set_uri("https://api.example.com/v1/completions".parse::<Uri>().unwrap());
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.uri.authority().map(http::uri::Authority::as_str),
+            Some("api.example.com"),
+            "the h2 target must keep its authority"
+        );
+        assert_eq!(req.uri.scheme_str(), Some("https"), "and its scheme");
+        assert_eq!(
+            req.uri.path(),
+            "/grid-models/model-a/v1/completions",
+            "and still be prefixed"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_prefixes_an_absolute_form_target() {
+        // Skipping it would send a prefixed cluster the upstream root, which is
+        // the outcome prefixing a resembling path exists to prevent.
+        let mut req = request_with_raw_target("GET", b"http://api.example.com/v1/completions");
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.raw_path(),
+            b"http://api.example.com/grid-models/model-a/v1/completions",
+            "absolute-form keeps its authority and gains the prefix"
+        );
+    }
+
+    #[test]
+    fn apply_base_path_anchors_and_prefixes_a_query_only_target() {
+        let mut req = request_with_raw_target("GET", b"?limit=2");
+        let ctx = ctx_with_base_path(Some("/grid-models/model-a"));
+
+        apply_base_path(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.raw_path(),
+            b"/grid-models/model-a/?limit=2",
+            "a query-only target is anchored at the root before prefixing"
         );
     }
 

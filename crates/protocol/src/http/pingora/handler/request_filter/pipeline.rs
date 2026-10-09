@@ -1038,6 +1038,7 @@ mod tests {
         praxis_core::connectivity::Upstream {
             address: Arc::from("127.0.0.1:8080"),
             authority: None,
+            base_path: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         }

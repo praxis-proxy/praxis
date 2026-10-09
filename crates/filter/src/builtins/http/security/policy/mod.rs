@@ -66,6 +66,12 @@
 //! Bodyless requests remain subject to identity policy but skip inference
 //! routing. APIs that identify the model only in the URL are unsupported.
 //!
+//! OPA, CEL, and Cedar `pre_invocation` steps on `llm:` routes also read the
+//! parsed body as `llm.request`; `post_invocation` steps do not receive it.
+//! The upstream receives the original bytes on allow. A body that repeats
+//! a JSON object key, including one that differs only in case, is denied
+//! before policy runs.
+//!
 //! See `examples/configs/security/policy-llm.yaml`.
 //!
 //! With `body_access: read_write`, `cmf.llm_output` evaluates non-streaming
@@ -143,6 +149,7 @@
 //! | Inference request deny | Plain HTTP response with an OpenAI-compatible error envelope and `X-Policy-Violation`. |
 //! | Inference response deny | The response body is replaced; the committed status and headers cannot change. |
 //! | Oversized inference request | HTTP 413 with violation code `llm.body_too_large`. |
+//! | Request body repeating a JSON object key, on a policy with `llm:` routes and no `mcp.method` | HTTP 400 with violation code `llm.duplicate_key`. |
 //!
 //! Any violation carrying a `proto_error_code` overrides `-32001` on the
 //! wire, and its `details` map is merged into `error.data`; the pending

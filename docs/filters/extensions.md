@@ -477,10 +477,12 @@ async fn on_request(
 
 ### `on_response_body` is synchronous
 
-Pingora's response body callback is not async. Do not
-block the thread with `block_on` or heavy computation.
-If you need async I/O during response payload processing,
-spawn a background task and communicate via a channel.
+Unlike `on_request_body`, the `HttpFilter` trait declares
+`on_response_body` as a plain `fn`, and it runs inline on
+the worker thread proxying the response. Do not block
+the thread with `block_on` or heavy computation. If you
+need async I/O during response payload processing, spawn
+a background task and communicate via a channel.
 
 ### Use conditions instead of internal checks
 

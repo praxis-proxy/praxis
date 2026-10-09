@@ -170,6 +170,55 @@ pub struct ClusterHttpOptions {
     /// [`H1`]: UpstreamHttpVersion::H1
     #[serde(default)]
     pub version: UpstreamHttpVersion,
+
+    /// Base path prepended to the request path on the upstream leg.
+    ///
+    /// Set when one gateway fronts several upstreams that each serve the
+    /// same API under their own prefix: which prefix a request needs
+    /// follows from the cluster the load balancer selected, so nothing
+    /// before selection can know it. Applies to the upstream leg only,
+    /// so route matching, access logs and anything else reading the
+    /// request path still see what the client sent.
+    ///
+    /// An absolute path of at most 1024 bytes, visible ASCII only, with
+    /// no empty, `.` or `..` segment, no query, fragment or
+    /// percent-encoding. A trailing slash is stripped and a bare `/` is
+    /// treated as unset.
+    ///
+    /// A routing convenience, not an isolation boundary: do not rely on
+    /// it to confine a request to a subtree, because the proxy forwards
+    /// a percent-encoded separator verbatim and an upstream that decodes
+    /// it before resolving dot segments can leave the prefix.
+    ///
+    /// Prefixes a target that names a path: origin-form, absolute-form,
+    /// and a query-only target, which is anchored at the root first. An
+    /// asterisk-form or CONNECT target names no resource and is sent
+    /// unchanged.
+    ///
+    /// Applies to HTTP clusters. A TCP load balancer does not process
+    /// HTTP targets and ignores it.
+    ///
+    /// Not applied to a health check probe, which builds its own
+    /// request, so `health_check.path` is always the full upstream path.
+    /// Not applied on the response, so an upstream `Location` or `Link`
+    /// header still carries the prefix.
+    ///
+    /// ```
+    /// # use praxis_core::config::Cluster;
+    /// let yaml = r#"
+    /// name: "model-a"
+    /// endpoints: ["10.0.0.1:443"]
+    /// http:
+    ///   base_path: "/grid-models/model-a"
+    /// "#;
+    /// let cluster: Cluster = serde_yaml::from_str(yaml).unwrap();
+    /// assert_eq!(
+    ///     cluster.http.base_path.as_deref(),
+    ///     Some("/grid-models/model-a")
+    /// );
+    /// ```
+    #[serde(default)]
+    pub base_path: Option<Arc<str>>,
 }
 
 /// A named group of upstream endpoints.
@@ -318,6 +367,33 @@ pub struct Cluster {
     /// retry behavior (3 attempts, idempotent methods, 64 `KiB` body).
     #[serde(default)]
     pub retry_policy: Option<RetryPolicy>,
+}
+
+impl ClusterHttpOptions {
+    /// The effective upstream base path, or `None` when there is
+    /// nothing to prepend.
+    ///
+    /// Strips a trailing slash so the join with a request path that
+    /// always carries a leading slash cannot double it, and treats a
+    /// bare `/` as unset.
+    ///
+    /// ```
+    /// # use praxis_core::config::ClusterHttpOptions;
+    /// let base = |v: &str| ClusterHttpOptions {
+    ///     base_path: Some(v.into()),
+    ///     ..ClusterHttpOptions::default()
+    /// };
+    /// assert_eq!(base("/models/a").normalized_base_path(), Some("/models/a"));
+    /// assert_eq!(base("/models/a/").normalized_base_path(), Some("/models/a"));
+    /// assert_eq!(base("/").normalized_base_path(), None);
+    /// assert_eq!(ClusterHttpOptions::default().normalized_base_path(), None);
+    /// ```
+    #[must_use]
+    pub fn normalized_base_path(&self) -> Option<&str> {
+        let raw = self.base_path.as_deref()?;
+        let trimmed = raw.strip_suffix('/').unwrap_or(raw);
+        (!trimmed.is_empty()).then_some(trimmed)
+    }
 }
 
 impl Cluster {

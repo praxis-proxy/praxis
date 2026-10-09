@@ -27,12 +27,14 @@ use super::ConnectionOptions;
 /// let upstream = Upstream {
 ///     address: Arc::from("127.0.0.1:8080"),
 ///     authority: None,
+///     base_path: None,
 ///     tls: None,
 ///     connection: Arc::new(ConnectionOptions::default()),
 /// };
 ///
 /// assert_eq!(&*upstream.address, "127.0.0.1:8080");
 /// assert!(upstream.authority.is_none());
+/// assert!(upstream.base_path.is_none());
 /// assert!(upstream.tls.is_none());
 /// ```
 ///
@@ -47,6 +49,12 @@ pub struct Upstream {
     /// When set, the proxy sends this value as the upstream HTTP/1.1
     /// `Host` header instead of forwarding the downstream value.
     pub authority: Option<HeaderValue>,
+
+    /// Base path prepended to the request path on the upstream leg.
+    ///
+    /// Cluster-scoped and already normalized, so a retry to another
+    /// endpoint of the same cluster presents the same prefix.
+    pub base_path: Option<Arc<str>>,
 
     /// Connection tuning for this upstream.
     pub connection: Arc<ConnectionOptions>,
@@ -131,6 +139,7 @@ mod tests {
         Upstream {
             address: Arc::from(address),
             authority: None,
+            base_path: None,
             tls,
             connection: Arc::new(ConnectionOptions::default()),
         }

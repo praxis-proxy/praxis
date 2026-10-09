@@ -685,6 +685,7 @@ async fn terminal_branch_reselecting_upstream_forwards_upstream() -> Result<(), 
     ctx.upstream = Some(praxis_core::connectivity::Upstream {
         address: Arc::from("10.0.0.9:80"),
         authority: None,
+        base_path: None,
         connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: None,
     });
@@ -4343,6 +4344,7 @@ impl HttpFilter for UpstreamSelectFilter {
         ctx.upstream = Some(praxis_core::connectivity::Upstream {
             address: Arc::from(self.0),
             authority: None,
+            base_path: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
             tls: None,
         });

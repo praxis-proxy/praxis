@@ -1778,6 +1778,7 @@ mod tests {
         ctx.upstream = Some(Upstream {
             address: Arc::from("10.0.0.1:8080"),
             authority: None,
+            base_path: None,
             tls: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         });

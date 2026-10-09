@@ -1,0 +1,48 @@
+# Access Log Syslog Sink
+#
+# Ships access log records to a syslog daemon as RFC 3164 messages,
+# bypassing the tracing subscriber. The transport is one of `unix`
+# (a local socket such as /dev/log), `udp`, or `tcp`; `udp` and `tcp`
+# require an `address`, while `unix` uses the default socket path or an
+# optional `path`. This example uses UDP so it runs without a local
+# syslog socket; point `address` at your collector.
+#
+# Requires the experimental `access-log-syslog` build feature.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features access-log-syslog -- -c examples/configs/observability/access-log-syslog.yaml
+#   curl http://localhost:8080/
+#   # watch UDP syslog on 127.0.0.1:5514, e.g. `nc -u -l 5514`
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+
+      - filter: access_log
+        template: "{method} {path} {status} {duration_ms}ms id={request_id}"
+        sink:
+          type: syslog
+          transport: udp
+          address: "127.0.0.1:5514"
+          facility: local0
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

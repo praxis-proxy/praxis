@@ -5,7 +5,7 @@
 
 use std::{
     io::Read as _,
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     thread::{self, JoinHandle},
 };
 
@@ -21,8 +21,11 @@ pub fn spawn_raw_http_backend<F>(handler: F) -> (u16, JoinHandle<()>)
 where
     F: FnOnce(TcpStream) + Send + 'static,
 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind raw HTTP backend");
-    let port = listener.local_addr().expect("raw backend address").port();
+    // Through the shared allocator so the port joins the process-wide set:
+    // an ephemeral bind can otherwise land on a port `free_port` already
+    // handed out, and a test treating that port as a dead backend then
+    // reaches this one.
+    let (listener, port) = crate::net::port::bind_unique_port();
     let handle = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("accept raw HTTP backend request");
         handler(stream);

@@ -6,6 +6,10 @@
 
 #![allow(clippy::missing_docs_in_private_items, reason = "internal emit plan types")]
 
+#[cfg(feature = "access-log-syslog")]
+use std::net::{SocketAddr, ToSocketAddrs as _};
+#[cfg(feature = "access-log-syslog")]
+use std::os::unix::net::{UnixDatagram, UnixStream};
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashMap, HashSet},
@@ -23,9 +27,13 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
+#[cfg(feature = "access-log-syslog")]
+use chrono::Local;
 use chrono::{DateTime, SecondsFormat, Utc};
 use http::header::HeaderName;
 use serde::Deserialize;
+#[cfg(feature = "access-log-syslog")]
+use syslog::{Formatter3164, LogFormat, Logger, LoggerBackend, Severity};
 use tracing::info;
 
 use crate::{
@@ -153,8 +161,9 @@ struct AccessLogConfig {
     /// decides text or JSON output. Mutually exclusive with `fields`.
     template: Option<String>,
 
-    /// Output sink: `{type: stdout}` or `{type: file, path: ...}`. Omitted means
-    /// emit through the tracing subscriber.
+    /// Output sink: `{type: stdout}`, `{type: file, path: ...}`, or (with the
+    /// `access-log-syslog` feature) `{type: syslog, ...}`. Omitted means emit
+    /// through the tracing subscriber.
     #[serde(default)]
     sink: Option<SinkConfig>,
 }
@@ -174,6 +183,36 @@ enum SinkConfig {
         /// Destination path, opened in append+create mode.
         path: String,
     },
+    /// Send each line as an RFC 3164 syslog message over a local socket, UDP, or TCP.
+    #[cfg(feature = "access-log-syslog")]
+    Syslog {
+        /// Syslog facility encoded in the message PRI header.
+        facility: SyslogFacility,
+        /// Resolved transport destination.
+        target: SyslogDestination,
+    },
+}
+
+/// Resolved syslog destination; the `(transport, address, path)` pairing is
+/// validated in [`SinkConfig::try_syslog`] during deserialization.
+#[cfg(feature = "access-log-syslog")]
+#[derive(Clone, Debug)]
+enum SyslogDestination {
+    /// Local `AF_UNIX` socket; `None` path means `/dev/log`.
+    Unix {
+        /// Socket path override (`None` means `/dev/log`).
+        path: Option<String>,
+    },
+    /// Remote UDP datagram target (RFC 5426).
+    Udp {
+        /// Collector `host:port`.
+        address: String,
+    },
+    /// Remote TCP stream target (RFC 6587).
+    Tcp {
+        /// Collector `host:port`.
+        address: String,
+    },
 }
 
 /// Sink config exactly as written in YAML, before validation into
@@ -182,13 +221,30 @@ enum SinkConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSinkConfig {
-    /// Sink kind (`stdout` or `file`).
+    /// Sink kind (`stdout`, `file`, or `syslog` with the `access-log-syslog`
+    /// feature).
     #[serde(rename = "type")]
     kind: SinkKind,
 
-    /// File path; required for `file`, rejected for `stdout`.
+    /// File path; required for `file`, rejected for `stdout`. Doubles as the
+    /// local socket path override for `syslog` + `transport: unix`.
     #[serde(default)]
     path: Option<String>,
+
+    /// Syslog transport. Only valid for `type: syslog`; defaults to `unix`.
+    #[cfg(feature = "access-log-syslog")]
+    #[serde(default)]
+    transport: Option<SyslogTransport>,
+
+    /// Remote `host:port` for `syslog` with `transport: udp`/`tcp`.
+    #[cfg(feature = "access-log-syslog")]
+    #[serde(default)]
+    address: Option<String>,
+
+    /// Syslog facility. Only valid for `type: syslog`; defaults to `user`.
+    #[cfg(feature = "access-log-syslog")]
+    #[serde(default)]
+    facility: Option<SyslogFacility>,
 }
 
 /// Direct output sink kind discriminant.
@@ -199,19 +255,192 @@ enum SinkKind {
     Stdout,
     /// Append NDJSON lines to a file.
     File,
+    /// Send lines as syslog messages.
+    #[cfg(feature = "access-log-syslog")]
+    Syslog,
 }
 
 impl TryFrom<RawSinkConfig> for SinkConfig {
     type Error = String;
 
     fn try_from(raw: RawSinkConfig) -> Result<Self, Self::Error> {
-        match (raw.kind, raw.path) {
-            (SinkKind::Stdout, None) => Ok(Self::Stdout),
-            (SinkKind::Stdout, Some(_)) => Err("access_log: sink type stdout does not accept a path".to_owned()),
-            (SinkKind::File, Some(path)) => Ok(Self::File { path }),
-            (SinkKind::File, None) => Err("access_log: sink type file requires a path".to_owned()),
+        match raw.kind {
+            SinkKind::Stdout => {
+                #[cfg(feature = "access-log-syslog")]
+                raw.reject_syslog_fields("stdout")?;
+                match raw.path {
+                    None => Ok(Self::Stdout),
+                    Some(_) => Err("access_log: sink type stdout does not accept a path".to_owned()),
+                }
+            },
+            SinkKind::File => {
+                #[cfg(feature = "access-log-syslog")]
+                raw.reject_syslog_fields("file")?;
+                match raw.path {
+                    Some(path) => Ok(Self::File { path }),
+                    None => Err("access_log: sink type file requires a path".to_owned()),
+                }
+            },
+            #[cfg(feature = "access-log-syslog")]
+            SinkKind::Syslog => Self::try_syslog(raw),
         }
     }
+}
+
+#[cfg(feature = "access-log-syslog")]
+impl RawSinkConfig {
+    /// Reject the syslog-only keys (`transport`, `address`, `facility`) on a
+    /// non-syslog sink, so a misplaced key is a config error rather than a
+    /// silently ignored one.
+    fn reject_syslog_fields(&self, kind: &str) -> Result<(), String> {
+        if self.transport.is_some() || self.address.is_some() || self.facility.is_some() {
+            return Err(format!(
+                "access_log: sink type {kind} does not accept syslog fields (transport, address, facility)"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "access-log-syslog")]
+impl SinkConfig {
+    /// Resolve a `syslog` sink into a [`SyslogDestination`], rejecting fields the
+    /// chosen transport ignores (`unix` takes a `path`; `udp`/`tcp` take an `address`).
+    fn try_syslog(raw: RawSinkConfig) -> Result<Self, String> {
+        let facility = raw.facility.unwrap_or_default();
+        let target = match raw.transport.unwrap_or_default() {
+            SyslogTransport::Unix => match raw.address {
+                Some(_) => return Err("access_log: sink transport unix does not accept an address".to_owned()),
+                None => SyslogDestination::Unix { path: raw.path },
+            },
+            SyslogTransport::Udp => SyslogDestination::Udp {
+                address: remote_address(raw.path.is_some(), raw.address)?,
+            },
+            SyslogTransport::Tcp => SyslogDestination::Tcp {
+                address: remote_address(raw.path.is_some(), raw.address)?,
+            },
+        };
+        Ok(Self::Syslog { facility, target })
+    }
+}
+
+/// Validate a remote (`udp`/`tcp`) syslog destination: a `host:port` `address`, no `path`.
+#[cfg(feature = "access-log-syslog")]
+fn remote_address(has_path: bool, address: Option<String>) -> Result<String, String> {
+    if has_path {
+        return Err("access_log: sink transport udp/tcp does not accept a path".to_owned());
+    }
+    let address = address.ok_or_else(|| "access_log: sink transport udp/tcp requires an address".to_owned())?;
+    validate_host_port(&address)?;
+    Ok(address)
+}
+
+/// Reject an `address` that is not `host:port` (non-zero port, non-empty host), without DNS.
+#[cfg(feature = "access-log-syslog")]
+fn validate_host_port(address: &str) -> Result<(), String> {
+    let invalid = || format!("access_log: syslog address {address:?} is not host:port");
+    let (host, port) = address.rsplit_once(':').ok_or_else(invalid)?;
+    // A bracketed IPv6 host may contain colons (`[::1]`); an unbracketed host may
+    // not, so `collector:514:123` is rejected rather than read as host `collector:514`.
+    let host_ok = match host.strip_prefix('[').and_then(|inner| inner.strip_suffix(']')) {
+        Some(inner) => !inner.is_empty(),
+        None => !host.is_empty() && !host.contains(':'),
+    };
+    match port.parse::<u16>() {
+        Ok(port) if port != 0 && host_ok => Ok(()),
+        _ => Err(invalid()),
+    }
+}
+
+/// Standard syslog facility codes (RFC 3164 §4.1.1).
+#[cfg(feature = "access-log-syslog")]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum SyslogFacility {
+    /// Kernel messages.
+    Kern,
+    /// User-level messages (default).
+    #[default]
+    User,
+    /// Mail system.
+    Mail,
+    /// System daemons.
+    Daemon,
+    /// Security/authorization messages.
+    Auth,
+    /// Messages generated internally by syslogd.
+    Syslog,
+    /// Line printer subsystem.
+    Lpr,
+    /// Network news subsystem.
+    News,
+    /// UUCP subsystem.
+    Uucp,
+    /// Clock daemon.
+    Cron,
+    /// Security/authorization messages (private).
+    Authpriv,
+    /// FTP daemon.
+    Ftp,
+    /// Local use 0.
+    Local0,
+    /// Local use 1.
+    Local1,
+    /// Local use 2.
+    Local2,
+    /// Local use 3.
+    Local3,
+    /// Local use 4.
+    Local4,
+    /// Local use 5.
+    Local5,
+    /// Local use 6.
+    Local6,
+    /// Local use 7.
+    Local7,
+}
+
+#[cfg(feature = "access-log-syslog")]
+impl SyslogFacility {
+    /// Facility contribution to PRI (`facility * 8`); literals avoid an `as` cast.
+    fn priority_base(self) -> u8 {
+        match self {
+            SyslogFacility::Kern => 0,      //     0 * 8
+            SyslogFacility::User => 8,      //     1 * 8
+            SyslogFacility::Mail => 16,     //     2 * 8
+            SyslogFacility::Daemon => 24,   //     3 * 8
+            SyslogFacility::Auth => 32,     //     4 * 8
+            SyslogFacility::Syslog => 40,   //     5 * 8
+            SyslogFacility::Lpr => 48,      //     6 * 8
+            SyslogFacility::News => 56,     //     7 * 8
+            SyslogFacility::Uucp => 64,     //     8 * 8
+            SyslogFacility::Cron => 72,     //     9 * 8
+            SyslogFacility::Authpriv => 80, //    10 * 8
+            SyslogFacility::Ftp => 88,      //    11 * 8
+            SyslogFacility::Local0 => 128,  //    16 * 8
+            SyslogFacility::Local1 => 136,  //    17 * 8
+            SyslogFacility::Local2 => 144,  //    18 * 8
+            SyslogFacility::Local3 => 152,  //    19 * 8
+            SyslogFacility::Local4 => 160,  //    20 * 8
+            SyslogFacility::Local5 => 168,  //    21 * 8
+            SyslogFacility::Local6 => 176,  //    22 * 8
+            SyslogFacility::Local7 => 184,  //    23 * 8
+        }
+    }
+}
+
+/// Syslog transport carrier.
+#[cfg(feature = "access-log-syslog")]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum SyslogTransport {
+    /// Local `AF_UNIX` socket (default `/dev/log`).
+    #[default]
+    Unix,
+    /// Remote UDP datagram (RFC 5426).
+    Udp,
+    /// Remote TCP stream (RFC 6587).
+    Tcp,
 }
 
 /// Emit-time access log conditions.
@@ -351,6 +580,11 @@ const SINK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Poll interval while waiting for a writer to finish during shutdown.
 const SINK_JOIN_POLL: Duration = Duration::from_millis(5);
 
+/// Connect/write timeout for the TCP and Unix syslog transports, so a stalled
+/// collector cannot block the writer thread (and its bounded queue) indefinitely.
+#[cfg(feature = "access-log-syslog")]
+const SYSLOG_IO_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Set once at process shutdown so idle writers flush and exit even when their
 /// sender never drops (the stdout singleton), making their handles joinable.
 static SINK_SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -421,6 +655,17 @@ impl WriteWarnThrottle {
     /// Warn about a write/flush failure unless one was already logged this
     /// second.
     fn warn(&mut self, dest: &str, err: &std::io::Error) {
+        let now = unix_secs();
+        if now != self.last_secs {
+            self.last_secs = now;
+            tracing::warn!(sink = %dest, error = %err, "access_log sink write failed");
+        }
+    }
+
+    /// Warn about a sink failure carrying a non-`io::Error` cause (e.g. a syslog
+    /// connect error), throttled identically to [`WriteWarnThrottle::warn`].
+    #[cfg(feature = "access-log-syslog")]
+    fn warn_display(&mut self, dest: &str, err: &dyn std::fmt::Display) {
         let now = unix_secs();
         if now != self.last_secs {
             self.last_secs = now;
@@ -593,6 +838,382 @@ fn file_sink(path: &str) -> Result<Arc<DirectSink>, FilterError> {
     guard.insert(key, Arc::downgrade(&sink));
     drop(guard);
     Ok(sink)
+}
+
+// -----------------------------------------------------------------------------
+// Syslog sink
+// -----------------------------------------------------------------------------
+
+/// RFC 3164 formatter for the `syslog` `Logger`, replacing `Formatter3164`: unlike
+/// the crate it renders the header in local time (via `chrono::Local`, which reads
+/// the zone soundly where the crate forces UTC) and wraps each TCP record in RFC
+/// 6587 octet-counted framing (`LEN SP MSG`) so a collector can split records.
+#[cfg(feature = "access-log-syslog")]
+#[derive(Clone, Debug)]
+struct Rfc3164Formatter {
+    /// Facility contribution to PRI (`facility * 8`); see [`SyslogFacility`].
+    priority_base: u8,
+    /// Local host name for remote (`udp`/`tcp`) targets; `None` on `unix`.
+    hostname: Option<String>,
+    /// Syslog TAG process name (always `praxis`).
+    process: String,
+    /// Process id recorded in the TAG.
+    pid: u32,
+    /// Wrap each record in RFC 6587 octet-counted framing (TCP only).
+    octet_framed: bool,
+}
+
+/// Render the RFC 3164 timestamp (`Mmm _d HH:MM:SS`) for `now` in its own zone.
+#[cfg(feature = "access-log-syslog")]
+fn rfc3164_timestamp<Tz: chrono::TimeZone<Offset: std::fmt::Display>>(now: &DateTime<Tz>) -> String {
+    now.format("%b %e %H:%M:%S").to_string()
+}
+
+/// RFC 3164 §4.1 caps a complete syslog message (header included) at 1024 bytes;
+/// a receiver may truncate or discard anything longer.
+#[cfg(feature = "access-log-syslog")]
+const RFC3164_MAX_BYTES: usize = 1024;
+
+/// Truncate `record` in place to at most [`RFC3164_MAX_BYTES`], on a UTF-8 char
+/// boundary so the emitted message stays valid and within the RFC 3164 §4.1 limit.
+#[cfg(feature = "access-log-syslog")]
+fn cap_rfc3164(record: &mut String) {
+    if record.len() <= RFC3164_MAX_BYTES {
+        return;
+    }
+    let mut end = RFC3164_MAX_BYTES;
+    while end > 0 && !record.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    record.truncate(end);
+}
+
+#[cfg(feature = "access-log-syslog")]
+impl<T: std::fmt::Display> LogFormat<T> for Rfc3164Formatter {
+    fn format<W: std::io::Write>(&self, w: &mut W, _severity: Severity, message: T) -> syslog::Result<()> {
+        // The access_log sink emits every record at info, so PRI is facility | 6.
+        let pri = self.priority_base.saturating_add(6); // 6 = info
+        let timestamp = rfc3164_timestamp(&Local::now());
+        let host = self
+            .hostname
+            .as_deref()
+            .map_or_else(String::new, |name| format!("{name} "));
+        let mut record = format!("<{pri}>{timestamp} {host}{}[{}]: {message}", self.process, self.pid);
+        cap_rfc3164(&mut record);
+        if self.octet_framed {
+            write!(w, "{} {record}", record.len())?;
+        } else {
+            write!(w, "{record}")?;
+        }
+        Ok(())
+    }
+}
+
+/// Everything the writer needs to (re)build its `Logger`: the crate's `Logger` has
+/// no reconnect method, so the writer rebuilds it from this after a write error.
+#[cfg(feature = "access-log-syslog")]
+struct SyslogTarget {
+    /// Resolved transport destination for the connection.
+    destination: SyslogDestination,
+    /// Message formatter carrying the facility and process identity.
+    formatter: Rfc3164Formatter,
+    /// Destination label for diagnostics.
+    dest: Arc<str>,
+}
+
+/// Build a syslog [`DirectSink`]: assemble the formatter, then spawn the writer
+/// thread and keep its bounded-queue sender. A remote (`udp`/`tcp`) target fills in
+/// the local host name for the RFC 3164 HEADER; `unix` leaves the daemon to stamp it.
+#[cfg(feature = "access-log-syslog")]
+fn syslog_sink(facility: SyslogFacility, destination: SyslogDestination) -> Result<Arc<DirectSink>, FilterError> {
+    let dest: Arc<str> = Arc::from(syslog_dest(&destination));
+    let hostname = match destination {
+        SyslogDestination::Unix { .. } => None,
+        // Borrow the crate's host-name detection for the remote HEADER.
+        SyslogDestination::Udp { .. } | SyslogDestination::Tcp { .. } => Formatter3164::default().hostname,
+    };
+    let formatter = Rfc3164Formatter {
+        priority_base: facility.priority_base(),
+        hostname,
+        process: "praxis".to_owned(),
+        pid: std::process::id(),
+        // RFC 6587 octet framing delimits records on a TCP stream; datagram
+        // transports (udp, unix) carry one record per message already.
+        octet_framed: matches!(destination, SyslogDestination::Tcp { .. }),
+    };
+    let target = SyslogTarget {
+        destination,
+        formatter,
+        dest: Arc::clone(&dest),
+    };
+    let (tx, rx) = sync_channel(SINK_QUEUE_CAPACITY);
+    spawn_syslog_writer(rx, target).map_err(|e| format!("access_log: cannot start syslog sink writer: {e}"))?;
+    Ok(Arc::new(DirectSink::new(tx, dest)))
+}
+
+/// Human-readable destination label for diagnostics.
+#[cfg(feature = "access-log-syslog")]
+fn syslog_dest(destination: &SyslogDestination) -> String {
+    match destination {
+        SyslogDestination::Unix { path } => format!("syslog:unix:{}", path.as_deref().unwrap_or("/dev/log")),
+        SyslogDestination::Udp { address } => format!("syslog:udp:{address}"),
+        SyslogDestination::Tcp { address } => format!("syslog:tcp:{address}"),
+    }
+}
+
+/// Spawn the syslog writer thread and register its handle for shutdown.
+#[cfg(feature = "access-log-syslog")]
+fn spawn_syslog_writer(rx: Receiver<String>, target: SyslogTarget) -> std::io::Result<()> {
+    let handle = std::thread::Builder::new()
+        .name("access-log-syslog".to_owned())
+        .spawn(move || run_syslog_writer(&rx, &target, &SINK_SHUTDOWN))?;
+    register_sink_writer(handle);
+    Ok(())
+}
+
+/// Drain the queue into the syslog `Logger`, owning its connection lifecycle and
+/// honouring [`SINK_SHUTDOWN`] so an idle writer still exits at shutdown.
+#[cfg(feature = "access-log-syslog")]
+fn run_syslog_writer(rx: &Receiver<String>, target: &SyslogTarget, shutdown: &AtomicBool) {
+    let mut state = SyslogWriterState::default();
+    loop {
+        match rx.recv_timeout(SINK_POLL_INTERVAL) {
+            Ok(line) => state.emit(target, &line),
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) if shutdown.load(Ordering::Acquire) => break,
+            Err(RecvTimeoutError::Timeout) => {},
+        }
+    }
+    while let Ok(line) = rx.try_recv() {
+        state.emit(target, &line);
+    }
+}
+
+/// After a failed (re)connection the writer suppresses reconnects for this long,
+/// dropping records meanwhile. Every connect attempt may spawn a `syslog-io` helper
+/// thread (for a Unix connect or DNS resolution) that a hung syscall can leave
+/// blocked, so bounding the reconnect rate bounds how fast those helpers can pile up
+/// during a sustained outage.
+#[cfg(feature = "access-log-syslog")]
+const SYSLOG_RECONNECT_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// State the syslog writer carries across records: the lazily-built `Logger`, the
+/// failure-warning throttle, and the post-failure reconnect-cooldown deadline.
+#[cfg(feature = "access-log-syslog")]
+#[derive(Default)]
+struct SyslogWriterState {
+    /// Active logger, or `None` before the first record and after a failure.
+    logger: Option<Logger<LoggerBackend, Rfc3164Formatter>>,
+    /// Rate-limits connect/write failure warnings.
+    throttle: WriteWarnThrottle,
+    /// When set, reconnect attempts are suppressed until this instant.
+    cooldown_until: Option<Instant>,
+}
+
+#[cfg(feature = "access-log-syslog")]
+impl SyslogWriterState {
+    /// Emit one line, lazily (re)connecting the `Logger`. A failed connect *or* send
+    /// starts a cooldown during which records are dropped, so a stalled peer or
+    /// resolver cannot make every queued record block for the I/O timeout or spawn
+    /// another blocked helper thread.
+    fn emit(&mut self, target: &SyslogTarget, line: &str) {
+        if self.logger.is_none() {
+            if self.in_cooldown() {
+                return;
+            }
+            match connect_logger(target) {
+                Ok(active) => {
+                    self.logger = Some(active);
+                    self.cooldown_until = None;
+                },
+                Err(e) => {
+                    self.throttle.warn_display(&target.dest, &e);
+                    self.start_cooldown();
+                    return;
+                },
+            }
+        }
+        if let Some(active) = self.logger.as_mut()
+            && let Err(e) = active.info(line)
+        {
+            self.throttle.warn_display(&target.dest, &e);
+            // A send failure forces a reconnect on the next record; cool down too so a
+            // collector that stalls after connecting cannot loop one timed-out write
+            // (and reconnect) per record.
+            self.logger = None;
+            self.start_cooldown();
+        }
+    }
+
+    /// Begin the post-failure reconnect cooldown from now.
+    fn start_cooldown(&mut self) {
+        self.cooldown_until = Instant::now().checked_add(SYSLOG_RECONNECT_COOLDOWN);
+    }
+
+    /// Whether the post-failure reconnect cooldown is still in effect.
+    fn in_cooldown(&self) -> bool {
+        self.cooldown_until.is_some_and(|until| Instant::now() < until)
+    }
+}
+
+/// (Re)connect the `syslog` crate `Logger` for the target's destination.
+#[cfg(feature = "access-log-syslog")]
+fn connect_logger(target: &SyslogTarget) -> syslog::Result<Logger<LoggerBackend, Rfc3164Formatter>> {
+    let formatter = target.formatter.clone();
+    match &target.destination {
+        SyslogDestination::Unix { path } => connect_unix(formatter, path.as_deref(), SYSLOG_IO_TIMEOUT),
+        SyslogDestination::Udp { address } => connect_udp(formatter, address, SYSLOG_IO_TIMEOUT),
+        SyslogDestination::Tcp { address } => connect_tcp(formatter, address, SYSLOG_IO_TIMEOUT),
+    }
+}
+
+/// Run a blocking I/O op on a short-lived thread, returning its result or a
+/// `TimedOut` error if it does not finish within `timeout`. Bounds operations std
+/// offers no timeout for (unix stream connect, DNS resolution) so a stalled peer or
+/// resolver cannot block the writer thread (and thus its bounded queue) forever.
+#[cfg(feature = "access-log-syslog")]
+fn with_timeout<T, F>(timeout: Duration, op: F) -> std::io::Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> std::io::Result<T> + Send + 'static,
+{
+    let (tx, rx) = sync_channel(1);
+    std::thread::Builder::new()
+        .name("syslog-io".to_owned())
+        .spawn(move || {
+            drop(tx.send(op()));
+        })?;
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "syslog io timed out")),
+    }
+}
+
+/// Resolve `address` to socket addresses within `timeout`, so a stalled resolver
+/// cannot block the writer thread before the connect timeout even begins.
+#[cfg(feature = "access-log-syslog")]
+fn resolve_addrs(address: &str, timeout: Duration) -> std::io::Result<Vec<SocketAddr>> {
+    let owned = address.to_owned();
+    with_timeout(timeout, move || Ok(owned.to_socket_addrs()?.collect()))
+}
+
+/// Connect a Unix syslog logger with bounded connect and write timeouts (the crate's
+/// helpers set none), trying a datagram socket first (the usual `/dev/log` shape) and
+/// falling through to a `SOCK_STREAM` collector only when the datagram connect fails
+/// with the socket-type mismatch, so a missing socket or denied permission surfaces as
+/// itself rather than a masked stream-connect error.
+#[cfg(feature = "access-log-syslog")]
+fn connect_unix(
+    formatter: Rfc3164Formatter,
+    path: Option<&str>,
+    timeout: Duration,
+) -> syslog::Result<Logger<LoggerBackend, Rfc3164Formatter>> {
+    let path = path.unwrap_or("/dev/log");
+    match unix_datagram(path, timeout) {
+        Ok(socket) => Ok(Logger::new(LoggerBackend::Unix(socket), formatter)),
+        Err(e) if is_wrong_socket_type(&e) => connect_unix_stream_logger(formatter, path, timeout),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Build a stream-backed Unix syslog logger for a `SOCK_STREAM` collector, bounding
+/// both the connect and subsequent writes by `timeout`.
+#[cfg(feature = "access-log-syslog")]
+fn connect_unix_stream_logger(
+    formatter: Rfc3164Formatter,
+    path: &str,
+    timeout: Duration,
+) -> syslog::Result<Logger<LoggerBackend, Rfc3164Formatter>> {
+    let stream = connect_unix_stream(path, timeout)?;
+    stream.set_write_timeout(Some(timeout))?;
+    Ok(Logger::new(
+        LoggerBackend::UnixStream(BufWriter::new(stream)),
+        formatter,
+    ))
+}
+
+/// Raw `EPROTOTYPE` errno: a datagram connect to a `SOCK_STREAM` endpoint reports it
+/// (Linux `91`). The lone datagram error that warrants the stream fallback.
+#[cfg(all(feature = "access-log-syslog", target_os = "linux"))]
+const EPROTOTYPE_ERRNO: i32 = 91;
+/// Raw `EPROTOTYPE` errno on BSD/macOS targets (`41`).
+#[cfg(all(feature = "access-log-syslog", not(target_os = "linux")))]
+const EPROTOTYPE_ERRNO: i32 = 41;
+
+/// Whether a Unix datagram connect error means the endpoint is a `SOCK_STREAM` socket
+/// (retry it as a stream) rather than a real failure such as a missing socket or
+/// denied permission. `EPROTOTYPE` has no std `ErrorKind`, so match its raw errno;
+/// `InvalidInput` covers the same mismatch surfaced as a kind.
+#[cfg(feature = "access-log-syslog")]
+fn is_wrong_socket_type(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::InvalidInput || err.raw_os_error() == Some(EPROTOTYPE_ERRNO)
+}
+
+/// Connect a Unix stream within `timeout` so a full listen backlog cannot block the
+/// writer; std has no bounded `UnixStream::connect`, so it runs via [`with_timeout`].
+#[cfg(feature = "access-log-syslog")]
+fn connect_unix_stream(path: &str, timeout: Duration) -> std::io::Result<UnixStream> {
+    let owned = path.to_owned();
+    with_timeout(timeout, move || UnixStream::connect(owned))
+}
+
+/// Bind an unbound `AF_UNIX` datagram socket with a write timeout and connect it
+/// to `path`, so `send` on a full collector buffer times out instead of blocking.
+#[cfg(feature = "access-log-syslog")]
+fn unix_datagram(path: &str, write_timeout: Duration) -> std::io::Result<UnixDatagram> {
+    let socket = UnixDatagram::unbound()?;
+    socket.set_write_timeout(Some(write_timeout))?;
+    socket.connect(path)?;
+    Ok(socket)
+}
+
+/// Connect a UDP syslog logger, resolving the collector within `timeout` and binding
+/// the local socket in its address family so an IPv6 target (e.g. `[::1]:514`) works.
+#[cfg(feature = "access-log-syslog")]
+fn connect_udp(
+    formatter: Rfc3164Formatter,
+    address: &str,
+    timeout: Duration,
+) -> syslog::Result<Logger<LoggerBackend, Rfc3164Formatter>> {
+    let server = resolve_addrs(address, timeout)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "syslog udp address did not resolve"))?;
+    // Resolved SocketAddr for both local and server keeps the crate's bind DNS-free.
+    let local: SocketAddr = if server.is_ipv6() {
+        ([0_u8; 16], 0).into()
+    } else {
+        ([0_u8; 4], 0).into()
+    };
+    syslog::udp(formatter, local, server)
+}
+
+/// Connect a TCP syslog logger with bounded connect and write timeouts so a stalled
+/// collector cannot block the writer. `Logger::info` flushes the backend per message.
+#[cfg(feature = "access-log-syslog")]
+fn connect_tcp(
+    formatter: Rfc3164Formatter,
+    address: &str,
+    timeout: Duration,
+) -> syslog::Result<Logger<LoggerBackend, Rfc3164Formatter>> {
+    let stream = dial_tcp(address, timeout)?;
+    stream.set_write_timeout(Some(timeout))?;
+    Ok(Logger::new(LoggerBackend::Tcp(BufWriter::new(stream)), formatter))
+}
+
+/// Dial the first reachable address `address` resolves to, bounding both resolution
+/// and each connect by `timeout`. `connect_timeout` takes one `SocketAddr`, so we
+/// iterate the resolved set ourselves and surface the last error if none work.
+#[cfg(feature = "access-log-syslog")]
+fn dial_tcp(address: &str, timeout: Duration) -> std::io::Result<std::net::TcpStream> {
+    let mut last_err = std::io::Error::new(std::io::ErrorKind::NotFound, "syslog tcp address did not resolve");
+    for addr in resolve_addrs(address, timeout)? {
+        match std::net::TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(e) => last_err = e,
+        }
+    }
+    Err(last_err)
 }
 
 /// Cached response metadata for emit on the body phase.
@@ -1541,6 +2162,8 @@ fn build_runtime_sink(sink_cfg: Option<SinkConfig>) -> Result<RuntimeSink, Filte
         None => Ok(RuntimeSink::Tracing),
         Some(SinkConfig::Stdout) => Ok(RuntimeSink::Direct(stdout_sink()?)),
         Some(SinkConfig::File { path }) => Ok(RuntimeSink::Direct(file_sink(&path)?)),
+        #[cfg(feature = "access-log-syslog")]
+        Some(SinkConfig::Syslog { facility, target }) => Ok(RuntimeSink::Direct(syslog_sink(facility, target)?)),
     }
 }
 
@@ -2327,6 +2950,7 @@ conditions:
         ctx.upstream = Some(Upstream {
             address: Arc::from("10.0.0.2:8080"),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         });
@@ -2879,6 +3503,338 @@ response_headers: [content-type]
             .err()
             .expect("file sink without a path should fail");
         assert!(err.to_string().contains("requires a path"), "got: {err}");
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn from_config_rejects_syslog_udp_without_address() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("sink:\n  type: syslog\n  transport: udp").unwrap();
+        let err = AccessLogFilter::from_config(&yaml)
+            .err()
+            .expect("syslog udp without an address should fail");
+        assert!(err.to_string().contains("requires an address"), "got: {err}");
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn from_config_rejects_syslog_tcp_without_address() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("sink:\n  type: syslog\n  transport: tcp").unwrap();
+        let err = AccessLogFilter::from_config(&yaml)
+            .err()
+            .expect("syslog tcp without an address should fail");
+        assert!(err.to_string().contains("requires an address"), "got: {err}");
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn from_config_rejects_syslog_unix_with_address() {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str("sink:\n  type: syslog\n  transport: unix\n  address: 127.0.0.1:514").unwrap();
+        let err = AccessLogFilter::from_config(&yaml)
+            .err()
+            .expect("syslog unix with an address should fail");
+        assert!(err.to_string().contains("does not accept an address"), "got: {err}");
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn from_config_rejects_syslog_udp_with_path() {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str("sink:\n  type: syslog\n  transport: udp\n  address: 127.0.0.1:514\n  path: /dev/log")
+                .unwrap();
+        let err = AccessLogFilter::from_config(&yaml)
+            .err()
+            .expect("syslog udp with a path should fail");
+        assert!(err.to_string().contains("does not accept a path"), "got: {err}");
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn from_config_rejects_syslog_fields_on_stdout() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("sink:\n  type: stdout\n  facility: local0").unwrap();
+        let err = AccessLogFilter::from_config(&yaml)
+            .err()
+            .expect("stdout sink with a syslog field should fail");
+        assert!(err.to_string().contains("does not accept syslog fields"), "got: {err}");
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn from_config_rejects_syslog_fields_on_file() {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str("sink:\n  type: file\n  path: /tmp/x.log\n  transport: tcp").unwrap();
+        let err = AccessLogFilter::from_config(&yaml)
+            .err()
+            .expect("file sink with a syslog field should fail");
+        assert!(err.to_string().contains("does not accept syslog fields"), "got: {err}");
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn syslog_unix_sink_delivers_rendered_line() {
+        // Bind a datagram receiver first so the writer thread's lazy connect
+        // succeeds, then drive the emit path and confirm the framed line lands.
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("syslog.sock");
+        let receiver = UnixDatagram::bind(&sock_path).unwrap();
+        receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+            "template: '{{method}} {{path}} {{status}}'\nsink:\n  type: syslog\n  transport: unix\n  path: {}\n  facility: local0",
+            sock_path.to_str().unwrap()
+        ))
+        .unwrap();
+        let filter = test_filter(&yaml);
+
+        let req = crate::test_utils::make_request(http::Method::GET, "/health");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        filter.emit_access_log(&ctx, 200, None, 7);
+
+        let mut buf = [0_u8; 2048];
+        let n = receiver.recv(&mut buf).unwrap();
+        assert_rfc3164(&String::from_utf8_lossy(&buf[..n]), false);
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    fn assert_rfc3164(line: &str, expect_hostname: bool) {
+        assert!(line.starts_with("<134>"), "PRI for local0.info must be <134>: {line:?}");
+        let tag = format!("praxis[{}]: GET /health 200", std::process::id());
+        assert!(line.ends_with(&tag), "line must end with TAG[PID]: MSG: {line:?}");
+        let header = line.split(" praxis[").next().unwrap_or_default();
+        let fields = header.split_whitespace().count();
+        if expect_hostname {
+            assert_eq!(fields, 4, "remote HEADER must carry PRI+timestamp+hostname: {header:?}");
+        } else {
+            assert_eq!(fields, 3, "unix HEADER must omit the hostname: {header:?}");
+        }
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn syslog_udp_sink_emits_rfc3164_with_hostname() {
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let address = receiver.local_addr().unwrap().to_string();
+
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+            "template: '{{method}} {{path}} {{status}}'\nsink:\n  type: syslog\n  transport: udp\n  address: {address}\n  facility: local0"
+        )).unwrap();
+        let filter = test_filter(&yaml);
+        let req = crate::test_utils::make_request(http::Method::GET, "/health");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        filter.emit_access_log(&ctx, 200, None, 7);
+
+        let mut buf = [0_u8; 2048];
+        let n = receiver.recv(&mut buf).unwrap();
+        assert_rfc3164(&String::from_utf8_lossy(&buf[..n]), true);
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn syslog_tcp_sink_emits_rfc3164_with_octet_framing() {
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+            "template: '{{method}} {{path}} {{status}}'\nsink:\n  type: syslog\n  transport: tcp\n  address: {address}\n  facility: local0"
+        )).unwrap();
+        let filter = test_filter(&yaml);
+        let req = crate::test_utils::make_request(http::Method::GET, "/health");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        // Two records back-to-back exercise RFC 6587 octet framing as the record
+        // delimiter on the stream (the crate writes none).
+        filter.emit_access_log(&ctx, 200, None, 7);
+        filter.emit_access_log(&ctx, 200, None, 7);
+
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut buf = Vec::new();
+        let mut chunk = [0_u8; 2048];
+        let records = loop {
+            let n = stream.read(&mut chunk).unwrap();
+            assert!(n > 0, "collector closed before both frames arrived");
+            buf.extend_from_slice(&chunk[..n]);
+            let records = parse_octet_frames(&buf);
+            if records.len() >= 2 {
+                break records;
+            }
+        };
+        assert_eq!(records.len(), 2, "two records must be framed separately");
+        for record in &records {
+            assert_rfc3164(record, true);
+        }
+    }
+
+    /// Decode RFC 6587 octet-counted frames (`MSG-LEN SP MSG`) from a byte buffer,
+    /// returning the messages and ignoring any trailing partial frame.
+    #[cfg(feature = "access-log-syslog")]
+    fn parse_octet_frames(buf: &[u8]) -> Vec<String> {
+        let mut records = Vec::new();
+        let mut rest = buf;
+        while let Some(sp) = rest.iter().position(|&byte| byte == b' ') {
+            let (len_bytes, after) = rest.split_at(sp);
+            let Ok(len) = std::str::from_utf8(len_bytes).unwrap_or_default().parse::<usize>() else {
+                break;
+            };
+            match after.get(1..=len) {
+                Some(msg) => {
+                    records.push(String::from_utf8_lossy(msg).into_owned());
+                    rest = after.get(len.saturating_add(1)..).unwrap_or_default();
+                },
+                None => break,
+            }
+        }
+        records
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn remote_address_rejects_malformed_host_port() {
+        for bad in [
+            "collector",
+            "collector:",
+            "collector:0",
+            "collector:70000",
+            "collector:abc",
+            ":514",
+            "collector:514:123",
+        ] {
+            assert!(
+                remote_address(false, Some(bad.to_owned())).is_err(),
+                "address {bad:?} must be rejected at config time"
+            );
+        }
+        for good in ["collector:514", "127.0.0.1:514", "[::1]:514"] {
+            assert!(
+                remote_address(false, Some(good.to_owned())).is_ok(),
+                "address {good:?} must be accepted"
+            );
+        }
+    }
+
+    /// A formatter standing in for a real sink in connection-level tests.
+    #[cfg(feature = "access-log-syslog")]
+    fn test_formatter() -> Rfc3164Formatter {
+        Rfc3164Formatter {
+            priority_base: SyslogFacility::Local0.priority_base(),
+            hostname: None,
+            process: "praxis".to_owned(),
+            pid: std::process::id(),
+            octet_framed: false,
+        }
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn rfc3164_timestamp_renders_wall_clock_in_its_own_offset() {
+        // 12:00:00Z at UTC-04:00 is 08:00:00 local; the HEADER must carry local
+        // wall-clock time, not UTC (the crate's formatter would emit 12:00:00).
+        use chrono::{FixedOffset, TimeZone as _};
+        let offset = FixedOffset::west_opt(4 * 3600).unwrap();
+        let instant = offset.with_ymd_and_hms(2026, 1, 2, 8, 0, 0).unwrap();
+        assert_eq!(rfc3164_timestamp(&instant), "Jan  2 08:00:00");
+        // The same instant one zone east renders a different wall clock.
+        let east = FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(rfc3164_timestamp(&instant.with_timezone(&east)), "Jan  2 14:00:00");
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn syslog_unix_write_times_out_when_collector_stalls() {
+        use std::time::Instant;
+        // A Unix stream collector that never drains must not block the writer
+        // forever: the bounded write timeout surfaces an error instead. The
+        // listener is bound but never accepts, so the connected socket's send
+        // buffer fills and the next write blocks until it times out.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("stall.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+
+        let mut logger =
+            connect_unix(test_formatter(), path.to_str(), Duration::from_millis(200)).expect("connect to collector");
+        let payload = "x".repeat(8192);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut timed_out = false;
+        while Instant::now() < deadline {
+            if logger.info(&payload).is_err() {
+                timed_out = true;
+                break;
+            }
+        }
+        assert!(
+            timed_out,
+            "a stalled unix collector must not block the writer indefinitely"
+        );
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn rfc3164_message_is_capped_at_1024_bytes() {
+        // RFC 3164 §4.1 limits a complete message to 1024 bytes; an overlong rendered
+        // line must be truncated on the wire rather than sent in full.
+        let formatter = test_formatter();
+        let mut out = Vec::new();
+        <Rfc3164Formatter as LogFormat<String>>::format(&formatter, &mut out, Severity::LOG_INFO, "a".repeat(4096))
+            .unwrap();
+        assert!(
+            out.len() <= RFC3164_MAX_BYTES,
+            "RFC 3164 §4.1 caps the message at {RFC3164_MAX_BYTES} bytes, got {}",
+            out.len()
+        );
+        assert!(std::str::from_utf8(&out).is_ok(), "truncation must keep valid UTF-8");
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "test stalls an op with thread::sleep")]
+    fn with_timeout_bounds_a_stalled_operation() {
+        // A completed op returns its value; an op that outlasts the timeout surfaces a
+        // TimedOut error instead of blocking, which is how unix connect and DNS stay
+        // bounded on the writer thread.
+        let quick: std::io::Result<u8> = with_timeout(Duration::from_secs(5), || Ok(7));
+        assert_eq!(quick.unwrap(), 7);
+        let slow: std::io::Result<u8> = with_timeout(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_secs(5));
+            Ok(0)
+        });
+        assert_eq!(slow.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn syslog_writer_backs_off_after_a_failed_connect() {
+        // A failed (re)connection must start a cooldown so the writer stops retrying
+        // (and stops spawning helper threads) on every subsequent record until it
+        // expires. A missing socket path fails the connect quickly.
+        let target = SyslogTarget {
+            destination: SyslogDestination::Unix {
+                path: Some("/nonexistent/praxis-syslog-test.sock".to_owned()),
+            },
+            formatter: test_formatter(),
+            dest: Arc::from("syslog:unix:/nonexistent/praxis-syslog-test.sock"),
+        };
+        let mut state = SyslogWriterState::default();
+        assert!(!state.in_cooldown(), "no cooldown before the first attempt");
+        state.emit(&target, "first");
+        assert!(state.logger.is_none(), "a missing socket must not yield a logger");
+        assert!(
+            state.in_cooldown(),
+            "a failed connect must start the reconnect cooldown"
+        );
+    }
+
+    #[cfg(feature = "access-log-syslog")]
+    #[test]
+    fn stream_fallback_only_on_socket_type_mismatch() {
+        use std::io::{Error, ErrorKind};
+        // A missing socket or denied permission is a real datagram failure: surface it
+        // rather than masking it with a stream-connect fallback.
+        assert!(!is_wrong_socket_type(&Error::from(ErrorKind::NotFound)));
+        assert!(!is_wrong_socket_type(&Error::from(ErrorKind::PermissionDenied)));
+        // InvalidInput and raw EPROTOTYPE both mean the endpoint is a stream socket.
+        assert!(is_wrong_socket_type(&Error::from(ErrorKind::InvalidInput)));
+        assert!(is_wrong_socket_type(&Error::from_raw_os_error(EPROTOTYPE_ERRNO)));
     }
 
     #[test]

@@ -969,7 +969,11 @@ impl FilteredSubrequestExecutor {
             }
             let request = SubRequest {
                 method: current_request.method.clone(),
-                uri: subrequest_uri(filter_ctx.rewritten_path.as_ref(), &current_request.uri)?,
+                uri: subrequest_uri(
+                    filter_ctx.rewritten_path.as_ref(),
+                    &current_request.uri,
+                    upstream.base_path.as_deref(),
+                )?,
                 headers: sub_headers,
                 body: request_body.unwrap_or_default(),
             };

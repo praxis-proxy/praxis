@@ -25,7 +25,7 @@ use ppe::praxis_policy_core::{
     },
     engine::PolicyEngine,
     error::{PluginError, PluginViolation},
-    extensions::{LLMExtension, MetaExtension},
+    extensions::{LLMExtension, LlmRequestDocument, MetaExtension},
     hooks::Extensions,
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
@@ -120,6 +120,60 @@ enum GatedIdentity {
 /// through `cmf.llm_input`, without classifier metadata. Missing,
 /// unlisted, and ambiguous models fail closed by default.
 ///
+/// OPA, CEL, and Cedar `pre_invocation` steps on `llm:` routes also read the
+/// parsed request body as `llm.request` (`input.llm.request` in OPA, `context.llm.request`
+/// in Cedar), so a rule can inspect `tools`, `messages`, or `input`. Only a
+/// request attributed to a model carries it: a JSON body with a usable
+/// top-level `model`, no JSON-RPC envelope, and no `mcp.method` metadata.
+/// Other requests carry none. CEL and Cedar deny when a rule reads it, and
+/// so does an OPA boolean or object decision, but an OPA deny set needs its
+/// own guard. On allow the upstream receives the original bytes. A body
+/// over `llm.max_request_bytes` receives HTTP 413 before any authorization
+/// rule runs. Policy judges the body as it reaches this filter, so order
+/// body-rewriting filters before `policy`.
+/// For rule syntax, engine types, and absent-value behavior, see
+/// [Structured request input] in the policy engine docs.
+///
+/// PPE 0.4.1 changes OPA and CEL `args` on `tool:` routes to native JSON.
+/// Before upgrading, review rules that read `args`: for example, a numeric
+/// ID in `args.ids` must be compared with `13`, not `"13"`. A schema-backed
+/// `cedar-direct` PDP must set `structured_context: true` or the policy
+/// fails to load. Its schema must also declare the optional `args` and `llm`
+/// context fields its actions can receive, or those requests are denied.
+/// See the [PPE 0.4.1 changelog] and
+/// [args migration guidance].
+///
+/// The configured policy receives the full parsed inference request. Treat
+/// policy documents and custom plugins as trusted: a rule or an explicit
+/// outbound call can disclose fields it reads. Review policy authorship and
+/// outbound endpoints before enabling structured request input.
+///
+/// On a policy with `llm:` routes, any request body without `mcp.method`
+/// metadata that repeats a key within one JSON object, at any depth,
+/// including keys that differ only in case,
+/// receives HTTP 400 with violation code `llm.duplicate_key` before any
+/// authorization rule runs, since backends disagree on which copy wins.
+/// This covers bodies with no `model` and unclaimed JSON-RPC envelopes too.
+/// The response names neither the key nor any value. A body that is not
+/// valid JSON is not refused for being malformed: it carries no usable
+/// `model`, so it is handled like any other body without one.
+///
+/// A lone differently cased field such as `Tools` is not a duplicate.
+/// `llm.request` keeps the wire spelling, so a rule checking only `tools`
+/// will not see `Tools`. If an upstream accepts such aliases, cover them
+/// explicitly in policy or require canonical field spelling at its boundary.
+///
+/// The CMF prompt text that APL steps and scanners read is projected from
+/// `system`, Responses `instructions`, `messages[].content`, legacy
+/// `prompt`, and `input`. For Responses and embeddings `input`, only text
+/// counts: a string, string items, and `input_text`, `text`,
+/// `output_text`, `reasoning_text`, or `summary_text` parts. Message items
+/// contribute their `content`. Every other item type, including tool calls,
+/// tool outputs, and reasoning, contributes its `arguments`, `input`,
+/// `output`, `text`, `content`, and `summary`. File search result `text`, code
+/// interpreter `code` and output `logs`, and listed MCP tool `description`
+/// are also projected. Token-ID arrays, images, and files are skipped.
+///
 /// `body_access: read_write` enables the JSON-RPC re-serialization
 /// round-trip so APL field mutators (`redact()`, `assign()`) rewrite
 /// the upstream request body and the downstream response. It also enables
@@ -160,6 +214,10 @@ enum GatedIdentity {
 /// An endpoint URL may name an IP address over `http`, but not over
 /// `https`: an IP carries no SNI, and Pingora peers skip certificate
 /// verification entirely when SNI is empty. Use a hostname for `https`.
+///
+/// [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
+/// [PPE 0.4.1 changelog]: https://github.com/praxis-proxy/policy/blob/v0.4.1/CHANGELOG.md#041---2026-10-05
+/// [args migration guidance]: https://github.com/praxis-proxy/policy/blob/v0.4.1/docs/content/apl/pdp.md#migrating-args-policies
 ///
 /// # YAML configuration
 ///
@@ -762,7 +820,11 @@ impl PolicyFilter {
     /// resolved [`IdentityPayload`] (subject / client / workload / raw
     /// credentials / delegation) or a rejection when no identity
     /// continues.
-    #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
+    #[expect(
+        clippy::large_futures,
+        clippy::large_stack_frames,
+        reason = "async handler over large CMF/pipeline types"
+    )]
     async fn resolve_identity(
         &self,
         ctx: &HttpFilterContext<'_>,
@@ -937,7 +999,11 @@ impl PolicyFilter {
     ///
     /// Reserved entity-less coordinates select global authentication; absent
     /// coordinates would be rejected as an unidentified request.
-    #[expect(clippy::large_stack_frames, reason = "async PPE identity payload")]
+    #[expect(
+        clippy::large_futures,
+        clippy::large_stack_frames,
+        reason = "async PPE identity payload"
+    )]
     async fn resolve_gated_identity(
         &self,
         ctx: &HttpFilterContext<'_>,
@@ -960,6 +1026,11 @@ impl PolicyFilter {
 
     /// Finish an identity-only admission after classification establishes that
     /// no entity-specific resolver can apply.
+    #[expect(
+        clippy::large_futures,
+        clippy::large_stack_frames,
+        reason = "PPE identity resolution carries large async payloads"
+    )]
     async fn complete_gated_admission(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let authenticated = match Self::take_gated_identity(ctx) {
             GatedIdentity::Subject(authenticated) => Some(authenticated),
@@ -978,6 +1049,11 @@ impl PolicyFilter {
     /// un-authenticated traffic is rejected before the body-buffer cost is
     /// paid. For entity-aware policies, authorization runs later, in
     /// `on_request_body`, once the request is classified.
+    #[expect(
+        clippy::large_futures,
+        clippy::large_stack_frames,
+        reason = "PPE identity resolution carries large async payloads"
+    )]
     async fn identity_gate(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         // When a downstream body-buffering filter (e.g. the protocol
         // classifier) forces a pre-read, praxis runs `on_request_body` BEFORE
@@ -1013,6 +1089,7 @@ impl PolicyFilter {
 
     /// Authorize an inference request through `cmf.llm_input`.
     #[expect(
+        clippy::large_futures,
         clippy::large_stack_frames,
         clippy::too_many_lines,
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
@@ -1020,7 +1097,7 @@ impl PolicyFilter {
     async fn dispatch_llm_request(
         &self,
         ctx: &mut HttpFilterContext<'_>,
-        parsed: &ParsedLlmRequest,
+        parsed: ParsedLlmRequest,
         model: String,
     ) -> Result<FilterAction, FilterError> {
         let (entity_type, hook_name) = (ENTITY_LLM, HOOK_CMF_LLM_INPUT);
@@ -1046,15 +1123,18 @@ impl PolicyFilter {
         Self::take_gated_identity(ctx);
         Self::publish_authenticated_identity(ctx, &identity);
 
+        // Read what the handler needs before the document moves into the extensions.
+        let payload = MessagePayload {
+            message: request_message(&parsed),
+        };
+        let streaming = parsed.is_streaming();
+
         let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &model);
         Self::attach_http_attributes(ctx, &mut extensions, headers);
         self.attach_llm_attributes(&mut extensions, parsed, &model);
         ctx.extensions.insert(ResolvedIdentity(identity));
         ctx.extensions.insert(InferenceRequest { model: model.clone() });
 
-        let payload = MessagePayload {
-            message: request_message(parsed),
-        };
         let (cmf_result, _bg) = self
             .mgr
             .invoke_named::<CmfHook>(hook_name, payload, extensions, None)
@@ -1106,7 +1186,7 @@ impl PolicyFilter {
 
         // Metadata exposes the model downstream without trusting a client header.
         ctx.set_metadata("llm.model", model.clone());
-        if parsed.is_streaming() {
+        if streaming {
             ctx.set_metadata("llm.stream", "true");
         }
 
@@ -1127,8 +1207,8 @@ impl PolicyFilter {
         .is_some()
     }
 
-    /// Add inference attributes used by APL rules.
-    fn attach_llm_attributes(&self, ext: &mut Extensions, parsed: &ParsedLlmRequest, model: &str) {
+    /// Add inference attributes used by APL rules and the parsed body for PDPs.
+    fn attach_llm_attributes(&self, ext: &mut Extensions, parsed: ParsedLlmRequest, model: &str) {
         ext.llm = Some(Arc::new(LLMExtension {
             model_id: Some(model.to_owned()),
             provider: self.cfg.llm.provider.clone(),
@@ -1136,6 +1216,7 @@ impl PolicyFilter {
         }));
 
         let promoted = parsed.promoted_params(&self.cfg.llm.promote_params);
+        ext.llm_request = Some(LlmRequestDocument::new(parsed.into_value()));
         if promoted.is_empty() {
             return;
         }
@@ -1314,6 +1395,7 @@ impl PolicyFilter {
     /// identity failure is the usual 401. Authorization runs here (not the
     /// body phase) because it needs no request body.
     #[expect(
+        clippy::large_futures,
         clippy::large_stack_frames,
         clippy::too_many_lines,
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
@@ -1419,6 +1501,10 @@ impl PolicyFilter {
     }
 
     /// Await the response hook on the worker runtime, as the request half does.
+    #[expect(
+        clippy::large_stack_frames,
+        reason = "PPE response dispatch carries large async payloads"
+    )]
     async fn dispatch_response_hook(
         &self,
         hook: &'static str,
@@ -1438,6 +1524,10 @@ impl PolicyFilter {
     ///
     /// Returns [`FilterError`] when the hook times out or yields no result,
     /// so the response fails under the filter's `failure_mode`.
+    #[expect(
+        clippy::large_stack_frames,
+        reason = "PPE response dispatch carries large async payloads"
+    )]
     fn dispatch_response_cmf(
         &self,
         hook: &'static str,
@@ -1578,6 +1668,16 @@ fn oversized_body_rejection() -> Rejection {
         .with_body(llm_error_envelope_bytes_within(Some(&violation), usize::MAX))
 }
 
+/// Build an HTTP 400 rejection for a request body that repeats a JSON
+/// object key. The body names neither the key nor any value.
+fn duplicate_key_rejection() -> Rejection {
+    let violation = PluginViolation::new("llm.duplicate_key", "request body repeats a JSON object key");
+    Rejection::status(400)
+        .with_header(VIOLATION_HEADER, violation.code.clone())
+        .with_header("Content-Type", "application/json")
+        .with_body(llm_error_envelope_bytes_within(Some(&violation), usize::MAX))
+}
+
 /// Build an unmatched inference route violation.
 fn no_route_violation() -> PluginViolation {
     PluginViolation::new("llm.no_route", "no policy route permits this model")
@@ -1705,6 +1805,7 @@ impl HttpFilter for PolicyFilter {
     }
 
     #[expect(
+        clippy::large_futures,
         clippy::large_stack_frames,
         clippy::too_many_lines,
         reason = "async handler with multiple await points over large CMF types; linear phase flow"
@@ -1758,13 +1859,24 @@ impl HttpFilter for PolicyFilter {
                 return self.complete_gated_admission(ctx).await;
             }
 
-            // A JSON-RPC envelope belongs to the classifier, not inference.
-            let parsed = self
+            // A repeated key makes the body mean different things to
+            // different parsers, so no policy can judge it.
+            let Ok(parsed) = self
                 .llm_routes
-                .then(|| ParsedLlmRequest::parse(body.as_ref().unwrap_or(&EMPTY_BODY)));
+                .then(|| ParsedLlmRequest::parse(body.as_ref().unwrap_or(&EMPTY_BODY)))
+                .transpose()
+            else {
+                tracing::debug!(
+                    target: "policy.filter",
+                    "request body repeats a JSON object key; denying (fail-closed)",
+                );
+                return Ok(FilterAction::Reject(duplicate_key_rejection()));
+            };
+
+            // A JSON-RPC envelope belongs to the classifier, not inference.
             let carries_envelope = parsed.as_ref().is_some_and(ParsedLlmRequest::carries_json_rpc_envelope);
 
-            if let Some(parsed) = parsed.as_ref() {
+            if let Some(parsed) = parsed {
                 match (carries_envelope, parsed.model().map(str::to_owned)) {
                     (true, Some(_)) => {
                         tracing::warn!(
@@ -1813,7 +1925,7 @@ impl HttpFilter for PolicyFilter {
 
         // Refuse conflicting coordinates rather than choose the wrong policy.
         if self.llm_routes
-            && ParsedLlmRequest::parse(body.as_ref().unwrap_or(&EMPTY_BODY))
+            && ParsedLlmRequest::parse_last_wins(body.as_ref().unwrap_or(&EMPTY_BODY))
                 .model()
                 .is_some()
         {
@@ -1974,6 +2086,11 @@ impl HttpFilter for PolicyFilter {
         Ok(FilterAction::BodyDone)
     }
 
+    #[expect(
+        clippy::large_futures,
+        clippy::large_stack_frames,
+        reason = "PPE response dispatch carries large async payloads"
+    )]
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(hook) = self.response_hook else {
             return Ok(FilterAction::Continue);

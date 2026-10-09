@@ -37,5 +37,5 @@ pub use client::{SubRequestClient, record_http_client_status};
 pub use internals::{SubRequestConnector, SubRequestConnectorOptions};
 pub use types::{
     DEPTH_HEADER, FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse,
-    SubResponseBody,
+    SubResponseBody, UrlSubRequestError,
 };

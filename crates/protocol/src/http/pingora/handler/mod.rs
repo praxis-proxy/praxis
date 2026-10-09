@@ -932,6 +932,7 @@ mod tests {
             upstream: Some(Upstream {
                 address: Arc::from("10.0.0.1:80"),
                 authority: None,
+                base_path: None,
                 connection: Arc::new(ConnectionOptions::default()),
                 tls: None,
             }),
@@ -1190,6 +1191,7 @@ mod tests {
         ctx.upstream_for_retry = Some(Upstream {
             address: Arc::from("10.0.0.1:80"),
             authority: None,
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         });
@@ -1294,6 +1296,7 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
             authority: None,
+            base_path: None,
         });
         let e = retry_util::handle_connect_failure(&mut ctx, make_error());
         assert!(e.retry(), "should retry with upstream address present");
@@ -1323,6 +1326,7 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
             authority: None,
+            base_path: None,
         });
         let e = retry_util::handle_connect_failure(&mut ctx, make_error());
         assert!(
@@ -1341,6 +1345,7 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
             authority: None,
+            base_path: None,
         });
         let e = retry_util::handle_connect_failure(&mut ctx, make_error());
         assert!(!e.retry(), "should not retry large body even with upstream address");

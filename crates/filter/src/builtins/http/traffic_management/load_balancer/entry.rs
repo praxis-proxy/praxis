@@ -59,6 +59,9 @@ pub(super) struct ClusterEntry {
     /// Opaque application provider tagged on the cluster, if any.
     pub(super) application_provider: Option<Arc<str>>,
 
+    /// Normalized upstream base path tagged on the cluster, if any.
+    pub(super) base_path: Option<Arc<str>>,
+
     /// Resolved retry policy (legacy default when unset).
     pub(super) retry_policy: Arc<RetryPolicy>,
 
@@ -121,6 +124,7 @@ impl ClusterEntry {
         Upstream {
             address: addr,
             authority,
+            base_path: self.base_path.clone(),
             connection: Arc::clone(&self.opts),
             tls,
         }
@@ -166,6 +170,7 @@ impl ClusterEntry {
             Arc::clone(&self.opts),
             self.tls.clone(),
             self.authority.clone(),
+            self.base_path.clone(),
             hash_key,
             retry_policy,
             Arc::clone(&self.retry_state),
@@ -223,6 +228,7 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
         tls,
         application_protocol: cluster.http.application_protocol.clone(),
         application_provider: cluster.http.application_provider.clone(),
+        base_path: cluster.http.normalized_base_path().map(Arc::from),
         retry_policy,
         retry_state,
         merged_retry_memo: ArcSwap::from_pointee(RetryMemo::new()),

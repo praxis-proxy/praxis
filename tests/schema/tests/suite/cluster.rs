@@ -551,6 +551,59 @@ clusters:
 }
 
 #[test]
+fn accept_cluster_with_base_path() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["10.0.0.1:443"]
+    http:
+      base_path: "/grid-models/model-a"
+"#;
+    let config = Config::from_yaml(yaml).unwrap();
+    assert_eq!(
+        config.clusters[0].http.base_path.as_deref(),
+        Some("/grid-models/model-a"),
+        "base path should be parsed"
+    );
+    assert_eq!(
+        config.clusters[0].http.normalized_base_path(),
+        Some("/grid-models/model-a"),
+        "the normalized form should match when there is nothing to normalize"
+    );
+}
+
+#[test]
+fn reject_cluster_with_a_relative_base_path() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["10.0.0.1:443"]
+    http:
+      base_path: "grid-models/model-a"
+"#;
+    let err = Config::from_yaml(yaml).expect_err("a relative base path should be rejected");
+    assert!(err.to_string().contains("must start with '/'"), "got: {err}");
+}
+
+#[test]
 fn accept_cluster_with_authority() {
     let yaml = r#"
 listeners:

@@ -346,6 +346,7 @@ impl StagedUpstream {
         Ok(Self(Upstream {
             address: Arc::from(address.to_string().as_str()),
             authority: Some(target.host_authority().clone()),
+            base_path: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls,
         }))
