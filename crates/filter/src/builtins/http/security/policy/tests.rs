@@ -5752,6 +5752,34 @@ async fn a_post_only_tool_route_dispatches_its_hook() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tools_call_error_response_skips_post_hook() {
+    let (_dir, path) = write_tool_post_only_config();
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(request_body), true)
+        .await
+        .expect("request phase ran");
+    assert!(matches!(action, FilterAction::BodyDone));
+
+    let original = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"upstream error, and long enough that a replacement deny envelope fits inside the committed content length without being trimmed"}}"#,
+    );
+    let mut body = Some(original.clone());
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+    assert_eq!(body.expect("response body"), original);
+}
+
 /// Write a post-only `prompt:` route.
 fn write_prompt_post_only_config() -> (TempDir, String) {
     write_entity_config_with_routes(
