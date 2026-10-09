@@ -21,6 +21,8 @@ iterative-request-router = ["praxis/iterative-request-router"]
 bound-upstream-request-body = ["praxis/bound-upstream-request-body"]
 # Off by default; runs the SPIFFE mTLS e2e tests against a proxy built with it.
 spiffe = ["praxis/spiffe"]
+# Off by default; runs the access_log syslog-sink example test against a proxy built with it.
+access-log-syslog = ["praxis/access-log-syslog"]
 no-mac-cert-rotation-tests = []
 otel = ["praxis/otel"]
 
@@ -59,3 +61,6 @@ tokio-tungstenite = { workspace = true }
 opentelemetry-proto = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
+opentelemetry = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }

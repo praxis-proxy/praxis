@@ -15,7 +15,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use metrics::histogram;
 use pingora_core::upstreams::peer::{HttpPeer, Peer as _};
-use tracing::{debug, warn};
+use tracing::{Instrument as _, Span, debug, warn};
 
 use super::{
     body::dispose_session_abnormal,
@@ -132,13 +132,43 @@ impl SubRequestClient {
     /// headers, circuit guard, and admission permit. Both `execute()`
     /// and `send_streaming()` call this, then diverge.
     #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
-    #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
     async fn open_exchange<'conn>(
         &'conn self,
         peer: &HttpPeer,
         request: &SubRequest,
         timeout: Duration,
         framework_headers: Option<&FrameworkHeaders>,
+    ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
+        #[cfg(feature = "otel")]
+        let client_span = subrequest_client_span(peer, request);
+        #[cfg(not(feature = "otel"))]
+        let client_span = Span::none();
+
+        let result = self
+            .open_exchange_inner(peer, request, timeout, framework_headers, &client_span)
+            .instrument(client_span.clone())
+            .await;
+        if result.is_err() && !client_span.is_disabled() {
+            client_span.record("otel.status_code", "ERROR");
+            client_span.record("error.type", "subrequest");
+        }
+        result
+    }
+
+    /// Open an HTTP exchange while its per-attempt span is active.
+    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
+    #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "explicit per-attempt span keeps propagation bound to this exchange"
+    )]
+    async fn open_exchange_inner<'conn>(
+        &'conn self,
+        peer: &HttpPeer,
+        request: &SubRequest,
+        timeout: Duration,
+        framework_headers: Option<&FrameworkHeaders>,
+        client_span: &Span,
     ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
         let exchange_started = tokio::time::Instant::now();
         let deadline = exchange_started
@@ -178,6 +208,10 @@ impl SubRequestClient {
             for (name, value) in fw.iter() {
                 let _insert = req_header.insert_header(name.clone(), value.clone());
             }
+        }
+        #[cfg(feature = "otel")]
+        {
+            inject_subrequest_trace_context(&mut req_header, client_span);
         }
         ensure_host_header(&mut req_header, &bounded_peer)?;
         if !request.body.is_empty() || empty_body_needs_framing(&request.method) {
@@ -325,6 +359,7 @@ impl SubRequestClient {
             }
             break status;
         };
+        record_http_client_status(client_span, status);
 
         if !(100..=599).contains(&status) {
             session.shutdown().await;
@@ -363,6 +398,7 @@ impl SubRequestClient {
             circuit_guard,
             permit,
             deadline,
+            client_span: client_span.clone(),
         })
     }
 
@@ -468,6 +504,7 @@ impl SubRequestClient {
             peer: Some(exchange.peer),
             connector: Some(exchange.connector.clone()),
             permit: exchange.permit,
+            client_span: exchange.client_span,
             read_timeout,
             idle_timeout: limits.idle_timeout,
             stream_deadline,
@@ -537,6 +574,7 @@ impl SubRequestClient {
             circuit_guard,
             permit: _permit,
             deadline,
+            client_span,
         } = match exchange {
             Ok(ex) => ex,
             Err(err) => return Err(err),
@@ -547,6 +585,7 @@ impl SubRequestClient {
         // Enforce deadline on body collection phase.
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
+            record_subrequest_client_error(&client_span, "subrequest_body");
             return Err(SubRequestError::DeadlineExceeded);
         }
 
@@ -598,10 +637,14 @@ impl SubRequestClient {
 
             Ok(Bytes::from(body_buf))
         })
+        .instrument(client_span.clone())
         .await
         .unwrap_or_else(|_elapsed| Err(SubRequestError::DeadlineExceeded));
 
         // Finalize circuit guard with full-exchange outcome.
+        if body_result.is_err() {
+            record_subrequest_client_error(&client_span, "subrequest_body");
+        }
         let result = body_result.map(|body| SubResponse {
             status,
             headers: resp_headers,
@@ -614,9 +657,74 @@ impl SubRequestClient {
     }
 }
 
+/// Replace propagated request headers with the active exported client span context.
+#[cfg(feature = "otel")]
+fn inject_subrequest_trace_context(req_header: &mut pingora_http::RequestHeader, client_span: &Span) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    let span_context = client_span.context();
+    let mut propagated = HeaderMap::new();
+    if crate::trace_context::inject_context(&mut propagated, &span_context) {
+        let _remove_traceparent = req_header.remove_header("traceparent");
+        let _remove_tracestate = req_header.remove_header("tracestate");
+        if let Some(value) = propagated.get("traceparent") {
+            let _insert_traceparent = req_header.insert_header("traceparent", value.clone());
+        }
+        if let Some(value) = propagated.get("tracestate") {
+            let _insert_tracestate = req_header.insert_header("tracestate", value.clone());
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Private Utilities
 // -----------------------------------------------------------------------------
+
+/// Create a bounded HTTP client span for a framework sub-request.
+#[cfg(feature = "otel")]
+fn subrequest_client_span(peer: &HttpPeer, request: &SubRequest) -> Span {
+    let (server_address, server_port) = peer._address.as_inet().map_or_else(
+        || ("unix".to_owned(), 0),
+        |address| (address.ip().to_string(), address.port()),
+    );
+    let method = request.method.as_str();
+    tracing::info_span!(
+        "http_client_request",
+        "otel.name" = method,
+        "otel.kind" = "client",
+        "otel.status_code" = tracing::field::Empty,
+        "http.request.method" = method,
+        "http.response.status_code" = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
+        "server.address" = server_address,
+        "server.port" = server_port,
+    )
+}
+
+/// Record HTTP CLIENT response status attributes on an active span.
+pub fn record_http_client_status(client_span: &Span, status: u16) {
+    if client_span.is_disabled() {
+        return;
+    }
+    client_span.record("http.response.status_code", status);
+    if let Some(error_type) = subrequest_client_status_error_type(status) {
+        client_span.record("otel.status_code", "ERROR");
+        client_span.record("error.type", error_type.as_str());
+    }
+}
+
+/// Mark a failed sub-request phase without exporting transport error text.
+pub(super) fn record_subrequest_client_error(client_span: &Span, error_type: &'static str) {
+    if !client_span.is_disabled() {
+        client_span.record("otel.status_code", "ERROR");
+        client_span.record("error.type", error_type);
+    }
+}
+
+/// Return the bounded `error.type` value for an HTTP error status.
+fn subrequest_client_status_error_type(status: u16) -> Option<String> {
+    (status >= 400).then(|| status.to_string())
+}
 
 /// Tear down an abnormally terminated header exchange: drop the circuit
 /// guard (recording a failure via its `Drop` impl), discard the session,
@@ -627,6 +735,7 @@ async fn fail_header_exchange(
     termination: &'static str,
     error: SubRequestError,
 ) -> SubRequestError {
+    record_subrequest_client_error(&exchange.client_span, "subrequest_header");
     drop(circuit_guard);
     dispose_session_abnormal(
         exchange.session,
@@ -642,7 +751,114 @@ async fn fail_header_exchange(
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::too_many_lines, clippy::items_after_statements, reason = "tests")]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    #[test]
+    fn subrequest_client_status_marks_4xx_and_5xx_as_errors() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        for (status, expected) in [(200, None), (404, Some("404")), (500, Some("500"))] {
+            assert_eq!(subrequest_client_status_error_type(status).as_deref(), expected);
+            let capture = StatusRecordCapture::default();
+            let subscriber = tracing_subscriber::registry().with(capture.clone());
+            let _guard = tracing::subscriber::set_default(subscriber);
+            let span = tracing::info_span!(
+                "subrequest_client",
+                "http.response.status_code" = tracing::field::Empty,
+                "otel.status_code" = tracing::field::Empty,
+                "error.type" = tracing::field::Empty,
+            );
+            record_http_client_status(&span, status);
+            drop(span);
+
+            let fields = capture
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            assert!(
+                fields
+                    .iter()
+                    .any(|(name, value)| { name == "http.response.status_code" && value == &status.to_string() })
+            );
+            assert_eq!(
+                fields
+                    .iter()
+                    .find(|(name, _)| name == "otel.status_code")
+                    .map(|(_, value)| value.as_str()),
+                expected.map(|_| "\"ERROR\""),
+                "subrequest CLIENT OTel status for HTTP {status}"
+            );
+            let error_type = expected.map(|value| format!("\"{value}\""));
+            assert_eq!(
+                fields
+                    .iter()
+                    .find(|(name, _)| name == "error.type")
+                    .map(|(_, value)| value.as_str()),
+                error_type.as_deref(),
+                "subrequest CLIENT error.type for HTTP {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn subrequest_body_error_marks_client_span_without_error_text() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = StatusRecordCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let span = tracing::info_span!(
+            "subrequest_client",
+            "otel.status_code" = tracing::field::Empty,
+            "error.type" = tracing::field::Empty,
+        );
+        record_subrequest_client_error(&span, "subrequest_body");
+
+        let fields = capture
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(
+            fields
+                .iter()
+                .any(|(name, value)| name == "otel.status_code" && value == "\"ERROR\"")
+        );
+        assert!(
+            fields
+                .iter()
+                .any(|(name, value)| name == "error.type" && value == "\"subrequest_body\"")
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct StatusRecordCapture(Arc<Mutex<Vec<(String, String)>>>);
+
+    impl<S> tracing_subscriber::Layer<S> for StatusRecordCapture
+    where
+        S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+    {
+        fn on_record(
+            &self,
+            _id: &tracing::span::Id,
+            record: &tracing::span::Record<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Visitor<'fields>(&'fields mut Vec<(String, String)>);
+
+            impl tracing::field::Visit for Visitor<'_> {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    self.0.push((field.name().to_owned(), format!("{value:?}")));
+                }
+            }
+
+            let mut captured = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            record.record(&mut Visitor(&mut captured));
+        }
+    }
 
     #[test]
     fn max_interim_responses_constant_is_32() {

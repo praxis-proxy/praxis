@@ -26,6 +26,10 @@ fn every_example_resolves_its_pipelines() {
         if path.file_name().is_some_and(|name| name == "tls-mtls-spiffe.yaml") {
             continue;
         }
+        #[cfg(not(feature = "access-log-syslog"))]
+        if path.file_name().is_some_and(|name| name == "access-log-syslog.yaml") {
+            continue;
+        }
         match resolve(&path) {
             Ok(()) => validated += 1,
             Err(error) if environmental(&error) => {},

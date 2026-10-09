@@ -27,6 +27,32 @@ use praxis_test_utils::{
 // Tests
 // -----------------------------------------------------------------------------
 
+/// The benchmark harness polls `/ready` on the health/metrics listener.
+#[test]
+fn comparison_benchmark_config_serves_readiness() {
+    let backend = start_backend_with_shutdown("benchmark-backend");
+    let proxy_addr = format!("127.0.0.1:{}", free_port());
+    let metrics_addr = format!("127.0.0.1:{}", free_port());
+    let yaml = include_str!("../../../../xtask/comparison/configs/praxis.yaml")
+        .replace("0.0.0.0:18090", &proxy_addr)
+        .replace("127.0.0.1:9901", &metrics_addr)
+        .replace("127.0.0.1:18080", &format!("127.0.0.1:{}", backend.port()));
+    let config = Config::from_yaml(&yaml).expect("benchmark config should parse");
+    assert_eq!(
+        config.admin.metrics_address.as_deref(),
+        Some(metrics_addr.as_str()),
+        "the benchmark probe must reach the health/metrics listener"
+    );
+    let _proxy = start_full_proxy(&config);
+    wait_for_http(&metrics_addr);
+    let (status, _) = http_get(&metrics_addr, "/ready", None);
+    assert_eq!(status, 200, "benchmark readiness probe must succeed");
+    wait_for_http(&proxy_addr);
+    let (status, body) = http_get(&proxy_addr, "/", None);
+    assert_eq!(status, 200, "benchmark proxy must forward traffic");
+    assert_eq!(body, "benchmark-backend", "benchmark backend must be reached");
+}
+
 #[test]
 fn health_check_config_parses_with_clusters() {
     let backend_port_guard = start_backend_with_shutdown("ok");

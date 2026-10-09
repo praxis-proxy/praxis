@@ -95,6 +95,7 @@ fn make_routes(n: usize) -> Vec<Route> {
             headers: None,
             cluster: format!("cluster-{i}").into(),
             retry_policy: None,
+            hedge_policy: None,
         })
         .collect();
 
@@ -106,6 +107,7 @@ fn make_routes(n: usize) -> Vec<Route> {
         headers: None,
         cluster: "fallback".into(),
         retry_policy: None,
+        hedge_policy: None,
     });
 
     routes

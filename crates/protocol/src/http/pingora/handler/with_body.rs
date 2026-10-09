@@ -284,7 +284,7 @@ impl ProxyHttp for PingoraHttpHandler {
             .await
     }
 
-    fn upstream_response_trailer_filter(
+    async fn upstream_response_trailer_filter(
         &self,
         _session: &mut Session,
         upstream_trailers: &mut http::HeaderMap,
@@ -320,7 +320,7 @@ impl ProxyHttp for PingoraHttpHandler {
         Ok(produced)
     }
 
-    fn response_body_filter(
+    async fn response_body_filter(
         &self,
         _session: &mut Session,
         body: &mut Option<Bytes>,
@@ -358,6 +358,7 @@ impl ProxyHttp for PingoraHttpHandler {
     ) -> Box<pingora_core::Error> {
         let span = ctx.request_span.clone();
         let _entered = span.enter();
+        connected_to_upstream::record_attempt_failure(e.as_ref(), ctx);
         // A truncated replay buffer means a retry would resend a partial
         // request body — refuse rather than corrupt the request upstream.
         if session.as_mut().retry_buffer_truncated() {
@@ -376,6 +377,7 @@ impl ProxyHttp for PingoraHttpHandler {
         ctx: &mut Self::CTX,
         client_reused: bool,
     ) -> Box<pingora_core::Error> {
+        connected_to_upstream::record_attempt_failure(e.as_ref(), ctx);
         // Never retry once a final response reached the client: a second
         // attempt cannot rewrite the response line, so its body would be
         // spliced after whatever was already sent. A non-final 1xx (e.g.
@@ -459,6 +461,8 @@ impl ProxyHttp for PingoraHttpHandler {
         upstream_request::apply_grpc_deadline_header(upstream_request, ctx);
         let client_ver = ctx.client_http_version.unwrap_or(http::Version::HTTP_11);
         via::append_request_via(upstream_request, client_ver);
+        #[cfg(feature = "otel")]
+        inject_upstream_trace_context(upstream_request, &ctx.upstream_client_span)?;
         Ok(())
     }
 
@@ -473,10 +477,12 @@ impl ProxyHttp for PingoraHttpHandler {
     {
         let pipeline = ctx.pipeline(&self.pipeline);
         let span = ctx.request_span.clone();
+        let client_span = ctx.upstream_client_span.clone();
         let exchange_span = ctx.upstream_exchange_span.clone();
         let upstream_ver = upstream_response.version;
         let result = response_filter::execute(&pipeline, upstream_response, ctx)
             .instrument(exchange_span)
+            .instrument(client_span)
             .instrument(span)
             .await;
         if result.is_ok() {
@@ -492,14 +498,16 @@ impl ProxyHttp for PingoraHttpHandler {
 
     async fn upstream_peer(&self, _session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
         let span = ctx.request_span.clone();
-        upstream_peer::execute(ctx).instrument(span).await
+        let peer = upstream_peer::execute(ctx).instrument(span).await?;
+        connected_to_upstream::open_attempt(&peer, ctx);
+        Ok(peer)
     }
 
     async fn connected_to_upstream(
         &self,
         _session: &mut Session,
         reused: bool,
-        peer: &HttpPeer,
+        _peer: &HttpPeer,
         #[cfg(unix)] _fd: std::os::unix::io::RawFd,
         #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
         digest: Option<&pingora_core::protocols::Digest>,
@@ -520,7 +528,7 @@ impl ProxyHttp for PingoraHttpHandler {
         if ctx.retries > 0 {
             metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_SUCCESS);
         }
-        connected_to_upstream::execute(reused, peer, digest, ctx);
+        connected_to_upstream::record_connected(reused, digest, ctx);
         Ok(())
     }
 
@@ -529,7 +537,11 @@ impl ProxyHttp for PingoraHttpHandler {
         // Drop the exchange span before the request span so child
         // ends before parent in tracing output.
         let _exchange_span = std::mem::replace(&mut ctx.upstream_exchange_span, tracing::Span::none());
+        _exchange_span.in_scope(|| {});
         drop(_exchange_span);
+        let _client_span = std::mem::replace(&mut ctx.upstream_client_span, tracing::Span::none());
+        _client_span.in_scope(|| {});
+        drop(_client_span);
         let span = std::mem::replace(&mut ctx.request_span, tracing::Span::none());
         let written_status = session.response_written().map_or(0, |resp| resp.status.as_u16());
         async {
@@ -544,6 +556,31 @@ impl ProxyHttp for PingoraHttpHandler {
         .instrument(span)
         .await;
     }
+}
+
+/// Inject the active exported HTTP client span into the finalized request.
+#[cfg(feature = "otel")]
+fn inject_upstream_trace_context(
+    upstream_request: &mut pingora_http::RequestHeader,
+    client_span: &tracing::Span,
+) -> Result<()> {
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+    // This is the last request-header mutation hook. Replace conflicting
+    // client/filter values with the client span exported for this attempt.
+    let span_context = client_span.context();
+    let mut propagated = http::HeaderMap::new();
+    if praxis_core::trace_context::inject_context(&mut propagated, &span_context) {
+        let _remove_traceparent = upstream_request.remove_header("traceparent");
+        let _remove_tracestate = upstream_request.remove_header("tracestate");
+        if let Some(value) = propagated.get("traceparent") {
+            upstream_request.insert_header("traceparent", value.clone())?;
+        }
+        if let Some(value) = propagated.get("tracestate") {
+            upstream_request.insert_header("tracestate", value.clone())?;
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------

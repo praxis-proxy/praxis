@@ -262,12 +262,19 @@ pub struct PingoraRequestCtx {
     /// `logging` hook before the span is dropped.
     pub request_span: Span,
 
+    /// HTTP client span for the current upstream request attempt.
+    ///
+    /// Created when Pingora selects a peer, before it dials. Its context is
+    /// injected into the final upstream request headers after connection, and
+    /// the next attempt replaces it rather than reusing a stale span ID.
+    pub upstream_client_span: Span,
+
     /// Child span covering upstream request/response exchange.
     ///
-    /// Created in `connected_to_upstream` after the connection is
-    /// established (or reused). Response-phase attributes
-    /// (`http.response.status_code`, `http.response.body.size`) are
-    /// recorded in the `logging` hook before the span is dropped.
+    /// Created below the per-attempt client span when Pingora selects a peer.
+    /// Response-phase attributes (`http.response.status_code`,
+    /// `http.response.body.size`) are recorded in the `logging` hook before
+    /// the span is dropped.
     pub upstream_exchange_span: Span,
 
     /// When this request was received.
@@ -341,6 +348,9 @@ pub struct PingoraRequestCtx {
 
     /// Optional route-level retry policy override (merged by the load balancer).
     pub route_retry_policy: Option<Arc<praxis_core::config::RetryPolicy>>,
+
+    /// Per-route hedge policy copied from the filter context.
+    pub hedge_policy: Option<Arc<praxis_core::config::HedgePolicy>>,
 
     /// Shared cluster retry state (budget + active requests).
     pub cluster_retry_state: Option<Arc<praxis_core::retry::ClusterRetryState>>,
@@ -449,6 +459,7 @@ macro_rules! filter_context {
             attempted_endpoints: std::mem::take(&mut $ctx.attempted_endpoints),
             retry_policy: $ctx.retry_policy.clone(),
             route_retry_policy: $ctx.route_retry_policy.clone(),
+            hedge_policy: $ctx.hedge_policy.clone(),
             cluster_retry_state: $ctx.cluster_retry_state.clone(),
             cluster_retry_state_released: $ctx.cluster_retry_state_released,
             endpoint_reselector: $ctx.endpoint_reselector.clone(),
@@ -632,6 +643,7 @@ impl Default for PingoraRequestCtx {
             request_is_idempotent: false,
             request_snapshot: None,
             request_span: Span::none(),
+            upstream_client_span: Span::none(),
             request_start: Instant::now(),
             upstream_exchange_span: Span::none(),
             response_body_buffer: None,
@@ -650,6 +662,7 @@ impl Default for PingoraRequestCtx {
             attempted_endpoints: Vec::new(),
             retry_policy: None,
             route_retry_policy: None,
+            hedge_policy: None,
             cluster_retry_state: None,
             cluster_retry_state_released: false,
             endpoint_reselector: None,

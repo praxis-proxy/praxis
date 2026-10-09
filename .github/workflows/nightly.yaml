@@ -175,6 +175,10 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+      CARGO_NET_RETRY: "5"
+      CARGO_HTTP_MULTIPLEXING: "false"
     strategy:
       fail-fast: false
       matrix:
@@ -186,20 +190,35 @@ jobs:
           persist-credentials: false
 
       - name: Install ${{ matrix.toolchain }} toolchain
-        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
         with:
           toolchain: ${{ matrix.toolchain }}
 
       - name: Install h2spec
         run: make target/praxis-binutils/h2spec
 
+      - name: Fetch dependencies
+        # Cargo does not retry every curl error, including partial-file errors.
+        # Retry fetching separately so compiler and test failures remain visible.
+        run: |
+          for delay in 0 10 20; do
+            sleep "$delay"
+            if cargo fetch --locked; then
+              exit 0
+            else
+              status=$?
+            fi
+            echo "Dependency fetch failed (exit $status)."
+          done
+          exit "$status"
+
       - name: Check workspace
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --locked --offline
 
       - name: Run tests
         run: |
-          export PATH="$(pwd)/target/praxis-binutils:$PATH"
-          cargo test --workspace
+          export PATH="${PWD}/target/praxis-binutils:$PATH"
+          cargo test --workspace --locked --offline
 
   # ----------------------------------------------------------------------------
   # Nightly container image (published to GHCR)

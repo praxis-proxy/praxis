@@ -58,7 +58,7 @@ sequenceDiagram
 7. Request forwarded, response headers received
 8. `response_filter`: pipeline runs filters in reverse
 9. `response_body_filter`: stream response body through
-   filters (synchronous; Pingora constraint)
+   filters (synchronous: `on_response_body` is a plain `fn`)
 10. `logging`: re-runs response filters if response
     phase was skipped (upstream error, filter rejection)
 11. Connection returned to pool

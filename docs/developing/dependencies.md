@@ -139,6 +139,22 @@ already a direct dependency.
 (dtolnay, dev tooling), `criterion` / `plotters`
 (benchmarks), `tempfile`.
 
+`syslog` backs the `access_log` filter's RFC 3164
+sink and is optional, pulled in only by the
+off-by-default experimental `access-log-syslog`
+feature. It is maintained by Geoffroy Couprie
+(author of the `nom` parser-combinator crate) at
+<https://github.com/Geal/rust-syslog>, MIT-licensed,
+and the de-facto Rust syslog client. It carries no
+cryptography of its own — message framing is plain
+formatting and transport is `std` sockets — so it is
+excluded from the default and FIPS builds purely to
+keep those trees minimal, not for a crypto conflict.
+Should it go dormant, the exit is to vendor its
+narrow surface: RFC 3164 formatting over the
+`std::net` / `std::os::unix::net` sockets Praxis
+already constructs directly.
+
 ## Review Cadence
 
 - Every new dependency goes through this policy at

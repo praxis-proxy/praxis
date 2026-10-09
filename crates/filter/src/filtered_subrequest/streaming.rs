@@ -132,6 +132,7 @@ impl FilteredStreamingBody {
                 attempted_endpoints: Vec::new(),
                 retry_policy: None,
                 route_retry_policy: None,
+                hedge_policy: None,
                 cluster_retry_state: None,
                 cluster_retry_state_released: false,
                 endpoint_reselector: None,
@@ -269,7 +270,6 @@ impl FilteredStreamingBody {
 
 #[async_trait]
 impl StreamingResponseBody for FilteredStreamingBody {
-    #[expect(clippy::too_many_lines, reason = "pull loop applies deadlines and completion state")]
     async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
         if let Some(chunk) = self.pending_chunks.pop_front() {
             return Ok(Some(chunk));
@@ -279,22 +279,18 @@ impl StreamingResponseBody for FilteredStreamingBody {
         }
 
         loop {
-            let upstream = self
-                .upstream
-                .as_mut()
-                .ok_or_else(|| -> FilterError { "filtered_subrequest: upstream already consumed".to_owned().into() })?;
+            let next = {
+                let upstream = self.upstream.as_mut().ok_or_else(|| -> FilterError {
+                    "filtered_subrequest: upstream already consumed".to_owned().into()
+                })?;
 
-            let remaining = self
-                .continuation
-                .step_deadline
-                .checked_duration_since(std::time::Instant::now())
-                .unwrap_or_default();
-            let next = if remaining.is_zero() {
-                Err(praxis_core::subrequest::SubRequestError::DeadlineExceeded)
-            } else {
-                tokio::time::timeout(remaining, upstream.next_chunk())
-                    .await
-                    .unwrap_or(Err(praxis_core::subrequest::SubRequestError::DeadlineExceeded))
+                // Let SubResponseBody observe the absolute step deadline itself.
+                // An outer timeout here drops its future before the body can run
+                // its timeout cleanup and record DeadlineExceeded on the CLIENT
+                // span. The body also enforces its own read/idle limits, so this
+                // cap is the single authoritative bound for the next read.
+                upstream.cap_stream_deadline(std_instant_to_tokio(self.continuation.step_deadline));
+                upstream.next_chunk().await
             };
 
             match next {
@@ -747,6 +743,95 @@ mod tests {
             matches!(err, SubRequestError::DeadlineExceeded),
             "the body filter's expired absolute deadline must reach the live body: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn step_deadline_is_observed_by_the_underlying_stream_body() {
+        use pingora_core::upstreams::peer::HttpPeer;
+
+        let (addr, backend) = spawn_stalling_backend().await;
+        praxis_tls::provider::install();
+        let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
+        let client = SubRequestClient::new(connector);
+        let peer = HttpPeer::new(addr.to_string(), false, String::new());
+        let request = SubRequest {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/step-deadline-wire"),
+            headers: HeaderMap::new(),
+            body: Bytes::new(),
+        };
+        let response = Box::pin(client.send_streaming(
+            &peer,
+            &request,
+            Duration::from_secs(5),
+            StreamLimits {
+                idle_timeout: Duration::from_secs(30),
+                max_stream_duration: None,
+                max_total_bytes: None,
+            },
+            None,
+        ))
+        .await
+        .unwrap();
+
+        let registry = crate::FilterRegistry::with_builtins();
+        let pipeline = Arc::new(crate::FilterPipeline::build(&mut [], &registry).unwrap());
+        let step_deadline = Instant::now() + Duration::from_secs(5);
+        let continuation = super::super::continuation::FilteredSubrequestContinuation {
+            pipeline,
+            request_snapshot: crate::Request {
+                headers: HeaderMap::new(),
+                method: http::Method::GET,
+                uri: http::Uri::from_static("/step-deadline-wire"),
+            },
+            response_snapshot: crate::Response {
+                headers: HeaderMap::new(),
+                status: http::StatusCode::OK,
+            },
+            extensions: crate::RequestExtensions::default(),
+            filter_state: HashMap::new(),
+            filter_results: HashMap::new(),
+            filter_metadata: HashMap::new(),
+            structured_metadata: HashMap::new(),
+            executed_filter_indices: Vec::new(),
+            body_done_indices: Vec::new(),
+            response_body_bytes: 0,
+            response_body_mode: crate::BodyMode::Stream,
+            completed: false,
+            client_addr: None,
+            downstream_tls: false,
+            request_start: Instant::now(),
+            step_deadline,
+            peer_identity: None,
+        };
+        let mut filtered = FilteredStreamingBody::new(Box::new(response.body), continuation);
+        assert_eq!(
+            crate::actions::StreamingResponseBody::next_chunk(&mut filtered)
+                .await
+                .unwrap(),
+            Some(Bytes::from_static(b"hello")),
+            "the first chunk arrives before the step deadline"
+        );
+        filtered.continuation.step_deadline = Instant::now() + Duration::from_millis(150);
+        assert_eq!(
+            crate::actions::StreamingResponseBody::next_chunk(&mut filtered)
+                .await
+                .unwrap(),
+            None,
+            "deadline termination is handled by the streaming completion path"
+        );
+        assert!(filtered.finished, "the expired step must finish the stream");
+        assert_eq!(
+            filtered
+                .continuation
+                .extensions
+                .get::<crate::StreamTermination>()
+                .map(crate::StreamTermination::cause),
+            Some(crate::StreamTerminationCause::DeadlineExceeded),
+            "the inner SubResponseBody must report its own step deadline"
+        );
+        drop(filtered);
+        backend.abort();
     }
 
     #[test]

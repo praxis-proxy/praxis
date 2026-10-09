@@ -41,6 +41,27 @@ pub fn bind_unique_port() -> (TcpListener, u16) {
     panic!("failed to bind a unique port after 256 attempts");
 }
 
+/// Like [`bind_unique_port`] but on `ip`, for a backend that must answer on
+/// a specific local address.
+///
+/// # Panics
+///
+/// Panics if a unique port cannot be bound after 256 attempts.
+pub fn bind_unique_port_on(ip: std::net::IpAddr) -> (TcpListener, u16) {
+    for _ in 0..256 {
+        let listener = TcpListener::bind((ip, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        if ALLOCATED_PORTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(port)
+        {
+            return (listener, port);
+        }
+    }
+    panic!("failed to bind a unique port on {ip} after 256 attempts");
+}
+
 /// A held port that keeps its [`TcpListener`] open until dropped or released.
 ///
 /// Call [`release`] to drop the listener and obtain the

@@ -46,6 +46,11 @@ Header restrictions see the request as earlier filters in the pipeline left it: 
 | `routes[].retry_policy.retry_budget.min_retries_per_second` | integer | no | Floor on tokens per second even at low traffic. |
 | `routes[].retry_policy.retry_body_limit_bytes` | integer | no | Max request body size eligible for replay (bytes). Defaults to 64 `KiB`. |
 | `routes[].retry_policy.allow_non_idempotent` | bool | no | Allow retries for non-idempotent methods (POST/PATCH) when true. |
+| `routes[].hedge_policy` | HedgePolicy | no | Optional per-route hedged-request policy. When set, this route races the request across healthy endpoints in its cluster and returns the first successful response. Absent means one upstream attempt. |
+| `routes[].hedge_policy.initial_requests` | integer | yes | Attempts started immediately, including the primary. `1` sends the primary and waits for `per_try_timeout_ms` before any copy. Values greater than 1 fan out that many attempts at once. |
+| `routes[].hedge_policy.max_attempts` | integer | yes | Total attempts for one client request, including the primary. Must be at least `initial_requests` and at most 8. |
+| `routes[].hedge_policy.per_try_timeout_ms` | integer | no | Milliseconds to wait, with no successful response, before starting the next attempt. Required when `max_attempts` is greater than `initial_requests`. Must be omitted when they are equal. |
+| `routes[].hedge_policy.budget_percent` | number | yes | Cap on hedge copies as a percent of requests on this route (`0.0..=100.0`). The percent must be a multiple of `0.01` (one basis point). A finer value is rejected so the loaded percent is the percent that is enforced. The primary attempt is not counted. `0` disables copies. `10` allows about one extra attempt per ten requests. |
 | `multi_level_subdomain_matching` | bool | no | Enable multi-level subdomain matching for wildcard hosts. When `false` (default), `*.example.com` matches only single-level subdomains like `foo.example.com`. When `true`, it also matches multi-level subdomains like `foo.bar.example.com` (suffix match). Some control planes (e.g. Kubernetes Gateway API) require this. |
 
 ## Example

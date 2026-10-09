@@ -570,6 +570,14 @@ fn build_grpc_exporter(
         .with_tonic()
         .with_endpoint(endpoint);
 
+    // OpenTelemetry OTLP 0.33 configures TLS for HTTPS endpoints, but its
+    // default Tonic config does not load trust roots. Add platform roots only
+    // when this endpoint resolves to HTTPS; an explicit HTTP endpoint must
+    // retain its existing plaintext behavior.
+    if grpc_endpoint_uses_https(endpoint, resolve_otlp_grpc_insecure()) {
+        builder = builder.with_tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots());
+    }
+
     if let Some(hdrs) = headers {
         builder = builder.with_metadata(build_metadata_map(hdrs)?);
     }
@@ -577,6 +585,35 @@ fn build_grpc_exporter(
     builder
         .build()
         .map_err(|err| ProxyError::Config(format!("failed to build OTLP gRPC exporter: {err}")))
+}
+
+/// Decide whether the configured gRPC endpoint will use HTTPS, matching the
+/// locked OpenTelemetry OTLP exporter's explicit-scheme and `INSECURE` rules.
+#[cfg(feature = "otel")]
+fn grpc_endpoint_uses_https(endpoint: &str, insecure: bool) -> bool {
+    let has_scheme = endpoint
+        .split_once("://")
+        .is_some_and(|(scheme, _)| !scheme.contains(['/', '?', '#']));
+
+    if has_scheme {
+        endpoint
+            .parse::<http::Uri>()
+            .ok()
+            .and_then(|uri| uri.scheme_str().map(str::to_owned))
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https"))
+    } else {
+        !insecure
+    }
+}
+
+/// Read OTLP's trace-specific and generic `INSECURE` variables in the
+/// precedence order used by the locked OpenTelemetry exporter.
+#[cfg(feature = "otel")]
+fn resolve_otlp_grpc_insecure() -> bool {
+    std::env::var(opentelemetry_otlp::OTEL_EXPORTER_OTLP_TRACES_INSECURE)
+        .ok()
+        .or_else(|| std::env::var(opentelemetry_otlp::OTEL_EXPORTER_OTLP_INSECURE).ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 /// Build an HTTP/protobuf OTLP span exporter.
@@ -894,6 +931,17 @@ mod tests {
 
     use super::*;
     use crate::config::{LogOutput, LoggingConfig};
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn grpc_endpoint_tls_detection_preserves_otlp_scheme_resolution() {
+        assert!(grpc_endpoint_uses_https("https://collector.example:4317", true));
+        assert!(!grpc_endpoint_uses_https("http://collector.example:4317", false));
+        assert!(!grpc_endpoint_uses_https("http://collector.example:4317", true));
+        assert!(grpc_endpoint_uses_https("collector.example:4317", false));
+        assert!(!grpc_endpoint_uses_https("collector.example:4317", true));
+        assert!(!grpc_endpoint_uses_https("unix:///var/run/otel.sock", false));
+    }
 
     #[test]
     fn empty_log_overrides_produces_valid_filter() {

@@ -236,6 +236,8 @@ pub(super) struct RawExchange<'conn, 'reg> {
     pub(super) permit: Option<OwnedSemaphorePermit>,
     /// Absolute deadline for the entire exchange.
     pub(super) deadline: tokio::time::Instant,
+    /// Per-attempt HTTP client span retained through response-body completion.
+    pub(super) client_span: tracing::Span,
 }
 
 // -----------------------------------------------------------------------------

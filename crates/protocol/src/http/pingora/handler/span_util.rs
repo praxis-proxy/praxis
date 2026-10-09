@@ -29,7 +29,7 @@ pub(super) fn http_version_label(version: http::Version) -> &'static str {
 /// the upstream exchange.
 ///
 /// Called from the `logging` hook to fill in `http.response.status_code`,
-/// `otel.status_code` and `error.type` (5xx only), `http.route` and the
+/// `otel.status_code` and `error.type` (5xx only on SERVER spans), `http.route` and the
 /// `otel.name` upgrade to `{method} {route}` (when a route matched),
 /// `upstream.address`, and `upstream.cluster` on the root request span,
 /// and response attributes on the upstream exchange span.

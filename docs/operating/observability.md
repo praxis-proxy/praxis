@@ -5,6 +5,32 @@ logs, and health endpoints for monitoring proxy
 behavior. This guide covers setup, metric reference,
 logging configuration, and usage patterns.
 
+## OTLP Trace Export
+
+When Praxis is built with the `otel` feature and an OTLP endpoint is configured,
+OTLP/gRPC exports to HTTPS use the operating system's native certificate trust
+store and retain normal certificate-chain and hostname verification. The
+endpoint scheme controls transport: an explicit `http://` endpoint remains
+plaintext; an explicit `https://` endpoint uses verified TLS. For a scheme-less
+gRPC endpoint, `OTEL_EXPORTER_OTLP_TRACES_INSECURE` takes precedence over
+`OTEL_EXPORTER_OTLP_INSECURE`; only the value `true` (case-insensitive) selects
+plaintext, matching the OpenTelemetry OTLP exporter contract.
+
+Install private collector CAs in the platform trust store, or point
+`SSL_CERT_FILE` at a PEM bundle or `SSL_CERT_DIR` at a directory of PEM
+certificates. These variables are consumed by Tonic's native-root loader. When
+either variable is set, certificates are loaded from those explicit locations
+instead of the platform defaults. If both public and private roots are needed,
+provide a bundle containing both; these overrides do not append to system
+roots. Praxis never disables peer or hostname verification as a fallback. The
+HTTP/protobuf exporter remains governed by its URL scheme and is not changed by
+the gRPC trust configuration.
+
+See the [OTLP tracing configuration example][otlp-tracing-config] for endpoint,
+sampling, batching, and header settings.
+
+[otlp-tracing-config]: ../../examples/configs/observability/tracing-otlp.yaml
+
 ## Admin and Metrics Endpoints
 
 Health and metrics endpoints use a dedicated listener. Configure

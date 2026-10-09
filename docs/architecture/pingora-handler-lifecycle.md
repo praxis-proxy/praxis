@@ -386,9 +386,10 @@ Source: `response_filter.rs`,
 
 ### response_body_filter
 
-Processes response body chunks. **Synchronous** - no
-`.await` (Pingora API constraint). Mirrors the request
-body filter's body-mode dispatch logic for the
+Processes response body chunks. The Pingora hook is
+async, but nothing in it awaits: `on_response_body` is
+a plain `fn` on the `HttpFilter` trait. Mirrors the
+request body filter's body-mode dispatch logic for the
 response direction.
 
 **Short-circuit conditions:**

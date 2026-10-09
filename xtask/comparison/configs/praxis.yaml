@@ -5,7 +5,7 @@
 # Uses --network host, so listens directly on the host.
 
 admin:
-  address: "127.0.0.1:9901"
+  metrics_address: "127.0.0.1:9901"
 
 listeners:
   - name: default
