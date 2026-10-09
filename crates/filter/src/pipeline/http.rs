@@ -55,11 +55,11 @@ impl FilterPipeline {
     /// hook, in pipeline order, before any `StreamBuffer` request-body pre-read
     /// and before the main request phase.
     ///
-    /// Walks only [`request_head_filter_indices`], evaluating each filter's
+    /// Walks only `request_head_filter_indices`, evaluating each filter's
     /// request conditions against the request head exactly as the request phase
     /// does and honoring each filter's `failure_mode`. The head phase selects no
     /// upstream and runs no branches, so it never touches
-    /// [`executed_filter_indices`]: the later request phase runs every filter's
+    /// `executed_filter_indices`: the later request phase runs every filter's
     /// `on_request` and owns response-phase pairing.
     ///
     /// Only `Continue` and `Reject` are honored (see [`on_request_head`]); any
@@ -69,8 +69,6 @@ impl FilterPipeline {
     ///
     /// Returns [`FilterError`] when a filter fails with a closed `failure_mode`.
     ///
-    /// [`request_head_filter_indices`]: FilterPipeline::request_head_filter_indices
-    /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
     /// [`on_request_head`]: crate::HttpFilter::on_request_head
     #[expect(clippy::too_many_lines, reason = "per-filter condition eval and head dispatch")]
     pub async fn execute_http_request_head(

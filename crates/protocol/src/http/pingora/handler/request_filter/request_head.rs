@@ -7,7 +7,8 @@
 //! normalization and reserved-header validation but before any optional
 //! `StreamBuffer` request-body pre-read and before the main request phase.
 //! Facts a head filter publishes (extensions, metadata, filter results,
-//! filter state) are written back to [`PingoraRequestCtx`] so the pre-read
+//! filter state) are written back to
+//! [`PingoraRequestCtx`](crate::http::pingora::context::PingoraRequestCtx) so the pre-read
 //! pass and the request phase observe them; trusted header mutations are
 //! applied physically to the session and request, where they are trusted by
 //! construction because reserved-header validation already ran.

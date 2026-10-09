@@ -15,10 +15,10 @@ The class is also written to `head_classifier.class` filter metadata and to the 
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `rules` | ClassRule[] | yes | Ordered classification rules; the first rule whose `path_prefix` matches the request path supplies the class. |
-| `rules[].path_prefix` | string | yes | Request path prefix this rule matches (for example `/api/`). |
-| `rules[].class` | string | yes | Class published when `path_prefix` matches the request path. |
 | `default_class` | string | no | Class assigned when no rule matches. When unset, an unmatched request publishes no class and the chain proceeds unclassified. |
+| `rules` | ClassRule[] | yes | Ordered classification rules; the first rule whose `path_prefix` matches the request path supplies the class. |
+| `rules[].class` | string | yes | Class published when `path_prefix` matches the request path. |
+| `rules[].path_prefix` | string | yes | Request path prefix this rule matches (for example `/api/`). |
 
 ## Example
 
