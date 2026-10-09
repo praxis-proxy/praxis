@@ -37,6 +37,14 @@ const CLOUD_EVENTS_PUBLISH_DURATION_SECONDS: &str = "praxis_cloud_events_publish
 /// Counter for `CloudEvents` events skipped before publication.
 const CLOUD_EVENTS_SKIPPED_TOTAL: &str = "praxis_cloud_events_skipped_total";
 
+/// Request-head direction label value (`on_request_head`).
+///
+/// A distinct phase from [`PHASE_REQUEST`] so the pre-pre-read head pass is
+/// separable in dashboards: a filter active in both the head phase and the
+/// normal request phase would otherwise produce indistinguishable histogram
+/// entries.
+pub(crate) const PHASE_REQUEST_HEAD: &str = "request_head";
+
 /// Request direction label value.
 pub(crate) const PHASE_REQUEST: &str = "request";
 
@@ -220,7 +228,20 @@ mod tests {
     }
 
     #[test]
+    fn record_distinguishes_request_head_and_request_phases() {
+        crate::test_utils::install_metrics_recorder();
+
+        record_filter_duration("head_phase_test", PHASE_REQUEST_HEAD, STREAM_HEADERS, 0.001);
+        record_filter_duration("head_phase_test", PHASE_REQUEST, STREAM_HEADERS, 0.002);
+
+        let rendered = crate::test_utils::render_metrics();
+        assert_metric_labels(&rendered, "head_phase_test", "request_head", "headers");
+        assert_metric_labels(&rendered, "head_phase_test", "request", "headers");
+    }
+
+    #[test]
     fn phase_constants_have_expected_values() {
+        assert_eq!(PHASE_REQUEST_HEAD, "request_head", "PHASE_REQUEST_HEAD label value");
         assert_eq!(PHASE_REQUEST, "request", "PHASE_REQUEST label value");
         assert_eq!(PHASE_RESPONSE, "response", "PHASE_RESPONSE label value");
         assert_eq!(

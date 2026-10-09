@@ -24,7 +24,8 @@ use crate::{
     condition::{SelectedUpstream, should_execute_from, should_execute_response_ref},
     context::{EffectiveHeaders, HttpFilterContext, Response},
     metrics::{
-        PHASE_REQUEST, PHASE_RESPONSE, PHASE_SELECTED_UPSTREAM, STREAM_BODY, STREAM_HEADERS, record_filter_duration,
+        PHASE_REQUEST, PHASE_REQUEST_HEAD, PHASE_RESPONSE, PHASE_SELECTED_UPSTREAM, STREAM_BODY, STREAM_HEADERS,
+        record_filter_duration,
     },
 };
 #[cfg(feature = "bound-upstream-request-body")]
@@ -379,6 +380,86 @@ pub(super) async fn run_request_filter(
         Err(e) => {
             check_failure_mode(http_filter.name(), e, "request", failure_mode)?;
             Ok(HeaderFilterOutcome::Continue)
+        },
+    }
+}
+
+/// Run a single request-head filter hook (`on_request_head`) with tracing and
+/// metrics, returning the rejection it produced, if any.
+///
+/// The head phase selects no upstream and synthesizes no response, so only
+/// `Continue` and `Reject` are honored: a release, body-done, terminal, or
+/// streaming-terminal action is logged and treated as `Continue`. When
+/// `failure_mode` is [`FailureMode::Open`], an error is logged and treated as
+/// `Continue`.
+pub(super) async fn run_request_head_filter(
+    http_filter: &dyn crate::filter::HttpFilter,
+    ctx: &mut HttpFilterContext<'_>,
+    failure_mode: FailureMode,
+    metrics_enabled: bool,
+) -> Result<Option<Rejection>, FilterError> {
+    let filter_span = debug_span!(
+        "filter",
+        "otel.name" = %format_args!("filter:{}:request_head", http_filter.name()),
+        "filter.name" = http_filter.name(),
+        "filter.phase" = "request_head",
+        "filter.result" = tracing::field::Empty,
+    );
+    let head_result = async {
+        trace!("on_request_head");
+        let result = if metrics_enabled {
+            let start = std::time::Instant::now();
+            let result = http_filter.on_request_head(ctx).await;
+            record_filter_duration(
+                http_filter.name(),
+                PHASE_REQUEST_HEAD,
+                STREAM_HEADERS,
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        } else {
+            http_filter.on_request_head(ctx).await
+        };
+        record_filter_result(&filter_span, &result);
+        result
+    }
+    .instrument(filter_span.clone())
+    .await;
+    dispatch_request_head_result(head_result, http_filter.name(), failure_mode)
+}
+
+/// Classify a request-head filter result into an optional rejection, logging on
+/// reject, on an ignored action, and on a failure-mode error.
+fn dispatch_request_head_result(
+    result: Result<FilterAction, FilterError>,
+    filter_name: &str,
+    failure_mode: FailureMode,
+) -> Result<Option<Rejection>, FilterError> {
+    match result {
+        Ok(FilterAction::Continue) => Ok(None),
+        Ok(FilterAction::Reject(rejection)) => {
+            warn!(
+                filter = filter_name,
+                status = rejection.status,
+                "request-head phase rejected by filter"
+            );
+            Ok(Some(rejection))
+        },
+        Ok(
+            FilterAction::Release
+            | FilterAction::BodyDone
+            | FilterAction::TerminalResponse(_)
+            | FilterAction::StreamingTerminalResponse(_),
+        ) => {
+            warn!(
+                filter = filter_name,
+                "request-head phase: unsupported action ignored; only Continue and Reject are honored"
+            );
+            Ok(None)
+        },
+        Err(e) => {
+            check_failure_mode(filter_name, e, "request head", failure_mode)?;
+            Ok(None)
         },
     }
 }
@@ -963,6 +1044,77 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_request_head_filter_continue_returns_none() {
+        let filter = HeadFilter::default();
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let outcome = run_request_head_filter(&filter, &mut ctx, FailureMode::Closed, false)
+            .await
+            .unwrap();
+        assert!(outcome.is_none(), "a continuing head filter produces no rejection");
+    }
+
+    #[tokio::test]
+    async fn run_request_head_filter_reject_returns_rejection() {
+        let filter = HeadFilter {
+            reject_status: Some(451),
+            ..HeadFilter::default()
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let outcome = run_request_head_filter(&filter, &mut ctx, FailureMode::Closed, false)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&outcome, Some(r) if r.status == 451),
+            "a rejecting head filter should surface its rejection status"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_request_head_filter_ignores_unsupported_action() {
+        let filter = HeadFilter {
+            release: true,
+            ..HeadFilter::default()
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let outcome = run_request_head_filter(&filter, &mut ctx, FailureMode::Closed, false)
+            .await
+            .unwrap();
+        assert!(
+            outcome.is_none(),
+            "the head phase drops a Release action and treats it as Continue"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_request_head_filter_error_open_swallows() {
+        let filter = HeadFilter {
+            error: true,
+            ..HeadFilter::default()
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let outcome = run_request_head_filter(&filter, &mut ctx, FailureMode::Open, false)
+            .await
+            .unwrap();
+        assert!(outcome.is_none(), "a fail-open head error is swallowed as Continue");
+    }
+
+    #[tokio::test]
+    async fn run_request_head_filter_error_closed_propagates() {
+        let filter = HeadFilter {
+            error: true,
+            ..HeadFilter::default()
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let result = run_request_head_filter(&filter, &mut ctx, FailureMode::Closed, false).await;
+        assert!(result.is_err(), "a fail-closed head error aborts the request");
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -992,6 +1144,45 @@ mod tests {
 
         async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
             Ok(FilterAction::Reject(Rejection::status(self.0)))
+        }
+    }
+
+    /// HTTP filter returning a configured action from `on_request_head`.
+    #[derive(Default)]
+    struct HeadFilter {
+        /// Reject with this status, when set.
+        reject_status: Option<u16>,
+        /// Return a `Release` action (an unsupported head action) when `true`.
+        release: bool,
+        /// Return an error when `true`.
+        error: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpFilter for HeadFilter {
+        fn name(&self) -> &'static str {
+            "head_filter"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn runs_request_head(&self) -> bool {
+            true
+        }
+
+        async fn on_request_head(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            if self.error {
+                return Err("head error".into());
+            }
+            if let Some(status) = self.reject_status {
+                return Ok(FilterAction::Reject(Rejection::status(status)));
+            }
+            if self.release {
+                return Ok(FilterAction::Release);
+            }
+            Ok(FilterAction::Continue)
         }
     }
 

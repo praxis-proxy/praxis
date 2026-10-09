@@ -26,8 +26,9 @@ use super::{
     filter::PipelineFilter,
     http_utils::{
         BodyFilterOutcome, HeaderFilterOutcome, accumulate_body_bytes, as_request_body_filter, as_response_body_filter,
-        released_or_continue, run_request_body_filter, run_request_filter, run_response_body_filter,
-        run_response_filter, run_selected_upstream_request_body_filter, skip_by_response_conditions,
+        released_or_continue, run_request_body_filter, run_request_filter, run_request_head_filter,
+        run_response_body_filter, run_response_filter, run_selected_upstream_request_body_filter,
+        skip_by_response_conditions,
     },
 };
 use crate::{
@@ -50,6 +51,66 @@ use crate::{actions::BoundUpstreamBodyOutcome, condition::SelectedUpstream, exte
     reason = "pipeline concerns are split across modules"
 )]
 impl FilterPipeline {
+    /// Run the request-head phase: every opted-in filter's `on_request_head`
+    /// hook, in pipeline order, before any `StreamBuffer` request-body pre-read
+    /// and before the main request phase.
+    ///
+    /// Walks only [`request_head_filter_indices`], evaluating each filter's
+    /// request conditions against the request head exactly as the request phase
+    /// does and honoring each filter's `failure_mode`. The head phase selects no
+    /// upstream and runs no branches, so it never touches
+    /// [`executed_filter_indices`]: the later request phase runs every filter's
+    /// `on_request` and owns response-phase pairing.
+    ///
+    /// Only `Continue` and `Reject` are honored (see [`on_request_head`]); any
+    /// other action is dropped with a warning and treated as `Continue`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] when a filter fails with a closed `failure_mode`.
+    ///
+    /// [`request_head_filter_indices`]: FilterPipeline::request_head_filter_indices
+    /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
+    /// [`on_request_head`]: crate::HttpFilter::on_request_head
+    #[expect(clippy::too_many_lines, reason = "per-filter condition eval and head dispatch")]
+    pub async fn execute_http_request_head(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<FilterAction, FilterError> {
+        for &idx in &self.request_head_filter_indices {
+            let Some(pf) = self.filters.get(idx) else {
+                continue;
+            };
+            let AnyFilter::Http(http_filter) = &pf.filter else {
+                continue;
+            };
+            if !pf.conditions.is_empty()
+                && !should_execute_bound_selected(
+                    &pf.conditions,
+                    ctx.request,
+                    ctx.bound_upstream_view(),
+                    super::http_utils::ctx_selected_upstream(ctx),
+                )
+            {
+                trace!(filter = http_filter.name(), "request-head hook skipped by conditions");
+                continue;
+            }
+            ctx.current_filter_id = Some(pf.filter_id);
+            let outcome = run_request_head_filter(
+                http_filter.as_ref(),
+                ctx,
+                pf.failure_mode,
+                self.record_filter_duration_metrics,
+            )
+            .await;
+            ctx.current_filter_id = None;
+            if let Some(rejection) = outcome? {
+                return Ok(FilterAction::Reject(rejection));
+            }
+        }
+        Ok(FilterAction::Continue)
+    }
+
     /// Run all HTTP request filters in order.
     ///
     /// Tracks which filter indices actually executed so the

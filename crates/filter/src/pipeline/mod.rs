@@ -156,6 +156,14 @@ pub struct FilterPipeline {
     /// Global response body ceiling, enforced by counting in Stream mode.
     response_body_ceiling: Option<usize>,
 
+    /// Indices into `filters` of top-level filters that run the request-head
+    /// phase, walked once per request by [`execute_http_request_head`] before
+    /// any `StreamBuffer` request-body pre-read. Empty when no filter opts in,
+    /// which keeps the head phase off the zero-buffering fast path.
+    ///
+    /// [`execute_http_request_head`]: FilterPipeline::execute_http_request_head
+    request_head_filter_indices: Vec<usize>,
+
     /// Indices into `filters` of filters declaring request-body access.
     request_body_filter_indices: Vec<usize>,
 
@@ -330,6 +338,18 @@ impl FilterPipeline {
     /// Whether any filter in the pipeline needs body access.
     pub fn needs_body_filters(&self) -> bool {
         self.body_capabilities.needs_request_body || self.body_capabilities.needs_response_body
+    }
+
+    /// Whether any filter opts in to the request-head phase.
+    ///
+    /// The protocol layer calls [`execute_http_request_head`] only when this is
+    /// `true`, so a pipeline with no head participant pays nothing and keeps the
+    /// zero-buffering fast path.
+    ///
+    /// [`execute_http_request_head`]: FilterPipeline::execute_http_request_head
+    #[must_use]
+    pub fn has_request_head_phase(&self) -> bool {
+        !self.request_head_filter_indices.is_empty()
     }
 
     /// Number of filters in the pipeline.

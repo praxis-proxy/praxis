@@ -105,6 +105,31 @@ pub(super) fn body_filter_indices(filters: &[PipelineFilter]) -> (Vec<usize>, Ve
     (request, response)
 }
 
+/// Precompute the pipeline indices of top-level filters that run the
+/// request-head phase.
+///
+/// The head loop runs each of these filters' [`on_request_head`] hook before
+/// any `StreamBuffer` request-body pre-read; walking only these indices skips
+/// non-participating filters without a per-request predicate check. A filter
+/// opts in by overriding [`runs_request_head`].
+///
+/// Top-level only: branch filters never run the head hook, matching the
+/// body-phase precompute helpers.
+///
+/// [`on_request_head`]: crate::HttpFilter::on_request_head
+/// [`runs_request_head`]: crate::HttpFilter::runs_request_head
+pub(super) fn request_head_filter_indices(filters: &[PipelineFilter]) -> Vec<usize> {
+    let mut indices = Vec::new();
+    for (idx, pf) in filters.iter().enumerate() {
+        if let AnyFilter::Http(f) = &pf.filter
+            && f.runs_request_head()
+        {
+            indices.push(idx);
+        }
+    }
+    indices
+}
+
 /// Precompute the pipeline indices of filters that declared
 /// selected-upstream request-body access.
 ///
@@ -1205,12 +1230,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn request_head_filter_indices_collects_opted_in_filters() {
+        let head = PipelineFilter::new(0, AnyFilter::Http(Box::new(HeadCapFilter)), vec![], vec![]);
+        let plain = PipelineFilter::new(1, AnyFilter::Http(Box::new(NoopHttpFilter)), vec![], vec![]);
+        let indices = request_head_filter_indices(&[head, plain]);
+        assert_eq!(indices, vec![0], "only the opted-in filter's index is collected");
+    }
+
+    #[test]
+    fn request_head_filter_indices_empty_without_opt_in() {
+        let plain = PipelineFilter::new(0, AnyFilter::Http(Box::new(NoopHttpFilter)), vec![], vec![]);
+        assert!(
+            request_head_filter_indices(&[plain]).is_empty(),
+            "a pipeline with no head participant collects no head indices"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
     /// Noop HTTP filter for body capability branch testing.
     struct NoopHttpFilter;
+
+    /// HTTP filter that opts in to the request-head phase.
+    struct HeadCapFilter;
+
+    #[async_trait::async_trait]
+    impl crate::filter::HttpFilter for HeadCapFilter {
+        fn name(&self) -> &'static str {
+            "head_cap"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut crate::HttpFilterContext<'_>,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            Ok(crate::FilterAction::Continue)
+        }
+
+        fn runs_request_head(&self) -> bool {
+            true
+        }
+    }
 
     #[async_trait::async_trait]
     impl crate::filter::HttpFilter for NoopHttpFilter {
