@@ -283,6 +283,7 @@ fn serve_alpn_connections(
 
 /// Observe the server's handshake result and send application bytes only on success.
 fn serve_alpn(mut stream: std::net::TcpStream, config: Arc<ServerConfig>, observed: &mpsc::Sender<AlpnOutcome>) {
+    stream.set_nonblocking(false).unwrap();
     stream.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
     stream.set_write_timeout(Some(IO_TIMEOUT)).unwrap();
     let mut connection = ServerConnection::new(config).unwrap();
