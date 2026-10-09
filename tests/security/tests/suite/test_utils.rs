@@ -57,5 +57,35 @@ pub(super) fn send_text(addr: &str, request: &str) -> String {
 
 /// Count response frames in fixtures whose bodies cannot contain a status line.
 pub(super) fn status_lines(raw: &str) -> usize {
-    raw.match_indices("HTTP/1.").count()
+    let mut remaining = raw;
+    let mut count = 0;
+    while let Some(start) = remaining.find("HTTP/1.") {
+        remaining = remaining.get(start..).unwrap();
+        let Some(header_end) = remaining.find("\r\n\r\n") else {
+            break;
+        };
+        count += 1;
+        remaining = remaining.get(header_end + 4..).unwrap();
+    }
+    count
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn status_count_ignores_header_values_without_missing_appended_responses() {
+    let first = "HTTP/1.1 200 OK\r\nX-Echo: HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nsafe";
+    assert_eq!(
+        status_lines(first),
+        1,
+        "a reflected header must not count as another response"
+    );
+    let appended = format!("{first}HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\npoison");
+    assert_eq!(
+        status_lines(&appended),
+        2,
+        "a status immediately after the body is a second response"
+    );
 }
