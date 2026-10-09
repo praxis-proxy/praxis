@@ -1056,6 +1056,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_request_head_filter_records_duration_when_metrics_enabled() {
+        let filter = HeadFilter::default();
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let outcome = run_request_head_filter(&filter, &mut ctx, FailureMode::Closed, true)
+            .await
+            .unwrap();
+        assert!(
+            outcome.is_none(),
+            "enabling duration metrics must not change the head outcome"
+        );
+    }
+
+    #[tokio::test]
     async fn run_request_head_filter_reject_returns_rejection() {
         let filter = HeadFilter {
             reject_status: Some(451),

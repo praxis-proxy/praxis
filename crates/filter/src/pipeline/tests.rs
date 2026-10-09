@@ -165,6 +165,50 @@ fn ordinary_routing_does_not_require_global_cluster_metadata_agreement() {
     );
 }
 
+#[tokio::test]
+async fn execute_http_request_head_skips_hook_when_conditions_unmet() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: head_classifier
+  conditions:
+    - when: {path_prefix: "/api/"}
+  rules:
+    - path_prefix: /api/
+      class: api
+"#,
+    )
+    .unwrap();
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+
+    // Conditions met: the head hook runs and classifies.
+    let matched_req = crate::test_utils::make_request(Method::GET, "/api/users");
+    let mut matched_ctx = crate::test_utils::make_filter_context(&matched_req);
+    let action = pipeline.execute_http_request_head(&mut matched_ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a met-condition head hook continues"
+    );
+    assert_eq!(
+        matched_ctx.get_metadata("head_classifier.class"),
+        Some("api"),
+        "a request meeting the head filter's conditions is classified"
+    );
+
+    // Conditions unmet: the head hook is skipped entirely.
+    let skipped_req = crate::test_utils::make_request(Method::GET, "/other");
+    let mut skipped_ctx = crate::test_utils::make_filter_context(&skipped_req);
+    let action = pipeline.execute_http_request_head(&mut skipped_ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a skipped head hook continues"
+    );
+    assert!(
+        skipped_ctx.get_metadata("head_classifier.class").is_none(),
+        "a request failing the head filter's conditions skips the hook"
+    );
+}
+
 #[cfg(feature = "upstream-binding")]
 #[test]
 fn binding_enabled_routing_requires_global_cluster_metadata_agreement() {
