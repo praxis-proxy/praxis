@@ -126,13 +126,16 @@ enum GatedIdentity {
 /// `cmf.llm_output` for non-streaming inference responses. APL field
 /// mutators do not rewrite inference bodies.
 ///
-/// `body_access: read_write` also enables response-phase `tool:` rules,
-/// including attribute-only `post_invocation` rules. Under `read_only`, these
+/// `body_access: read_write` also enables response-phase `tool:`, `prompt:`,
+/// and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these
 /// rules are skipped and a warning is emitted. A response-only route adds no
 /// request-phase route rule; identity checks and `global` policy still apply.
 ///
-/// `prompt:` and `resource:` response rules do not currently run under either
-/// body access mode. Use `pre_invocation` for those controls.
+/// `result.<field>` projection for `prompt:` and `resource:` routes remains
+/// blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330].
+///
+/// [policy #75]: https://github.com/praxis-proxy/policy/issues/75
+/// [Praxis #1330]: https://github.com/praxis-proxy/praxis/issues/1330
 ///
 /// Policies with MCP entity routes cannot declare `authorization:` on an
 /// `http:` route. Use `global` for shared authorization; route-scoped
@@ -592,8 +595,8 @@ impl PolicyFilter {
                 target: "policy.filter",
                 "policy declares response-phase `prompt:` or `resource:` rules: \
                  `post_invocation` predicates over identity and attributes are dispatched, but \
-                 `result.<field>` projection is not yet available for these entity types \
-                 (content projection is tools/call only).",
+                 `result.<field>` projection remains blocked on praxis-proxy/policy#75; \
+                 host-side content projection is tracked in praxis-proxy/praxis#1330.",
             );
         }
     }
