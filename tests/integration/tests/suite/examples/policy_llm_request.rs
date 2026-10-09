@@ -158,7 +158,7 @@ fn responses_body(tools: &[&str]) -> String {
 }
 
 /// Responses tool history carrying `text` in each formerly skipped field.
-fn responses_tool_history(text: &str) -> [serde_json::Value; 3] {
+fn responses_tool_history(text: &str) -> [serde_json::Value; 7] {
     [
         serde_json::json!({"type": "custom_tool_call_output", "call_id": "c1", "output": text}),
         serde_json::json!({
@@ -169,6 +169,10 @@ fn responses_tool_history(text: &str) -> [serde_json::Value; 3] {
             "type": "mcp_call", "id": "mcp1", "name": "lookup", "server_label": "server",
             "arguments": serde_json::json!({"q": text}).to_string(), "output": "result",
         }),
+        serde_json::json!({"type": "file_search_call", "results": [{"text": text}]}),
+        serde_json::json!({"type": "code_interpreter_call", "code": text}),
+        serde_json::json!({"type": "code_interpreter_call", "outputs": [{"type": "logs", "logs": text}]}),
+        serde_json::json!({"type": "mcp_list_tools", "tools": [{"name": "lookup", "description": text}]}),
     ]
 }
 
@@ -224,6 +228,15 @@ fn responses_tool_history_is_subject_to_prompt_rules() {
                 assert_forwarded_unchanged("/v1/responses", &body);
             }
         }
+    }
+}
+
+#[test]
+fn a_messages_field_cannot_hide_responses_input_from_prompt_rules() {
+    for messages in [serde_json::Value::Null, serde_json::json!([])] {
+        let denied = serde_json::json!({"model": "responses-prompt", "messages": messages, "input": "SECRET-MARKER"})
+            .to_string();
+        assert_denied_unforwarded("/v1/responses", &denied);
     }
 }
 
@@ -344,6 +357,8 @@ fn a_body_repeating_a_key_is_rejected_before_policy_or_upstream() {
         r#"{"model":"chat-cel","tools":[{"type":"function","function":{"name":"transfer_funds"}}],"tools":[]}"#,
         r#"{"model":"chat-opa","tools":[{"type":"function","function":{"name":"lookup","name":"transfer_funds"}}]}"#,
         r#"{"model":"chat-cel","model":"chat-opa","messages":[]}"#,
+        r#"{"model":"chat-cel","MODEL":"chat-opa","messages":[]}"#,
+        r#"{"model":"chat-cel","tools":[],"Tools":[{"type":"function","function":{"name":"transfer_funds"}}]}"#,
     ] {
         let backend = start_probe_backend();
         let proxy_port = free_port();

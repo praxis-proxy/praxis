@@ -3,7 +3,7 @@
 
 //! Inference request and response parsing for CMF policy evaluation.
 
-use std::{cell::Cell, fmt};
+use std::{cell::Cell, collections::HashSet, fmt};
 
 use bytes::Bytes;
 use ppe::praxis_policy_core::{
@@ -140,7 +140,7 @@ impl ParsedLlmRequest {
         }
 
         // Responses and embeddings carry the prompt in `input`.
-        if let Some(input) = self.0.get("input").filter(|_| self.0.get("messages").is_none()) {
+        if let Some(input) = self.0.get("input") {
             push_input_text(&mut parts, input);
         }
 
@@ -228,12 +228,33 @@ fn push_input_text(parts: &mut Vec<ContentPart>, input: &serde_json::Value) {
 /// Every non-message item type is scanned, so a tool call or output of a
 /// type not named here still reaches prompt rules and scanners.
 fn push_input_item_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value) {
-    let fields = match item.get("type").and_then(serde_json::Value::as_str) {
+    let kind = item.get("type").and_then(serde_json::Value::as_str);
+    let fields = match kind {
         Some("message") | None => &["content"][..],
         Some(_) => INPUT_ITEM_TEXT_FIELDS,
     };
     for value in fields.iter().filter_map(|field| item.get(field)) {
         push_input_parts_text(parts, value);
+    }
+    match kind {
+        Some("file_search_call") => push_nested_item_text(parts, item, "results", "text"),
+        Some("code_interpreter_call") => {
+            if let Some(code) = item.get("code") {
+                push_text(parts, code);
+            }
+            push_nested_item_text(parts, item, "outputs", "logs");
+        },
+        Some("mcp_list_tools") => push_nested_item_text(parts, item, "tools", "description"),
+        Some(_) | None => {},
+    }
+}
+
+/// Project named text from an array of tool-history records.
+fn push_nested_item_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value, array: &str, field: &str) {
+    if let Some(records) = item.get(array).and_then(serde_json::Value::as_array) {
+        for value in records.iter().filter_map(|record| record.get(field)) {
+            push_text(parts, value);
+        }
     }
 }
 
@@ -354,11 +375,14 @@ impl<'de> serde::de::Visitor<'de> for UniqueKeys<'_> {
 
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut object = serde_json::Map::new();
+        let mut seen = HashSet::new();
         while let Some(key) = map.next_key::<String>()? {
             let value = map.next_value_seed(self)?;
-            if object.insert(key, value).is_some() {
+            // Go backends also match JSON field names without regard to case.
+            if !seen.insert(unicase::UniCase::new(key.as_str()).to_folded_case()) {
                 self.duplicate.set(true);
             }
+            object.insert(key, value);
         }
         Ok(serde_json::Value::Object(object))
     }
@@ -565,6 +589,21 @@ mod tests {
             ),
             "a second `tools` could hide the first from policy while the backend acts on it",
         );
+    }
+
+    #[test]
+    fn case_variant_keys_are_rejected_at_every_depth() {
+        for body in [
+            r#"{"model":"allowed","MODEL":"forbidden"}"#,
+            r#"{"model":"m","tools":[],"Tools":[{"name":"forbidden"}]}"#,
+            r#"{"model":"m","tools":[],"toolſ":[{"name":"forbidden"}]}"#,
+            r#"{"model":"m","tools":[{"function":{"name":"allowed","Name":"forbidden"}}]}"#,
+        ] {
+            assert!(
+                matches!(try_request(body), Err(DuplicateKey)),
+                "case variants can name the same backend field: {body}"
+            );
+        }
     }
 
     #[test]
@@ -800,6 +839,18 @@ mod tests {
     }
 
     #[test]
+    fn input_is_projected_even_when_messages_is_present() {
+        for messages in ["null", "[]", r#"[{"content":"chat"}]"#] {
+            let body = format!(r#"{{"model":"m","messages":{messages},"input":"hidden"}}"#);
+            let content = texts(&request(&body).content());
+            assert!(
+                content.iter().any(|part| part == "hidden"),
+                "a messages field cannot hide Responses input: {body}"
+            );
+        }
+    }
+
+    #[test]
     fn unknown_body_shape_yields_no_content_but_keeps_the_model() {
         let parsed = request(r#"{"model":"m","inputs":{"nested":"value"}}"#);
         assert!(parsed.content().is_empty());
@@ -949,6 +1000,20 @@ mod tests {
             texts(&parsed.content()),
             vec!["shell", "custom", "reasoning", "summary", "unknown"],
             "an item type outside the known set must not hide its text from scanners",
+        );
+    }
+
+    #[test]
+    fn standard_responses_history_fields_are_projected() {
+        let parsed = request(
+            r#"{"model":"m","input":[
+                {"type":"file_search_call","results":[{"text":"search result"}]},
+                {"type":"code_interpreter_call","code":"print(1)","outputs":[{"type":"logs","logs":"execution log"}]},
+                {"type":"mcp_list_tools","tools":[{"name":"lookup","description":"tool description"}]}]}"#,
+        );
+        assert_eq!(
+            texts(&parsed.content()),
+            vec!["search result", "print(1)", "execution log", "tool description"],
         );
     }
 

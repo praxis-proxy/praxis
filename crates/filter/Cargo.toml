@@ -16,6 +16,7 @@ name = "praxis_filter"
 default = ["policy-engine"]
 policy-engine = [
     "dep:ppe",
+    "dep:unicase",
     "tokio/rt-multi-thread",
 ]
 basic-auth-filter = [
@@ -100,6 +101,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true, optional = true }
+unicase = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 zeroize = { workspace = true }
 

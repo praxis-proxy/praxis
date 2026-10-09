@@ -66,9 +66,11 @@
 //! Bodyless requests remain subject to identity policy but skip inference
 //! routing. APIs that identify the model only in the URL are unsupported.
 //!
-//! OPA, CEL, and Cedar steps also read the parsed body as `llm.request`.
+//! OPA, CEL, and Cedar `pre_invocation` steps on `llm:` routes also read the
+//! parsed body as `llm.request`; `post_invocation` steps do not receive it.
 //! The upstream receives the original bytes on allow. A body that repeats
-//! a JSON object key is denied before policy runs.
+//! a JSON object key, including one that differs only in case, is denied
+//! before policy runs.
 //!
 //! See `examples/configs/security/policy-llm.yaml`.
 //!

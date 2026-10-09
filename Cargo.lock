@@ -3360,6 +3360,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "unicase",
  "url",
  "yaml_serde",
  "zeroize",
