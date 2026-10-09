@@ -189,7 +189,8 @@ version's section from `CHANGELOG.md`. The generated
 The `skip/changelog` label only affects those generated
 notes, not `CHANGELOG.md`.
 
-[changelog-convention]: https://github.com/praxis-proxy/conventions/blob/main/docs/release.md#changelog
+[changelog-convention]:
+https://github.com/praxis-proxy/conventions/blob/main/docs/release.md#changelog
 
 ## Release Branches
 

@@ -693,4 +693,5 @@ change also adds its entry under `[Unreleased]` in
 `CHANGELOG.md`. The [changelog
 convention][changelog-convention] covers the format.
 
-[changelog-convention]: https://github.com/praxis-proxy/conventions/blob/main/docs/release.md#changelog
+[changelog-convention]:
+https://github.com/praxis-proxy/conventions/blob/main/docs/release.md#changelog
