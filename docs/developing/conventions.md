@@ -687,3 +687,11 @@ skip the size and description checks. For a one-off
 exception, a reviewer can add `skip/pr-conventions`
 (size, description, commit format, and authorship) or
 `skip/commit-signing` (signed commits) to the PR.
+
+One rule no gate checks: a PR with a user-visible
+change also adds its entry under `[Unreleased]` in
+`CHANGELOG.md`. The [changelog
+convention][changelog-convention] covers the format.
+
+[changelog-convention]:
+https://github.com/praxis-proxy/conventions/blob/main/docs/release.md#changelog

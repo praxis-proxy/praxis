@@ -9,6 +9,7 @@ Fixes #
 - [ ] Signed off all commits (`git commit -s`)
 - [ ] Tests added or updated
 - [ ] Documentation updated (if applicable)
+- [ ] CHANGELOG.md updated (if the change is user-visible)
 - [ ] `make lint && make test && make test-integration` passes locally
 
 ### Does this introduce a breaking change?
