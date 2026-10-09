@@ -225,8 +225,8 @@ fn push_input_text(parts: &mut Vec<ContentPart>, input: &serde_json::Value) {
 
 /// Append message or tool-history text from one `input` item.
 ///
-/// Every non-message item type is scanned, so a tool call or output of a
-/// type not named here still reaches prompt rules and scanners.
+/// Unlisted item types contribute any text found in the common fields in
+/// [`INPUT_ITEM_TEXT_FIELDS`]; known types can contribute additional fields.
 fn push_input_item_text(parts: &mut Vec<ContentPart>, item: &serde_json::Value) {
     let kind = item.get("type").and_then(serde_json::Value::as_str);
     let fields = match kind {
