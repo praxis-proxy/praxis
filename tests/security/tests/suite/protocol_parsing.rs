@@ -11,6 +11,10 @@ use praxis_test_utils::{
 
 use super::test_utils::{send_text, status_lines};
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[test]
 fn chunked_encoding_non_hex_size_rejected() {
     assert_invalid_chunk("xyz");

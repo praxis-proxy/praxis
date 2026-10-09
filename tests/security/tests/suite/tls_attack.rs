@@ -25,6 +25,10 @@ use super::test_utils::{IO_TIMEOUT, connect, send_text};
 /// Legacy `TLS_ECDHE_ECDSA_WITH_RC4_128_SHA` suite, matching the control certificate.
 const RC4_SUITE: u16 = 0xC007;
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[test]
 fn tls12_cipher_policy_accepts_allowed_and_rejects_excluded_suite() {
     let certs = TestCertificates::generate();

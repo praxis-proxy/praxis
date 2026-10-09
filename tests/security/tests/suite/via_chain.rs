@@ -8,6 +8,10 @@ use praxis_test_utils::{
     free_port, parse_body, parse_status, simple_proxy_yaml, start_header_echo_backend, start_proxy,
 };
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[test]
 fn long_request_via_chain_preserved_and_extended() {
     let backend = start_header_echo_backend();
