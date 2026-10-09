@@ -1,0 +1,74 @@
+# Head Classifier Routing
+#
+# Classifies each request from its head (path) and promotes the class as a
+# reserved x-praxis-head-class header that the router matches to pick an upstream.
+# Classification runs in the request-head phase, before any request body is read.
+#
+#   ┌────────┐
+#   │ client │
+#   └───┬────┘
+#       │
+#   ┌───▼─────────────────┐
+#   │ proxy  :8080        │
+#   │  head_classifier ─┐ │  /api/*    -> class api
+#   │                   │ │  /assets/* -> class assets
+#   │  router  <────────┘ │  (default) -> class other
+#   └───┬────────┬────────┘
+#       │        │        │
+#   ┌───▼──┐ ┌───▼───┐ ┌──▼────┐
+#   │ api  │ │assets │ │ other │
+#   │ 3001 │ │ 3002  │ │ 3003  │
+#   └──────┘ └───────┘ └───────┘
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/head-classifier.yaml
+#   curl http://localhost:8080/api/users    # -> api backend
+#   curl http://localhost:8080/assets/app.js # -> assets backend
+#   curl http://localhost:8080/home          # -> other backend
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    protocol: http
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: head_classifier
+        rules:
+          - path_prefix: "/api/"
+            class: api
+          - path_prefix: "/assets/"
+            class: assets
+        default_class: other
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            headers:
+              x-praxis-head-class: api
+            cluster: api-backend
+          - path_prefix: "/"
+            headers:
+              x-praxis-head-class: assets
+            cluster: assets-backend
+          - path_prefix: "/"
+            headers:
+              x-praxis-head-class: other
+            cluster: other-backend
+
+      - filter: load_balancer
+        clusters:
+          - name: api-backend
+            endpoints:
+              - "127.0.0.1:3001"
+          - name: assets-backend
+            endpoints:
+              - "127.0.0.1:3002"
+          - name: other-backend
+            endpoints:
+              - "127.0.0.1:3003"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
