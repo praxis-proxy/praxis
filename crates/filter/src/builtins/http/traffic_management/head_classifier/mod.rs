@@ -30,25 +30,25 @@ use crate::{
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HeadClassifierConfig {
-    /// Ordered classification rules; the first rule whose `path_prefix` matches
-    /// the request path supplies the class.
-    rules: Vec<ClassRule>,
-
     /// Class assigned when no rule matches. When unset, an unmatched request
     /// publishes no class and the chain proceeds unclassified.
     #[serde(default)]
     default_class: Option<String>,
+
+    /// Ordered classification rules; the first rule whose `path_prefix` matches
+    /// the request path supplies the class.
+    rules: Vec<ClassRule>,
 }
 
 /// A single path-prefix classification rule.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClassRule {
-    /// Request path prefix this rule matches (for example `/api/`).
-    path_prefix: String,
-
     /// Class published when `path_prefix` matches the request path.
     class: String,
+
+    /// Request path prefix this rule matches (for example `/api/`).
+    path_prefix: String,
 }
 
 /// Classifies a request from its head and promotes the matched class as a
@@ -77,11 +77,11 @@ struct ClassRule {
 /// default_class: other
 /// ```
 pub struct HeadClassifierFilter {
-    /// Ordered path-prefix rules, checked in configuration order.
-    rules: Vec<ClassRule>,
-
     /// Class for requests that no rule matches, if configured.
     default_class: Option<String>,
+
+    /// Ordered path-prefix rules, checked in configuration order.
+    rules: Vec<ClassRule>,
 }
 
 impl HeadClassifierFilter {
@@ -104,8 +104,8 @@ impl HeadClassifierFilter {
             validate_class(default)?;
         }
         Ok(Box::new(Self {
-            rules: cfg.rules,
             default_class: cfg.default_class,
+            rules: cfg.rules,
         }))
     }
 
