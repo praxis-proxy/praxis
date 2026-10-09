@@ -90,7 +90,8 @@ impl HeadClassifierFilter {
     /// # Errors
     ///
     /// Returns [`FilterError`] when the config is invalid, a `path_prefix` is
-    /// empty, or a class value is empty or unsafe to promote to a header.
+    /// empty, or a class value is empty, too long, or unsafe to promote to a
+    /// header.
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: HeadClassifierConfig = parse_filter_config("head_classifier", config)?;
         for rule in &cfg.rules {
@@ -118,14 +119,28 @@ impl HeadClassifierFilter {
     }
 }
 
-/// Validate that a class value is non-empty and safe to promote to a header.
+/// Maximum class byte length. Matches the `FilterResultSet` and filter-metadata
+/// value caps (256 B) so a class accepted here never fails at runtime when
+/// `on_request_head` writes it to those sinks.
+const MAX_CLASS_LEN: usize = 256; // 256 B
+
+/// Validate that a class value is non-empty, within the runtime length cap, and
+/// safe to promote to a header.
 ///
 /// # Errors
 ///
-/// Returns [`FilterError`] when `class` is empty or carries control bytes.
+/// Returns [`FilterError`] when `class` is empty, exceeds [`MAX_CLASS_LEN`]
+/// bytes, or carries control bytes.
 fn validate_class(class: &str) -> Result<(), FilterError> {
     if class.is_empty() {
         return Err("head_classifier: class must not be empty".into());
+    }
+    if class.len() > MAX_CLASS_LEN {
+        return Err(format!(
+            "head_classifier: class must not exceed {MAX_CLASS_LEN} bytes, got {len}",
+            len = class.len()
+        )
+        .into());
     }
     if !is_safe_promoted_value(class) {
         return Err(format!("head_classifier: class {class:?} contains unsafe characters").into());

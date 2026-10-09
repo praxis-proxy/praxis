@@ -65,6 +65,38 @@ fn from_config_rejects_unsafe_class() {
     );
 }
 
+#[test]
+fn from_config_rejects_overlong_class() {
+    let class = "a".repeat(257);
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&format!("rules:\n  - path_prefix: /api/\n    class: {class}\n")).unwrap();
+    assert!(
+        HeadClassifierFilter::from_config(&yaml).is_err(),
+        "a class over the 256-byte runtime value cap must be rejected at config time, not 500 at runtime"
+    );
+}
+
+#[test]
+fn from_config_accepts_max_length_class() {
+    let class = "a".repeat(256);
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(&format!("rules:\n  - path_prefix: /api/\n    class: {class}\n")).unwrap();
+    assert!(
+        HeadClassifierFilter::from_config(&yaml).is_ok(),
+        "a class at exactly the 256-byte cap must be accepted"
+    );
+}
+
+#[test]
+fn from_config_rejects_overlong_default_class() {
+    let class = "a".repeat(257);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!("{RULES}default_class: {class}\n")).unwrap();
+    assert!(
+        HeadClassifierFilter::from_config(&yaml).is_err(),
+        "an over-long default_class must be rejected at config time"
+    );
+}
+
 #[tokio::test]
 async fn matched_rule_promotes_class() {
     let req = make_request(http::Method::GET, "/api/users");
