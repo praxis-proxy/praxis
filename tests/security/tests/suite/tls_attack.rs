@@ -11,8 +11,8 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    TestCertificates, free_port, parse_body, parse_cert_chain_and_key, parse_status, simple_proxy_yaml,
-    start_backend_with_shutdown, start_full_proxy, start_tls_proxy_no_wait, wait_for_tcp,
+    TestCertificates, ensure_crypto_provider, free_port, parse_body, parse_cert_chain_and_key, parse_status,
+    simple_proxy_yaml, start_backend_with_shutdown, start_full_proxy, start_tls_proxy_no_wait, wait_for_tcp,
 };
 use rustls::{CipherSuite, ClientConfig, ClientConnection, ServerConfig, ServerConnection};
 
@@ -193,6 +193,7 @@ type AlpnOutcome = Result<Option<Vec<u8>>, rustls::Error>;
 
 /// Exchange through a verified TLS upstream that advertises HTTP/1.1 only.
 fn upstream_exchange(certs: &TestCertificates, version: &str) -> (u16, String, Vec<AlpnOutcome>) {
+    ensure_crypto_provider();
     let (chain, key) = parse_cert_chain_and_key(
         &std::fs::read(&certs.cert_path).unwrap(),
         &std::fs::read(&certs.key_path).unwrap(),
