@@ -580,7 +580,14 @@ impl PolicyFilter {
                  them.",
             );
         }
-        if post_prompt_resource {
+        if post_prompt_resource && !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy declares response-phase `prompt:` or `resource:` rules, but \
+                 `body_access` is `read_only`, which does not buffer the response: those \
+                 rules will never run. Set `body_access: read_write` to enable them.",
+            );
+        } else if post_prompt_resource {
             tracing::info!(
                 target: "policy.filter",
                 "policy declares response-phase `prompt:` or `resource:` rules: \

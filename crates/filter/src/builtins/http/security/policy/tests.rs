@@ -5650,14 +5650,27 @@ fn a_read_write_tool_response_policy_does_not_warn() {
 }
 
 #[test]
-fn a_prompt_response_policy_does_not_warn() {
-    let (_dir, path) = write_prompt_post_only_config();
-    let logs = capture_warnings(|| drop(build_read_write_filter(path)));
-    assert!(
-        !logs.contains("those rules never run"),
-        "prompt post hooks are dispatched now (attribute-only evaluation); the old warning \
-         must not fire. got {logs}",
-    );
+fn read_only_prompt_and_resource_response_policies_warn_with_the_remedy() {
+    for (_dir, path) in [write_prompt_post_only_config(), write_resource_post_only_config()] {
+        let logs = capture_warnings(|| drop(build_filter(path)));
+        assert!(
+            logs.contains("response-phase `prompt:` or `resource:` rules")
+                && logs.contains("rules will never run")
+                && logs.contains("body_access: read_write"),
+            "a `read_only` filter must warn that prompt/resource hooks cannot run and name the remedy; got {logs}",
+        );
+    }
+}
+
+#[test]
+fn read_write_prompt_and_resource_response_policies_do_not_warn() {
+    for (_dir, path) in [write_prompt_post_only_config(), write_resource_post_only_config()] {
+        let logs = capture_warnings(|| drop(build_read_write_filter(path)));
+        assert!(
+            !logs.contains("response-phase `prompt:` or `resource:` rules"),
+            "`read_write` enables prompt/resource post hooks and must not warn; got {logs}",
+        );
+    }
 }
 
 /// An `http:` route that only `bob` satisfies, beside a post-only `tool:`
