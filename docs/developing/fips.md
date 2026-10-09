@@ -50,7 +50,7 @@ else they prove the same offers are accepted. So they run, and mean
 something, on every developer machine and in the hosted CI too.
 `PRAXIS_FIPS_HOST=1` declares the host to be in FIPS mode: the harness then
 fails closed the first time it installs the provider on a host that is not
-(both signals, provider and kernel flag), and every behavior test insists on
+(all three signals: provider, kernel flag and crypto policy), and every behavior test insists on
 its approved-mode branch. A green run on the FIPS runner therefore cannot
 have happened on OpenSSL's default provider.
 

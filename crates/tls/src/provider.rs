@@ -202,7 +202,8 @@ impl Status {
         reasons
     }
 
-    /// Append the kernel FIPS flag reason, if unmet.
+    /// `None` means the file is unreadable (e.g. a container without `/proc`),
+    /// which is a distinct failure from `Some(false)`.
     fn push_kernel_reason(&self, reasons: &mut Vec<String>) {
         match self.kernel_fips {
             Some(true) => {},
@@ -211,7 +212,8 @@ impl Status {
         }
     }
 
-    /// Append the crypto policy reason, if unmet.
+    /// `None` covers both absent and empty files, per the `crypto_policy_from`
+    /// parser.
     fn push_crypto_policy_reason(&self, reasons: &mut Vec<String>) {
         match &self.crypto_policy {
             Some(policy) if is_fips_policy(policy) => {},
@@ -219,7 +221,9 @@ impl Status {
                 "the system crypto policy is {policy:?}, not FIPS (/etc/crypto-policies/config)"
             )),
             None => {
-                reasons.push("the system crypto policy cannot be read (/etc/crypto-policies/config is absent)".into());
+                reasons.push(
+                    "the system crypto policy cannot be read (/etc/crypto-policies/config is absent or empty)".into(),
+                );
             },
         }
     }
@@ -228,8 +232,8 @@ impl Status {
 /// Read the process's FIPS status.
 ///
 /// Reads the kernel flag and the system crypto policy on every call; both
-/// are cheap and cannot change once the system has booted, so callers may
-/// cache the result or not as they like.
+/// are cheap to read. The kernel flag is fixed at boot, but the crypto
+/// policy can change at runtime (`update-crypto-policies --set`).
 ///
 /// ```
 /// praxis_tls::provider::install();
@@ -279,9 +283,11 @@ fn crypto_policy_from(contents: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Whether the base policy name (before the first `:`) is exactly `FIPS`.
+/// Whether the policy is `FIPS`, alone or restricted by `OSPP`. Any other
+/// subpolicy (`NO-ENFORCE-EMS`, `SHA1`) loosens FIPS and is rejected.
 fn is_fips_policy(policy: &str) -> bool {
-    policy.split(':').next() == Some("FIPS")
+    let mut parts = policy.split(':');
+    parts.next() == Some("FIPS") && parts.all(|sub| sub == "OSPP")
 }
 
 /// Fail closed when the deployment requires FIPS mode and a TLS config would
@@ -372,7 +378,10 @@ mod tests {
 
     #[test]
     fn unmet_is_empty_when_all_signals_are_present() {
-        assert!(satisfied().unmet().is_empty());
+        assert!(
+            satisfied().unmet().is_empty(),
+            "all signals present means no unmet reasons"
+        );
     }
 
     #[test]
@@ -382,11 +391,12 @@ mod tests {
             ..satisfied()
         };
         let reasons = kernel_off.unmet();
-        assert_eq!(reasons.len(), 1);
+        assert_eq!(reasons.len(), 1, "only the kernel signal is unmet");
         assert!(
             reasons
                 .first()
-                .is_some_and(|reason| reason.contains("kernel is not in FIPS mode"))
+                .is_some_and(|reason| reason.contains("kernel is not in FIPS mode")),
+            "the reason must name the kernel FIPS flag"
         );
     }
 
@@ -400,7 +410,8 @@ mod tests {
             provider_off
                 .unmet()
                 .first()
-                .is_some_and(|reason| reason.contains("OpenSSL provider"))
+                .is_some_and(|reason| reason.contains("OpenSSL provider")),
+            "the reason must name the OpenSSL provider"
         );
     }
 
@@ -411,8 +422,11 @@ mod tests {
             ..satisfied()
         };
         let reasons = default_policy.unmet();
-        assert_eq!(reasons.len(), 1);
-        assert!(reasons.first().is_some_and(|reason| reason.contains("crypto policy")));
+        assert_eq!(reasons.len(), 1, "only the crypto policy signal is unmet");
+        assert!(
+            reasons.first().is_some_and(|reason| reason.contains("crypto policy")),
+            "the reason must name the crypto policy"
+        );
     }
 
     #[test]
@@ -422,11 +436,12 @@ mod tests {
             ..satisfied()
         };
         let reasons = no_policy.unmet();
-        assert_eq!(reasons.len(), 1);
+        assert_eq!(reasons.len(), 1, "only the crypto policy signal is unmet");
         assert!(
             reasons
                 .first()
-                .is_some_and(|reason| reason.contains("crypto policy") && reason.contains("absent"))
+                .is_some_and(|reason| reason.contains("crypto policy") && reason.contains("absent")),
+            "the reason must name the absent crypto policy"
         );
     }
 
@@ -444,34 +459,68 @@ mod tests {
         assert!(
             reasons
                 .first()
-                .is_some_and(|reason| reason.contains("not the installed crypto provider"))
+                .is_some_and(|reason| reason.contains("not the installed crypto provider")),
+            "first reason must name the missing provider"
         );
-        assert!(reasons.get(1).is_some_and(|reason| reason.contains("cannot be read")));
-        assert!(reasons.get(2).is_some_and(|reason| reason.contains("crypto policy")));
+        assert!(
+            reasons.get(1).is_some_and(|reason| reason.contains("cannot be read")),
+            "second reason must name the unreadable kernel flag"
+        );
+        assert!(
+            reasons.get(2).is_some_and(|reason| reason.contains("crypto policy")),
+            "third reason must name the missing crypto policy"
+        );
     }
 
     #[test]
     fn crypto_policy_parser_extracts_the_first_real_line() {
-        assert_eq!(crypto_policy_from("# comment\n\nFIPS\n").as_deref(), Some("FIPS"));
-        assert_eq!(crypto_policy_from("FIPS:OSPP\n").as_deref(), Some("FIPS:OSPP"));
-        assert_eq!(crypto_policy_from("DEFAULT\n").as_deref(), Some("DEFAULT"));
-        assert_eq!(crypto_policy_from(""), None);
-        assert_eq!(crypto_policy_from("# only comments\n"), None);
+        assert_eq!(
+            crypto_policy_from("# comment\n\nFIPS\n").as_deref(),
+            Some("FIPS"),
+            "skips comments and blanks"
+        );
+        assert_eq!(
+            crypto_policy_from("FIPS:OSPP\n").as_deref(),
+            Some("FIPS:OSPP"),
+            "preserves subpolicies"
+        );
+        assert_eq!(
+            crypto_policy_from("DEFAULT\n").as_deref(),
+            Some("DEFAULT"),
+            "non-FIPS policy is still parsed"
+        );
+        assert_eq!(crypto_policy_from(""), None, "empty file yields None");
+        assert_eq!(
+            crypto_policy_from("# only comments\n"),
+            None,
+            "comments-only file yields None"
+        );
     }
 
     #[test]
     fn fips_policy_variants_are_accepted() {
-        assert!(is_fips_policy("FIPS"));
-        assert!(is_fips_policy("FIPS:OSPP"));
+        assert!(is_fips_policy("FIPS"), "bare FIPS must be accepted");
+        assert!(
+            is_fips_policy("FIPS:OSPP"),
+            "FIPS:OSPP tightens FIPS and must be accepted"
+        );
     }
 
     #[test]
     fn fips_policy_lookalikes_are_rejected() {
-        assert!(!is_fips_policy("FIPSXYZ"));
-        assert!(!is_fips_policy("FIPS-DRAFT"));
-        assert!(!is_fips_policy("fips"));
-        assert!(!is_fips_policy("DEFAULT:FIPS"));
-        assert!(!is_fips_policy("DEFAULT"));
+        assert!(!is_fips_policy("FIPSXYZ"), "FIPSXYZ is not a FIPS policy");
+        assert!(!is_fips_policy("FIPS-DRAFT"), "FIPS-DRAFT is not a FIPS policy");
+        assert!(!is_fips_policy("fips"), "lowercase fips is not a FIPS policy");
+        assert!(
+            !is_fips_policy("DEFAULT:FIPS"),
+            "FIPS as a subpolicy of DEFAULT is not a FIPS policy"
+        );
+        assert!(!is_fips_policy("DEFAULT"), "DEFAULT is not a FIPS policy");
+        assert!(
+            !is_fips_policy("FIPS:NO-ENFORCE-EMS"),
+            "NO-ENFORCE-EMS loosens FIPS and must be rejected"
+        );
+        assert!(!is_fips_policy("FIPS:SHA1"), "SHA1 loosens FIPS and must be rejected");
     }
 
     #[test]
