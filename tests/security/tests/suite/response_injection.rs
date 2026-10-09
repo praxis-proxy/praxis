@@ -11,6 +11,10 @@ use praxis_test_utils::{
 
 use super::test_utils::{send_text, status_lines};
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[test]
 fn upstream_obs_fold_does_not_inject_a_response_header() {
     let raw = response_with_header(b"X-Safe: ok\r\n X-Injected: evil".to_vec());

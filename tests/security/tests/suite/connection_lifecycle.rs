@@ -16,6 +16,10 @@ use praxis_test_utils::{
 
 use super::test_utils::{IO_TIMEOUT, connect, read_closed, send_text, status_lines};
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[test]
 fn keepalive_poisoning_does_not_leak_to_later_requests() {
     let (backend, log) = start_keepalive_poison_backend();
