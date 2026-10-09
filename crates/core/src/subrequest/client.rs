@@ -140,7 +140,7 @@ impl SubRequestClient {
     /// budget for its connect phase, so one unresponsive address cannot consume
     /// the whole deadline before fallback; request and response I/O still use the
     /// overall deadline. A [`UrlResolutionPolicy::ClientPerCall`] target dials at
-    /// most [`MAX_CLIENT_SELECTED_DIALS`] of its client-controlled addresses, even
+    /// most `MAX_CLIENT_SELECTED_DIALS` of its client-controlled addresses, even
     /// though `validate` still inspects the complete set.
     /// `max_response_bytes` is also capped by this client's ceiling.
     /// For incremental response bodies, use policy-aware target preparation,
