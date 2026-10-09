@@ -73,9 +73,58 @@ pub trait HttpFilter: Send + Sync {
     /// Called for each incoming request, in pipeline order.
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError>;
 
+    /// Called once per request during the request-head phase, before any
+    /// optional `StreamBuffer` request-body pre-read and before the main
+    /// request phase, for filters that declare [`runs_request_head`].
+    ///
+    /// The head phase runs after ingress normalization and reserved-header
+    /// validation but before a body is read, giving a filter a supported point
+    /// to publish facts derived only from the request head (method, path,
+    /// headers): typed extensions, metadata, filter results, and trusted header
+    /// mutations. Those facts are durable, so they are visible both during the
+    /// body pre-read and the later request phase, in that order. Filters run in
+    /// pipeline order, honoring each filter's request conditions and
+    /// `failure_mode`.
+    ///
+    /// The head phase selects no upstream, buffers no body, and synthesizes no
+    /// response, so only [`FilterAction::Continue`] and [`FilterAction::Reject`]
+    /// are honored. Any other action (a terminal, streaming, release, or
+    /// body-done action) is logged and treated as [`FilterAction::Continue`];
+    /// synthesizing a response or selecting an upstream belongs in
+    /// [`on_request`], which still runs for every filter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if head processing fails. The pipeline honors
+    /// the filter's `failure_mode`: a closed filter's error aborts the request,
+    /// an open filter's error is logged and treated as
+    /// [`FilterAction::Continue`].
+    ///
+    /// [`runs_request_head`]: HttpFilter::runs_request_head
+    /// [`on_request`]: HttpFilter::on_request
+    async fn on_request_head(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let _ = ctx;
+        Ok(FilterAction::Continue)
+    }
+
     // -------------------------------------------------------------------------
     // Pipeline Capability Declarations
     // -------------------------------------------------------------------------
+
+    /// Whether this filter publishes facts during the request-head phase.
+    ///
+    /// Return `true` to receive [`on_request_head`], the lifecycle point that
+    /// runs once before any `StreamBuffer` request-body pre-read. Pipeline
+    /// construction invokes the head hook only for filters that opt in, so a
+    /// pipeline where no filter overrides this runs no head phase and keeps the
+    /// zero-buffering fast path untouched. A filter that classifies from the
+    /// request head alone overrides this; filters that act only in the request
+    /// or body phases leave the default.
+    ///
+    /// [`on_request_head`]: HttpFilter::on_request_head
+    fn runs_request_head(&self) -> bool {
+        false
+    }
 
     /// Whether this filter can assign [`HttpFilterContext::cluster`].
     ///
@@ -770,6 +819,29 @@ mod tests {
         assert!(
             !filter.may_select_streaming_subrequest_response(),
             "filters must opt in to streaming selection"
+        );
+    }
+
+    #[test]
+    fn default_runs_request_head_is_false() {
+        let filter = MinimalFilter;
+        assert!(
+            !filter.runs_request_head(),
+            "filters must opt in to the request-head phase"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_on_request_head_returns_continue() {
+        let filter = MinimalFilter;
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request_head(&mut ctx).await.unwrap();
+
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "default on_request_head should return Continue"
         );
     }
 

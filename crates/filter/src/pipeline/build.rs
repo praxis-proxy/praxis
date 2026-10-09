@@ -27,7 +27,10 @@ use tracing::debug;
 use super::catalog::ClusterApplicationCatalog;
 use super::{
     FilterPipeline,
-    body::{body_filter_indices, compute_body_capabilities, selected_upstream_request_body_indices},
+    body::{
+        body_filter_indices, compute_body_capabilities, request_head_filter_indices,
+        selected_upstream_request_body_indices,
+    },
     filter::PipelineFilter,
 };
 use crate::{FilterError, any_filter::AnyFilter, registry::FilterRegistry};
@@ -129,6 +132,7 @@ impl FilterPipeline {
             .enumerate()
             .filter_map(|(idx, pf)| (pf.filter.name() == "trace_context").then_some(idx))
             .collect();
+        let request_head_filter_indices = request_head_filter_indices(&filters);
         let (request_body_filter_indices, response_body_filter_indices) = body_filter_indices(&filters);
         let selected_upstream_request_body_filter_indices = selected_upstream_request_body_indices(&filters);
         #[cfg(feature = "bound-upstream-request-body")]
@@ -140,6 +144,7 @@ impl FilterPipeline {
             body_capabilities,
             compression,
             filters,
+            request_head_filter_indices,
             request_body_filter_indices,
             response_body_filter_indices,
             selected_upstream_request_body_filter_indices,

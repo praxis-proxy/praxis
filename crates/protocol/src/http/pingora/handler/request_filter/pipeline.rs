@@ -138,6 +138,20 @@ pub(in crate::http) async fn execute(
     ctx.request_body_mode = caps.request_body_mode;
     ctx.response_body_mode = caps.response_body_mode;
 
+    // Request-head phase: runs once before any StreamBuffer pre-read and the
+    // main request phase, so a head-only classifier's facts are visible to
+    // body filters during pre-read. Gated on opt-in, so the zero-buffering
+    // fast path is untouched when no filter participates.
+    if pipeline.has_request_head_phase() {
+        let span = ctx.request_span.clone();
+        if super::request_head::execute(pipeline, session, &mut request, ctx)
+            .instrument(span)
+            .await
+        {
+            return Ok(true);
+        }
+    }
+
     if matches!(caps.request_body_mode, BodyMode::StreamBuffer { .. }) {
         tracing::debug!("pre-reading request body for StreamBuffer inspection");
         let span = ctx.request_span.clone();

@@ -2644,6 +2644,371 @@ async fn run_streaming_flushes_completion_output_after_upstream_eof() {
     );
 }
 
+// -----------------------------------------------------------------------------
+// Request-head phase on the iterative-request-router path (issue #1142)
+// -----------------------------------------------------------------------------
+
+// A head-only classifier: runs in the request-head phase and promotes a header
+// before any StreamBuffer pre-read or the request phase. The promotion uses a
+// non-reserved name because reserved `x-praxis-*` headers are stripped at the
+// forwarding boundary and would never reach the upstream.
+struct HeadHeaderTagFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for HeadHeaderTagFilter {
+    fn name(&self) -> &'static str {
+        "test_head_header_tag"
+    }
+
+    fn runs_request_head(&self) -> bool {
+        true
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    async fn on_request_head(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        ctx.request_headers_to_set.push((
+            http::header::HeaderName::from_static("x-head-tag"),
+            http::HeaderValue::from_static("classified"),
+        ));
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+// A head filter that rejects in the request-head phase, before pre-read and the
+// request phase run, so no upstream is ever contacted.
+struct HeadRejectFilter(u16);
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for HeadRejectFilter {
+    fn name(&self) -> &'static str {
+        "test_head_reject"
+    }
+
+    fn runs_request_head(&self) -> bool {
+        true
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    async fn on_request_head(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Reject(crate::Rejection::status(self.0)))
+    }
+}
+
+// A StreamBuffer filter whose pre-read `on_request_body` records whether a fact
+// the request-head phase published is already visible. The IRR path reuses one
+// `filter_ctx` across phases, so a head-published fact must be observable in the
+// later pre-read pass — the guarantee issue #1142 adds.
+struct HeadFactProbeFilter {
+    seen: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for HeadFactProbeFilter {
+    fn name(&self) -> &'static str {
+        "test_head_fact_probe"
+    }
+
+    fn runs_request_head(&self) -> bool {
+        true
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    async fn on_request_head(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        ctx.set_metadata("head.seen", "1");
+        Ok(crate::FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> crate::BodyMode {
+        crate::BodyMode::StreamBuffer { max_bytes: Some(4096) }
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        if ctx.filter_metadata.contains_key("head.seen") {
+            self.seen.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+// Route an outbound chain, prefixed by one of the head-phase test filters, to a
+// real backend. Unlike `routed_chain_yaml` this omits `test_streaming_selector`,
+// so the exchange stays buffered.
+fn head_routed_chain_yaml(head_filter: &str, addr: std::net::SocketAddr) -> String {
+    format!(
+        "
+- filter: {head_filter}
+- filter: router
+  routes:
+    - path_prefix: \"/\"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints:
+        - \"{addr}\"
+"
+    )
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn request_head_promoted_header_reaches_upstream() {
+    use std::{
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::SubRequestClient;
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (addr, backend) =
+        spawn_capturing_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", Arc::clone(&captured)).await;
+
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_head_header_tag",
+            crate::FilterFactory::Http(Arc::new(|_| Ok(Box::new(HeadHeaderTagFilter)))),
+        )
+        .unwrap();
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&head_routed_chain_yaml("test_head_header_tag", addr)).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("buffered callout should return a response");
+    backend.abort();
+
+    let received = String::from_utf8(captured.lock().unwrap().clone())
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(
+        received.contains("x-head-tag") && received.contains("classified"),
+        "a header promoted in the request-head phase must reach the upstream: {received:?}"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn request_head_reject_short_circuits_before_upstream() {
+    use std::{
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::SubRequestClient;
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (addr, backend) =
+        spawn_capturing_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", Arc::clone(&captured)).await;
+
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_head_reject",
+            crate::FilterFactory::Http(Arc::new(|_| Ok(Box::new(HeadRejectFilter(403))))),
+        )
+        .unwrap();
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&head_routed_chain_yaml("test_head_reject", addr)).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let response = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("a head rejection must surface as a buffered local response")
+    {
+        crate::CalloutResponse::Buffered(response) => response,
+        crate::CalloutResponse::Streaming { .. } => panic!("a head rejection must be buffered, not streaming"),
+    };
+    backend.abort();
+
+    assert_eq!(
+        response.status, 403,
+        "a rejecting head filter must short-circuit with its status"
+    );
+    assert!(
+        captured.lock().unwrap().is_empty(),
+        "a head rejection must short-circuit before the upstream is contacted"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn request_head_fact_is_visible_to_pre_read_body() {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::SubRequestClient;
+
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let seen = Arc::new(AtomicBool::new(false));
+
+    let seen_factory = Arc::clone(&seen);
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_head_fact_probe",
+            crate::FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(HeadFactProbeFilter {
+                    seen: Arc::clone(&seen_factory),
+                }))
+            })),
+        )
+        .unwrap();
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&head_routed_chain_yaml("test_head_fact_probe", addr)).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    let request = crate::SubRequest {
+        method: http::Method::POST,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::from_static(b"probe-body"),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("buffered callout should return a response");
+    backend.abort();
+
+    assert!(
+        seen.load(Ordering::SeqCst),
+        "a fact published in the request-head phase must be visible to the StreamBuffer pre-read pass"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn request_head_promoted_header_reaches_streaming_upstream() {
+    use std::{
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (addr, backend) = spawn_capturing_backend(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n",
+        Arc::clone(&captured),
+    )
+    .await;
+
+    let mut registry = callout_registry();
+    registry
+        .register(
+            "test_head_header_tag",
+            crate::FilterFactory::Http(Arc::new(|_| Ok(Box::new(HeadHeaderTagFilter)))),
+        )
+        .unwrap();
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&routed_chain_yaml(addr, "- filter: test_head_header_tag\n")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let executor = streaming_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+    drop(drain(&mut body).await);
+    backend.abort();
+
+    let received = String::from_utf8(captured.lock().unwrap().clone())
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(
+        received.contains("x-head-tag") && received.contains("classified"),
+        "a head-promoted header must reach the upstream on the streaming path too: {received:?}"
+    );
+}
+
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
 async fn run_streaming_yields_upstream_chunks_for_clean_eof() {

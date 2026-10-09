@@ -45,6 +45,7 @@ mod grpc_timeout;
 mod grpc_web;
 mod guardrails;
 mod guardrails_per_model;
+mod head_classifier;
 mod header_manipulation;
 mod header_presence_condition;
 mod health_checks;

@@ -583,6 +583,11 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
         "endpoint_selector",
         crate::builtins::EndpointSelectorFilter::from_config,
     );
+    register_http(
+        filters,
+        "head_classifier",
+        crate::builtins::HeadClassifierFilter::from_config,
+    );
     register_http(filters, "headers", HeaderFilter::from_config);
     register_http_security(filters, "forwarded_headers", ForwardedHeadersFilter::from_config);
     register_http(filters, "grpc_detection", GrpcDetectionFilter::from_config);
@@ -755,6 +760,10 @@ mod tests {
         assert!(names.contains(&"grpc_timeout"), "grpc_timeout should be registered");
         assert!(names.contains(&"grpc_web"), "grpc_web should be registered");
         assert!(names.contains(&"guardrails"), "guardrails should be registered");
+        assert!(
+            names.contains(&"head_classifier"),
+            "head_classifier should be registered"
+        );
         assert!(names.contains(&"headers"), "headers should be registered");
         assert!(names.contains(&"ip_acl"), "ip_acl should be registered");
         assert!(names.contains(&"load_balancer"), "load_balancer should be registered");

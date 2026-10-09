@@ -483,6 +483,10 @@ mod tests {
     }
 
     /// Build a [`FilterPipeline`] wrapping the given TCP filters.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "explicit FilterPipeline struct literal with all fields"
+    )]
     fn make_tcp_pipeline(filters: Vec<Box<dyn TcpFilter>>) -> FilterPipeline {
         let filters: Vec<_> = filters
             .into_iter()
@@ -506,6 +510,7 @@ mod tests {
             time_source: Arc::new(praxis_core::time::SystemTimeSource),
             request_body_ceiling: None,
             response_body_ceiling: None,
+            request_head_filter_indices: Vec::new(),
             request_body_filter_indices: Vec::new(),
             response_body_filter_indices: Vec::new(),
             selected_upstream_request_body_filter_indices: Vec::new(),

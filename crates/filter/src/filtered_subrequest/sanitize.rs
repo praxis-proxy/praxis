@@ -102,6 +102,22 @@ pub(super) fn apply_pre_read_header_mutations(headers: &mut HeaderMap, ctx: &Htt
     }
 }
 
+/// Fold a phase's promoted headers into `headers`, then clear the pending
+/// channels so the next phase starts from an empty mutation set.
+///
+/// Shared by the request-head and pre-read phases: each bakes its own mutations
+/// into the routed request snapshot in turn (head first, body on top), and
+/// clearing between them keeps `apply_pre_read_header_mutations`'s one-mechanism
+/// provenance rule intact per phase (the ordered log never mixes with the
+/// grouped queues within a single phase).
+pub(super) fn fold_pending_into(headers: &mut HeaderMap, ctx: &mut HttpFilterContext<'_>) {
+    apply_pre_read_header_mutations(headers, ctx);
+    ctx.extra_request_headers.clear();
+    ctx.request_headers_to_remove.clear();
+    ctx.request_headers_to_set.clear();
+    ctx.pre_read_mutations.clear();
+}
+
 /// Remove inbound message-framing headers after request-body filters
 /// have potentially changed the payload. The subrequest executor adds
 /// the correct `Content-Length` for non-empty bodies.

@@ -7,6 +7,7 @@ mod circuit_breaker;
 mod endpoint_selector;
 mod grpc_detection;
 mod grpc_timeout;
+mod head_classifier;
 #[cfg(feature = "iterative-request-router")]
 mod iterative_request_router;
 mod load_balancer;
@@ -22,6 +23,7 @@ pub use circuit_breaker::CircuitBreakerFilter;
 pub use endpoint_selector::EndpointSelectorFilter;
 pub use grpc_detection::GrpcDetectionFilter;
 pub use grpc_timeout::GrpcTimeoutFilter;
+pub use head_classifier::HeadClassifierFilter;
 #[cfg(feature = "iterative-request-router")]
 pub use iterative_request_router::IterativeRequestRouterFilter;
 pub use load_balancer::{EndpointReselector, LoadBalancerFilter};
