@@ -72,7 +72,7 @@ for where the current image stands.
 At startup praxis installs its crypto provider and logs the FIPS status:
 
 ```text
-installed rustls crypto provider provider="openssl" provider_fips=true kernel_fips=Some(true) fips_required=true
+installed rustls crypto provider provider="openssl" provider_fips=true kernel_fips=Some(true) crypto_policy=Some("FIPS") fips_required=true
 ```
 
 - `provider_fips`: whether OpenSSL's default properties select only
@@ -80,12 +80,16 @@ installed rustls crypto provider provider="openssl" provider_fips=true kernel_fi
   is what RHEL's FIPS mode configures.
 - `kernel_fips`: `/proc/sys/crypto/fips_enabled`; `None` where the file does
   not exist (a container without `/proc`, a non-Linux host).
+- `crypto_policy`: the active system crypto policy from
+  `/etc/crypto-policies/config`; `None` on platforms without crypto-policies
+  support. The policy must be visible inside the container, since a runtime
+  that does not propagate it now refuses to start when FIPS is required.
 
 Set `PRAXIS_REQUIRE_FIPS=1` in production FIPS deployments. An empty value,
 `0`, `false`, `no` or `off` leaves it off; any other value, a typo included,
 turns it on. It is a check, not a switch. With it on, praxis refuses to start:
 
-- unless both signals above are present, and names each one that is missing;
+- unless all three signals above are present, and names each one that is missing;
 - when a listener's TLS configuration is not FIPS-approved by rustls;
 - when the binary registers the `policy` filter, as the standard build does:
   the policy engine verifies JWTs with aws-lc-rs and its OAuth and Valkey
@@ -103,7 +107,7 @@ podman run --rm -e PRAXIS_REQUIRE_FIPS=1 ghcr.io/praxis-proxy/praxis:0.7.0-fips
 On a host that is not in FIPS mode this exits immediately with:
 
 ```text
-fatal: PRAXIS_REQUIRE_FIPS is set but FIPS mode is not in effect: the OpenSSL provider does not report FIPS-approved algorithms (is the fips provider active?); the kernel is not in FIPS mode (/proc/sys/crypto/fips_enabled is 0)
+fatal: PRAXIS_REQUIRE_FIPS is set but FIPS mode is not in effect: the OpenSSL provider does not report FIPS-approved algorithms (is the fips provider active?); the kernel is not in FIPS mode (/proc/sys/crypto/fips_enabled is 0); the system crypto policy is "DEFAULT", not FIPS (/etc/crypto-policies/config)
 ```
 
 ## TLS behavior
@@ -176,7 +180,7 @@ What each proves:
   and refuses a TLS 1.2 peer without Extended Master Secret, a listener with
   a short RSA key cannot serve, a ChaCha20-only listener cannot start, MD5 is
   refused in process, and the binary serves under `PRAXIS_REQUIRE_FIPS=1`
-  with the status line reporting both signals.
+  with the status line reporting all three signals.
 - `fips-runtime-probe` does the listener part of that against the shipped
   image itself, started under `PRAXIS_REQUIRE_FIPS=1`, and checks its
   startup line. This is the check against the bits that ship.
@@ -189,8 +193,8 @@ podman run --rm -e PRAXIS_REQUIRE_FIPS=1 --entrypoint praxis \
     ghcr.io/praxis-proxy/praxis:<version>-fips --validate -c /etc/praxis/config.yaml
 ```
 
-The second command exits 0, silently, only when the provider and the kernel
-both report FIPS mode. It does not build the listener TLS
+The second command exits 0, silently, only when the provider, the kernel
+and the crypto policy all report FIPS mode. It does not build the listener TLS
 configurations or log the startup line; the workload does both when it
 starts, so start it with `PRAXIS_REQUIRE_FIPS=1` as well and keep that line
 as evidence.
