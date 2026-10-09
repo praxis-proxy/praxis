@@ -3,13 +3,14 @@
 
 //! Response body filter execution.
 //!
-//! Implements Pingora's synchronous `response_body_filter` hook.
-//! Runs the pipeline's response-body filters on each chunk,
-//! buffering or streaming per the pipeline's [`BodyMode`]. The
-//! synchronous constraint (no `.await`) is a Pingora API limitation;
-//! body filters must complete without async I/O.
+//! Backs Pingora's `response_body_filter` hook. Runs the pipeline's
+//! response-body filters on each chunk, buffering or streaming per the
+//! pipeline's [`BodyMode`]. The Pingora hook is async, but this runs
+//! synchronously because [`HttpFilter::on_response_body`] is a plain
+//! `fn`: body filters must complete without async I/O.
 //!
 //! [`BodyMode`]: praxis_filter::BodyMode
+//! [`HttpFilter::on_response_body`]: praxis_filter::HttpFilter::on_response_body
 
 use std::time::Duration;
 
@@ -30,7 +31,9 @@ use super::{
 // Response Body Filters
 // -----------------------------------------------------------------------------
 
-/// Run body filters on a response body chunk (synchronous; Pingora constraint).
+/// Run body filters on a response body chunk (synchronous, like [`HttpFilter::on_response_body`]).
+///
+/// [`HttpFilter::on_response_body`]: praxis_filter::HttpFilter::on_response_body
 #[expect(clippy::too_many_lines, reason = "body filter dispatch")]
 pub(super) fn execute(
     pipeline: &FilterPipeline,

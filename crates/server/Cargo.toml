@@ -73,6 +73,9 @@ bound-upstream-request-body = ["praxis-filter/bound-upstream-request-body", "ups
 chain-binding = ["praxis-filter/chain-binding", "experimental"]
 # SPIFFE X.509-SVID mTLS peer identity. Off by default; experimental.
 spiffe = ["praxis-protocol/spiffe", "praxis-filter/spiffe", "experimental"]
+# The `access_log` syslog sink (RFC 3164 over unix/UDP/TCP). Off by default;
+# experimental. Pulls in the `syslog` crate, kept out of the default/FIPS builds.
+access-log-syslog = ["praxis-filter/access-log-syslog", "experimental"]
 # The `policy` filter (Praxis Policy Engine). On by default. The workspace
 # declares praxis-filter with `default-features = false`, so this feature is
 # the only thing that turns the filter's `policy-engine` on; a

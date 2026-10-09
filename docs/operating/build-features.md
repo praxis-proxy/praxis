@@ -78,6 +78,7 @@ really is out of the build.
 | `bound-upstream-request-body` | off (experimental) | The `HttpFilter::on_bound_upstream_request_body` hook, run once at the logical-binding barrier. | For out-of-tree filters that must inspect or rewrite the request body against the bound upstream; no in-tree filter uses it yet. Pulls in `upstream-binding`. |
 | `chain-binding` | off (experimental) | The `register_chain_binding` outbound-callout API (`ChainBindingContext::bind_chain`) and its authority-bound deferred credentials (`PendingCredentials`, `DeferredCredential`). | For out-of-tree callout filters; no in-tree consumer yet. |
 | `spiffe` | off (experimental) | SPIFFE X.509-SVID mTLS peer identity (the `require_named` listener mode) and the `peer_identity_trust` filter. | On for mTLS peer-identity authorization. Adds `spiffe` and `x509-parser`. |
+| `access-log-syslog` | off (experimental) | The `access_log` filter's syslog sink (RFC 3164 over a Unix socket, UDP, or TCP). | On to ship access logs to a syslog collector. Adds the optional `syslog` crate; kept out of the default and FIPS builds. |
 | `dev` | off | Developer convenience bundle (currently enables `basic-auth-filter`). | Local development builds. |
 | `experimental` | off | Marker feature set transitively by experimental features; drives a startup warning. | Not selected directly; it lights up when an experimental feature is enabled. |
 
@@ -133,6 +134,12 @@ production` at startup. Do not run an experimental build in production.
   `peer_identity_trust` works with any mTLS client certificate, not only
   SPIFFE, so a non-SPIFFE mTLS deployment must still build with `spiffe` to use
   it.
+- **`access-log-syslog`**: the `access_log` filter's `sink: {type: syslog}`
+  output, sending each record as an RFC 3164 message over a Unix socket, UDP, or
+  TCP. Each message is capped at 1024 bytes (RFC 3164 §4.1), so an overlength
+  record is truncated and a structured (e.g. JSON) payload may not remain valid.
+  Off by default; adds the optional `syslog` crate, which is crypto-free and
+  kept out of the default and FIPS builds.
 
 ## Notes
 
@@ -152,9 +159,9 @@ production` at startup. Do not run an experimental build in production.
   `iterative-request-router`, `chain-binding`, `router-json-aliases`,
   `bound-upstream-request-body`) exist
   to keep unfinished or not-for-production surface out of default builds
-  rather than to save a crate; `spiffe` and `cloud-events-filter` do
-  additionally drop dependencies
-  (`spiffe` + `x509-parser`, and `chrono` + `url` respectively).
+  rather than to save a crate; `spiffe`, `cloud-events-filter`, and
+  `access-log-syslog` do additionally drop dependencies
+  (`spiffe` + `x509-parser`, `chrono` + `url`, and `syslog` respectively).
 
 ## See also
 

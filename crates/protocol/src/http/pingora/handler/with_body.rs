@@ -284,7 +284,7 @@ impl ProxyHttp for PingoraHttpHandler {
             .await
     }
 
-    fn upstream_response_trailer_filter(
+    async fn upstream_response_trailer_filter(
         &self,
         _session: &mut Session,
         upstream_trailers: &mut http::HeaderMap,
@@ -320,7 +320,7 @@ impl ProxyHttp for PingoraHttpHandler {
         Ok(produced)
     }
 
-    fn response_body_filter(
+    async fn response_body_filter(
         &self,
         _session: &mut Session,
         body: &mut Option<Bytes>,
