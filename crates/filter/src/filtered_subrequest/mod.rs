@@ -71,7 +71,7 @@ use tracing::{Instrument as _, warn};
 use self::{
     context::{SubrequestRuntimeResources, build_sub_filter_context},
     sanitize::{
-        apply_pre_read_header_mutations, apply_request_header_mutations, body_exceeds_limit, ensure_destination_host,
+        apply_request_header_mutations, body_exceeds_limit, ensure_destination_host, fold_pending_into,
         response_body_overflow_limit, sanitize_subrequest_headers, sanitize_subresponse_headers, set_authority_host,
         streaming_transport_limit, strip_reserved_headers, subrequest_uri, subresponse_from_rejection,
     },
@@ -788,6 +788,26 @@ impl FilteredSubrequestExecutor {
                 pipeline.body_capabilities().request_body_mode,
                 crate::BodyMode::StreamBuffer { .. }
             );
+
+            // Request-head phase: run the opted-in head hooks once, before any
+            // StreamBuffer pre-read and the request phase of this internal
+            // exchange. A head-only classifier's typed facts persist on the
+            // shared `filter_ctx` (so the pre-read body filters observe them),
+            // and its promoted headers are folded into `routed_req` so the
+            // router observes them in the request phase (via the single re-point
+            // below). Gated on opt-in, so the zero-buffering fast path is
+            // untouched.
+            if pipeline.has_request_head_phase() {
+                let action = pipeline.execute_http_request_head(&mut filter_ctx).await?;
+                if let FilterAction::Reject(rejection) = action {
+                    return Ok(RawResponse::Rejected(rejection));
+                }
+                if self.accounting.exceeds_limit(&filter_ctx.extensions) {
+                    return Ok(RawResponse::Rejected(Rejection::status(413)));
+                }
+                fold_pending_into(&mut routed_req.headers, &mut filter_ctx);
+            }
+
             if pre_read_body {
                 let action = pipeline
                     .execute_http_request_body(&mut filter_ctx, &mut request_body, true)
@@ -798,14 +818,21 @@ impl FilteredSubrequestExecutor {
                 if self.accounting.exceeds_limit(&filter_ctx.extensions) {
                     return Ok(RawResponse::Rejected(Rejection::status(413)));
                 }
-                apply_pre_read_header_mutations(&mut routed_req.headers, &filter_ctx);
-                filter_ctx.extra_request_headers.clear();
-                filter_ctx.request_headers_to_remove.clear();
-                filter_ctx.request_headers_to_set.clear();
-                filter_ctx.pre_read_mutations.clear();
+                fold_pending_into(&mut routed_req.headers, &mut filter_ctx);
+                filter_ctx.buffered_request_body.clone_from(&request_body);
+            }
+
+            // Single re-point: both the head and pre-read phases have baked their
+            // promoted headers into `routed_req` (head first, body on top), with
+            // the pending channels cleared between them so each phase's
+            // `apply_pre_read_header_mutations` saw only its own mutations.
+            // Storing `&routed_req` freezes it for the context's lifetime, so it
+            // must happen after every mutable access above; the request phase
+            // then routes on the merged headers. When neither phase ran,
+            // `routed_req` still equals `sub_req` and the re-point is a no-op.
+            if pipeline.has_request_head_phase() || pre_read_body {
                 sub_headers.clone_from(&routed_req.headers);
                 filter_ctx.request = &routed_req;
-                filter_ctx.buffered_request_body.clone_from(&request_body);
             }
 
             let action = pipeline.execute_http_request(&mut filter_ctx).await?;
