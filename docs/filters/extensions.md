@@ -448,6 +448,12 @@ mutate chunks in place.
   to inspect the full body before upstream selection.
   Set `max_bytes` to avoid unbounded memory growth.
 
+During incremental request or response body handling, `Release` flushes the
+buffer and changes the context's runtime body mode to `Stream` for subsequent
+chunks. The global body size ceiling still applies. A static request pre-read
+keeps buffering until end-of-stream even after `Release`, so body writers
+receive the complete request before routing runs.
+
 Two patterns for declaring `StreamBuffer`:
 
 **Static declaration** (filter always needs the body):

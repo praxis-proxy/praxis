@@ -55,8 +55,8 @@ pub(super) fn execute(
     let is_stream_buffer = matches!(ctx.response_body_mode, BodyMode::StreamBuffer { .. });
 
     // The global body_limits ceiling applies in every mode but SizeLimit,
-    // which carries its own cap: Stream only counts, and a runtime
-    // StreamBuffer's cap comes from the filter, before and after Release.
+    // which carries its own cap. StreamBuffer's buffering cap applies only
+    // while accumulating; after Release, Stream still obeys this ceiling.
     // The projection does not mutate the counter; the filter pipeline below
     // is the accumulator. `None` is only reachable with allow_unbounded_body.
     if !matches!(ctx.response_body_mode, BodyMode::SizeLimit { .. })
@@ -128,7 +128,7 @@ pub(super) fn execute(
         Ok(FilterAction::Release) => {
             release_stream_buffer(
                 body,
-                is_stream_buffer,
+                &mut ctx.response_body_mode,
                 &mut ctx.response_body_released,
                 &mut ctx.response_body_buffer,
                 end_of_stream,
@@ -188,7 +188,11 @@ fn mark_delivered_at_eos(ctx: &mut PingoraRequestCtx, end_of_stream: bool) {
     reason = "tests"
 )]
 mod tests {
-    use praxis_filter::FilterRegistry;
+    use std::sync::Arc;
+
+    use praxis_filter::{
+        BodyAccess, FilterEntry, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext, Request,
+    };
 
     use super::*;
 
@@ -447,6 +451,81 @@ mod tests {
         assert!(ctx.response_delivery_complete, "complete at EOS");
     }
 
+    #[test]
+    fn release_exposes_stream_on_nonempty_final_chunk() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = release_pipeline(6, false)?;
+        let mut ctx = release_ctx(BodyMode::StreamBuffer { max_bytes: Some(2) });
+        let mut prefix = Some(Bytes::from_static(b"ab"));
+        execute(&pipeline, &mut prefix, false, &mut ctx)?;
+        assert_eq!(prefix, Some(Bytes::from_static(b"ab")), "release flushes the prefix");
+        assert_observed_mode(&ctx, "buffered");
+
+        let mut tail = Some(Bytes::from_static(b"cdef"));
+        execute(&pipeline, &mut tail, true, &mut ctx)?;
+        assert_observed_mode(&ctx, "stream");
+        assert_eq!(
+            tail,
+            Some(Bytes::from_static(b"cdef")),
+            "repeated Release preserves the tail"
+        );
+        assert_eq!(ctx.response_body_bytes, 6, "each byte is counted once");
+        assert!(ctx.response_body_buffer.is_none(), "released buffering never restarts");
+        Ok(())
+    }
+
+    #[test]
+    fn released_response_still_enforces_global_ceiling() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = release_pipeline(5, false)?;
+        let mut ctx = release_ctx(BodyMode::StreamBuffer { max_bytes: Some(2) });
+        let mut prefix = Some(Bytes::from_static(b"ab"));
+        execute(&pipeline, &mut prefix, false, &mut ctx)?;
+        let mut tail = Some(Bytes::from_static(b"cdef"));
+
+        let result = execute(&pipeline, &mut tail, true, &mut ctx);
+        assert!(
+            matches!(&result, Err(error) if error.to_string().contains("global body limit")),
+            "a streamed tail cannot bypass the global ceiling"
+        );
+        assert_eq!(ctx.response_body_bytes, 2, "rejected bytes are not counted");
+        assert!(!ctx.response_delivery_complete, "rejected EOS is not delivered");
+        Ok(())
+    }
+
+    #[test]
+    fn release_at_eos_preserves_frozen_aggregate() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = release_pipeline(6, true)?;
+        let mut ctx = release_ctx(BodyMode::StreamBuffer { max_bytes: Some(2) });
+        let mut prefix = Some(Bytes::from_static(b"a"));
+        execute(&pipeline, &mut prefix, false, &mut ctx)?;
+        assert!(prefix.is_none(), "buffered prefix is withheld before Release");
+        let mut body = Some(Bytes::from_static(b"b"));
+        execute(&pipeline, &mut body, true, &mut ctx)?;
+        assert_eq!(body, Some(Bytes::from_static(b"ab")), "EOS aggregate is preserved");
+        assert_eq!(ctx.response_body_mode, BodyMode::Stream, "EOS Release ends buffering");
+        assert_eq!(ctx.response_body_bytes, 2, "EOS counts the aggregate once");
+        assert_eq!(
+            pipeline.body_capabilities().response_body_mode,
+            BodyMode::StreamBuffer { max_bytes: Some(2) },
+            "declared capabilities remain unchanged"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn release_leaves_original_stream_unchanged() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = release_pipeline(6, false)?;
+        let mut ctx = release_ctx(BodyMode::Stream);
+        for (chunk, end_of_stream) in [(b"ab".as_slice(), false), (b"cdef".as_slice(), true)] {
+            let mut body = Some(Bytes::copy_from_slice(chunk));
+            execute(&pipeline, &mut body, end_of_stream, &mut ctx)?;
+            assert_eq!(body.as_deref(), Some(chunk), "Release leaves streamed bytes untouched");
+            assert_observed_mode(&ctx, "stream");
+        }
+        assert_eq!(ctx.response_body_bytes, 6, "every streamed byte is counted once");
+        assert!(!ctx.response_body_released, "original Stream never releases a buffer");
+        Ok(())
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -460,5 +539,86 @@ mod tests {
     /// Create a default request context for tests.
     fn make_ctx() -> PingoraRequestCtx {
         PingoraRequestCtx::default()
+    }
+
+    /// Build a body-capable pipeline with a release probe and a global ceiling.
+    fn release_pipeline(
+        ceiling: usize,
+        release_at_eos: bool,
+    ) -> Result<FilterPipeline, Box<dyn std::error::Error + Send + Sync>> {
+        let mut registry = FilterRegistry::with_builtins();
+        registry.register(
+            "release_probe",
+            FilterFactory::Http(Arc::new(move |_| Ok(Box::new(ReleaseProbe { release_at_eos })))),
+        )?;
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str("- filter: release_probe")?;
+        let mut pipeline = FilterPipeline::build(&mut entries, &registry)?;
+        pipeline.apply_body_limits(None, Some(ceiling), false)?;
+        Ok(pipeline)
+    }
+
+    /// Create a body context with the required request snapshot.
+    fn release_ctx(mode: BodyMode) -> PingoraRequestCtx {
+        let mut ctx = make_ctx();
+        ctx.response_body_mode = mode;
+        ctx.request_snapshot = Some(Request {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers: http::HeaderMap::new(),
+        });
+        ctx
+    }
+
+    /// Check the mode recorded by the body hook itself.
+    fn assert_observed_mode(ctx: &PingoraRequestCtx, expected: &str) {
+        assert_eq!(
+            ctx.filter_metadata.get("release.mode").map(String::as_str),
+            Some(expected),
+            "the body hook sees the actual delivery mode"
+        );
+    }
+
+    /// Records the response delivery mode and releases every body invocation.
+    struct ReleaseProbe {
+        /// Whether to hold the buffer until its EOS aggregate is delivered.
+        release_at_eos: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpFilter for ReleaseProbe {
+        fn name(&self) -> &'static str {
+            "release_probe"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> std::result::Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn response_body_access(&self) -> BodyAccess {
+            BodyAccess::ReadOnly
+        }
+
+        fn response_body_mode(&self) -> BodyMode {
+            BodyMode::StreamBuffer { max_bytes: Some(2) }
+        }
+
+        fn on_response_body(
+            &self,
+            ctx: &mut HttpFilterContext<'_>,
+            _body: &mut Option<Bytes>,
+            end_of_stream: bool,
+        ) -> std::result::Result<FilterAction, FilterError> {
+            let mode = if ctx.response_body_mode == BodyMode::Stream {
+                "stream"
+            } else {
+                "buffered"
+            };
+            ctx.filter_metadata.insert("release.mode".to_owned(), mode.to_owned());
+            Ok(if self.release_at_eos && !end_of_stream {
+                FilterAction::Continue
+            } else {
+                FilterAction::Release
+            })
+        }
     }
 }

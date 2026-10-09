@@ -872,48 +872,63 @@ mod tests {
 
     #[test]
     fn release_sets_flag_and_flushes_buffer() {
+        let mut mode = BodyMode::StreamBuffer { max_bytes: Some(100) };
         let mut body: Option<Bytes> = None;
         let mut released = false;
         let mut buf = Some(BodyBuffer::new(100));
         buf.as_mut().unwrap().push(Bytes::from_static(b"buffered")).unwrap();
         buf.as_mut().unwrap().push(Bytes::from_static(b" data")).unwrap();
 
-        body_util::release_stream_buffer(&mut body, true, &mut released, &mut buf, false);
+        body_util::release_stream_buffer(&mut body, &mut mode, &mut released, &mut buf, false);
         assert!(released);
         assert_eq!(body.unwrap(), Bytes::from_static(b"buffered data"));
+        assert_eq!(mode, BodyMode::Stream, "release switches the runtime mode");
         assert!(buf.is_none());
     }
 
     #[test]
     fn release_noop_when_already_released() {
-        let mut body: Option<Bytes> = None;
+        let mut mode = BodyMode::Stream;
+        let mut body = Some(Bytes::from_static(b"tail"));
         let mut released = true;
         let mut buf: Option<BodyBuffer> = None;
 
-        body_util::release_stream_buffer(&mut body, true, &mut released, &mut buf, false);
-        assert!(body.is_none(), "body should be unchanged when already released");
+        body_util::release_stream_buffer(&mut body, &mut mode, &mut released, &mut buf, false);
+        assert_eq!(
+            body,
+            Some(Bytes::from_static(b"tail")),
+            "repeated release preserves the tail"
+        );
+        assert_eq!(mode, BodyMode::Stream, "released mode stays Stream");
     }
 
     #[test]
     fn release_noop_when_not_stream_buffer() {
+        let mut mode = BodyMode::Stream;
         let mut body: Option<Bytes> = None;
         let mut released = false;
         let mut buf: Option<BodyBuffer> = None;
 
-        body_util::release_stream_buffer(&mut body, false, &mut released, &mut buf, false);
+        body_util::release_stream_buffer(&mut body, &mut mode, &mut released, &mut buf, false);
         assert!(!released, "released flag should be unchanged for non-stream-buffer");
     }
 
     #[test]
     fn release_at_eos_sets_flag_but_no_flush() {
-        let mut body: Option<Bytes> = None;
+        let mut mode = BodyMode::StreamBuffer { max_bytes: Some(100) };
+        let mut body = Some(Bytes::from_static(b"frozen"));
         let mut released = false;
         let mut buf = Some(BodyBuffer::new(100));
         buf.as_mut().unwrap().push(Bytes::from_static(b"data")).unwrap();
 
-        body_util::release_stream_buffer(&mut body, true, &mut released, &mut buf, true);
+        body_util::release_stream_buffer(&mut body, &mut mode, &mut released, &mut buf, true);
         assert!(released);
-        assert!(body.is_none(), "body should not be overwritten at EOS");
+        assert_eq!(
+            body,
+            Some(Bytes::from_static(b"frozen")),
+            "EOS aggregate is not overwritten"
+        );
+        assert_eq!(mode, BodyMode::Stream, "EOS release switches the mode");
         assert!(buf.is_some(), "buffer should not be taken at EOS");
     }
 

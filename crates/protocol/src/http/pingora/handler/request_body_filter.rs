@@ -90,8 +90,8 @@ pub(super) async fn execute(
     let is_stream_buffer = matches!(ctx.request_body_mode, BodyMode::StreamBuffer { .. });
 
     // The global body_limits ceiling applies in every mode but SizeLimit,
-    // which carries its own cap: Stream only counts, and a runtime
-    // StreamBuffer's cap comes from the filter, before and after Release.
+    // which carries its own cap. StreamBuffer's buffering cap applies only
+    // while accumulating; after Release, Stream still obeys this ceiling.
     // The projection does not mutate the counter; the filter pipeline below
     // is the accumulator. `None` is only reachable with allow_unbounded_body.
     if !matches!(ctx.request_body_mode, BodyMode::SizeLimit { .. })
@@ -175,7 +175,7 @@ pub(super) async fn execute(
         Ok(FilterAction::Release) => {
             release_stream_buffer(
                 body,
-                is_stream_buffer,
+                &mut ctx.request_body_mode,
                 &mut ctx.request_body_released,
                 &mut ctx.request_body_buffer,
                 end_of_stream,
