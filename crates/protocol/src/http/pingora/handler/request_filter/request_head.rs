@@ -99,7 +99,7 @@ async fn run(
 ) -> Result<RequestHeadOutcome, FilterError> {
     let (action, mutations) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, request, None);
-        let action = pipeline.execute_http_request_head(&mut filter_ctx).await?;
+        let action = pipeline.execute_http_request_head(&mut filter_ctx).await;
 
         // Capture trusted header mutations with the same precedence as the
         // pre-read pass: the ordered log wins, else the grouped queues.
@@ -108,17 +108,20 @@ async fn run(
             push_grouped_queues(&filter_ctx, &mut mutations);
         }
 
-        // Publish head facts back to ctx. `build_filter_context` moved these
-        // out of ctx (including the per-request prepared extensions), so the
-        // write-back is required for pre-read and the request phase to see
-        // them, not merely to forward head-set values.
+        // Publish head facts back to ctx before propagating any error.
+        // `build_filter_context` moved these out of ctx (including the
+        // per-request prepared extensions), so the write-back is required for
+        // pre-read and the request phase to see them, not merely to forward
+        // head-set values. A closed-failure error must not skip it: pre_read_body
+        // and run_pipeline likewise restore facts before returning `Err`, so the
+        // 500's fallback access record still observes head-published facts.
         ctx.extensions = filter_ctx.extensions;
         ctx.filter_metadata = filter_ctx.filter_metadata;
         ctx.filter_state = filter_ctx.filter_state;
         ctx.filter_results = filter_ctx.filter_results;
         ctx.structured_metadata = filter_ctx.structured_metadata;
 
-        (action, mutations)
+        (action?, mutations)
     };
 
     if let FilterAction::Reject(rejection) = action {
@@ -230,7 +233,10 @@ mod tests {
             Ok(FilterAction::Continue)
         }
 
-        async fn on_request_head(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        async fn on_request_head(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            // Publish a fact before failing, so the closed-failure test can assert
+            // it still round-trips to ctx for the 500's fallback access record.
+            ctx.set_metadata("head_key", "head_value");
             Err(FilterError::from("head hook failed"))
         }
     }
@@ -297,6 +303,12 @@ mod tests {
         assert!(
             result.is_err(),
             "a closed head failure must propagate so the caller returns 500"
+        );
+        assert_eq!(
+            ctx.filter_metadata.get("head_key").map(String::as_str),
+            Some("head_value"),
+            "head-published facts must still round-trip to ctx on a closed-failure error, \
+             so the 500's fallback access record sees them"
         );
     }
 
