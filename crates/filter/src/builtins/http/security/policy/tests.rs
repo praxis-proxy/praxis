@@ -5752,6 +5752,34 @@ async fn a_post_only_tool_route_dispatches_its_hook() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tools_call_error_response_skips_post_hook() {
+    let (_dir, path) = write_tool_post_only_config();
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(request_body), true)
+        .await
+        .expect("request phase ran");
+    assert!(matches!(action, FilterAction::BodyDone));
+
+    let original = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"upstream error, and long enough that a replacement deny envelope fits inside the committed content length without being trimmed"}}"#,
+    );
+    let mut body = Some(original.clone());
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+    assert_eq!(body.expect("response body"), original);
+}
+
 /// Write a post-only `prompt:` route.
 fn write_prompt_post_only_config() -> (TempDir, String) {
     write_entity_config_with_routes(
@@ -5810,11 +5838,8 @@ async fn post_only_round_trip(path: String, method: &str, name: &str, request_bo
     body.expect("response body")
 }
 
-// Prompt and resource post hooks remain unsupported because response content
-// is currently projected only for `tools/call`.
-
 #[tokio::test(flavor = "multi_thread")]
-async fn a_post_only_prompt_route_does_not_yet_dispatch() {
+async fn a_post_only_prompt_route_dispatches_its_hook() {
     let (_dir, path) = write_prompt_post_only_config();
     let served = post_only_round_trip(
         path,
@@ -5823,15 +5848,20 @@ async fn a_post_only_prompt_route_does_not_yet_dispatch() {
         br#"{"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"summarize"}}"#,
     )
     .await;
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
     assert_eq!(
-        served,
-        bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()),
-        "a prompt response is passed through untouched because the post hook is never dispatched",
+        parsed["error"]["data"]["violation"], "prompt_withheld",
+        "the post-phase deny must reach the wire; a body that still carries `result` means the \
+         hook never dispatched. got {served:?}",
+    );
+    assert!(
+        parsed.get("result").is_none(),
+        "deny envelopes must not retain the upstream result",
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_post_only_resource_route_does_not_yet_dispatch() {
+async fn a_post_only_resource_route_dispatches_its_hook() {
     let (_dir, path) = write_resource_post_only_config();
     let served = post_only_round_trip(
         path,
@@ -5840,10 +5870,15 @@ async fn a_post_only_resource_route_does_not_yet_dispatch() {
         br#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///data.csv"}}"#,
     )
     .await;
+    let parsed: serde_json::Value = serde_json::from_slice(&served).expect("served body is JSON");
     assert_eq!(
-        served,
-        bytes::Bytes::from_static(ROOMY_MCP_RESPONSE.as_bytes()),
-        "a resource response is passed through untouched because the post hook is never dispatched",
+        parsed["error"]["data"]["violation"], "resource_withheld",
+        "the post-phase deny must reach the wire; a body that still carries `result` means the \
+         hook never dispatched. got {served:?}",
+    );
+    assert!(
+        parsed.get("result").is_none(),
+        "deny envelopes must not retain the upstream result",
     );
 }
 
@@ -5992,14 +6027,27 @@ fn a_read_write_tool_response_policy_does_not_warn() {
 }
 
 #[test]
-fn a_prompt_response_policy_warns_that_read_write_is_not_the_fix() {
-    let (_dir, path) = write_prompt_post_only_config();
-    let logs = capture_warnings(|| drop(build_read_write_filter(path)));
-    assert!(
-        logs.contains("those rules never run") && logs.contains("does not change this"),
-        "a prompt response rule is undispatched under both body accesses, so the warning must \
-         not offer `read_write` as the remedy; got {logs}",
-    );
+fn read_only_prompt_and_resource_response_policies_warn_with_the_remedy() {
+    for (_dir, path) in [write_prompt_post_only_config(), write_resource_post_only_config()] {
+        let logs = capture_warnings(|| drop(build_filter(path)));
+        assert!(
+            logs.contains("response-phase `prompt:` or `resource:` rules")
+                && logs.contains("rules will never run")
+                && logs.contains("body_access: read_write"),
+            "a `read_only` filter must warn that prompt/resource hooks cannot run and name the remedy; got {logs}",
+        );
+    }
+}
+
+#[test]
+fn read_write_prompt_and_resource_response_policies_do_not_warn() {
+    for (_dir, path) in [write_prompt_post_only_config(), write_resource_post_only_config()] {
+        let logs = capture_warnings(|| drop(build_read_write_filter(path)));
+        assert!(
+            !logs.contains("response-phase `prompt:` or `resource:` rules"),
+            "`read_write` enables prompt/resource post hooks and must not warn; got {logs}",
+        );
+    }
 }
 
 /// An `http:` route that only `bob` satisfies, beside a post-only `tool:`

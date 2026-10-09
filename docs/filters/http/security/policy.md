@@ -31,9 +31,9 @@ The CMF prompt text that APL steps and scanners read is projected from `system`,
 
 `body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also enables `cmf.llm_output` for non-streaming inference responses. APL field mutators do not rewrite inference bodies.
 
-`body_access: read_write` also enables response-phase `tool:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these rules are skipped and a warning is emitted. A response-only route adds no request-phase route rule; identity checks and `global` policy still apply.
+`body_access: read_write` also enables response-phase `tool:`, `prompt:`, and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these rules are skipped and a warning is emitted. A response-only route adds no request-phase route rule; identity checks and `global` policy still apply.
 
-`prompt:` and `resource:` response rules do not currently run under either body access mode. Use `pre_invocation` for those controls.
+`result.<field>` projection for `prompt:` and `resource:` routes remains blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330].
 
 Policies with MCP entity routes cannot declare `authorization:` on an `http:` route. Use `global` for shared authorization; route-scoped `authentication:` remains supported.
 
@@ -81,5 +81,7 @@ llm:
 ```
 
 [PPE 0.4.1 changelog]: https://github.com/praxis-proxy/policy/blob/v0.4.1/CHANGELOG.md#041---2026-10-05
+[Praxis #1330]: https://github.com/praxis-proxy/praxis/issues/1330
 [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
 [args migration guidance]: https://github.com/praxis-proxy/policy/blob/v0.4.1/docs/content/apl/pdp.md#migrating-args-policies
+[policy #75]: https://github.com/praxis-proxy/policy/issues/75

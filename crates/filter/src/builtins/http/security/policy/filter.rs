@@ -180,13 +180,16 @@ enum GatedIdentity {
 /// `cmf.llm_output` for non-streaming inference responses. APL field
 /// mutators do not rewrite inference bodies.
 ///
-/// `body_access: read_write` also enables response-phase `tool:` rules,
-/// including attribute-only `post_invocation` rules. Under `read_only`, these
+/// `body_access: read_write` also enables response-phase `tool:`, `prompt:`,
+/// and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these
 /// rules are skipped and a warning is emitted. A response-only route adds no
 /// request-phase route rule; identity checks and `global` policy still apply.
 ///
-/// `prompt:` and `resource:` response rules do not currently run under either
-/// body access mode. Use `pre_invocation` for those controls.
+/// `result.<field>` projection for `prompt:` and `resource:` routes remains
+/// blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330].
+///
+/// [policy #75]: https://github.com/praxis-proxy/policy/issues/75
+/// [Praxis #1330]: https://github.com/praxis-proxy/praxis/issues/1330
 ///
 /// Policies with MCP entity routes cannot declare `authorization:` on an
 /// `http:` route. Use `global` for shared authorization; route-scoped
@@ -445,16 +448,16 @@ impl PolicyFilter {
         let mcp_pre = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_PROMPT_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_RESOURCE_PRE_FETCH);
-        // Split by entity because only the tool half is dispatched. The
-        // response phase builds its payload with
-        // `build_response_content_for_method`, which projects `tools/call` and
-        // nothing else, so a prompt or resource post hook is registered,
-        // reached, and then skipped on empty content. The two get different
-        // advice below.
+        // Split by entity: tool post hooks evaluate with projected content,
+        // while prompt and resource post hooks dispatch with an empty payload
+        // (content projection is tools/call only). Attribute-only rules
+        // (identity and subject/meta predicates) work for all three;
+        // `result.<field>` projection for prompts and resources is still
+        // blocked on policy work.
         let mcp_post_tool = mgr.has_hooks_for(HOOK_CMF_TOOL_POST_INVOKE);
-        let mcp_post_undispatched =
+        let mcp_post_prompt_resource =
             mgr.has_hooks_for(HOOK_CMF_PROMPT_POST_INVOKE) || mgr.has_hooks_for(HOOK_CMF_RESOURCE_POST_FETCH);
-        let mcp_post = mcp_post_tool || mcp_post_undispatched;
+        let mcp_post = mcp_post_tool || mcp_post_prompt_resource;
         let mcp_routes = mcp_pre || mcp_post;
         let llm_post = mgr.has_hooks_for(HOOK_CMF_LLM_OUTPUT);
         // A post-only route still needs request state for response dispatch.
@@ -502,7 +505,7 @@ impl PolicyFilter {
             Self::warn_on_inference_gaps(&policy_config, http_global, &cfg, llm_post);
         }
         Self::warn_on_inert_inference_defaults(&policy_config, llm_routes);
-        Self::warn_on_entity_response_gaps(&cfg, mcp_post_tool, mcp_post_undispatched);
+        Self::warn_on_entity_response_gaps(&cfg, mcp_post_tool, mcp_post_prompt_resource);
 
         // Reject an `http:` route that no classified request can reach.
         if let Some(message) = Self::http_route_beside_entity_routes(&yaml, mcp_routes) {
@@ -628,7 +631,7 @@ impl PolicyFilter {
     }
 
     /// Warn when configured MCP entity response rules cannot run.
-    fn warn_on_entity_response_gaps(cfg: &PolicyFilterConfig, post_tool: bool, post_undispatched: bool) {
+    fn warn_on_entity_response_gaps(cfg: &PolicyFilterConfig, post_tool: bool, post_prompt_resource: bool) {
         if post_tool && !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
             tracing::warn!(
                 target: "policy.filter",
@@ -638,14 +641,20 @@ impl PolicyFilter {
                  them.",
             );
         }
-        if post_undispatched {
+        if post_prompt_resource && !matches!(cfg.body_access, BodyAccessMode::ReadWrite) {
             tracing::warn!(
                 target: "policy.filter",
-                "policy declares response-phase `prompt:` or `resource:` rules \
-                 (`result.<field>` or `post_invocation`): those rules never run. The response \
-                 payload is projected for `tools/call` only, so the hook is registered and then \
-                 skipped. `body_access: read_write` does not change this. Move the control to the \
-                 request phase (`pre_invocation`), which is dispatched for all three entity types.",
+                "policy declares response-phase `prompt:` or `resource:` rules, but \
+                 `body_access` is `read_only`, which does not buffer the response: those \
+                 rules will never run. Set `body_access: read_write` to enable them.",
+            );
+        } else if post_prompt_resource {
+            tracing::info!(
+                target: "policy.filter",
+                "policy declares response-phase `prompt:` or `resource:` rules: \
+                 `post_invocation` predicates over identity and attributes are dispatched, but \
+                 `result.<field>` projection remains blocked on praxis-proxy/policy#75; \
+                 host-side content projection is tracked in praxis-proxy/praxis#1330.",
             );
         }
     }
@@ -2197,7 +2206,13 @@ impl HttpFilter for PolicyFilter {
         let extensions = Self::extensions_from_identity(&headers, identity, entity_type, &entity_name);
 
         let content = build_response_content_for_method(&method, &entity_name, &id_str, &parsed);
-        if content.is_empty() {
+        // For tools/call, empty content means the upstream returned an error
+        // response (no `result` field), and dispatching the post hook against
+        // that is a behavior change we do not want here. For prompts and
+        // resources, content projection is not yet implemented (tools/call
+        // only), so content is always empty, but attribute-only post rules
+        // (identity, CEL predicates over subject/meta) are still valid.
+        if content.is_empty() && method == "tools/call" {
             return Ok(FilterAction::Continue);
         }
         let payload = MessagePayload {
