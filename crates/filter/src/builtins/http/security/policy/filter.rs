@@ -451,7 +451,7 @@ impl PolicyFilter {
         // Split by entity: tool post hooks evaluate with projected content,
         // while prompt and resource post hooks dispatch with an empty payload
         // (content projection is tools/call only). Attribute-only rules
-        // (identity, subject/meta/http predicates) work for all three;
+        // (identity and subject/meta predicates) work for all three;
         // `result.<field>` projection for prompts and resources is still
         // blocked on policy work.
         let mcp_post_tool = mgr.has_hooks_for(HOOK_CMF_TOOL_POST_INVOKE);
@@ -2211,7 +2211,7 @@ impl HttpFilter for PolicyFilter {
         // that is a behavior change we do not want here. For prompts and
         // resources, content projection is not yet implemented (tools/call
         // only), so content is always empty, but attribute-only post rules
-        // (identity, CEL predicates over subject/meta/http) are still valid.
+        // (identity, CEL predicates over subject/meta) are still valid.
         if content.is_empty() && method == "tools/call" {
             return Ok(FilterAction::Continue);
         }
