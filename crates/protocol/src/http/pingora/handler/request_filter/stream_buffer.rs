@@ -275,8 +275,9 @@ pub(super) async fn pre_read_body(
 /// ordered trusted mutations (remove -> set -> add).
 ///
 /// Used only when a pass wrote no ordered `pre_read_mutations`, so the two
-/// mechanisms never mix within one pass.
-fn push_grouped_queues(filter_ctx: &HttpFilterContext<'_>, log: &mut Vec<TrustedHeaderMutation>) {
+/// mechanisms never mix within one pass. Shared with the request-head phase,
+/// which captures head-filter mutations with the same precedence.
+pub(super) fn push_grouped_queues(filter_ctx: &HttpFilterContext<'_>, log: &mut Vec<TrustedHeaderMutation>) {
     for name in &filter_ctx.request_headers_to_remove {
         log.push(TrustedHeaderMutation::Remove(name.clone()));
     }

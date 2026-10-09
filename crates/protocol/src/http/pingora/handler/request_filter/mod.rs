@@ -17,6 +17,8 @@ mod error_handling;
 mod header_mutations;
 /// Request-phase entry point and pipeline runner.
 mod pipeline;
+/// Request-head phase execution, before `StreamBuffer` pre-read.
+mod request_head;
 /// Request utilities: span creation, snapshotting, and validation.
 mod request_utils;
 /// StreamBuffer pre-read logic and TRACE response construction.
