@@ -12,7 +12,7 @@ use praxis_test_utils::{
     start_proxy_with_registry,
 };
 
-use crate::throughput_utils::{BenchConfig, assert_performance, report_results, run_benchmark_with_body};
+use crate::throughput_utils::{BenchConfig, assert_performance, bench_guard, report_results, run_benchmark_with_body};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -20,6 +20,7 @@ use crate::throughput_utils::{BenchConfig, assert_performance, report_results, r
 
 #[test]
 fn bench_body_passthrough() {
+    let _bench = bench_guard();
     let _backend = start_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();
@@ -36,6 +37,7 @@ fn bench_body_passthrough() {
 
 #[test]
 fn bench_body_readonly_stream() {
+    let _bench = bench_guard();
     let _backend = start_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();
@@ -53,6 +55,7 @@ fn bench_body_readonly_stream() {
 
 #[test]
 fn bench_body_medium_payload() {
+    let _bench = bench_guard();
     let _backend = start_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();
@@ -69,6 +72,7 @@ fn bench_body_medium_payload() {
 
 #[test]
 fn bench_body_large_payload() {
+    let _bench = bench_guard();
     let _backend = start_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();

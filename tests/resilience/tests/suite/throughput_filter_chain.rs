@@ -6,7 +6,7 @@
 use praxis_core::config::Config;
 use praxis_test_utils::{free_port, start_backend, start_proxy};
 
-use crate::throughput_utils::{BenchConfig, assert_performance, report_results, run_get_benchmark};
+use crate::throughput_utils::{BenchConfig, assert_performance, bench_guard, report_results, run_get_benchmark};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -14,6 +14,7 @@ use crate::throughput_utils::{BenchConfig, assert_performance, report_results, r
 
 #[test]
 fn bench_pipeline_4_filters() {
+    let _bench = bench_guard();
     let backend_port = start_backend("ok");
     let proxy_port = free_port();
     let yaml = multi_filter_yaml(proxy_port, backend_port, 1);
@@ -28,6 +29,7 @@ fn bench_pipeline_4_filters() {
 
 #[test]
 fn bench_pipeline_8_filters() {
+    let _bench = bench_guard();
     let backend_port = start_backend("ok");
     let proxy_port = free_port();
     let yaml = multi_filter_yaml(proxy_port, backend_port, 5);
@@ -42,6 +44,7 @@ fn bench_pipeline_8_filters() {
 
 #[test]
 fn bench_pipeline_15_filters() {
+    let _bench = bench_guard();
     let backend_port = start_backend("ok");
     let proxy_port = free_port();
     let yaml = multi_filter_yaml(proxy_port, backend_port, 12);

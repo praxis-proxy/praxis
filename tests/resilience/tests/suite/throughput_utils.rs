@@ -2,9 +2,12 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Shared benchmark harness for Praxis system benchmarks.
+//!
+//! Every throughput test in the suite holds [`bench_guard`] for its whole
+//! measurement, so one benchmark runs at a time.
 
 use std::{
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
@@ -98,6 +101,29 @@ pub(crate) struct BenchResult {
 
     /// Number of requests that returned a non-200 status.
     pub errors: usize,
+}
+
+// -----------------------------------------------------------------------------
+// Mutual Exclusion
+// -----------------------------------------------------------------------------
+
+/// Serializes every throughput benchmark in this binary.
+///
+/// A throughput floor only means something when the benchmark has the machine
+/// to itself for the whole measurement. Under the default test-thread pool the
+/// 16 benchmarks otherwise start together, and each `DEFAULT_CONCURRENCY`-wide
+/// load generator plus its in-process proxy and backend competes with every
+/// sibling, so the measured number depends on which benchmarks happened to be
+/// running at the same moment. One test at a time is the only way the floors
+/// measure the proxy rather than the scheduler.
+static BENCH_LOCK: Mutex<()> = Mutex::new(());
+
+/// Hold for the whole benchmark so no sibling benchmark runs meanwhile.
+///
+/// A poisoned lock is granted anyway: a benchmark that panics should not make
+/// every later one hang on a lock that nobody will ever release again.
+pub(crate) fn bench_guard() -> MutexGuard<'static, ()> {
+    BENCH_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // -----------------------------------------------------------------------------
@@ -282,7 +308,9 @@ pub(crate) fn run_get_benchmark(config: &BenchConfig, addr: &str, path: &str) ->
 
 #[cfg(test)]
 mod tests {
-    use super::parse_throughput_scale;
+    use std::{sync::Arc, thread};
+
+    use super::{bench_guard, parse_throughput_scale};
 
     #[test]
     fn an_unset_scale_leaves_the_floors_alone() {
@@ -304,5 +332,42 @@ mod tests {
     #[should_panic(expected = "must be a positive number")]
     fn a_zero_scale_is_rejected() {
         parse_throughput_scale(Some("0"));
+    }
+
+    #[test]
+    fn a_second_guard_waits_until_the_first_is_dropped() {
+        let held = bench_guard();
+        let acquired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&acquired);
+
+        let worker = thread::spawn(move || {
+            let _guard = bench_guard();
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+
+        assert!(
+            !acquired.load(std::sync::atomic::Ordering::SeqCst),
+            "the second guard must block while the first is held"
+        );
+
+        drop(held);
+        worker.join().expect("worker thread panicked");
+
+        assert!(
+            acquired.load(std::sync::atomic::Ordering::SeqCst),
+            "the second guard must be granted once the first is dropped"
+        );
+    }
+
+    #[test]
+    fn a_poisoned_lock_is_still_granted_to_the_next_benchmark() {
+        let poisoned = thread::spawn(|| {
+            let _guard = bench_guard();
+            panic!("poisoned by a panicked benchmark");
+        });
+
+        assert!(poisoned.join().is_err(), "the worker should have panicked");
+
+        let _guard = bench_guard();
     }
 }
