@@ -9,7 +9,7 @@
 //! header sanitization. Supports both buffered (collect full body)
 //! and streaming (chunk-by-chunk) response modes.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use http::HeaderMap;
@@ -42,6 +42,26 @@ use crate::{
 /// response, bounding a pathological upstream that only emits interim
 /// headers (the overall deadline is the other bound).
 const MAX_INTERIM_RESPONSES: u32 = 32;
+
+/// CA certificates loaded from `runtime.upstream_ca_file`.
+#[derive(Clone)]
+struct RuntimeCa(Arc<[pingora_core::utils::tls::WrappedX509]>);
+
+impl std::fmt::Debug for RuntimeCa {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("RuntimeCa").field(&self.0.len()).finish()
+    }
+}
+
+/// Record `err` against the circuit guard, then return it.
+///
+/// Taking the guard here means a later drop cannot record the same attempt again.
+fn charge(guard: &mut Option<CircuitGuard<'_>>, err: SubRequestError) -> SubRequestError {
+    if let Some(guard) = guard.take() {
+        guard.fail(&err);
+    }
+    err
+}
 
 /// Eager buffer capacity cap for buffered response bodies.
 ///
@@ -95,6 +115,9 @@ pub struct SubRequestClient {
     /// Hard ceiling on buffered response bytes. Per-call limits are
     /// clamped to `min(this, per_call)` so callers cannot exceed it.
     pub(super) max_response_bytes: usize,
+
+    /// Parsed `runtime.upstream_ca_file`, when one is configured.
+    upstream_ca: Option<RuntimeCa>,
 }
 
 impl SubRequestClient {
@@ -110,6 +133,7 @@ impl SubRequestClient {
         Self {
             connector,
             max_response_bytes: crate::config::ABSOLUTE_MAX_BODY_BYTES,
+            upstream_ca: None,
         }
     }
 
@@ -122,7 +146,21 @@ impl SubRequestClient {
         Self {
             connector,
             max_response_bytes,
+            upstream_ca: None,
         }
+    }
+
+    /// Trust `ca` when a cluster does not set its own CA.
+    #[must_use]
+    pub fn with_upstream_ca(mut self, ca: Arc<[pingora_core::utils::tls::WrappedX509]>) -> Self {
+        self.upstream_ca = Some(RuntimeCa(ca));
+        self
+    }
+
+    /// Runtime CA bundle, when `runtime.upstream_ca_file` was loaded.
+    #[must_use]
+    pub fn upstream_ca(&self) -> Option<Arc<[pingora_core::utils::tls::WrappedX509]>> {
+        self.upstream_ca.as_ref().map(|ca| Arc::clone(&ca.0))
     }
 
     /// Execute a buffered request against an absolute HTTP(S) URL.
@@ -263,7 +301,7 @@ impl SubRequestClient {
     #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
     #[expect(
         clippy::too_many_arguments,
-        reason = "connect cap threads the per-attempt budget through the shared transport path"
+        reason = "connect cap and hedge cancellation policy are both per-exchange"
     )]
     async fn open_exchange<'conn>(
         &'conn self,
@@ -272,6 +310,7 @@ impl SubRequestClient {
         timeout: Duration,
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
+        abandon_neutral: bool,
     ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
         #[cfg(feature = "otel")]
         let client_span = subrequest_client_span(peer, request);
@@ -286,6 +325,7 @@ impl SubRequestClient {
                 connect_attempt_cap,
                 framework_headers,
                 &client_span,
+                abandon_neutral,
             )
             .instrument(client_span.clone())
             .await;
@@ -311,6 +351,7 @@ impl SubRequestClient {
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
         client_span: &Span,
+        abandon_neutral: bool,
     ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
         let exchange_started = tokio::time::Instant::now();
         let deadline = exchange_started
@@ -387,7 +428,7 @@ impl SubRequestClient {
         // ---------------------------------------------------------------------
         // 4. Circuit try_acquire
         // ---------------------------------------------------------------------
-        let circuit_guard = match (&self.connector.circuit_breakers, peer_key) {
+        let mut circuit_guard = match (&self.connector.circuit_breakers, peer_key) {
             (Some(registry), Some(key)) => match registry.try_acquire(key.clone()) {
                 CircuitCheck::Rejected => {
                     return Err(SubRequestError::CircuitOpen { peer: key.to_string() });
@@ -396,13 +437,16 @@ impl SubRequestClient {
             },
             _ => None,
         };
+        if abandon_neutral && let Some(guard) = circuit_guard.as_mut() {
+            guard.abandon_as_neutral();
+        }
 
         // ---------------------------------------------------------------------
         // 5. Connect + I/O
         // ---------------------------------------------------------------------
         let overall_connect_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         if overall_connect_budget.is_zero() {
-            return Err(SubRequestError::DeadlineExceeded);
+            return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
         }
         // An optional per-attempt cap bounds only this connect phase; everything
         // after a successful connect still runs against the overall deadline.
@@ -413,8 +457,8 @@ impl SubRequestClient {
             Box::pin(self.connector.connector().get_http_session(&bounded_peer)),
         )
         .await
-        .map_err(|_elapsed| connect_timeout_error(deadline))?
-        .map_err(|err| SubRequestError::Connect(err.to_string()))?;
+        .map_err(|_elapsed| charge(&mut circuit_guard, connect_timeout_error(deadline)))?
+        .map_err(|err| charge(&mut circuit_guard, SubRequestError::Connect(err.to_string())))?;
 
         debug!(
             peer = %bounded_peer.address(),
@@ -429,20 +473,25 @@ impl SubRequestClient {
 
         let header_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         if header_budget.is_zero() {
-            return Err(SubRequestError::DeadlineExceeded);
+            return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
         }
 
         let header_write_timeout = min_timeout(bounded_peer.options.write_timeout, header_budget);
         tokio::time::timeout(header_write_timeout, session.write_request_header(Box::new(req_header)))
             .await
-            .map_err(|_elapsed| classify_timeout(header_budget, bounded_peer.options.write_timeout, "write"))?
-            .map_err(|err| SubRequestError::Io(err.to_string()))?;
+            .map_err(|_elapsed| {
+                charge(
+                    &mut circuit_guard,
+                    classify_timeout(header_budget, bounded_peer.options.write_timeout, "write"),
+                )
+            })?
+            .map_err(|err| charge(&mut circuit_guard, SubRequestError::Io(err.to_string())))?;
 
         if !request.body.is_empty() {
             let body_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
             if body_budget.is_zero() {
                 session.shutdown().await;
-                return Err(SubRequestError::DeadlineExceeded);
+                return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
             }
             let body_write_timeout = min_timeout(bounded_peer.options.write_timeout, body_budget);
             tokio::time::timeout(
@@ -450,20 +499,30 @@ impl SubRequestClient {
                 session.write_request_body(request.body.clone(), true),
             )
             .await
-            .map_err(|_elapsed| classify_timeout(body_budget, bounded_peer.options.write_timeout, "write"))?
-            .map_err(|err| SubRequestError::Io(err.to_string()))?;
+            .map_err(|_elapsed| {
+                charge(
+                    &mut circuit_guard,
+                    classify_timeout(body_budget, bounded_peer.options.write_timeout, "write"),
+                )
+            })?
+            .map_err(|err| charge(&mut circuit_guard, SubRequestError::Io(err.to_string())))?;
         }
 
         let finish_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         if finish_budget.is_zero() {
             session.shutdown().await;
-            return Err(SubRequestError::DeadlineExceeded);
+            return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
         }
         let finish_write_timeout = min_timeout(bounded_peer.options.write_timeout, finish_budget);
         tokio::time::timeout(finish_write_timeout, session.finish_request_body())
             .await
-            .map_err(|_elapsed| classify_timeout(finish_budget, bounded_peer.options.write_timeout, "write"))?
-            .map_err(|err| SubRequestError::Io(err.to_string()))?;
+            .map_err(|_elapsed| {
+                charge(
+                    &mut circuit_guard,
+                    classify_timeout(finish_budget, bounded_peer.options.write_timeout, "write"),
+                )
+            })?
+            .map_err(|err| charge(&mut circuit_guard, SubRequestError::Io(err.to_string())))?;
 
         // ---------------------------------------------------------------------
         // 6. Read the response header, skipping 1xx interim responses
@@ -481,26 +540,35 @@ impl SubRequestClient {
             let read_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
             if read_budget.is_zero() {
                 session.shutdown().await;
-                return Err(SubRequestError::DeadlineExceeded);
+                return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
             }
             let read_timeout = min_timeout(bounded_peer.options.read_timeout, read_budget);
 
             tokio::time::timeout(read_timeout, session.read_response_header())
                 .await
-                .map_err(|_elapsed| classify_timeout(read_budget, bounded_peer.options.read_timeout, "read"))?
-                .map_err(|err| SubRequestError::Io(err.to_string()))?;
+                .map_err(|_elapsed| {
+                    charge(
+                        &mut circuit_guard,
+                        classify_timeout(read_budget, bounded_peer.options.read_timeout, "read"),
+                    )
+                })?
+                .map_err(|err| charge(&mut circuit_guard, SubRequestError::Io(err.to_string())))?;
 
-            let resp_header = session
-                .response_header()
-                .ok_or_else(|| SubRequestError::Io("no response header received".to_owned()))?;
+            let resp_header = session.response_header().ok_or_else(|| {
+                charge(
+                    &mut circuit_guard,
+                    SubRequestError::Io("no response header received".to_owned()),
+                )
+            })?;
             let status = resp_header.status.as_u16();
 
             if (100..=199).contains(&status) && status != 101 {
                 interim_count = interim_count.saturating_add(1);
                 if interim_count > MAX_INTERIM_RESPONSES {
                     session.shutdown().await;
-                    return Err(SubRequestError::Io(
-                        "upstream sent too many 1xx interim responses".to_owned(),
+                    return Err(charge(
+                        &mut circuit_guard,
+                        SubRequestError::Io("upstream sent too many 1xx interim responses".to_owned()),
                     ));
                 }
                 continue;
@@ -511,13 +579,17 @@ impl SubRequestClient {
 
         if !(100..=599).contains(&status) {
             session.shutdown().await;
-            return Err(SubRequestError::Io(format!(
-                "upstream returned unsupported HTTP status {status}"
-            )));
+            return Err(charge(
+                &mut circuit_guard,
+                SubRequestError::Io(format!("upstream returned unsupported HTTP status {status}")),
+            ));
         }
-        let resp_header = session
-            .response_header()
-            .ok_or_else(|| SubRequestError::Io("no response header received".to_owned()))?;
+        let resp_header = session.response_header().ok_or_else(|| {
+            charge(
+                &mut circuit_guard,
+                SubRequestError::Io("no response header received".to_owned()),
+            )
+        })?;
         // Copy the response headers in one pass, sized up front. The
         // values are already-validated `HeaderValue`s (pingora's header
         // map stores the http crate's type), so cloning is a refcount
@@ -587,9 +659,10 @@ impl SubRequestClient {
         framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<StreamingSubResponse, SubRequestError> {
         // Streaming uses no per-attempt connect cap: its header `timeout` already
-        // bounds the whole connect-plus-header phase.
+        // bounds the whole connect-plus-header phase. Cancellation still records
+        // a circuit failure; only a hedged attempt is neutral on drop.
         let mut exchange = self
-            .open_exchange(peer, request, timeout, None, framework_headers)
+            .open_exchange(peer, request, timeout, None, framework_headers, false)
             .await?;
 
         // Hold the circuit guard until the header-time outcome is known.
@@ -718,8 +791,55 @@ impl SubRequestClient {
         timeout: Duration,
         framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<SubResponse, SubRequestError> {
-        self.execute_with_connect_cap(peer, request, max_response_bytes, timeout, None, framework_headers)
-            .await
+        self.execute_inner(
+            peer,
+            request,
+            max_response_bytes,
+            timeout,
+            None,
+            framework_headers,
+            false,
+        )
+        .await
+    }
+
+    /// Execute a buffered sub-request whose cancellation is neutral to the circuit breaker.
+    ///
+    /// Dropping this future after the exchange has started releases the circuit
+    /// slot without recording success or failure. A connect, I/O, or deadline
+    /// error still records a failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubRequestError`] on admission timeout, connection failure,
+    /// I/O error, response body exceeding the size limit, or deadline expiry.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "framework_headers is the typed metadata injection point"
+    )]
+    #[expect(
+        clippy::large_stack_frames,
+        clippy::large_futures,
+        reason = "Pingora session types are large; leaving the delegation unboxed preserves downstream future-size expectations and avoids a per-call heap allocation"
+    )]
+    pub async fn execute_abandon_neutral(
+        &self,
+        peer: &HttpPeer,
+        request: &SubRequest,
+        max_response_bytes: usize,
+        timeout: Duration,
+        framework_headers: Option<&FrameworkHeaders>,
+    ) -> Result<SubResponse, SubRequestError> {
+        self.execute_inner(
+            peer,
+            request,
+            max_response_bytes,
+            timeout,
+            None,
+            framework_headers,
+            true,
+        )
+        .await
     }
 
     /// Buffered execution with an optional per-attempt connect cap.
@@ -732,8 +852,11 @@ impl SubRequestClient {
         clippy::too_many_arguments,
         reason = "connect cap is URL fallback's per-attempt budget alongside framework metadata"
     )]
-    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
-    #[expect(clippy::too_many_lines, reason = "inline body collection loop")]
+    #[expect(
+        clippy::large_stack_frames,
+        clippy::large_futures,
+        reason = "Pingora session types are large; leaving the delegation unboxed preserves downstream future-size expectations and avoids a per-call heap allocation"
+    )]
     async fn execute_with_connect_cap(
         &self,
         peer: &HttpPeer,
@@ -743,8 +866,45 @@ impl SubRequestClient {
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<SubResponse, SubRequestError> {
+        self.execute_inner(
+            peer,
+            request,
+            max_response_bytes,
+            timeout,
+            connect_attempt_cap,
+            framework_headers,
+            false,
+        )
+        .await
+    }
+
+    /// Shared body of [`execute`](Self::execute), [`execute_abandon_neutral`](Self::execute_abandon_neutral),
+    /// and [`execute_with_connect_cap`](Self::execute_with_connect_cap).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "connect cap and hedge cancellation policy are both per-exchange"
+    )]
+    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
+    #[expect(clippy::too_many_lines, reason = "inline body collection loop")]
+    async fn execute_inner(
+        &self,
+        peer: &HttpPeer,
+        request: &SubRequest,
+        max_response_bytes: usize,
+        timeout: Duration,
+        connect_attempt_cap: Option<Duration>,
+        framework_headers: Option<&FrameworkHeaders>,
+        abandon_neutral: bool,
+    ) -> Result<SubResponse, SubRequestError> {
         let exchange = self
-            .open_exchange(peer, request, timeout, connect_attempt_cap, framework_headers)
+            .open_exchange(
+                peer,
+                request,
+                timeout,
+                connect_attempt_cap,
+                framework_headers,
+                abandon_neutral,
+            )
             .await;
 
         let RawExchange {
@@ -768,7 +928,11 @@ impl SubRequestClient {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             record_subrequest_client_error(&client_span, "subrequest_body");
-            return Err(SubRequestError::DeadlineExceeded);
+            let err = SubRequestError::DeadlineExceeded;
+            if let Some(guard) = circuit_guard {
+                guard.fail(&err);
+            }
+            return Err(err);
         }
 
         // Size the buffer from Content-Length when present, clamped to
@@ -976,7 +1140,7 @@ async fn fail_header_exchange(
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::too_many_lines, clippy::items_after_statements, reason = "tests")]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     use super::*;
 

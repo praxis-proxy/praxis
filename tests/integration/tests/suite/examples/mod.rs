@@ -49,6 +49,8 @@ mod guardrails_per_model;
 mod header_manipulation;
 mod header_presence_condition;
 mod health_checks;
+#[cfg(feature = "hedged-requests")]
+mod hedged_requests;
 mod hostname_upstream;
 mod http_active_requests;
 #[cfg(feature = "iterative-request-router")]

@@ -71,8 +71,12 @@ pub fn build_full_registry() -> FilterRegistry {
 /// gated on the circuit breaker being present. See issue #994.
 ///
 /// [`SubRequestConnector`]: praxis_core::subrequest::SubRequestConnector
-#[must_use]
-pub fn build_subrequest_client(config: &Config) -> SubRequestClient {
+///
+/// # Errors
+///
+/// Returns an error when `runtime.upstream_ca_file` is set and the file
+/// cannot be read or parsed.
+pub fn build_subrequest_client(config: &Config) -> Result<SubRequestClient, Box<dyn std::error::Error + Send + Sync>> {
     let pool_size = config
         .runtime
         .subrequest_pool_size
@@ -93,7 +97,13 @@ pub fn build_subrequest_client(config: &Config) -> SubRequestClient {
     });
 
     let ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
-    SubRequestClient::with_max_response_bytes(connector, ceiling)
+    let mut client = SubRequestClient::with_max_response_bytes(connector, ceiling);
+    if let Some(path) = config.runtime.upstream_ca_file.as_deref() {
+        let cached = praxis_tls::CachedCaCerts::from_pem_file(path)?;
+        let converted = praxis_core::connectivity::peer::ca_from_cached(&cached);
+        client = client.with_upstream_ca(Arc::from(converted));
+    }
+    Ok(client)
 }
 
 // -----------------------------------------------------------------------------
@@ -1142,7 +1152,7 @@ filter_chains:
     fn build_subrequest_client_wires_circuit_breaker_from_config() {
         // Tests skip the server bootstrap that installs the provider.
         praxis_tls::provider::install();
-        let client = build_subrequest_client(&config_with_circuit_breaker());
+        let client = build_subrequest_client(&config_with_circuit_breaker()).expect("sub-request client");
         assert!(
             client.connector().has_circuit_breaker(),
             "a configured runtime.subrequest_circuit_breaker must be wired into the connector; \
@@ -1155,7 +1165,7 @@ filter_chains:
     fn build_subrequest_client_omits_circuit_breaker_when_unset() {
         // Tests skip the server bootstrap that installs the provider.
         praxis_tls::provider::install();
-        let client = build_subrequest_client(&valid_config());
+        let client = build_subrequest_client(&valid_config()).expect("sub-request client");
         assert!(
             !client.connector().has_circuit_breaker(),
             "no circuit breaker should be wired when none is configured"
@@ -1166,7 +1176,7 @@ filter_chains:
     fn build_subrequest_client_threads_max_connections_from_config() {
         // Tests skip the server bootstrap that installs the provider.
         praxis_tls::provider::install();
-        let client = build_subrequest_client(&config_with_circuit_breaker());
+        let client = build_subrequest_client(&config_with_circuit_breaker()).expect("sub-request client");
         assert_eq!(
             client.connector().configured_max_connections(),
             Some(7),

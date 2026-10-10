@@ -814,6 +814,29 @@ fn circuit_guard_drop_without_finalize_records_failure() {
     );
 }
 
+#[test]
+fn circuit_guard_neutral_drop_leaves_the_peer_healthy() {
+    let registry = test_registry(1);
+    let key = test_peer("127.0.0.1:8080");
+    let mut guard = acquire_guard(&registry, key.clone());
+    guard.abandon_as_neutral();
+    drop(guard);
+    assert!(registry.precheck(&key), "an abandoned attempt is not a peer failure");
+}
+
+#[test]
+fn circuit_guard_fail_connect_records_failure() {
+    let registry = test_registry(1);
+    let key = test_peer("127.0.0.1:8080");
+    let mut guard = acquire_guard(&registry, key.clone());
+    guard.abandon_as_neutral();
+    guard.fail(&SubRequestError::Connect("refused".to_owned()));
+    assert!(
+        !registry.precheck(&key),
+        "a connect error is still a failure when drop would be neutral"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // SubRequestError (CircuitOpen)
 // -----------------------------------------------------------------------------

@@ -535,6 +535,16 @@ impl CircuitBreakerRegistry {
         }
     }
 
+    /// Free an in-flight slot without recording success or failure.
+    ///
+    /// A cancelled attempt that never finished is not evidence about the
+    /// peer. See [`CircuitBreaker::release`].
+    pub fn release(&self, peer: &PeerKey, token: CircuitToken) {
+        if let Some(cb) = self.breakers.get(peer) {
+            cb.release(token);
+        }
+    }
+
     /// Evict breakers that have been idle for at least `idle_threshold`
     /// (see `CircuitBreaker::is_idle`): no request in flight and not
     /// `Open` inside its recovery window. Residual failures do not exempt a

@@ -13,7 +13,7 @@ use std::{sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize};
 
-use crate::hedge::HedgeBudget;
+use crate::hedge::{HedgeBudget, HedgeRace};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -114,8 +114,10 @@ struct HedgePolicyRaw {
     ///
     /// The percent must be a multiple of `0.01` (one basis point). A finer
     /// value is rejected so the loaded percent is the percent that is enforced.
-    /// The primary attempt is not counted. `0` disables copies. `10` allows
-    /// about one extra attempt per ten requests.
+    /// The primary attempt is not counted. `0` disables copies. While no copy
+    /// is in flight, any positive budget admits one, so a single active
+    /// request can still hedge. Further copies stay under the percent: `10`
+    /// keeps about one extra attempt per ten active requests.
     budget_percent: f64,
 }
 
@@ -148,6 +150,20 @@ impl HedgePolicy {
     #[must_use]
     pub fn budget(&self) -> &HedgeBudget {
         &self.budget
+    }
+
+    /// Race for one client request on this route.
+    ///
+    /// The race shares this policy's budget, so every request on the route
+    /// counts against the same cap.
+    #[must_use]
+    pub fn start_race(&self) -> HedgeRace {
+        HedgeRace::new(
+            self.initial_requests,
+            self.max_attempts,
+            self.per_try_timeout(),
+            Arc::clone(&self.budget),
+        )
     }
 }
 
@@ -429,5 +445,49 @@ budget_percent: 100
             cloned.budget().try_admit(),
             "clones of one policy share the admission counter"
         );
+    }
+
+    #[test]
+    fn start_race_shares_the_route_budget() {
+        let policy: HedgePolicy = serde_yaml::from_str(
+            r#"
+initial_requests: 2
+max_attempts: 2
+budget_percent: 10
+"#,
+        )
+        .unwrap();
+        let mut first = policy.start_race();
+        let mut second = policy.start_race();
+        assert_eq!(
+            launch_count(first.open(two_upstreams)),
+            2,
+            "the first request is under the 10% cap"
+        );
+        assert_eq!(
+            launch_count(second.open(two_upstreams)),
+            1,
+            "the shared budget denies the second copy"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    fn launch_count(outcome: crate::hedge::HedgeOutcome) -> usize {
+        match outcome {
+            crate::hedge::HedgeOutcome::Launch { attempts, .. } => attempts.len(),
+            crate::hedge::HedgeOutcome::Won { .. }
+            | crate::hedge::HedgeOutcome::Lost { .. }
+            | crate::hedge::HedgeOutcome::Pending => 0,
+        }
+    }
+
+    fn two_upstreams(exclude: &[Arc<str>]) -> Option<Arc<str>> {
+        ["10.0.0.1:80", "10.0.0.2:80"]
+            .into_iter()
+            .map(Arc::<str>::from)
+            .find(|address| exclude.iter().all(|existing| existing != address))
     }
 }

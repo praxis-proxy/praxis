@@ -79,6 +79,7 @@ really is out of the build.
 | `chain-binding` | off (experimental) | The `register_chain_binding` outbound-callout API (`ChainBindingContext::bind_chain`) and its authority-bound deferred credentials (`PendingCredentials`, `DeferredCredential`). | For out-of-tree callout filters; no in-tree consumer yet. |
 | `spiffe` | off (experimental) | SPIFFE X.509-SVID mTLS peer identity (the `require_named` listener mode) and the `peer_identity_trust` filter. | On for mTLS peer-identity authorization. Adds `spiffe` and `x509-parser`. |
 | `access-log-syslog` | off (experimental) | The `access_log` filter's syslog sink (RFC 3164 over a Unix socket, UDP, or TCP). | On to ship access logs to a syslog collector. Adds the optional `syslog` crate; kept out of the default and FIPS builds. |
+| `hedged-requests` | off (experimental) | Races one idempotent request across healthy endpoints and returns the first successful response. | On when a route sets `hedge_policy` with `max_attempts` greater than 1. Off, the policy is still parsed and every request stays on one upstream. |
 | `dev` | off | Developer convenience bundle (currently enables `basic-auth-filter`). | Local development builds. |
 | `experimental` | off | Marker feature set transitively by experimental features; drives a startup warning. | Not selected directly; it lights up when an experimental feature is enabled. |
 

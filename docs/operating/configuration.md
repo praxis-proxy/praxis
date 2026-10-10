@@ -810,6 +810,36 @@ plaintext, so a top-level cluster's data-path settings
 have no effect at all. Configure
 those on the inline load-balancer cluster instead.
 
+## Hedged Requests
+
+A route may set `hedge_policy` to race one idempotent client request across
+healthy endpoints in its cluster. The proxy must be built with the
+`hedged-requests` feature. `initial_requests` start at once. Each later copy
+waits `per_try_timeout_ms`, unless nothing is left in flight, in which case
+the next copy starts immediately while `max_attempts` and the budget allow
+it. A 2xx, 3xx, or 4xx response is terminal: it is returned and the other
+attempts stop. A 5xx response or an attempt that fails before receiving an
+HTTP response does not win, so the race starts another available attempt. If
+no attempt produces a 2xx–4xx response, the proxy returns the retained
+failure status and body when one is available. If no HTTP status is
+available, it returns 502 Bad Gateway.
+
+The policy is parsed with the route. `max_attempts: 1`, `CONNECT`,
+`Upgrade`, non-idempotent methods (`POST`, `PUT`, `PATCH`, `DELETE`),
+`application/grpc` requests, and requests that accept `text/event-stream`
+stay on one upstream. A hedged response is buffered up to the response
+ceiling, so this policy is a poor fit for any other response that must
+stream. The per-request
+`max_attempts` cap applies even when the shared budget would allow another
+copy. While no copy is in flight, any positive `budget_percent` admits one,
+so a single active request can still hedge. Further copies stay within that
+percent of the requests in flight. A copy reserves budget before an endpoint
+is chosen. The reservation
+is held while the copy is in flight, and returned when no endpoint can take
+the copy or when the attempt finishes. When the cluster has no `tls.ca`, a
+hedged attempt uses `runtime.upstream_ca_file`. See the
+[router filter](../filters/http/traffic_management/router.md).
+
 ## Failure Mode
 
 Filters declare `failure_mode: open` (continue on error)

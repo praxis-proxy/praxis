@@ -23,6 +23,8 @@ bound-upstream-request-body = ["praxis/bound-upstream-request-body"]
 spiffe = ["praxis/spiffe"]
 # Off by default; runs the access_log syslog-sink example test against a proxy built with it.
 access-log-syslog = ["praxis/access-log-syslog"]
+# Off by default; races hedged requests in the example test.
+hedged-requests = ["praxis/hedged-requests"]
 no-mac-cert-rotation-tests = []
 otel = ["praxis/otel"]
 

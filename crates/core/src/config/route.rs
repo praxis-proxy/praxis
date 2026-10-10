@@ -235,9 +235,11 @@ pub struct Route {
 
     /// Optional per-route hedged-request policy.
     ///
-    /// When set, this route races the request across healthy endpoints in
-    /// `cluster` and returns the first successful response. Absent means
-    /// one upstream attempt.
+    /// When `max_attempts` is greater than 1, the route buffers the request,
+    /// races it across healthy endpoints in `cluster`, and returns the first
+    /// 2xx, 3xx, or 4xx response, cancelling the other attempts.
+    /// `max_attempts` of 1, `CONNECT`, and `Upgrade` keep a single upstream
+    /// attempt. Absent means one upstream attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hedge_policy: Option<HedgePolicy>,
 }
@@ -279,9 +281,11 @@ struct RouteRaw {
 
     /// Optional per-route hedged-request policy.
     ///
-    /// When set, this route races the request across healthy endpoints in
-    /// `cluster` and returns the first successful response. Absent means
-    /// one upstream attempt.
+    /// When `max_attempts` is greater than 1, the route buffers the request,
+    /// races it across healthy endpoints in `cluster`, and returns the first
+    /// 2xx, 3xx, or 4xx response, cancelling the other attempts.
+    /// `max_attempts` of 1, `CONNECT`, and `Upgrade` keep a single upstream
+    /// attempt. Absent means one upstream attempt.
     #[serde(default)]
     hedge_policy: Option<HedgePolicy>,
 }

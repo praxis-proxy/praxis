@@ -82,7 +82,7 @@ fn resolve(path: &std::path::Path) -> Result<(), String> {
         &praxis_core::health::build_health_registry(&config.clusters),
         &praxis_core::kv::KvStoreRegistry::new(),
         &Arc::new(praxis_filter::SessionStoreRegistry::new()),
-        &praxis::build_subrequest_client(&config),
+        &praxis::build_subrequest_client(&config).map_err(|error| error.to_string())?,
     )
     .map(drop)
     .map_err(|error| error.to_string())

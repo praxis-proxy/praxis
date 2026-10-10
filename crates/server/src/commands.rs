@@ -77,7 +77,7 @@ pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn
     }
     let health_registry = praxis_core::health::build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    let subrequest_client = praxis::build_subrequest_client(config);
+    let subrequest_client = praxis::build_subrequest_client(config)?;
     let session_stores = std::sync::Arc::new(praxis_filter::SessionStoreRegistry::new());
     praxis::resolve_pipelines(
         config,

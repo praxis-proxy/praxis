@@ -188,6 +188,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detects gRPC requests from the content-type header and promotes the variant to filter metadata and results |
 | [grpc-timeout.yaml](configs/traffic-management/grpc-timeout.yaml) | Honours the `grpc-timeout` request header as a real deadline |
 | [health-checks.yaml](configs/traffic-management/health-checks.yaml) | Per-cluster health checks probe endpoints on a timer and remove unhealthy backends from the load balancer rotation |
+| [hedged-requests.yaml](configs/traffic-management/hedged-requests.yaml) | Races one idempotent request across two endpoints and returns the first 2xx, 3xx, or 4xx response |
 | [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Demonstrates using DNS hostnames instead of IP addresses for upstream endpoints |
 | [hosts.yaml](configs/traffic-management/hosts.yaml) | One listener serves multiple domains |
 | [iterative-request-router-failover.yaml](configs/traffic-management/iterative-request-router-failover.yaml) | Demonstrates provider failover using the iterative_request_router filter |

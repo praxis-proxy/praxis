@@ -38,7 +38,7 @@ pub mod fd;
 pub mod grpc;
 /// Shared health state types for active health checking.
 pub mod health;
-/// Hedge-copy admission budget.
+/// Hedge-copy admission budget and the per-request race.
 pub mod hedge;
 /// Per-instance request ID generation.
 pub mod id;

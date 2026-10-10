@@ -3448,10 +3448,11 @@ response_headers: [content-type]
         assert!(matches!(filter.sink, RuntimeSink::Tracing));
     }
 
-    /// Number of NDJSON records in `contents`, or `None` when any line is not
-    /// valid JSON yet. A flush can expose the start of the next line before
-    /// the rest of that line is written.
+    /// A background flush can expose an incomplete next record.
     fn complete_ndjson_count(contents: &str) -> Option<usize> {
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            return None;
+        }
         let mut count = 0_usize;
         for line in contents.lines() {
             if serde_json::from_str::<BTreeMap<String, String>>(line).is_err() {
@@ -3475,6 +3476,33 @@ response_headers: [content-type]
             std::thread::sleep(Duration::from_millis(20));
         }
         std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    #[test]
+    fn complete_ndjson_count_requires_a_final_newline() {
+        assert_eq!(complete_ndjson_count(""), Some(0), "empty input is zero records");
+        assert_eq!(
+            complete_ndjson_count("{\"a\":\"1\"}\n"),
+            Some(1),
+            "one newline-terminated record counts"
+        );
+        assert_eq!(
+            complete_ndjson_count("{\"a\":\"1\"}\n{\"b\":\"2\"}\n"),
+            Some(2),
+            "two newline-terminated records count"
+        );
+        assert!(
+            complete_ndjson_count("{\"a\":\"1\"}").is_none(),
+            "a JSON object without a newline is not a finished record"
+        );
+        assert!(
+            complete_ndjson_count("{\"a\":\"1\"}\nnot-json\n").is_none(),
+            "invalid JSON is not a finished record"
+        );
+        assert!(
+            complete_ndjson_count("{\"a\":\"1\"}\n{\"b\"").is_none(),
+            "a truncated trailing record is not finished"
+        );
     }
 
     #[test]

@@ -140,9 +140,13 @@ struct RouterRouteConfigRaw {
 
     /// Optional per-route hedged-request policy.
     ///
-    /// When set, this route races the request across healthy endpoints in
-    /// its cluster and returns the first successful response. Absent means
-    /// one upstream attempt.
+    /// When `max_attempts` is greater than 1 and the `hedged-requests` feature
+    /// is enabled, an idempotent request buffers its body, races it across
+    /// healthy endpoints in its cluster, and returns the first 2xx, 3xx, or
+    /// 4xx response, cancelling the other attempts. `max_attempts` of 1,
+    /// `CONNECT`, `Upgrade`, non-idempotent methods, and `application/grpc`
+    /// requests keep a single upstream attempt. Absent means one upstream
+    /// attempt.
     #[serde(default)]
     hedge_policy: Option<praxis_core::config::HedgePolicy>,
 }

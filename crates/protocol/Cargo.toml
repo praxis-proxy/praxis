@@ -34,6 +34,9 @@ otel = ["praxis-core/otel", "dep:tracing-opentelemetry"]
 # Test-only hooks (the upstream retry gate) for the integration suites. Off
 # by default so release builds carry no test synchronization on the data path.
 test-support = []
+# Hedged requests. Off by default. The server feature of the same name also
+# turns on `experimental`.
+hedged-requests = []
 # The `policy` filter (Praxis Policy Engine) in the filter crate this crate
 # embeds. Off by default at the library level, like the other forwards here;
 # the `praxis-proxy` binary turns it on via its own default. A library consumer

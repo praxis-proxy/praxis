@@ -15,6 +15,9 @@ mod body_handling;
 mod error_handling;
 /// Header mutation application for pre-read and request-phase filters.
 mod header_mutations;
+/// Hedged upstream attempts for a route that configured `hedge_policy`.
+#[cfg(feature = "hedged-requests")]
+mod hedge;
 /// Request-phase entry point and pipeline runner.
 mod pipeline;
 /// Request utilities: span creation, snapshotting, and validation.

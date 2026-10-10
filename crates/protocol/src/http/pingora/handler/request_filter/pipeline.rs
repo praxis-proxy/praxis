@@ -204,6 +204,10 @@ pub(in crate::http) async fn execute(
                     Cow::Owned(name) => req_headers.insert_header(name, value),
                 };
             }
+            #[cfg(feature = "hedged-requests")]
+            if super::hedge::dispatch(pipeline, session, ctx).await? {
+                return Ok(true);
+            }
             Ok(false)
         },
         Ok(PipelineResult {

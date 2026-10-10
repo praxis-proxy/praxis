@@ -246,9 +246,12 @@ pub(super) struct RawExchange<'conn, 'reg> {
 
 /// RAII guard ensuring every acquired circuit token is finalized.
 ///
-/// On drop without explicit [`finalize`](Self::finalize), records a
-/// failure — this covers deadline exits, panics, and any early-return
-/// path after token acquisition.
+/// On drop without explicit [`finalize`](Self::finalize) or [`fail`](Self::fail),
+/// records a failure. That covers deadline exits, panics, and any early-return
+/// path after token acquisition. [`abandon_as_neutral`](Self::abandon_as_neutral)
+/// changes that drop into a release: the in-flight slot is freed and neither
+/// success nor failure is recorded. Callers that set the flag still call
+/// [`fail`](Self::fail) on a real error so only an aborted attempt is neutral.
 pub(super) struct CircuitGuard<'reg> {
     /// The registry that issued the token.
     registry: &'reg CircuitBreakerRegistry,
@@ -256,6 +259,8 @@ pub(super) struct CircuitGuard<'reg> {
     peer: PeerKey,
     /// The generation token; `None` after finalization.
     token: Option<CircuitToken>,
+    /// Drop releases the slot instead of recording a failure.
+    neutral_on_drop: bool,
 }
 
 impl<'reg> CircuitGuard<'reg> {
@@ -265,6 +270,30 @@ impl<'reg> CircuitGuard<'reg> {
             registry,
             peer,
             token: Some(token),
+            neutral_on_drop: false,
+        }
+    }
+
+    /// A later drop releases the slot without a success or a failure.
+    pub(super) fn abandon_as_neutral(&mut self) {
+        self.neutral_on_drop = true;
+    }
+
+    /// Record this error and consume the token.
+    ///
+    /// Connect, I/O, and deadline errors are failures. Every other error
+    /// is a success, matching [`finalize`](Self::finalize).
+    pub(super) fn fail(mut self, err: &SubRequestError) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        if matches!(
+            err,
+            SubRequestError::Connect(_) | SubRequestError::Io(_) | SubRequestError::DeadlineExceeded
+        ) {
+            self.registry.record_failure(&self.peer, token);
+        } else {
+            self.registry.record_success(&self.peer, token);
         }
     }
 
@@ -294,7 +323,11 @@ impl<'reg> CircuitGuard<'reg> {
 impl Drop for CircuitGuard<'_> {
     fn drop(&mut self) {
         if let Some(token) = self.token.take() {
-            self.registry.record_failure(&self.peer, token);
+            if self.neutral_on_drop {
+                self.registry.release(&self.peer, token);
+            } else {
+                self.registry.record_failure(&self.peer, token);
+            }
         }
     }
 }

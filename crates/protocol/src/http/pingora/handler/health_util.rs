@@ -73,6 +73,19 @@ pub(super) fn record_passive_health(
     apply_passive_threshold(health, idx, cluster_name, is_failure);
 }
 
+/// The logging hook only sees the winner. A copy that failed, or a connect
+/// that never produced a status, still has to move this endpoint's passive
+/// health.
+#[cfg(feature = "hedged-requests")]
+pub(super) fn record_hedge_attempt(
+    health: &praxis_core::health::ClusterHealthEntry,
+    cluster_name: &Arc<str>,
+    idx: usize,
+    is_failure: bool,
+) {
+    apply_passive_threshold(health, idx, cluster_name, is_failure);
+}
+
 /// Whether the request ended on the client side before the upstream answered:
 /// a downstream-sourced error with no upstream response status. Such a
 /// request says nothing about the endpoint, so neither passive health nor the

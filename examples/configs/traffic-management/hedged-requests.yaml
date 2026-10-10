@@ -1,0 +1,38 @@
+# Hedged Requests
+#
+# Races one idempotent request across two endpoints and returns the first
+# 2xx, 3xx, or 4xx response. Requires the `hedged-requests` feature.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features hedged-requests -- -c examples/configs/traffic-management/hedged-requests.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+            hedge_policy:
+              initial_requests: 1
+              max_attempts: 2
+              per_try_timeout_ms: 30
+              budget_percent: 100
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy: round_robin
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

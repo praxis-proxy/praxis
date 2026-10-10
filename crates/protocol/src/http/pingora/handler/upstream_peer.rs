@@ -278,7 +278,7 @@ fn apply_per_try_timeout(ctx: &PingoraRequestCtx, upstream: &mut Upstream) {
 ///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
-async fn build_peer(upstream: &Upstream, allow_private: bool) -> Result<Box<HttpPeer>> {
+pub(super) async fn build_peer(upstream: &Upstream, allow_private: bool) -> Result<Box<HttpPeer>> {
     let addr: SocketAddr = resolve_upstream(upstream, allow_private).await?;
 
     let tls_enabled = upstream.tls.is_some();

@@ -509,7 +509,7 @@ fn build_server_state(
 
     // Shared with the CLI --validate/--dump path (commands.rs) so both build an
     // identical connector, including the circuit breaker (issue #994).
-    let subrequest_client = crate::pipelines::build_subrequest_client(config);
+    let subrequest_client = crate::pipelines::build_subrequest_client(config)?;
 
     // Build the downstream registry once, from immutable server context, then
     // reuse it across reloads. The factory is synchronous and side-effect-free.

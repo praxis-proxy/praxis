@@ -147,7 +147,7 @@ check-features: ## check each optional feature on its own
 	@for f in policy-engine config-reload admin-api otel basic-auth-filter \
 	          cloud-events-filter upstream-binding iterative-request-router \
 	          router-json-aliases bound-upstream-request-body chain-binding spiffe \
-	          access-log-syslog; do \
+	          access-log-syslog hedged-requests; do \
 		echo "== cargo check -p praxis-proxy --no-default-features --features $$f --all-targets =="; \
 		cargo check -p praxis-proxy --no-default-features --features "$$f" --all-targets || exit 1; \
 	done

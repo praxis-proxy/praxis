@@ -94,7 +94,7 @@ fn resolved_policy_filters_call_out_through_the_runtime_connector() {
     praxis::install_crypto_provider();
     let dir = tempfile::TempDir::new().expect("create a tempdir");
     let config = runtime_config(&dir);
-    let client = praxis::build_subrequest_client(&config);
+    let client = praxis::build_subrequest_client(&config).expect("sub-request client");
 
     let permit = hold_the_only_admission_permit(&client);
     let err = resolve(&config, &client).expect_err(
