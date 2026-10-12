@@ -5845,8 +5845,7 @@ fn inherited_prompt_and_resource_result_rules_are_rejected() -> Result<(), crate
             let config = ppe::praxis_policy_core::config::parse_config(&yaml)
                 .map_err(|error| -> crate::FilterError { error.to_string().into() })?;
             let error = super::response_rules::ensure_supported_entity_results(&yaml, &config)
-                .err()
-                .expect("inherited result pipeline must fail");
+                .expect_err("inherited result pipeline must fail");
             assert!(
                 error.to_string().contains("projection is unavailable"),
                 "{entity} inherits an unsupported {source} field pipeline; got {error}",
