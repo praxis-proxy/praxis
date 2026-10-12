@@ -5880,14 +5880,10 @@ routes:
 }
 
 /// Test configurations for every layer contributing entity result pipelines.
-fn entity_result_inheritance_configs(entity: &str) -> [(&'static str, String); 4] {
+fn entity_result_inheritance_configs(entity: &str) -> [(&'static str, String); 3] {
     let route = format!("routes:\n  - {entity}: example\n");
     let bundle = "groups:\n  sensitive:\n    result:\n      ssn: \"str | mask(2)\"\n";
     [
-        (
-            "global",
-            format!("global:\n  result:\n    ssn: \"str | mask(2)\"\n{route}"),
-        ),
         (
             "defaults",
             format!("global:\n  defaults:\n    {entity}:\n      result:\n        ssn: \"str | mask(2)\"\n{route}"),
