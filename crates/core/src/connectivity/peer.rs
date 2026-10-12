@@ -45,11 +45,10 @@ const MAX_DNS_ENTRIES: usize = 1_024;
 /// [`UrlResolutionPolicy::ClientPerCall`](crate::connectivity::UrlResolutionPolicy::ClientPerCall).
 const MAX_PER_CALL_DNS_LOOKUPS: usize = 64;
 
-/// Maximum client-selected lookups whose caller stopped waiting while the
-/// blocking resolver is still running. Together with the attended slots this
-/// is half of tokio's default 512 blocking threads, so stalled per-call DNS
-/// can never take the whole pool from the cached resolver and file IO.
-const MAX_ABANDONED_PER_CALL_DNS_LOOKUPS: usize = 192; // 64 + 192 = 256
+/// Maximum client-selected lookups, including those whose caller stopped
+/// waiting. Every lookup reserves capacity before starting, so admission
+/// slots can always be released without allowing unbounded blocking work.
+const MAX_ABANDONED_PER_CALL_DNS_LOOKUPS: usize = 192;
 
 /// How long a client-selected lookup may hold its admission slot, and how
 /// long a caller waits for one. One glibc `RES_TIMEOUT` round: a healthy
@@ -131,8 +130,8 @@ pub enum AddressResolutionError {
     },
 
     /// A client-selected lookup was still blocking when its slot cap fired.
-    /// The resolver thread keeps running, counted against the abandoned
-    /// budget or, when that budget was full, still holding its slot.
+    /// The resolver thread keeps running against its reserved abandoned
+    /// budget, without holding an admission slot.
     #[error("upstream address resolution for '{address}' exceeded {after:?}")]
     Stalled {
         /// Hostname being resolved.
@@ -141,7 +140,8 @@ pub enum AddressResolutionError {
         after: Duration,
     },
 
-    /// No client-selected lookup slot freed up within one slot cap.
+    /// No client-selected lookup slot freed up within one slot cap, or the
+    /// reserved lookup budget was full.
     #[error("upstream address resolution for '{address}' refused: per-call DNS lookups saturated")]
     Saturated {
         /// Hostname being resolved.
@@ -438,8 +438,8 @@ pub(crate) async fn resolve_host_per_call(host: &str) -> Result<Vec<IpAddr>, Add
 
 /// The bounds every client-selected lookup runs under.
 pub(crate) struct PerCallDnsBounds {
-    /// Lookups whose caller stopped waiting while the resolver thread is
-    /// still running.
+    /// Capacity reserved before starting each lookup, retained until the
+    /// resolver finishes even if its caller stops waiting.
     pub(crate) abandoned: Arc<tokio::sync::Semaphore>,
     /// Lookups a caller is waiting on.
     pub(crate) admission: Arc<tokio::sync::Semaphore>,
@@ -502,20 +502,45 @@ impl Drop for SlotRelease {
 
 /// Owned by the caller: when the caller stops waiting (its cap fired, or its
 /// own deadline dropped it), a lookup that is still running moves to the
-/// abandoned budget, which hands the admission slot back. When the budget is
-/// full the lookup keeps its slot until it finishes.
+/// abandoned budget using capacity reserved before the lookup started, so
+/// the admission slot is always handed back.
 struct Attendance {
-    /// The budget a still-running lookup moves to.
-    abandoned: Arc<tokio::sync::Semaphore>,
+    /// Capacity reserved for a lookup that may outlive its caller.
+    reserved: Option<tokio::sync::OwnedSemaphorePermit>,
     /// The lookup's permit slot.
     slot: Arc<Slot>,
+}
+
+impl Attendance {
+    /// Reserve capacity before starting a lookup, refusing excess work.
+    fn new(
+        host: &str,
+        bounds: &PerCallDnsBounds,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<Self, AddressResolutionError> {
+        let reserved = Arc::clone(&bounds.abandoned)
+            .try_acquire_owned()
+            .map_err(|error| match error {
+                tokio::sync::TryAcquireError::NoPermits => AddressResolutionError::Saturated {
+                    address: host.to_owned(),
+                },
+                tokio::sync::TryAcquireError::Closed => AddressResolutionError::Task {
+                    address: host.to_owned(),
+                    message: error.to_string(),
+                },
+            })?;
+        Ok(Self {
+            reserved: Some(reserved),
+            slot: Arc::new(Slot::new(Some(Held::Attended(permit)))),
+        })
+    }
 }
 
 impl Drop for Attendance {
     fn drop(&mut self) {
         let mut held = lock_slot(&self.slot);
         let previous = if matches!(*held, Some(Held::Attended(_)))
-            && let Ok(budget) = Arc::clone(&self.abandoned).try_acquire_owned()
+            && let Some(budget) = self.reserved.take()
         {
             held.replace(Held::Abandoned(budget))
         } else {
@@ -529,19 +554,15 @@ impl Drop for Attendance {
 /// Run one lookup under `bounds`. The caller holds an admission slot for at
 /// most `bounds.cap`; a lookup still blocking past that is handed to the
 /// abandoned budget and reported as [`AddressResolutionError::Stalled`]. A
-/// caller that finds no slot within one cap gets
+/// caller that finds no slot within one cap or no reserved capacity gets
 /// [`AddressResolutionError::Saturated`] without starting a lookup.
 pub(crate) async fn resolve_host_per_call_with<L: BlockingLookup>(
     host: &str,
     lookup: &L,
     bounds: &PerCallDnsBounds,
 ) -> Result<Vec<IpAddr>, AddressResolutionError> {
-    let permit = admit(host, bounds).await?;
-    let release = SlotRelease(Arc::new(Slot::new(Some(Held::Attended(permit)))));
-    let attendance = Attendance {
-        abandoned: Arc::clone(&bounds.abandoned),
-        slot: Arc::clone(&release.0),
-    };
+    let attendance = Attendance::new(host, bounds, admit(host, bounds).await?)?;
+    let release = SlotRelease(Arc::clone(&attendance.slot));
     let task_host = host.to_owned();
     let task_lookup = lookup.clone();
     let mut handle = tokio::spawn(async move {
@@ -2283,7 +2304,7 @@ mod tests {
         reason = "verifies the slot hand-off across caller cancellation"
     )]
     async fn cancelled_caller_moves_its_lookup_to_the_abandoned_budget() {
-        let bounds = Arc::new(test_bounds(1, 1));
+        let bounds = Arc::new(test_bounds(1, 2));
         let first = ControlledLookup::new(Behavior::Ok(vec!["1.2.3.4".parse().unwrap()]));
         let first_caller = spawn_per_call("first.praxis-test.invalid", &first, &bounds);
         await_lookup_started(&first.calls).await;
@@ -2302,7 +2323,7 @@ mod tests {
         );
         assert_eq!(
             bounds.abandoned.available_permits(),
-            0,
+            1,
             "the orphaned lookup must be counted against the abandoned budget"
         );
 
@@ -2317,17 +2338,65 @@ mod tests {
         );
         assert_eq!(
             bounds.abandoned.available_permits(),
-            0,
+            1,
             "the first lookup is still blocked, so it must still be budgeted"
         );
 
         first.release.notify_one();
-        await_permits(&bounds.abandoned, 1).await;
+        await_permits(&bounds.abandoned, 2).await;
         assert_eq!(
             bounds.admission.available_permits(),
             1,
             "every slot must be free once both lookups have finished"
         );
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "cancels the last reserved lookup and checks refusal and recovery"
+    )]
+    async fn cancellation_releases_admission_when_every_budget_share_is_reserved() {
+        let bounds = Arc::new(test_bounds(1, 1));
+        let stuck = ControlledLookup::new(Behavior::Ok(vec!["1.2.3.4".parse().unwrap()]));
+        let caller = spawn_per_call("cancel-full.praxis-test.invalid", &stuck, &bounds);
+        await_lookup_started(&stuck.calls).await;
+        assert_eq!(
+            bounds.abandoned.available_permits(),
+            0,
+            "capacity must be reserved before a lookup starts"
+        );
+        caller.abort();
+        drop(caller.await);
+        assert_eq!(
+            bounds.admission.available_permits(),
+            1,
+            "cancellation must always release admission"
+        );
+        assert_eq!(
+            bounds.abandoned.available_permits(),
+            0,
+            "the running lookup must retain its reservation"
+        );
+        let refused = resolve_host_per_call_with("refused.praxis-test.invalid", &stuck, &bounds)
+            .await
+            .expect_err("the full physical-work budget must refuse new work");
+        assert!(
+            matches!(refused, AddressResolutionError::Saturated { .. }),
+            "got {refused}"
+        );
+        assert_eq!(
+            stuck.calls.load(Ordering::SeqCst),
+            1,
+            "budget exhaustion must never spawn excess work"
+        );
+        assert_eq!(
+            bounds.admission.available_permits(),
+            1,
+            "refusal must return its admission slot"
+        );
+        stuck.release.notify_one();
+        await_permits(&bounds.abandoned, 1).await;
     }
 
     #[tokio::test]
@@ -2424,8 +2493,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    #[expect(clippy::too_many_lines, reason = "walks two stuck lookups through a budget of one")]
-    async fn full_abandoned_budget_keeps_the_slot_until_the_lookup_finishes() {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "fills the budget, rejects excess work, then drains it"
+    )]
+    async fn full_abandoned_budget_rejects_new_work_without_holding_admission() {
         let bounds = test_bounds(1, 1);
         let stuck = ControlledLookup::new(Behavior::Ok(vec!["1.2.3.4".parse().unwrap()]));
         let budgeted = resolve_host_per_call_with("budgeted.praxis-test.invalid", &stuck, &bounds)
@@ -2441,16 +2513,29 @@ mod tests {
             "the first lookup takes the budget"
         );
 
-        let kept = resolve_host_per_call_with("kept.praxis-test.invalid", &stuck, &bounds)
+        let started = tokio::time::Instant::now();
+        let refused = resolve_host_per_call_with("refused.praxis-test.invalid", &stuck, &bounds)
             .await
-            .expect_err("the caller must still be released at the cap when the budget is full");
-        assert!(matches!(kept, AddressResolutionError::Stalled { .. }), "got {kept}");
+            .expect_err("a full budget must refuse new work before starting a lookup");
+        assert!(
+            matches!(refused, AddressResolutionError::Saturated { .. }),
+            "got {refused}"
+        );
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "budget exhaustion must fail promptly"
+        );
         assert_eq!(
             bounds.admission.available_permits(),
-            0,
-            "with the budget full the blocked lookup must keep its admission slot"
+            1,
+            "a full lookup budget must not retain an admission slot"
         );
-        assert_eq!(stuck.calls.load(Ordering::SeqCst), 2, "both lookups ran");
+        assert_eq!(
+            stuck.calls.load(Ordering::SeqCst),
+            1,
+            "refused work must never start a lookup"
+        );
 
         stuck.release.notify_waiters();
         await_permits(&bounds.admission, 1).await;
@@ -2458,7 +2543,7 @@ mod tests {
         assert_eq!(
             bounds.admission.available_permits(),
             1,
-            "a kept slot must return to admission when its lookup finishes"
+            "admission must remain free while a budgeted lookup finishes"
         );
     }
 
@@ -2468,11 +2553,8 @@ mod tests {
         reason = "pins the admission wait to one cap with a far deadline"
     )]
     async fn admission_wait_is_capped_and_starts_no_lookup() {
-        let bounds = Arc::new(test_bounds(1, 0));
-        let holder = ControlledLookup::new(Behavior::Ok(vec!["1.2.3.4".parse().unwrap()]));
-        let holder_caller = spawn_per_call("holder.praxis-test.invalid", &holder, &bounds);
-        await_lookup_started(&holder.calls).await;
-        tokio::time::advance(Duration::from_secs(1)).await;
+        let bounds = test_bounds(1, 1);
+        let held = Arc::clone(&bounds.admission).acquire_owned().await.unwrap();
 
         let waiter = ControlledLookup::new(Behavior::Ok(vec!["5.6.7.8".parse().unwrap()]));
         let started = tokio::time::Instant::now();
@@ -2500,17 +2582,9 @@ mod tests {
         assert_eq!(
             bounds.admission.available_permits(),
             0,
-            "the slot stays with the blocked lookup that could not be budgeted"
+            "waiting must not release another caller's admission slot"
         );
-        assert!(
-            matches!(
-                holder_caller.await.unwrap(),
-                Err(AddressResolutionError::Stalled { .. })
-            ),
-            "the holder itself was released at its own cap"
-        );
-
-        holder.release.notify_one();
+        drop(held);
         await_permits(&bounds.admission, 1).await;
     }
 
@@ -2537,7 +2611,7 @@ mod tests {
         assert_eq!(
             bounds.abandoned.available_permits(),
             1,
-            "an answered lookup must never touch the abandoned budget"
+            "an answered lookup must return its budget reservation"
         );
     }
 
@@ -2563,26 +2637,21 @@ mod tests {
             "two stuck lookups fill a budget of two"
         );
 
-        let kept = resolve_host_per_call_with("three.praxis-test.invalid", &stuck, &bounds)
+        let refused = resolve_host_per_call_with("three.praxis-test.invalid", &stuck, &bounds)
             .await
-            .expect_err("the third stuck lookup stalls at the cap too");
-        assert!(matches!(kept, AddressResolutionError::Stalled { .. }), "got {kept}");
+            .expect_err("a full physical-work budget must refuse new lookups");
         assert_eq!(
             bounds.admission.available_permits(),
-            0,
-            "with the budget full the third lookup must keep its slot"
+            1,
+            "a full physical-work budget must leave admission free"
         );
-
-        let refused = resolve_host_per_call_with("four.praxis-test.invalid", &stuck, &bounds)
-            .await
-            .expect_err("with every slot pinned a new caller must fail");
         assert!(
             matches!(refused, AddressResolutionError::Saturated { .. }),
             "a new caller must fail fast rather than queue: {refused}"
         );
         assert_eq!(
             stuck.calls.load(Ordering::SeqCst),
-            3,
+            2,
             "the saturated caller must not have started a lookup"
         );
 
@@ -2607,7 +2676,7 @@ mod tests {
             "gap.praxis-test.invalid",
             handle,
             Attendance {
-                abandoned: Arc::clone(&bounds.abandoned),
+                reserved: None,
                 slot: Arc::new(Slot::new(None)),
             },
             TEST_CAP,
@@ -2632,7 +2701,7 @@ mod tests {
             "running.praxis-test.invalid",
             handle,
             Attendance {
-                abandoned: Arc::clone(&bounds.abandoned),
+                reserved: Some(Arc::clone(&bounds.abandoned).try_acquire_owned().unwrap()),
                 slot: Arc::clone(&slot),
             },
             TEST_CAP,
@@ -2677,7 +2746,7 @@ mod tests {
         assert_eq!(
             bounds.abandoned.available_permits(),
             1,
-            "an attended panic must not touch the budget"
+            "an attended panic must return its budget reservation"
         );
 
         let abandoned = ControlledLookup::new(Behavior::Panic);
@@ -2743,6 +2812,27 @@ mod tests {
         })
         .await
         .expect("every admission slot and every budget share must come back once the lookups finish");
+    }
+
+    #[tokio::test]
+    async fn closed_lookup_budget_returns_admission_without_starting_work() {
+        let bounds = test_bounds(1, 1);
+        bounds.abandoned.close();
+        let lookup = ControlledLookup::new(Behavior::Ok(vec!["1.2.3.4".parse().unwrap()]));
+        let err = resolve_host_per_call_with("closed-budget.praxis-test.invalid", &lookup, &bounds)
+            .await
+            .expect_err("a closed lookup budget cannot reserve capacity");
+        assert!(matches!(err, AddressResolutionError::Task { .. }), "got {err}");
+        assert_eq!(
+            lookup.calls.load(Ordering::SeqCst),
+            0,
+            "a lookup must have reserved capacity before starting"
+        );
+        assert_eq!(
+            bounds.admission.available_permits(),
+            1,
+            "failed reservation must return admission"
+        );
     }
 
     #[tokio::test]

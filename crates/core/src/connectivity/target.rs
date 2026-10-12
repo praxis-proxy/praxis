@@ -78,16 +78,17 @@ pub enum UrlResolutionPolicy {
     /// Every `ClientPerCall` lookup runs under one process-wide admission pool
     /// (`MAX_PER_CALL_DNS_LOOKUPS` in [`super::peer`], 64 slots). A slot is held
     /// for at most one cap (`PER_CALL_DNS_LOOKUP_CAP`, 5 s). A lookup still
-    /// blocking in `getaddrinfo` past that hands its slot back and runs on
-    /// against a budget of `MAX_ABANDONED_PER_CALL_DNS_LOOKUPS` (192) abandoned
-    /// lookups, and the caller gets [`AddressResolutionError::Stalled`]; a
-    /// caller whose own deadline drops it moves its lookup the same way. A
-    /// caller that finds no slot within one cap fails fast with
-    /// [`AddressResolutionError::Saturated`] instead of burning its deadline.
-    /// When the abandoned budget is full, a slot stays held until the resolver
-    /// returns. So client-selected names can pin at most 256 resolver threads,
-    /// and a caller waits at most one cap for a slot plus one cap for an
-    /// answer, or its own deadline when that is shorter.
+    /// blocking in `getaddrinfo` past that hands its slot back, and the caller
+    /// gets [`AddressResolutionError::Stalled`]; a caller whose own deadline
+    /// drops it releases its slot the same way. Every lookup reserves one of
+    /// `MAX_ABANDONED_PER_CALL_DNS_LOOKUPS` (192) budget shares before starting
+    /// and retains it until the OS resolver returns. A caller that finds no
+    /// slot within one cap or no budget share fails with
+    /// [`AddressResolutionError::Saturated`] without starting a lookup. Even
+    /// when all budget shares are held by stalled lookups, admission slots
+    /// are released at the cap. Client-selected names can pin at most 192
+    /// resolver threads, and a caller waits at most one cap for a slot plus
+    /// one cap for an answer, or its own deadline when that is shorter.
     ///
     /// For plain DNS the `timeout` and `attempts` options in `resolv.conf`
     /// bound how long glibc blocks per lookup, and glibc rereads the file, so
@@ -1200,7 +1201,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     #[expect(
         clippy::too_many_lines,
-        reason = "checks the cap against a longer and a shorter URL deadline"
+        reason = "checks the cap, a shorter URL deadline, and physical-work saturation"
     )]
     async fn client_per_call_stalls_at_the_cap_or_at_a_shorter_deadline() {
         let cap = Duration::from_secs(5);
@@ -1264,6 +1265,30 @@ mod tests {
             stuck.bounds.abandoned.available_permits(),
             0,
             "the lookup dropped by its deadline must be counted against the budget too"
+        );
+
+        let started = tokio::time::Instant::now();
+        let err = prepare_url_target_with_resolver(
+            "https://refused.praxis-test.invalid/",
+            (started + Duration::from_secs(30)).into_std(),
+            |_| Ok(()),
+            &stuck,
+        )
+        .await
+        .expect_err("a full lookup budget must refuse URL preparation before starting work");
+        assert!(
+            matches!(err, UrlTargetError::Resolve(AddressResolutionError::Saturated { .. })),
+            "physical-work exhaustion must surface as saturation: {err:?}"
+        );
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "saturation must not consume the URL deadline"
+        );
+        assert_eq!(
+            stuck.bounds.admission.available_permits(),
+            1,
+            "refused preparation must release admission"
         );
     }
 
