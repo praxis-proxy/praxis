@@ -92,7 +92,7 @@ fn response_release_handles_empty_body() {
 
     assert_eq!(status, 200, "empty released response is delivered");
     assert!(body.is_empty(), "empty release emits no payload");
-    let observations = observations.lock().unwrap();
+    let observations = observations.lock().unwrap().clone();
     assert_eq!(observations.len(), 1, "the empty body invokes the release hook once");
     let observation = observations.first().unwrap();
     assert_eq!(observation.bytes, 0, "the release callback receives no bytes");
