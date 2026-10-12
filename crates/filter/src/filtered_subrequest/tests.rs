@@ -548,6 +548,58 @@ fn pre_read_mutations_apply_remove_set_and_add() {
     );
 }
 
+#[test]
+fn pre_read_applies_grouped_queues_and_trusted_log_together() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    // A single pre-read writes both channels: `json_body_field` promotes a body
+    // field through the grouped `extra_request_headers` queue, while another
+    // filter records a trusted mutation. Both must reach the routing snapshot.
+    ctx.extra_request_headers
+        .push((std::borrow::Cow::Borrowed("x-praxis-guard-model"), "gpt".to_owned()));
+    ctx.pre_read_mutations = vec![crate::TrustedHeaderMutation::Set(
+        "x-praxis-class".parse().unwrap(),
+        http::HeaderValue::from_static("api"),
+    )];
+
+    let mut headers = HeaderMap::new();
+    super::sanitize::apply_pre_read_header_mutations(&mut headers, &ctx);
+
+    assert_eq!(
+        headers.get("x-praxis-guard-model").map(http::HeaderValue::as_bytes),
+        Some(b"gpt".as_slice()),
+        "grouped-queue promotion must survive alongside the trusted log"
+    );
+    assert_eq!(
+        headers.get("x-praxis-class").map(http::HeaderValue::as_bytes),
+        Some(b"api".as_slice()),
+        "trusted-log mutation must survive alongside the grouped queues"
+    );
+}
+
+#[test]
+fn pre_read_trusted_log_wins_on_conflict() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    // When both channels target the same header, the trusted log applies last
+    // and is authoritative.
+    ctx.extra_request_headers
+        .push((std::borrow::Cow::Borrowed("x-praxis-class"), "grouped".to_owned()));
+    ctx.pre_read_mutations = vec![crate::TrustedHeaderMutation::Set(
+        "x-praxis-class".parse().unwrap(),
+        http::HeaderValue::from_static("trusted"),
+    )];
+
+    let mut headers = HeaderMap::new();
+    super::sanitize::apply_pre_read_header_mutations(&mut headers, &ctx);
+
+    assert_eq!(
+        headers.get("x-praxis-class").map(http::HeaderValue::as_bytes),
+        Some(b"trusted".as_slice()),
+        "the trusted log applies last and wins over the grouped queue"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Sub-Filter Context
 // -----------------------------------------------------------------------------
