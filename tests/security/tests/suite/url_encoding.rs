@@ -144,7 +144,7 @@ fn double_encoded_path_segments_do_not_bypass_matching() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-/// Build distinguishable routes with the allowed path's requested match semantics.
+/// Distinct backend responses make incorrect URI routing visible to the tests.
 fn two_route_yaml(proxy_port: u16, allowed_port: u16, denied_port: u16, allowed_path: PathMatch) -> String {
     let (path_key, path_value) = match allowed_path {
         PathMatch::Exact { path } => ("path", path),
