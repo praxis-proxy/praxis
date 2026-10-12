@@ -85,7 +85,9 @@ influence downstream processing:
 `on_request_head` runs once, before any body is read, for filters that opt in
 via `runs_request_head`. It only runs for **top-level** filters: a filter
 nested inside a branch chain never runs its head hook (a `head_classifier`
-placed inside a branch chain silently does nothing). Facts it publishes
+placed inside a branch chain silently does nothing), and a head filter inside
+an `iterative_request_router` step is rejected at config build — the head phase
+runs once at ingress, never inside an iterative exchange. Facts it publishes
 (extensions, metadata, filter results, trusted header mutations) are visible
 both during a later `stream_buffer` pre-read and the request phase.
 

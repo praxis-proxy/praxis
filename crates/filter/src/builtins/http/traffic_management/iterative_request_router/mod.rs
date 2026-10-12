@@ -331,6 +331,18 @@ impl IterativeRequestRouterFilter {
             // operator's declared posture — runtime `apply_insecure_options` runs
             // too late to undo a build rejection.
             let pipeline = ctx.build_nested_step_pipeline(&mut entries)?;
+            // The request-head phase runs once at ingress, never inside an
+            // iterative exchange. Reject a head filter in a step so the config
+            // fails loudly here instead of the hook silently never firing (the
+            // same top-level-only contract branch chains already enforce).
+            if pipeline.has_request_head_phase() {
+                return Err(format!(
+                    "iterative_request_router: step '{}' contains a request-head filter; \
+                     the request-head phase runs only at ingress, not inside iterative exchanges",
+                    step.name
+                )
+                .into());
+            }
             // A step runs as a continuation of this IRR's parent, which already
             // guarantees a logical binding on entry (the parent's own
             // bound-upstream reachability check enforces that a binding precedes

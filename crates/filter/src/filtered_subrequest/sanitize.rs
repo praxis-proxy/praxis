@@ -138,13 +138,11 @@ pub(super) fn apply_pre_read_header_mutations(headers: &mut HeaderMap, ctx: &Htt
     }
 }
 
-/// Fold a phase's promoted headers into `headers`, then clear the pending
-/// channels so the next phase starts from an empty mutation set.
+/// Fold the pre-read phase's promoted headers into `headers`, then clear the
+/// pending channels so a later phase starts from an empty mutation set.
 ///
-/// Shared by the request-head and pre-read phases: each bakes its own mutations
-/// into the routed request snapshot in turn (head first, body on top), and
-/// clearing between them keeps `apply_pre_read_header_mutations`'s one-mechanism
-/// provenance rule intact per phase (the ordered log never mixes with the
+/// Clearing after the fold keeps `apply_pre_read_header_mutations`'s
+/// one-mechanism provenance rule intact (the ordered log never mixes with the
 /// grouped queues within a single phase).
 pub(super) fn fold_pending_into(headers: &mut HeaderMap, ctx: &mut HttpFilterContext<'_>) {
     apply_pre_read_header_mutations(headers, ctx);

@@ -305,6 +305,35 @@ steps:
 }
 
 #[test]
+fn rejects_request_head_filter_in_step() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+steps:
+  - name: step1
+    filters:
+      - filter: head_classifier
+        rules:
+          - path_prefix: /api/
+            class: api
+      - filter: static_response
+        status: 200
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let err = super::IterativeRequestRouterFilter::from_config(&yaml)
+        .err()
+        .expect("a request-head filter in a step must be rejected");
+    assert!(
+        err.to_string().contains("request-head"),
+        "a request-head filter in a step must be rejected: {err}"
+    );
+}
+
+#[test]
 fn rejects_protocol_only_compression_step() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         "
