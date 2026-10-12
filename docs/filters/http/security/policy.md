@@ -33,7 +33,7 @@ The CMF prompt text that APL steps and scanners read is projected from `system`,
 
 `body_access: read_write` also enables response-phase `tool:`, `prompt:`, and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these rules are skipped and a warning is emitted. A response-only route adds no request-phase route rule; identity checks and `global` policy still apply.
 
-`result.<field>` projection for `prompt:` and `resource:` routes remains blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330].
+`result.<field>` projection for `prompt:` and `resource:` routes remains blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330]. A `result:` field pipeline on either entity, including an inherited one, is rejected at load so its controls cannot be silently skipped.
 
 Policies with MCP entity routes cannot declare `authorization:` on an `http:` route. Use `global` for shared authorization; route-scoped `authentication:` remains supported.
 

@@ -5816,6 +5816,88 @@ fn a_post_only_resource_route_is_an_entity_route() {
     assert_eq!(build_read_write_filter(path).derived_shape(), (false, true));
 }
 
+#[test]
+fn prompt_and_resource_result_rules_fail_filter_construction() {
+    for entity in ["prompt", "resource"] {
+        let (_dir, path) = write_entity_config_with_routes(&format!(
+            "routes:\n  - {entity}: example\n    result:\n      ssn: \"str | mask(2)\"\n"
+        ));
+        for access in ["read_only", "read_write"] {
+            let config = serde_yaml::from_str(&format!("config_path: {path}\nbody_access: {access}\n"))
+                .expect("filter configuration");
+            let error = PolicyFilter::from_config(&config)
+                .err()
+                .expect("unsupported result rules must fail at load");
+            assert!(
+                error
+                    .to_string()
+                    .contains("declares `result:` field rules for prompt/resource routes"),
+                "a {entity} field rule must be refused under {access}; got {error}",
+            );
+        }
+    }
+}
+
+#[test]
+fn inherited_prompt_and_resource_result_rules_are_rejected() -> Result<(), crate::FilterError> {
+    for entity in ["prompt", "resource"] {
+        for (source, yaml) in entity_result_inheritance_configs(entity) {
+            let config = ppe::praxis_policy_core::config::parse_config(&yaml)
+                .map_err(|error| -> crate::FilterError { error.to_string().into() })?;
+            let error = super::response_rules::ensure_supported_entity_results(&yaml, &config)
+                .err()
+                .expect("inherited result pipeline must fail");
+            assert!(
+                error.to_string().contains("projection is unavailable"),
+                "{entity} inherits an unsupported {source} field pipeline; got {error}",
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn tool_result_rules_and_attribute_only_entity_rules_remain_supported() -> Result<(), crate::FilterError> {
+    let yaml = r#"groups:
+  sensitive:
+    result:
+      ssn: "str | mask(2)"
+routes:
+  - tool: echo
+    groups: sensitive
+  - prompt: summarize
+    result: {}
+    authorization:
+      post_invocation:
+        - "authenticated: deny('withheld', 'withheld')"
+  - resource: "file:///data.csv"
+    authorization:
+      post_invocation:
+        - "authenticated: deny('withheld', 'withheld')"
+"#;
+    let config = ppe::praxis_policy_core::config::parse_config(yaml)
+        .map_err(|error| -> crate::FilterError { error.to_string().into() })?;
+    super::response_rules::ensure_supported_entity_results(yaml, &config)
+}
+
+/// Test configurations for every layer contributing entity result pipelines.
+fn entity_result_inheritance_configs(entity: &str) -> [(&'static str, String); 4] {
+    let route = format!("routes:\n  - {entity}: example\n");
+    let bundle = "groups:\n  sensitive:\n    result:\n      ssn: \"str | mask(2)\"\n";
+    [
+        (
+            "global",
+            format!("global:\n  result:\n    ssn: \"str | mask(2)\"\n{route}"),
+        ),
+        (
+            "defaults",
+            format!("global:\n  defaults:\n    {entity}:\n      result:\n        ssn: \"str | mask(2)\"\n{route}"),
+        ),
+        ("groups", format!("{bundle}{route}    groups: sensitive\n")),
+        ("tags", format!("{bundle}{route}    meta: {{tags: [sensitive]}}\n")),
+    ]
+}
+
 /// Run a post-only entity round trip and return the served response body.
 async fn post_only_round_trip(path: String, method: &str, name: &str, request_body: &'static [u8]) -> bytes::Bytes {
     let filter = build_read_write_filter(path);

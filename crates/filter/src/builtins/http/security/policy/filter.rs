@@ -49,6 +49,7 @@ use super::{
         reserialize_json_rpc_response_body,
     },
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
+    response_rules::ensure_supported_entity_results,
     transport::PolicyHttpTransport,
 };
 use crate::{
@@ -187,6 +188,8 @@ enum GatedIdentity {
 ///
 /// `result.<field>` projection for `prompt:` and `resource:` routes remains
 /// blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330].
+/// A `result:` field pipeline on either entity, including an inherited one,
+/// is rejected at load so its controls cannot be silently skipped.
 ///
 /// [policy #75]: https://github.com/praxis-proxy/policy/issues/75
 /// [Praxis #1330]: https://github.com/praxis-proxy/praxis/issues/1330
@@ -494,6 +497,7 @@ impl PolicyFilter {
                 .into()
             })?;
         let dispatch_timeout = response_dispatch_timeout(policy_config.engine_settings.plugin_timeout);
+        ensure_supported_entity_results(&yaml, &policy_config)?;
         if entity_routes {
             ensure_dispatch_runtime()
                 .map_err(|e| -> FilterError { format!("policy: response hooks cannot run: {e}").into() })?;

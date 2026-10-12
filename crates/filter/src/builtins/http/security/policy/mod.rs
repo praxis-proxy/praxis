@@ -128,7 +128,8 @@
 //!   `resource:` routes. Attribute-only `post_invocation` rules run for all three entity types; `result.<field>`
 //!   redactions currently work only for tools. A deny replaces the body with a JSON-RPC error envelope fitted to the
 //!   committed Content-Length. Prompt/resource result projection remains blocked on [policy #75]; host-side content
-//!   projection is tracked in [Praxis #1330].
+//!   projection is tracked in [Praxis #1330]. `result:` field pipelines on prompt/resource routes are rejected at load,
+//!   including inherited pipelines.
 //!
 //! `read_only` skips all MCP entity response rules, including attribute-only
 //! `post_invocation` rules, and warns at load. A response-only route adds no
@@ -183,6 +184,7 @@ mod filter;
 mod host_plugins;
 mod json_rpc;
 mod llm;
+mod response_rules;
 mod transport;
 
 pub use filter::PolicyFilter;
