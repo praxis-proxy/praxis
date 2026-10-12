@@ -474,6 +474,31 @@ mod tests {
     }
 
     #[test]
+    fn release_empty_body_switches_to_stream() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = release_pipeline(6, false)?;
+        for end_of_stream in [false, true] {
+            for mut body in [None, Some(Bytes::new())] {
+                let mut ctx = release_ctx(BodyMode::StreamBuffer { max_bytes: Some(2) });
+                execute(&pipeline, &mut body, end_of_stream, &mut ctx)?;
+                assert_observed_mode(&ctx, "buffered");
+                assert!(
+                    body.as_ref().is_none_or(Bytes::is_empty),
+                    "empty release emits no bytes"
+                );
+                assert_eq!(ctx.response_body_mode, BodyMode::Stream, "empty Release ends buffering");
+                assert!(ctx.response_body_released, "empty Release records the transition");
+                assert!(ctx.response_body_buffer.is_none(), "empty Release retains no buffer");
+                assert_eq!(ctx.response_body_bytes, 0, "empty Release counts no bytes");
+                assert_eq!(
+                    ctx.response_delivery_complete, end_of_stream,
+                    "only EOS completes delivery"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn released_response_still_enforces_global_ceiling() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let pipeline = release_pipeline(5, false)?;
         let mut ctx = release_ctx(BodyMode::StreamBuffer { max_bytes: Some(2) });

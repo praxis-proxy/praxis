@@ -160,6 +160,9 @@ pub enum FilterAction {
     /// Signal that accumulated body data ([`StreamBuffer`] mode)
     /// should be forwarded to upstream. After release, remaining
     /// chunks flow through in stream mode.
+    /// Buffering is shared by all filters in that direction; one filter's
+    /// release ends buffering for the entire direction after the current
+    /// body callback has run through the pipeline.
     ///
     /// The incremental Pingora body path switches the direction's runtime
     /// body mode to [`Stream`] after flushing the buffer. Static request

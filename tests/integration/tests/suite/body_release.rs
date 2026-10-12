@@ -75,6 +75,35 @@ fn response_release_exposes_stream_on_nonempty_eos() {
 }
 
 #[test]
+fn response_release_handles_empty_body() {
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let (backend_port, backend_thread) = spawn_raw_http_backend(|mut stream| {
+        read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n")
+            .unwrap();
+    });
+    let config = release_config(backend_port, 16);
+    let registry = release_registry(Direction::Response, &observations);
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+    wait_for_tcp(proxy.addr());
+    let (status, body) = http_get(proxy.addr(), "/", None);
+    backend_thread.join().unwrap();
+
+    assert_eq!(status, 200, "empty released response is delivered");
+    assert!(body.is_empty(), "empty release emits no payload");
+    let observations = observations.lock().unwrap();
+    assert_eq!(observations.len(), 1, "the empty body invokes the release hook once");
+    let observation = observations.first().unwrap();
+    assert_eq!(observation.bytes, 0, "the release callback receives no bytes");
+    assert!(observation.end_of_stream, "empty release completes the response");
+    assert!(
+        matches!(observation.mode, BodyMode::StreamBuffer { .. }),
+        "the first empty callback sees buffering before Release"
+    );
+}
+
+#[test]
 fn request_release_still_enforces_global_ceiling() {
     let backend = start_echo_backend();
     let observations = Arc::new(Mutex::new(Vec::new()));
