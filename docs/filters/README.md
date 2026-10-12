@@ -74,12 +74,20 @@ influence downstream processing:
 
 | Hook | Direction | Phase |
 | --- | --- | --- |
+| `on_request_head` | Forward (pipeline order), at most once | Request head, before any `stream_buffer` pre-read and before the request phase (top-level filters only) |
 | `on_request` | Forward (pipeline order) | Request |
 | `on_response` | Reverse (pipeline order) | Response |
 | `on_request_body` | Forward | Request body chunks |
 | `on_bound_upstream_request_body` | Forward, at most once | Complete body after logical binding, before endpoint selection (experimental `bound-upstream-request-body` builds only) |
 | `on_selected_upstream_request_body` | Forward, per exchange | Complete body after endpoint selection |
 | `on_response_body` | Reverse | Response body chunks |
+
+`on_request_head` runs once, before any body is read, for filters that opt in
+via `runs_request_head`. It only runs for **top-level** filters: a filter
+nested inside a branch chain never runs its head hook (a `head_classifier`
+placed inside a branch chain silently does nothing). Facts it publishes
+(extensions, metadata, filter results, trusted header mutations) are visible
+both during a later `stream_buffer` pre-read and the request phase.
 
 Request `conditions` gate the request and ordinary body hooks. Response
 `response_conditions` gate only the response hooks. A filter skipped on

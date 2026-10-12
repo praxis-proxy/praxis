@@ -121,6 +121,38 @@ async fn matched_rule_promotes_class() {
 }
 
 #[tokio::test]
+async fn rules_match_at_segment_boundaries() {
+    let filter = build(&format!("{RULES}default_class: other\n"));
+
+    // `/apikeys` shares a raw prefix with `/api/` but not a segment boundary, so
+    // it must fall through to the default rather than classify as api.
+    let apikeys = make_request(http::Method::GET, "/apikeys");
+    let mut ctx = make_filter_context(&apikeys);
+    let _action = filter
+        .on_request_head(&mut ctx)
+        .await
+        .expect("head phase should not error");
+    assert_eq!(
+        promoted_class(&ctx).as_deref(),
+        Some("other"),
+        "/apikeys must not match the /api/ rule at a non-boundary"
+    );
+
+    // The bare `/api` segment matches the `/api/` rule (trailing slash ignored).
+    let api = make_request(http::Method::GET, "/api");
+    let mut ctx = make_filter_context(&api);
+    let _action = filter
+        .on_request_head(&mut ctx)
+        .await
+        .expect("head phase should not error");
+    assert_eq!(
+        promoted_class(&ctx).as_deref(),
+        Some("api"),
+        "/api must match the /api/ rule at the segment boundary"
+    );
+}
+
+#[tokio::test]
 async fn default_class_used_when_no_rule_matches() {
     let req = make_request(http::Method::GET, "/home");
     let mut ctx = make_filter_context(&req);

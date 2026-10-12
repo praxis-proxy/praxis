@@ -110,10 +110,15 @@ impl HeadClassifierFilter {
     }
 
     /// Return the class for `path`: the first matching rule, else the default.
+    ///
+    /// Rules match at segment boundaries via
+    /// [`path_prefix_matches`](crate::path_match::path_prefix_matches), so
+    /// `path_prefix` means the same thing here as it does on `router` routes and
+    /// filter conditions: `/api` matches `/api` and `/api/v1` but not `/apikeys`.
     fn classify(&self, path: &str) -> Option<&str> {
         self.rules
             .iter()
-            .find(|rule| path.starts_with(rule.path_prefix.as_str()))
+            .find(|rule| crate::path_match::path_prefix_matches(path, &rule.path_prefix))
             .map(|rule| rule.class.as_str())
             .or(self.default_class.as_deref())
     }

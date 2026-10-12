@@ -12,7 +12,8 @@
 #   │ proxy  :8080        │
 #   │  head_classifier ─┐ │  /api/*    -> class api
 #   │                   │ │  /assets/* -> class assets
-#   │  router  <────────┘ │  (default) -> class other
+#   │  guardrails   <───┤ │  (class api) inspect body
+#   │  router       <───┘ │  (default) -> class other
 #   └───┬────────┬────────┘
 #       │        │        │
 #   ┌───▼──┐ ┌───▼───┐ ┌──▼────┐
@@ -20,11 +21,22 @@
 #   │ 3001 │ │ 3002  │ │ 3003  │
 #   └──────┘ └───────┘ └───────┘
 #
+# Because head_classifier runs in the request-head phase (before any body is
+# read), the promoted x-praxis-head-class header is already set when a later
+# body-inspecting filter runs during the StreamBuffer pre-read. The guardrails
+# filter below is gated on that header, so it inspects bodies only for class
+# `api`: this demonstrates — and guards against regressing — the head phase
+# running before the body pre-read.
+#
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/head-classifier.yaml
 #   curl http://localhost:8080/api/users    # -> api backend
 #   curl http://localhost:8080/assets/app.js # -> assets backend
 #   curl http://localhost:8080/home          # -> other backend
+#   # 403: class api body guardrails block a forbidden body
+#   curl -d 'forbidden' http://localhost:8080/api/users
+#   # 200: class other skips guardrails, forbidden body reaches the backend
+#   curl -d 'forbidden' http://localhost:8080/home
 
 listeners:
   - name: default
@@ -42,6 +54,19 @@ filter_chains:
           - path_prefix: "/assets/"
             class: assets
         default_class: other
+
+      # Inspect bodies only for the head-promoted `api` class. The gate header
+      # is set in the request-head phase, before this body filter reads the
+      # body during pre-read, so class `api` requests are inspected while other
+      # classes skip guardrails entirely.
+      - filter: guardrails
+        conditions:
+          - when:
+              headers:
+                x-praxis-head-class: api
+        rules:
+          - target: body
+            contains: "forbidden"
 
       - filter: router
         routes:
@@ -72,3 +97,7 @@ filter_chains:
 
 insecure_options:
   allow_private_endpoints: true # example proxies to local backends
+  skip_pipeline_checks:
+    # Guardrails runs only for the head-promoted `api` class; acknowledge the
+    # conditional-security bypass for other classes explicitly.
+    conditional_security: true
