@@ -3,7 +3,7 @@
 
 //! URL / path encoding attack-vector tests.
 
-use praxis_core::config::Config;
+use praxis_core::config::{Config, PathMatch};
 use praxis_test_utils::{
     free_port, parse_body, parse_status, simple_proxy_yaml, start_backend_with_shutdown, start_proxy,
     start_uri_echo_backend,
@@ -18,7 +18,14 @@ fn fragment_identifier_does_not_influence_routing() {
     let allowed = start_backend_with_shutdown("allowed");
     let denied = start_backend_with_shutdown("denied");
     let proxy_port = free_port();
-    let yaml = two_route_yaml(proxy_port, allowed.port(), denied.port());
+    let yaml = two_route_yaml(
+        proxy_port,
+        allowed.port(),
+        denied.port(),
+        PathMatch::Exact {
+            path: "/allowed/resource".to_owned(),
+        },
+    );
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -36,18 +43,32 @@ fn fragment_identifier_does_not_influence_routing() {
          Connection: close\r\n\
          \r\n",
     );
+    let fallback = super::test_utils::send_text(
+        proxy.addr(),
+        "GET /allowed/resource/extra HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
 
-    assert_eq!(parse_status(&without), 200, "unmodified route must succeed");
-    assert_eq!(parse_body(&without), "allowed", "positive control must select /allowed");
+    assert_eq!(parse_status(&without), 200, "unmodified exact route must succeed");
+    assert_eq!(
+        parse_body(&without),
+        "allowed",
+        "positive control must select the exact route"
+    );
     assert_eq!(
         parse_status(&with_fragment),
         200,
-        "fragment target must retain its route"
+        "fragment target must retain its exact route"
     );
     assert_eq!(
         parse_body(&with_fragment),
         "allowed",
-        "fragment must not route to /denied"
+        "fragment must not make the exact route miss"
+    );
+    assert_eq!(parse_status(&fallback), 200, "fallback route must be reachable");
+    assert_eq!(
+        parse_body(&fallback),
+        "denied",
+        "exact route must not match a longer path"
     );
 }
 
@@ -79,7 +100,14 @@ fn double_encoded_path_segments_do_not_bypass_matching() {
     let allowed = start_uri_echo_backend();
     let denied = start_backend_with_shutdown("denied");
     let proxy_port = free_port();
-    let yaml = two_route_yaml(proxy_port, allowed.port(), denied.port());
+    let yaml = two_route_yaml(
+        proxy_port,
+        allowed.port(),
+        denied.port(),
+        PathMatch::Prefix {
+            path_prefix: "/allowed".to_owned(),
+        },
+    );
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
@@ -116,8 +144,12 @@ fn double_encoded_path_segments_do_not_bypass_matching() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-/// Build distinguishable routes for URI matching assertions.
-fn two_route_yaml(proxy_port: u16, allowed_port: u16, denied_port: u16) -> String {
+/// Build distinguishable routes with the allowed path's requested match semantics.
+fn two_route_yaml(proxy_port: u16, allowed_port: u16, denied_port: u16, allowed_path: PathMatch) -> String {
+    let (path_key, path_value) = match allowed_path {
+        PathMatch::Exact { path } => ("path", path),
+        PathMatch::Prefix { path_prefix } => ("path_prefix", path_prefix),
+    };
     format!(
         r#"
 listeners:
@@ -129,7 +161,7 @@ filter_chains:
     filters:
       - filter: router
         routes:
-          - path_prefix: "/allowed"
+          - {path_key}: "{path_value}"
             cluster: allowed
           - path_prefix: "/denied"
             cluster: denied
