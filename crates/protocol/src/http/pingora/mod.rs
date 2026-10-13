@@ -76,7 +76,7 @@ impl Protocol for PingoraHttp {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
 
-            handler::load_http_handler(server.server_mut(), listener, pipeline, &mut cert_watcher_shutdowns)?;
+            handler::load_http_handler_on_runtime(server, listener, pipeline, &mut cert_watcher_shutdowns)?;
         }
 
         Ok(cert_watcher_shutdowns)

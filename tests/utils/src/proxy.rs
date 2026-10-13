@@ -442,6 +442,7 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
             Some(Arc::clone(&health_registry)),
             config.admin.verbose,
             Some((Arc::clone(&pipelines), Arc::clone(&listener_meta))),
+            None,
         );
     }
 

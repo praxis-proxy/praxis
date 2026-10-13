@@ -3,10 +3,15 @@
 
 //! Pingora-specific server factory and lifecycle management.
 
-use pingora_core::server::{RunArgs, Server, configuration::ServerConf};
+use std::sync::Arc;
+
+use pingora_core::{
+    server::{RunArgs, Server, configuration::ServerConf},
+    services::{ServiceHandle, ServiceWithDependents, background::background_service},
+};
 use tracing::info;
 
-use super::RuntimeOptions;
+use super::{RuntimeOptions, RuntimeReadiness, RuntimeService, service::RuntimeServiceAdapter};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -24,6 +29,12 @@ const SHUTDOWN_GRACE_CAP_SECS: u64 = 5; // 5 s pre-drain grace before runtime sh
 pub struct PingoraServerRuntime {
     /// The underlying Pingora server instance.
     server: Server,
+    /// Client-facing proxy services gated by contributed runtime services.
+    proxy_services: Vec<ServiceHandle>,
+    /// Runtime services that must become ready before proxy services start.
+    runtime_services: Vec<ServiceHandle>,
+    /// Aggregate readiness shared with administrative health reporting.
+    runtime_readiness: RuntimeReadiness,
 }
 
 impl std::fmt::Debug for PingoraServerRuntime {
@@ -40,12 +51,55 @@ impl PingoraServerRuntime {
     pub fn new(config: &crate::config::Config) -> Self {
         let opts = RuntimeOptions::from(&config.runtime);
         let server = build_http_server(config.shutdown_timeout_secs, &opts);
-        Self { server }
+        Self {
+            server,
+            proxy_services: Vec::new(),
+            runtime_services: Vec::new(),
+            runtime_readiness: RuntimeReadiness::default(),
+        }
     }
 
     /// Access the inner Pingora server for service registration.
     pub fn server_mut(&mut self) -> &mut Server {
         &mut self.server
+    }
+
+    /// Aggregate readiness of all registered runtime services.
+    #[must_use]
+    pub fn runtime_readiness(&self) -> RuntimeReadiness {
+        self.runtime_readiness.clone()
+    }
+
+    /// Register a client-facing proxy service.
+    ///
+    /// Proxy services registered here are made dependent on every opaque
+    /// runtime service. This keeps their listeners from serving until required
+    /// runtime resources signal readiness.
+    pub fn add_proxy_service<S>(&mut self, service: S)
+    where
+        S: ServiceWithDependents + 'static,
+    {
+        let proxy_service = self.server.add_service(service);
+        for runtime_service in &self.runtime_services {
+            proxy_service.add_dependency(runtime_service);
+        }
+        self.proxy_services.push(proxy_service);
+    }
+
+    /// Register an opaque process-lifetime task on the serving runtime.
+    ///
+    /// The task controls its readiness and receives shutdown through Praxis
+    /// wrappers, so callers do not need access to Pingora or the mutable server.
+    pub fn add_runtime_service(&mut self, name: &str, service: Arc<dyn RuntimeService>) {
+        let readiness = self.runtime_readiness.register();
+        let runtime_service = self.server.add_service(background_service(
+            name,
+            RuntimeServiceAdapter::new(name, service, readiness),
+        ));
+        for proxy_service in &self.proxy_services {
+            proxy_service.add_dependency(&runtime_service);
+        }
+        self.runtime_services.push(runtime_service);
     }
 
     /// Start all registered services. Blocks forever.
@@ -198,7 +252,85 @@ fn warn_unsupported_global_queue_interval(runtime: &RuntimeOptions) {
     reason = "tests use expect/unwrap for brevity"
 )]
 mod tests {
+    use std::{
+        pin::Pin,
+        sync::atomic::{AtomicBool, Ordering},
+        time::{Duration, Instant},
+    };
+
+    use async_trait::async_trait;
+
     use super::*;
+    use crate::{RuntimeServiceContext, RuntimeServiceFuture};
+
+    /// Runtime service whose readiness is released by the test.
+    struct GatedRuntimeService {
+        started: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    }
+
+    impl RuntimeService for GatedRuntimeService {
+        fn run(self: Arc<Self>, context: RuntimeServiceContext) -> RuntimeServiceFuture {
+            Box::pin(async move {
+                let (mut shutdown, ready) = context.into_parts();
+                self.started.store(true, Ordering::SeqCst);
+                while !self.release.load(Ordering::SeqCst) && !shutdown.is_requested() {
+                    tokio::task::yield_now().await;
+                }
+                if shutdown.is_requested() {
+                    return;
+                }
+                ready.notify_ready();
+                let _changed = shutdown.changed().await;
+            })
+        }
+    }
+
+    /// Dependent proxy task that records when Pingora starts it.
+    struct RecordingProxyService {
+        started: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl pingora_core::services::background::BackgroundService for RecordingProxyService {
+        async fn start(&self, mut shutdown: pingora_core::server::ShutdownWatch) {
+            self.started.store(true, Ordering::SeqCst);
+            let _changed = shutdown.changed().await;
+        }
+    }
+
+    /// Shutdown signal controlled by an atomic flag.
+    struct ControlledShutdown {
+        requested: Arc<AtomicBool>,
+    }
+
+    impl pingora_core::server::ShutdownSignalWatch for ControlledShutdown {
+        fn recv<'watch, 'fut>(
+            &'watch self,
+        ) -> Pin<Box<dyn Future<Output = pingora_core::server::ShutdownSignal> + Send + 'fut>>
+        where
+            'watch: 'fut,
+            Self: 'fut,
+        {
+            Box::pin(async move {
+                while !self.requested.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                pingora_core::server::ShutdownSignal::FastShutdown
+            })
+        }
+    }
+
+    /// Wait briefly for a flag set by a service runtime.
+    fn wait_for_flag(flag: &AtomicBool) -> bool {
+        let Some(deadline) = Instant::now().checked_add(Duration::from_secs(2)) else {
+            return false;
+        };
+        while !flag.load(Ordering::SeqCst) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        flag.load(Ordering::SeqCst)
+    }
 
     #[test]
     fn build_http_server_returns_bootstrapped_server() {
@@ -281,6 +413,55 @@ mod tests {
         });
     }
 
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "test wires and observes two managed services")]
+    fn runtime_service_readiness_gates_proxy_services() {
+        let config = crate::config::Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
+        let mut runtime = PingoraServerRuntime::new(&config);
+        let provisioner_started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let proxy_started = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        runtime.add_proxy_service(background_service(
+            "test-proxy",
+            RecordingProxyService {
+                started: Arc::clone(&proxy_started),
+            },
+        ));
+        runtime.add_runtime_service(
+            "test-provisioner",
+            Arc::new(GatedRuntimeService {
+                started: Arc::clone(&provisioner_started),
+                release: Arc::clone(&release),
+            }),
+        );
+        let runtime_readiness = runtime.runtime_readiness();
+        assert!(!runtime_readiness.is_ready(), "registered service should start unready");
+
+        let shutdown_for_runtime = Arc::clone(&shutdown);
+        let running = std::thread::spawn(move || {
+            runtime.run_with_args(RunArgs {
+                shutdown_signal: Box::new(ControlledShutdown {
+                    requested: shutdown_for_runtime,
+                }),
+            });
+        });
+
+        let provisioner_ran = wait_for_flag(&provisioner_started);
+        let proxy_was_gated = !proxy_started.load(Ordering::SeqCst);
+        release.store(true, Ordering::SeqCst);
+        let proxy_ran_after_ready = wait_for_flag(&proxy_started);
+        let runtime_became_ready = runtime_readiness.is_ready();
+        shutdown.store(true, Ordering::SeqCst);
+        running.join().unwrap();
+
+        assert!(provisioner_ran, "runtime service should start");
+        assert!(proxy_was_gated, "proxy must wait for runtime readiness");
+        assert!(proxy_ran_after_ready, "proxy should start after readiness");
+        assert!(runtime_became_ready, "aggregate runtime readiness should become true");
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -291,7 +472,7 @@ mod tests {
     impl pingora_core::server::ShutdownSignalWatch for ImmediateShutdown {
         fn recv<'watch, 'fut>(
             &'watch self,
-        ) -> std::pin::Pin<Box<dyn Future<Output = pingora_core::server::ShutdownSignal> + Send + 'fut>>
+        ) -> Pin<Box<dyn Future<Output = pingora_core::server::ShutdownSignal> + Send + 'fut>>
         where
             'watch: 'fut,
             Self: 'fut,
@@ -303,7 +484,7 @@ mod tests {
     /// Run `func` under a thread-local subscriber that records everything
     /// logged at WARN or above, returning the value and captured output.
     fn capture_warnings<T, F: FnOnce() -> T>(func: F) -> (T, String) {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Mutex;
 
         #[derive(Clone)]
         struct Buffer(Arc<Mutex<Vec<u8>>>);

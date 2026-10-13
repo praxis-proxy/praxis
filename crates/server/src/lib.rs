@@ -18,9 +18,10 @@
 //!   crates are discovered at build time via `[package.metadata.praxis-filters]`.
 //! - Pipeline resolution: named chains are concatenated into per-listener [`FilterPipeline`]s at startup
 //!   ([`resolve_pipelines`]).
-//! - Running the server ([`try_run_server`], [`try_run_server_with_registry`], or the never-returning [`run_server`]
-//!   and [`run_server_with_registry`]) and the file-watching hot-reload path that rebuilds and atomically swaps
-//!   pipelines when the config file changes.
+//! - Running the server ([`try_run_server`], [`try_run_server_with_registry`], [`try_run_server_with_composition`], or
+//!   their never-returning wrappers) and the file-watching hot-reload path that rebuilds pipelines when the config file
+//!   changes.
+//! - Offline validation with the same composition candidate boundary ([`validate_config_with_composition`]).
 //!
 //! [`FilterPipeline`]: praxis_filter::FilterPipeline
 
@@ -40,6 +41,7 @@ pub(crate) mod watcher;
 pub use composition::{CompositionError, ExtensionContext, RegistryContext, ServerComposition, ValidatorContext};
 pub use pipelines::{build_full_registry, build_subrequest_client, resolve_pipelines};
 pub use praxis_core::{
+    RuntimeReadiness, RuntimeReady, RuntimeService, RuntimeServiceContext, RuntimeServiceFuture, RuntimeShutdown,
     config::load_config,
     logging::{TracingGuard, init_tracing, with_bootstrap_logging},
 };
@@ -47,7 +49,7 @@ pub use praxis_filter::{PipelineExtension, RequestExtensions};
 pub use server::{
     StartupError, check_root_privilege, fatal, install_crypto_provider, report_fatal, resolve_config_path, run_server,
     run_server_with_composition, run_server_with_registry, try_run_server, try_run_server_with_composition,
-    try_run_server_with_registry,
+    try_run_server_with_registry, validate_config, validate_config_with_composition,
 };
 pub use startup_checks::fips_blocker;
 #[cfg(feature = "admin-api")]

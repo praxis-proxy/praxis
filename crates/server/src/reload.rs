@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use praxis_core::{
     config::{Config, ProtocolKind},
-    health::{HealthRegistry, build_health_registry},
+    health::HealthRegistry,
 };
 use praxis_filter::FilterRegistry;
 use praxis_protocol::ListenerPipelines;
@@ -23,7 +23,7 @@ use crate::reload_diagnostics::{
 };
 use crate::{
     composition::PipelineComposition,
-    pipelines::resolve_pipelines_with_composition,
+    pipelines::resolve_pipeline_candidate,
     reload_diagnostics::{
         log_config_change_audit, log_restart_required_changes, warn_insecure_option_escalations,
         warn_stateful_filter_reset,
@@ -87,19 +87,15 @@ pub(crate) fn reload_pipelines(
         error!(error = %err, "config reload failed: TCP listener topology changed; requires restart");
         return Err(err);
     }
-
-    let health_registry = build_health_registry(&new_config.clusters);
-
     let new_ceiling = new_config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
     let updated_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
         subrequest_client.connector().clone(),
         new_ceiling,
     );
 
-    let new_pipelines = match resolve_pipelines_with_composition(
+    let candidate = match resolve_pipeline_candidate(
         new_config,
         registry,
-        &health_registry,
         kv_stores,
         session_stores,
         &updated_client,
@@ -111,6 +107,8 @@ pub(crate) fn reload_pipelines(
             return Err(err);
         },
     };
+    let health_registry = candidate.health_registry;
+    let new_pipelines = candidate.pipelines;
 
     // Emit this reload's change diagnostics under the OLD logging baseline:
     // refresh_baseline below applies the new config's env-filter immediately,
@@ -448,7 +446,10 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use praxis_core::config::{InsecureOptions, SkipPipelineChecks};
+    use praxis_core::{
+        config::{InsecureOptions, SkipPipelineChecks},
+        health::build_health_registry,
+    };
     use praxis_filter::{CircuitBreakerFilter, FilterFactory, PipelineExtension, RequestExtensions};
 
     use super::*;
@@ -2173,13 +2174,14 @@ filter_chains:
 
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_in_factory = Arc::clone(&calls);
-        let (_registry_factory, composition) = ServerComposition::standard()
+        let composition = ServerComposition::standard()
             .add_pipeline_extension_factory(move |_ctx| {
                 calls_in_factory.fetch_add(1, Ordering::SeqCst);
                 let ext: Box<dyn PipelineExtension> = Box::new(ReloadMarker(3));
                 Ok(ext)
             })
-            .into_parts();
+            .into_parts()
+            .pipeline;
 
         let new_config = valid_config();
         reload_pipelines(

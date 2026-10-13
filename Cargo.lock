@@ -3313,6 +3313,7 @@ dependencies = [
 name = "praxis-proxy-core"
 version = "0.7.4"
 dependencies = [
+ "async-trait",
  "bytes",
  "chrono",
  "dashmap",

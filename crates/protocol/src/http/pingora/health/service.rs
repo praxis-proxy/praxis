@@ -19,7 +19,7 @@ use pingora_core::{
         listening::Service,
     },
 };
-use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
+use praxis_core::{RuntimeReadiness, health::HealthRegistry, kv::KvStoreRegistry};
 use tokio::time::Duration;
 use tracing::{error, info, warn};
 
@@ -102,6 +102,12 @@ pub struct PingoraHealthService {
 
     /// When `true`, reject requests whose `Host` is not loopback.
     require_loopback_host: bool,
+
+    /// Optional aggregate readiness of process-lifetime runtime services.
+    ///
+    /// When set, `/ready` reports `503` until these services report ready,
+    /// before upstream cluster health is considered.
+    runtime_readiness: Option<RuntimeReadiness>,
 }
 
 impl PingoraHealthService {
@@ -122,7 +128,18 @@ impl PingoraHealthService {
             pipelines: None,
             verbose,
             require_loopback_host: false,
+            runtime_readiness: None,
         }
+    }
+
+    /// Gate `/ready` on process-lifetime runtime services.
+    ///
+    /// When set, `/ready` returns `503` until the runtime services report
+    /// ready, before upstream cluster health is considered.
+    #[must_use]
+    pub fn runtime_readiness(mut self, readiness: RuntimeReadiness) -> Self {
+        self.runtime_readiness = Some(readiness);
+        self
     }
 
     /// Resolve readiness against current pipelines after a config reload.
@@ -166,7 +183,11 @@ impl PingoraHealthService {
             Some(state) => stats_admin::resolve_health_registry(self.registry.as_ref(), Some(state), &state.meta),
             None => self.registry.clone(),
         };
-        compute_ready_response(registry.as_ref(), self.verbose)
+        compute_ready_response_with_runtime(
+            registry.as_ref(),
+            self.verbose,
+            self.runtime_readiness.as_ref().is_none_or(RuntimeReadiness::is_ready),
+        )
     }
 }
 
@@ -208,24 +229,33 @@ pub fn add_health_endpoint_to_pingora_server(
 ) {
     let recorder = install_prometheus_admin_recorder();
     add_prometheus_upkeep_to_pingora_server(server, recorder);
-    add_health_endpoint_to_pingora_server_with_pipelines(server, metrics_addr, registry, verbose, None);
+    add_health_endpoint_to_pingora_server_with_pipelines(server, metrics_addr, registry, verbose, None, None);
 }
 
 /// Add the health and metrics listener with live pipeline readiness.
 ///
 /// This does not install the Prometheus recorder or its upkeep service; use it
 /// when the caller already manages that lifecycle.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "metrics listener wiring: registry, pipelines, and readiness"
+)]
 pub fn add_health_endpoint_to_pingora_server_with_pipelines(
     server: &mut Server,
     metrics_addr: &str,
     registry: Option<HealthRegistry>,
     verbose: bool,
     pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+    runtime_readiness: Option<RuntimeReadiness>,
 ) {
     let require_loopback_host = admin_host::is_loopback_host(metrics_addr);
     let health = PingoraHealthService::new(registry, verbose).require_loopback_host(require_loopback_host);
     let health = match pipelines {
         Some((pipelines, meta)) => health.with_live_pipelines(pipelines, meta),
+        None => health,
+    };
+    let health = match runtime_readiness {
+        Some(readiness) => health.runtime_readiness(readiness),
         None => health,
     };
 
@@ -548,6 +578,22 @@ fn compute_ready_response(registry: Option<&HealthRegistry>, verbose: bool) -> (
     (status_code, body)
 }
 
+/// Build the `/ready` response, reporting runtime-service initialization
+/// before checking upstream health.
+fn compute_ready_response_with_runtime(
+    registry: Option<&HealthRegistry>,
+    verbose: bool,
+    runtime_services_ready: bool,
+) -> (u16, String) {
+    if !runtime_services_ready {
+        return (
+            503,
+            r#"{"status":"initializing","runtime_services":"pending"}"#.to_owned(),
+        );
+    }
+    compute_ready_response(registry, verbose)
+}
+
 // -----------------------------------------------------------------------------
 // Aggregation Utilities
 // -----------------------------------------------------------------------------
@@ -720,6 +766,25 @@ mod tests {
             200,
             "/ready must resolve from live pipelines, not the frozen startup snapshot"
         );
+    }
+
+    #[test]
+    fn ready_returns_503_while_runtime_services_initialize() {
+        let (status, body) = compute_ready_response_with_runtime(None, false, false);
+
+        assert_eq!(status, 503, "pending runtime services must keep readiness false");
+        assert!(
+            body.contains("initializing"),
+            "response should explain the startup state"
+        );
+    }
+
+    #[test]
+    fn ready_checks_upstream_health_after_runtime_services_initialize() {
+        let (status, body) = compute_ready_response_with_runtime(None, false, true);
+
+        assert_eq!(status, 200, "ready runtime services should defer to upstream health");
+        assert!(body.contains("ok"), "response should preserve the normal ready body");
     }
 
     #[tokio::test(start_paused = true)]
