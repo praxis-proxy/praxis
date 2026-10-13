@@ -274,13 +274,18 @@ fn system_crypto_policy() -> Option<String> {
     crypto_policy_from(&contents)
 }
 
-/// The first non-comment, non-blank line from a crypto-policies config.
+/// The policy a crypto-policies config names, parsed the way
+/// `update-crypto-policies` parses it: `#` comments out the rest of a line,
+/// names are case-insensitive, and each later line adds subpolicies.
 fn crypto_policy_from(contents: &str) -> Option<String> {
-    contents
+    let policy = contents
         .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(str::to_owned)
+        .map(|line| line.split_once('#').map_or(line, |(kept, _)| kept).trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(":")
+        .to_ascii_uppercase();
+    (!policy.is_empty()).then_some(policy)
 }
 
 /// Whether the policy is `FIPS`, alone or restricted by `OSPP`. Any other
@@ -473,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn crypto_policy_parser_extracts_the_first_real_line() {
+    fn crypto_policy_parser_parses_valid_inputs() {
         assert_eq!(
             crypto_policy_from("# comment\n\nFIPS\n").as_deref(),
             Some("FIPS"),
@@ -482,18 +487,42 @@ mod tests {
         assert_eq!(
             crypto_policy_from("FIPS:OSPP\n").as_deref(),
             Some("FIPS:OSPP"),
-            "preserves subpolicies"
+            "preserves inline subpolicies"
         );
         assert_eq!(
             crypto_policy_from("DEFAULT\n").as_deref(),
             Some("DEFAULT"),
             "non-FIPS policy is still parsed"
         );
+        assert_eq!(
+            crypto_policy_from("FIPS # STIG baseline\n").as_deref(),
+            Some("FIPS"),
+            "inline comment is stripped"
+        );
+        assert_eq!(
+            crypto_policy_from("fips\n").as_deref(),
+            Some("FIPS"),
+            "names are uppercased"
+        );
+    }
+
+    #[test]
+    fn crypto_policy_parser_handles_multiline_and_empty() {
         assert_eq!(crypto_policy_from(""), None, "empty file yields None");
         assert_eq!(
             crypto_policy_from("# only comments\n"),
             None,
             "comments-only file yields None"
+        );
+        assert_eq!(
+            crypto_policy_from("FIPS\nNO-ENFORCE-EMS\n").as_deref(),
+            Some("FIPS:NO-ENFORCE-EMS"),
+            "later lines are joined as subpolicies"
+        );
+        assert_eq!(
+            crypto_policy_from("FIPS\n# comment\nOSPP\n").as_deref(),
+            Some("FIPS:OSPP"),
+            "comment lines between policy lines are skipped"
         );
     }
 
