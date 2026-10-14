@@ -1294,10 +1294,33 @@ impl PolicyFilter {
             ..Default::default()
         });
 
-        // -- meta: entity identity (from protocol classifier) + operator config --
+        // -- operator-supplied context + entity coordinates in a single meta clone --
+        Self::stamp_operator_context(&mut ext, headers, cfg, Some((entity_type, entity_name)));
+
+        ext
+    }
+
+    /// Stamp operator-supplied context onto extensions: `context_meta`
+    /// (scope, tags, properties), the dedicated `agent.session_id`
+    /// binding, and `context_headers` (header → extension field
+    /// mapping). When `entity` is `Some`, the entity coordinates are
+    /// assigned in the same metadata clone. Called from both
+    /// `extensions_from_identity` (normal path, with entity) and the
+    /// entity-less fallback in `response_extensions` (with `None`) so
+    /// response-phase rules see the same operator context regardless
+    /// of whether a request-phase identity was stashed.
+    fn stamp_operator_context(
+        ext: &mut Extensions,
+        headers: &std::collections::HashMap<String, String>,
+        cfg: &PolicyFilterConfig,
+        entity: Option<(&str, &str)>,
+    ) {
+        // -- meta: entity identity + context_meta (scope, tags, properties) --
         let mut meta = ext.meta.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
-        meta.entity_type = Some(entity_type.to_owned());
-        meta.entity_name = Some(entity_name.to_owned());
+        if let Some((entity_type, entity_name)) = entity {
+            meta.entity_type = Some(entity_type.to_owned());
+            meta.entity_name = Some(entity_name.to_owned());
+        }
         if let Some(scope) = &cfg.context_meta.scope {
             meta.scope = Some(scope.clone());
         }
@@ -1319,10 +1342,8 @@ impl PolicyFilter {
 
         // -- context_headers: map reserved-prefix headers → extension fields --
         if !cfg.context_headers.is_empty() {
-            Self::apply_context_headers(headers, &cfg.context_headers, &mut ext);
+            Self::apply_context_headers(headers, &cfg.context_headers, ext);
         }
-
-        ext
     }
 
     /// Read headers named in `context_headers` and write their values
@@ -2241,11 +2262,7 @@ impl PolicyFilter {
                  an entry sourced from it renders nothing",
             );
             let mut ext = Self::entity_less_extensions();
-            if let (Some(scope), Some(meta)) = (&cfg.context_meta.scope, ext.meta.as_ref()) {
-                let mut m = (**meta).clone();
-                m.scope = Some(scope.clone());
-                ext.meta = Some(Arc::new(m));
-            }
+            Self::stamp_operator_context(&mut ext, view.headers(), cfg, None);
             ext
         };
         // Keep the request line, so a response contract resolves the same route
