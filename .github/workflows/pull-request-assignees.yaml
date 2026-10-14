@@ -22,7 +22,7 @@ permissions: {}
 
 jobs:
   assignees:
-    uses: praxis-proxy/conventions/.github/workflows/pr-assignees.yaml@95eec25537bf606cea287931537cefc491ea08ac # unreleased, after v0.3.0
+    uses: praxis-proxy/conventions/.github/workflows/pr-assignees.yaml@2b6bf27b160c9eba7912cbb494aeb7669f2a69e3 # unreleased, after v0.3.0
     with:
       maintainer-teams: core-maintainers
       reviewer-teams: core-reviewers
