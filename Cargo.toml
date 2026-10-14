@@ -115,7 +115,7 @@ rustls-openssl = { version = "0.4.1", package = "quixotic-plecostomus-rustls-ope
 # parse-only: default-features off keeps the verify/ring crypto out of the graph.
 x509-parser = { version = "0.18.1", default-features = false }
 # SPIFFE-ID parsing only; default-features off keeps the workload-API client (tonic/grpc) and JWT support out of the graph.
-spiffe = { version = "0.16.1", default-features = false }
+spiffe = { version = "0.18.0", default-features = false }
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 syn = { version = "3.0.6", features = ["full", "extra-traits", "visit"] }
