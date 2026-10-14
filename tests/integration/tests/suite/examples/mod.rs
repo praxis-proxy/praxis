@@ -87,6 +87,8 @@ mod policy_api_key;
 #[cfg(feature = "policy-engine")]
 mod policy_assertions;
 #[cfg(feature = "policy-engine")]
+mod policy_context;
+#[cfg(feature = "policy-engine")]
 mod policy_http;
 #[cfg(feature = "policy-engine")]
 mod policy_jwks;

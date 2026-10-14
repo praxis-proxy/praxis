@@ -1,0 +1,79 @@
+# Policy with context_headers and context_meta
+#
+# Demonstrates the host-supplied context surface: `context_headers`
+# maps reserved-prefix HTTP headers to agent / framework extension
+# fields so APL rules can reference them; `context_meta` stamps
+# operator-defined scope, tags, and properties onto every policy
+# evaluation.
+#
+# Headers under reserved prefixes (`x-praxis-*`, `x-ext-agent-*`,
+# `x-ext-protocol-*`) are set by the gateway itself — ingress rejects
+# client requests carrying them, so values here are trusted.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- \
+#     -c examples/configs/security/policy-context.yaml
+#
+# The `context_meta.scope` value feeds the PPE's scoped route resolver,
+# selecting authentication and authorization blocks that declare the
+# matching `meta.scope:` in the policy document.
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # A trusted filter (or ingress controller) populates the
+      # reserved-prefix headers before the policy filter reads them.
+      # In production these are injected by infrastructure; `headers`
+      # with `request_set` simulates this for the example.
+      - filter: headers
+        request_set:
+          # Calling agent identity, e.g. from an orchestrator sidecar.
+          - name: x-ext-agent-id
+            value: "planner-v2"
+          # Conversation identifier assigned by the host.
+          - name: x-ext-agent-conversation
+            value: "conv-00000000-0000-0000-0000-000000000000"
+          # Client framework reported by the protocol classifier.
+          - name: x-ext-protocol-framework
+            value: "langchain"
+
+      - filter: policy
+        config_path: /etc/praxis/policy.yaml
+        require_protocol_metadata: true
+
+        # Map reserved-prefix headers to extension fields.
+        # Keys are typed: only agent.* and framework.* targets listed
+        # in ContextField are accepted (agent.session_id is excluded —
+        # it has dedicated handling via the session taint subsystem).
+        context_headers:
+          agent.agent_id: x-ext-agent-id
+          agent.conversation_id: x-ext-agent-conversation
+          framework.framework: x-ext-protocol-framework
+
+        # Operator-defined metadata stamped onto every evaluation.
+        context_meta:
+          scope: production
+          tags:
+            - compliance
+          properties:
+            region: us-east-1
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

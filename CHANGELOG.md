@@ -19,6 +19,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `policy` filter accepts `context_headers` and `context_meta` configuration.
+  `context_headers` maps reserved-prefix HTTP headers to typed `agent.*` /
+  `framework.*` extension fields (via a closed `ContextField` enum) so APL
+  rules can reference host-injected values. `context_meta` stamps operator-
+  defined `scope`, `tags`, and `properties` onto every policy evaluation;
+  `scope` feeds the PPE's scoped route resolver for both authentication and
+  authorization. ([#1388](https://github.com/praxis-proxy/praxis/pull/1388))
 - Named filter chains take a `conditions:` list that every filter in the chain
   inherits, ANDed with the filter's own conditions, wherever the chain is used
   (listeners, branch chains, outbound bindings).
