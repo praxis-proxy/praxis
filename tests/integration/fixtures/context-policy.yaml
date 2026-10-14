@@ -1,0 +1,55 @@
+# Policy fixture for the `security/policy-context.yaml` example integration
+# test.  The example points `config_path` at an operator-supplied deployment
+# path; the test rewrites that to this file so the policy filter constructs
+# without shipping a policy under examples/.
+#
+# Shape: one HS256 JWT identity plugin (fail-closed) + a `global` HTTP
+# authorization policy with two predicates that exercise the context
+# surface the example advertises:
+#
+#   1. `agent.agent_id` (populated by `context_headers` from the
+#      `x-ext-agent-id` header) must exist, equal `planner-v2`, and
+#      remain different from `blocked-agent`.
+#   2. `meta.properties.region` (stamped by `context_meta`) must equal
+#      `us-east-1`.
+#
+# The example ships agent_id=planner-v2 and region=us-east-1, so both
+# predicates pass and a well-formed request reaches the backend (200).
+# The integration test patches one value at a time to trigger each deny
+# (403).
+
+engine_settings:
+  dispatch: policy
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["praxis-policy-example"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+      - cel: { expr: "has(agent.agent_id) && agent.agent_id == 'planner-v2' && agent.agent_id != 'blocked-agent'" }
+      - cel: { expr: "has(meta.properties.region) && meta.properties.region == 'us-east-1'" }
+  pdp:
+    - kind: cel
+  response:
+    status: 403
+    body: "denied by context policy"
+    headers:
+      X-Context-Deny: "true"
