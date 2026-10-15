@@ -27,11 +27,11 @@ pub struct RequestHead {
     pub target: String,
 }
 
-/// The status line and headers of a received response.
-#[derive(Clone, Debug)]
-pub struct ResponseHead {
-    /// Response headers as received.
-    pub headers: HeaderMap,
+/// A borrowed view of the status line and headers of a received response.
+#[derive(Clone, Copy, Debug)]
+pub struct ResponseHead<'response> {
+    /// Response headers as received, retained by the transport for framing.
+    pub headers: &'response HeaderMap,
 
     /// HTTP status code.
     pub status: u16,
@@ -160,9 +160,20 @@ pub trait Session: Send + 'static {
     /// Mark the request complete when no body chunk carried `end_of_stream`.
     fn finish_request(&mut self) -> impl Future<Output = Result<(), EgressError>> + Send;
 
-    /// Read the next response head. A `1xx` interim response is returned as
-    /// is; callers loop until a final status arrives.
-    fn read_response_head(&mut self) -> impl Future<Output = Result<ResponseHead, EgressError>> + Send;
+    /// Read the next response head into the session, replacing the previous
+    /// head. Inspect it with [`response_head`](Self::response_head) before
+    /// reading again: callers skip interim `1xx` statuses, except final `101`.
+    fn read_response_head(&mut self) -> impl Future<Output = Result<(), EgressError>> + Send;
+
+    /// Borrow the most recently read response head without copying its headers.
+    /// The transport retains the original headers for body framing and reuse;
+    /// callers sanitize this view into their own map before advancing the
+    /// session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EgressError::Io`] when no response head is available.
+    fn response_head(&self) -> Result<ResponseHead<'_>, EgressError>;
 
     /// Whether the response ended with its head (no body follows).
     fn response_done(&mut self) -> bool;

@@ -2843,7 +2843,10 @@ async fn interim_1xx_response_is_skipped_not_panicked() {
         socket
             .write_all(
                 b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n\
-                  HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+                  HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\
+                  Connection: x-private\r\nX-Private: hidden\r\n\
+                  X-Praxis-Internal: hidden\r\n\
+                  Set-Cookie: first=1\r\nSet-Cookie: second=2\r\n\r\nhello",
             )
             .await
             .unwrap();
@@ -2871,6 +2874,19 @@ async fn interim_1xx_response_is_skipped_not_panicked() {
         "the final status, not the interim 103, must be returned"
     );
     assert_eq!(response.body.as_ref(), b"hello", "the final response body must be read");
+    let cookies: Vec<_> = response
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect();
+    assert_eq!(cookies, vec!["first=1", "second=2"], "duplicate final headers survive");
+    for name in ["link", "connection", "x-private", "x-praxis-internal", "content-length"] {
+        assert!(
+            response.headers.get(name).is_none(),
+            "unexpected response header: {name}"
+        );
+    }
 }
 
 #[tokio::test]

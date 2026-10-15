@@ -200,16 +200,18 @@ impl Session for PingoraSession {
             .map_err(|err| io_error(&err))
     }
 
-    async fn read_response_head(&mut self) -> Result<ResponseHead, EgressError> {
-        self.inner.read_response_header().await.map_err(|err| io_error(&err))?;
+    async fn read_response_head(&mut self) -> Result<(), EgressError> {
+        self.inner.read_response_header().await.map_err(|err| io_error(&err))
+    }
 
+    fn response_head(&self) -> Result<ResponseHead<'_>, EgressError> {
         let header = self
             .inner
             .response_header()
             .ok_or_else(|| EgressError::Io("no response header received".to_owned()))?;
 
         Ok(ResponseHead {
-            headers: header.headers.clone(),
+            headers: &header.headers,
             status: header.status.as_u16(),
             version: header.version,
         })
@@ -360,6 +362,53 @@ mod tests {
             Some(Duration::from_secs(10)),
             "a looser operator timeout is cut to the exchange timeout"
         );
+    }
+
+    #[tokio::test]
+    #[expect(clippy::too_many_lines, reason = "test setup and transport invariants")]
+    async fn response_head_borrows_the_transport_headers() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        praxis_tls::provider::install();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let peer = PeerSpec::plain(listener.local_addr().unwrap());
+        let backend = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::with_capacity(4096);
+            while !request.ends_with(b"\r\n\r\n") {
+                assert_ne!(socket.read_buf(&mut request).await.unwrap(), 0, "complete request head");
+            }
+            socket
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\nX-Test: kept\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        let connector = PingoraConnector::new(1);
+        let mut session = Box::pin(connector.connect(&peer, Duration::from_secs(5)))
+            .await
+            .unwrap();
+        assert!(matches!(session.response_head(), Err(EgressError::Io(_))));
+        session
+            .send_request_head(RequestHead {
+                method: http::Method::GET,
+                target: "/".to_owned(),
+                headers: http::HeaderMap::new(),
+            })
+            .await
+            .unwrap();
+        session.finish_request().await.unwrap();
+        session.read_response_head().await.unwrap();
+
+        let head = session.response_head().unwrap();
+        let transport = session.inner.response_header().unwrap();
+        assert!(std::ptr::eq(head.headers, &transport.headers));
+        assert_eq!(head.status, 204);
+        assert_eq!(head.version, http::Version::HTTP_11);
+        assert_eq!(head.headers.get("x-test").unwrap(), "kept");
+        assert_eq!(head.headers.get("connection").unwrap(), "close");
+        assert!(session.response_done(), "the original head still frames the response");
+        Box::pin(connector.release(session, false)).await;
+        backend.await.unwrap();
     }
 
     #[test]

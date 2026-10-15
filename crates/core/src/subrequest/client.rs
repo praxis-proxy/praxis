@@ -488,7 +488,7 @@ impl<C: Connector> SubRequestClient<C> {
         // not interim.
         let read_timeout = peer.connection.read_timeout;
         let mut interim_count = 0_u32;
-        let response = loop {
+        let (status, version, resp_headers) = loop {
             let read_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
             if read_budget.is_zero() {
                 session.shutdown().await;
@@ -496,9 +496,13 @@ impl<C: Connector> SubRequestClient<C> {
             }
             let read_wait = min_timeout(read_timeout, read_budget);
 
-            let candidate = tokio::time::timeout(read_wait, session.read_response_head())
+            tokio::time::timeout(read_wait, session.read_response_head())
                 .await
                 .map_err(|_elapsed| charge(&mut circuit_guard, classify_timeout(read_budget, read_timeout, "read")))?
+                .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
+
+            let candidate = session
+                .response_head()
                 .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
 
             if (100..=199).contains(&candidate.status) && candidate.status != 101 {
@@ -512,9 +516,12 @@ impl<C: Connector> SubRequestClient<C> {
                 }
                 continue;
             }
-            break candidate;
+            break (
+                candidate.status,
+                candidate.version,
+                sanitize_response_headers(candidate.headers),
+            );
         };
-        let status = response.status;
         record_http_client_status(client_span, status);
 
         if !(100..=599).contains(&status) {
@@ -524,7 +531,6 @@ impl<C: Connector> SubRequestClient<C> {
                 SubRequestError::Io(format!("upstream returned unsupported HTTP status {status}")),
             ));
         }
-        let resp_headers = sanitize_response_headers(&response.headers);
 
         // ---------------------------------------------------------------------
         // 7. Return RawExchange
@@ -536,7 +542,7 @@ impl<C: Connector> SubRequestClient<C> {
             read_timeout,
             connector: &self.connector,
             status,
-            version: response.version,
+            version,
             headers: resp_headers,
             circuit_guard,
             permit,

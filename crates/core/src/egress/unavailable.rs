@@ -68,7 +68,11 @@ impl Session for UnavailableSession {
         match *self {}
     }
 
-    async fn read_response_head(&mut self) -> Result<ResponseHead, EgressError> {
+    async fn read_response_head(&mut self) -> Result<(), EgressError> {
+        match *self {}
+    }
+
+    fn response_head(&self) -> Result<ResponseHead<'_>, EgressError> {
         match *self {}
     }
 
