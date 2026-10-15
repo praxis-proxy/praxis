@@ -51,5 +51,8 @@ per-call values. They contain no timing result.
 For comparisons across revisions, the CI driver
 [`subrequest-comparison.py`](subrequest-comparison.py) runs the same matrix
 on one runner, preserves raw JSON and produces a descriptive summary.
-Only peer construction is adapted for the API before the backend seam;
+Peer construction is adapted for the API before the backend seam;
 `subrequest_peer.rs` keeps that setup outside the common workload.
+The benchmark explicitly enables the Pingora backend. The comparison driver
+omits that feature request only on the pre-seam revision, where Pingora was
+unconditional and the feature did not exist.

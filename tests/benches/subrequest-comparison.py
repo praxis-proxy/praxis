@@ -79,6 +79,9 @@ def prepare_tree(repository, tree, revision):
         (benches / "benches/subrequest_peer.rs").write_text(LEGACY_PEER)
         manifest = benches / "Cargo.toml"
         manifest.write_text(manifest.read_text().replace(
+            'praxis-core = { workspace = true, features = ["pingora"] }',
+            'praxis-core = { workspace = true }', 1
+        ).replace(
             "[dev-dependencies]\n", "[dev-dependencies]\npingora-core = { workspace = true }\n", 1
         ))
         add_lock_dependency(tree / "Cargo.lock", "quixotic-plecostomus-core")
