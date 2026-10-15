@@ -91,6 +91,7 @@ fn try_install_crypto_provider() -> Result<(), String> {
         provider = status.name,
         provider_fips = status.provider_fips,
         kernel_fips = ?status.kernel_fips,
+        crypto_policy = ?status.crypto_policy,
         fips_required = praxis_tls::provider::required(),
         "installed rustls crypto provider"
     );
