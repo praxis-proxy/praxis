@@ -6,7 +6,7 @@
 use praxis_core::config::Config;
 use praxis_test_utils::{free_port, start_backend, start_proxy};
 
-use crate::throughput_utils::{BenchConfig, assert_performance, report_results, run_get_benchmark};
+use crate::throughput_utils::{BenchConfig, assert_performance, bench_guard, report_results, run_get_benchmark};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -14,6 +14,7 @@ use crate::throughput_utils::{BenchConfig, assert_performance, report_results, r
 
 #[test]
 fn bench_simple_proxy_serial() {
+    let _bench = bench_guard();
     let backend_port = start_backend("ok");
     let proxy_port = free_port();
     let yaml = praxis_test_utils::simple_proxy_yaml(proxy_port, backend_port);
@@ -29,6 +30,7 @@ fn bench_simple_proxy_serial() {
 
 #[test]
 fn bench_simple_proxy_concurrent() {
+    let _bench = bench_guard();
     let backend_port = start_backend("ok");
     let proxy_port = free_port();
     let yaml = praxis_test_utils::simple_proxy_yaml(proxy_port, backend_port);
@@ -44,6 +46,7 @@ fn bench_simple_proxy_concurrent() {
 
 #[test]
 fn bench_simple_proxy_high_concurrency() {
+    let _bench = bench_guard();
     let backend_port = start_backend("ok");
     let proxy_port = free_port();
     let yaml = praxis_test_utils::simple_proxy_yaml(proxy_port, backend_port);

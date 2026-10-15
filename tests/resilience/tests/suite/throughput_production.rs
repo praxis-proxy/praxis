@@ -9,8 +9,8 @@ use praxis_core::config::Config;
 use praxis_test_utils::{free_port, start_echo_backend, start_proxy};
 
 use crate::throughput_utils::{
-    BenchConfig, assert_performance, compute_percentile, report_results, run_benchmark, run_benchmark_with_body,
-    run_get_benchmark,
+    BenchConfig, assert_performance, bench_guard, compute_percentile, report_results, run_benchmark,
+    run_benchmark_with_body, run_get_benchmark,
 };
 
 // -----------------------------------------------------------------------------
@@ -19,6 +19,7 @@ use crate::throughput_utils::{
 
 #[test]
 fn bench_production_pipeline_get() {
+    let _bench = bench_guard();
     let _backend = start_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();
@@ -36,6 +37,7 @@ fn bench_production_pipeline_get() {
 
 #[test]
 fn bench_production_pipeline_post() {
+    let _bench = bench_guard();
     let _backend = start_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();
@@ -55,6 +57,7 @@ fn bench_production_pipeline_post() {
 
 #[test]
 fn bench_production_pipeline_mixed() {
+    let _bench = bench_guard();
     let _backend = start_echo_backend();
     let backend_port = _backend.port();
     let proxy_port = free_port();

@@ -83,6 +83,21 @@ raise the deadline for every readiness utility; `make coverage` and
 `make coverage-check` already set it. When unset, the defaults apply
 (2s for TCP, 5s for HTTP, HTTP/2, and TLS).
 
+The resilience suite's throughput tests run one at a time, so a
+throughput floor always measures a benchmark that has the machine to
+itself rather than one competing with its siblings. That still leaves
+the floor sized for GitHub's hosted runners, so a much slower host can
+miss it. `PRAXIS_TEST_THROUGHPUT_SCALE` multiplies every throughput
+floor (1 when unset, `0.5` halves them) and a scaled failure says so in
+its message; the latency ceilings are not scaled:
+
+```console
+PRAXIS_TEST_THROUGHPUT_SCALE=0.5 make test-resilience
+```
+
+The FIPS host run uses this knob too, set from the Makefile's
+`FIPS_HOST_THROUGHPUT_SCALE` — see [fips.md](fips.md).
+
 ### Supply Chain Safety
 
 Security is enforced at every stage of development.
