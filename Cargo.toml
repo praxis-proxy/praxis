@@ -82,14 +82,21 @@ quote = "1.0.47"
 # crates keep `policy-engine` in their own defaults, so the standard test run is
 # unchanged, and `--no-default-features` gives the FIPS build's feature set.
 praxis = { path = "crates/server", package = "praxis-proxy", default-features = false }
-praxis-core = { version = "0.7.4", path = "crates/core", package = "praxis-proxy-core" }
+# default-features = false, like praxis-filter below: the core crate's only
+# default is the `pingora` network backend, and the backend is chosen once, by
+# the `praxis-proxy` binary's own `pingora` feature, which forwards it here
+# through praxis-protocol. A member that inherits this entry gets the backend
+# through that chain, never by accident.
+praxis-core = { version = "0.7.4", path = "crates/core", package = "praxis-proxy-core", default-features = false }
 # default-features = false: the filter crate's own default (`policy-engine`)
 # must not leak in through this dependency edge, or a build that turns the
 # policy engine off at the binary (`--no-default-features`, the FIPS build)
 # would still link it. The `praxis-proxy` binary's default feature set forwards
 # `policy-engine` explicitly, so the standard build is unchanged.
 praxis-filter = { version = "0.7.4", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
-praxis-protocol = { version = "0.7.4", path = "crates/protocol", package = "praxis-proxy-protocol" }
+# default-features = false for the same reason as praxis-core: the protocol
+# crate's default is the `pingora` backend, selected by the binary's feature.
+praxis-protocol = { version = "0.7.4", path = "crates/protocol", package = "praxis-proxy-protocol", default-features = false }
 praxis-tls = { version = "0.7.4", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 praxis-proxy-benchmarks = "0.2.2"

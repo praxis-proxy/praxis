@@ -100,8 +100,7 @@ pub fn build_subrequest_client(config: &Config) -> Result<SubRequestClient, Box<
     let mut client = SubRequestClient::with_max_response_bytes(connector, ceiling);
     if let Some(path) = config.runtime.upstream_ca_file.as_deref() {
         let cached = praxis_tls::CachedCaCerts::from_pem_file(path)?;
-        let converted = praxis_core::connectivity::peer::ca_from_cached(&cached);
-        client = client.with_upstream_ca(Arc::from(converted));
+        client = client.with_upstream_ca(Arc::new(cached));
     }
     Ok(client)
 }
