@@ -73,8 +73,9 @@ Create `crates/core/src/server/<name>.rs`. `from_config` builds the runtime
 from `Config` (thread count via `resolve_thread_count`, shutdown timing
 from `shutdown_timeout_secs`) and binds nothing. `run_until_shutdown`
 installs signal handling and serves; `run_with_shutdown` serves until the
-given future resolves, which is how the harness stops a proxy. Both return
-once the graceful shutdown has completed.
+given future resolves, which is how the harness stops a proxy. The signal
+path returns once graceful shutdown completes. Pingora uses immediate
+shutdown for the supplied future and may drop active work.
 
 ### 3. Implement `Connector` and `Session`
 
@@ -88,6 +89,14 @@ tighter per-attempt cap with its own timer, so a cap that runs out is
 reported as such rather than as a transport timeout. `release(session,
 false)` is the abnormal path: shut the connection down, except that a
 stream of a multiplexed connection only gives up its share.
+
+`Session::read_response_head` asynchronously reads one head into the
+session. `response_head` then borrows its status, version and headers in a
+backend-neutral `ResponseHead` view. Keep the transport's headers intact
+for body framing and connection reuse: the caller sanitizes the borrowed
+headers directly into its result map. Each new read replaces that view;
+interim `1xx` heads are skipped, while `101` is final. The borrow ends
+before the session moves into the response body handle.
 
 The sub-request client is generic over the connector and needs nothing
 else. Under a backend that also routes the proxy data path through its

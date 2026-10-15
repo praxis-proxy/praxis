@@ -43,7 +43,8 @@ pub trait ServerRuntime: Sized {
     /// the graceful shutdown has completed.
     fn run_until_shutdown(self);
 
-    /// Serve until `shutdown` resolves, then return once the graceful
-    /// shutdown has completed. For harnesses that stop the server themselves.
+    /// Serve until `shutdown` resolves, then return once shutdown completes.
+    /// For harnesses that stop the server themselves. Pingora shuts down
+    /// immediately on this path and may drop active work.
     fn run_with_shutdown(self, shutdown: ShutdownFuture);
 }
