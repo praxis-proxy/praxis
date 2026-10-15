@@ -11,6 +11,16 @@
 //! selection existed, while disabling a dimension drops it from the emitted
 //! labels (`selected_labels` builds the reduced set for the multi-label
 //! metrics; the single-label recorders check the flag inline).
+//!
+//! The request, body, error and upstream recorders are driven by a
+//! backend's data path. A build with no backend compiles them but calls
+//! none, which the module-level expectation below accounts for; a new
+//! backend adds its feature to that `not(...)` list.
+
+#![cfg_attr(
+    not(feature = "pingora"),
+    expect(dead_code, reason = "the recording surface is only driven by a backend's data path")
+)]
 
 use std::sync::OnceLock;
 
@@ -717,6 +727,7 @@ pub(crate) fn record_error(error_type: &'static str) {
 /// Connect failures map to `upstream_unavailable` and are also counted by
 /// `praxis_upstream_connect_failures_total`; the overlap is deliberate so
 /// that `praxis_errors_total` is a complete error denominator on its own.
+#[cfg(feature = "pingora")]
 pub(crate) fn error_type_for(etype: &::pingora_core::ErrorType, source: &::pingora_core::ErrorSource) -> &'static str {
     use ::pingora_core::ErrorSource::{Downstream, Internal, Unset};
 
@@ -736,6 +747,7 @@ pub(crate) fn error_type_for(etype: &::pingora_core::ErrorType, source: &::pingo
 }
 
 /// Whether the error is a connect, handshake, read or write timeout.
+#[cfg(feature = "pingora")]
 fn is_timeout(etype: &::pingora_core::ErrorType) -> bool {
     use ::pingora_core::ErrorType::{ConnectTimedout, ReadTimedout, TLSHandshakeTimedout, WriteTimedout};
 
@@ -746,6 +758,7 @@ fn is_timeout(etype: &::pingora_core::ErrorType) -> bool {
 }
 
 /// Whether the error means the upstream was never reached.
+#[cfg(feature = "pingora")]
 fn is_unreachable(etype: &::pingora_core::ErrorType) -> bool {
     use ::pingora_core::ErrorType::{BindError, ConnectError, ConnectNoRoute, ConnectRefused, SocketError};
 
@@ -1204,6 +1217,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pingora")]
     fn error_type_for_maps_pingora_errors_to_bounded_values() {
         use ::pingora_core::{ErrorSource, ErrorType};
 

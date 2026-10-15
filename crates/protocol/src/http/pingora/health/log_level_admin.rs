@@ -6,10 +6,10 @@
 use std::sync::Arc;
 
 use http::Response;
-use pingora_core::protocols::http::ServerSession;
 use praxis_core::logging::{LogLevelError, LogLevelState, PutLogLevelRequest};
 use serde_json::json;
 
+use super::admin_request::{AdminRequest, BodyReadError};
 use crate::http::pingora::json::json_response;
 
 // -----------------------------------------------------------------------------
@@ -24,15 +24,15 @@ const MAX_BODY_BYTES: usize = 16_384; // 16 KiB
 // -----------------------------------------------------------------------------
 
 /// Handle `/api/log-level` admin requests.
-pub(super) async fn log_level_response(
+pub(super) async fn log_level_response<R: AdminRequest>(
     state: &Arc<LogLevelState>,
-    session: &mut ServerSession,
+    req: &mut R,
     method: &str,
     query: Option<&str>,
 ) -> Response<Vec<u8>> {
     match method {
         "GET" | "HEAD" => get_response(state, method),
-        "PUT" => put_response(state, session).await,
+        "PUT" => put_response(state, req).await,
         "DELETE" => delete_response(state, query),
         _ => method_not_allowed(),
     }
@@ -50,8 +50,8 @@ fn get_response(state: &Arc<LogLevelState>, method: &str) -> Response<Vec<u8>> {
 }
 
 /// Handle `PUT` and apply a validated runtime overlay.
-async fn put_response(state: &Arc<LogLevelState>, session: &mut ServerSession) -> Response<Vec<u8>> {
-    let body = match read_body(session).await {
+async fn put_response<R: AdminRequest>(state: &Arc<LogLevelState>, req: &mut R) -> Response<Vec<u8>> {
+    let body = match read_body(req).await {
         Ok(body) => body,
         Err(resp) => return resp,
     };
@@ -225,23 +225,15 @@ fn method_not_allowed() -> Response<Vec<u8>> {
 }
 
 /// Read the request body as UTF-8, up to [`MAX_BODY_BYTES`].
-async fn read_body(session: &mut ServerSession) -> Result<String, Response<Vec<u8>>> {
-    let mut buf = Vec::new();
-    loop {
-        match session.read_request_body().await {
-            Ok(Some(chunk)) => {
-                if buf.len() + chunk.len() > MAX_BODY_BYTES {
-                    return Err(payload_too_large());
-                }
-                buf.extend_from_slice(&chunk);
-            },
-            Ok(None) => break,
-            Err(error) => {
-                tracing::warn!(%error, "log level admin request body read failed");
-                return Err(internal_error());
-            },
-        }
-    }
+async fn read_body<R: AdminRequest>(req: &mut R) -> Result<String, Response<Vec<u8>>> {
+    let buf = match req.read_body(MAX_BODY_BYTES).await {
+        Ok(buf) => buf,
+        Err(BodyReadError::TooLarge) => return Err(payload_too_large()),
+        Err(BodyReadError::Io(error)) => {
+            tracing::warn!(%error, "log level admin request body read failed");
+            return Err(internal_error());
+        },
+    };
     String::from_utf8(buf).map_err(|error| bad_request(format!("request body is not valid UTF-8: {error}")))
 }
 

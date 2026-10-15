@@ -7,26 +7,39 @@
 //! service. Pingora owns request-smuggling prevention, HTTP/2
 //! backpressure, connection-pool safety, and HTTP/1.1 upgrade detection
 //! with bidirectional forwarding (WebSocket and similar). Praxis code
-//! layered on top, here and in the [`handler`](crate::http::pingora::handler) submodule, owns
+//! layered on top, here and in the `handler` submodule, owns
 //! hop-by-hop header stripping (with conditional preservation for
 //! upgrade requests), Host validation, `X-Forwarded-*` injection, and
 //! retry logic.
+//!
+//! The `health`, `metrics`, `json` and `kv` submodules are backend-neutral
+//! and compile without the `pingora` feature; only their Pingora glue and
+//! the proxy handler itself are gated. They keep this path for now and are
+//! re-exported at `crate::http::{health, metrics, kv}`.
 
+#[cfg(feature = "pingora")]
 use std::sync::Arc;
 
+#[cfg(feature = "pingora")]
 use praxis_core::{
-    PingoraServerRuntime, ProxyError,
+    ProxyError,
+    backend::Runtime,
     config::{Config, ProtocolKind},
 };
 
+#[cfg(feature = "pingora")]
 use crate::{ListenerPipelines, Protocol};
 
 /// Per-request context for filter pipeline results.
+#[cfg(feature = "pingora")]
 pub mod context;
+#[cfg(feature = "pingora")]
 pub(crate) mod convert;
 /// Trailers-Only responses for proxy-generated gRPC errors.
+#[cfg(feature = "pingora")]
 pub(crate) mod grpc_trailers;
 /// HTTP proxy handler and Pingora integration.
+#[cfg(feature = "pingora")]
 pub mod handler;
 /// Health check infrastructure: admin endpoints, probes, and background runner.
 pub mod health;
@@ -36,6 +49,7 @@ pub(crate) mod json;
 #[cfg(feature = "admin-api")]
 pub mod kv;
 /// Listener configuration and TLS setup.
+#[cfg(feature = "pingora")]
 pub mod listener;
 /// Prometheus metrics: recorder, HTTP request counters, and scrape endpoint.
 pub mod metrics;
@@ -51,12 +65,14 @@ pub mod metrics;
 /// [`handler::load_http_handler`] for each listener. Implements [`Protocol`].
 ///
 /// [`Protocol`]: crate::Protocol
+#[cfg(feature = "pingora")]
 pub struct PingoraHttp;
 
+#[cfg(feature = "pingora")]
 impl Protocol for PingoraHttp {
     fn register(
         self: Box<Self>,
-        server: &mut PingoraServerRuntime,
+        server: &mut Runtime,
         config: &Config,
         pipelines: &ListenerPipelines,
     ) -> Result<Vec<tokio::sync::watch::Sender<bool>>, ProxyError> {
@@ -88,6 +104,7 @@ impl Protocol for PingoraHttp {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
