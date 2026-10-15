@@ -8,21 +8,28 @@
 //! enforcement, response body size limits, and automatic hop-by-hop
 //! header sanitization. Supports both buffered (collect full body)
 //! and streaming (chunk-by-chunk) response modes.
+//!
+//! The client is generic over the build's egress [`Connector`]: it speaks
+//! only [`PeerSpec`] and the [`Session`] contract, so it runs unchanged on
+//! any network backend.
+//!
+//! [`Connector`]: crate::egress::Connector
+//! [`PeerSpec`]: crate::egress::PeerSpec
+//! [`Session`]: crate::egress::Session
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use http::HeaderMap;
 use metrics::histogram;
-use pingora_core::upstreams::peer::{HttpPeer, Peer as _};
+use praxis_tls::CachedCaCerts;
 use tracing::{Instrument as _, Span, debug, warn};
 
 use super::{
-    body::dispose_session_abnormal,
     internals::{
-        CircuitGuard, RawExchange, SUBREQUEST_HEADER_DURATION_SECONDS, SubRequestConnector, check_clean_completion,
-        clamp_peer_timeouts, classify_timeout, connection_nominated_tokens, empty_body_needs_framing,
-        ensure_host_header, is_boundary_stripped, is_request_stripped, min_timeout, record_header_termination,
+        CircuitGuard, RawExchange, SUBREQUEST_HEADER_DURATION_SECONDS, SubRequestConnector, classify_timeout,
+        connection_nominated_tokens, empty_body_needs_framing, ensure_host_header, is_boundary_stripped,
+        is_request_stripped, min_timeout, record_header_termination, transport_error,
     },
     types::{
         FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse,
@@ -30,38 +37,20 @@ use super::{
     },
 };
 use crate::{
-    circuit::{CircuitCheck, PeerKey},
+    backend,
+    circuit::CircuitCheck,
     connectivity::{UrlResolutionPolicy, UrlTargetError, prepare_url_target_with_policy},
+    egress::{Completion, Connector, PeerSpec, RequestHead, Session as _},
 };
 
 // -----------------------------------------------------------------------------
-// SubRequestClient
+// Constants
 // -----------------------------------------------------------------------------
 
 /// Maximum number of 1xx interim responses tolerated before a final
 /// response, bounding a pathological upstream that only emits interim
 /// headers (the overall deadline is the other bound).
 const MAX_INTERIM_RESPONSES: u32 = 32;
-
-/// CA certificates loaded from `runtime.upstream_ca_file`.
-#[derive(Clone)]
-struct RuntimeCa(Arc<[pingora_core::utils::tls::WrappedX509]>);
-
-impl std::fmt::Debug for RuntimeCa {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("RuntimeCa").field(&self.0.len()).finish()
-    }
-}
-
-/// Record `err` against the circuit guard, then return it.
-///
-/// Taking the guard here means a later drop cannot record the same attempt again.
-fn charge(guard: &mut Option<CircuitGuard<'_>>, err: SubRequestError) -> SubRequestError {
-    if let Some(guard) = guard.take() {
-        guard.fail(&err);
-    }
-    err
-}
 
 /// Eager buffer capacity cap for buffered response bodies.
 ///
@@ -80,6 +69,10 @@ const EAGER_BODY_CAPACITY: usize = 131_072; // 128 KiB
 /// single call out across unbounded connection attempts. Operator-configured
 /// targets ([`UrlResolutionPolicy::OperatorCached`]) are not capped.
 const MAX_CLIENT_SELECTED_DIALS: usize = 4;
+
+// -----------------------------------------------------------------------------
+// SubRequestClient
+// -----------------------------------------------------------------------------
 
 /// Hardened sub-request executor wrapping a shared connector.
 ///
@@ -108,19 +101,19 @@ const MAX_CLIENT_SELECTED_DIALS: usize = 4;
 /// let client = SubRequestClient::new(connector);
 /// ```
 #[derive(Clone, Debug)]
-pub struct SubRequestClient {
+pub struct SubRequestClient<C: Connector = backend::Connector> {
     /// Wrapped shared connector.
-    connector: SubRequestConnector,
+    connector: SubRequestConnector<C>,
 
     /// Hard ceiling on buffered response bytes. Per-call limits are
     /// clamped to `min(this, per_call)` so callers cannot exceed it.
     pub(super) max_response_bytes: usize,
 
-    /// Parsed `runtime.upstream_ca_file`, when one is configured.
-    upstream_ca: Option<RuntimeCa>,
+    /// Trust anchors from `runtime.upstream_ca_file`, when one is configured.
+    upstream_ca: Option<Arc<CachedCaCerts>>,
 }
 
-impl SubRequestClient {
+impl<C: Connector> SubRequestClient<C> {
     /// Create a client wrapping the given shared connector.
     ///
     /// Defaults the client-wide response ceiling to
@@ -129,7 +122,7 @@ impl SubRequestClient {
     ///
     /// [`ABSOLUTE_MAX_BODY_BYTES`]: crate::config::ABSOLUTE_MAX_BODY_BYTES
     /// [`with_max_response_bytes`]: Self::with_max_response_bytes
-    pub fn new(connector: SubRequestConnector) -> Self {
+    pub fn new(connector: SubRequestConnector<C>) -> Self {
         Self {
             connector,
             max_response_bytes: crate::config::ABSOLUTE_MAX_BODY_BYTES,
@@ -142,7 +135,7 @@ impl SubRequestClient {
     /// Every `execute()` call clamps its per-call limit to
     /// `min(per_call, ceiling)`, preventing callers from
     /// exceeding the global cap.
-    pub fn with_max_response_bytes(connector: SubRequestConnector, max_response_bytes: usize) -> Self {
+    pub fn with_max_response_bytes(connector: SubRequestConnector<C>, max_response_bytes: usize) -> Self {
         Self {
             connector,
             max_response_bytes,
@@ -152,15 +145,15 @@ impl SubRequestClient {
 
     /// Trust `ca` when a cluster does not set its own CA.
     #[must_use]
-    pub fn with_upstream_ca(mut self, ca: Arc<[pingora_core::utils::tls::WrappedX509]>) -> Self {
-        self.upstream_ca = Some(RuntimeCa(ca));
+    pub fn with_upstream_ca(mut self, ca: Arc<CachedCaCerts>) -> Self {
+        self.upstream_ca = Some(ca);
         self
     }
 
     /// Runtime CA bundle, when `runtime.upstream_ca_file` was loaded.
     #[must_use]
-    pub fn upstream_ca(&self) -> Option<Arc<[pingora_core::utils::tls::WrappedX509]>> {
-        self.upstream_ca.as_ref().map(|ca| Arc::clone(&ca.0))
+    pub fn upstream_ca(&self) -> Option<Arc<CachedCaCerts>> {
+        self.upstream_ca.as_ref().map(Arc::clone)
     }
 
     /// Execute a buffered request against an absolute HTTP(S) URL.
@@ -279,7 +272,7 @@ impl SubRequestClient {
     }
 
     /// Access the underlying connector for direct pool operations.
-    pub fn connector(&self) -> &SubRequestConnector {
+    pub fn connector(&self) -> &SubRequestConnector<C> {
         &self.connector
     }
 
@@ -295,23 +288,22 @@ impl SubRequestClient {
 
     /// Shared transport path: admission, connect, I/O, header validation.
     ///
-    /// Returns a live `RawExchange` owning the session, peer, sanitized
+    /// Returns a live `RawExchange` owning the session, sanitized
     /// headers, circuit guard, and admission permit. Both `execute()`
     /// and `send_streaming()` call this, then diverge.
-    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
     #[expect(
         clippy::too_many_arguments,
         reason = "connect cap and hedge cancellation policy are both per-exchange"
     )]
     async fn open_exchange<'conn>(
         &'conn self,
-        peer: &HttpPeer,
+        peer: &PeerSpec,
         request: &SubRequest,
         timeout: Duration,
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
         abandon_neutral: bool,
-    ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
+    ) -> Result<RawExchange<'conn, 'conn, C>, SubRequestError> {
         #[cfg(feature = "otel")]
         let client_span = subrequest_client_span(peer, request);
         #[cfg(not(feature = "otel"))]
@@ -337,7 +329,6 @@ impl SubRequestClient {
     }
 
     /// Open an HTTP exchange while its per-attempt span is active.
-    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
     #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
     #[expect(
         clippy::too_many_arguments,
@@ -345,75 +336,34 @@ impl SubRequestClient {
     )]
     async fn open_exchange_inner<'conn>(
         &'conn self,
-        peer: &HttpPeer,
+        peer: &PeerSpec,
         request: &SubRequest,
         timeout: Duration,
         connect_attempt_cap: Option<Duration>,
         framework_headers: Option<&FrameworkHeaders>,
         client_span: &Span,
         abandon_neutral: bool,
-    ) -> Result<RawExchange<'conn, 'conn>, SubRequestError> {
+    ) -> Result<RawExchange<'conn, 'conn, C>, SubRequestError> {
         let exchange_started = tokio::time::Instant::now();
         let deadline = exchange_started
             .checked_add(timeout)
             .ok_or(SubRequestError::DeadlineExceeded)?;
-        let mut bounded_peer = peer.clone();
-        clamp_peer_timeouts(&mut bounded_peer, timeout);
 
         // ---------------------------------------------------------------------
         // 1. Validate request (before any circuit/admission state)
         // ---------------------------------------------------------------------
-        let path = request
-            .uri
-            .path_and_query()
-            .map_or(b"/".as_slice(), |pq| pq.as_str().as_bytes());
-        let mut req_header = pingora_http::RequestHeader::build(request.method.clone(), path, None)
-            .map_err(|err| SubRequestError::InvalidRequest(err.to_string()))?;
-
-        // Forward the request headers in one pass — no intermediate map
-        // clone, no repeated removal passes: skip hop-by-hop (fixed and
-        // Connection-nominated), framing (re-computed below), and
-        // reserved internal names as each header streams by. Framework
-        // headers are inserted afterwards with replace semantics, as the
-        // old map-insert had.
-        let nominated = connection_nominated_tokens(&request.headers);
-        for (name, value) in &request.headers {
-            if is_request_stripped(name, &nominated) {
-                continue;
-            }
-            let _append = req_header.append_header(name.clone(), value.clone());
-        }
-        drop(nominated);
-        if let Some(fw) = framework_headers {
-            for name in fw.removals() {
-                let _remove = req_header.remove_header(name);
-            }
-            for (name, value) in fw.iter() {
-                let _insert = req_header.insert_header(name.clone(), value.clone());
-            }
-        }
-        #[cfg(feature = "otel")]
-        {
-            inject_subrequest_trace_context(&mut req_header, client_span);
-        }
-        ensure_host_header(&mut req_header, &bounded_peer)?;
-        if !request.body.is_empty() || empty_body_needs_framing(&request.method) {
-            let _cl = req_header.insert_header("Content-Length", request.body.len().to_string());
-        }
+        let head = build_request_head(peer, request, framework_headers, client_span)?;
 
         // ---------------------------------------------------------------------
         // 2. Circuit precheck
         // ---------------------------------------------------------------------
-        let peer_key: Option<PeerKey> = bounded_peer
-            .address()
-            .as_inet()
-            .copied()
-            .map(|addr| PeerKey::new(addr, bounded_peer.sni.as_str()));
-
-        if let (Some(registry), Some(key)) = (&self.connector.circuit_breakers, &peer_key)
-            && !registry.precheck(key)
+        let peer_key = peer.circuit_key();
+        if let Some(registry) = &self.connector.circuit_breakers
+            && !registry.precheck(&peer_key)
         {
-            return Err(SubRequestError::CircuitOpen { peer: key.to_string() });
+            return Err(SubRequestError::CircuitOpen {
+                peer: peer_key.to_string(),
+            });
         }
 
         // ---------------------------------------------------------------------
@@ -428,14 +378,16 @@ impl SubRequestClient {
         // ---------------------------------------------------------------------
         // 4. Circuit try_acquire
         // ---------------------------------------------------------------------
-        let mut circuit_guard = match (&self.connector.circuit_breakers, peer_key) {
-            (Some(registry), Some(key)) => match registry.try_acquire(key.clone()) {
+        let mut circuit_guard = match &self.connector.circuit_breakers {
+            Some(registry) => match registry.try_acquire(peer_key.clone()) {
                 CircuitCheck::Rejected => {
-                    return Err(SubRequestError::CircuitOpen { peer: key.to_string() });
+                    return Err(SubRequestError::CircuitOpen {
+                        peer: peer_key.to_string(),
+                    });
                 },
-                CircuitCheck::Allowed(token) => Some(CircuitGuard::new(registry, key, token)),
+                CircuitCheck::Allowed(token) => Some(CircuitGuard::new(registry, peer_key, token)),
             },
-            _ => None,
+            None => None,
         };
         if abandon_neutral && let Some(guard) = circuit_guard.as_mut() {
             guard.abandon_as_neutral();
@@ -450,19 +402,18 @@ impl SubRequestClient {
         }
         // An optional per-attempt cap bounds only this connect phase; everything
         // after a successful connect still runs against the overall deadline.
+        // The backend's own setup timers are bounded by the exchange timeout, so
+        // this outer timer is what reports a cap that ran out.
         let connect_budget = connect_attempt_cap.map_or(overall_connect_budget, |cap| cap.min(overall_connect_budget));
 
-        let (mut session, reused) = tokio::time::timeout(
-            connect_budget,
-            Box::pin(self.connector.connector().get_http_session(&bounded_peer)),
-        )
-        .await
-        .map_err(|_elapsed| charge(&mut circuit_guard, connect_timeout_error(deadline)))?
-        .map_err(|err| charge(&mut circuit_guard, SubRequestError::Connect(err.to_string())))?;
+        let mut session = tokio::time::timeout(connect_budget, Box::pin(self.connector.inner.connect(peer, timeout)))
+            .await
+            .map_err(|_elapsed| charge(&mut circuit_guard, connect_timeout_error(deadline)))?
+            .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
 
         debug!(
-            peer = %bounded_peer.address(),
-            reused,
+            peer = %peer.address,
+            reused = session.reused(),
             method = %request.method,
             // Path only: a URL-mode query string can carry a credential, so the
             // query is never logged, but the path keeps explicit-peer sub-requests
@@ -471,21 +422,22 @@ impl SubRequestClient {
             "sub-request: connected"
         );
 
+        let write_timeout = peer.connection.write_timeout;
         let header_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
         if header_budget.is_zero() {
             return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
         }
 
-        let header_write_timeout = min_timeout(bounded_peer.options.write_timeout, header_budget);
-        tokio::time::timeout(header_write_timeout, session.write_request_header(Box::new(req_header)))
+        let header_write_timeout = min_timeout(write_timeout, header_budget);
+        tokio::time::timeout(header_write_timeout, session.send_request_head(head))
             .await
             .map_err(|_elapsed| {
                 charge(
                     &mut circuit_guard,
-                    classify_timeout(header_budget, bounded_peer.options.write_timeout, "write"),
+                    classify_timeout(header_budget, write_timeout, "write"),
                 )
             })?
-            .map_err(|err| charge(&mut circuit_guard, SubRequestError::Io(err.to_string())))?;
+            .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
 
         if !request.body.is_empty() {
             let body_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -493,19 +445,19 @@ impl SubRequestClient {
                 session.shutdown().await;
                 return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
             }
-            let body_write_timeout = min_timeout(bounded_peer.options.write_timeout, body_budget);
+            let body_write_timeout = min_timeout(write_timeout, body_budget);
             tokio::time::timeout(
                 body_write_timeout,
-                session.write_request_body(request.body.clone(), true),
+                session.send_request_body(request.body.clone(), true),
             )
             .await
             .map_err(|_elapsed| {
                 charge(
                     &mut circuit_guard,
-                    classify_timeout(body_budget, bounded_peer.options.write_timeout, "write"),
+                    classify_timeout(body_budget, write_timeout, "write"),
                 )
             })?
-            .map_err(|err| charge(&mut circuit_guard, SubRequestError::Io(err.to_string())))?;
+            .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
         }
 
         let finish_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -513,56 +465,43 @@ impl SubRequestClient {
             session.shutdown().await;
             return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
         }
-        let finish_write_timeout = min_timeout(bounded_peer.options.write_timeout, finish_budget);
-        tokio::time::timeout(finish_write_timeout, session.finish_request_body())
+        let finish_write_timeout = min_timeout(write_timeout, finish_budget);
+        tokio::time::timeout(finish_write_timeout, session.finish_request())
             .await
             .map_err(|_elapsed| {
                 charge(
                     &mut circuit_guard,
-                    classify_timeout(finish_budget, bounded_peer.options.write_timeout, "write"),
+                    classify_timeout(finish_budget, write_timeout, "write"),
                 )
             })?
-            .map_err(|err| charge(&mut circuit_guard, SubRequestError::Io(err.to_string())))?;
+            .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
 
         // ---------------------------------------------------------------------
         // 6. Read the response header, skipping 1xx interim responses
         // ---------------------------------------------------------------------
         //
-        // Pingora's H1 client reads exactly one header block per call and does
-        // not advance past an informational (1xx) response; its body reader is
-        // left uninitialized, so reading the body while the status is still 1xx
-        // panics. An upstream may send an unsolicited `100 Continue` or
-        // `103 Early Hints` (RFC 8297) ahead of the final response, so loop
-        // until a final status arrives, honoring the overall deadline.
-        // `101 Switching Protocols` is a final response, not interim.
+        // A transport reads exactly one header block per call and does not
+        // advance past an informational (1xx) response. An upstream may send an
+        // unsolicited `100 Continue` or `103 Early Hints` (RFC 8297) ahead of
+        // the final response, so loop until a final status arrives, honoring
+        // the overall deadline. `101 Switching Protocols` is a final response,
+        // not interim.
+        let read_timeout = peer.connection.read_timeout;
         let mut interim_count = 0_u32;
-        let status = loop {
+        let response = loop {
             let read_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
             if read_budget.is_zero() {
                 session.shutdown().await;
                 return Err(charge(&mut circuit_guard, SubRequestError::DeadlineExceeded));
             }
-            let read_timeout = min_timeout(bounded_peer.options.read_timeout, read_budget);
+            let read_wait = min_timeout(read_timeout, read_budget);
 
-            tokio::time::timeout(read_timeout, session.read_response_header())
+            let candidate = tokio::time::timeout(read_wait, session.read_response_head())
                 .await
-                .map_err(|_elapsed| {
-                    charge(
-                        &mut circuit_guard,
-                        classify_timeout(read_budget, bounded_peer.options.read_timeout, "read"),
-                    )
-                })?
-                .map_err(|err| charge(&mut circuit_guard, SubRequestError::Io(err.to_string())))?;
+                .map_err(|_elapsed| charge(&mut circuit_guard, classify_timeout(read_budget, read_timeout, "read")))?
+                .map_err(|err| charge(&mut circuit_guard, transport_error(err)))?;
 
-            let resp_header = session.response_header().ok_or_else(|| {
-                charge(
-                    &mut circuit_guard,
-                    SubRequestError::Io("no response header received".to_owned()),
-                )
-            })?;
-            let status = resp_header.status.as_u16();
-
-            if (100..=199).contains(&status) && status != 101 {
+            if (100..=199).contains(&candidate.status) && candidate.status != 101 {
                 interim_count = interim_count.saturating_add(1);
                 if interim_count > MAX_INTERIM_RESPONSES {
                     session.shutdown().await;
@@ -573,8 +512,9 @@ impl SubRequestClient {
                 }
                 continue;
             }
-            break status;
+            break candidate;
         };
+        let status = response.status;
         record_http_client_status(client_span, status);
 
         if !(100..=599).contains(&status) {
@@ -584,26 +524,7 @@ impl SubRequestClient {
                 SubRequestError::Io(format!("upstream returned unsupported HTTP status {status}")),
             ));
         }
-        let resp_header = session.response_header().ok_or_else(|| {
-            charge(
-                &mut circuit_guard,
-                SubRequestError::Io("no response header received".to_owned()),
-            )
-        })?;
-        // Copy the response headers in one pass, sized up front. The
-        // values are already-validated `HeaderValue`s (pingora's header
-        // map stores the http crate's type), so cloning is a refcount
-        // bump — re-validating every byte through `from_bytes` was pure
-        // waste and its error arm was unreachable.
-        let resp_nominated = connection_nominated_tokens(&resp_header.headers);
-        let mut resp_headers = HeaderMap::with_capacity(resp_header.headers.len());
-        for (name, value) in &resp_header.headers {
-            if is_boundary_stripped(name, &resp_nominated) {
-                continue;
-            }
-            resp_headers.append(name.clone(), value.clone());
-        }
-        let version = resp_header.version;
+        let resp_headers = sanitize_response_headers(&response.headers);
 
         // ---------------------------------------------------------------------
         // 7. Return RawExchange
@@ -612,10 +533,10 @@ impl SubRequestClient {
 
         Ok(RawExchange {
             session,
-            peer: bounded_peer,
+            read_timeout,
             connector: &self.connector,
             status,
-            version,
+            version: response.version,
             headers: resp_headers,
             circuit_guard,
             permit,
@@ -650,16 +571,15 @@ impl SubRequestClient {
         clippy::too_many_arguments,
         reason = "framework_headers is the typed metadata injection point"
     )]
-    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
     #[expect(clippy::too_many_lines, reason = "sequential HTTP exchange steps")]
     pub async fn send_streaming(
         &self,
-        peer: &HttpPeer,
+        peer: &PeerSpec,
         request: &SubRequest,
         timeout: Duration,
         limits: StreamLimits,
         framework_headers: Option<&FrameworkHeaders>,
-    ) -> Result<StreamingSubResponse, SubRequestError> {
+    ) -> Result<StreamingSubResponse<C>, SubRequestError> {
         // Streaming uses no per-attempt connect cap: its header `timeout` already
         // bounds the whole connect-plus-header phase. Cancellation still records
         // a circuit failure; only a hedged attempt is neutral on drop.
@@ -676,9 +596,9 @@ impl SubRequestClient {
 
         // Check for header-time completion (HEAD, 204, 304, zero-length).
         if exchange.session.response_done() {
-            match check_clean_completion(&mut exchange.session) {
-                Ok(true) => {},
-                Ok(false) => {
+            match exchange.session.completion() {
+                Ok(Completion::Finished) => {},
+                Ok(Completion::Incomplete) => {
                     let err = SubRequestError::Io(
                         "upstream indicated response done but stream is not cleanly terminated".to_owned(),
                     );
@@ -686,16 +606,20 @@ impl SubRequestClient {
                         Box::pin(fail_header_exchange(exchange, circuit_guard, "header_incomplete", err)).await,
                     );
                 },
-                Err(err) => return Err(Box::pin(fail_header_exchange(exchange, circuit_guard, "h2_error", err)).await),
+                Err(err) => {
+                    return Err(Box::pin(fail_header_exchange(
+                        exchange,
+                        circuit_guard,
+                        "h2_error",
+                        transport_error(err),
+                    ))
+                    .await);
+                },
             }
             if let Some(guard) = circuit_guard {
                 guard.finalize_success();
             }
-            exchange
-                .connector
-                .connector()
-                .release_http_session(exchange.session, &exchange.peer, None)
-                .await;
+            exchange.connector.inner.release(exchange.session, true).await;
             record_header_termination("header_only");
             return Ok(StreamingSubResponse {
                 status: exchange.status,
@@ -712,11 +636,11 @@ impl SubRequestClient {
             guard.finalize_success();
         }
 
-        // Capture the operator-configured read timeout before clearing
-        // Pingora's internal timer. next_chunk() enforces it externally
+        // Capture the operator-configured read timeout before clearing the
+        // transport's internal timer. next_chunk() enforces it externally
         // alongside idle_timeout and stream_deadline.
-        let read_timeout = exchange.peer.options.read_timeout;
-        exchange.session.set_read_timeout(None);
+        let read_timeout = exchange.read_timeout;
+        exchange.session.clear_read_timeout();
 
         // Compute stream deadline from max_stream_duration. One clock
         // read serves both the deadline and the stream start below.
@@ -728,7 +652,6 @@ impl SubRequestClient {
 
         let body = SubResponseBody {
             session: Some(exchange.session),
-            peer: Some(exchange.peer),
             connector: Some(exchange.connector.clone()),
             permit: exchange.permit,
             client_span: exchange.client_span,
@@ -780,14 +703,9 @@ impl SubRequestClient {
         clippy::too_many_arguments,
         reason = "stable public buffered-execution signature with framework metadata"
     )]
-    #[expect(
-        clippy::large_stack_frames,
-        clippy::large_futures,
-        reason = "Pingora session types are large; leaving the delegation unboxed preserves downstream future-size expectations and avoids a per-call heap allocation"
-    )]
     pub async fn execute(
         &self,
-        peer: &HttpPeer,
+        peer: &PeerSpec,
         request: &SubRequest,
         max_response_bytes: usize,
         timeout: Duration,
@@ -819,14 +737,9 @@ impl SubRequestClient {
         clippy::too_many_arguments,
         reason = "framework_headers is the typed metadata injection point"
     )]
-    #[expect(
-        clippy::large_stack_frames,
-        clippy::large_futures,
-        reason = "Pingora session types are large; leaving the delegation unboxed preserves downstream future-size expectations and avoids a per-call heap allocation"
-    )]
     pub async fn execute_abandon_neutral(
         &self,
-        peer: &HttpPeer,
+        peer: &PeerSpec,
         request: &SubRequest,
         max_response_bytes: usize,
         timeout: Duration,
@@ -854,14 +767,9 @@ impl SubRequestClient {
         clippy::too_many_arguments,
         reason = "connect cap is URL fallback's per-attempt budget alongside framework metadata"
     )]
-    #[expect(
-        clippy::large_stack_frames,
-        clippy::large_futures,
-        reason = "Pingora session types are large; leaving the delegation unboxed preserves downstream future-size expectations and avoids a per-call heap allocation"
-    )]
     async fn execute_with_connect_cap(
         &self,
-        peer: &HttpPeer,
+        peer: &PeerSpec,
         request: &SubRequest,
         max_response_bytes: usize,
         timeout: Duration,
@@ -886,11 +794,10 @@ impl SubRequestClient {
         clippy::too_many_arguments,
         reason = "connect cap and hedge cancellation policy are both per-exchange"
     )]
-    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
     #[expect(clippy::too_many_lines, reason = "inline body collection loop")]
     async fn execute_inner(
         &self,
-        peer: &HttpPeer,
+        peer: &PeerSpec,
         request: &SubRequest,
         max_response_bytes: usize,
         timeout: Duration,
@@ -911,7 +818,7 @@ impl SubRequestClient {
 
         let RawExchange {
             mut session,
-            peer: bounded_peer,
+            read_timeout: configured_read,
             connector,
             status,
             version,
@@ -951,7 +858,6 @@ impl SubRequestClient {
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.parse::<usize>().ok())
             .map_or(0, |len| len.min(effective_limit).min(EAGER_BODY_CAPACITY));
-        let configured_read = bounded_peer.options.read_timeout;
         let body_result: Result<Bytes, SubRequestError> = tokio::time::timeout(remaining, async {
             let mut body_buf = Vec::with_capacity(advertised);
             while !session.response_done() {
@@ -960,8 +866,8 @@ impl SubRequestClient {
                     session.shutdown().await;
                     return Err(SubRequestError::DeadlineExceeded);
                 }
-                let read_timeout = min_timeout(configured_read, read_budget);
-                match tokio::time::timeout(read_timeout, session.read_response_body()).await {
+                let read_wait = min_timeout(configured_read, read_budget);
+                match tokio::time::timeout(read_wait, session.read_response_body()).await {
                     Ok(Ok(Some(chunk))) => {
                         if body_buf.len().saturating_add(chunk.len()) > effective_limit {
                             warn!(
@@ -981,7 +887,7 @@ impl SubRequestClient {
                     Ok(Ok(None)) => break,
                     Ok(Err(err)) => {
                         session.shutdown().await;
-                        return Err(SubRequestError::Io(err.to_string()));
+                        return Err(transport_error(err));
                     },
                     Err(_elapsed) => {
                         session.shutdown().await;
@@ -992,10 +898,7 @@ impl SubRequestClient {
 
             debug!(status, body_bytes = body_buf.len(), "sub-request: response received");
 
-            connector
-                .connector()
-                .release_http_session(session, &bounded_peer, None)
-                .await;
+            connector.inner.release(session, true).await;
 
             Ok(Bytes::from(body_buf))
         })
@@ -1020,21 +923,100 @@ impl SubRequestClient {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Request Assembly
+// -----------------------------------------------------------------------------
+
+/// Build the sanitized request head: the method, the origin-form target, and
+/// the headers that may cross the sub-request boundary.
+///
+/// Framework metadata and trace context replace whatever the caller sent
+/// under the same names, and `Host` and `Content-Length` are settled last.
+#[expect(clippy::too_many_lines, reason = "one pass over the headers, then framing")]
+fn build_request_head(
+    peer: &PeerSpec,
+    request: &SubRequest,
+    framework_headers: Option<&FrameworkHeaders>,
+    client_span: &Span,
+) -> Result<RequestHead, SubRequestError> {
+    let target = request
+        .uri
+        .path_and_query()
+        .map_or_else(|| String::from("/"), |pq| String::from(pq.as_str()));
+
+    // Forward the request headers in one pass: skip hop-by-hop (fixed and
+    // Connection-nominated), framing (re-computed below), and reserved
+    // internal names as each header streams by. Framework headers are
+    // inserted afterwards with replace semantics.
+    let nominated = connection_nominated_tokens(&request.headers);
+    let mut headers = HeaderMap::with_capacity(request.headers.len());
+    for (name, value) in &request.headers {
+        if is_request_stripped(name, &nominated) {
+            continue;
+        }
+        headers.append(name.clone(), value.clone());
+    }
+    drop(nominated);
+
+    if let Some(fw) = framework_headers {
+        for name in fw.removals() {
+            headers.remove(name);
+        }
+        for (name, value) in fw.iter() {
+            headers.insert(name.clone(), value.clone());
+        }
+    }
+
+    #[cfg(feature = "otel")]
+    inject_subrequest_trace_context(&mut headers, client_span);
+    #[cfg(not(feature = "otel"))]
+    {
+        _ = client_span;
+    }
+
+    ensure_host_header(&mut headers, peer.address)?;
+    if !request.body.is_empty() || empty_body_needs_framing(&request.method) {
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from(request.body.len()),
+        );
+    }
+
+    Ok(RequestHead {
+        headers,
+        method: request.method.clone(),
+        target,
+    })
+}
+
+/// Copy the response headers that may cross the sub-request boundary.
+fn sanitize_response_headers(received: &HeaderMap) -> HeaderMap {
+    let nominated = connection_nominated_tokens(received);
+    let mut headers = HeaderMap::with_capacity(received.len());
+    for (name, value) in received {
+        if is_boundary_stripped(name, &nominated) {
+            continue;
+        }
+        headers.append(name.clone(), value.clone());
+    }
+    headers
+}
+
 /// Replace propagated request headers with the active exported client span context.
 #[cfg(feature = "otel")]
-fn inject_subrequest_trace_context(req_header: &mut pingora_http::RequestHeader, client_span: &Span) {
+fn inject_subrequest_trace_context(headers: &mut HeaderMap, client_span: &Span) {
     use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
     let span_context = client_span.context();
     let mut propagated = HeaderMap::new();
     if crate::trace_context::inject_context(&mut propagated, &span_context) {
-        let _remove_traceparent = req_header.remove_header("traceparent");
-        let _remove_tracestate = req_header.remove_header("tracestate");
+        headers.remove("traceparent");
+        headers.remove("tracestate");
         if let Some(value) = propagated.get("traceparent") {
-            let _insert_traceparent = req_header.insert_header("traceparent", value.clone());
+            headers.insert("traceparent", value.clone());
         }
         if let Some(value) = propagated.get("tracestate") {
-            let _insert_tracestate = req_header.insert_header("tracestate", value.clone());
+            headers.insert("tracestate", value.clone());
         }
     }
 }
@@ -1043,13 +1025,19 @@ fn inject_subrequest_trace_context(req_header: &mut pingora_http::RequestHeader,
 // Private Utilities
 // -----------------------------------------------------------------------------
 
+/// Record `err` against the circuit guard, then return it.
+///
+/// Taking the guard here means a later drop cannot record the same attempt again.
+fn charge(guard: &mut Option<CircuitGuard<'_>>, err: SubRequestError) -> SubRequestError {
+    if let Some(guard) = guard.take() {
+        guard.fail(&err);
+    }
+    err
+}
+
 /// Create a bounded HTTP client span for a framework sub-request.
 #[cfg(feature = "otel")]
-fn subrequest_client_span(peer: &HttpPeer, request: &SubRequest) -> Span {
-    let (server_address, server_port) = peer._address.as_inet().map_or_else(
-        || ("unix".to_owned(), 0),
-        |address| (address.ip().to_string(), address.port()),
-    );
+fn subrequest_client_span(peer: &PeerSpec, request: &SubRequest) -> Span {
     let method = request.method.as_str();
     tracing::info_span!(
         "http_client_request",
@@ -1059,8 +1047,8 @@ fn subrequest_client_span(peer: &HttpPeer, request: &SubRequest) -> Span {
         "http.request.method" = method,
         "http.response.status_code" = tracing::field::Empty,
         "error.type" = tracing::field::Empty,
-        "server.address" = server_address,
-        "server.port" = server_port,
+        "server.address" = peer.address.ip().to_string(),
+        "server.port" = peer.address.port(),
     )
 }
 
@@ -1113,7 +1101,7 @@ fn connect_timeout_error(deadline: tokio::time::Instant) -> SubRequestError {
     }
 }
 
-/// Pingora transport diagnostics may include raw response header bytes. URL
+/// Transport diagnostics may include raw response header bytes. URL
 /// execution must not return those bytes because upstreams can reflect a
 /// credential-bearing query in a malformed response. Keep the error category
 /// while replacing untrusted free-form messages with fixed text.
@@ -1135,20 +1123,15 @@ fn redact_url_exchange_error(error: SubRequestError) -> SubRequestError {
 /// Tear down an abnormally terminated header exchange: drop the circuit
 /// guard (recording a failure via its `Drop` impl), discard the session,
 /// record the termination metric, and hand back the error to return.
-async fn fail_header_exchange(
-    exchange: RawExchange<'_, '_>,
+async fn fail_header_exchange<C: Connector>(
+    exchange: RawExchange<'_, '_, C>,
     circuit_guard: Option<CircuitGuard<'_>>,
     termination: &'static str,
     error: SubRequestError,
 ) -> SubRequestError {
     record_subrequest_client_error(&exchange.client_span, "subrequest_header");
     drop(circuit_guard);
-    dispose_session_abnormal(
-        exchange.session,
-        Some(&exchange.peer),
-        Some(exchange.connector.connector()),
-    )
-    .await;
+    exchange.connector.inner.release(exchange.session, false).await;
     record_header_termination(termination);
     error
 }

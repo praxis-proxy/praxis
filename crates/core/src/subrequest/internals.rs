@@ -3,25 +3,26 @@
 
 //! Internal connector types and metric constants for sub-request execution.
 //!
-//! Provides [`SubRequestConnector`] wrapping Pingora's HTTP connector
-//! with circuit breaker integration, connection pooling, and bounded
-//! concurrency via semaphores. Defines metric name constants shared
-//! across buffered and streaming execution paths.
+//! Provides [`SubRequestConnector`], which wraps the build's egress
+//! [`Connector`] with circuit breaker integration and bounded concurrency
+//! via semaphores. Defines metric name constants shared across buffered
+//! and streaming execution paths.
+//!
+//! [`Connector`]: crate::egress::Connector
 
-use std::{sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use http::HeaderMap;
 use metrics::{counter, histogram};
-use pingora_core::{
-    connectors::{ConnectorOptions, http::Connector},
-    protocols::http::client::HttpSession,
-    upstreams::peer::{HttpPeer, Peer as _},
-};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::debug;
 
 use super::types::{SubRequestError, SubResponse};
-use crate::circuit::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitToken, PeerKey};
+use crate::{
+    backend,
+    circuit::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitToken, PeerKey},
+    egress::{Connector, EgressError},
+};
 
 // -----------------------------------------------------------------------------
 // Metric names
@@ -59,9 +60,9 @@ pub struct SubRequestConnectorOptions {
 
 /// Shared HTTP connector for sub-requests.
 ///
-/// Wraps Pingora's [`Connector`] behind an [`Arc`] so that all
-/// filter instances share a single connection pool. Created once at
-/// server startup and passed through unchanged on config reload.
+/// Wraps the backend's egress [`Connector`] so that all filter instances
+/// share a single connection pool. Created once at server startup and
+/// passed through unchanged on config reload.
 ///
 /// An optional admission semaphore limits the number of concurrently
 /// active sub-request exchanges.
@@ -73,13 +74,11 @@ pub struct SubRequestConnectorOptions {
 /// let connector = SubRequestConnector::new(128, None);
 /// let _clone = connector.clone();
 /// ```
-///
-/// [`Arc`]: std::sync::Arc
-/// [`Connector`]: pingora_core::connectors::http::Connector
 #[derive(Clone)]
-pub struct SubRequestConnector {
-    /// Shared Pingora HTTP connector.
-    pub(super) inner: Arc<Connector<()>>,
+pub struct SubRequestConnector<C: Connector = backend::Connector> {
+    /// The backend's connector and pool. Shared, not cloned, so that its
+    /// address tells callers whether two holders dial through one pool.
+    pub(super) inner: Arc<C>,
 
     /// Admission semaphore bounding concurrently active exchanges.
     pub(super) admission: Option<Arc<Semaphore>>,
@@ -92,8 +91,8 @@ pub struct SubRequestConnector {
 }
 
 impl SubRequestConnector {
-    /// Create a connector with the given keepalive pool size and
-    /// optional active-connection limit.
+    /// Create a connector on the build's backend with the given keepalive
+    /// pool size and optional active-connection limit.
     ///
     /// ```
     /// use praxis_core::subrequest::SubRequestConnector;
@@ -103,16 +102,10 @@ impl SubRequestConnector {
     /// let bounded = SubRequestConnector::new(64, Some(256));
     /// ```
     pub fn new(keepalive_pool_size: usize, max_connections: Option<usize>) -> Self {
-        let options = ConnectorOptions::new(keepalive_pool_size);
-        Self {
-            inner: Arc::new(Connector::new(Some(options))),
-            admission: max_connections.map(|n| Arc::new(Semaphore::new(n))),
-            configured_max_connections: max_connections,
-            circuit_breakers: None,
-        }
+        Self::with_connector(backend::Connector::new(keepalive_pool_size), max_connections, None)
     }
 
-    /// Create a connector from [`SubRequestConnectorOptions`].
+    /// Create a connector on the build's backend from [`SubRequestConnectorOptions`].
     ///
     /// ```
     /// use praxis_core::subrequest::{SubRequestConnector, SubRequestConnectorOptions};
@@ -125,21 +118,48 @@ impl SubRequestConnector {
     /// });
     /// ```
     pub fn with_options(opts: SubRequestConnectorOptions) -> Self {
-        let options = ConnectorOptions::new(opts.keepalive_pool_size);
+        Self::with_connector(
+            backend::Connector::new(opts.keepalive_pool_size),
+            opts.max_connections,
+            opts.circuit_breaker,
+        )
+    }
+}
+
+impl<C: Connector> SubRequestConnector<C> {
+    /// Wrap an already-built egress connector.
+    ///
+    /// The build's backend is the usual choice ([`new`] and
+    /// [`with_options`]); this is for a caller that supplies its own, such as
+    /// a test double.
+    ///
+    /// ```
+    /// use praxis_core::{
+    ///     egress::{Connector as _, Unavailable},
+    ///     subrequest::SubRequestConnector,
+    /// };
+    ///
+    /// let connector = SubRequestConnector::with_connector(Unavailable::new(8), Some(4), None);
+    /// assert_eq!(connector.configured_max_connections(), Some(4));
+    /// ```
+    ///
+    /// [`new`]: SubRequestConnector::new
+    /// [`with_options`]: SubRequestConnector::with_options
+    pub fn with_connector(
+        inner: C,
+        max_connections: Option<usize>,
+        circuit_breaker: Option<CircuitBreakerConfig>,
+    ) -> Self {
         Self {
-            inner: Arc::new(Connector::new(Some(options))),
-            admission: opts.max_connections.map(|n| Arc::new(Semaphore::new(n))),
-            configured_max_connections: opts.max_connections,
-            circuit_breakers: opts
-                .circuit_breaker
-                .map(|cfg| Arc::new(CircuitBreakerRegistry::new(cfg))),
+            inner: Arc::new(inner),
+            admission: max_connections.map(|limit| Arc::new(Semaphore::new(limit))),
+            configured_max_connections: max_connections,
+            circuit_breakers: circuit_breaker.map(|cfg| Arc::new(CircuitBreakerRegistry::new(cfg))),
         }
     }
 
-    /// Access the underlying Pingora [`Connector`].
-    ///
-    /// [`Connector`]: pingora_core::connectors::http::Connector
-    pub fn connector(&self) -> &Connector<()> {
+    /// Access the underlying egress [`Connector`].
+    pub fn connector(&self) -> &C {
         &self.inner
     }
 
@@ -200,10 +220,10 @@ impl SubRequestConnector {
     }
 }
 
-impl std::fmt::Debug for SubRequestConnector {
+impl<C: Connector> std::fmt::Debug for SubRequestConnector<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubRequestConnector")
-            .field("pool", &"Connector<()>")
+            .field("pool", &std::any::type_name::<C>())
             .field("max_connections", &self.configured_max_connections)
             .field("circuit_breakers", &self.circuit_breakers.is_some())
             .finish()
@@ -219,13 +239,13 @@ impl std::fmt::Debug for SubRequestConnector {
 /// Returned by `open_exchange()` and consumed by either
 /// `execute()` (buffered collection) or `send_streaming()`
 /// (body ownership handoff).
-pub(super) struct RawExchange<'conn, 'reg> {
-    /// Live Pingora HTTP session.
-    pub(super) session: HttpSession<()>,
-    /// Peer address (timeout-bounded).
-    pub(super) peer: HttpPeer,
+pub(super) struct RawExchange<'conn, 'reg, C: Connector> {
+    /// Live transport session.
+    pub(super) session: C::Session,
+    /// The peer's operator-configured per-read timeout.
+    pub(super) read_timeout: Option<Duration>,
     /// Connector ref for session release.
-    pub(super) connector: &'conn SubRequestConnector,
+    pub(super) connector: &'conn SubRequestConnector<C>,
     /// HTTP status code.
     pub(super) status: u16,
     /// Protocol version of the upstream response.
@@ -335,23 +355,8 @@ impl Drop for CircuitGuard<'_> {
 }
 
 // -----------------------------------------------------------------------------
-// Protocol-aware completion check
+// Header-phase termination
 // -----------------------------------------------------------------------------
-
-/// Protocol-aware clean completion check.
-///
-/// Returns `Ok(true)` for clean EOF, `Ok(false)` for incomplete,
-/// and `Err` for H2 error-terminated streams.
-pub(super) fn check_clean_completion(session: &mut HttpSession<()>) -> Result<bool, SubRequestError> {
-    use pingora_core::protocols::http::custom::client::Session as _;
-    match session {
-        HttpSession::H1(h1) => Ok(h1.is_body_done()),
-        HttpSession::H2(h2) => h2
-            .check_response_end_or_error()
-            .map_err(|err| SubRequestError::Io(err.to_string())),
-        HttpSession::Custom(custom) => Ok(custom.response_finished()),
-    }
-}
 
 /// Record metrics and trace for header-phase stream termination.
 ///
@@ -424,23 +429,28 @@ pub(super) fn empty_body_needs_framing(method: &http::Method) -> bool {
     matches!(*method, http::Method::POST | http::Method::PUT | http::Method::PATCH)
 }
 
-/// Ensure HTTP/1.1 virtual hosting and HTTP/2 `:authority` are valid.
-pub(super) fn ensure_host_header(
-    request: &mut pingora_http::RequestHeader,
-    peer: &HttpPeer,
-) -> Result<(), SubRequestError> {
-    if !request.headers.contains_key(http::header::HOST) {
-        request
-            .insert_header(http::header::HOST, peer.address().to_string())
+/// Ensure HTTP/1.1 virtual hosting and HTTP/2 `:authority` are valid by
+/// defaulting a missing `Host` to the peer's socket address.
+pub(super) fn ensure_host_header(headers: &mut HeaderMap, address: SocketAddr) -> Result<(), SubRequestError> {
+    if !headers.contains_key(http::header::HOST) {
+        let host = http::HeaderValue::from_str(&address.to_string())
             .map_err(|error| SubRequestError::InvalidRequest(error.to_string()))?;
+        headers.insert(http::header::HOST, host);
     }
     Ok(())
 }
 
-/// Clamp connect timeouts to the remaining overall deadline.
-pub(super) fn clamp_peer_timeouts(peer: &mut HttpPeer, deadline: Duration) {
-    peer.options.connection_timeout = Some(min_timeout(peer.options.connection_timeout, deadline));
-    peer.options.total_connection_timeout = Some(min_timeout(peer.options.total_connection_timeout, deadline));
+/// Map a transport failure onto the sub-request error it means.
+///
+/// Message text is carried through unchanged so callers keep seeing the
+/// transport's own diagnostics.
+pub(super) fn transport_error(err: EgressError) -> SubRequestError {
+    match err {
+        EgressError::InvalidRequest(message) => SubRequestError::InvalidRequest(message),
+        EgressError::Connect(message) => SubRequestError::Connect(message),
+        EgressError::Io(message) => SubRequestError::Io(message),
+        unavailable @ EgressError::Unavailable => SubRequestError::Connect(unavailable.to_string()),
+    }
 }
 
 /// Keep an operator-configured timeout when it is stricter than the deadline.
