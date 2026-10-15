@@ -15,6 +15,8 @@ workspace = true
 dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
+h2 = { workspace = true }
 criterion = { workspace = true }
 governor = { workspace = true }
 http = { workspace = true }
@@ -26,6 +28,11 @@ praxis-tls = { workspace = true, features = ["bench-utils"] }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "time"] }
+
+[[bench]]
+name = "subrequest_headers"
+path = "benches/subrequest_headers.rs"
+harness = false
 
 [[bench]]
 name = "condition_eval"

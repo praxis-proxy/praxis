@@ -3486,9 +3486,11 @@ dependencies = [
 name = "praxis-tests-benches"
 version = "0.7.4"
 dependencies = [
+ "bytes",
  "criterion",
  "dhat",
  "governor",
+ "h2",
  "http",
  "parking_lot",
  "portable-atomic",
