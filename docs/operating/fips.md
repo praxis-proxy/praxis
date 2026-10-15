@@ -20,7 +20,7 @@ features. The FIPS build leaves out what is not yet FIPS compliant:
 | | Standard | FIPS |
 |---|---|---|
 | Make targets | `release`, `container` | `release-fips`, `container-fips` |
-| Cargo features | defaults | `config-reload,admin-api` |
+| Cargo features | defaults | `pingora,config-reload,admin-api` |
 | `policy` filter (policy engine) | yes | no: its dependencies carry their own cryptography |
 | Base image | Alpine, praxis built with upstream Rust | `ubi9/ubi-minimal`, praxis built with Red Hat's `rust-toolset` on `ubi9/ubi`, both pinned by digest and signature-verified |
 | OpenSSL | Alpine's, dynamically linked | UBI's, dynamically linked (`openssl-libs` and `openssl-fips-provider-so`), the validated module on a FIPS host |
