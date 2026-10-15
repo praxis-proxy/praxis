@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Shared [`HttpPeer`] construction utilities for TLS, SNI, and connection options.
+//! Address resolution and server-name derivation for upstream peers, plus,
+//! under the `pingora` feature, the mapping of connection options and
+//! cached TLS material onto a Pingora `HttpPeer`.
 //!
-//! Used by both the protocol layer's upstream peer builder and the
-//! filter layer's sub-request executor to avoid duplicating TLS
-//! and connection option mapping.
+//! The resolution and naming helpers are backend-neutral and feed
+//! [`PeerSpec`]; the Pingora mappings are what the Pingora backend applies
+//! when it turns a spec into a peer.
 //!
-//! [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
+//! [`PeerSpec`]: crate::egress::PeerSpec
 
 use std::{
     net::{IpAddr, SocketAddr},
@@ -16,12 +18,13 @@ use std::{
 };
 
 use dashmap::DashMap;
+#[cfg(feature = "pingora")]
 use pingora_core::{protocols::ALPN, upstreams::peer::HttpPeer};
 
-use super::{
-    ConnectionOptions,
-    trusted_private::{is_trusted_host, trusted_host_may_reach},
-};
+#[cfg(feature = "pingora")]
+use super::ConnectionOptions;
+use super::trusted_private::{is_trusted_host, trusted_host_may_reach};
+#[cfg(feature = "pingora")]
 use crate::config::UpstreamHttpVersion;
 
 /// TTL for cached DNS entries.
@@ -957,6 +960,7 @@ fn select_preferred_address(addrs: &[SocketAddr], address: &str) -> Result<Socke
 ///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 #[inline]
+#[cfg(feature = "pingora")]
 pub fn apply_connection_options(peer: &mut HttpPeer, opts: &ConnectionOptions) {
     peer.options.connection_timeout = opts.connection_timeout;
     peer.options.total_connection_timeout = opts.total_connection_timeout;
@@ -972,6 +976,7 @@ pub fn apply_connection_options(peer: &mut HttpPeer, opts: &ConnectionOptions) {
 /// == 1` forces the HTTP/1.1 pool, and over plaintext (where there is no
 /// negotiation) `get_min_http_version() == 2` is the signal to speak h2c
 /// with prior knowledge.
+#[cfg(feature = "pingora")]
 fn alpn_for(version: UpstreamHttpVersion) -> ALPN {
     match version {
         UpstreamHttpVersion::H1 => ALPN::H1,
@@ -994,6 +999,7 @@ fn alpn_for(version: UpstreamHttpVersion) -> ALPN {
 ///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
+#[cfg(feature = "pingora")]
 pub fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls, address: &str) {
     if !tls.verify() {
         tracing::debug!(upstream = %address, "upstream TLS verification disabled for this peer");
@@ -1018,6 +1024,7 @@ pub fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls,
 /// Convert cached CA DER bytes into [`WrappedX509`] values.
 ///
 /// [`WrappedX509`]: pingora_core::utils::tls::WrappedX509
+#[cfg(feature = "pingora")]
 pub fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<pingora_core::utils::tls::WrappedX509> {
     cached
         .der_certs()
@@ -1033,6 +1040,7 @@ pub fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<pingora_core::u
 /// Convert cached client cert/key DER bytes into a [`CertKey`].
 ///
 /// [`CertKey`]: pingora_core::utils::tls::CertKey
+#[cfg(feature = "pingora")]
 pub fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora_core::utils::tls::CertKey {
     pingora_core::utils::tls::CertKey::new(cached.cert_der().to_vec(), cached.key_der().to_vec())
 }
@@ -1153,6 +1161,9 @@ pub fn tls_server_name(tls: &praxis_tls::CachedClusterTls, address: &str) -> Res
 )]
 mod tests {
     use super::*;
+    // The parent only imports this for the Pingora peer builder.
+    #[cfg(not(feature = "pingora"))]
+    use crate::connectivity::ConnectionOptions;
 
     #[tokio::test]
     async fn resolve_address_parses_literal_without_dns() {
@@ -1552,6 +1563,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pingora")]
     fn apply_cached_tls_memoizes_ca_conversion() {
         let cached_ca = Arc::new(praxis_tls::CachedCaCerts::new(vec![vec![1, 2, 3]]));
         let converted_a: *const [pingora_core::utils::tls::WrappedX509] = cached_ca
@@ -1573,6 +1585,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pingora")]
     fn apply_connection_options_defaults_to_http1() {
         let mut peer = HttpPeer::new("127.0.0.1:80", false, String::new());
         apply_connection_options(&mut peer, &ConnectionOptions::default());
@@ -1584,6 +1597,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pingora")]
     fn apply_connection_options_sets_h2_alpn() {
         let mut peer = HttpPeer::new("127.0.0.1:80", false, String::new());
         let opts = ConnectionOptions {
@@ -1604,6 +1618,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pingora")]
     fn apply_connection_options_sets_h2h1_alpn_for_auto() {
         let mut peer = HttpPeer::new("127.0.0.1:80", false, String::new());
         let opts = ConnectionOptions {
@@ -1624,6 +1639,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "pingora")]
     fn apply_connection_options_sets_timeouts() {
         use std::time::Duration;
 
