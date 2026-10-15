@@ -3459,7 +3459,6 @@ dependencies = [
 name = "praxis-test-utils"
 version = "0.7.4"
 dependencies = [
- "arc-swap",
  "async-trait",
  "bytes",
  "futures",
@@ -3472,7 +3471,6 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
  "praxis-proxy-tls",
- "quixotic-plecostomus-core",
  "rcgen",
  "rustls",
  "tempfile",

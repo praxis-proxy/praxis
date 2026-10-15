@@ -11,13 +11,12 @@ publish = false
 workspace = true
 
 [dependencies]
-arc-swap = { workspace = true }
 # The same two features as praxis-protocol below, and nothing else: the
 # workspace declares the binary crate without its defaults so the policy engine
 # is a choice each test crate makes (its `policy-engine` feature), not a
 # side effect of depending on the harness. `--no-default-features` on a test
 # crate therefore builds the proxy exactly as the FIPS build does.
-praxis = { workspace = true, features = ["config-reload", "admin-api"] }
+praxis = { workspace = true, features = ["pingora", "config-reload", "admin-api"] }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 # The shared harness exercises admin/health/metrics endpoints and cert hot-reload;
@@ -35,7 +34,6 @@ serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
-pingora-core = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

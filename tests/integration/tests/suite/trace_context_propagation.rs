@@ -329,7 +329,11 @@ impl HttpFilter for PreReadCalloutFilter {
             return Ok(FilterAction::Continue);
         }
 
-        let peer = pingora_core::upstreams::peer::HttpPeer::new(self.callout.clone(), false, String::new());
+        let address: std::net::SocketAddr = self
+            .callout
+            .parse()
+            .map_err(|e| -> FilterError { format!("callout address: {e}").into() })?;
+        let peer = praxis_core::egress::PeerSpec::plain(address);
         let response = ctx
             .execute_subrequest(
                 &peer,
