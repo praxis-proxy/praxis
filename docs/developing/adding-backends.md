@@ -158,8 +158,10 @@ The Pingora glue is `crates/protocol/src/http/pingora/health/pingora_glue.rs`.
 
 ### 6. Build and CI
 
-- Add the feature to `check-features` in the `Makefile` so it compiles on
-  its own.
+- Add a separate invocation to `check-features` in the `Makefile` that uses
+  `--no-default-features --features <name> --all-targets`. The existing
+  optional-feature loop always enables `pingora`, so adding another backend
+  to that loop would enable mutually exclusive backends together.
 - Add the feature to the `not(...)` list of the dead-code expectation at
   the top of `crates/protocol/src/http/pingora/metrics.rs`: with your
   backend compiled in, the recording helpers have a caller again.
