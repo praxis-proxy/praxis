@@ -138,6 +138,7 @@ check: ## cargo check of the default and lean feature sets
 	cargo check -p praxis-proxy-filter --no-default-features
 	cargo check -p praxis-proxy-core --no-default-features
 	cargo check -p praxis-proxy-protocol --no-default-features
+	cargo check -p praxis-proxy-protocol --no-default-features --features admin-api --all-targets
 
 # Verify every optional and experimental feature compiles in isolation.
 # `lint` and `test` build the extremes (--all-features and

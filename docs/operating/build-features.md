@@ -16,13 +16,13 @@ which includes hot-reload, the admin surface, and the `policy` filter.
 Build the leanest possible binary (every optional subsystem off) with:
 
 ```console
-cargo build -p praxis-proxy --release --no-default-features
+cargo build -p praxis-proxy --release --no-default-features --features pingora
 ```
 
 and add back individual features as needed:
 
 ```console
-cargo build -p praxis-proxy --release --no-default-features --features admin-api
+cargo build -p praxis-proxy --release --no-default-features --features pingora,admin-api
 ```
 
 For a policy-free build that keeps everything else, name the features you want
