@@ -3380,7 +3380,6 @@ dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-tls",
  "proptest",
- "quixotic-plecostomus-core",
  "rand 0.10.3",
  "regex",
  "secrecy",

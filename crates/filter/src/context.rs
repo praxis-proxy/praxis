@@ -1002,7 +1002,7 @@ impl HttpFilterContext<'_> {
     )]
     pub async fn execute_subrequest(
         &self,
-        peer: &pingora_core::upstreams::peer::HttpPeer,
+        peer: &praxis_core::egress::PeerSpec,
         request: &praxis_core::subrequest::SubRequest,
         max_response_bytes: usize,
         timeout: Duration,
@@ -1031,7 +1031,7 @@ impl HttpFilterContext<'_> {
     )]
     pub async fn send_streaming_subrequest(
         &self,
-        peer: &pingora_core::upstreams::peer::HttpPeer,
+        peer: &praxis_core::egress::PeerSpec,
         request: &praxis_core::subrequest::SubRequest,
         timeout: Duration,
         limits: praxis_core::subrequest::StreamLimits,
@@ -1828,7 +1828,7 @@ mod tests {
     async fn execute_subrequest_returns_error_without_client() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let ctx = crate::test_utils::make_filter_context(&req);
-        let peer = pingora_core::upstreams::peer::HttpPeer::new("127.0.0.1:9".to_owned(), false, String::new());
+        let peer = praxis_core::egress::PeerSpec::plain("127.0.0.1:9".parse().unwrap());
         let subrequest = praxis_core::subrequest::SubRequest {
             method: Method::GET,
             uri: "/sub".parse().unwrap(),
@@ -1860,7 +1860,7 @@ mod tests {
     async fn send_streaming_subrequest_returns_error_without_client() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let ctx = crate::test_utils::make_filter_context(&req);
-        let peer = pingora_core::upstreams::peer::HttpPeer::new("127.0.0.1:9".to_owned(), false, String::new());
+        let peer = praxis_core::egress::PeerSpec::plain("127.0.0.1:9".parse().unwrap());
         let subrequest = praxis_core::subrequest::SubRequest {
             method: Method::GET,
             uri: "/sub".parse().unwrap(),
@@ -1915,7 +1915,7 @@ mod tests {
         let client = SubRequestClient::new(crate::test_support::connector(1, None));
         ctx.subrequest_client = Some(&client);
 
-        let peer = pingora_core::upstreams::peer::HttpPeer::new(addr, false, "localhost".into());
+        let peer = praxis_core::egress::PeerSpec::new(addr, false, "localhost");
         let response = ctx
             .execute_subrequest(
                 &peer,

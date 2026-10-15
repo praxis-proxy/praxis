@@ -676,7 +676,7 @@ async fn build_peer_applies_tls_with_explicit_sni() {
     };
 
     let peer = super::transport::build_peer(&upstream, false).await.unwrap();
-    assert_eq!(peer.sni, "backend.example", "the configured SNI must be applied");
+    assert_eq!(&*peer.sni, "backend.example", "the configured SNI must be applied");
 }
 
 #[tokio::test]
@@ -692,7 +692,7 @@ async fn build_peer_derives_sni_from_hostname_address() {
     };
 
     let peer = super::transport::build_peer(&upstream, true).await.unwrap();
-    assert_eq!(peer.sni, "localhost", "the SNI must derive from the address hostname");
+    assert_eq!(&*peer.sni, "localhost", "the SNI must derive from the address hostname");
 }
 
 #[tokio::test]
@@ -708,7 +708,7 @@ async fn build_peer_names_an_ip_address_by_its_ip() {
     };
 
     let peer = super::transport::build_peer(&upstream, false).await.unwrap();
-    assert_eq!(peer.sni, "::1", "an IP address must be verified against its IP SAN");
+    assert_eq!(&*peer.sni, "::1", "an IP address must be verified against its IP SAN");
 }
 
 #[tokio::test]
@@ -728,7 +728,7 @@ async fn build_peer_refuses_a_tls_peer_with_no_server_name() {
         .await
         .expect_err("a TLS peer with an empty name must not be built");
     assert!(
-        matches!(err, super::transport::PeerError::MissingServerName(_)),
+        matches!(err, praxis_core::egress::UpstreamPeerError::MissingServerName(_)),
         "expected MissingServerName, got: {err}"
     );
 }
@@ -749,7 +749,7 @@ async fn build_peer_rejects_hostname_resolving_to_private_address() {
     assert!(
         matches!(
             err,
-            super::transport::PeerError::Resolve(
+            praxis_core::egress::UpstreamPeerError::Resolve(
                 praxis_core::connectivity::peer::AddressResolutionError::PrivateAddress { .. }
             )
         ),

@@ -93,7 +93,6 @@ http = { workspace = true }
 metrics = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 percent-encoding = { workspace = true }
-pingora-core = { workspace = true }
 praxis-core = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
