@@ -149,9 +149,14 @@ impl Workload {
             "backend body must match the workload"
         );
         assert_eq!(
+            response.headers.get("content-length").unwrap(),
+            "64",
+            "response framing metadata must survive"
+        );
+        assert_eq!(
             response.headers.len(),
-            self.headers + 1,
-            "all extra headers and the connection ID must survive"
+            self.headers + 2,
+            "extra headers, Content-Length and the connection ID must survive"
         );
         response
             .headers

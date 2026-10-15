@@ -2881,7 +2881,12 @@ async fn interim_1xx_response_is_skipped_not_panicked() {
         .map(|value| value.to_str().unwrap())
         .collect();
     assert_eq!(cookies, vec!["first=1", "second=2"], "duplicate final headers survive");
-    for name in ["link", "connection", "x-private", "x-praxis-internal", "content-length"] {
+    assert_eq!(
+        response.headers.get("content-length").unwrap(),
+        "5",
+        "response framing metadata survives"
+    );
+    for name in ["link", "connection", "x-private", "x-praxis-internal"] {
         assert!(
             response.headers.get(name).is_none(),
             "unexpected response header: {name}"
