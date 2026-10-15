@@ -8,7 +8,6 @@
 //! concurrent outbound calls through one pool, not the full hedge scheduler.
 
 #![forbid(unsafe_code)]
-#![expect(clippy::allow_attributes, reason = "blanket benchmark suppressions")]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -28,7 +27,7 @@ use std::time::Instant;
 use std::{net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
-use praxis_core::subrequest::{SubRequest, SubRequestClient, SubRequestConnector, SubResponse};
+use praxis_core::subrequest::{SubRequest, SubRequestClient, SubRequestConnector, SubRequestError, SubResponse};
 use serde_json::json;
 use subrequest_backend::Backend;
 use subrequest_peer::{BenchPeer, build_peer};
@@ -122,23 +121,24 @@ impl Workload {
     }
 
     async fn cycle(&self) -> [u64; 2] {
-        let first_future = Box::pin(
-            self.client
-                .execute(&self.peer, &self.request, 1024, Duration::from_secs(5), None),
-        );
+        let first_future = self.request_future();
         if self.attempts == 1 {
             return [self.validate(&first_future.await.unwrap()), 0];
         }
-        let second_future =
-            Box::pin(
-                self.client
-                    .execute(&self.peer, &self.request, 1024, Duration::from_secs(5), None),
-            );
+        let second_future = self.request_future();
         let (first_response, second_response) = tokio::join!(first_future, second_future);
         [
             self.validate(&first_response.unwrap()),
             self.validate(&second_response.unwrap()),
         ]
+    }
+
+    /// Box each large executor future before composing the concurrent cycle.
+    fn request_future(&self) -> impl Future<Output = Result<SubResponse, SubRequestError>> + Send {
+        Box::pin(
+            self.client
+                .execute(&self.peer, &self.request, 1024, Duration::from_secs(5), None),
+        )
     }
 
     fn validate(&self, response: &SubResponse) -> u64 {

@@ -91,6 +91,10 @@ pub(crate) async fn serve(protocol: &str, headers: usize) {
     let (sender, mut shutdown) = tokio::sync::oneshot::channel();
     std::thread::spawn(move || {
         let mut byte = [0_u8; 1];
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "benchmark child reads its parent lifetime pipe, not interactive input"
+        )]
         let _eof = std::io::stdin().read(&mut byte);
         let _sent = sender.send(());
     });
