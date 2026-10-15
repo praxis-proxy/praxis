@@ -4,9 +4,12 @@
 
 Protocols translate between external network protocols
 and the internal filter pipeline. Each protocol
-registers one or more Pingora services that bind
-listeners and dispatch traffic through the filter
-pipeline.
+registers one or more services on the network backend's
+runtime that bind listeners and dispatch traffic through
+the filter pipeline. (A *protocol* is what a listener
+speaks; a *backend* is the library that owns the sockets.
+To add a backend instead, see
+[Adding a Network Backend](adding-backends.md).)
 
 ## Steps
 
@@ -19,7 +22,7 @@ the [`Protocol`] trait:
 pub trait Protocol: Send {
     fn register(
         self: Box<Self>,
-        server: &mut PingoraServerRuntime,
+        server: &mut praxis_core::backend::Runtime,
         config: &Config,
         pipelines: &ListenerPipelines,
     ) -> Result<Vec<watch::Sender<bool>>, ProxyError>;
@@ -28,15 +31,17 @@ pub trait Protocol: Send {
 
 `register` filters listeners by protocol kind, resolves
 pipelines from `ListenerPipelines`, and registers
-Pingora services on `PingoraServerRuntime`. Return any
-TLS certificate watcher shutdown senders; the caller
-keeps them alive until server shutdown.
+services on the backend runtime (`backend::Runtime` is
+the selected backend's runtime type). Return any TLS
+certificate watcher shutdown senders; the caller keeps
+them alive until server shutdown.
 
-**Reference implementations:**
+**Reference implementations** (exposed as
+`praxis_protocol::backend::{Http, Tcp}`):
 
 - **HTTP**: `crates/protocol/src/http/pingora/mod.rs`
   (`PingoraHttp`)
-- **TCP**: `crates/protocol/src/tcp/mod.rs` (`PingoraTcp`)
+- **TCP**: `crates/protocol/src/tcp/service.rs` (`PingoraTcp`)
 
 ### 2. Add `ProtocolKind` variant
 

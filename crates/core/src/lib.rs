@@ -17,8 +17,8 @@
 //! - YAML configuration parsing and validation with serde ([`config`]).
 //! - Error types shared across the workspace ([`errors`], re-exported as [`ProxyError`]).
 //! - Health state for active health checking ([`health`]) and the key-value store trait and registry ([`kv`]).
-//! - The Pingora-backed server factory and runtime options ([`PingoraServerRuntime`], [`RuntimeOptions`]) plus tracing
-//!   setup ([`TracingGuard`], [`logging`]).
+//! - The network backend contract ([`server::ServerRuntime`], [`egress`]) with the build's selected backend behind
+//!   [`backend`], the runtime options ([`RuntimeOptions`]) and tracing setup ([`TracingGuard`], [`logging`]).
 //!
 //! Configuration types validate at load time, upholding the invariant
 //! that higher layers never re-check structural validity of a [`config`]
@@ -30,6 +30,8 @@ pub mod circuit;
 pub mod config;
 /// Upstream connection options and endpoint types.
 pub mod connectivity;
+/// Backend-neutral egress: peers, connectors, and sessions.
+pub mod egress;
 /// Error types shared across the workspace.
 pub mod errors;
 /// Process-wide file descriptor pressure monitoring.
@@ -68,4 +70,46 @@ pub mod trace_state;
 
 pub use errors::ProxyError;
 pub use logging::TracingGuard;
-pub use server::{PingoraServerRuntime, RuntimeOptions};
+#[cfg(feature = "pingora")]
+pub use server::PingoraServerRuntime;
+pub use server::{RuntimeOptions, ServerRuntime};
+
+// -----------------------------------------------------------------------------
+// Backend Selection
+// -----------------------------------------------------------------------------
+
+/// The network backend this build runs on.
+///
+/// Exactly one backend is selected at build time with a Cargo feature, and
+/// these names resolve to its types: `Runtime` implements [`ServerRuntime`]
+/// and `Connector` implements [`egress::Connector`]. Under the `pingora`
+/// feature both are the Pingora implementations. Without a backend feature
+/// the library still compiles: `Connector` refuses every connection and
+/// `Runtime` has nothing to serve, and the `praxis-proxy` binary refuses to
+/// build. Adding a backend means adding its feature here; see
+/// `docs/developing/adding-backends.md`.
+///
+/// ```
+/// use praxis_core::{backend, egress::Connector as _};
+/// praxis_tls::provider::install(); // required before any connector is built
+///
+/// let connector = backend::Connector::new(16);
+/// let _shared = connector.clone();
+/// ```
+///
+/// [`ServerRuntime`]: crate::server::ServerRuntime
+/// [`egress::Connector`]: crate::egress::Connector
+pub mod backend {
+    /// With no backend compiled in, every connection is refused.
+    #[cfg(not(feature = "pingora"))]
+    pub use crate::egress::Unavailable as Connector;
+    /// The egress connector shared by every outbound exchange.
+    #[cfg(feature = "pingora")]
+    pub use crate::egress::pingora::PingoraConnector as Connector;
+    /// With no backend compiled in, there is nothing to serve.
+    #[cfg(not(feature = "pingora"))]
+    pub use crate::server::UnavailableRuntime as Runtime;
+    /// The server runtime: owns the async runtime, listeners and shutdown.
+    #[cfg(feature = "pingora")]
+    pub use crate::server::pingora::PingoraServerRuntime as Runtime;
+}

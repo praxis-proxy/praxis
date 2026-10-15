@@ -3,10 +3,16 @@
 
 //! Pingora-specific server factory and lifecycle management.
 
-use pingora_core::server::{RunArgs, Server, configuration::ServerConf};
+use std::{
+    pin::Pin,
+    sync::{Mutex, PoisonError},
+};
+
+use pingora_core::server::{RunArgs, Server, ShutdownSignal, ShutdownSignalWatch, configuration::ServerConf};
 use tracing::info;
 
-use super::RuntimeOptions;
+use super::{RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
+use crate::config::Config;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -37,7 +43,7 @@ impl std::fmt::Debug for PingoraServerRuntime {
 impl PingoraServerRuntime {
     /// Create a new server runtime from config.
     #[must_use]
-    pub fn new(config: &crate::config::Config) -> Self {
+    pub fn new(config: &Config) -> Self {
         let opts = RuntimeOptions::from(&config.runtime);
         let server = build_http_server(config.shutdown_timeout_secs, &opts);
         Self { server }
@@ -56,33 +62,43 @@ impl PingoraServerRuntime {
     /// tracing guard that flushes buffered logs and spans, must run on the
     /// way out.
     ///
-    /// [`run_until_shutdown`]: Self::run_until_shutdown
+    /// [`run_until_shutdown`]: ServerRuntime::run_until_shutdown
     pub fn run(self) -> ! {
         self.server.run_forever()
     }
 
-    /// Start all registered services and block until the server shuts down
-    /// on a Unix signal.
+    /// Start all registered services with Pingora's own run arguments.
     ///
+    /// Returns when the [`RunArgs`] shutdown signal fires. The backend
+    /// contract's [`run_until_shutdown`] and [`run_with_shutdown`] are the
+    /// two shapes of this that the server and the test harness use.
+    ///
+    /// [`run_until_shutdown`]: ServerRuntime::run_until_shutdown
+    /// [`run_with_shutdown`]: ServerRuntime::run_with_shutdown
+    /// [`RunArgs`]: pingora_core::server::RunArgs
+    pub fn run_with_args(self, args: RunArgs) {
+        self.server.run(args);
+    }
+}
+
+impl ServerRuntime for PingoraServerRuntime {
+    fn from_config(config: &Config) -> Self {
+        Self::new(config)
+    }
+
     /// Returns once a graceful shutdown (or an upgrade hand-off to a new
     /// process) completes; daemon and upgrade handling are unchanged from
     /// [`run`], which exits the process at that point instead.
     ///
-    /// [`run`]: Self::run
-    pub fn run_until_shutdown(self) {
+    /// [`run`]: PingoraServerRuntime::run
+    fn run_until_shutdown(self) {
         self.run_with_args(RunArgs::default());
     }
 
-    /// Start all registered services with a shutdown signal.
-    ///
-    /// Like [`run_until_shutdown`], this method returns when the
-    /// [`RunArgs`] shutdown signal fires, allowing test harnesses to
-    /// stop the server cleanly.
-    ///
-    /// [`run_until_shutdown`]: Self::run_until_shutdown
-    /// [`RunArgs`]: pingora_core::server::RunArgs
-    pub fn run_with_args(self, args: RunArgs) {
-        self.server.run(args);
+    fn run_with_shutdown(self, shutdown: ShutdownFuture) {
+        self.run_with_args(RunArgs {
+            shutdown_signal: Box::new(FutureShutdown::new(shutdown)),
+        });
     }
 }
 
@@ -117,22 +133,48 @@ pub fn build_http_server(shutdown_timeout_secs: u64, runtime: &RuntimeOptions) -
     server
 }
 
-/// Number of worker threads Pingora runs for `configured`
-/// (`runtime.threads`): the CPUs available to the process when zero.
+// -----------------------------------------------------------------------------
+// FutureShutdown
+// -----------------------------------------------------------------------------
+
+/// Adapts a shutdown future to Pingora's signal watch.
 ///
-/// ```
-/// use praxis_core::server::pingora::resolve_thread_count;
-///
-/// assert_eq!(resolve_thread_count(4), 4);
-/// assert!(resolve_thread_count(0) >= 1);
-/// ```
-pub fn resolve_thread_count(configured: usize) -> usize {
-    if configured == 0 {
-        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
-    } else {
-        configured
+/// Pingora polls the watch once; the future is handed over on that call and
+/// a fast shutdown is requested when it resolves, which is what a harness
+/// stopping the server wants.
+struct FutureShutdown {
+    /// The future to wait on, taken by the first `recv` call.
+    shutdown: Mutex<Option<ShutdownFuture>>,
+}
+
+impl FutureShutdown {
+    /// Wrap `shutdown` for Pingora.
+    fn new(shutdown: ShutdownFuture) -> Self {
+        Self {
+            shutdown: Mutex::new(Some(shutdown)),
+        }
     }
 }
+
+impl ShutdownSignalWatch for FutureShutdown {
+    fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
+    where
+        'watch: 'fut,
+        Self: 'fut,
+    {
+        let pending = self.shutdown.lock().unwrap_or_else(PoisonError::into_inner).take();
+        Box::pin(async move {
+            if let Some(shutdown) = pending {
+                shutdown.await;
+            }
+            ShutdownSignal::FastShutdown
+        })
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Server Configuration
+// -----------------------------------------------------------------------------
 
 /// Build a [`ServerConf`] from runtime options.
 ///
@@ -274,11 +316,19 @@ mod tests {
 
     #[test]
     fn run_with_args_returns_after_shutdown() {
-        let config = crate::config::Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
+        let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
         let runtime = PingoraServerRuntime::new(&config);
         runtime.run_with_args(RunArgs {
             shutdown_signal: Box::new(ImmediateShutdown),
         });
+    }
+
+    #[test]
+    fn run_with_shutdown_returns_once_the_future_resolves() {
+        let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
+        let runtime = PingoraServerRuntime::from_config(&config);
+
+        runtime.run_with_shutdown(Box::pin(std::future::ready(())));
     }
 
     // -------------------------------------------------------------------------
@@ -288,22 +338,20 @@ mod tests {
     /// Shutdown watch that requests a fast shutdown as soon as it is polled.
     struct ImmediateShutdown;
 
-    impl pingora_core::server::ShutdownSignalWatch for ImmediateShutdown {
-        fn recv<'watch, 'fut>(
-            &'watch self,
-        ) -> std::pin::Pin<Box<dyn Future<Output = pingora_core::server::ShutdownSignal> + Send + 'fut>>
+    impl ShutdownSignalWatch for ImmediateShutdown {
+        fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
         where
             'watch: 'fut,
             Self: 'fut,
         {
-            Box::pin(std::future::ready(pingora_core::server::ShutdownSignal::FastShutdown))
+            Box::pin(std::future::ready(ShutdownSignal::FastShutdown))
         }
     }
 
     /// Run `func` under a thread-local subscriber that records everything
     /// logged at WARN or above, returning the value and captured output.
     fn capture_warnings<T, F: FnOnce() -> T>(func: F) -> (T, String) {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
 
         #[derive(Clone)]
         struct Buffer(Arc<Mutex<Vec<u8>>>);

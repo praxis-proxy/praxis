@@ -19,6 +19,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- A network backend contract, so an alternative to Pingora can be dropped
+  in behind a Cargo feature: `praxis_core::server::ServerRuntime`,
+  `praxis_core::egress::{PeerSpec, Connector, Session}`,
+  `praxis_protocol::http::health::AdminRequest`, and the `backend` modules
+  in `praxis-proxy-core` and `praxis-proxy-protocol` that resolve to the
+  selected backend. `docs/developing/adding-backends.md` describes what a
+  backend implements.
 - Named filter chains take a `conditions:` list that every filter in the chain
   inherits, ANDed with the filter's own conditions, wherever the chain is used
   (listeners, branch chains, outbound bindings).
@@ -63,6 +70,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking:** the Pingora backend is now the `pingora` Cargo feature of
+  `praxis-proxy`, `praxis-proxy-protocol` and `praxis-proxy-core`, on by
+  default. A `--no-default-features` build (the FIPS build included) names
+  it: `--features pingora,config-reload,admin-api`. A build with no backend
+  feature refuses to compile the binary.
+- **Breaking:** sub-request peers are `praxis_core::egress::PeerSpec` instead
+  of Pingora's `HttpPeer`: `SubRequestClient::execute`, `send_streaming`,
+  `HttpFilterContext::execute_subrequest`, `send_streaming_subrequest` and
+  `PreparedSubrequest::{peers, peer_at}` take or return it, and
+  `SubRequestClient::with_upstream_ca` takes the cached CA certificates
+  rather than Pingora's parsed form. `praxis-proxy-filter` no longer depends
+  on Pingora.
+- **Breaking:** `Protocol::register` takes `&mut praxis_core::backend::Runtime`
+  (the same type as before under the default feature). The admin, health and
+  metrics listeners are registered through `praxis_protocol::backend::admin`;
+  the `*_to_pingora_server` functions remain for callers holding a raw
+  Pingora `Server`. The Praxis-owned health, metrics and KV modules are
+  reachable as `praxis_protocol::http::{health, metrics, kv}`.
 - **Breaking:** `/healthy`, `/ready` and `/metrics` moved off `admin.address`
   to their own listener, `admin.metrics_address`, which may bind a non-loopback
   address without `insecure_options.allow_public_admin`. Set it and move probes

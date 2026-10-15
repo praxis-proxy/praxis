@@ -10,8 +10,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use http::{Response, header::HOST};
-use pingora_http::RequestHeader;
+use http::{HeaderMap, Response, Uri, header::HOST};
 use praxis_core::connectivity::normalize_mapped_ipv4;
 use tracing::debug;
 
@@ -25,7 +24,7 @@ use crate::http::pingora::json::json_response;
 ///
 /// Every `Host` header and any URI authority (the HTTP/2 `:authority`) must
 /// satisfy [`is_loopback_host`]. An HTTP/1.1 absolute-form target keeps its
-/// authority out of the URI, but the Pingora fork rejects one that disagrees
+/// authority out of the URI, but the backend rejects one that disagrees
 /// with `Host` at ingress, so the `Host` check covers it. A request that names
 /// no host at all (HTTP/1.0) is
 /// allowed: browsers always send `Host`, so its absence cannot come from a
@@ -35,9 +34,9 @@ use crate::http::pingora::json::json_response;
 /// unwilling to answer for the named authority.
 ///
 /// [RFC 9110 Section 15.5.20]: https://datatracker.ietf.org/doc/html/rfc9110#section-15.5.20
-pub(crate) fn reject_non_loopback_host(req: &RequestHeader) -> Option<Response<Vec<u8>>> {
-    let header_hosts = req.headers.get_all(HOST).iter().map(|value| value.to_str().ok());
-    let uri_host = req.uri.authority().map(|authority| Some(authority.as_str()));
+pub(crate) fn reject_non_loopback_host(uri: &Uri, headers: &HeaderMap) -> Option<Response<Vec<u8>>> {
+    let header_hosts = headers.get_all(HOST).iter().map(|value| value.to_str().ok());
+    let uri_host = uri.authority().map(|authority| Some(authority.as_str()));
     if header_hosts
         .chain(uri_host)
         .all(|host| host.is_some_and(is_loopback_host))
@@ -45,7 +44,7 @@ pub(crate) fn reject_non_loopback_host(req: &RequestHeader) -> Option<Response<V
         return None;
     }
 
-    debug!(host = ?req.headers.get(HOST), path = %req.uri.path(), "management request rejected: non-loopback Host");
+    debug!(host = ?headers.get(HOST), path = %uri.path(), "management request rejected: non-loopback Host");
     Some(json_response(421, br#"{"error":"misdirected request"}"#))
 }
 
@@ -190,23 +189,30 @@ mod tests {
 
     #[test]
     fn guard_allows_loopback_host_header() {
-        let req = request_with_hosts(b"/api/stats", &[b"127.0.0.1:9901"]);
-        assert!(reject_non_loopback_host(&req).is_none(), "loopback Host must pass");
+        let (uri, headers) = request_with_hosts(b"/api/stats", &[b"127.0.0.1:9901"]);
+
+        assert!(
+            reject_non_loopback_host(&uri, &headers).is_none(),
+            "loopback Host must pass"
+        );
     }
 
     #[test]
     fn guard_allows_missing_host() {
-        let req = request_with_hosts(b"/api/stats", &[]);
+        let (uri, headers) = request_with_hosts(b"/api/stats", &[]);
+
         assert!(
-            reject_non_loopback_host(&req).is_none(),
+            reject_non_loopback_host(&uri, &headers).is_none(),
             "a request without Host must pass"
         );
     }
 
     #[test]
     fn guard_rejects_rebound_host_with_421_json() {
-        let req = request_with_hosts(b"/api/kv/store/key", &[b"attacker.example:9901"]);
-        let resp = reject_non_loopback_host(&req).unwrap();
+        let (uri, headers) = request_with_hosts(b"/api/kv/store/key", &[b"attacker.example:9901"]);
+
+        let resp = reject_non_loopback_host(&uri, &headers).unwrap();
+
         assert_eq!(resp.status().as_u16(), 421, "rebound Host must be misdirected");
         assert_eq!(
             resp.body(),
@@ -222,46 +228,51 @@ mod tests {
 
     #[test]
     fn guard_rejects_empty_host() {
-        let req = request_with_hosts(b"/healthy", &[b""]);
+        let (uri, headers) = request_with_hosts(b"/healthy", &[b""]);
+
         assert!(
-            reject_non_loopback_host(&req).is_some(),
+            reject_non_loopback_host(&uri, &headers).is_some(),
             "an empty Host must be rejected"
         );
     }
 
     #[test]
     fn guard_rejects_non_utf8_host() {
-        let req = request_with_hosts(b"/healthy", &[b"local\xffhost"]);
+        let (uri, headers) = request_with_hosts(b"/healthy", &[b"local\xffhost"]);
+
         assert!(
-            reject_non_loopback_host(&req).is_some(),
+            reject_non_loopback_host(&uri, &headers).is_some(),
             "a non-UTF-8 Host must be rejected"
         );
     }
 
     #[test]
     fn guard_rejects_any_non_loopback_host_among_duplicates() {
-        let req = request_with_hosts(b"/healthy", &[b"localhost", b"attacker.example"]);
+        let (uri, headers) = request_with_hosts(b"/healthy", &[b"localhost", b"attacker.example"]);
+
         assert!(
-            reject_non_loopback_host(&req).is_some(),
+            reject_non_loopback_host(&uri, &headers).is_some(),
             "every Host header must name loopback"
         );
     }
 
     #[test]
     fn guard_rejects_non_loopback_request_authority() {
-        let mut req = request_with_hosts(b"/api/stats", &[b"localhost"]);
-        req.set_uri(http::Uri::from_static("http://attacker.example/api/stats"));
+        let (_, headers) = request_with_hosts(b"/api/stats", &[b"localhost"]);
+        let uri = Uri::from_static("http://attacker.example/api/stats");
+
         assert!(
-            reject_non_loopback_host(&req).is_some(),
+            reject_non_loopback_host(&uri, &headers).is_some(),
             "a request authority (HTTP/2 :authority) must also name loopback"
         );
     }
 
     #[test]
     fn guard_allows_loopback_absolute_form_authority_without_host() {
-        let req = request_with_hosts(b"http://127.0.0.1:9901/api/stats", &[]);
+        let (uri, headers) = request_with_hosts(b"http://127.0.0.1:9901/api/stats", &[]);
+
         assert!(
-            reject_non_loopback_host(&req).is_none(),
+            reject_non_loopback_host(&uri, &headers).is_none(),
             "a loopback absolute-form authority must pass"
         );
     }
@@ -270,12 +281,13 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    /// Build a `GET` request header carrying each of `hosts` as a `Host` header.
-    fn request_with_hosts(path: &[u8], hosts: &[&[u8]]) -> RequestHeader {
-        let mut req = RequestHeader::build("GET", path, None).unwrap();
+    /// Build a request target and headers carrying each of `hosts` as a `Host` header.
+    fn request_with_hosts(path: &[u8], hosts: &[&[u8]]) -> (Uri, HeaderMap) {
+        let uri = Uri::try_from(std::str::from_utf8(path).unwrap()).unwrap();
+        let mut headers = HeaderMap::new();
         for host in hosts {
-            req.append_header(HOST, HeaderValue::from_bytes(host).unwrap()).unwrap();
+            headers.append(HOST, HeaderValue::from_bytes(host).unwrap());
         }
-        req
+        (uri, headers)
     }
 }

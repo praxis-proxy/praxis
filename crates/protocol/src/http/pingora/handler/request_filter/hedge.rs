@@ -21,6 +21,7 @@ use pingora_proxy::Session;
 use praxis_core::{
     config::ABSOLUTE_MAX_BODY_BYTES,
     connectivity::Upstream,
+    egress::PeerSpec,
     health::{ClusterHealthState, HealthRegistry},
     hedge::{HedgeAttempt, HedgeDelivery, drive},
     subrequest::{SubRequest, SubRequestClient, SubRequestError, SubResponse},
@@ -417,7 +418,7 @@ async fn run_attempt(plan: Box<AttemptPlan>, address: Arc<str>) -> HedgeAttempt<
         address: Arc::clone(&address),
     };
     let upstream = Box::new(prepared_upstream(plan.as_ref(), Arc::clone(&address)));
-    let peer = super::super::upstream_peer::build_peer(upstream.as_ref(), plan.allow_private);
+    let peer = PeerSpec::from_upstream(upstream.as_ref(), plan.allow_private);
     let Ok(mut peer) = Box::pin(peer).await else {
         // The peer was never dialed, so this is not a passive-health failure.
         // Keep the miss so a race that never gets an HTTP response is still an
@@ -427,12 +428,10 @@ async fn run_attempt(plan: Box<AttemptPlan>, address: Arc<str>) -> HedgeAttempt<
         }
         return missed();
     };
-    if peer.options.ca.is_none()
-        && let Some(ca) = plan.client.upstream_ca()
-    {
-        peer.options.ca = Some(ca);
-    }
-    let (attempt, transport_fault, miss) = Box::pin(exchange(plan.as_ref(), upstream.as_ref(), peer)).await;
+    // Runtime trust anchors apply only where the cluster set no CA of its own;
+    // the backend makes that call when it dials.
+    peer.trust_anchors = plan.client.upstream_ca();
+    let (attempt, transport_fault, miss) = Box::pin(exchange(plan.as_ref(), upstream.as_ref(), Box::new(peer))).await;
     if let Some(miss) = miss
         && let Ok(mut slot) = plan.misses.lock()
     {
@@ -448,10 +447,14 @@ async fn run_attempt(plan: Box<AttemptPlan>, address: Arc<str>) -> HedgeAttempt<
 /// response, including a 5xx, is classified from its status. Admission, an
 /// already-open circuit, a local request error, and a body that is too large
 /// to buffer are not evidence about that endpoint.
+#[expect(
+    clippy::large_stack_frames,
+    reason = "the exchange future is built on the stack before it is boxed"
+)]
 async fn exchange(
     plan: &AttemptPlan,
     upstream: &Upstream,
-    peer: Box<pingora_core::upstreams::peer::HttpPeer>,
+    peer: Box<PeerSpec>,
 ) -> (HedgeAttempt<SubResponse>, bool, Option<SubRequestError>) {
     let request = Box::new(subrequest_from(plan, upstream.authority.clone()));
     let timeout = exchange_timeout(plan.per_try_ms);

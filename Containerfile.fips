@@ -31,7 +31,7 @@ ARG UBI9_MINIMAL_DIGEST=sha256:8ebe2ad8fdf3cab3e5a53c1edc69194c98209cfadab24b884
 # Red Hat's rust-toolset may trail the workspace's rust-version; the build
 # passes --ignore-rust-version so the toolchain Red Hat ships is what gets
 # exercised. If the tree needs a newer compiler, this step is where it shows.
-ARG CARGO_FEATURES="config-reload,admin-api"
+ARG CARGO_FEATURES="pingora,config-reload,admin-api"
 ARG CARGO_ARGS="--ignore-rust-version"
 
 # ------------------------------------------------------------------------------

@@ -5,10 +5,8 @@
 
 use std::net::{IpAddr, SocketAddr};
 
-use pingora_core::upstreams::peer::HttpPeer;
-
 use super::peer::{AddressResolutionError, resolve_host_cached, resolve_host_per_call};
-use crate::{connectivity::normalize_mapped_ipv4, subrequest::SubRequest};
+use crate::{connectivity::normalize_mapped_ipv4, egress::PeerSpec, subrequest::SubRequest};
 
 /// Failure categories for URL target preparation.
 ///
@@ -437,7 +435,7 @@ pub struct PreparedSubrequest {
 
 impl PreparedSubrequest {
     /// Peers for every validated address, in resolver order. Primary path.
-    pub fn peers(&self) -> impl Iterator<Item = HttpPeer> + '_ {
+    pub fn peers(&self) -> impl Iterator<Item = PeerSpec> + '_ {
         self.addresses
             .iter()
             .map(|addr| peer_for(*addr, self.is_tls, &self.sni))
@@ -446,7 +444,7 @@ impl PreparedSubrequest {
     /// Peer for the address at `index`, or `None` if out of range. Indexed
     /// fallback for callers that track attempt position.
     #[must_use]
-    pub fn peer_at(&self, index: usize) -> Option<HttpPeer> {
+    pub fn peer_at(&self, index: usize) -> Option<PeerSpec> {
         self.addresses
             .get(index)
             .map(|addr| peer_for(*addr, self.is_tls, &self.sni))
@@ -467,19 +465,20 @@ impl PreparedSubrequest {
 
 /// Build a peer for one validated address.
 ///
-/// Fail-closed: a TLS peer with an empty SNI would switch pingora to
-/// `VerificationMode::SkipAll`, so this refuses to build one. Combined with the
-/// parse-time empty-host rejection, an empty TLS SNI is unreachable. This is a
-/// real runtime check (present in release), not a `debug_assert!`.
-fn peer_for(addr: SocketAddr, is_tls: bool, sni: &str) -> HttpPeer {
+/// Fail-closed: a TLS peer with an empty SNI would leave the backend with no
+/// name to verify the certificate against, so this refuses to build one.
+/// Combined with the parse-time empty-host rejection, an empty TLS SNI is
+/// unreachable. This is a real runtime check (present in release), not a
+/// `debug_assert!`.
+fn peer_for(addr: SocketAddr, is_tls: bool, sni: &str) -> PeerSpec {
     if is_tls {
         assert!(
             !sni.is_empty(),
             "BUG: refusing to build a TLS peer with an empty SNI (non-empty SNI invariant violated)"
         );
-        HttpPeer::new(addr, true, sni.to_owned())
+        PeerSpec::new(addr, true, sni)
     } else {
-        HttpPeer::new(addr, false, String::new())
+        PeerSpec::plain(addr)
     }
 }
 
@@ -714,12 +713,11 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    #[cfg(feature = "pingora")]
+    use crate::subrequest::{StreamLimits, SubRequestConnectorOptions};
     use crate::{
         connectivity::peer::{BlockingLookup, PerCallDnsBounds, resolve_host_per_call_with},
-        subrequest::{
-            StreamLimits, SubRequestClient, SubRequestConnector, SubRequestConnectorOptions, SubRequestError,
-            UrlSubRequestError,
-        },
+        subrequest::{SubRequestClient, SubRequestConnector, SubRequestError, UrlSubRequestError},
     };
 
     #[test]
@@ -929,8 +927,6 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    use pingora_core::upstreams::peer::{Peer as _, Scheme};
-
     fn target(is_tls: bool, authority: &str, sni: &str, addrs: &[&str]) -> PreparedTarget {
         PreparedTarget::new(
             is_tls,
@@ -991,11 +987,11 @@ mod tests {
         let prepared = t.bind(req_with_host("ignored"));
         let peers: Vec<_> = prepared.peers().collect();
         assert_eq!(peers.len(), 2);
-        assert_eq!(peers[0].address().to_string(), "10.0.0.1:8443");
-        assert_eq!(peers[1].address().to_string(), "10.0.0.2:8443");
-        assert_eq!(peers[0].sni, "h.example.com");
-        assert_eq!(peers[0].scheme, Scheme::HTTPS);
-        assert_eq!(prepared.peer_at(1).unwrap().address().to_string(), "10.0.0.2:8443");
+        assert_eq!(peers[0].address.to_string(), "10.0.0.1:8443");
+        assert_eq!(peers[1].address.to_string(), "10.0.0.2:8443");
+        assert_eq!(&*peers[0].sni, "h.example.com");
+        assert!(peers[0].tls, "an https target builds TLS peers");
+        assert_eq!(prepared.peer_at(1).unwrap().address.to_string(), "10.0.0.2:8443");
         assert!(prepared.peer_at(2).is_none());
     }
 
@@ -1004,8 +1000,8 @@ mod tests {
         let t = target(false, "h", "", &["10.0.0.1:80"]);
         let prepared = t.bind(req_with_host("ignored"));
         let peer = prepared.peer_at(0).unwrap();
-        assert_eq!(peer.sni, "");
-        assert_eq!(peer.scheme, Scheme::HTTP);
+        assert!(peer.sni.is_empty(), "an http target has no server name");
+        assert!(!peer.tls, "an http target builds plain peers");
     }
 
     #[test]
@@ -1500,6 +1496,10 @@ mod tests {
         assert_eq!(target.host_authority().to_str().unwrap(), "127.0.0.1:9");
     }
 
+    /// Serve `body` once on a loopback port. The exchange tests that dial it
+    /// need a network backend compiled in, so they and this helper are gated
+    /// on one; a build without a backend refuses every connection.
+    #[cfg(feature = "pingora")]
     async fn spawn_loopback_backend(body: &'static str) -> u16 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1535,6 +1535,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
@@ -1578,6 +1579,7 @@ mod tests {
         drop(streaming);
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     #[expect(clippy::too_many_lines, reason = "checks address fallback and authority on the wire")]
     async fn execute_url_uses_frozen_fallback_and_url_authority() {
@@ -1696,6 +1698,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
@@ -1751,6 +1754,7 @@ mod tests {
         backend.await.unwrap();
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
@@ -1839,6 +1843,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
@@ -1880,6 +1885,7 @@ mod tests {
         backend.await.unwrap();
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
@@ -1946,6 +1952,7 @@ mod tests {
         backend.abort();
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
@@ -2055,6 +2062,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     #[expect(clippy::too_many_lines, reason = "tests explicit-peer Host on the wire")]
     async fn explicit_peer_execute_preserves_virtual_host() {
@@ -2074,7 +2082,7 @@ mod tests {
         });
         praxis_tls::provider::install();
         let client = SubRequestClient::new(SubRequestConnector::new(1, None));
-        let peer = HttpPeer::new(addr, false, String::new());
+        let peer = PeerSpec::plain(addr);
         let response = Box::pin(client.execute(
             &peer,
             &req_with_host("virtual.example"),
@@ -2305,9 +2313,9 @@ mod tests {
             &["10.0.0.1:443", "10.0.0.2:443", "10.0.0.3:443"],
         );
         let prepared = t.bind(req_with_host("ignored"));
-        assert_eq!(prepared.peer_at(0).unwrap().address().to_string(), "10.0.0.1:443");
-        assert_eq!(prepared.peer_at(1).unwrap().address().to_string(), "10.0.0.2:443");
-        assert_eq!(prepared.peer_at(2).unwrap().address().to_string(), "10.0.0.3:443");
+        assert_eq!(prepared.peer_at(0).unwrap().address.to_string(), "10.0.0.1:443");
+        assert_eq!(prepared.peer_at(1).unwrap().address.to_string(), "10.0.0.2:443");
+        assert_eq!(prepared.peer_at(2).unwrap().address.to_string(), "10.0.0.3:443");
         assert!(prepared.peer_at(3).is_none());
         assert!(prepared.peer_at(999).is_none());
     }

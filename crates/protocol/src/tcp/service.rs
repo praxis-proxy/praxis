@@ -11,7 +11,10 @@ use praxis_core::{ProxyError, config::Config};
 use praxis_filter::{FilterPipeline, FilterRegistry};
 use tokio::sync::{Semaphore, watch};
 
-use super::{proxy, tls};
+use super::{
+    groups::{self, TcpGroupKey},
+    proxy, tls,
+};
 use crate::{ListenerPipelines, Protocol};
 
 // -----------------------------------------------------------------------------
@@ -29,19 +32,19 @@ pub struct PingoraTcp;
 impl Protocol for PingoraTcp {
     fn register(
         self: Box<Self>,
-        server: &mut praxis_core::PingoraServerRuntime,
+        server: &mut praxis_core::backend::Runtime,
         config: &Config,
         pipelines: &ListenerPipelines,
     ) -> Result<Vec<watch::Sender<bool>>, ProxyError> {
-        let groups = tls::group_tcp_listeners(config);
-        tls::validate_tcp_group_consistency(&groups)?;
+        let grouped = groups::group_tcp_listeners(config);
+        groups::validate_tcp_group_consistency(&grouped)?;
         #[expect(clippy::expect_used, reason = "empty pipeline is infallible")]
         let fallback_pipeline = Arc::new(ArcSwap::from_pointee(
             FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).expect("empty pipeline is valid"),
         ));
 
         let mut cert_watcher_shutdowns = Vec::new();
-        for (group_key, listeners) in groups {
+        for (group_key, listeners) in grouped {
             let mut service = build_tcp_service(&group_key, &listeners, pipelines, &fallback_pipeline, config);
             cert_watcher_shutdowns.extend(tls::register_tcp_listeners(
                 &mut service,
@@ -58,10 +61,6 @@ impl Protocol for PingoraTcp {
 // -----------------------------------------------------------------------------
 // Service Construction
 // -----------------------------------------------------------------------------
-
-/// The listener group key: shared upstream address, cluster, idle timeout
-/// (ms), and max session duration (secs).
-type TcpGroupKey = (Option<String>, Option<String>, Option<u64>, Option<u64>);
 
 /// Build the TCP proxy service for one listener group.
 fn build_tcp_service(

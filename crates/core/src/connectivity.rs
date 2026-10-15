@@ -6,9 +6,9 @@
 mod classification;
 mod connection_options;
 mod network;
-/// Shared [`HttpPeer`] construction utilities for TLS and connection options.
-///
-/// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
+/// Address resolution, server-name derivation, and (under the `pingora`
+/// feature) the mapping of connection options and TLS material onto a
+/// Pingora peer.
 pub mod peer;
 mod target;
 mod trusted_private;

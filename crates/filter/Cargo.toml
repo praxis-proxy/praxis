@@ -93,7 +93,8 @@ http = { workspace = true }
 metrics = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 percent-encoding = { workspace = true }
-pingora-core = { workspace = true }
+# The workspace entry carries no defaults: the filter engine dials through the
+# egress contract and never needs a network backend of its own.
 praxis-core = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
@@ -119,6 +120,9 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 jsonwebtoken = { workspace = true }
+# The filter's own tests dial real sockets through the sub-request client, so
+# they need a backend even though the library does not.
+praxis-core = { workspace = true, features = ["pingora"] }
 opentelemetry_sdk = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 proptest = { workspace = true }

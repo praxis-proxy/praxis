@@ -3380,7 +3380,6 @@ dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-tls",
  "proptest",
- "quixotic-plecostomus-core",
  "rand 0.10.3",
  "regex",
  "secrecy",
@@ -3425,6 +3424,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
@@ -3459,7 +3459,6 @@ dependencies = [
 name = "praxis-test-utils"
 version = "0.7.4"
 dependencies = [
- "arc-swap",
  "async-trait",
  "bytes",
  "futures",
@@ -3472,7 +3471,6 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
  "praxis-proxy-tls",
- "quixotic-plecostomus-core",
  "rcgen",
  "rustls",
  "tempfile",
@@ -3488,9 +3486,11 @@ dependencies = [
 name = "praxis-tests-benches"
 version = "0.7.4"
 dependencies = [
+ "bytes",
  "criterion",
  "dhat",
  "governor",
+ "h2",
  "http",
  "parking_lot",
  "portable-atomic",
