@@ -64,6 +64,11 @@ The referenced YAML is the policy document — plugins, routes, and identity-sou
 | `llm.provider` | string | no | Operator-supplied provider recorded on `llm.provider`. |
 | `llm.require_model` | bool | no | Deny a request whose body carries no usable top-level `model`. Enabled by default. When disabled, the request falls through to other policy paths. |
 | `llm.require_route` | bool | no | Deny a model no `llm:` route selects. Enabled by default. Disable only to admit unlisted models. |
+| `context_headers` | object<string, string> | no | Maps extension field names to HTTP header names for populating host-supplied `agent.*` and `framework.*` context slots. Only headers with a reserved prefix (`x-ext-agent-*` or `x-praxis-*`) are accepted — this guarantees the value was set by a trusted gateway filter, not spoofed by the client (Praxis ingress strips reserved-prefix headers from client requests with a 400 reject). `agent.session_id` keeps its dedicated `X-Session-Id` handling and must not appear in this map. An absent or empty header leaves the extension field unset. A slot with no populated fields is left `None` on `Extensions`. |
+| `context_meta` | ContextMetaConfig | no | Static operator-supplied metadata for the `meta` extension slot. These values are per-deployment (not per-request) and populate `meta.tags`, `meta.scope`, and `meta.properties` on every request processed by this filter instance. **Important:** the PPE uses `meta.scope` for route resolution. Setting it here can change which policy route a request resolves to, not just what the audit record says. |
+| `context_meta.tags` | HashSet | no | Operational tags — merged with any tags from the matching route. Used by policy rules: `meta.tags contains "regulated"`. |
+| `context_meta.scope` | string | no | Host-defined grouping (virtual server ID, namespace, etc.). **Caution:** PPE scores route resolution on `meta.scope`, so setting it here changes which policy route a request resolves to, not just what the audit record says. |
+| `context_meta.properties` | object<string, string> | no | Arbitrary key-value metadata, available as `meta.properties.<key>` in APL predicates. |
 
 ## Example
 
