@@ -82,6 +82,9 @@ fn bench_load_balancer(c: &mut Criterion) {
         );
     });
 
+    #[cfg(feature = "slow-start")]
+    bench_slow_start(&mut group, &rt);
+
     group.finish();
 }
 
@@ -94,6 +97,109 @@ fn make_ctx_with_cluster<'a>(req: &'a praxis_filter::Request, cluster: &str) -> 
     let mut ctx = common::make_ctx(req);
     ctx.cluster = Some(std::sync::Arc::from(cluster));
     ctx
+}
+
+/// Settled and in-window slow start, at the same pool sizes as the other cases.
+#[cfg(feature = "slow-start")]
+fn bench_slow_start(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    rt: &tokio::runtime::Runtime,
+) {
+    use std::sync::Arc;
+
+    use praxis_core::config::SlowStartConfig;
+    use praxis_filter::SlowStartRegistry;
+
+    for &pool_size in &[10_usize, 50] {
+        let mut cluster = make_cluster(LoadBalancerStrategy::Simple(SimpleStrategy::RoundRobin), pool_size);
+        cluster.slow_start = Some(SlowStartConfig {
+            window_ms: 60_000,
+            aggression: 1.0,
+        });
+        let lb = LoadBalancerFilter::new(&[cluster.clone()]);
+        lb.bind_slow_start(&Arc::new(SlowStartRegistry::new()));
+        let addresses: Vec<Arc<str>> = cluster
+            .endpoints
+            .iter()
+            .map(|endpoint| Arc::from(endpoint.address()))
+            .collect();
+        let healthy = health_registry(&addresses, None);
+        warm_slow_start(rt, &lb, &healthy);
+        group.bench_with_input(BenchmarkId::new("slow_start_settled", pool_size), &lb, |b, filter| {
+            let healthy = &healthy;
+            b.to_async(rt).iter_batched(
+                || make_request("/api/v1/users"),
+                |req| async move {
+                    let mut ctx = make_ctx_with_cluster(&req, "bench");
+                    ctx.health_registry = Some(healthy);
+                    let _result = black_box(filter.on_request(black_box(&mut ctx)).await.unwrap());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        let active = LoadBalancerFilter::new(&[cluster]);
+        active.bind_slow_start(&Arc::new(SlowStartRegistry::new()));
+        let down = health_registry(&addresses, Some(pool_size.saturating_sub(1)));
+        let recovered = health_registry(&addresses, None);
+        warm_slow_start(rt, &active, &down);
+        warm_slow_start(rt, &active, &recovered);
+        group.bench_with_input(
+            BenchmarkId::new("slow_start_active", pool_size),
+            &active,
+            |b, filter| {
+                let recovered = &recovered;
+                b.to_async(rt).iter_batched(
+                    || make_request("/api/v1/users"),
+                    |req| async move {
+                        let mut ctx = make_ctx_with_cluster(&req, "bench");
+                        ctx.health_registry = Some(recovered);
+                        let _result = black_box(filter.on_request(black_box(&mut ctx)).await.unwrap());
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
+    }
+}
+
+/// One request so the ramp records membership before the measured loop.
+#[cfg(feature = "slow-start")]
+fn warm_slow_start(
+    rt: &tokio::runtime::Runtime,
+    lb: &LoadBalancerFilter,
+    health: &praxis_core::health::HealthRegistry,
+) {
+    rt.block_on(async {
+        let req = make_request("/api/v1/users");
+        let mut ctx = make_ctx_with_cluster(&req, "bench");
+        ctx.health_registry = Some(health);
+        let _result = lb.on_request(&mut ctx).await.unwrap();
+    });
+}
+
+/// Health map for `bench`. `down` is the endpoint index that is unhealthy.
+#[cfg(feature = "slow-start")]
+fn health_registry(addresses: &[std::sync::Arc<str>], down: Option<usize>) -> praxis_core::health::HealthRegistry {
+    use std::{collections::HashMap, sync::Arc};
+
+    use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
+
+    let endpoints: Vec<EndpointHealth> = addresses
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let endpoint = EndpointHealth::new();
+            if down == Some(index) {
+                endpoint.mark_unhealthy();
+            }
+            endpoint
+        })
+        .collect();
+    let entry = ClusterHealthEntry::new(endpoints, addresses.to_vec(), None, None);
+    let mut map = HashMap::new();
+    map.insert(Arc::from("bench"), Arc::new(entry));
+    Arc::new(map)
 }
 
 /// Build a cluster with the given strategy and `n` endpoints.

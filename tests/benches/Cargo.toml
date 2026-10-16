@@ -99,4 +99,5 @@ harness = false
 [features]
 policy-engine = ["praxis-filter/policy-engine"]
 upstream-binding = ["praxis-filter/upstream-binding"]
+slow-start = ["praxis-core/slow-start", "praxis-filter/slow-start"]
 dhat-heap = ["dep:dhat"]

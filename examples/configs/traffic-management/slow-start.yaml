@@ -1,8 +1,9 @@
 # Slow Start
 #
-# Configure a slow-start window that load-balancer selection
-# does not apply yet. Endpoints listed here are the baseline
-# and keep their configured weight.
+# Ramp newly added and recovered endpoints up to their
+# configured weight. Endpoints listed here are the baseline
+# and keep their configured weight. An endpoint added in a
+# later reload starts at zero and climbs over window_ms.
 #
 # ⚠️  EXPERIMENTAL: This example uses the `slow-start` experimental feature.
 # Not recommended for production use. Build with --features slow-start.

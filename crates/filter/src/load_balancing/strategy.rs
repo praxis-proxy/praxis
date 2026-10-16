@@ -11,9 +11,18 @@ use praxis_core::{
 };
 
 use super::{
-    consistent_hash::ConsistentHash, endpoint::WeightedEndpoint, least_connections::LeastConnections, maglev::Maglev,
-    p2c::PowerOfTwoChoices, priority::PriorityLevels, random::Random, ring_hash::RingHash, round_robin::RoundRobin,
-    subset::Subset, zone_aware::ZoneAware,
+    consistent_hash::ConsistentHash,
+    endpoint::WeightedEndpoint,
+    least_connections::LeastConnections,
+    maglev::Maglev,
+    p2c::PowerOfTwoChoices,
+    priority::PriorityLevels,
+    random::Random,
+    ring_hash::RingHash,
+    round_robin::RoundRobin,
+    slow_start::{self, EffectiveWeights},
+    subset::Subset,
+    zone_aware::ZoneAware,
 };
 
 // -----------------------------------------------------------------------------
@@ -68,37 +77,82 @@ impl Strategy {
         health: Option<&ClusterHealthState>,
         exclude: &[Arc<str>],
     ) -> Option<Arc<str>> {
-        let addr = match self {
-            Self::RoundRobin(rr) => rr.select(health, exclude),
-            Self::LeastConnections(lc) => lc.select(health, exclude),
-            Self::ConsistentHash(ch) => ch.select(hash_key, health, exclude),
-            Self::PowerOfTwoChoices(p2c) => p2c.select(health, exclude),
-            Self::Random(r) => r.select(health, exclude),
-            Self::Maglev(m) => m.select(hash_key, health, exclude),
-            Self::RingHash(rh) => rh.select(hash_key, health, exclude),
-            Self::Subset(s) => s.select(hash_key, health, exclude),
-            Self::ZoneAware(za) => za.select(hash_key, health, exclude),
-            Self::Priority(p) => p.select(hash_key, health, exclude),
-        };
-        if addr.is_some() {
-            return addr;
+        self.select_weighted(hash_key, health, exclude, None)
+    }
+
+    /// Pick an endpoint, using `weights` when the slow-start ramp is scaling.
+    ///
+    /// `None`, and a fallback pick where every healthy endpoint is still at
+    /// zero, keep today's configured weights. Hash strategies ignore `weights`.
+    pub(crate) fn select_weighted(
+        &self,
+        hash_key: Option<&str>,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: Option<&EffectiveWeights>,
+    ) -> Option<Arc<str>> {
+        if let Some(addr) = self.pick(hash_key, health, exclude, weights) {
+            return Some(addr);
         }
         // All endpoints excluded — fall back to the full set.
         if !exclude.is_empty() {
-            return match self {
-                Self::RoundRobin(rr) => rr.select(health, &[]),
-                Self::LeastConnections(lc) => lc.select(health, &[]),
-                Self::ConsistentHash(ch) => ch.select(hash_key, health, &[]),
-                Self::PowerOfTwoChoices(p2c) => p2c.select(health, &[]),
-                Self::Random(r) => r.select(health, &[]),
-                Self::Maglev(m) => m.select(hash_key, health, &[]),
-                Self::RingHash(rh) => rh.select(hash_key, health, &[]),
-                Self::Subset(s) => s.select(hash_key, health, &[]),
-                Self::ZoneAware(za) => za.select(hash_key, health, &[]),
-                Self::Priority(p) => p.select(hash_key, health, &[]),
-            };
+            return self.pick(hash_key, health, &[], weights);
         }
         None
+    }
+
+    /// One selection pass. Does not retry with an empty exclusion set.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "each strategy is one arm; the ramp split is the same shape"
+    )]
+    fn pick(
+        &self,
+        hash_key: Option<&str>,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: Option<&EffectiveWeights>,
+    ) -> Option<Arc<str>> {
+        match self {
+            Self::RoundRobin(rr) => apply_ramp(
+                weights,
+                || rr.select(health, exclude),
+                |weights| rr.select_weighted(health, exclude, Some(weights)),
+            ),
+            Self::LeastConnections(lc) => apply_ramp(
+                weights,
+                || lc.select(health, exclude),
+                |weights| lc.select_weighted(health, exclude, Some(weights)),
+            ),
+            Self::PowerOfTwoChoices(p2c) => apply_ramp(
+                weights,
+                || p2c.select(health, exclude),
+                |weights| p2c.select_weighted(health, exclude, Some(weights)),
+            ),
+            Self::Random(r) => apply_ramp(
+                weights,
+                || r.select(health, exclude),
+                |weights| r.select_weighted(health, exclude, Some(weights)),
+            ),
+            Self::Subset(s) => apply_ramp(
+                weights,
+                || s.select(hash_key, health, exclude),
+                |weights| s.select_weighted(hash_key, health, exclude, Some(weights)),
+            ),
+            Self::ZoneAware(za) => apply_ramp(
+                weights,
+                || za.select(hash_key, health, exclude),
+                |weights| za.select_weighted(hash_key, health, exclude, Some(weights)),
+            ),
+            Self::Priority(p) => apply_ramp(
+                weights,
+                || p.select(hash_key, health, exclude),
+                |weights| p.select_weighted(hash_key, health, exclude, Some(weights)),
+            ),
+            Self::ConsistentHash(ch) => ch.select(hash_key, health, exclude),
+            Self::Maglev(m) => m.select(hash_key, health, exclude),
+            Self::RingHash(rh) => rh.select(hash_key, health, exclude),
+        }
     }
 
     /// Called after a response arrives so that strategies that track in-flight
@@ -112,6 +166,23 @@ impl Strategy {
             Self::Priority(p) => p.release(addr),
             Self::RoundRobin(_) | Self::ConsistentHash(_) | Self::Random(_) | Self::Maglev(_) | Self::RingHash(_) => {},
         }
+    }
+}
+
+/// Use configured selection unless the ramp is scaling, and fall back to it
+/// when the scaled pass finds nothing.
+///
+/// A subset or retry can see only endpoints that are still at zero. Returning
+/// `None` from that pass would fail the request, or send a retry back to the
+/// endpoint it just excluded. The configured pass still serves those endpoints.
+fn apply_ramp<'a>(
+    weights: Option<&'a EffectiveWeights>,
+    configured: impl FnOnce() -> Option<Arc<str>>,
+    scaled: impl FnOnce(&'a EffectiveWeights) -> Option<Arc<str>>,
+) -> Option<Arc<str>> {
+    match slow_start::scaling_weights(weights) {
+        Some(weights) => scaled(weights).or_else(configured),
+        None => configured(),
     }
 }
 
@@ -572,5 +643,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hash_selection_ignores_ramp_weights() {
+        let endpoints = make_endpoints();
+        let strategy = build_strategy(
+            &LoadBalancerStrategy::Parameterised(ParameterisedStrategy::ConsistentHash(ConsistentHashOpts::default())),
+            endpoints,
+        );
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 1_000_000), ("10.0.0.2:80", 0)]);
+        let plain = strategy.select(Some("session"), None, &[]).unwrap();
+        let ramped = strategy
+            .select_weighted(Some("session"), None, &[], Some(&weights))
+            .unwrap();
+        assert_eq!(plain, ramped, "a hash strategy keeps its ring when a ramp is scaling");
+    }
+
+    #[test]
+    fn zero_ramp_subset_falls_back_to_configured_weight() {
+        use std::collections::HashMap;
+
+        use praxis_core::config::{SimpleStrategy, SubsetFallbackPolicy};
+
+        let mut first = WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1);
+        first.metadata.insert("version".to_owned(), "canary".to_owned());
+        let mut second = WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1);
+        second.metadata.insert("version".to_owned(), "canary".to_owned());
+        let subset = Subset::new(
+            vec![first, second],
+            &HashMap::from([("version".to_owned(), "canary".to_owned())]),
+            &SimpleStrategy::RoundRobin,
+            SubsetFallbackPolicy::NoEndpoint,
+        );
+        let strategy = Strategy::Subset(subset);
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 0), ("10.0.0.2:80", 0)]);
+        assert!(
+            strategy.select_weighted(None, None, &[], Some(&weights)).is_some(),
+            "a no_endpoint subset whose members are still at zero keeps serving"
+        );
     }
 }

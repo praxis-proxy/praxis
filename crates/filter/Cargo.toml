@@ -49,8 +49,8 @@ iterative-request-router = ["upstream-binding"]
 router-json-aliases = []
 
 # Per-cluster slow start. Off by default; experimental. The config field is
-# accepted only with this feature, and load-balancer selection does not read
-# the ramp yet.
+# accepted only with this feature. Weighted strategies apply the ramp. Hash
+# strategies do not.
 slow-start = ["praxis-core/slow-start"]
 
 # The once-per-request bound-upstream request-body hook

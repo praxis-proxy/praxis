@@ -13,6 +13,7 @@ use praxis_core::{
 
 use super::{
     endpoint::WeightedEndpoint,
+    slow_start::EffectiveWeights,
     strategy::{Strategy, build_simple_strategy},
 };
 
@@ -80,17 +81,30 @@ impl Subset {
         health: Option<&ClusterHealthState>,
         exclude: &[Arc<str>],
     ) -> Option<Arc<str>> {
+        self.select_weighted(hash_key, health, exclude, None)
+    }
+
+    /// Select from the subset, forwarding ramp weights to the inner strategy.
+    pub(crate) fn select_weighted(
+        &self,
+        hash_key: Option<&str>,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: Option<&EffectiveWeights>,
+    ) -> Option<Arc<str>> {
         if let Some(strategy) = &self.subset_strategy
             && !self.all_subset_unhealthy(health)
         {
-            let result = strategy.select(hash_key, health, exclude);
+            let result = strategy.select_weighted(hash_key, health, exclude, weights);
             if result.is_some() {
                 return result;
             }
         }
 
         match self.fallback_policy {
-            SubsetFallbackPolicy::AnyEndpoint => self.fallback_strategy.select(hash_key, health, exclude),
+            SubsetFallbackPolicy::AnyEndpoint => self
+                .fallback_strategy
+                .select_weighted(hash_key, health, exclude, weights),
             SubsetFallbackPolicy::NoEndpoint => None,
         }
     }

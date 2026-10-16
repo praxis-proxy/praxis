@@ -373,10 +373,9 @@ pub struct Cluster {
     /// Ramp newly added and newly recovered endpoints up to their configured weight.
     ///
     /// Requires the `slow-start` Cargo feature, which is off by default.
-    /// Load-balancer selection does not read this ramp yet: the setting is
-    /// accepted and stored, and a follow-up applies it while choosing an
-    /// endpoint. Omit it to give every eligible endpoint its configured weight
-    /// immediately. See [`SlowStartConfig`].
+    /// Weighted strategies apply the ramp while choosing an endpoint. Hash
+    /// strategies keep the configured weight. Omit it to give every eligible
+    /// endpoint its configured weight immediately. See [`SlowStartConfig`].
     #[cfg(feature = "slow-start")]
     #[serde(default)]
     pub slow_start: Option<SlowStartConfig>,

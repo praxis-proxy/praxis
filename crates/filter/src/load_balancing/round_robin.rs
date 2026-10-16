@@ -4,13 +4,17 @@
 //! Weighted round-robin endpoint selection via cumulative weight thresholds.
 
 use std::sync::{
-    Arc,
+    Arc, Mutex, PoisonError,
     atomic::{AtomicUsize, Ordering},
 };
 
 use praxis_core::health::ClusterHealthState;
 
-use super::{endpoint::WeightedEndpoint, is_excluded};
+use super::{
+    endpoint::WeightedEndpoint,
+    is_excluded,
+    slow_start::{self, EffectiveWeights},
+};
 
 // -----------------------------------------------------------------------------
 // RoundRobin
@@ -26,16 +30,24 @@ pub(crate) struct RoundRobin {
 
     /// Monotonically increasing counter; modulo-selected per call.
     counter: AtomicUsize,
+
+    /// Running scores for smooth weighted round robin.
+    ///
+    /// Used only while slow start is scaling. Contiguous buckets stay in
+    /// place for configured weights, whose totals are small.
+    smooth: Mutex<Vec<i64>>,
 }
 
 impl RoundRobin {
     /// Create a round-robin selector from a deduplicated weighted endpoint list.
     pub(crate) fn new(endpoints: Vec<WeightedEndpoint>) -> Self {
         let total_weight: usize = endpoints.iter().map(|ep| ep.weight as usize).sum();
+        let smooth = Mutex::new(vec![0; endpoints.len()]);
         Self {
             endpoints,
             total_weight,
             counter: AtomicUsize::new(0),
+            smooth,
         }
     }
 
@@ -45,8 +57,21 @@ impl RoundRobin {
     /// unhealthy. Endpoints listed in `exclude` are skipped.
     #[inline]
     pub(crate) fn select(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<Arc<str>> {
+        self.select_weighted(health, exclude, None)
+    }
+
+    /// Pick the next endpoint, using smooth weighted round robin when `weights` scales.
+    pub(crate) fn select_weighted(
+        &self,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: Option<&EffectiveWeights>,
+    ) -> Option<Arc<str>> {
         if self.total_weight == 0 {
             return None;
+        }
+        if let Some(weights) = slow_start::scaling_weights(weights) {
+            return self.select_smooth(health, exclude, weights);
         }
         let tick = self.counter.fetch_add(1, Ordering::Relaxed);
 
@@ -57,6 +82,55 @@ impl RoundRobin {
         }
 
         select_by_weight_excluding(&self.endpoints, tick, exclude)
+    }
+
+    /// Nginx-style smooth weighted round robin over the scaled ramp weights.
+    ///
+    /// Each eligible endpoint adds its weight to a running score. The highest
+    /// score is picked and then reduced by the total, so a fractional ramp
+    /// interleaves instead of occupying a million contiguous slots.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the score update and the winner adjustment are one critical section"
+    )]
+    fn select_smooth(
+        &self,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: &EffectiveWeights,
+    ) -> Option<Arc<str>> {
+        let mut current = self.smooth.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut best: Option<(usize, i64)> = None;
+        let mut total = 0_i64;
+        for (pos, endpoint) in self.endpoints.iter().enumerate() {
+            if !smooth_candidate(endpoint, health, exclude) {
+                continue;
+            }
+            let weight = i64::try_from(slow_start::endpoint_weight(
+                &endpoint.address,
+                endpoint.weight,
+                Some(weights),
+            ))
+            .unwrap_or(i64::MAX);
+            if weight <= 0 {
+                continue;
+            }
+            let score = current.get(pos).copied().unwrap_or(0).saturating_add(weight);
+            if let Some(slot) = current.get_mut(pos) {
+                *slot = score;
+            }
+            total = total.saturating_add(weight);
+            if best.is_none_or(|(_, best_score)| score > best_score) {
+                best = Some((pos, score));
+            }
+        }
+        let (pos, _) = best?;
+        if let Some(slot) = current.get_mut(pos) {
+            *slot = slot.saturating_sub(total);
+        }
+        let address = Arc::clone(&self.endpoints.get(pos)?.address);
+        drop(current);
+        Some(address)
     }
 
     /// Attempt weighted selection among only healthy endpoints.
@@ -107,6 +181,14 @@ impl RoundRobin {
         }
         None
     }
+}
+
+/// Whether `endpoint` is in the smooth-round-robin candidate set.
+fn smooth_candidate(endpoint: &WeightedEndpoint, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> bool {
+    if is_excluded(&endpoint.address, exclude) {
+        return false;
+    }
+    health.is_none_or(|state| state.is_address_healthy(&endpoint.address))
 }
 
 /// Walk `endpoints` to find the weight bucket containing `slot`.
@@ -172,6 +254,76 @@ mod tests {
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
+
+    #[test]
+    fn smooth_round_robin_interleaves_a_partial_ramp() {
+        let rr = RoundRobin::new(vec![
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
+        ]);
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 1_000_000), ("10.0.0.2:80", 500_000)]);
+        let picks: Vec<String> = std::iter::repeat_with(|| {
+            rr.select_weighted(None, &[], Some(&weights))
+                .expect("both endpoints have weight")
+                .to_string()
+        })
+        .take(6)
+        .collect();
+        let heavy = picks.iter().filter(|pick| pick.as_str() == "10.0.0.1:80").count();
+        assert_eq!(
+            heavy, 4,
+            "weight 2/3 of the picks go to the settled endpoint: {picks:?}"
+        );
+        assert!(
+            picks
+                .windows(3)
+                .all(|window| window.iter().filter(|pick| pick.as_str() == "10.0.0.1:80").count() < 3),
+            "the heavier endpoint does not take three requests in a row: {picks:?}"
+        );
+    }
+
+    #[test]
+    fn smooth_round_robin_skips_a_zero_ramp() {
+        let rr = RoundRobin::new(vec![
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
+        ]);
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 1_000_000), ("10.0.0.2:80", 0)]);
+        for _ in 0..4 {
+            let picked = rr
+                .select_weighted(None, &[], Some(&weights))
+                .expect("the settled endpoint");
+            assert_eq!(&*picked, "10.0.0.1:80", "an endpoint at zero stays out of rotation");
+        }
+    }
+
+    #[test]
+    fn an_idle_ramp_keeps_contiguous_buckets() {
+        let rr = RoundRobin::new(vec![
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 2),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
+        ]);
+        let weights = EffectiveWeights::idle(&[("10.0.0.1:80", 2_000_000), ("10.0.0.2:80", 1_000_000)]);
+        let picks: Vec<String> = std::iter::repeat_with(|| {
+            rr.select_weighted(None, &[], Some(&weights))
+                .expect("both endpoints have configured weight")
+                .to_string()
+        })
+        .take(6)
+        .collect();
+        assert_eq!(
+            picks,
+            [
+                "10.0.0.1:80",
+                "10.0.0.1:80",
+                "10.0.0.2:80",
+                "10.0.0.1:80",
+                "10.0.0.1:80",
+                "10.0.0.2:80",
+            ],
+            "an idle ramp uses configured buckets: {picks:?}"
+        );
+    }
 
     #[test]
     fn single_endpoint() {

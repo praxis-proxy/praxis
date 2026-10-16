@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-#![expect(
-    dead_code,
-    reason = "load-balancer strategies consume this ramp in the follow-up change"
-)]
-
 //! Slow-start ramp shared by the weighted load-balancing strategies.
 //!
 //! The registry survives config reload, so an endpoint added in a later
 //! generation is ramped and an endpoint that was already present keeps the
 //! clock it started with. Health transitions are applied on each selection.
+
+#![cfg_attr(
+    not(feature = "slow-start"),
+    expect(
+        dead_code,
+        reason = "bindings and the ramp engine are installed only with the slow-start feature"
+    )
+)]
 
 use std::{
     collections::{HashMap, HashSet},
@@ -68,9 +71,9 @@ impl SlowStartParams {
 /// Values are in [`WEIGHT_SCALE`] units so a fractional ramp is still a
 /// positive integer. Round robin must not use those units as contiguous
 /// buckets (`slot = tick % total`): two settled endpoints at weight 1 would
-/// each take a million requests in a row. The follow-up that teaches round
-/// robin to read this map needs smooth weighted round robin, which
-/// interleaves endpoints, instead of the scaled total as the bucket size.
+/// each take a million requests in a row. While the ramp is scaling, round
+/// robin uses smooth weighted round robin, which interleaves endpoints
+/// instead of treating the scaled total as the bucket size.
 #[derive(Clone)]
 pub(crate) struct EffectiveWeights {
     /// Scaled weight keyed by endpoint address.
@@ -82,6 +85,11 @@ pub(crate) struct EffectiveWeights {
     /// Set when every healthy endpoint's ramp weight is still 0, so the
     /// cluster can still serve traffic.
     fallback: bool,
+    /// At least one healthy endpoint is still inside its window.
+    ///
+    /// An idle ramp, where every endpoint is at full weight or down, is
+    /// false so selection keeps the configured pickers.
+    scaling: bool,
 }
 
 impl EffectiveWeights {
@@ -99,10 +107,69 @@ impl EffectiveWeights {
 
     /// Whether load-aware pickers should treat weight as capacity.
     ///
-    /// False for a fallback pick, which uses the configured weights as today.
+    /// False for a fallback pick and for an idle ramp. Both keep the
+    /// configured weights.
     pub(crate) fn scales_capacity(&self) -> bool {
-        !self.fallback
+        self.scaling
     }
+
+    /// Scaled weights for a test pick that does not go through the registry.
+    #[cfg(test)]
+    pub(crate) fn from_scaled(entries: &[(&str, u64)]) -> Self {
+        Self::from_scaled_with(entries, true)
+    }
+
+    /// A snapshot whose ramp is idle, so selection keeps configured weights.
+    #[cfg(test)]
+    pub(crate) fn idle(entries: &[(&str, u64)]) -> Self {
+        Self::from_scaled_with(entries, false)
+    }
+
+    /// Test snapshot. `scaling` is false for an idle ramp.
+    #[cfg(test)]
+    fn from_scaled_with(entries: &[(&str, u64)], scaling: bool) -> Self {
+        let by_address = entries
+            .iter()
+            .map(|(address, weight)| (Arc::<str>::from(*address), *weight))
+            .collect();
+        Self {
+            by_address: Arc::new(by_address),
+            fallback: false,
+            scaling,
+        }
+    }
+}
+
+/// Ramp weights that should change a pick, or `None` to keep configured weights.
+///
+/// `None` when the snapshot is missing, when every healthy endpoint is still
+/// at zero, and when the ramp is idle. An idle cluster has `slow_start` set
+/// and every endpoint at full weight or down, so the configured pickers run.
+pub(crate) fn scaling_weights(weights: Option<&EffectiveWeights>) -> Option<&EffectiveWeights> {
+    weights.filter(|weights| weights.scales_capacity())
+}
+
+/// Cost of the next request on an endpoint, compared across a pair.
+///
+/// `(load + 1) * configured * other_scaled`. Two endpoints at full weight
+/// cancel to raw load. A small ramp stays more expensive than a busier peer
+/// that has already reached its configured weight.
+pub(crate) fn ramp_load_cost(load: usize, configured: u32, other_scaled: u64) -> u128 {
+    let load = u128::try_from(load.saturating_add(1)).unwrap_or(u128::MAX);
+    load.saturating_mul(u128::from(configured))
+        .saturating_mul(u128::from(other_scaled))
+}
+
+/// Snapshot for `cluster` when one of `bindings` ramps it.
+pub(crate) fn weights_for(
+    bindings: &[SlowStartBinding],
+    cluster: &str,
+    health: Option<&ClusterHealthState>,
+) -> Option<EffectiveWeights> {
+    bindings
+        .iter()
+        .find(|binding| binding.cluster_name() == cluster)
+        .map(|binding| binding.snapshot(None, health))
 }
 
 /// Weight units for one endpoint, using the ramp when one is active.
@@ -547,10 +614,24 @@ impl SlowStartBinding {
         }
     }
 
+    /// Cluster this binding ramps.
+    pub(crate) fn cluster_name(&self) -> &str {
+        &self.cluster
+    }
+
     /// Attach to `registry` now, so the baseline is recorded before the first request.
-    pub(crate) fn open(self, registry: &Arc<SlowStartRegistry>) -> Self {
+    ///
+    /// Fills this binding's locks in place. Callers keep the binding in a
+    /// plain list and share it across requests without a second mutex.
+    pub(crate) fn open(&self, registry: &Arc<SlowStartRegistry>) {
         drop(self.registry.set(Arc::clone(registry)));
-        self.ramp_handle(Some(registry));
+        drop(self.ramp_handle(Some(registry)));
+    }
+
+    /// Attach and hand the binding back. Tests keep the value they opened.
+    #[cfg(test)]
+    fn opened(self, registry: &Arc<SlowStartRegistry>) -> Self {
+        self.open(registry);
         self
     }
 
@@ -838,9 +919,11 @@ impl ClusterRamp {
             healthy_total = add_if_healthy(&self.endpoints, address, weight, healthy_total);
             by_address.insert(Arc::clone(address), weight);
         }
+        let idle = self.ramp_is_idle(endpoints);
         EffectiveWeights {
             by_address: Arc::new(by_address),
             fallback: healthy_total == 0,
+            scaling: !idle && healthy_total > 0,
         }
     }
 
@@ -1032,6 +1115,20 @@ mod tests {
     }
 
     #[test]
+    fn a_settled_snapshot_is_not_scaling() {
+        let registry = Arc::new(SlowStartRegistry::new());
+        registry.pin(Instant::now());
+        let started = registry.enter_generation();
+        let binding = binding(&["10.0.0.1:80", "10.0.0.2:80"]).opened(&registry);
+        started.commit();
+        let weights = binding.snapshot(Some(&registry), None);
+        assert!(
+            scaling_weights(Some(&weights)).is_none(),
+            "an idle ramp keeps the configured pickers"
+        );
+    }
+
+    #[test]
     fn baseline_endpoints_stay_at_full_weight() {
         let registry = SlowStartRegistry::new();
         let now = Instant::now();
@@ -1055,10 +1152,10 @@ mod tests {
         let registry = Arc::new(SlowStartRegistry::new());
         registry.pin(Instant::now());
         registry.begin_generation();
-        let first = binding(&["10.0.0.1:80"]).open(&registry);
+        let first = binding(&["10.0.0.1:80"]).opened(&registry);
         registry.end_generation();
         registry.begin_generation();
-        let second = binding(&["10.0.0.1:80", "10.0.0.2:80"]).open(&registry);
+        let second = binding(&["10.0.0.1:80", "10.0.0.2:80"]).opened(&registry);
         let added = second.snapshot(Some(&registry), None);
         assert_eq!(
             added.of("10.0.0.1:80", 1),
@@ -1083,7 +1180,7 @@ mod tests {
         let registry = Arc::new(SlowStartRegistry::new());
         registry.pin(Instant::now());
         registry.begin_generation();
-        let origin = binding(&["10.0.0.1:80"]).open(&registry);
+        let origin = binding(&["10.0.0.1:80"]).opened(&registry);
         registry.end_generation();
         registry.begin_generation();
         let long = SlowStartBinding::new(
@@ -1091,13 +1188,13 @@ mod tests {
             params(30_000, 1.0),
             vec![(Arc::from("10.0.0.1:80"), 1), (Arc::from("10.0.0.2:80"), 1)],
         )
-        .open(&registry);
+        .opened(&registry);
         let short = SlowStartBinding::new(
             Arc::from("backend"),
             params(1, 1.0),
             vec![(Arc::from("10.0.0.1:80"), 1), (Arc::from("10.0.0.2:80"), 1)],
         )
-        .open(&registry);
+        .opened(&registry);
         registry.advance(Duration::from_millis(1));
         assert_eq!(
             short.snapshot(Some(&registry), None).of("10.0.0.2:80", 1),
@@ -1117,12 +1214,12 @@ mod tests {
         let registry = Arc::new(SlowStartRegistry::new());
         registry.pin(Instant::now());
         let started = registry.enter_generation();
-        let live = binding(&["10.0.0.1:80", "10.0.0.2:80"]).open(&registry);
+        let live = binding(&["10.0.0.1:80", "10.0.0.2:80"]).opened(&registry);
         started.commit();
         let installed = registry.installed.load(Ordering::Acquire);
 
         let abandoned = registry.enter_generation();
-        let failed = binding(&["10.0.0.1:80", "10.0.0.3:80"]).open(&registry);
+        let failed = binding(&["10.0.0.1:80", "10.0.0.3:80"]).opened(&registry);
         drop(failed);
         drop(abandoned);
 
@@ -1139,7 +1236,7 @@ mod tests {
         );
 
         let next = registry.enter_generation();
-        let added = binding(&["10.0.0.1:80", "10.0.0.2:80", "10.0.0.4:80"]).open(&registry);
+        let added = binding(&["10.0.0.1:80", "10.0.0.2:80", "10.0.0.4:80"]).opened(&registry);
         next.commit();
         let weights = added.snapshot(Some(&registry), None);
         assert_eq!(
@@ -1155,6 +1252,40 @@ mod tests {
     }
 
     #[test]
+    fn round_robin_uses_the_ramp_for_a_newly_added_endpoint() {
+        use crate::load_balancing::{endpoint::WeightedEndpoint, round_robin::RoundRobin};
+
+        let registry = Arc::new(SlowStartRegistry::new());
+        registry.pin(Instant::now());
+        let started = registry.enter_generation();
+        let baseline = binding(&["10.0.0.1:80"]).opened(&registry);
+        started.commit();
+        let next = registry.enter_generation();
+        let added = binding(&["10.0.0.1:80", "10.0.0.2:80"]).opened(&registry);
+        next.commit();
+        let weights = added.snapshot(Some(&registry), None);
+        let rr = RoundRobin::new(vec![
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1),
+        ]);
+        for _ in 0..4 {
+            let picked = rr
+                .select_weighted(None, &[], Some(&weights))
+                .expect("the baseline endpoint is at full weight");
+            assert_eq!(&*picked, "10.0.0.1:80", "a just-added endpoint stays out of rotation");
+        }
+        registry.advance(Duration::from_millis(30_000));
+        let settled = added.snapshot(Some(&registry), None);
+        let mut seen_new = false;
+        for _ in 0..4 {
+            let picked = rr.select_weighted(None, &[], Some(&settled)).expect("both endpoints");
+            seen_new |= &*picked == "10.0.0.2:80";
+        }
+        assert!(seen_new, "the new endpoint joins rotation once its window ends");
+        drop(baseline);
+    }
+
+    #[test]
     fn listeners_opened_in_one_build_keep_their_own_baseline() {
         let registry = Arc::new(SlowStartRegistry::new());
         registry.pin(Instant::now());
@@ -1164,8 +1295,8 @@ mod tests {
         registry.begin_generation();
         registry.end_generation();
         registry.begin_generation();
-        let left = binding(&["10.0.0.1:80", "10.0.0.2:80"]).open(&registry);
-        let right = binding(&["10.0.0.2:80", "10.0.0.3:80"]).open(&registry);
+        let left = binding(&["10.0.0.1:80", "10.0.0.2:80"]).opened(&registry);
+        let right = binding(&["10.0.0.2:80", "10.0.0.3:80"]).opened(&registry);
         let weights = right.snapshot(Some(&registry), None);
         assert_eq!(
             weights.of("10.0.0.3:80", 1),
@@ -1180,13 +1311,13 @@ mod tests {
         let registry = Arc::new(SlowStartRegistry::new());
         registry.pin(Instant::now());
         registry.begin_generation();
-        let original = binding(&["10.0.0.1:80", "10.0.0.2:80"]).open(&registry);
+        let original = binding(&["10.0.0.1:80", "10.0.0.2:80"]).opened(&registry);
         registry.end_generation();
         registry.begin_generation();
-        let narrowed = binding(&["10.0.0.1:80"]).open(&registry);
+        let narrowed = binding(&["10.0.0.1:80"]).opened(&registry);
         registry.end_generation();
         registry.begin_generation();
-        let restored = binding(&["10.0.0.1:80", "10.0.0.2:80"]).open(&registry);
+        let restored = binding(&["10.0.0.1:80", "10.0.0.2:80"]).opened(&registry);
         assert_eq!(
             restored.snapshot(Some(&registry), None).of("10.0.0.2:80", 1),
             0,
@@ -1199,7 +1330,7 @@ mod tests {
     #[test]
     fn baseline_is_recorded_when_the_binding_opens() {
         let registry = Arc::new(SlowStartRegistry::new());
-        let held = binding(&["10.0.0.1:80", "10.0.0.2:80"]).open(&registry);
+        let held = binding(&["10.0.0.1:80", "10.0.0.2:80"]).opened(&registry);
         assert!(
             registry.baseline_seeded("backend"),
             "opening the binding records the baseline before any snapshot"
@@ -1211,7 +1342,7 @@ mod tests {
     fn removed_cluster_leaves_the_registry_when_its_pipeline_drops() {
         let registry = Arc::new(SlowStartRegistry::new());
         registry.begin_generation();
-        let held = binding(&["10.0.0.1:80"]).open(&registry);
+        let held = binding(&["10.0.0.1:80"]).opened(&registry);
         registry.end_generation();
         assert!(registry.baseline_seeded("backend"), "the installed cluster stays");
         registry.begin_generation();

@@ -823,10 +823,13 @@ is first enabled for that cluster name. A reload that
 turns the setting on and adds an endpoint in the same
 change records that endpoint at full weight. An address
 added in a later reload, and an endpoint that becomes
-healthy again, ramp from zero. Hash strategies ignore
-the ramp. Load-balancer selection does not read this
-ramp yet: the setting is accepted and stored, and a
-follow-up applies it while choosing an endpoint. See
+healthy again, ramp from zero. Round robin, random,
+least-connections, and power-of-two-choices apply that
+weight while selecting, including inside subset,
+priority, and zone-aware selection. Round robin
+interleaves the scaled weights instead of handing each
+endpoint a long contiguous run. Hash strategies ignore
+the ramp. See
 [Slow Start](load-balancing.md#slow-start) and
 [slow-start.yaml](../../examples/configs/traffic-management/slow-start.yaml).
 

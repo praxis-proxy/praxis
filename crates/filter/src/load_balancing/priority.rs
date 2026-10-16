@@ -10,6 +10,7 @@ use praxis_core::{config::SimpleStrategy, health::ClusterHealthState};
 
 use super::{
     endpoint::WeightedEndpoint,
+    slow_start::EffectiveWeights,
     strategy::{Strategy, build_simple_strategy},
 };
 
@@ -74,13 +75,24 @@ impl PriorityLevels {
         health: Option<&ClusterHealthState>,
         exclude: &[Arc<str>],
     ) -> Option<Arc<str>> {
+        self.select_weighted(hash_key, health, exclude, None)
+    }
+
+    /// Select from the highest tier that has capacity, forwarding ramp weights.
+    pub(crate) fn select_weighted(
+        &self,
+        hash_key: Option<&str>,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: Option<&EffectiveWeights>,
+    ) -> Option<Arc<str>> {
         if self.tiers.is_empty() {
             return None;
         }
 
         for tier in &self.tiers {
             if self.tier_has_capacity(tier, health) {
-                let result = tier.strategy.select(hash_key, health, exclude);
+                let result = tier.strategy.select_weighted(hash_key, health, exclude, weights);
                 if result.is_some() {
                     return result;
                 }
@@ -95,7 +107,7 @@ impl PriorityLevels {
             .iter()
             .find(|tier| Self::tier_healthy_count(tier, health) > 0)
             .or_else(|| self.tiers.first())
-            .and_then(|t| t.strategy.select(hash_key, health, exclude))
+            .and_then(|tier| tier.strategy.select_weighted(hash_key, health, exclude, weights))
     }
 
     /// Propagate release to all tier strategies.

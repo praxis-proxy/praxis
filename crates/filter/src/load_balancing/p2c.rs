@@ -14,7 +14,11 @@ use std::{
 use praxis_core::health::ClusterHealthState;
 use smallvec::SmallVec;
 
-use super::{endpoint::WeightedEndpoint, is_excluded};
+use super::{
+    endpoint::WeightedEndpoint,
+    is_excluded,
+    slow_start::{self, EffectiveWeights},
+};
 
 // -----------------------------------------------------------------------------
 // PowerOfTwoChoices
@@ -79,8 +83,26 @@ impl PowerOfTwoChoices {
     ///
     /// Falls back to all endpoints when every endpoint is unhealthy.
     /// With a single endpoint, returns it directly.
-    #[expect(clippy::indexing_slicing, reason = "positions come from the endpoints scan")]
     pub(crate) fn select(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<Arc<str>> {
+        self.select_weighted(health, exclude, None)
+    }
+
+    /// Sample two endpoints. Ramp weights replace configured weights while scaling.
+    pub(crate) fn select_weighted(
+        &self,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: Option<&EffectiveWeights>,
+    ) -> Option<Arc<str>> {
+        if let Some(weights) = slow_start::scaling_weights(weights) {
+            return self.select_scaled(health, exclude, weights);
+        }
+        self.select_configured(health, exclude)
+    }
+
+    /// Sample two endpoints using configured weights.
+    #[expect(clippy::indexing_slicing, reason = "positions come from the endpoints scan")]
+    fn select_configured(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<Arc<str>> {
         if self.endpoints.is_empty() {
             return None;
         }
@@ -116,6 +138,100 @@ impl PowerOfTwoChoices {
 
         self.counters[chosen].fetch_add(1, Ordering::AcqRel);
         Some(Arc::clone(&self.endpoints[chosen].address))
+    }
+
+    /// Sample two endpoints in proportion to their scaled ramp weight.
+    #[expect(clippy::indexing_slicing, reason = "positions come from the endpoints scan")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the two samples and the empty-candidate fallback stay together"
+    )]
+    fn select_scaled(
+        &self,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: &EffectiveWeights,
+    ) -> Option<Arc<str>> {
+        if self.endpoints.is_empty() {
+            return None;
+        }
+        let mut candidates = self.candidate_positions(health, exclude);
+        candidates.retain(|pos| self.scaled_weight(*pos, weights) > 0);
+        if candidates.is_empty() {
+            let any_healthy = health.is_some_and(|state| {
+                state
+                    .endpoints()
+                    .iter()
+                    .any(praxis_core::health::EndpointHealth::is_healthy)
+            });
+            if any_healthy {
+                return None;
+            }
+            return self.select_configured(health, exclude);
+        }
+        let total: u64 = candidates.iter().map(|&pos| self.scaled_weight(pos, weights)).sum();
+        let pos = if candidates.len() == 1 || total <= 1 {
+            candidates[0]
+        } else {
+            let pos_a = self.pick_scaled(&candidates, weights, total);
+            let rest: SmallVec<[usize; 8]> = candidates.iter().copied().filter(|&pos| pos != pos_a).collect();
+            let rest_total = total.saturating_sub(self.scaled_weight(pos_a, weights));
+            let pos_b = if rest.is_empty() || rest_total == 0 {
+                pos_a
+            } else {
+                self.pick_scaled(&rest, weights, rest_total)
+            };
+            if pos_a == pos_b {
+                pos_a
+            } else {
+                self.less_loaded_scaled(pos_a, pos_b, weights)
+            }
+        };
+        self.counters[pos].fetch_add(1, Ordering::AcqRel);
+        Some(Arc::clone(&self.endpoints[pos].address))
+    }
+
+    /// Scaled ramp weight for the endpoint at `pos`.
+    #[expect(clippy::indexing_slicing, reason = "pos comes from the endpoints scan")]
+    fn scaled_weight(&self, pos: usize, weights: &EffectiveWeights) -> u64 {
+        let endpoint = &self.endpoints[pos];
+        slow_start::endpoint_weight(&endpoint.address, endpoint.weight, Some(weights))
+    }
+
+    /// Map a random slot onto `candidates` using scaled weights.
+    fn pick_scaled(&self, candidates: &[usize], weights: &EffectiveWeights, total: u64) -> usize {
+        let slot = super::next_random(&self.rng) % total.max(1);
+        let mut start = 0_u64;
+        for &pos in candidates {
+            let end = start.saturating_add(self.scaled_weight(pos, weights));
+            if slot < end {
+                return pos;
+            }
+            start = end;
+        }
+        candidates.last().copied().unwrap_or(0)
+    }
+
+    /// Lower `(load + 1) * configured / scaled`, breaking ties with higher configured weight.
+    #[expect(clippy::indexing_slicing, reason = "positions come from the endpoints scan")]
+    fn less_loaded_scaled(&self, a: usize, b: usize, weights: &EffectiveWeights) -> usize {
+        let load_a = self.counters[a].load(Ordering::Acquire);
+        let load_b = self.counters[b].load(Ordering::Acquire);
+        let scaled_a = self.scaled_weight(a, weights);
+        let scaled_b = self.scaled_weight(b, weights);
+        let cost_a = slow_start::ramp_load_cost(load_a, self.endpoints[a].weight, scaled_b);
+        let cost_b = slow_start::ramp_load_cost(load_b, self.endpoints[b].weight, scaled_a);
+        match cost_a.cmp(&cost_b) {
+            core::cmp::Ordering::Less => a,
+            core::cmp::Ordering::Greater => b,
+            core::cmp::Ordering::Equal => {
+                if self.endpoints[a].weight >= self.endpoints[b].weight {
+                    a
+                } else {
+                    b
+                }
+            },
+        }
     }
 
     /// Decrement the in-flight counter for `addr` after a response.
@@ -226,6 +342,18 @@ mod tests {
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
+
+    #[test]
+    fn scaled_power_of_two_skips_a_zero_ramp() {
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 1_000_000), ("10.0.0.2:80", 0)]);
+        for _ in 0..16 {
+            let picked = p2c
+                .select_weighted(None, &[], Some(&weights))
+                .expect("the settled endpoint");
+            assert_eq!(&*picked, "10.0.0.1:80", "an endpoint at zero is not sampled");
+        }
+    }
 
     #[test]
     fn single_endpoint_always_selected() {

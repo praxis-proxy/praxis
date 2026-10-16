@@ -58,8 +58,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   ([#1361](https://github.com/praxis-proxy/praxis/pull/1361),
   [#1372](https://github.com/praxis-proxy/praxis/pull/1372))
 - Clusters accept an optional `slow_start` (`window_ms`, `aggression`) when
-  built with the `slow-start` feature. Selection does not apply the ramp yet.
-  ([#1364](https://github.com/praxis-proxy/praxis/pull/1364))
+  built with the `slow-start` feature. Round robin, random, least-connections,
+  and power-of-two-choices apply the ramp, including inside subset, priority,
+  and zone-aware selection. Hash strategies keep the configured weight.
+  ([#1364](https://github.com/praxis-proxy/praxis/pull/1364),
+  [#1406](https://github.com/praxis-proxy/praxis/pull/1406),
+  [#110](https://github.com/praxis-proxy/praxis/issues/110))
 
 ### Changed
 

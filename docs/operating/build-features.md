@@ -75,7 +75,7 @@ really is out of the build.
 | `upstream-binding` | off (experimental) | Logical upstream binding: the `router` publishes the matched cluster as a request-wide binding that `bound_upstream` conditions and `cluster_source: bound_upstream` load balancers read. | On when a pipeline gates filters on the bound cluster's application metadata or dispatches from the binding. Implied by the two features below. Off, those config forms are rejected at load time and the router never touches request extensions. |
 | `iterative-request-router` | off (experimental) | The `iterative_request_router` filter: a bounded loop of sub-requests for provider failover and agentic/tool loops. | On for callout and failover pipelines (the AI gateway relies on it). No extra dependencies; pulls in `upstream-binding`, since its steps dispatch from the binding. |
 | `router-json-aliases` | off (experimental) | The `router` filter's JSON-alias body-routing groundwork. | Groundwork only: it is not wired into routing, and a route that sets `json_aliases` is rejected at build even with the feature on. Default builds do not accept the keys. |
-| `slow-start` | off (experimental) | Per-cluster `slow_start` config. | The key is rejected unless the feature is on. Selection does not read the ramp yet; the feature only accepts and stores the window. |
+| `slow-start` | off (experimental) | Per-cluster `slow_start` config. | The key is rejected unless the feature is on. With the feature on, weighted strategies apply the ramp. Hash strategies do not. |
 | `bound-upstream-request-body` | off (experimental) | The `HttpFilter::on_bound_upstream_request_body` hook, run once at the logical-binding barrier. | For out-of-tree filters that must inspect or rewrite the request body against the bound upstream; no in-tree filter uses it yet. Pulls in `upstream-binding`. |
 | `chain-binding` | off (experimental) | The `register_chain_binding` outbound-callout API (`ChainBindingContext::bind_chain`) and its authority-bound deferred credentials (`PendingCredentials`, `DeferredCredential`). | For out-of-tree callout filters; no in-tree consumer yet. |
 | `spiffe` | off (experimental) | SPIFFE X.509-SVID mTLS peer identity (the `require_named` listener mode) and the `peer_identity_trust` filter. | On for mTLS peer-identity authorization. Adds `spiffe` and `x509-parser`. |
@@ -116,8 +116,9 @@ production` at startup. Do not run an experimental build in production.
   at build even with the feature on. It is kept behind the flag for a future
   implementation; default builds do not carry the `json_aliases` keys at all.
 - **`slow-start`**: per-cluster `slow_start` window. Default builds reject the
-  key. With the feature on, the window is accepted and stored, but
-  load-balancer selection does not read the ramp yet.
+  key. With the feature on, round robin, random, least-connections, and
+  power-of-two-choices apply the ramp. Hash strategies keep the configured
+  weight.
 - **`bound-upstream-request-body`**: the once-per-request bound-upstream
   request-body hook (`bound_upstream_request_body_access` and
   `on_bound_upstream_request_body` on `HttpFilter`). It runs right after the
