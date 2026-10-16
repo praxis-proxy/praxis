@@ -150,6 +150,31 @@ fn acl_before_router_means_no_routing_on_denied() {
     );
 }
 
+#[test]
+fn acl_blocks_max_forwards_zero_answered_by_proxy() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = acl_yaml(proxy_port, backend_port, &[], &["0.0.0.0/0"]);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    for method in ["OPTIONS", "TRACE"] {
+        let raw = http_send(
+            proxy.addr(),
+            &format!("{method} / HTTP/1.1\r\nHost: localhost\r\nMax-Forwards: 0\r\nConnection: close\r\n\r\n"),
+        );
+        assert_eq!(
+            parse_status(&raw),
+            403,
+            "ACL deny-all must block {method} with Max-Forwards: 0 before the proxy answers it"
+        );
+        assert!(
+            !parse_body(&raw).contains("max-forwards"),
+            "a denied {method} must not be echoed back"
+        );
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

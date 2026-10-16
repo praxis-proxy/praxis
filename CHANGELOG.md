@@ -135,6 +135,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   filter and chain conditions, and `--dump` redacts `credential_injection`
   values nested in `iterative_request_router` steps. Both used to print them
   as configured. ([#1286](https://github.com/praxis-proxy/praxis/pull/1286))
+- A TRACE or OPTIONS request with `Max-Forwards: 0` is answered by the proxy
+  only after the request filters admit it. Before, it got a 200 before any
+  filter ran, so a client denied by `ip_acl` or another rejecting filter still
+  got a response.
 
 Releases 0.1.0 through 0.7.3 came out before this file existed; their notes
 are on [GitHub Releases](https://github.com/praxis-proxy/praxis/releases).

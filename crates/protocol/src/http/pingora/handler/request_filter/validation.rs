@@ -14,10 +14,12 @@ use super::stream_buffer::build_trace_response;
 
 /// Handle `Max-Forwards` on TRACE and OPTIONS requests per [RFC 9110 Section 7.6.2].
 ///
-/// When `Max-Forwards` is present and zero, the proxy responds directly
-/// instead of forwarding. When positive, it decrements and forwards.
-/// For non-TRACE/OPTIONS methods, or when the header is absent, returns `None`.
-pub(super) async fn handle_max_forwards(session: &mut Session) -> Option<bool> {
+/// When `Max-Forwards` is present and zero, returns the response the proxy
+/// gives as the final recipient instead of forwarding. The caller sends it
+/// only once the request filters admit the request, so access control still
+/// applies to it. When positive, it decrements and forwards. For
+/// non-TRACE/OPTIONS methods, or when the header is absent, returns `None`.
+pub(super) fn handle_max_forwards(session: &mut Session) -> Option<Rejection> {
     let method = &session.req_header().method;
     if !matches!(*method, http::Method::TRACE | http::Method::OPTIONS) {
         return None;
@@ -27,13 +29,11 @@ pub(super) async fn handle_max_forwards(session: &mut Session) -> Option<bool> {
 
     if mf == 0 {
         debug!(method = %method, "Max-Forwards is 0; responding without forwarding");
-        let rejection = if *method == http::Method::TRACE {
+        return Some(if *method == http::Method::TRACE {
             build_trace_response(session)
         } else {
             Rejection::status(200)
-        };
-        crate::http::pingora::convert::send_rejection(session, rejection).await;
-        return Some(true);
+        });
     }
 
     debug!(method = %method, max_forwards = mf - 1, "decrementing Max-Forwards");
@@ -59,7 +59,7 @@ fn parse_max_forwards(session: &Session) -> Option<u32> {
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(clippy::unwrap_used, reason = "tests")]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -105,22 +105,27 @@ mod tests {
     #[tokio::test]
     async fn trace_with_zero_max_forwards_is_answered_directly() {
         let (mut session, _client) = session_for("TRACE / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 0\r\n\r\n").await;
-        let handled = handle_max_forwards(&mut session).await;
-        assert_eq!(handled, Some(true), "TRACE with Max-Forwards 0 must be answered");
+        let answer = handle_max_forwards(&mut session).expect("TRACE with Max-Forwards 0 must be answered");
+        assert_eq!(answer.status, 200, "TRACE answer is a 200 echo");
+        let body = answer.body.unwrap_or_default();
+        assert!(body.starts_with(b"TRACE / "), "TRACE answer must echo the request line");
     }
 
     #[tokio::test]
     async fn options_with_zero_max_forwards_is_answered_directly() {
         let (mut session, _client) = session_for("OPTIONS / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 0\r\n\r\n").await;
-        let handled = handle_max_forwards(&mut session).await;
-        assert_eq!(handled, Some(true), "OPTIONS with Max-Forwards 0 must be answered");
+        let answer = handle_max_forwards(&mut session).expect("OPTIONS with Max-Forwards 0 must be answered");
+        assert_eq!(answer.status, 200, "OPTIONS answer is a bare 200");
+        assert!(answer.body.is_none(), "OPTIONS answer has no body");
     }
 
     #[tokio::test]
     async fn positive_max_forwards_is_decremented() {
         let (mut session, _client) = session_for("TRACE / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 3\r\n\r\n").await;
-        let handled = handle_max_forwards(&mut session).await;
-        assert_eq!(handled, None, "positive Max-Forwards must forward");
+        assert!(
+            handle_max_forwards(&mut session).is_none(),
+            "positive Max-Forwards must forward"
+        );
         let value = session
             .req_header()
             .headers
@@ -133,7 +138,9 @@ mod tests {
     #[tokio::test]
     async fn get_requests_ignore_max_forwards() {
         let (mut session, _client) = session_for("GET / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 0\r\n\r\n").await;
-        let handled = handle_max_forwards(&mut session).await;
-        assert_eq!(handled, None, "GET must ignore Max-Forwards");
+        assert!(
+            handle_max_forwards(&mut session).is_none(),
+            "GET must ignore Max-Forwards"
+        );
     }
 }

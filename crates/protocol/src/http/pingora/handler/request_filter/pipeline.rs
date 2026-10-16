@@ -98,12 +98,9 @@ pub(in crate::http) async fn execute(
         return Ok(true);
     }
 
-    if let Some(handled) = super::validation::handle_max_forwards(session).await {
-        if handled {
-            snapshot_for_early_exit(session, ctx);
-        }
-        return Ok(handled);
-    }
+    // Decided from the request as received, but sent only once the request
+    // filters admit it.
+    let max_forwards_answer = super::validation::handle_max_forwards(session);
 
     ctx.client_http_version = Some(session.req_header().version);
 
@@ -198,6 +195,10 @@ pub(in crate::http) async fn execute(
             headers_to_remove,
             headers_to_set,
         }) => {
+            if let Some(answer) = max_forwards_answer {
+                send_rejection_for(session, answer, ctx).await;
+                return Ok(true);
+            }
             // Mirror of `apply_pending_header_mutations`, which applied the
             // same three lists to `ctx.request_snapshot` in the same
             // remove -> set -> add order. Keep the two in step.
