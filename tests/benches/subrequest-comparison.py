@@ -24,7 +24,7 @@ import tomllib
 
 
 COMPLETION_PARENT = "3141d5b9a19fa1688cf0fcd26cd036d35918df6d"
-COMPLETION_CANDIDATE = "45bc8af281d1e23f40eca78723de37b5ead7bc30"
+COMPLETION_CANDIDATE = "e6f006bc64783fa63e4b0e284e3e55f583efd1b2"
 COMPLETION_HARNESS_PATHS = {
     ".github/workflows/subrequest-benchmarks.yaml",
     "tests/benches/subrequest-comparison.py",

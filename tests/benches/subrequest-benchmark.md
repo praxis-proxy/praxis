@@ -58,9 +58,10 @@ omits that feature request only on the pre-seam revision, where Pingora was
 unconditional and the feature did not exist.
 
 The completion-guard investigation pins parent `3141d5b9` and verifies the
-current harness head's entire production tree is equivalent to guard commit
-`45bc8af2`: only this document, the comparison driver, and its workflow may
-differ. Any other changed path fails the investigation. Metadata records the
+current harness head's tree is equivalent to the test-lint snapshot
+`e6f006bc`, which retains the runtime guard from `45bc8af2`: only this
+document, the comparison driver, and its workflow may differ. Any other
+changed path fails the investigation. Metadata records the
 harness SHA and its runtime-equivalent guard SHA separately. The existing
 base/original/candidate matrix remains intact. An additional timing-only
 comparison builds the parent once and reuses the candidate binary. It runs
