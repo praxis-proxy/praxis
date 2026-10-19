@@ -152,6 +152,7 @@ async fn buffered_completion_controls_success_and_reuse() {
 }
 
 /// Verify response, connection lifecycle, and admission release for one scenario.
+#[expect(clippy::unwrap_used, reason = "fixed test setup and success-path assertions")]
 #[expect(
     clippy::too_many_lines,
     reason = "one completion scenario and its lifecycle assertions"
