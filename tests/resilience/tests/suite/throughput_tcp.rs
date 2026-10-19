@@ -13,7 +13,7 @@ use std::{
 use praxis_core::config::Config;
 use praxis_test_utils::{free_port, wait_for_tcp};
 
-use crate::throughput_utils::{BenchResult, assert_performance, report_results};
+use crate::throughput_utils::{BenchResult, assert_performance, bench_guard, report_results};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -21,6 +21,7 @@ use crate::throughput_utils::{BenchResult, assert_performance, report_results};
 
 #[test]
 fn bench_tcp_proxy_serial() {
+    let _bench = bench_guard();
     let backend_port = start_tcp_echo_backend();
     let proxy_port = free_port();
     let addr = start_tcp_proxy(proxy_port, backend_port);
@@ -33,6 +34,7 @@ fn bench_tcp_proxy_serial() {
 
 #[test]
 fn bench_tcp_proxy_concurrent() {
+    let _bench = bench_guard();
     let backend_port = start_tcp_echo_backend();
     let proxy_port = free_port();
     let addr = start_tcp_proxy(proxy_port, backend_port);
@@ -45,6 +47,7 @@ fn bench_tcp_proxy_concurrent() {
 
 #[test]
 fn bench_tcp_proxy_large_payload() {
+    let _bench = bench_guard();
     let backend_port = start_tcp_echo_backend();
     let proxy_port = free_port();
     let addr = start_tcp_proxy(proxy_port, backend_port);
