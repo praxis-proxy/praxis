@@ -30,6 +30,12 @@ pub(crate) mod internals;
 /// Data types for sub-request exchanges.
 mod types;
 
+/// Backend-neutral buffered completion contract regression tests.
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
+mod completion_tests;
+
 // The exchange tests dial a local listener through the build's connector, so
 // they need a network backend compiled in.
 #[cfg(test)]

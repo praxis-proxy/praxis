@@ -902,6 +902,18 @@ impl<C: Connector> SubRequestClient<C> {
                 }
             }
 
+            match session.completion() {
+                Ok(Completion::Finished) => {},
+                Ok(Completion::Incomplete) => {
+                    session.shutdown().await;
+                    return Err(SubRequestError::Io("upstream closed without clean EOF".to_owned()));
+                },
+                Err(err) => {
+                    session.shutdown().await;
+                    return Err(transport_error(err));
+                },
+            }
+
             debug!(status, body_bytes = body_buf.len(), "sub-request: response received");
 
             connector.inner.release(session, true).await;
