@@ -56,3 +56,25 @@ Peer construction is adapted for the API before the backend seam;
 The benchmark explicitly enables the Pingora backend. The comparison driver
 omits that feature request only on the pre-seam revision, where Pingora was
 unconditional and the feature did not exist.
+
+The completion-guard investigation pins parent `3141d5b9` and verifies the
+current harness head's entire production tree is equivalent to guard commit
+`45bc8af2`: only this document, the comparison driver, and its workflow may
+differ. Any other changed path fails the investigation. Metadata records the
+harness SHA and its runtime-equivalent guard SHA separately. The existing
+base/original/candidate matrix remains intact. An additional timing-only
+comparison builds the parent once and reuses the candidate binary. It runs
+four alternating ABBA/BAAB blocks per cell: parent, candidate, candidate,
+parent, then candidate, parent, parent, candidate. This balances middle and
+outer process positions between revisions, while cell order rotates between
+blocks. Each fresh process performs the same 101 warmup
+cycles and seven samples of 1000 cycles as the normal timing workload.
+
+Raw process records and per-block ratios are retained separately. Each block
+ratio divides the median of its two candidate process medians by the median
+of its two parent process medians. The summary reports all four ratios and
+their median and range; the seven contiguous samples within each process
+are not independent replicates. This bounded comparison isolates the guard
+commit more closely, but shared-runner interference and process order can
+still affect results. It introduces no latency threshold or universal
+performance claim and does not measure tail latency or the hedge scheduler.

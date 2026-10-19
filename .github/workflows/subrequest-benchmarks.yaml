@@ -48,11 +48,15 @@ jobs:
           # runs can select new references for subsequent investigations.
           BASE_REF: ${{ inputs.base_ref || 'ab616c1fc0d7a52b5148ea65c86e03e9a9873421' }}
           BEFORE_REF: ${{ inputs.before_ref || '91a5f4a970b5a6500c717ff99fee0bc388915f2e' }}
+          # The paired investigation verifies this head differs from the guard
+          # snapshot only in the three benchmark harness files.
           CANDIDATE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMPLETION_PARENT_REF: 3141d5b9a19fa1688cf0fcd26cd036d35918df6d
         run: >-
           python3 tests/benches/subrequest-comparison.py
           --base "$BASE_REF" --before "$BEFORE_REF"
           --candidate "$CANDIDATE_REF" --output subrequest-results
+          --completion-parent "$COMPLETION_PARENT_REF"
 
       - name: Upload raw measurements and build logs
         if: always()

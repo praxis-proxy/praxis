@@ -23,6 +23,15 @@ import tempfile
 import tomllib
 
 
+COMPLETION_PARENT = "3141d5b9a19fa1688cf0fcd26cd036d35918df6d"
+COMPLETION_CANDIDATE = "45bc8af281d1e23f40eca78723de37b5ead7bc30"
+COMPLETION_HARNESS_PATHS = {
+    ".github/workflows/subrequest-benchmarks.yaml",
+    "tests/benches/subrequest-comparison.py",
+    "tests/benches/subrequest-benchmark.md",
+}
+
+
 LEGACY_PEER = '''// SPDX-License-Identifier: Apache-2.0
 //! Baseline adapter for the pre-seam public peer type; setup is not measured.
 use std::net::SocketAddr;
@@ -138,6 +147,57 @@ def measure(binaries, revisions, destination):
     return records
 
 
+def measure_completion(binaries, revisions, destination):
+    """Compare the guard commit with its parent in four balanced ABBA/BAAB process blocks."""
+    cases = list(itertools.product(("h1", "h2"), (16, 64), (1, 2)))
+    rows = []
+    with (destination / "completion-results.jsonl").open("w") as results:
+        for block in range(4):
+            offset = block % len(cases)
+            for protocol, headers, attempts in cases[offset:] + cases[:offset]:
+                medians = {"parent": [], "candidate": []}
+                order = ("parent", "candidate", "candidate", "parent")
+                if block % 2:
+                    order = ("candidate", "parent", "parent", "candidate")
+                for position, label in enumerate(order):
+                    command = [str(binaries[label, "timing"]), "--mode", "timing",
+                               "--protocol", protocol, "--headers", str(headers),
+                               "--attempts", str(attempts), "--iterations", "1000", "--samples", "7"]
+                    name = f"completion-{block}-{protocol}-{headers}-{attempts}-{position}-{label}"
+                    with (destination / f"{name}.stderr").open("w") as errors:
+                        raw = subprocess.check_output(command, cwd=destination, stderr=errors,
+                                                      text=True, timeout=300)
+                    record = json.loads(raw)
+                    record.update(revision=label, sha=revisions[label], block=block, position=position)
+                    print(json.dumps(record), flush=True)
+                    results.write(json.dumps(record) + "\n")
+                    results.flush()
+                    medians[label].append(statistics.median(record["sample_ns_per_call"]))
+                ratio = statistics.median(medians["candidate"]) / statistics.median(medians["parent"])
+                rows.append(dict(protocol=protocol, headers=headers, attempts=attempts,
+                                 block=block, candidate_parent_ratio=ratio))
+    (destination / "completion-ratios.json").write_text(json.dumps(rows, indent=2) + "\n")
+    summary = ["# Completion guard paired timing", "",
+               "Pinned parent versus verified guard-equivalent harness head, four alternating ABBA/BAAB blocks per cell.",
+               "Each process has its own warmup and seven contiguous timing samples.",
+               "Each block ratio divides the median of two candidate process medians by",
+               "the median of two parent process medians. Samples are not independent replicates.",
+               "Ratios above 1 mean slower candidate amortized wall time; this is not a speed gate.", "",
+               "| Protocol | Headers | Attempts | Four block ratios | Median ratio | Range |",
+               "|---|---:|---:|---|---:|---|"]
+    for protocol, headers, attempts in cases:
+        ratios = [row["candidate_parent_ratio"] for row in rows
+                  if (row["protocol"], row["headers"], row["attempts"]) == (protocol, headers, attempts)]
+        values = ", ".join(f"{ratio:.4f}" for ratio in ratios)
+        summary.append(f"| {protocol} | {headers} | {attempts} | {values} | "
+                       f"{statistics.median(ratios):.4f} | {min(ratios):.4f}–{max(ratios):.4f} |")
+    text = "\n".join(summary) + "\n"
+    (destination / "completion-summary.md").write_text(text)
+    if "GITHUB_STEP_SUMMARY" in os.environ:
+        with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as summary_file:
+            summary_file.write(text)
+
+
 def summarize(records, destination):
     """Present descriptive timing and allocation data without a noisy speed gate."""
     rows = ["# Subrequest performance comparison", "",
@@ -168,15 +228,30 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("base", "before", "candidate", "output"):
         parser.add_argument(f"--{name}", required=True)
+    parser.add_argument("--completion-parent", help="Enable the pinned parent/guard timing investigation")
     args = parser.parse_args()
     repository = Path(output(["git", "rev-parse", "--show-toplevel"], Path.cwd()))
     revisions = {label: output(["git", "rev-parse", "--verify", "--end-of-options", f"{getattr(args, label)}^{{commit}}"], repository)
                  for label in ("base", "before", "candidate")}
-    if output(["git", "rev-parse", "HEAD"], repository) != revisions["candidate"]:
+    harness_sha = output(["git", "rev-parse", "HEAD"], repository)
+    if harness_sha != revisions["candidate"]:
         raise RuntimeError("checkout must be the exact candidate commit")
+    if args.completion_parent:
+        parent = output(["git", "rev-parse", "--verify", "--end-of-options",
+                         f"{args.completion_parent}^{{commit}}"], repository)
+        if parent != COMPLETION_PARENT:
+            raise RuntimeError("completion investigation requires the pinned parent commit")
+        changed = subprocess.check_output(
+            ["git", "diff", "--no-renames", "--name-only", "-z", COMPLETION_CANDIDATE, harness_sha, "--"],
+            cwd=repository,
+        ).decode().split("\0")
+        if set(filter(None, changed)) - COMPLETION_HARNESS_PATHS:
+            raise RuntimeError("completion candidate may differ from the guard commit only in harness files")
     destination = Path(args.output).resolve()
     destination.mkdir(parents=True, exist_ok=True)
-    metadata = {"revisions": revisions, "platform": platform.platform(),
+    metadata = {"harness_sha": harness_sha, "completion_parent": parent if args.completion_parent else None,
+                "completion_runtime_equivalent": COMPLETION_CANDIDATE if args.completion_parent else None,
+                "revisions": revisions, "platform": platform.platform(),
                 "rustc": output(["rustc", "-Vv"], repository),
                 "cpu": Path("/proc/cpuinfo").read_text() if Path("/proc/cpuinfo").exists() else platform.processor()}
     (destination / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -190,6 +265,11 @@ def main():
             for mode in ("timing", "allocations"):
                 binaries[label, mode] = build(tree, label, mode, destination, environment)
         summarize(measure(binaries, revisions, destination), destination)
+        if args.completion_parent:
+            parent_tree = Path(scratch) / "parent"
+            prepare_tree(repository, parent_tree, parent)
+            binaries["parent", "timing"] = build(parent_tree, "parent", "timing", destination, environment)
+            measure_completion(binaries, dict(parent=parent, candidate=revisions["candidate"]), destination)
 
 
 if __name__ == "__main__":
