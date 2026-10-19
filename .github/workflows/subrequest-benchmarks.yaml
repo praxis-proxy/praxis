@@ -51,7 +51,7 @@ jobs:
           # The paired investigation verifies this head differs from the guard
           # snapshot only in the three benchmark harness files.
           CANDIDATE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
-          COMPLETION_PARENT_REF: 3141d5b9a19fa1688cf0fcd26cd036d35918df6d
+          COMPLETION_PARENT_REF: ${{ github.event.pull_request.number == 1407 && '3141d5b9a19fa1688cf0fcd26cd036d35918df6d' || '' }}
         run: >-
           python3 tests/benches/subrequest-comparison.py
           --base "$BASE_REF" --before "$BEFORE_REF"

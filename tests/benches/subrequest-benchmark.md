@@ -79,3 +79,7 @@ are not independent replicates. This bounded comparison isolates the guard
 commit more closely, but shared-runner interference and process order can
 still affect results. It introduces no latency threshold or universal
 performance claim and does not measure tail latency or the hedge scheduler.
+
+The workflow enables this paired study automatically only for PR 1407. Other
+PRs and manual workflow runs retain the ordinary three-revision matrix; the
+optional CLI flag remains available for the pinned investigation.
