@@ -3,9 +3,9 @@
 
 //! Functional coverage for both TLS health-check example modes.
 
-use std::{sync::atomic::Ordering, time::Duration};
+use std::{collections::HashMap, sync::atomic::Ordering, time::Duration};
 
-use praxis_test_utils::{TestCertificates, free_port, http_get, start_full_proxy};
+use praxis_test_utils::{TestCertificates, free_port, http_get, load_example_config, start_full_proxy};
 
 use super::super::tls_health_check::Backend;
 
@@ -14,12 +14,25 @@ async fn tls_health_check_example_exercises_handshake_and_https_modes() {
     let certs = TestCertificates::generate();
     let handshake = Backend::new(&certs, false).await;
     let https = Backend::new(&certs, false).await;
-    let admin_addr = format!("127.0.0.1:{}", free_port());
-    let yaml = include_str!("../../../../../examples/configs/observability/tls-health-check.yaml")
-        .replace("127.0.0.1:8080", &format!("127.0.0.1:{}", free_port()))
-        .replace("127.0.0.1:9902", &admin_addr)
-        .replace("127.0.0.1:8443", &handshake.address)
-        .replace("127.0.0.1:8444", &https.address)
+    let admin_port = free_port();
+    let admin_addr = format!("127.0.0.1:{admin_port}");
+    let config = load_example_config(
+        "observability/tls-health-check.yaml",
+        free_port(),
+        HashMap::from([
+            ("127.0.0.1:9902", admin_port),
+            (
+                "127.0.0.1:8443",
+                handshake.address.parse::<std::net::SocketAddr>().unwrap().port(),
+            ),
+            (
+                "127.0.0.1:8444",
+                https.address.parse::<std::net::SocketAddr>().unwrap().port(),
+            ),
+        ]),
+    );
+    let yaml = serde_yaml::to_string(&config)
+        .unwrap()
         .replace("/etc/praxis/upstream-ca.pem", certs.ca_cert_path.to_str().unwrap());
     let config = praxis_core::config::Config::from_yaml(&yaml).unwrap();
     let _proxy = start_full_proxy(&config);
