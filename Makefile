@@ -133,10 +133,12 @@ release: ## release build of the praxis binary
 
 check: ## cargo check of the default and lean feature sets
 	cargo check --workspace
-	cargo check -p praxis-proxy --no-default-features
-	cargo check -p praxis-proxy --no-default-features --features config-reload,admin-api
+	cargo check -p praxis-proxy --no-default-features --features pingora
+	cargo check -p praxis-proxy --no-default-features --features pingora,config-reload,admin-api
 	cargo check -p praxis-proxy-filter --no-default-features
 	cargo check -p praxis-proxy-core --no-default-features
+	cargo check -p praxis-proxy-protocol --no-default-features
+	cargo check -p praxis-proxy-protocol --no-default-features --features admin-api --all-targets
 
 # Verify every optional and experimental feature compiles in isolation.
 # `lint` and `test` build the extremes (--all-features and
@@ -148,8 +150,8 @@ check-features: ## check each optional feature on its own
 	          cloud-events-filter upstream-binding iterative-request-router \
 	          router-json-aliases slow-start bound-upstream-request-body chain-binding spiffe \
 	          access-log-syslog hedged-requests; do \
-		echo "== cargo check -p praxis-proxy --no-default-features --features $$f --all-targets =="; \
-		cargo check -p praxis-proxy --no-default-features --features "$$f" --all-targets || exit 1; \
+		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f --all-targets =="; \
+		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f" --all-targets || exit 1; \
 	done
 
 clean: ## cargo clean
@@ -314,7 +316,7 @@ container-run: | require-container-engine ## run the container image (host netwo
 #
 # See docs/developing/fips.md and docs/developing/getting-started.md.
 
-FIPS_FEATURES           := config-reload,admin-api
+FIPS_FEATURES           := pingora,config-reload,admin-api
 # The same list qualified for a multi-package cargo invocation.
 _COMMA                  := ,
 FIPS_FEATURES_QUALIFIED := $(subst $(_COMMA),$(_COMMA)praxis-proxy/,praxis-proxy/$(FIPS_FEATURES))
@@ -731,8 +733,8 @@ bench: $(VEGETA) $(FORTIO_DEP) ## Criterion microbenchmarks
 ##@ Quality
 lint: ## clippy, fmt check, machete, xtask lints, FIPS deps, containers
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
-	cargo clippy -p praxis-proxy --no-default-features --all-targets -- -D warnings
-	cargo clippy -p praxis-proxy --no-default-features --features config-reload,admin-api --all-targets -- -D warnings
+	cargo clippy -p praxis-proxy --no-default-features --features pingora --all-targets -- -D warnings
+	cargo clippy -p praxis-proxy --no-default-features --features pingora,config-reload,admin-api --all-targets -- -D warnings
 	cargo clippy -p praxis-proxy-filter --no-default-features --all-targets -- -D warnings
 	cargo clippy -p praxis-proxy-core --no-default-features --all-targets -- -D warnings
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check

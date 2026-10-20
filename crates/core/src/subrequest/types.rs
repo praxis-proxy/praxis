@@ -18,6 +18,7 @@ use thiserror::Error;
 use tokio::sync::OwnedSemaphorePermit;
 
 use super::internals::SubRequestConnector;
+use crate::{backend, egress::Connector};
 
 /// An outbound HTTP request for a sub-request exchange.
 #[derive(Clone, Debug)]
@@ -251,10 +252,10 @@ pub struct StreamLimits {
 
 /// A streaming sub-request response with headers and an opaque body handle.
 ///
-/// The body handle owns the live Pingora session, admission permit,
+/// The body handle owns the live transport session, admission permit,
 /// and transport deadlines. It does not borrow `SubRequestClient`
 /// or any other external state.
-pub struct StreamingSubResponse {
+pub struct StreamingSubResponse<C: Connector = backend::Connector> {
     /// HTTP status code.
     pub status: u16,
 
@@ -262,7 +263,7 @@ pub struct StreamingSubResponse {
     pub headers: HeaderMap,
 
     /// Opaque streaming body handle.
-    pub body: SubResponseBody,
+    pub body: SubResponseBody<C>,
 }
 
 /// Opaque handle to a streaming sub-request response body.
@@ -270,17 +271,15 @@ pub struct StreamingSubResponse {
 /// Pull-based: call [`next_chunk()`](Self::next_chunk) to receive
 /// the next body chunk. Returns `Ok(None)` at clean EOF.
 ///
-/// Owns the live Pingora HTTP session, admission permit, connector
+/// Owns the live transport session, admission permit, connector
 /// (for session release), and all streaming deadlines.
-pub struct SubResponseBody {
+pub struct SubResponseBody<C: Connector = backend::Connector> {
     /// HTTP client span kept active through streaming response completion.
     pub(super) client_span: tracing::Span,
-    /// Live Pingora HTTP session.
-    pub(super) session: Option<pingora_core::protocols::http::client::HttpSession<()>>,
-    /// Peer address for connection pooling.
-    pub(super) peer: Option<pingora_core::upstreams::peer::HttpPeer>,
+    /// Live transport session.
+    pub(super) session: Option<C::Session>,
     /// Connector for session release.
-    pub(super) connector: Option<SubRequestConnector>,
+    pub(super) connector: Option<SubRequestConnector<C>>,
     /// Admission permit.
     pub(super) permit: Option<OwnedSemaphorePermit>,
     /// Operator-configured per-read timeout from the peer.

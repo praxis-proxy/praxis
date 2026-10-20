@@ -23,6 +23,8 @@ workspace = true
 [dependencies]
 clap = { workspace = true }
 notify = { workspace = true, optional = true }
+# The workspace entries for the two crates that carry a backend have no
+# defaults: this crate's `pingora` feature is the one switch that selects it.
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-tls = { workspace = true }
@@ -46,7 +48,13 @@ tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [features]
-default = ["config-reload", "admin-api", "policy-engine"]
+default = ["pingora", "config-reload", "admin-api", "policy-engine"]
+
+# The network backend. Exactly one backend feature must be on; a build with
+# none refuses to compile (see src/lib.rs). `pingora` is the only backend
+# today and is on by default. A `--no-default-features` build names it
+# explicitly, as `make release-fips` does. See docs/developing/adding-backends.md.
+pingora = ["praxis-core/pingora", "praxis-protocol/pingora"]
 
 # Config-file and TLS certificate hot-reload (filesystem watching via
 # `notify`). On by default; disable for a leaner build that drops the
@@ -67,8 +75,8 @@ upstream-binding = ["praxis-filter/upstream-binding", "praxis-protocol/upstream-
 iterative-request-router = ["praxis-filter/iterative-request-router", "upstream-binding", "experimental"]
 # The `router` filter's JSON-alias body-routing groundwork. Off by default; experimental.
 router-json-aliases = ["praxis-filter/router-json-aliases", "experimental"]
-# Per-cluster slow start. Off by default; experimental. Selection does not
-# read the ramp yet; the feature only accepts and stores the config.
+# Per-cluster slow start. Off by default; experimental. With the feature on,
+# weighted strategies apply the ramp. Hash strategies do not.
 slow-start = ["praxis-filter/slow-start", "experimental"]
 # The bound-upstream request-body hook. Off by default; experimental.
 bound-upstream-request-body = ["praxis-filter/bound-upstream-request-body", "upstream-binding", "experimental"]

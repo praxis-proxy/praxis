@@ -73,6 +73,28 @@ impl From<&crate::config::RuntimeConfig> for RuntimeOptions {
 }
 
 // -----------------------------------------------------------------------------
+// Thread Count
+// -----------------------------------------------------------------------------
+
+/// Number of worker threads a backend runs for `configured`
+/// (`runtime.threads`): the CPUs available to the process when zero.
+///
+/// ```
+/// use praxis_core::server::resolve_thread_count;
+///
+/// assert_eq!(resolve_thread_count(4), 4);
+/// assert!(resolve_thread_count(0) >= 1);
+/// ```
+#[must_use]
+pub fn resolve_thread_count(configured: usize) -> usize {
+    if configured == 0 {
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+    } else {
+        configured
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 

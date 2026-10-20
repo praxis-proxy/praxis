@@ -4,55 +4,37 @@
 //! Response body streaming and session disposal utilities.
 //!
 //! Handles streaming response bodies from sub-request exchanges with
-//! per-chunk metrics and protocol-aware session cleanup. H2 streams
-//! are released back to the connector to preserve multiplexed
-//! connections, while H1/Custom sessions are shut down immediately
-//! to avoid connection corruption from unread response bytes.
+//! per-chunk metrics and protocol-aware session cleanup. Whether an
+//! abnormally ended session can give anything back to the pool (a
+//! multiplexed stream can, a corrupted H1 connection cannot) is the
+//! backend's call, made inside [`Connector::release`].
+//!
+//! [`Connector::release`]: crate::egress::Connector::release
 
 use std::time::Duration;
 
 use bytes::Bytes;
 use metrics::{counter, histogram};
-use pingora_core::{connectors::http::Connector, protocols::http::client::HttpSession, upstreams::peer::HttpPeer};
 use tracing::{Instrument as _, debug, warn};
 
 use super::{
     internals::{
         SUBREQUEST_STREAM_BYTES_TOTAL, SUBREQUEST_STREAM_DURATION_SECONDS, SUBREQUEST_STREAMS_TOTAL,
-        check_clean_completion,
+        SubRequestConnector, transport_error,
     },
     types::{SubRequestError, SubResponseBody},
 };
-
-/// Dispose of a session after abnormal termination (cancel, timeout,
-/// error). H2 streams are released through the connector so the
-/// multiplexed connection survives. H1/Custom sessions are shut down
-/// without pooling because unread response bytes would corrupt the
-/// next response on a reused connection.
-pub(super) async fn dispose_session_abnormal(
-    session: HttpSession<()>,
-    peer: Option<&HttpPeer>,
-    connector: Option<&Connector>,
-) {
-    let mut session = session;
-    session.shutdown().await;
-    if matches!(session, HttpSession::H2(_))
-        && let (Some(peer), Some(connector)) = (peer, connector)
-    {
-        connector.release_http_session(session, peer, None).await;
-    }
-}
+use crate::egress::{Completion, Connector, Session as _};
 
 // -----------------------------------------------------------------------------
 // SubResponseBody
 // -----------------------------------------------------------------------------
 
-impl SubResponseBody {
+impl<C: Connector> SubResponseBody<C> {
     /// Create a body in the completed state (for header-time completion).
     pub(super) fn new_done() -> Self {
         Self {
             session: None,
-            peer: None,
             connector: None,
             permit: None,
             client_span: tracing::Span::none(),
@@ -137,7 +119,6 @@ impl SubResponseBody {
     }
 
     /// Read one body chunk while the sub-request client span is active.
-    #[expect(clippy::large_stack_frames, reason = "Pingora session types are large")]
     #[expect(clippy::too_many_lines, reason = "inline chunk read and deadline enforcement")]
     #[expect(
         clippy::expect_used,
@@ -191,12 +172,12 @@ impl SubResponseBody {
                 }
 
                 // Check for immediate completion after this chunk.
-                match check_clean_completion(self.session.as_mut().expect("session present")) {
-                    Ok(true) => self.release_session().await,
-                    Ok(false) => {},
+                match self.session.as_mut().expect("session present").completion() {
+                    Ok(Completion::Finished) => self.release_session().await,
+                    Ok(Completion::Incomplete) => {},
                     Err(err) => {
                         self.shutdown_and_done("h2_error").await;
-                        return Err(err);
+                        return Err(transport_error(err));
                     },
                 }
 
@@ -204,24 +185,24 @@ impl SubResponseBody {
             },
             Ok(Ok(None)) => {
                 // No more data. Check clean completion.
-                match check_clean_completion(self.session.as_mut().expect("session present")) {
-                    Ok(true) => {
+                match self.session.as_mut().expect("session present").completion() {
+                    Ok(Completion::Finished) => {
                         self.release_session().await;
                         Ok(None)
                     },
-                    Ok(false) => {
+                    Ok(Completion::Incomplete) => {
                         self.shutdown_and_done("io_error").await;
                         Err(SubRequestError::Io("upstream closed without clean EOF".to_owned()))
                     },
                     Err(err) => {
                         self.shutdown_and_done("io_error").await;
-                        Err(err)
+                        Err(transport_error(err))
                     },
                 }
             },
             Ok(Err(err)) => {
                 self.shutdown_and_done("io_error").await;
-                Err(SubRequestError::Io(err.to_string()))
+                Err(transport_error(err))
             },
             Err(_elapsed) => {
                 // Distinguish stream deadline, read timeout, and idle timeout.
@@ -262,18 +243,13 @@ impl SubResponseBody {
         self.done = true;
         if let Some(session) = self.session.take() {
             let permit = self.permit.take();
-            let peer_ref = self.peer.as_ref();
-            let conn_ref = self
-                .connector
-                .as_ref()
-                .map(super::internals::SubRequestConnector::connector);
+            let connector = self.connector.take();
             Box::pin(async move {
-                dispose_session_abnormal(session, peer_ref, conn_ref).await;
+                dispose_abnormal(session, connector.as_ref()).await;
                 drop(permit);
             })
             .await;
         }
-        self.peer.take();
         self.connector.take();
     }
 
@@ -292,17 +268,14 @@ impl SubResponseBody {
         );
         self.record_stream_metrics("eof");
         self.done = true;
-        if let (Some(session), Some(peer), Some(connector)) =
-            (self.session.take(), self.peer.as_ref(), self.connector.as_ref())
-        {
+        if let (Some(session), Some(connector)) = (self.session.take(), self.connector.as_ref()) {
             let permit = self.permit.take();
             Box::pin(async move {
-                connector.connector().release_http_session(session, peer, None).await;
+                connector.inner.release(session, true).await;
                 drop(permit);
             })
             .await;
         }
-        self.peer.take();
         self.connector.take();
     }
 
@@ -330,7 +303,7 @@ impl SubResponseBody {
     }
 }
 
-impl Drop for SubResponseBody {
+impl<C: Connector> Drop for SubResponseBody<C> {
     fn drop(&mut self) {
         if self.done || self.session.is_none() {
             return;
@@ -345,19 +318,28 @@ impl Drop for SubResponseBody {
         let Some(session) = self.session.take() else {
             return;
         };
-        let peer = self.peer.take();
         let connector = self.connector.take();
         let permit = self.permit.take();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                Box::pin(dispose_session_abnormal(
-                    session,
-                    peer.as_ref(),
-                    connector.as_ref().map(super::internals::SubRequestConnector::connector),
-                ))
-                .await;
+                Box::pin(dispose_abnormal(session, connector.as_ref())).await;
                 drop(permit);
             });
         }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+/// Dispose of a session after abnormal termination (cancel, timeout,
+/// error): hand it back to its connector without keepalive, so the backend
+/// decides what survives, or shut it down outright when no connector is
+/// left to take it.
+async fn dispose_abnormal<C: Connector>(mut session: C::Session, connector: Option<&SubRequestConnector<C>>) {
+    match connector {
+        Some(connector) => connector.inner.release(session, false).await,
+        None => session.shutdown().await,
     }
 }

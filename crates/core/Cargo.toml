@@ -16,11 +16,20 @@ name = "praxis_core"
 workspace = true
 
 [features]
+# The Pingora network backend: `backend::Runtime` and `backend::Connector`
+# resolve to the Pingora implementations and the fork crates are linked. On by
+# default. A build with no backend feature still compiles (the contract and
+# the neutral helpers stay), which is how the lean-build checks run; the
+# `praxis-proxy` binary refuses to build without one. See
+# docs/developing/adding-backends.md.
+default = ["pingora"]
+pingora = ["dep:pingora-core", "dep:pingora-http"]
 # Config support for logical upstream binding (`bound_upstream` conditions).
 # Off by default; experimental. The filter crate's `upstream-binding` turns it on.
 upstream-binding = []
-# Per-cluster `slow_start`. Off by default; experimental. Selection does not
-# read the ramp yet. Without this feature the field is an unknown key.
+# Per-cluster `slow_start`. Off by default; experimental. With the feature on,
+# weighted strategies apply the ramp. Hash strategies do not. Without this
+# feature the field is an unknown key.
 slow-start = []
 spiffe = ["praxis-tls/spiffe"]
 test-support = []
@@ -41,8 +50,8 @@ opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 percent-encoding = { workspace = true }
-pingora-core = { workspace = true }
-pingora-http = { workspace = true }
+pingora-core = { workspace = true, optional = true }
+pingora-http = { workspace = true, optional = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }

@@ -4,8 +4,18 @@ name: Issue Triage
 # Workflow Settings
 # ------------------------------------------------------------------------------
 #
-# Shared from praxis-proxy/conventions (issue-triage.yaml). Reviewers triage
-# here too, so core-reviewers counts as a maintainer team.
+# Flags new issues for triage and unassigns anyone put on an issue that hasn't
+# been triaged yet (it needs a milestone and a project board), shared from
+# praxis-proxy/conventions (issue-triage.yaml). The bot's comment links to the
+# Triage section of docs/developing/project-management.md.
+#
+# The called job does everything with the praxis-bot app token, so this job
+# grants no GITHUB_TOKEN permissions.
+#
+# No conventions release has this version of the workflow yet, so the pin is
+# an untagged commit after v0.3.0. Dependabot reads versions from tags, not
+# comments: until this moves to a tag it tracks the conventions main branch and
+# leaves the comment as is.
 
 on:
   issues:
@@ -15,11 +25,8 @@ permissions: {}
 
 jobs:
   triage:
-    permissions:
-      issues: write
-    uses: praxis-proxy/conventions/.github/workflows/issue-triage.yaml@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+    uses: praxis-proxy/conventions/.github/workflows/issue-triage.yaml@2b6bf27b160c9eba7912cbb494aeb7669f2a69e3 # unreleased, after v0.3.0
     with:
-      maintainer-teams: project-leadership,core-maintainers,core-reviewers
       policy-doc: docs/developing/project-management.md#triage
     secrets:
       PRAXIS_BOT_APP_ID: ${{ secrets.PRAXIS_BOT_APP_ID }}

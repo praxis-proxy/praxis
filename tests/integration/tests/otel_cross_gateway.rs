@@ -222,11 +222,8 @@ fn exported_parentage_links_edge_provider_and_backend() {
     assert_eq!(internal_error_status, 500, "status backend should return 500");
 
     let subrequest_client = SubRequestClient::new(SubRequestConnector::new(2, None));
-    let subrequest_peer = pingora_core::upstreams::peer::HttpPeer::new(
-        format!("127.0.0.1:{}", subrequest_backend.port()),
-        false,
-        String::new(),
-    );
+    let subrequest_peer =
+        praxis_core::egress::PeerSpec::plain(SocketAddr::from(([127, 0, 0, 1], subrequest_backend.port())));
     let subrequest = SubRequest {
         method: Method::GET,
         uri: "/callout".parse().expect("valid callout URI"),
@@ -700,8 +697,7 @@ fn response_attempt_client_spans_record_final_status_and_actual_close() {
     );
 
     let subrequest_client = SubRequestClient::new(SubRequestConnector::new(1, None));
-    let subrequest_peer =
-        pingora_core::upstreams::peer::HttpPeer::new(format!("127.0.0.1:{step_deadline_port}"), false, String::new());
+    let subrequest_peer = praxis_core::egress::PeerSpec::plain(SocketAddr::from(([127, 0, 0, 1], step_deadline_port)));
     let subrequest = SubRequest {
         method: Method::GET,
         uri: "/step-deadline".parse().expect("valid subrequest URI"),

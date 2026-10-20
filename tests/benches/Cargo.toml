@@ -15,17 +15,24 @@ workspace = true
 dhat = { workspace = true, optional = true }
 
 [dev-dependencies]
+bytes = { workspace = true }
+h2 = { workspace = true }
 criterion = { workspace = true }
 governor = { workspace = true }
 http = { workspace = true }
 parking_lot = { workspace = true }
 portable-atomic = { workspace = true }
-praxis-core = { workspace = true }
+praxis-core = { workspace = true, features = ["pingora"] }
 praxis-filter = { workspace = true }
 praxis-tls = { workspace = true, features = ["bench-utils"] }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "time"] }
+
+[[bench]]
+name = "subrequest_headers"
+path = "benches/subrequest_headers.rs"
+harness = false
 
 [[bench]]
 name = "condition_eval"
@@ -99,4 +106,5 @@ harness = false
 [features]
 policy-engine = ["praxis-filter/policy-engine"]
 upstream-binding = ["praxis-filter/upstream-binding"]
+slow-start = ["praxis-core/slow-start", "praxis-filter/slow-start"]
 dhat-heap = ["dep:dhat"]

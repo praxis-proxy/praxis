@@ -19,14 +19,18 @@ use std::{
 };
 
 use praxis_core::{
-    PingoraServerRuntime,
+    ServerRuntime as _,
+    backend::Runtime,
     config::{Config, ConfigFile, LogOutput, ProtocolKind, RuntimeConfig},
     health::{HealthRegistry, build_health_registry},
     logging::LogLevelState,
     subrequest::SubRequestClient,
 };
 use praxis_filter::FilterRegistry;
-use praxis_protocol::{CertWatcherShutdowns, ListenerPipelines, Protocol as _, http::PingoraHttp, tcp::PingoraTcp};
+use praxis_protocol::{
+    CertWatcherShutdowns, ListenerPipelines, Protocol as _,
+    backend::{Http, Tcp},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -66,7 +70,7 @@ const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
 /// mode (`PRAXIS_REQUIRE_FIPS`), refuse to start unless it is in effect.
 ///
 /// Must run before anything constructs a listener or an upstream connector.
-/// Pingora builds its upstream connectors while the proxy *service* is
+/// The backend builds its upstream connectors while the proxy *service* is
 /// created, which is earlier than it looks, so this is the first statement of
 /// server startup rather than something done just before serving.
 ///
@@ -91,6 +95,7 @@ fn try_install_crypto_provider() -> Result<(), String> {
         provider = status.name,
         provider_fips = status.provider_fips,
         kernel_fips = ?status.kernel_fips,
+        crypto_policy = ?status.crypto_policy,
         fips_required = praxis_tls::provider::required(),
         "installed rustls crypto provider"
     );
@@ -309,17 +314,17 @@ pub fn try_run_server_with_composition(
     // Label selection is installed first and never changed: a gauge guard
     // acquired before a change and released after it would increment one
     // series and decrement another, stranding both.
-    praxis_protocol::http::pingora::metrics::install_metric_labels(config.metrics.labels.clone());
+    praxis_protocol::http::metrics::install_metric_labels(config.metrics.labels.clone());
 
     #[cfg(feature = "admin-api")]
     let prometheus_recorder = (config.admin.address.is_some() || config.admin.metrics_address.is_some())
-        .then(praxis_protocol::http::pingora::health::install_prometheus_admin_recorder);
+        .then(praxis_protocol::backend::admin::install_prometheus_admin_recorder);
 
     let health_registry = build_health_registry(&config.clusters);
     let (state, registry) = build_server_state(&config, composition, &health_registry, log_level)?;
 
     info!("initializing server");
-    let mut server = PingoraServerRuntime::new(&config);
+    let mut server = Runtime::from_config(&config);
     let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines)?;
     #[cfg(feature = "admin-api")]
     register_admin_endpoints(
@@ -464,10 +469,10 @@ struct ServerState {
     pipelines: Arc<ListenerPipelines>,
 
     /// Hot-swappable listener metadata for admin `/api/pipelines`.
-    listener_meta: praxis_protocol::http::pingora::health::ListenerMetaStore,
+    listener_meta: praxis_protocol::http::health::ListenerMetaStore,
 
     /// Hot-swappable cluster metadata for admin `/api/stats`.
-    cluster_meta: praxis_protocol::http::pingora::health::ClusterMetaStore,
+    cluster_meta: praxis_protocol::http::health::ClusterMetaStore,
 
     /// KV store registry.
     kv_stores: praxis_core::kv::KvStoreRegistry,
@@ -543,11 +548,11 @@ fn build_server_state(
     // last fallible step, immediately before the pipeline swap.
     slow_start_generation.commit();
 
-    let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
-        praxis_protocol::http::pingora::health::listener_meta_from_config(config),
+    let listener_meta = praxis_protocol::http::health::new_listener_meta_store(
+        praxis_protocol::http::health::listener_meta_from_config(config),
     );
-    let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
-        praxis_protocol::http::pingora::health::cluster_meta_from_config(config),
+    let cluster_meta = praxis_protocol::http::health::new_cluster_meta_store(
+        praxis_protocol::http::health::cluster_meta_from_config(config),
     );
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
@@ -574,13 +579,13 @@ fn build_server_state(
 // Protocol Registration
 // -----------------------------------------------------------------------------
 
-/// Register HTTP and TCP protocol handlers with the Pingora server.
+/// Register HTTP and TCP protocol handlers with the backend runtime.
 ///
 /// Only registers the protocols actually used by the config (skips HTTP registration if no
 /// HTTP listeners exist). Returns cert watcher shutdown handles so the server can stop file
 /// watches on exit.
 fn register_protocols(
-    server: &mut PingoraServerRuntime,
+    server: &mut Runtime,
     config: &Config,
     pipelines: &ListenerPipelines,
 ) -> Result<CertWatcherShutdowns, praxis_core::errors::ProxyError> {
@@ -591,7 +596,7 @@ fn register_protocols(
         .iter()
         .any(|listener| listener.protocol == ProtocolKind::Http)
     {
-        let shutdowns = Box::new(PingoraHttp).register(server, config, pipelines)?;
+        let shutdowns = Box::new(Http).register(server, config, pipelines)?;
         all_shutdowns.extend(shutdowns);
     }
 
@@ -600,7 +605,7 @@ fn register_protocols(
         .iter()
         .any(|listener| listener.protocol == ProtocolKind::Tcp)
     {
-        let shutdowns = Box::new(PingoraTcp).register(server, config, pipelines)?;
+        let shutdowns = Box::new(Tcp).register(server, config, pipelines)?;
         all_shutdowns.extend(shutdowns);
     }
 
@@ -675,7 +680,7 @@ fn watcher_params(
 // Admin
 // -----------------------------------------------------------------------------
 
-/// Register admin/health endpoints with the Pingora server.
+/// Register admin/health endpoints on the backend runtime.
 #[cfg(feature = "admin-api")]
 #[expect(
     clippy::too_many_arguments,
@@ -683,23 +688,25 @@ fn watcher_params(
 )]
 #[expect(clippy::too_many_lines, reason = "registering the independent management services")]
 fn register_admin_endpoints(
-    server: &mut PingoraServerRuntime,
+    server: &mut Runtime,
     config: &Config,
     health_registry: HealthRegistry,
     state: &ServerState,
-    prometheus_recorder: Option<praxis_protocol::http::pingora::health::PrometheusAdminRecorder>,
+    prometheus_recorder: Option<praxis_protocol::backend::admin::PrometheusAdminRecorder>,
     stats_started_at: std::time::Instant,
 ) {
+    use praxis_protocol::backend::admin;
+
     if let Some(admin_addr) = &config.admin.address {
-        praxis_protocol::http::pingora::health::add_admin_api_to_pingora_server(
-            server.server_mut(),
+        admin::add_admin_api(
+            server,
             admin_addr,
-            praxis_protocol::http::pingora::health::AdminEndpointOptions {
+            admin::AdminEndpointOptions {
                 health_registry: Some(Arc::clone(&health_registry)),
                 kv_registry: Some(state.kv_stores.clone()),
                 pipelines: Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
                 log_level: state.log_level.clone(),
-                stats: Some(praxis_protocol::http::pingora::health::StatsAdminState {
+                stats: Some(admin::StatsAdminState {
                     started_at: stats_started_at,
                     version: crate::version::process_version_info(),
                     listener_meta: Arc::clone(&state.listener_meta),
@@ -711,15 +718,12 @@ fn register_admin_endpoints(
     }
 
     if let Some(prometheus_recorder) = prometheus_recorder {
-        praxis_protocol::http::pingora::health::add_prometheus_upkeep_to_pingora_server(
-            server.server_mut(),
-            prometheus_recorder,
-        );
+        admin::add_prometheus_upkeep(server, prometheus_recorder);
     }
 
     if let Some(metrics_addr) = &config.admin.metrics_address {
-        praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server_with_pipelines(
-            server.server_mut(),
+        admin::add_health_endpoint_with_pipelines(
+            server,
             metrics_addr,
             Some(health_registry),
             config.admin.verbose,
@@ -763,7 +767,7 @@ type HousekeepingLoop = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// Spawn `fut` on a dedicated thread running its own current-thread
 /// tokio runtime.
 ///
-/// Server startup runs before [`PingoraServerRuntime::new`], so no
+/// Server startup runs before the backend runtime is built, so no
 /// reactor is registered on the calling thread and a bare
 /// `tokio::spawn` would panic; the health checks and the housekeeping
 /// loops get their own thread and runtime instead.
@@ -789,7 +793,7 @@ where
 /// [`CancellationToken`] so that every health check loop exits
 /// cleanly via `shutdown.cancelled()` before the thread returns.
 ///
-/// Pingora's `server.run()` installs its own signal handlers and may
+/// The backend runtime installs its own signal handlers and may
 /// terminate the process before this thread receives `ctrl_c`. This is
 /// acceptable: the OS reaps the thread on process exit, so the graceful
 /// shutdown path here is best-effort.
@@ -816,7 +820,7 @@ fn spawn_health_check_tasks(
         .collect();
 
     spawn_on_dedicated_runtime("health check runtime", async move {
-        praxis_protocol::http::pingora::health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
+        praxis_protocol::http::health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
         shutdown.cancelled().await;
     });
 }
@@ -865,7 +869,7 @@ fn fd_sampler_loop() -> HousekeepingLoop {
         loop {
             praxis_core::fd::refresh();
             if let Some(usage) = praxis_core::fd::usage() {
-                praxis_protocol::http::pingora::metrics::set_process_fd_gauges(usage);
+                praxis_protocol::http::metrics::set_process_fd_gauges(usage);
             }
             tokio::time::sleep(praxis_core::fd::sample_interval()).await;
         }
@@ -1102,7 +1106,7 @@ mod tests {
             None,
         )
         .expect("pipelines should build");
-        let mut server = PingoraServerRuntime::new(&config);
+        let mut server = Runtime::from_config(&config);
         let err = register_protocols(&mut server, &config, &state.pipelines)
             .err()
             .expect("an unloadable certificate should be returned, not exit");

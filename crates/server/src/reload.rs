@@ -62,8 +62,8 @@ pub(crate) fn reload_pipelines(
     old_config: &Config,
     registry: &FilterRegistry,
     live: &ListenerPipelines,
-    listener_meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
-    cluster_meta: &praxis_protocol::http::pingora::health::ClusterMetaStore,
+    listener_meta: &praxis_protocol::http::health::ListenerMetaStore,
+    cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
@@ -171,12 +171,12 @@ pub(crate) fn reload_pipelines(
         swapped.push(name);
     }
 
-    listener_meta.store(Arc::new(
-        praxis_protocol::http::pingora::health::listener_meta_from_config(new_config),
-    ));
-    cluster_meta.store(Arc::new(
-        praxis_protocol::http::pingora::health::cluster_meta_from_config(new_config),
-    ));
+    listener_meta.store(Arc::new(praxis_protocol::http::health::listener_meta_from_config(
+        new_config,
+    )));
+    cluster_meta.store(Arc::new(praxis_protocol::http::health::cluster_meta_from_config(
+        new_config,
+    )));
 
     respawn_health_checks(old_config, new_config, &health_registry, health_shutdown);
 
@@ -214,7 +214,7 @@ fn reject_protocol_changes(
 
 /// Reject reloads that change what a bound TCP listener captured at startup.
 ///
-/// A TCP listener group's Pingora service captures its upstream, cluster,
+/// A TCP listener group's backend service captures its upstream, cluster,
 /// timeouts, and `allow_private_upstreams` by value when it is built, and
 /// reads the pipeline slot of the group's first listener only. Changing
 /// the group key of a bound TCP listener, removing one, or flipping
@@ -385,11 +385,11 @@ fn respawn_health_checks(
     };
     old_token.cancel();
 
-    praxis_protocol::http::pingora::metrics::clear_stale_upstream_health_gauges(
+    praxis_protocol::http::metrics::clear_stale_upstream_health_gauges(
         health_checked_cluster_names(old_config),
         health_checked_cluster_names(config),
     );
-    praxis_protocol::http::pingora::metrics::seed_upstream_health_gauges(health_registry);
+    praxis_protocol::http::metrics::seed_upstream_health_gauges(health_registry);
 
     if health_registry.is_empty() {
         return;
@@ -429,7 +429,7 @@ fn spawn_health_check_thread(
             },
         };
         rt.block_on(async {
-            praxis_protocol::http::pingora::health::runner::spawn_health_checks(&clusters, &registry, &new_token);
+            praxis_protocol::http::health::runner::spawn_health_checks(&clusters, &registry, &new_token);
             new_token.cancelled().await;
         });
     });
@@ -1170,11 +1170,11 @@ filter_chains:
         .unwrap();
 
         let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
-            praxis_protocol::http::pingora::health::listener_meta_from_config(&old_config),
+        let meta = praxis_protocol::http::health::new_listener_meta_store(
+            praxis_protocol::http::health::listener_meta_from_config(&old_config),
         );
-        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
-            praxis_protocol::http::pingora::health::cluster_meta_from_config(&old_config),
+        let cluster_meta = praxis_protocol::http::health::new_cluster_meta_store(
+            praxis_protocol::http::health::cluster_meta_from_config(&old_config),
         );
 
         reload_pipelines(
@@ -1957,11 +1957,11 @@ filter_chains:
         )
         .unwrap();
         let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
-            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        let meta = praxis_protocol::http::health::new_listener_meta_store(
+            praxis_protocol::http::health::listener_meta_from_config(&config),
         );
-        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
-            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        let cluster_meta = praxis_protocol::http::health::new_cluster_meta_store(
+            praxis_protocol::http::health::cluster_meta_from_config(&config),
         );
 
         old_health.get("backend").unwrap().endpoints()[1].mark_unhealthy();
@@ -2015,11 +2015,11 @@ filter_chains:
         )
         .unwrap();
         let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
-            praxis_protocol::http::pingora::health::listener_meta_from_config(&two),
+        let meta = praxis_protocol::http::health::new_listener_meta_store(
+            praxis_protocol::http::health::listener_meta_from_config(&two),
         );
-        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
-            praxis_protocol::http::pingora::health::cluster_meta_from_config(&two),
+        let cluster_meta = praxis_protocol::http::health::new_cluster_meta_store(
+            praxis_protocol::http::health::cluster_meta_from_config(&two),
         );
 
         reload_pipelines(
@@ -2080,11 +2080,11 @@ filter_chains:
         )
         .unwrap();
         let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
-            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        let meta = praxis_protocol::http::health::new_listener_meta_store(
+            praxis_protocol::http::health::listener_meta_from_config(&config),
         );
-        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
-            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        let cluster_meta = praxis_protocol::http::health::new_cluster_meta_store(
+            praxis_protocol::http::health::cluster_meta_from_config(&config),
         );
 
         old_health.get("backend").unwrap().endpoints()[1].mark_unhealthy();
@@ -2146,11 +2146,11 @@ filter_chains:
         )
         .unwrap();
         let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
-            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        let meta = praxis_protocol::http::health::new_listener_meta_store(
+            praxis_protocol::http::health::listener_meta_from_config(&config),
         );
-        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
-            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        let cluster_meta = praxis_protocol::http::health::new_cluster_meta_store(
+            praxis_protocol::http::health::cluster_meta_from_config(&config),
         );
 
         let new_config = Config::from_yaml(
@@ -2349,8 +2349,8 @@ filter_chains:
         old_config: &Config,
         registry: &FilterRegistry,
         live: &ListenerPipelines,
-        meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
-        cluster_meta: &praxis_protocol::http::pingora::health::ClusterMetaStore,
+        meta: &praxis_protocol::http::health::ListenerMetaStore,
+        cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
         shutdown: &Arc<Mutex<CancellationToken>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         reload_pipelines(
@@ -2443,8 +2443,8 @@ filter_chains:
         Config,
         FilterRegistry,
         Arc<Mutex<CancellationToken>>,
-        praxis_protocol::http::pingora::health::ListenerMetaStore,
-        praxis_protocol::http::pingora::health::ClusterMetaStore,
+        praxis_protocol::http::health::ListenerMetaStore,
+        praxis_protocol::http::health::ClusterMetaStore,
     ) {
         setup_live_pipelines_from(valid_config())
     }
@@ -2457,8 +2457,8 @@ filter_chains:
         Config,
         FilterRegistry,
         Arc<Mutex<CancellationToken>>,
-        praxis_protocol::http::pingora::health::ListenerMetaStore,
-        praxis_protocol::http::pingora::health::ClusterMetaStore,
+        praxis_protocol::http::health::ListenerMetaStore,
+        praxis_protocol::http::health::ClusterMetaStore,
     ) {
         let registry = FilterRegistry::with_builtins();
         let health_registry: HealthRegistry = Arc::new(HashMap::new());
@@ -2472,11 +2472,11 @@ filter_chains:
         )
         .unwrap();
         let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
-            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        let meta = praxis_protocol::http::health::new_listener_meta_store(
+            praxis_protocol::http::health::listener_meta_from_config(&config),
         );
-        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
-            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        let cluster_meta = praxis_protocol::http::health::new_cluster_meta_store(
+            praxis_protocol::http::health::cluster_meta_from_config(&config),
         );
         (pipelines, config, registry, shutdown, meta, cluster_meta)
     }

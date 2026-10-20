@@ -18,7 +18,7 @@ workspace = true
 [dev-dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
-praxis = { workspace = true }
+praxis = { workspace = true, features = ["pingora"] }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-protocol = { workspace = true }

@@ -13,6 +13,7 @@ use praxis_core::{
 };
 
 use super::{authority::AuthorityResolver, strategy::Strategy};
+use crate::load_balancing::slow_start::EffectiveWeights;
 
 // -----------------------------------------------------------------------------
 // EndpointReselector
@@ -41,6 +42,12 @@ pub struct EndpointReselector {
     pub retry_policy: Arc<RetryPolicy>,
     /// Shared retry budget / active-request counter.
     pub retry_state: Arc<ClusterRetryState>,
+
+    /// Ramp weights captured for this request's retries.
+    ///
+    /// `None` keeps configured weights. A shared reselector leaves this empty;
+    /// a request whose cluster is scaling gets its own reselector.
+    weights: Option<EffectiveWeights>,
 }
 
 impl EndpointReselector {
@@ -69,12 +76,21 @@ impl EndpointReselector {
             hash_key,
             retry_policy,
             retry_state,
+            weights: None,
         }
+    }
+
+    /// Remember the ramp snapshot used for the first pick of this request.
+    #[must_use]
+    pub(super) fn with_weights(mut self, weights: EffectiveWeights) -> Self {
+        self.weights = Some(weights);
+        self
     }
 
     /// Select an upstream address, skipping `exclude`d endpoints.
     pub fn select_address(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<Arc<str>> {
-        self.strategy.select_with_key(self.hash_key.as_deref(), health, exclude)
+        self.strategy
+            .select_with_key(self.hash_key.as_deref(), health, exclude, self.weights.as_ref())
     }
 
     /// Build an [`Upstream`] for `addr`.

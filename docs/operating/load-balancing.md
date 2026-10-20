@@ -302,9 +302,12 @@ is first enabled for that cluster name. A reload that
 turns the setting on and adds an endpoint in the same
 change records that endpoint at full weight. An address
 added in a later reload, and an endpoint that returns
-from unhealthy to healthy, start a window. Weighted
-strategies do not read this ramp yet; a follow-up
-change applies it while selecting an endpoint.
+from unhealthy to healthy, start a window. Round robin,
+random, least-connections, and power-of-two-choices
+apply that weight. Round robin uses smooth weighted
+round robin while the ramp is moving, so a fractional
+weight is spread across requests instead of arriving as
+one long block. Hash strategies ignore the ramp.
 
 ## Panic Mode
 

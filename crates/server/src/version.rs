@@ -3,7 +3,7 @@
 
 //! Build-time version metadata for admin `/api/stats`.
 
-use praxis_protocol::http::pingora::health::ProcessVersionInfo;
+use praxis_protocol::http::health::ProcessVersionInfo;
 
 /// Version identity embedded at build time (`server/build.rs`).
 #[must_use]

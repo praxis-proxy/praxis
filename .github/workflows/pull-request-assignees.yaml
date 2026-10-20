@@ -1,0 +1,31 @@
+name: Pull Request Assignees
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+#
+# Assigns every PR a maintainer and a reviewer once it's ready for review,
+# shared from praxis-proxy/conventions (pr-assignees.yaml). The maintainer
+# comes from core-maintainers and the reviewer from core-reviewers; project
+# leads aren't in the pool. The teams are spelled out rather than left to the
+# shared defaults, so a pin bump can't quietly change who gets assigned here.
+#
+# The called job only uses the praxis-bot token, so it gets no permissions.
+# The pin is ahead of v0.3.0, the latest conventions tag; move it to the next
+# tag once one includes pr-assignees.yaml.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  assignees:
+    uses: praxis-proxy/conventions/.github/workflows/pr-assignees.yaml@2b6bf27b160c9eba7912cbb494aeb7669f2a69e3 # unreleased, after v0.3.0
+    with:
+      maintainer-teams: core-maintainers
+      reviewer-teams: core-reviewers
+    secrets:
+      PRAXIS_BOT_APP_ID: ${{ secrets.PRAXIS_BOT_APP_ID }}
+      PRAXIS_BOT_APP_PRIVATE_KEY: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}

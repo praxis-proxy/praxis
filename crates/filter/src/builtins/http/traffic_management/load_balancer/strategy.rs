@@ -9,7 +9,7 @@ use praxis_core::{config::LoadBalancerStrategy, health::ClusterHealthState};
 
 use crate::{
     filter::HttpFilterContext,
-    load_balancing::{endpoint::WeightedEndpoint, strategy as shared},
+    load_balancing::{endpoint::WeightedEndpoint, slow_start::EffectiveWeights, strategy as shared},
 };
 
 // -----------------------------------------------------------------------------
@@ -37,7 +37,19 @@ impl Strategy {
         exclude: &[Arc<str>],
     ) -> Option<Arc<str>> {
         let hash_key = self.extract_hash_key(ctx);
-        self.inner.select(hash_key, health, exclude)
+        self.select_with_key(hash_key, health, exclude, None)
+    }
+
+    /// Pick the next endpoint, applying `weights` when slow start is scaling.
+    pub(super) fn select_weighted(
+        &self,
+        ctx: &HttpFilterContext<'_>,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: Option<&EffectiveWeights>,
+    ) -> Option<Arc<str>> {
+        let hash_key = self.extract_hash_key(ctx);
+        self.select_with_key(hash_key, health, exclude, weights)
     }
 
     /// Pick the next endpoint using a pre-captured hash key (for retries).
@@ -46,8 +58,9 @@ impl Strategy {
         hash_key: Option<&str>,
         health: Option<&ClusterHealthState>,
         exclude: &[Arc<str>],
+        weights: Option<&EffectiveWeights>,
     ) -> Option<Arc<str>> {
-        self.inner.select(hash_key, health, exclude)
+        self.inner.select_weighted(hash_key, health, exclude, weights)
     }
 
     /// Called after a response arrives so that strategies that track in-flight

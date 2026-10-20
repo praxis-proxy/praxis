@@ -19,15 +19,15 @@ Requirements are listed in [docs/development.md].
 
 ## Picking Up an Issue
 
-Only issues a maintainer has triaged (given a milestone
-and added to a project board) are open for contributors
-to take, and only at `Medium` or `Low` priority. Urgent
-and high-priority work is assigned by maintainers. If you
-self-assign something outside these rules, a bot unassigns
-it and points you back here. See [Picking Up Work] for the
-full policy.
+An issue is open for contributors to take once it has
+been triaged, meaning it has a milestone and is on a
+project board. If you assign yourself to an issue that
+hasn't been triaged yet, a bot unassigns everyone on it,
+you included, and leaves a comment pointing to the
+[triage policy]. Ask a reviewer or maintainer to triage
+it first.
 
-[Picking Up Work]: docs/development.md#picking-up-work
+[triage policy]: docs/developing/project-management.md#triage
 
 ## Larger Changes
 
@@ -51,3 +51,12 @@ CI enforces reviewability on every PR:
 See the [PR conventions] section for details and override labels.
 
 [PR conventions]: docs/conventions.md#pull-request-conventions
+
+## Pull Request Review
+
+Once a PR is ready for review, a bot assigns it a
+maintainer and a reviewer, so you know who to ping when
+it needs attention. See [Pull Request Assignees] for how
+they are picked.
+
+[Pull Request Assignees]: docs/developing/project-management.md#pull-request-assignees

@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 /// Gradually raises an endpoint's load-balancing weight after it joins or
 /// recovers, instead of giving it the configured weight on the first request.
 ///
-/// Requires the `slow-start` Cargo feature. Load-balancer selection does not
-/// read this ramp yet: the setting is accepted and stored, and a follow-up
-/// applies it while choosing an endpoint.
+/// Requires the `slow-start` Cargo feature.
 ///
 /// The ramp is
 /// `time_factor ^ (1 / aggression)`, where `time_factor` is the fraction of
@@ -23,10 +21,11 @@ use serde::{Deserialize, Serialize};
 /// earlier in the window. Values below `1.0` hold it back until late in the
 /// window.
 ///
-/// Applies to round-robin, random, least-connections, and power-of-two-choices,
-/// including when those run inside subset, priority, or zone-aware selection.
-/// Consistent-hash, Maglev, and ring-hash keep the configured weight so a
-/// moving ramp does not reshuffle the ring.
+/// Round robin, random, least-connections, and power-of-two-choices apply the
+/// ramp while choosing an endpoint, including inside subset, priority, or
+/// zone-aware selection. Round robin interleaves the scaled weights. Consistent
+/// hash, Maglev, and ring hash keep the configured weight so a moving ramp
+/// does not reshuffle the ring.
 ///
 /// The baseline is the membership present when slow start is first enabled
 /// for that cluster name. A reload that enables it and adds an endpoint in

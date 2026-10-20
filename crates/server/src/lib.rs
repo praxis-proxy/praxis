@@ -10,7 +10,7 @@
 //! the `praxis-proxy` binary. It wires the other crates together into a
 //! running proxy: loading configuration, building the filter registry,
 //! resolving named filter chains into concrete pipelines, and starting
-//! the Pingora runtime.
+//! the network backend's runtime ([`praxis_core::backend`]).
 //!
 //! Responsibilities:
 //! - Configuration loading and config-path resolution ([`load_config`], [`resolve_config_path`]).
@@ -23,6 +23,12 @@
 //!   pipelines when the config file changes.
 //!
 //! [`FilterPipeline`]: praxis_filter::FilterPipeline
+
+// A proxy with no network backend has nothing to bind a listener with. Each
+// backend is a Cargo feature; `pingora` is on by default, and a
+// `--no-default-features` build names the one it wants.
+#[cfg(not(feature = "pingora"))]
+compile_error!("praxis-proxy needs a network backend: enable the `pingora` feature (on by default)");
 
 mod composition;
 mod fd_limit;

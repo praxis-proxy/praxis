@@ -20,7 +20,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use pingora_core::upstreams::peer::HttpPeer;
 use ppe::praxis_policy_core::{
     http::{
         DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_RESPONSE_BYTES, HttpRequest, HttpResponse, HttpTransport,
@@ -31,13 +30,15 @@ use ppe::praxis_policy_core::{
 use praxis_core::{
     config::DEFAULT_SUBREQUEST_POOL_SIZE,
     connectivity::{ConnectionOptions, peer as peer_utils},
+    egress::PeerSpec,
     subrequest::{SubRequest, SubRequestClient, SubRequestConnector, SubRequestError, SubResponse},
 };
 
 /// Isolates policy connections from cluster-specific TLS state.
 ///
-/// Pingora's reuse hash omits `options.ca`, so a distinct group key keeps
-/// cluster private-CA connections out of the policy pool partition.
+/// A backend pools connections per peer pool group, and its reuse key need
+/// not cover the trust anchors, so a distinct group keeps cluster private-CA
+/// connections out of the policy pool partition.
 const POLICY_PEER_GROUP: u64 = 0x706F_6C69_6379_5F31; // "policy_1"
 
 /// Performs the policy engine's outbound HTTP over the proxy's connector.
@@ -420,18 +421,15 @@ impl Target {
     /// fires first and an unreachable peer reports a timeout, which a
     /// delegating caller must treat as a possibly-minted token; with one,
     /// the same failure reports a connect error it can safely retry.
-    fn peer(&self, address: SocketAddr, connect_timeout: Option<Duration>) -> HttpPeer {
+    fn peer(&self, address: SocketAddr, connect_timeout: Option<Duration>) -> PeerSpec {
         let connect = connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
-        let mut peer = HttpPeer::new(address, self.tls, self.sni.clone());
-        peer.group_key = POLICY_PEER_GROUP;
-        peer_utils::apply_connection_options(
-            &mut peer,
-            &ConnectionOptions {
-                connection_timeout: Some(connect),
-                total_connection_timeout: Some(connect),
-                ..ConnectionOptions::default()
-            },
-        );
+        let mut peer = PeerSpec::new(address, self.tls, &self.sni);
+        peer.pool_group = POLICY_PEER_GROUP;
+        peer.connection = Arc::new(ConnectionOptions {
+            connection_timeout: Some(connect),
+            total_connection_timeout: Some(connect),
+            ..ConnectionOptions::default()
+        });
         peer
     }
 

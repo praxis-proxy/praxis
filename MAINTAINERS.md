@@ -16,20 +16,27 @@ definitions and processes.
 
 ## Maintainers
 
-| Name            | Repos    | GitHub       | Affiliation |
-| --------------- | -------- | ------------ | ----------- |
-| Alex Snaps      | Core     | [@alexsnaps] | Red Hat     |
-| Brent Salisbury | Grid     | [@nerdalert] | Red Hat     |
-| Fred Araujo     | Policy   | [@araujof]   | IBM         |
-| Sam Batschelet  | Grid     | [@hexfusion] | Red Hat     |
-| Sebastien Han   | Core, AI | [@leseb]     | Red Hat     |
-| Tim Walsh       | Core     | [@twghu]     | Red Hat     |
+| Name            | Repos    | GitHub          | Affiliation |
+| --------------- | -------- | --------------- | ----------- |
+| Alex Snaps      | Core     | [@alexsnaps]    | Red Hat     |
+| Aslak Knutsen   | Core, AI | [@aslakknutsen] | Red Hat     |
+| Brent Salisbury | Grid     | [@nerdalert]    | Red Hat     |
+| Fred Araujo     | Policy   | [@araujof]      | IBM         |
+| Sam Batschelet  | Grid     | [@hexfusion]    | Red Hat     |
+| Sebastien Han   | Core, AI | [@leseb]        | Red Hat     |
+| Tim Walsh       | Core     | [@twghu]        | Red Hat     |
 
 [@alexsnaps]: https://github.com/alexsnaps
 [@araujof]: https://github.com/araujof
+[@aslakknutsen]: https://github.com/aslakknutsen
 [@hexfusion]: https://github.com/hexfusion
 [@leseb]: https://github.com/leseb
 [@twghu]: https://github.com/twghu
+
+## Community
+| Name      | GitHub      | Affiliation |
+| --------- | ----------- | ----------- |
+| David G. Simmons | [@sdavidgs] | Red Hat     |
 
 ## Reviewers
 
@@ -37,7 +44,6 @@ definitions and processes.
 | ------------------------- | -------------- | ----------------- | ----------- |
 | Alexander Cristurean      | AI             | [@crstrn13]       | Red Hat     |
 | Asaad Balum               | AI             | [@asaadbalum]     | Red Hat     |
-| Aslak Knutsen             | Core, AI       | [@aslakknutsen]   | Red Hat     |
 | Brent Salisbury           | Core, AI, Grid | [@nerdalert]      | Red Hat     |
 | Christina Xu              | AI             | [@christinaexyou] | Red Hat     |
 | Craig Brookes             | Policy         | [@maleck13]       | Red Hat     |
@@ -61,7 +67,6 @@ definitions and processes.
 
 [@crstrn13]: https://github.com/crstrn13
 [@asaadbalum]: https://github.com/asaadbalum
-[@aslakknutsen]: https://github.com/aslakknutsen
 [@nerdalert]: https://github.com/nerdalert
 [@christinaexyou]: https://github.com/christinaexyou
 [@maleck13]: https://github.com/maleck13
