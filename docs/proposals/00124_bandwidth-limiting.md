@@ -41,7 +41,12 @@ This proposal adds:
 - Per-connection scope. Each connection has its own
   upload budget and its own download budget.
 - Per-source-IP scope. Connections from the same source
-  IP share one upload budget and one download budget.
+  IP that pass through one `bandwidth_limit` instance
+  share one upload budget and one download budget. That
+  instance owns the map, as `RateLimitFilter::from_config`
+  does for `rate_limit`. Another instance, including one
+  on a different listener or chain, has its own budgets.
+  Nothing in the process holds a shared map.
 - The same filter on HTTP and TCP listeners.
 - Pacing. Traffic above the limit is delayed so the
   stream stays at the configured rate. Request admission
@@ -64,9 +69,10 @@ This proposal adds:
   TCP connections.
 - Stop pacing a connection when the client disconnects,
   so a slow or gone peer does not hold a shared budget.
-- Keep per-IP tracking local to the process and bounded
-  in memory. A budget that must be exact across replicas
-  belongs with the shared state model in
+- Keep each per-IP map inside its filter instance and
+  bounded in memory. Listener chains do not share it. A
+  budget shared across instances or replicas belongs
+  with the shared state model in
   [proposal #99](00099_stateful-proxy-state-management.md)
   and is outside this proposal.
 - Leave the data path unchanged when the filter is not
@@ -75,7 +81,9 @@ This proposal adds:
 ### Example configuration
 
 Aspirational shape, using the same listener and filter
-chain structure as the existing `rate_limit` config:
+chain structure as the existing `rate_limit` config.
+The HTTP and TCP blocks are separate instances, so
+their per-IP budgets stay separate.
 
 ```yaml
 listeners:
@@ -156,10 +164,11 @@ Envoy's bandwidth limit filter, NGINX `limit_rate`, and
 HAProxy byte-rate limits treat throughput as a normal
 proxy control, separate from request-rate limiting.
 
-Per-IP budgets are local runtime state, like the per-IP
-map already used by `rate_limit`. This proposal does not
-add a new shared storage class. Cross-replica budgets
-would follow
+Per-IP budgets are local runtime state owned by the
+filter instance, like the per-IP map `rate_limit`
+creates in `from_config`. This proposal does not add a
+process-wide store or a new shared storage class.
+Cross-instance and cross-replica budgets would follow
 [proposal #99](00099_stateful-proxy-state-management.md)
 if a later issue requires them.
 
@@ -172,9 +181,10 @@ if a later issue requires them.
   model responses so that a single generation cannot
   consume the entire downlink.
 - As a platform operator, I want connections from the
-  same source IP to share an upload budget and a download
-  budget so that opening more connections does not
-  multiply that client's throughput.
+  same source IP that pass through one `bandwidth_limit`
+  instance to share an upload budget and a download
+  budget so that opening more connections on that
+  listener does not multiply that client's throughput.
 - As an operator of a TCP listener, I want the same
   upload and download limits on raw TCP connections so
   that HTTP and TCP entry points follow one policy.
@@ -190,8 +200,8 @@ if a later issue requires them.
   responses, and rate-limit headers stay there.
 - A single byte budget shared by every client. Issue
   #124 covers per-connection and per-source-IP limits.
-- Bandwidth aggregation across proxy replicas or
-  processes.
+- One per-IP budget shared across filter instances,
+  listener chains, or proxy processes.
 - Fair queuing, priority tiers, or traffic classes beyond
   the two scopes above.
 - Changing payload bytes. The filter changes when bytes
