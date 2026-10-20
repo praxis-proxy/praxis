@@ -54,10 +54,10 @@ fn explicit_ca_probes_do_not_load_platform_roots() {
         .env("SSL_CERT_DIR", "/nonexistent/platform-ca-dir")
         .output()
         .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        output.status.success(),
-        "explicit CA must replace unavailable platform roots: {}",
-        String::from_utf8_lossy(&output.stdout)
+        output.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
+        "explicit CA must replace unavailable platform roots: {stdout}"
     );
 }
 
