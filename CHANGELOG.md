@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Experimental `tls-health-check` feature for TLS handshake probes and HTTPS
+  health endpoints using cluster certificates and startup runtime trust.
+  Rust consumers matching `HealthCheckType` exhaustively must handle the new
+  `Tls` variant even when the feature is disabled.
 - `policy` filter accepts `context_headers` and `context_meta` configuration.
   `context_headers` maps reserved-prefix HTTP headers to typed `agent.*` /
   `framework.*` extension fields (via a closed `ContextField` enum) so APL

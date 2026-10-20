@@ -35,6 +35,9 @@ pub mod runner;
 mod service;
 #[cfg(feature = "admin-api")]
 mod stats_admin;
+/// TLS transport adapter for active probes.
+#[cfg(feature = "tls-health-check")]
+mod tls;
 
 #[cfg(feature = "admin-api")]
 pub use admin_request::{AdminRequest, BodyReadError};

@@ -41,7 +41,7 @@ clusters:
 
 | Field | Default | Description |
 | ----- | ------- | ----------- |
-| `type` | (required) | `http` or `tcp` |
+| `type` | (required) | `http`, `tcp`, `grpc`, or feature-gated `tls` |
 | `path` | `/` | HTTP path to probe |
 | `expected_status` | `200` | Status code that indicates healthy |
 | `interval_ms` | `5000` | Milliseconds between probe rounds |
@@ -54,12 +54,69 @@ The probe sends a raw `HTTP/1.1 GET` with a
 Any status code other than `expected_status` counts as
 a failure.
 
-HTTP probes connect in plaintext and cannot probe a
-cluster that terminates TLS: the handshake never
-completes, so the endpoint is marked unhealthy. Use a
-`tcp` probe (connect-only) for a TLS cluster. Praxis logs
-a warning at startup when a cluster has `tls` and an
-`http` health check.
+Without `tls-health-check`, HTTP probes connect in plaintext. A TLS cluster
+with an HTTP probe logs a startup warning; use a TCP probe or enable the
+feature described below. Plain HTTP retains `Host: health-check` with either
+build.
+
+### TLS and HTTPS Probes
+
+Build with `--features tls-health-check` to enable experimental TLS probes.
+The initial transport implementation uses the Pingora backend; selecting this
+feature also selects `pingora` in the protocol crate.
+
+```yaml
+clusters:
+  - name: secure
+    endpoints: ["backend.example.com:443"]
+    tls:
+      sni: backend.example.com
+      ca:
+        ca_path: /etc/praxis/upstream-ca.pem
+      # client_cert:
+      #   cert_path: /etc/praxis/client.pem
+      #   key_path: /etc/praxis/client-key.pem
+    health_check:
+      type: tls
+```
+
+`type: tls` requires cluster `tls` settings and completes a TLS handshake.
+To check an HTTPS application endpoint, use `type: http` on that TLS cluster
+and set `path` and `expected_status`. HTTPS probes use HTTP/1.1 even when
+`http.version` selects HTTP/2 for proxied traffic. Handshake-only probes honor
+`http.version` during ALPN negotiation and can check an h2-only TLS endpoint.
+The path still defaults to `/`, and the
+expected status defaults to `200`. Handshake-only probes ignore both fields.
+
+Probes use the cluster's CA, client certificate and `verify` settings.
+Disabling verification still requires the existing insecure opt-in. Without a
+cluster CA, `runtime.upstream_ca_file` replaces system trust when configured;
+otherwise system trust applies. Runtime trust is captured at startup and
+requires a restart to change, including when probe tasks reload. Cluster TLS
+material reloads with the config. Failed certificate loading makes probes
+fail, without falling back to another trust source or plaintext.
+
+The verification name comes from explicit `tls.sni`, then a fixed
+`http.authority`, then the endpoint hostname or IP address. A background probe
+has no downstream Host to inherit. Existing SNI validation and opt-in rules
+still apply to cluster config. HTTPS Host uses `http.authority` when set
+(including `{ from: endpoint }`), otherwise explicit SNI or the endpoint. IPv6
+Hosts use brackets; endpoint-derived Hosts omit port 443 and keep other ports.
+
+Each probe uses a new connection with session resumption disabled, so a
+resumed session cannot conceal a changed server certificate. One timeout
+covers DNS, connection, handshake, HTTP exchange and close. Successful probes
+send `close_notify` without waiting for the server to reply with its own alert.
+Only a bounded HTTP status line is read, not the entire response body.
+
+A verified handshake establishes server identity and sends configured client
+credentials. TLS 1.3 client-side handshake completion does not prove that the
+server accepted those credentials. Use an HTTPS response check to verify
+client authorization and application health. Upstream revocation checking is
+not supported; these probes make no certificate revocation guarantee.
+
+See the [TLS health-check example](../../examples/configs/observability/tls-health-check.yaml)
+for both modes. TCP stays connect-only, and gRPC probes remain plaintext.
 
 ### TCP Probes
 

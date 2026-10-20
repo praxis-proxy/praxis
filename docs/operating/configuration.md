@@ -793,7 +793,7 @@ and [Pipeline Concepts](../architecture/pipeline-concepts.md).
 
 ## Health Checks
 
-Per-cluster active HTTP/TCP probes and passive inline
+Per-cluster active HTTP, TCP, gRPC and optional TLS probes and passive inline
 failure tracking remove unhealthy endpoints from rotation.
 See [health-checks.yaml](../../examples/configs/traffic-management/health-checks.yaml).
 
@@ -802,12 +802,13 @@ the `/api/stats` admin view and startup key-permission
 checks), never proxied traffic: the data path builds its
 upstreams from the clusters defined inline in the
 `load_balancer` or `tcp_load_balancer` filter. A health
-probe uses only a cluster's `endpoints` and its
-`health_check` block, and HTTP/TCP probes connect in
-plaintext, so a top-level cluster's data-path settings
-(`tls`, `retry_policy`, the timeout fields,
-`load_balancer_strategy`, `trusted_private_endpoints`)
-have no effect at all. Configure
+probe uses a cluster's `endpoints` and `health_check` block. With the
+experimental `tls-health-check` build feature, TLS and HTTPS probes also use
+its `tls` and `http.authority` settings; handshake probes honor `http.version`
+for ALPN. See [health checking](health-checking.md#tls-and-https-probes).
+Without that feature, HTTP probes remain plaintext. Top-level data-path
+settings such as `retry_policy`, connection timeouts, `load_balancer_strategy`
+and `trusted_private_endpoints` do not configure proxied traffic. Configure
 those on the inline load-balancer cluster instead.
 
 ## Slow Start

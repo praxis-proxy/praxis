@@ -57,6 +57,10 @@ fn validate_expected_status(hc: &crate::config::HealthCheckConfig, cluster_name:
 fn validate_health_check_type(hc: &crate::config::HealthCheckConfig, cluster_name: &str) -> Result<(), ProxyError> {
     match hc.check_type {
         HealthCheckType::Http | HealthCheckType::Tcp => Ok(()),
+        HealthCheckType::Tls if cfg!(feature = "tls-health-check") => Ok(()),
+        HealthCheckType::Tls => Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': TLS probes require the tls-health-check build feature"
+        ))),
         HealthCheckType::Grpc => validate_grpc_service(&hc.grpc_service, cluster_name),
     }
 }
@@ -77,12 +81,24 @@ fn validate_grpc_service(service: &str, cluster_name: &str) -> Result<(), ProxyE
     Ok(())
 }
 
-/// Reject gRPC probes on TLS clusters.
+/// Require TLS configuration for TLS probes and reject it for gRPC probes.
 ///
 /// The probe speaks plaintext h2c on its own connection. Without this
 /// check a `tls:` cluster with `type: grpc` would drive every endpoint
 /// unhealthy and give the operator no clue why.
-pub(super) fn validate_grpc_probe_transport(cluster: &Cluster) -> Result<(), ProxyError> {
+pub(super) fn validate_probe_transport(cluster: &Cluster) -> Result<(), ProxyError> {
+    #[cfg(feature = "tls-health-check")]
+    if cluster
+        .health_check
+        .as_ref()
+        .is_some_and(|hc| hc.check_type == HealthCheckType::Tls)
+        && cluster.tls.is_none()
+    {
+        return Err(ProxyError::Config(format!(
+            "cluster '{}': health check type 'tls' requires cluster.tls",
+            cluster.name
+        )));
+    }
     let is_grpc = cluster
         .health_check
         .as_ref()
@@ -415,7 +431,7 @@ pub(super) fn warn_tls_http_probe_mismatch(cluster: &Cluster) {
 
 /// Whether a TLS cluster is health-checked with a plaintext HTTP probe.
 fn tls_http_probe_mismatch(has_tls: bool, check_type: HealthCheckType) -> bool {
-    has_tls && matches!(check_type, HealthCheckType::Http)
+    !cfg!(feature = "tls-health-check") && has_tls && matches!(check_type, HealthCheckType::Http)
 }
 
 // -----------------------------------------------------------------------------
@@ -436,10 +452,44 @@ mod tests {
     use super::super::validate_clusters;
     use crate::config::{Cluster, Config, InsecureOptions};
 
+    #[cfg(feature = "tls-health-check")]
+    #[test]
+    fn tls_probe_verify_false_still_requires_insecure_opt_in() {
+        let cluster = serde_yaml::from_str::<Cluster>(
+            "name: secure\nendpoints: ['example.com:443']\ntls: { verify: false }\nhealth_check: { type: tls }",
+        )
+        .unwrap();
+        let mut insecure = InsecureOptions::default();
+        let error = super::super::tls::validate_tls_settings(&cluster, &insecure).unwrap_err();
+        assert!(
+            error.to_string().contains("allow_tls_no_verify"),
+            "TLS probes cannot bypass the verification opt-in"
+        );
+        insecure.allow_tls_no_verify = true;
+        super::super::tls::validate_tls_settings(&cluster, &insecure).unwrap();
+    }
+
+    #[cfg(feature = "tls-health-check")]
+    #[test]
+    fn tls_probe_requires_cluster_tls() {
+        let cluster = serde_yaml::from_str::<Cluster>(
+            "name: secure\nendpoints: ['example.com:443']\nhealth_check: { type: tls }",
+        )
+        .unwrap();
+        let error = super::validate_probe_transport(&cluster).unwrap_err();
+        assert!(
+            error.to_string().contains("requires cluster.tls"),
+            "error names required TLS settings"
+        );
+    }
+
     #[test]
     fn tls_http_probe_mismatch_flags_plaintext_http_on_tls_cluster() {
         use crate::config::HealthCheckType;
-        assert!(super::tls_http_probe_mismatch(true, HealthCheckType::Http));
+        assert_eq!(
+            super::tls_http_probe_mismatch(true, HealthCheckType::Http),
+            !cfg!(feature = "tls-health-check")
+        );
         assert!(!super::tls_http_probe_mismatch(true, HealthCheckType::Tcp));
         assert!(!super::tls_http_probe_mismatch(false, HealthCheckType::Http));
     }

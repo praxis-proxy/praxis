@@ -8,6 +8,8 @@ readme.workspace = true
 publish = false
 
 [features]
+# TLS and HTTPS active probes. Off by default.
+tls-health-check = ["praxis-test-utils/tls-health-check"]
 spiffe = ["praxis-core/spiffe"]
 upstream-binding = ["praxis-core/upstream-binding"]
 slow-start = ["praxis-core/slow-start"]
