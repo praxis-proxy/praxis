@@ -79,9 +79,7 @@ impl TlsProbe {
         } else {
             true
         };
-        // Send close_notify without waiting for the peer's reciprocal alert.
-        stream.shutdown().await.map_err(|error| error.to_string())?;
-        Ok(healthy)
+        Ok(finish_probe(&mut stream, address, healthy).await)
     }
 
     /// Connect with the upstream resolver and a full, non-resumed handshake.
@@ -113,6 +111,18 @@ impl TlsProbe {
         http::header::HeaderValue::from_str(&host).map_err(|error| error.to_string())?;
         Ok(host)
     }
+}
+
+/// Preserve the probe verdict when the peer already closed its connection.
+async fn finish_probe<Stream: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut Stream,
+    address: &str,
+    healthy: bool,
+) -> bool {
+    if let Err(error) = stream.shutdown().await {
+        tracing::trace!(address, %error, "TLS health probe close_notify failed");
+    }
+    healthy
 }
 
 /// Resolve the fixed authority fallback without overriding explicit SNI.
@@ -243,7 +253,23 @@ fn bracket_ipv6(host: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+
     use super::*;
+
+    #[tokio::test]
+    async fn failed_shutdown_preserves_successful_and_failed_probe_verdicts() {
+        for healthy in [true, false] {
+            assert_eq!(
+                finish_probe(&mut FailedShutdown, "example.com:443", healthy).await,
+                healthy,
+                "a peer closing the connection must not replace the probe verdict"
+            );
+        }
+    }
 
     #[test]
     fn tls_config_preserves_ems_and_alpn_policy() -> Result<(), Box<dyn std::error::Error>> {
@@ -297,5 +323,22 @@ mod tests {
             "empty SNI cannot disable certificate verification"
         );
         Ok(())
+    }
+
+    /// A peer that accepts writes but has closed before shutdown.
+    struct FailedShutdown;
+
+    impl tokio::io::AsyncWrite for FailedShutdown {
+        fn poll_write(self: Pin<&mut Self>, _context: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+        }
     }
 }
