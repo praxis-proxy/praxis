@@ -111,7 +111,15 @@ async fn tls_probe_waits_for_rejection_on_slow_tls13_connection() {
     let certs = TestCertificates::generate();
     let backend = Backend::new(&certs, true).await;
     let (address, relay) = delayed_server_traffic(&backend.address).await;
-    assert_health(cluster(&certs, &address, HealthCheckType::Tls), None, false).await;
+    let mut config = cluster(&certs, &address, HealthCheckType::Tls);
+    config.health_check.as_mut().unwrap().timeout_ms = 5000;
+    config.health_check.as_mut().unwrap().interval_ms = 10_000;
+    let started = tokio::time::Instant::now();
+    assert_health(config, None, false).await;
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the delayed rejection must fail before the five-second probe timeout"
+    );
     relay.abort();
 }
 
