@@ -512,7 +512,7 @@ mod tests {
 
         assert!(
             matches!(&result, Err(EgressError::Connect(message)) if message.contains("CA")),
-            "unusable trust anchors must fail the connect: {result:?}"
+            "unusable trust anchors must fail the connect"
         );
     }
 
