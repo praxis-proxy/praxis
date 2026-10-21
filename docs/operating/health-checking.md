@@ -120,6 +120,14 @@ TLS alerts fail the probe. HTTPS probes
 read only a bounded HTTP status line, not the entire response body, and do not
 wait for a reciprocal close alert.
 
+TLS closure and error alerts are defined in [RFC 8446 Section 6] for TLS 1.3
+and [RFC 5246 Section 7.2] for TLS 1.2. The grace period and acceptance of
+transport EOF above are Praxis health-check policy. HTTP/1.1 status-line
+syntax is defined in [RFC 9112 Section 4]; the bounded read follows the
+resource-limit guidance in [RFC 9110 Section 17.5]. See the
+[TLS conformance tests] for protocol-version and client-authentication
+coverage, and [HTTP correctness] for the proxy's protocol responsibilities.
+
 A verified handshake establishes server identity and sends configured client
 credentials. TLS 1.3 client-side handshake completion does not prove that the
 server accepted those credentials, and a rejection arriving after the grace
@@ -131,6 +139,12 @@ See the [TLS health-check example][tls-health-check]
 for both modes. TCP stays connect-only, and gRPC probes remain plaintext.
 
 [tls-health-check]: ../../examples/configs/observability/tls-health-check.yaml
+[RFC 8446 Section 6]: https://datatracker.ietf.org/doc/html/rfc8446#section-6
+[RFC 5246 Section 7.2]: https://datatracker.ietf.org/doc/html/rfc5246#section-7.2
+[RFC 9112 Section 4]: https://datatracker.ietf.org/doc/html/rfc9112#section-4
+[RFC 9110 Section 17.5]: https://datatracker.ietf.org/doc/html/rfc9110#section-17.5
+[TLS conformance tests]: ../../tests/conformance/tests/suite/tls.rs
+[HTTP correctness]: ../architecture/http-correctness.md
 
 ### TCP Probes
 
