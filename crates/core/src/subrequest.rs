@@ -37,7 +37,7 @@ mod completion_tests;
 // The exchange tests dial a local listener through the build's connector, so
 // they need a network backend compiled in.
 #[cfg(test)]
-#[cfg(feature = "pingora")]
+#[cfg(any(feature = "pingora", feature = "hyper"))]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests;

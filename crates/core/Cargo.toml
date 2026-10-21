@@ -24,6 +24,23 @@ workspace = true
 # docs/developing/adding-backends.md.
 default = ["pingora"]
 pingora = ["dep:pingora-core", "dep:pingora-http"]
+# The hyper network backend: `backend::Runtime` and `backend::Connector`
+# resolve to the hyper implementations. Off by default and experimental; the
+# `praxis-proxy` binary's `hyper` feature turns it on together with
+# `experimental`. The two backend features are mutually exclusive; a hyper
+# build starts from `--no-default-features`. See
+# docs/developing/adding-backends.md.
+hyper = [
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:rustls-native-certs",
+    "dep:tokio-rustls",
+    "tokio/io-util",
+    "tokio/net",
+    "tokio/rt-multi-thread",
+    "tokio/signal",
+]
 # Config support for logical upstream binding (`bound_upstream` conditions).
 # Off by default; experimental. The filter crate's `upstream-binding` turns it on.
 upstream-binding = []
@@ -45,6 +62,9 @@ otel = [
 bytes = { workspace = true }
 dashmap = { workspace = true }
 http = { workspace = true }
+http-body-util = { workspace = true, optional = true }
+hyper = { workspace = true, features = ["client", "http1", "http2"], optional = true }
+hyper-util = { workspace = true, features = ["http1", "http2", "tokio"], optional = true }
 metrics = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
@@ -55,11 +75,13 @@ pingora-http = { workspace = true, optional = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
+rustls-native-certs = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
+tokio-rustls = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
@@ -69,8 +91,12 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 loom = { workspace = true }
+# Certificates with IP SANs for the hyper egress TLS tests.
+rcgen = { workspace = true }
 serde_json = { workspace = true }
 h2 = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+# `test_utils::gen_test_certs` mints a real CA PEM for the runtime trust-anchor tests.
+praxis-tls = { workspace = true, features = ["bench-utils"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "test-util"] }

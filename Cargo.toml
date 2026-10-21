@@ -51,6 +51,12 @@ futures = "0.3.34"
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-ng"] }
 h2 = "0.4.20"
 http = "1.5.0"
+# The hyper network backend (the `hyper` feature of praxis-proxy-core and
+# praxis-proxy-protocol). Already in the lock through tonic and reqwest;
+# defaults off so each crate names only the client or server half it builds.
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", default-features = false }
+hyper-util = { version = "0.1.21", default-features = false }
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
 loom = "0.7.2"
 metrics = "0.24.6"
@@ -94,8 +100,9 @@ praxis-core = { version = "0.7.5", path = "crates/core", package = "praxis-proxy
 # would still link it. The `praxis-proxy` binary's default feature set forwards
 # `policy-engine` explicitly, so the standard build is unchanged.
 praxis-filter = { version = "0.7.5", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
-# default-features = false for the same reason as praxis-core: the protocol
-# crate's default is the `pingora` backend, selected by the binary's feature.
+# default-features = false: the harness's default is the Pingora backend, and
+# a suite crate that runs on hyper must be able to leave it off, so each suite
+# forwards the backend it wants (`pingora` in its own default set).
 praxis-protocol = { version = "0.7.5", path = "crates/protocol", package = "praxis-proxy-protocol", default-features = false }
 praxis-tls = { version = "0.7.5", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
@@ -115,6 +122,9 @@ regex = "1.13.1"
 # on would silently link aws-lc-rs into every build, and
 # `prefer-post-quantum` is omitted because it implies `aws_lc_rs`.
 rustls = { version = "0.23.46", default-features = false, features = ["logging", "std", "tls12"] }
+# The system trust store for the hyper backend's upstream TLS when neither the
+# cluster nor the runtime names a CA, as the Pingora connector loads it.
+rustls-native-certs = "0.8.5"
 # The OpenSSL-backed rustls provider, vendored and published from the Pingora
 # fork (tofay/rustls-openssl 0.4.1 plus its FIPS provider-routing fixes); the
 # library name is still `rustls_openssl`.
@@ -128,10 +138,11 @@ serde_yaml = { package = "yaml_serde", version = "0.10.7" }
 syn = { version = "3.0.9", features = ["full", "extra-traits", "visit"] }
 syslog = "7.0.0"
 tempfile = "3.27.0"
-# Test-only. Its default features turn on rustls' `aws_lc_rs`, which would put
-# a second provider into every test binary and let `ClientConfig::builder()`
-# pick it silently when nothing is installed; the Pingora fork depends on it
-# the same way.
+# The hyper backend's TLS acceptor and connector, and the test suites' TLS
+# clients. Its default features turn on rustls' `aws_lc_rs`, which would put
+# a second provider into every binary and let `ClientConfig::builder()` pick
+# it silently when nothing is installed; the Pingora fork depends on it the
+# same way.
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["logging", "tls12"] }
 tokio-tungstenite = "0.30.0"
 thiserror = "2.0.21"
