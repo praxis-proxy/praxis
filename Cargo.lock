@@ -3851,15 +3851,15 @@ dependencies = [
 
 [[package]]
 name = "quixotic-plecostomus-error"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f5194971dca8add6ff0af06c581ecd9a36c16e7d930e997ca507a87fe44714d"
+checksum = "3b862d21a4a583c3ca4d99b8e19edee88e6633c8e697af1fb69bc31debcd9f42"
 
 [[package]]
 name = "quixotic-plecostomus-header-serde"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ae773393e9a1ef81add82f4d8a95a47fd7c9cb7fc39ae1b40fce22836e21915"
+checksum = "b5272cf10f575bc984f288ec0e7bbd771bcb41acf5b6b9f86d5a682f33591620"
 dependencies = [
  "bytes",
  "http",
@@ -3873,9 +3873,9 @@ dependencies = [
 
 [[package]]
 name = "quixotic-plecostomus-http"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c5b9b84e31715f3636a3d9795259ad752ba7f2a250a72e9d44b56dbdecb8dce"
+checksum = "120737916ea88106a578a927d7f08cea307c47d302cca8da9c10526f18ad53e8"
 dependencies = [
  "bytes",
  "http",
@@ -3884,9 +3884,9 @@ dependencies = [
 
 [[package]]
 name = "quixotic-plecostomus-lru"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10b38a989795e8007d39b663f3a93c5aab5a9d943403123c9a1903f50231d3db"
+checksum = "553160ee7147c96cf1304303badd5b695cec6906220a2b266b0c320ffe524d18"
 dependencies = [
  "ahash",
  "arrayvec 0.7.8",
@@ -3901,9 +3901,9 @@ dependencies = [
 
 [[package]]
 name = "quixotic-plecostomus-pool"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4485a15f77716fd0a7a0725f66e75632d63441dcc86840dde41aac1cdebce8d3"
+checksum = "90c164a763151399e746dcda8b3f37f4ce685749c268cc035634f9c9b9f2005d"
 dependencies = [
  "crossbeam-queue",
  "dashmap",
@@ -3940,9 +3940,9 @@ dependencies = [
 
 [[package]]
 name = "quixotic-plecostomus-runtime"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da9a37da793a8462cdf90ec3133e7a75f210be350bb80ee801322d3c9b9b0374"
+checksum = "c5fdf8b0830f790e0e6821795e95584a5a0661e67b6962302f86464ea80fc31c"
 dependencies = [
  "log",
  "once_cell",
@@ -3954,9 +3954,9 @@ dependencies = [
 
 [[package]]
 name = "quixotic-plecostomus-rustls"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4d17b81a9336b506f4452dcf4a683a8c37ee03eec1b210a5f7a48f92dc38023"
+checksum = "0b8036fd795e8f7d40b255765a30ce936769e6f34cf2f6aed1a7323e2512fc42"
 dependencies = [
  "log",
  "no_debug",
@@ -3984,9 +3984,9 @@ dependencies = [
 
 [[package]]
 name = "quixotic-plecostomus-timeout"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43470b45f68afa629b14796d0ec5e3aacedfa21ca14ad6e2be92a8ad32dd91a9"
+checksum = "44ca10b25ea7077e833438d1080659112dd3fbc9dcc3ad2f77de959372a85d66"
 dependencies = [
  "once_cell",
  "parking_lot",
