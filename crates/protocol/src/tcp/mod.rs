@@ -5,11 +5,15 @@
 
 /// Listener grouping and group-consistency validation (backend-neutral).
 mod groups;
+/// The hyper backend's TCP service (accept loop and TLS) and the listener
+/// sockets every hyper listener binds.
+#[cfg(feature = "hyper")]
+pub(crate) mod hyper;
 /// TCP connection metrics (Prometheus counters, gauges and histograms).
-#[cfg(feature = "pingora")]
+#[cfg(any(feature = "pingora", feature = "hyper"))]
 pub(crate) mod metrics;
-/// Bidirectional TCP proxy application.
-#[cfg(feature = "pingora")]
+/// Bidirectional TCP proxy application, shared by every backend.
+#[cfg(any(feature = "pingora", feature = "hyper"))]
 pub(crate) mod proxy;
 /// TCP protocol service construction and registration.
 #[cfg(feature = "pingora")]
@@ -19,5 +23,7 @@ mod service;
 mod tls;
 
 pub use groups::validate_tcp_groups;
+#[cfg(feature = "hyper")]
+pub use hyper::HyperTcp;
 #[cfg(feature = "pingora")]
 pub use service::PingoraTcp;
