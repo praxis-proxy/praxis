@@ -62,37 +62,37 @@ impl TlsProbe {
 
     /// Probe under one deadline for DNS, connection, handshake, HTTP and close.
     pub(super) async fn probe(&self, address: &str, timeout: Duration) -> bool {
-        match tokio::time::timeout(timeout, self.exchange(address)).await {
-            Ok(Ok(healthy)) => healthy,
-            Ok(Err(error)) => {
+        let Some(deadline) = tokio::time::Instant::now().checked_add(timeout) else {
+            return false;
+        };
+        match self.exchange(address, deadline).await {
+            Ok(healthy) => healthy,
+            Err(error) => {
                 tracing::debug!(address, %error, "TLS health probe failed");
-                false
-            },
-            Err(_) => {
-                tracing::debug!(address, "TLS health probe timed out");
                 false
             },
         }
     }
 
     /// Exchange over a new connection with session resumption disabled.
-    async fn exchange(&self, address: &str) -> Result<bool, String> {
+    async fn exchange(&self, address: &str, deadline: tokio::time::Instant) -> Result<bool, String> {
         let name = tls_server_name(&self.tls, address).map_err(|error| error.to_string())?;
         let started = tokio::time::Instant::now();
-        let mut stream = self.connect(address, name.clone()).await?;
+        let mut stream = tokio::time::timeout_at(deadline, self.connect(address, name.clone()))
+            .await
+            .map_err(|error| format!("TLS health probe handshake timed out: {error}"))??;
         let grace = MIN_HANDSHAKE_ALERT_GRACE.max(started.elapsed());
-        let healthy = if let Some((path, expected)) = &self.http {
-            let host = self.host(address, &name)?;
-            let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-            super::probe::http_exchange(&mut stream, address, &request, *expected).await
-        } else {
-            true
+        let Some((path, expected)) = &self.http else {
+            return finish_handshake(&mut stream, address, grace, deadline).await;
         };
-        let healthy = finish_probe(&mut stream, address, healthy).await;
-        if self.http.is_none() {
-            return handshake_result(&mut stream, grace).await;
-        }
-        Ok(healthy)
+        let host = self.host(address, &name)?;
+        let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+        tokio::time::timeout_at(deadline, async {
+            let healthy = super::probe::http_exchange(&mut stream, address, &request, *expected).await;
+            finish_probe(&mut stream, address, healthy).await
+        })
+        .await
+        .map_err(|error| format!("HTTPS health probe timed out: {error}"))
     }
 
     /// Connect with the upstream resolver and a full, non-resumed handshake.
@@ -100,7 +100,7 @@ impl TlsProbe {
         &self,
         address: &str,
         name: String,
-    ) -> Result<pingora_core::tls::ClientTlsStream<tokio::net::TcpStream>, String> {
+    ) -> Result<Box<pingora_core::tls::ClientTlsStream<tokio::net::TcpStream>>, String> {
         let socket = praxis_core::connectivity::peer::resolve_address(address)
             .await
             .map_err(|error| error.to_string())?;
@@ -111,6 +111,7 @@ impl TlsProbe {
         self.connector
             .connect(name, stream)
             .await
+            .map(Box::new)
             .map_err(|error| error.to_string())
     }
 
@@ -124,6 +125,21 @@ impl TlsProbe {
         http::header::HeaderValue::from_str(&host).map_err(|error| error.to_string())?;
         Ok(host)
     }
+}
+
+/// Observe rejection only within the remaining budget of a completed handshake.
+async fn finish_handshake<Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream: &mut Stream,
+    address: &str,
+    grace: Duration,
+    deadline: tokio::time::Instant,
+) -> Result<bool, String> {
+    tokio::time::timeout_at(deadline, async {
+        finish_probe(stream, address, true).await;
+        handshake_result(stream, grace).await
+    })
+    .await
+    .unwrap_or(Ok(true))
 }
 
 /// Reject late TLS alerts without requiring application data or a close reply.
@@ -291,6 +307,20 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_completed_handshake_uses_only_remaining_deadline() -> Result<(), String> {
+        let (mut stream, _peer) = tokio::io::duplex(1);
+        let remaining = Duration::from_millis(300);
+        let started = tokio::time::Instant::now();
+        let deadline = started.checked_add(remaining).ok_or("deadline overflow")?;
+        assert!(
+            finish_handshake(&mut stream, "example.com:443", Duration::from_millis(700), deadline).await?,
+            "silence at the deadline preserves a completed handshake"
+        );
+        assert_eq!(started.elapsed(), remaining, "the alert wait must not extend the probe");
+        Ok(())
+    }
 
     #[tokio::test(start_paused = true)]
     async fn silent_handshake_peer_succeeds_after_bounded_grace() -> Result<(), String> {

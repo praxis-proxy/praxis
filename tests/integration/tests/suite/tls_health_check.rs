@@ -124,6 +124,29 @@ async fn tls_probe_waits_for_rejection_on_slow_tls13_connection() {
 }
 
 #[tokio::test]
+async fn tls_probe_accepts_silent_peer_after_handshake_near_deadline() {
+    let certs = TestCertificates::generate();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config(&certs, false)));
+    let held = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let mut stream = acceptor.accept(socket).await.unwrap();
+        assert_eq!(stream.read(&mut [0]).await.unwrap(), 0, "probe sends close_notify");
+        std::future::pending::<()>().await;
+        drop(stream);
+    });
+    let started = tokio::time::Instant::now();
+    assert_health(cluster(&certs, &address, HealthCheckType::Tls), None, true).await;
+    assert!(
+        started.elapsed() < Duration::from_millis(1300),
+        "silence after a completed handshake must use only the remaining deadline"
+    );
+    held.abort();
+}
+
+#[tokio::test]
 async fn tls_probe_rejects_untrusted_tls13_client_credentials() {
     let certs = TestCertificates::generate();
     let backend = Backend::new(&certs, true).await;
