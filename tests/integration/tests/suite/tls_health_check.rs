@@ -62,6 +62,36 @@ fn explicit_ca_probes_do_not_load_platform_roots() {
 }
 
 #[tokio::test]
+async fn backend_discards_abruptly_closed_incomplete_requests() {
+    let certs = TestCertificates::generate();
+    let backend = Backend::new(&certs, false).await;
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(certs.ca_cert_der.clone().into()).unwrap();
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    for request in [b"".as_slice(), b"GET /health HTTP/1.1\r\nHost: localhost\r\n"] {
+        let socket = tokio::net::TcpStream::connect(&backend.address).await.unwrap();
+        let mut stream = connector
+            .connect("localhost".try_into().unwrap(), socket)
+            .await
+            .unwrap();
+        stream.write_all(request).await.unwrap();
+        stream.get_mut().0.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), stream.get_mut().0.read_to_end(&mut Vec::new()))
+            .await
+            .expect("backend must close after the incomplete TLS request")
+            .unwrap();
+    }
+    assert!(
+        backend.requests.lock().unwrap().is_empty(),
+        "read errors must not count as complete requests"
+    );
+    assert_eq!(backend.closes.load(Ordering::Relaxed), 0, "TCP EOF is not close_notify");
+}
+
+#[tokio::test]
 async fn tls_probe_checks_server_identity_and_sends_close_notify() {
     let certs = TestCertificates::generate();
     let backend = Backend::new(&certs, false).await;
@@ -560,7 +590,10 @@ impl Backend {
                         }
                         let mut request = Vec::new();
                         let mut buf = [0; 256];
-                        while let Ok(count) = stream.read(&mut buf).await {
+                        loop {
+                            let Ok(count) = stream.read(&mut buf).await else {
+                                return;
+                            };
                             if count == 0 {
                                 closes.fetch_add(1, Ordering::Relaxed);
                                 return;
