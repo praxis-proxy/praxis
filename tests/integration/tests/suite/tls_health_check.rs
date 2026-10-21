@@ -129,11 +129,12 @@ async fn tls_probe_accepts_silent_peer_after_handshake_near_deadline() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config(&certs, false)));
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     let held = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         tokio::time::sleep(Duration::from_millis(700)).await;
         let mut stream = acceptor.accept(socket).await.unwrap();
-        assert_eq!(stream.read(&mut [0]).await.unwrap(), 0, "probe sends close_notify");
+        drop(closed_tx.send(stream.read(&mut [0]).await));
         std::future::pending::<()>().await;
         drop(stream);
     });
@@ -143,6 +144,11 @@ async fn tls_probe_accepts_silent_peer_after_handshake_near_deadline() {
         started.elapsed() < Duration::from_millis(1300),
         "silence after a completed handshake must use only the remaining deadline"
     );
+    let closed = tokio::time::timeout(Duration::from_secs(2), closed_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(closed.unwrap(), 0, "probe sends close_notify");
     held.abort();
 }
 
@@ -513,7 +519,9 @@ impl Backend {
                             if request.windows(4).any(|window| window == b"\r\n\r\n") {
                                 break;
                             }
-                            assert!(request.len() <= 4096, "probe request must be bounded");
+                            if request.len() > 4096 {
+                                return;
+                            }
                         }
                         requests
                             .lock()
