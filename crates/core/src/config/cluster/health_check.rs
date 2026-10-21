@@ -33,6 +33,11 @@ use serde::{Deserialize, Serialize};
 pub enum HealthCheckType {
     /// HTTP GET probe.
     Http,
+    /// TLS handshake probe using cluster TLS settings.
+    ///
+    /// Deserialization and validation require the `tls-health-check` feature.
+    #[cfg_attr(not(feature = "tls-health-check"), serde(skip))]
+    Tls,
     /// TCP connect probe.
     Tcp,
     /// gRPC health probe via `grpc.health.v1.Health/Check`.
@@ -46,6 +51,7 @@ impl fmt::Display for HealthCheckType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Http => f.write_str("http"),
+            Self::Tls => f.write_str("tls"),
             Self::Tcp => f.write_str("tcp"),
             Self::Grpc => f.write_str("grpc"),
         }
@@ -85,11 +91,12 @@ impl fmt::Display for HealthCheckType {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheckConfig {
-    /// Probe type: [`Http`], [`Tcp`], or [`Grpc`].
+    /// Probe type: [`Http`], [`Tcp`], [`Grpc`], or feature-gated [`Tls`].
     ///
     /// [`Http`]: HealthCheckType::Http
     /// [`Tcp`]: HealthCheckType::Tcp
     /// [`Grpc`]: HealthCheckType::Grpc
+    /// [`Tls`]: HealthCheckType::Tls
     #[serde(rename = "type")]
     pub check_type: HealthCheckType,
 
@@ -184,6 +191,15 @@ fn default_unhealthy_threshold() -> u32 {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_probe_parsing_tracks_the_build_feature() {
+        let parsed = serde_yaml::from_str::<HealthCheckType>("tls");
+        #[cfg(feature = "tls-health-check")]
+        assert_eq!(parsed.unwrap(), HealthCheckType::Tls, "feature enables TLS probes");
+        #[cfg(not(feature = "tls-health-check"))]
+        assert!(parsed.is_err(), "TLS probes require the build feature");
+    }
 
     #[test]
     fn parse_full_config() {

@@ -7,6 +7,9 @@ license.workspace = true
 readme.workspace = true
 publish = false
 
+[features]
+tls-health-check = ["praxis/tls-health-check"]
+
 [lints]
 workspace = true
 
