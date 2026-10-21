@@ -33,6 +33,11 @@ definitions and processes.
 [@leseb]: https://github.com/leseb
 [@twghu]: https://github.com/twghu
 
+## Community
+| Name      | GitHub      | Affiliation |
+| --------- | ----------- | ----------- |
+| David G. Simmons | [@sdavidgs] | Red Hat     |
+
 ## Reviewers
 
 | Name                      | Repos          | GitHub            | Affiliation |

@@ -4,6 +4,7 @@
 //! Proxy startup and configuration test utilities for integration tests.
 
 use std::{
+    collections::HashMap,
     fmt,
     path::PathBuf,
     sync::Arc,
@@ -11,18 +12,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use arc_swap::ArcSwap;
-use pingora_core::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
 use praxis_core::{
+    ServerRuntime as _,
+    backend::Runtime,
     config::{Config, ExpandedFilterChains, Listener, ProtocolKind},
     health::{HealthRegistry, build_health_registry},
-    server::RuntimeOptions,
 };
 use praxis_filter::{FilterFactory, FilterPipeline, FilterRegistry, HttpFilter};
 use praxis_protocol::{
-    Protocol as _,
-    http::{PingoraHttp, load_http_handler},
-    tcp::PingoraTcp,
+    ListenerPipelines, Protocol as _,
+    backend::{Http, Tcp, admin},
+    http::health,
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -198,21 +198,7 @@ pub fn build_pipeline(config: &Config) -> FilterPipeline {
 // Proxy Guard
 // -----------------------------------------------------------------------------
 
-/// Signals a Pingora server to shut down when notified.
-struct NotifyShutdownWatch {
-    /// Fires when the corresponding [`ProxyGuard`] is dropped.
-    notify: Arc<Notify>,
-}
-
-#[async_trait::async_trait]
-impl ShutdownSignalWatch for NotifyShutdownWatch {
-    async fn recv(&self) -> ShutdownSignal {
-        self.notify.notified().await;
-        ShutdownSignal::FastShutdown
-    }
-}
-
-/// RAII guard that shuts down a Pingora proxy server when
+/// RAII guard that shuts down a proxy runtime when
 /// dropped. Returned by [`start_proxy_with_registry`] and
 /// related utilities so that test threads do not leak.
 pub struct ProxyGuard {
@@ -258,48 +244,70 @@ impl Drop for ProxyGuard {
     }
 }
 
-/// Build a Pingora [`Server`] configured with all listeners
-/// and the optional admin endpoint.
-///
-/// [`Server`]: pingora_core::server::Server
-fn build_pingora_server(config: &Config, registry: &FilterRegistry) -> pingora_core::server::Server {
-    // `wire_service` builds Pingora's upstream connector, which constructs a rustls
-    // `ClientConfig` even for a listener that serves plain HTTP.
-    crate::net::tls::ensure_crypto_provider();
-    let runtime = RuntimeOptions {
-        threads: TEST_WORKER_THREADS,
-        ..RuntimeOptions::default()
-    };
-    let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &runtime);
+/// Run `runtime` on its own thread until `notify` fires, then join on drop
+/// through the returned guard.
+fn spawn_runtime(addr: String, runtime: Runtime) -> ProxyGuard {
+    let notify = Arc::new(Notify::new());
+    let watch_notify = Arc::clone(&notify);
 
-    let mut cert_shutdowns = Vec::new();
-    for listener in &config.listeners {
-        let pipeline = Arc::new(ArcSwap::from(resolve_listener_pipeline(config, listener, registry)));
-        load_http_handler(&mut server, listener, pipeline, &mut cert_shutdowns).unwrap();
+    let handle = std::thread::spawn(move || {
+        runtime.run_with_shutdown(Box::pin(async move { watch_notify.notified().await }));
+    });
+
+    ProxyGuard {
+        addr,
+        handle: Some(handle),
+        notify,
     }
-    drop(cert_shutdowns);
+}
+
+/// Cap the worker threads a test runtime gets, keeping an explicit setting.
+fn capped_config(config: &Config) -> Config {
+    let mut capped = config.clone();
+    if capped.runtime.threads == 0 {
+        capped.runtime.threads = TEST_WORKER_THREADS;
+    }
+    capped
+}
+
+/// Build a backend runtime with every HTTP listener's pipeline resolved from
+/// `registry`, plus the optional admin and metrics endpoints, and nothing else
+/// (no sub-request client, no health probes).
+fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> Runtime {
+    // Registering a listener builds the backend's upstream connector, which
+    // constructs a rustls `ClientConfig` even for a listener that serves plain HTTP.
+    crate::net::tls::ensure_crypto_provider();
+    let mut runtime = Runtime::from_config(&capped_config(config));
+
+    let pipelines: HashMap<String, Arc<FilterPipeline>> = config
+        .listeners
+        .iter()
+        .map(|listener| {
+            (
+                listener.name.clone(),
+                resolve_listener_pipeline(config, listener, registry),
+            )
+        })
+        .collect();
+    let pipelines = ListenerPipelines::new(pipelines);
+    // Dropping the senders does not stop the cert watchers; they run for the
+    // life of the test process.
+    let _cert_shutdowns = Box::new(Http)
+        .register(&mut runtime, config, &pipelines)
+        .expect("HTTP protocol registration should succeed in test");
 
     if let Some(admin_addr) = &config.admin.address {
-        praxis_protocol::http::pingora::health::add_admin_api_to_pingora_server(
-            &mut server,
-            admin_addr,
-            praxis_protocol::http::pingora::health::AdminEndpointOptions::default(),
-        );
+        admin::add_admin_api(&mut runtime, admin_addr, admin::AdminEndpointOptions::default());
     }
 
     if let Some(metrics_addr) = &config.admin.metrics_address {
-        praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server(
-            &mut server,
-            metrics_addr,
-            None,
-            config.admin.verbose,
-        );
+        admin::add_health_endpoint(&mut runtime, metrics_addr, None, config.admin.verbose);
     }
 
-    server
+    runtime
 }
 
-/// Build a [`ProxyGuard`] by spawning a Pingora server that
+/// Build a [`ProxyGuard`] by spawning a backend runtime that
 /// shuts down when the guard is dropped.
 fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard {
     let addr = config
@@ -308,22 +316,8 @@ fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard 
         .expect("config must have at least one listener")
         .address
         .clone();
-    let server = build_pingora_server(config, registry);
-
-    let notify = Arc::new(Notify::new());
-    let watch_notify = Arc::clone(&notify);
-
-    let handle = std::thread::spawn(move || {
-        server.run(RunArgs {
-            shutdown_signal: Box::new(NotifyShutdownWatch { notify: watch_notify }),
-        });
-    });
-
-    ProxyGuard {
-        addr,
-        handle: Some(handle),
-        notify,
-    }
+    let runtime = build_light_runtime(config, registry);
+    spawn_runtime(addr, runtime)
 }
 
 // -----------------------------------------------------------------------------
@@ -357,21 +351,17 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
     guard
 }
 
-/// Build a [`PingoraServerRuntime`] with HTTP and TCP protocols
+/// Build a backend [`Runtime`] with HTTP and TCP protocols
 /// and spawn background health check probes.
-///
-/// [`PingoraServerRuntime`]: praxis_core::PingoraServerRuntime
-fn build_full_server(config: &Config) -> praxis_core::PingoraServerRuntime {
+fn build_full_server(config: &Config) -> Runtime {
     let registry = praxis::build_full_registry();
     build_full_server_with_registry(config, &registry)
 }
 
-/// Build a [`PingoraServerRuntime`] with a caller-supplied filter
+/// Build a backend [`Runtime`] with a caller-supplied filter
 /// registry, HTTP and TCP protocols, and background health probes.
-///
-/// [`PingoraServerRuntime`]: praxis_core::PingoraServerRuntime
 #[expect(clippy::too_many_lines, reason = "test utility wiring")]
-fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -> praxis_core::PingoraServerRuntime {
+fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -> Runtime {
     // Every full-proxy start builds a `SubRequestConnector`, which constructs a
     // rustls `ClientConfig`. Hooking the certificate fixtures is not enough: a test
     // that starts a proxy without TLS reaches rustls with no provider installed.
@@ -405,39 +395,29 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
     )
     .expect("pipeline resolution should succeed in test");
     let pipelines = Arc::new(pipelines);
-    let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
-        praxis_protocol::http::pingora::health::listener_meta_from_config(config),
-    );
-    let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
-        praxis_protocol::http::pingora::health::cluster_meta_from_config(config),
-    );
+    let listener_meta = health::new_listener_meta_store(health::listener_meta_from_config(config));
+    let cluster_meta = health::new_cluster_meta_store(health::cluster_meta_from_config(config));
 
-    // Cap worker threads for the full-proxy path too: PingoraServerRuntime
-    // derives its thread count from config.runtime.threads.
-    let mut capped = config.clone();
-    if capped.runtime.threads == 0 {
-        capped.runtime.threads = TEST_WORKER_THREADS;
-    }
-    let mut runtime = praxis_core::PingoraServerRuntime::new(&capped);
+    let mut runtime = Runtime::from_config(&capped_config(config));
 
     if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Http) {
-        let _ = Box::new(PingoraHttp)
+        let _ = Box::new(Http)
             .register(&mut runtime, config, &pipelines)
             .expect("HTTP protocol registration should succeed in test");
     }
 
     if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Tcp) {
-        let _ = Box::new(PingoraTcp)
+        let _ = Box::new(Tcp)
             .register(&mut runtime, config, &pipelines)
             .expect("TCP protocol registration should succeed in test");
     }
 
     let recorder = (config.admin.address.is_some() || config.admin.metrics_address.is_some())
-        .then(praxis_protocol::http::pingora::health::install_prometheus_admin_recorder);
+        .then(admin::install_prometheus_admin_recorder);
 
     if let Some(metrics_addr) = &config.admin.metrics_address {
-        praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server_with_pipelines(
-            runtime.server_mut(),
+        admin::add_health_endpoint_with_pipelines(
+            &mut runtime,
             metrics_addr,
             Some(Arc::clone(&health_registry)),
             config.admin.verbose,
@@ -446,15 +426,15 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
     }
 
     if let Some(admin_addr) = &config.admin.address {
-        praxis_protocol::http::pingora::health::add_admin_api_to_pingora_server(
-            runtime.server_mut(),
+        admin::add_admin_api(
+            &mut runtime,
             admin_addr,
-            praxis_protocol::http::pingora::health::AdminEndpointOptions {
+            admin::AdminEndpointOptions {
                 health_registry: Some(Arc::clone(&health_registry)),
                 kv_registry: Some(kv_stores),
                 pipelines: Some((Arc::clone(&pipelines), Arc::clone(&listener_meta))),
                 log_level: None,
-                stats: Some(praxis_protocol::http::pingora::health::StatsAdminState {
+                stats: Some(admin::StatsAdminState {
                     started_at: Instant::now(),
                     version: praxis::process_version_info(),
                     listener_meta,
@@ -466,7 +446,7 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
     }
 
     if let Some(recorder) = recorder {
-        praxis_protocol::http::pingora::health::add_prometheus_upkeep_to_pingora_server(runtime.server_mut(), recorder);
+        admin::add_prometheus_upkeep(&mut runtime, recorder);
     }
 
     spawn_test_health_checks(config, &health_registry);
@@ -488,7 +468,7 @@ fn spawn_test_health_checks(config: &Config, registry: &HealthRegistry) {
             .build()
             .expect("health check runtime");
         rt.block_on(async {
-            praxis_protocol::http::pingora::health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
+            health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
             shutdown.cancelled().await;
         });
     });
@@ -530,28 +510,14 @@ pub fn start_full_proxy_with_registry(config: &Config, registry: &FilterRegistry
 }
 
 /// Spawn a fully configured proxy runtime in a background thread.
-fn start_full_proxy_runtime(config: &Config, runtime: praxis_core::PingoraServerRuntime) -> ProxyGuard {
+fn start_full_proxy_runtime(config: &Config, runtime: Runtime) -> ProxyGuard {
     let addr = config
         .listeners
         .first()
         .expect("config must have at least one listener")
         .address
         .clone();
-
-    let notify = Arc::new(Notify::new());
-    let watch_notify = Arc::clone(&notify);
-
-    let handle = std::thread::spawn(move || {
-        runtime.run_with_args(RunArgs {
-            shutdown_signal: Box::new(NotifyShutdownWatch { notify: watch_notify }),
-        });
-    });
-
-    ProxyGuard {
-        addr,
-        handle: Some(handle),
-        notify,
-    }
+    spawn_runtime(addr, runtime)
 }
 
 // -----------------------------------------------------------------------------

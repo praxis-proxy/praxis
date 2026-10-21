@@ -96,9 +96,12 @@ pub struct LoadBalancerFilter {
     /// Slow-start bindings held for the lifetime of this pipeline.
     ///
     /// Filled at construction and attached when the pipeline is installed.
-    /// Selection does not read them yet.
+    /// Selection reads the snapshot for the cluster it is picking. The
+    /// bindings do not sit behind a mutex: attaching only fills locks inside
+    /// each binding, so a cluster without `slow_start` does not queue behind
+    /// one that is ramping.
     #[cfg(feature = "slow-start")]
-    ramps: std::sync::Mutex<Vec<crate::load_balancing::slow_start::SlowStartBinding>>,
+    ramps: Vec<crate::load_balancing::slow_start::SlowStartBinding>,
 }
 
 /// Where a load balancer reads the target cluster name for a request.
@@ -182,7 +185,7 @@ impl LoadBalancerFilter {
             clusters: map,
             cluster_source,
             #[cfg(feature = "slow-start")]
-            ramps: std::sync::Mutex::new(slow_start_bindings(clusters)),
+            ramps: slow_start_bindings(clusters),
         })
     }
 
@@ -282,6 +285,23 @@ impl LoadBalancerFilter {
     fn cluster_health<'a>(registry: Option<&'a HealthRegistry>, cluster_name: &str) -> Option<&'a ClusterHealthState> {
         registry.and_then(|r| r.get(cluster_name))
     }
+
+    /// Ramp snapshot for `cluster`, when this filter is holding its binding.
+    fn slow_start_weights(
+        &self,
+        cluster: &str,
+        health: Option<&ClusterHealthState>,
+    ) -> Option<crate::load_balancing::slow_start::EffectiveWeights> {
+        #[cfg(feature = "slow-start")]
+        {
+            crate::load_balancing::slow_start::weights_for(&self.ramps, cluster, health)
+        }
+        #[cfg(not(feature = "slow-start"))]
+        {
+            let _ = (self, cluster, health);
+            None
+        }
+    }
 }
 
 /// Bindings for clusters that configure a strategy which consumes the ramp.
@@ -305,9 +325,9 @@ impl HttpFilter for LoadBalancerFilter {
 
     #[cfg(feature = "slow-start")]
     fn bind_slow_start(&self, registry: &Arc<crate::SlowStartRegistry>) {
-        let mut ramps = self.ramps.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let pending = std::mem::take(&mut *ramps);
-        *ramps = pending.into_iter().map(|binding| binding.open(registry)).collect();
+        for binding in &self.ramps {
+            binding.open(registry);
+        }
     }
 
     fn load_balancer_clusters(&self) -> Vec<String> {
@@ -415,7 +435,14 @@ impl HttpFilter for LoadBalancerFilter {
             }
         }
 
-        let addr = entry.strategy.select(ctx, health, &[]).ok_or_else(|| -> FilterError {
+        let weights = self.slow_start_weights(cluster_name, health);
+        let scaling = crate::load_balancing::slow_start::scaling_weights(weights.as_ref()).is_some();
+        let addr = if scaling {
+            entry.strategy.select_weighted(ctx, health, &[], weights.as_ref())
+        } else {
+            entry.strategy.select(ctx, health, &[])
+        }
+        .ok_or_else(|| -> FilterError {
             format!("load_balancer filter: cluster '{cluster_name}' has no available endpoints").into()
         })?;
         debug!(cluster = %cluster_name, upstream = %addr, "upstream selected");
@@ -437,11 +464,17 @@ impl HttpFilter for LoadBalancerFilter {
         // The reselector is stateless config data: share one instance for
         // the dominant no-hash-key, cluster-default-policy case instead of
         // allocating a fresh one per request.
-        ctx.endpoint_reselector = Some(if hash_key.is_none() && Arc::ptr_eq(&policy, &entry.retry_policy) {
-            Arc::clone(entry.default_reselector())
-        } else {
-            Arc::new(entry.reselector_with_policy(hash_key, policy))
-        });
+        ctx.endpoint_reselector = Some(
+            if !scaling && hash_key.is_none() && Arc::ptr_eq(&policy, &entry.retry_policy) {
+                Arc::clone(entry.default_reselector())
+            } else {
+                let reselector = entry.reselector_with_policy(hash_key, policy);
+                Arc::new(match weights.filter(|_| scaling) {
+                    Some(weights) => reselector.with_weights(weights),
+                    None => reselector,
+                })
+            },
+        );
         ctx.attempted_endpoints.push(Arc::clone(&addr));
         ctx.upstream = Some(entry.build_upstream(addr, ctx));
         ctx.publish_selected_application(entry.application_protocol.clone(), entry.application_provider.clone());

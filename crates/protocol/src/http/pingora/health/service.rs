@@ -1,33 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Admin health-check HTTP service.
+//! Admin and health-check HTTP handlers.
+//!
+//! Backend-neutral: the services here decide what to answer from an
+//! [`AdminRequest`]; the backend's listener glue (for Pingora, the
+//! `pingora_glue` sibling) parses the request and serves the response.
 
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 
-use async_trait::async_trait;
 use http::Response;
-use pingora_core::{
-    apps::http_app::ServeHttp,
-    protocols::http::ServerSession,
-    server::Server,
-    services::{
-        background::{BackgroundService, background_service},
-        listening::Service,
-    },
-};
 use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
-use tokio::time::Duration;
-use tracing::{error, info, warn};
+use tokio::{sync::watch, time::Duration};
+use tracing::{error, warn};
 
-use super::{admin_host, listener_meta::ListenerMetaStore, log_level_admin, pipelines_admin, stats_admin};
+use super::{
+    admin_host, admin_request::AdminRequest, listener_meta::ListenerMetaStore, log_level_admin, pipelines_admin,
+    stats_admin,
+};
 use crate::http::pingora::{json::json_response, kv::dispatch_kv_request, metrics};
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
 /// Recorder upkeep runs independently of Prometheus scrape traffic.
-const PROMETHEUS_UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg_attr(
+    not(feature = "pingora"),
+    expect(dead_code, reason = "only a backend's upkeep service uses the default interval")
+)]
+pub(crate) const PROMETHEUS_UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 // -----------------------------------------------------------------------------
 // JSON Escaping
@@ -126,7 +131,18 @@ impl PingoraHealthService {
     }
 
     /// Resolve readiness against current pipelines after a config reload.
-    fn with_live_pipelines(mut self, pipelines: Arc<crate::ListenerPipelines>, meta: ListenerMetaStore) -> Self {
+    #[cfg_attr(
+        all(not(feature = "pingora"), not(test)),
+        expect(
+            dead_code,
+            reason = "only a backend's listener glue or tests configure live readiness"
+        )
+    )]
+    pub(crate) fn with_live_pipelines(
+        mut self,
+        pipelines: Arc<crate::ListenerPipelines>,
+        meta: ListenerMetaStore,
+    ) -> Self {
         self.pipelines = Some(pipelines_admin::PipelinesAdminState { pipelines, meta });
         self
     }
@@ -168,22 +184,18 @@ impl PingoraHealthService {
         };
         compute_ready_response(registry.as_ref(), self.verbose)
     }
-}
 
-#[async_trait]
-impl ServeHttp for PingoraHealthService {
-    async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
-        let req = http_session.req_header();
-
+    /// Answer one request on the health and metrics listener.
+    ///
+    /// The backend that parsed the request serves whatever this returns.
+    pub fn respond<R: AdminRequest>(&self, req: &R) -> Response<Vec<u8>> {
         if self.require_loopback_host
-            && let Some(resp) = admin_host::reject_non_loopback_host(req)
+            && let Some(resp) = admin_host::reject_non_loopback_host(req.uri(), req.headers())
         {
             return resp;
         }
 
-        let path = http_session.req_header().uri.path().to_owned();
-
-        match path.as_str() {
+        match req.uri().path() {
             "/healthy" => json_response(200, br#"{"status":"ok"}"#),
             "/metrics" => prometheus_response(),
             "/ready" => {
@@ -193,46 +205,6 @@ impl ServeHttp for PingoraHealthService {
             _ => json_response(404, br#"{"error":"not found"}"#),
         }
     }
-}
-
-/// Add the health and metrics listener to a Pingora server.
-///
-/// Installs the Prometheus recorder and registers its upkeep service. Use
-/// [`add_health_endpoint_to_pingora_server_with_pipelines`] when the caller
-/// already owns that lifecycle.
-pub fn add_health_endpoint_to_pingora_server(
-    server: &mut Server,
-    metrics_addr: &str,
-    registry: Option<HealthRegistry>,
-    verbose: bool,
-) {
-    let recorder = install_prometheus_admin_recorder();
-    add_prometheus_upkeep_to_pingora_server(server, recorder);
-    add_health_endpoint_to_pingora_server_with_pipelines(server, metrics_addr, registry, verbose, None);
-}
-
-/// Add the health and metrics listener with live pipeline readiness.
-///
-/// This does not install the Prometheus recorder or its upkeep service; use it
-/// when the caller already manages that lifecycle.
-pub fn add_health_endpoint_to_pingora_server_with_pipelines(
-    server: &mut Server,
-    metrics_addr: &str,
-    registry: Option<HealthRegistry>,
-    verbose: bool,
-    pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
-) {
-    let require_loopback_host = admin_host::is_loopback_host(metrics_addr);
-    let health = PingoraHealthService::new(registry, verbose).require_loopback_host(require_loopback_host);
-    let health = match pipelines {
-        Some((pipelines, meta)) => health.with_live_pipelines(pipelines, meta),
-        None => health,
-    };
-
-    let mut service = Service::new("metrics".to_owned(), health);
-    service.add_tcp(metrics_addr);
-    info!(address = %metrics_addr, verbose, "metrics endpoints enabled (health + metrics)");
-    server.add_service(service);
 }
 
 // -----------------------------------------------------------------------------
@@ -261,9 +233,12 @@ pub struct AdminEndpointOptions {
     pub verbose: bool,
 }
 
-/// Admin API service that routes `/api/*` endpoints through a Pingora [`Service`].
+/// Admin API service that routes `/api/*` endpoints.
 ///
-/// [`Service`]: pingora_core::services::listening::Service
+/// The backend's listener glue hands it each parsed request as an
+/// [`AdminRequest`] through [`respond`].
+///
+/// [`respond`]: PingoraAdminService::respond
 pub struct PingoraAdminService {
     /// Shared health registry for per-cluster status reporting.
     health_registry: Option<HealthRegistry>,
@@ -312,6 +287,21 @@ impl PingoraAdminService {
         }
     }
 
+    /// Build the service [`AdminEndpointOptions`] describe, guarding a
+    /// loopback bind against rebound hosts.
+    pub fn from_options(admin_addr: &str, options: AdminEndpointOptions) -> Self {
+        let verbose = options.verbose;
+        Self::new(
+            options.health_registry,
+            options.kv_registry,
+            options.pipelines,
+            options.log_level,
+            options.stats,
+            verbose,
+        )
+        .require_loopback_host(admin_host::is_loopback_host(admin_addr))
+    }
+
     /// Answer only requests whose `Host` names loopback (off by default).
     ///
     /// Enable this when the service is bound to a loopback address, so a web
@@ -323,18 +313,46 @@ impl PingoraAdminService {
         self
     }
 
+    /// Answer one request on the admin API listener.
+    ///
+    /// The backend that parsed the request serves whatever this returns.
+    pub async fn respond<R: AdminRequest>(&self, req: &mut R) -> Response<Vec<u8>> {
+        if self.require_loopback_host
+            && let Some(resp) = admin_host::reject_non_loopback_host(req.uri(), req.headers())
+        {
+            return resp;
+        }
+
+        let path = req.uri().path().to_owned();
+        let method = req.method().as_str().to_owned();
+        let query = req.uri().query().map(str::to_owned);
+
+        if let Some(resp) = self.dispatch_admin_api(req, &path, &method, query.as_deref()).await {
+            return resp;
+        }
+
+        if self.should_warn_for_legacy_probe(&path) {
+            warn!(
+                path = %path,
+                "health and metrics endpoints moved to admin.metrics_address; update probes and scrapers"
+            );
+        }
+
+        json_response(404, br#"{"error":"not found"}"#)
+    }
+
     /// Dispatch `/api/*` admin routes when configured.
     #[expect(clippy::too_many_lines, reason = "admin route table")]
-    async fn dispatch_admin_api(
+    async fn dispatch_admin_api<R: AdminRequest>(
         &self,
-        http_session: &mut ServerSession,
+        req: &mut R,
         path: &str,
         method: &str,
         query: Option<&str>,
     ) -> Option<Response<Vec<u8>>> {
         if path.starts_with("/api/kv/") {
             return Some(match &self.kv_registry {
-                Some(registry) => dispatch_kv_request(registry, http_session).await,
+                Some(registry) => dispatch_kv_request(registry, req).await,
                 None => json_response(404, br#"{"error":"not found"}"#),
             });
         }
@@ -348,7 +366,7 @@ impl PingoraAdminService {
 
         if path == "/api/log-level" {
             return Some(match &self.log_level {
-                Some(state) => log_level_admin::log_level_response(state, http_session, method, query).await,
+                Some(state) => log_level_admin::log_level_response(state, req, method, query).await,
                 None => json_response(404, br#"{"error":"not found"}"#),
             });
         }
@@ -377,84 +395,25 @@ impl PingoraAdminService {
     }
 }
 
-#[async_trait]
-impl ServeHttp for PingoraAdminService {
-    async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
-        let req = http_session.req_header();
-        if self.require_loopback_host
-            && let Some(resp) = admin_host::reject_non_loopback_host(req)
-        {
-            return resp;
-        }
-
-        let path = req.uri.path().to_owned();
-        let method = req.method.as_str().to_owned();
-        let query = req.uri.query().map(str::to_owned);
-
-        if let Some(resp) = self
-            .dispatch_admin_api(http_session, &path, &method, query.as_deref())
-            .await
-        {
-            return resp;
-        }
-
-        if self.should_warn_for_legacy_probe(&path) {
-            warn!(
-                path = %path,
-                "health and metrics endpoints moved to admin.metrics_address; update probes and scrapers"
-            );
-        }
-
-        json_response(404, br#"{"error":"not found"}"#)
-    }
-}
-
-/// Bind only the `/api/*` admin listener without installing a metrics recorder.
-///
-/// When `admin_addr` is loopback, requests with a non-loopback `Host` are
-/// rejected. Register recorder upkeep separately if `/api/stats` is enabled.
-pub fn add_admin_api_to_pingora_server(server: &mut Server, admin_addr: &str, options: AdminEndpointOptions) {
-    bind_admin_api_to_pingora_server(server, admin_addr, options);
-}
-
-/// Construct and register the API service without changing recorder lifecycle.
-fn bind_admin_api_to_pingora_server(server: &mut Server, admin_addr: &str, options: AdminEndpointOptions) {
-    let verbose = options.verbose;
-    let require_loopback_host = admin_host::is_loopback_host(admin_addr);
-    let admin = PingoraAdminService::new(
-        options.health_registry,
-        options.kv_registry,
-        options.pipelines,
-        options.log_level,
-        options.stats,
-        verbose,
-    )
-    .require_loopback_host(require_loopback_host);
-    let mut service = Service::new("admin".to_owned(), admin);
-    service.add_tcp(admin_addr);
-    info!(address = %admin_addr, verbose, require_loopback_host, "admin endpoints enabled (kv + pipelines + log-level + stats)");
-    server.add_service(service);
-}
-
 // -----------------------------------------------------------------------------
-// Metrics (PrometheusUpkeepService)
+// Metrics (Recorder Upkeep)
 // -----------------------------------------------------------------------------
 
 /// Closure used for one recorder maintenance pass.
-type UpkeepFn = Arc<dyn Fn() + Send + Sync>;
+pub(crate) type UpkeepFn = Arc<dyn Fn() + Send + Sync>;
 
-/// Pingora-managed recorder maintenance service.
-struct PrometheusUpkeepService {
-    /// Exporter handle used by each recorder maintenance pass.
-    handle: metrics_exporter_prometheus::PrometheusHandle,
-}
-
-/// Run non-overlapping upkeep passes until Pingora begins shutdown.
-async fn run_prometheus_upkeep(
-    mut shutdown: pingora_core::server::ShutdownWatch,
-    interval: Duration,
-    upkeep: UpkeepFn,
-) {
+/// Run non-overlapping upkeep passes until `shutdown` flips.
+///
+/// Backend-neutral: the backend runs this as one of its background
+/// services and hands it its own shutdown watch.
+#[cfg_attr(
+    all(not(feature = "pingora"), not(test)),
+    expect(
+        dead_code,
+        reason = "only a backend's upkeep service or tests run recorder maintenance"
+    )
+)]
+pub(crate) async fn run_prometheus_upkeep(mut shutdown: watch::Receiver<bool>, interval: Duration, upkeep: UpkeepFn) {
     loop {
         tokio::select! {
             _ = shutdown.changed() => break,
@@ -477,19 +436,6 @@ async fn run_prometheus_upkeep(
     }
 }
 
-#[async_trait]
-impl BackgroundService for PrometheusUpkeepService {
-    async fn start(&self, shutdown: pingora_core::server::ShutdownWatch) {
-        let handle = self.handle.clone();
-        run_prometheus_upkeep(
-            shutdown,
-            PROMETHEUS_UPKEEP_INTERVAL,
-            Arc::new(move || handle.run_upkeep()),
-        )
-        .await;
-    }
-}
-
 // -----------------------------------------------------------------------------
 // Metrics (PrometheusAdminRecorder)
 // -----------------------------------------------------------------------------
@@ -497,28 +443,25 @@ impl BackgroundService for PrometheusUpkeepService {
 /// Recorder used by `/metrics` and `/api/stats`, with managed upkeep.
 ///
 /// The concrete exporter handle stays private so applications cannot create a
-/// second lifecycle for the recorder. Pass this value to
-/// [`add_prometheus_upkeep_to_pingora_server`].
+/// second lifecycle for the recorder. Hand this value to the backend's
+/// upkeep registration (`backend::admin::add_prometheus_upkeep`).
 pub struct PrometheusAdminRecorder {
     /// Exporter handle shared by metrics rendering and recorder upkeep.
-    handle: metrics_exporter_prometheus::PrometheusHandle,
+    #[cfg_attr(
+        not(feature = "pingora"),
+        expect(dead_code, reason = "only a backend's upkeep service reads the recorder handle")
+    )]
+    pub(crate) handle: metrics_exporter_prometheus::PrometheusHandle,
 }
 
 /// Install the Prometheus recorder before startup instrumentation runs.
-/// Register its upkeep service with [`add_prometheus_upkeep_to_pingora_server`].
+/// Register its upkeep service with the backend's
+/// `backend::admin::add_prometheus_upkeep`.
 #[must_use]
 pub fn install_prometheus_admin_recorder() -> PrometheusAdminRecorder {
     PrometheusAdminRecorder {
         handle: metrics::install_prometheus_recorder().clone(),
     }
-}
-
-/// Register recorder upkeep after installing the recorder before startup
-/// instrumentation begins.
-pub fn add_prometheus_upkeep_to_pingora_server(server: &mut Server, recorder: PrometheusAdminRecorder) {
-    let handle = recorder.handle;
-    let upkeep = PrometheusUpkeepService { handle };
-    server.add_service(background_service("Prometheus upkeep", upkeep));
 }
 
 // -----------------------------------------------------------------------------
@@ -670,7 +613,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn prometheus_upkeep_waits_for_interval_and_does_not_catch_up() {
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let calls = Arc::new(AtomicUsize::new(0));
         let completed = Arc::new(Notify::new());
         let observed = Arc::clone(&calls);
@@ -724,7 +667,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn prometheus_upkeep_stops_before_the_first_pass() {
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&calls);
         let task = tokio::spawn(run_prometheus_upkeep(
@@ -742,7 +685,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn prometheus_upkeep_observes_shutdown_during_a_blocking_pass() {
-        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let started = Arc::new(AtomicUsize::new(0));
         let release = Arc::new(AtomicUsize::new(0));
         let started_signal = Arc::new(Notify::new());
@@ -985,6 +928,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn loopback_bound_admin_rejects_rebound_host_on_every_route() {
         let (svc, _registry) = kv_admin(true);
         for path in [
@@ -1014,6 +958,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn loopback_bound_admin_rejects_rebound_kv_mutations() {
         let (svc, registry) = kv_admin(true);
 
@@ -1035,6 +980,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn loopback_bound_admin_serves_loopback_hosts() {
         let (svc, registry) = kv_admin(true);
 
@@ -1065,6 +1011,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn loopback_bound_admin_serves_http10_request_without_host() {
         let (svc, _registry) = kv_admin(true);
         let resp = serve(&svc, b"GET /api/stats HTTP/1.0\r\n\r\n").await;
@@ -1076,6 +1023,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn loopback_bound_health_listener_guards_all_routes_and_only_serves_health_routes() {
         let svc = PingoraHealthService::new(None, false).require_loopback_host(true);
 
@@ -1095,6 +1043,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn admin_without_loopback_requirement_serves_any_host() {
         let (svc, registry) = kv_admin(false);
         let put = b"PUT /api/kv/test/color HTTP/1.1\r\nHost: admin.internal.example\r\nContent-Length: 3\r\n\r\nred";
@@ -1142,6 +1091,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Build an admin service with a `test` KV store holding `color=blue`.
+    #[cfg(feature = "pingora")]
     fn kv_admin(require_loopback_host: bool) -> (PingoraAdminService, KvStoreRegistry) {
         let registry = KvStoreRegistry::new();
         registry.get_or_create("test").set("color", Arc::from("blue"));
@@ -1151,13 +1101,14 @@ mod tests {
     }
 
     /// Serve one raw HTTP request through `svc` over an in-memory stream.
-    async fn serve<S: ServeHttp + Sync>(svc: &S, raw: &[u8]) -> Response<Vec<u8>> {
+    #[cfg(feature = "pingora")]
+    async fn serve<S: pingora_core::apps::http_app::ServeHttp + Sync>(svc: &S, raw: &[u8]) -> Response<Vec<u8>> {
         use tokio::io::AsyncWriteExt as _;
 
         let (mut client, server) = tokio::io::duplex(65_536); // 64 KiB
         client.write_all(raw).await.unwrap();
         client.shutdown().await.unwrap();
-        let mut session = ServerSession::new_http1(Box::new(server));
+        let mut session = pingora_core::protocols::http::ServerSession::new_http1(Box::new(server));
         assert!(session.read_request().await.unwrap(), "request header must parse");
         svc.response(&mut session).await
     }

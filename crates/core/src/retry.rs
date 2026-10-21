@@ -272,6 +272,36 @@ impl ClusterRetryState {
 }
 
 // -----------------------------------------------------------------------------
+// Replay Safety
+// -----------------------------------------------------------------------------
+
+/// Whether a stale (`ReusedOnly`) upstream failure is safe to replay.
+///
+/// Safe exactly when the failed connection was actually reused and the
+/// downstream replay buffer still holds the whole body. Method idempotency
+/// is deliberately not a factor: `ReusedOnly` means a pooled keepalive was
+/// closed by the peer before the request could be processed, so replaying it
+/// on a fresh connection duplicates no upstream side effect for any method.
+/// A fresh-connection failure is excluded because its request may already
+/// have been processed; a truncated buffer is excluded because a partial
+/// body cannot be resent intact.
+///
+/// Every network backend applies this same rule to its own reuse signal and
+/// replay buffer, so the retry semantics do not drift between backends.
+///
+/// ```
+/// use praxis_core::retry::reused_only_replay_safe;
+///
+/// assert!(reused_only_replay_safe(true, false));
+/// assert!(!reused_only_replay_safe(false, false));
+/// assert!(!reused_only_replay_safe(true, true));
+/// ```
+#[must_use]
+pub const fn reused_only_replay_safe(client_reused: bool, retry_buffer_truncated: bool) -> bool {
+    client_reused && !retry_buffer_truncated
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -370,6 +400,34 @@ mod tests {
             state.active_requests.load(Ordering::Relaxed),
             0,
             "leave at zero is a no-op"
+        );
+    }
+
+    #[test]
+    fn reused_only_replays_when_reused_and_buffer_intact() {
+        assert!(
+            reused_only_replay_safe(true, false),
+            "a stale reused connection with an intact replay buffer must retry, regardless of method"
+        );
+    }
+
+    #[test]
+    fn reused_only_does_not_replay_on_fresh_connection() {
+        assert!(
+            !reused_only_replay_safe(false, false),
+            "a fresh-connection failure may already have been processed and must not replay"
+        );
+        assert!(
+            !reused_only_replay_safe(false, true),
+            "a fresh connection with a truncated buffer must not replay"
+        );
+    }
+
+    #[test]
+    fn reused_only_does_not_replay_when_buffer_truncated() {
+        assert!(
+            !reused_only_replay_safe(true, true),
+            "a truncated replay buffer cannot resend the full body, so no retry"
         );
     }
 }

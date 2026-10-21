@@ -7,7 +7,11 @@ use std::sync::{Arc, atomic::AtomicU64};
 
 use praxis_core::health::ClusterHealthState;
 
-use super::{endpoint::WeightedEndpoint, is_excluded};
+use super::{
+    endpoint::WeightedEndpoint,
+    is_excluded,
+    slow_start::{self, EffectiveWeights},
+};
 
 // -----------------------------------------------------------------------------
 // Random
@@ -47,8 +51,21 @@ impl Random {
     /// weight, or to all endpoints (panic mode) when none are healthy.
     #[inline]
     pub(crate) fn select(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<Arc<str>> {
+        self.select_weighted(health, exclude, None)
+    }
+
+    /// Pick an endpoint, using scaled ramp weights when `weights` is scaling.
+    pub(crate) fn select_weighted(
+        &self,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: Option<&EffectiveWeights>,
+    ) -> Option<Arc<str>> {
         if self.total_weight == 0 {
             return None;
+        }
+        if let Some(weights) = slow_start::scaling_weights(weights) {
+            return self.select_scaled(health, exclude, weights);
         }
 
         // Allocation-free two-pass walk (the round-robin shape): pass 1
@@ -74,6 +91,42 @@ impl Random {
         }
         pick_where(&self.endpoints, unexcluded, super::next_random(&self.rng), total)
     }
+
+    /// Weighted random over scaled ramp units. A zero unit is not a candidate.
+    fn select_scaled(
+        &self,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: &EffectiveWeights,
+    ) -> Option<Arc<str>> {
+        let units = |endpoint: &WeightedEndpoint| {
+            slow_start::endpoint_weight(&endpoint.address, endpoint.weight, Some(weights))
+        };
+        let eligible = |endpoint: &WeightedEndpoint| {
+            slow_start::endpoint_weight(&endpoint.address, endpoint.weight, Some(weights)) > 0
+                && !is_excluded(&endpoint.address, exclude)
+                && health_allows(health, endpoint)
+        };
+        let (first, total) = survey_units(&self.endpoints, &eligible, &units);
+        if total > 0 {
+            return pick_units(&self.endpoints, &eligible, &units, super::next_random(&self.rng), total);
+        }
+        // No positive ramp weight in the healthy set. If nobody is healthy,
+        // panic mode still has to serve, using configured weights.
+        if health.is_some_and(|state| {
+            self.endpoints
+                .iter()
+                .any(|endpoint| state.is_address_healthy(&endpoint.address))
+        }) {
+            return first.map(|endpoint| Arc::clone(&endpoint.address));
+        }
+        self.select(health, exclude)
+    }
+}
+
+/// Whether `endpoint` passes the health filter. No health state means every endpoint is eligible.
+fn health_allows(health: Option<&ClusterHealthState>, endpoint: &WeightedEndpoint) -> bool {
+    health.is_none_or(|state| state.is_address_healthy(&endpoint.address))
 }
 
 /// First candidate and total candidate weight in one pass.
@@ -92,6 +145,49 @@ fn survey(
         }
     }
     (first, total)
+}
+
+/// First candidate and total scaled weight in one pass.
+fn survey_units<'a>(
+    endpoints: &'a [WeightedEndpoint],
+    candidate: &impl Fn(&WeightedEndpoint) -> bool,
+    units: &impl Fn(&WeightedEndpoint) -> u64,
+) -> (Option<&'a WeightedEndpoint>, u64) {
+    let mut first = None;
+    let mut total = 0_u64;
+    for endpoint in endpoints {
+        if candidate(endpoint) {
+            if first.is_none() {
+                first = Some(endpoint);
+            }
+            total = total.saturating_add(units(endpoint));
+        }
+    }
+    (first, total)
+}
+
+/// Map `random` onto a scaled-weight bucket.
+fn pick_units(
+    endpoints: &[WeightedEndpoint],
+    candidate: &impl Fn(&WeightedEndpoint) -> bool,
+    units: &impl Fn(&WeightedEndpoint) -> u64,
+    random: u64,
+    total_weight: u64,
+) -> Option<Arc<str>> {
+    let slot = random % total_weight;
+    let mut cumulative = 0_u64;
+    let mut last = None;
+    for endpoint in endpoints {
+        if !candidate(endpoint) {
+            continue;
+        }
+        cumulative = cumulative.saturating_add(units(endpoint));
+        if slot < cumulative {
+            return Some(Arc::clone(&endpoint.address));
+        }
+        last = Some(endpoint);
+    }
+    last.map(|endpoint| Arc::clone(&endpoint.address))
 }
 
 // -----------------------------------------------------------------------------
@@ -144,6 +240,18 @@ mod tests {
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
+
+    #[test]
+    fn scaled_random_skips_a_zero_ramp() {
+        let random = Random::new(vec![ep("10.0.0.1:80", 1), ep("10.0.0.2:80", 1)]);
+        let weights = EffectiveWeights::from_scaled(&[("10.0.0.1:80", 1_000_000), ("10.0.0.2:80", 0)]);
+        for _ in 0..16 {
+            let picked = random
+                .select_weighted(None, &[], Some(&weights))
+                .expect("the settled endpoint");
+            assert_eq!(&*picked, "10.0.0.1:80", "an endpoint at zero stays out of the draw");
+        }
+    }
 
     #[test]
     fn single_endpoint_always_selected() {

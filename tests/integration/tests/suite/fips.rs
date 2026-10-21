@@ -666,6 +666,7 @@ fn the_binary_serves_under_require_fips_exactly_on_a_fips_host() {
                 "provider=\"openssl\"",
                 "provider_fips=true",
                 "kernel_fips=Some(true)",
+                "crypto_policy=Some(\"FIPS\")",
                 "fips_required=true",
             ] {
                 assert!(line.contains(field), "the status line lacks {field}: {line}");

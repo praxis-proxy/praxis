@@ -5,16 +5,20 @@
 
 use std::sync::Arc;
 
+#[cfg(feature = "pingora")]
 use async_trait::async_trait;
 use http::Response;
+#[cfg(feature = "pingora")]
 use pingora_core::{
     apps::http_app::ServeHttp, protocols::http::ServerSession, server::Server, services::listening::Service,
 };
 use praxis_core::kv::KvStoreRegistry;
-use tracing::{info, warn};
+#[cfg(feature = "pingora")]
+use tracing::info;
+use tracing::warn;
 
 use crate::http::pingora::{
-    health::{admin_host, escape_json_string},
+    health::{AdminRequest, BodyReadError, admin_host, escape_json_string},
     json::json_response,
 };
 
@@ -54,6 +58,19 @@ impl PingoraKvService {
             require_loopback_host: false,
         }
     }
+
+    /// Answer one request on the standalone KV listener.
+    ///
+    /// The backend that parsed the request serves whatever this returns.
+    pub async fn respond<R: AdminRequest>(&self, req: &mut R) -> Response<Vec<u8>> {
+        if self.require_loopback_host
+            && let Some(resp) = admin_host::reject_non_loopback_host(req.uri(), req.headers())
+        {
+            return resp;
+        }
+
+        dispatch_kv_request(&self.registry, req).await
+    }
 }
 
 /// Dispatch a KV admin request and return the response.
@@ -66,14 +83,14 @@ impl PingoraKvService {
 ///
 /// [`PingoraAdminService`]: crate::http::pingora::health::PingoraAdminService
 /// [`PingoraKvService`]: PingoraKvService
-pub(crate) async fn dispatch_kv_request(registry: &KvStoreRegistry, session: &mut ServerSession) -> Response<Vec<u8>> {
-    let path = session.req_header().uri.path().to_owned();
-    let method = session.req_header().method.clone();
+pub(crate) async fn dispatch_kv_request<R: AdminRequest>(registry: &KvStoreRegistry, req: &mut R) -> Response<Vec<u8>> {
+    let path = req.uri().path().to_owned();
+    let method = req.method().clone();
 
     match resolve_kv_route(method.as_str(), &path) {
         KvRoute::List(store) => handle_list(registry, &store),
         KvRoute::Get(store, key) => handle_get(registry, &store, &key),
-        KvRoute::Set(store, key) => match read_body(session).await {
+        KvRoute::Set(store, key) => match read_body(req).await {
             Ok(body) => handle_set(registry, &store, &key, &body),
             Err(resp) => resp,
         },
@@ -115,16 +132,11 @@ fn resolve_kv_route(method: &str, path: &str) -> KvRoute {
     }
 }
 
+#[cfg(feature = "pingora")]
 #[async_trait]
 impl ServeHttp for PingoraKvService {
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
-        if self.require_loopback_host
-            && let Some(resp) = admin_host::reject_non_loopback_host(http_session.req_header())
-        {
-            return resp;
-        }
-
-        dispatch_kv_request(&self.registry, http_session).await
+        self.respond(http_session).await
     }
 }
 
@@ -136,24 +148,18 @@ impl ServeHttp for PingoraKvService {
 ///
 /// Returns an error response if the body exceeds the limit or is not
 /// valid UTF-8.
-async fn read_body(session: &mut ServerSession) -> Result<String, Response<Vec<u8>>> {
-    let mut buf = Vec::new();
-    loop {
-        match session.read_request_body().await {
-            Ok(Some(chunk)) => {
-                if buf.len() + chunk.len() > MAX_BODY_BYTES {
-                    warn!(limit = MAX_BODY_BYTES, "KV admin request body exceeded size limit");
-                    return Err(json_response(413, br#"{"error":"request body too large"}"#));
-                }
-                buf.extend_from_slice(&chunk);
-            },
-            Ok(None) => break,
-            Err(e) => {
-                warn!(error = %e, "KV admin request body read failed");
-                return Err(json_response(502, br#"{"error":"request body read failed"}"#));
-            },
-        }
-    }
+async fn read_body<R: AdminRequest>(req: &mut R) -> Result<String, Response<Vec<u8>>> {
+    let buf = match req.read_body(MAX_BODY_BYTES).await {
+        Ok(buf) => buf,
+        Err(BodyReadError::TooLarge) => {
+            warn!(limit = MAX_BODY_BYTES, "KV admin request body exceeded size limit");
+            return Err(json_response(413, br#"{"error":"request body too large"}"#));
+        },
+        Err(BodyReadError::Io(error)) => {
+            warn!(%error, "KV admin request body read failed");
+            return Err(json_response(502, br#"{"error":"request body read failed"}"#));
+        },
+    };
     String::from_utf8(buf).map_err(|e| {
         warn!(error = %e, "KV admin request body is not valid UTF-8");
         json_response(400, br#"{"error":"request body is not valid UTF-8"}"#)
@@ -242,6 +248,7 @@ fn handle_list(registry: &KvStoreRegistry, store: &str) -> Response<Vec<u8>> {
 ///
 /// [`AdminEndpointOptions`]: crate::http::pingora::health::AdminEndpointOptions
 /// [`add_admin_api_to_pingora_server`]: crate::http::pingora::health::add_admin_api_to_pingora_server
+#[cfg(feature = "pingora")]
 #[deprecated(note = "pass KvStoreRegistry through AdminEndpointOptions to add_admin_api_to_pingora_server")]
 pub fn add_kv_endpoint_to_pingora_server(server: &mut Server, admin_addr: &str, registry: KvStoreRegistry) {
     let kv = PingoraKvService {
@@ -497,6 +504,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Build a `ServerSession` that has already read the given raw request.
+    #[cfg(feature = "pingora")]
     async fn session_for(raw: Vec<u8>) -> ServerSession {
         use tokio::io::AsyncWriteExt as _;
 
@@ -511,6 +519,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn dispatch_lists_store_entries() {
         let registry = make_registry_with("test", &[("color", "blue")]);
         let mut session = session_for(b"GET /api/kv/test HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()).await;
@@ -521,6 +530,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn dispatch_put_sets_value_from_body() {
         let registry = make_registry_with("test", &[]);
         let mut session =
@@ -536,6 +546,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn dispatch_delete_removes_key() {
         let registry = make_registry_with("test", &[("temp", "v")]);
         let mut session = session_for(b"DELETE /api/kv/test/temp HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()).await;
@@ -546,6 +557,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn dispatch_unknown_route_returns_404() {
         let registry = make_empty_registry();
         let mut session = session_for(b"POST /api/kv/test/x HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()).await;
@@ -554,6 +566,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn dispatch_put_rejects_invalid_utf8_body() {
         let registry = make_registry_with("test", &[]);
         let mut raw = b"PUT /api/kv/test/bin HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n".to_vec();
@@ -564,6 +577,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn dispatch_put_rejects_oversized_body() {
         let registry = make_registry_with("test", &[]);
         let oversized = MAX_BODY_BYTES + 1;
@@ -576,6 +590,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn dispatch_put_maps_truncated_body_to_502() {
         let registry = make_registry_with("test", &[]);
         let mut session =
@@ -585,6 +600,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn legacy_kv_service_rejects_rebound_host_when_loopback_bound() {
         let registry = make_registry_with("test", &[("color", "blue")]);
         let svc = PingoraKvService {
@@ -609,6 +625,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn legacy_kv_service_serves_any_host_by_default() {
         let registry = make_registry_with("test", &[("color", "blue")]);
         let svc = PingoraKvService::new(registry);
@@ -618,6 +635,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "pingora")]
     async fn serve_http_delegates_to_dispatch() {
         let registry = make_registry_with("test", &[("k", "v")]);
         let service = PingoraKvService::new(registry);

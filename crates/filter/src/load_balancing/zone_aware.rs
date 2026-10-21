@@ -10,6 +10,7 @@ use praxis_core::{config::SimpleStrategy, health::ClusterHealthState};
 
 use super::{
     endpoint::WeightedEndpoint,
+    slow_start::EffectiveWeights,
     strategy::{Strategy, build_simple_strategy},
 };
 
@@ -77,16 +78,27 @@ impl ZoneAware {
         health: Option<&ClusterHealthState>,
         exclude: &[Arc<str>],
     ) -> Option<Arc<str>> {
+        self.select_weighted(hash_key, health, exclude, None)
+    }
+
+    /// Prefer the local zone, forwarding ramp weights to the inner strategy.
+    pub(crate) fn select_weighted(
+        &self,
+        hash_key: Option<&str>,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+        weights: Option<&EffectiveWeights>,
+    ) -> Option<Arc<str>> {
         if let Some(local) = &self.local_strategy
             && self.local_zone_healthy_enough(health)
         {
-            let result = local.select(hash_key, health, exclude);
+            let result = local.select_weighted(hash_key, health, exclude, weights);
             if result.is_some() {
                 return result;
             }
         }
 
-        self.all_strategy.select(hash_key, health, exclude)
+        self.all_strategy.select_weighted(hash_key, health, exclude, weights)
     }
 
     /// Propagate release to both inner strategies.

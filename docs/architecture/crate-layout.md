@@ -11,7 +11,10 @@ handlers, starts the server. Exposes `run_server` and
 serde), validation, error types, upstream connectivity
 options, `KvStoreRegistry` (concurrent registry of
 dynamic key-value stores with pluggable backends), and
-the `PingoraServerRuntime` wrapper.
+the network backend contract: the `ServerRuntime` trait,
+the `egress` connector and session traits with `PeerSpec`,
+and the `backend` module that resolves them to the
+selected backend (Pingora by default).
 
 **`praxis-filter`** : Filter pipeline engine. Defines the
 `HttpFilter` and `TcpFilter` traits, condition evaluation,
@@ -19,9 +22,11 @@ body access declarations, the `FilterPipeline` executor,
 `FilterRegistry`, and all built-in filter implementations.
 
 **`praxis-protocol`** : Thin protocol adapters that translate
-upstream library callbacks (Pingora) into filter pipeline
+the network backend's callbacks (Pingora) into filter pipeline
 invocations. `Protocol` trait, `ListenerPipelines`, HTTP and
-TCP implementations.
+TCP implementations, the backend-neutral admin, health and
+metrics handlers, and the `backend` module that exposes the
+selected backend's adapters.
 
 **`praxis-tls`** : TLS configuration types and runtime
 setup. Defines `ListenerTls` (certificate list, client CA,
@@ -86,9 +91,17 @@ praxis-core                     Configuration, errors, and server factory
 │   └── memory                  In-memory backend (DashMap)
 ├── logging                     Tracing subscriber setup
 ├── memory                      Process-wide memory pressure monitoring
-├── server/                     Server factory and lifecycle
-│   ├── pingora                 Pingora server configuration
-│   └── runtime                 PingoraServerRuntime wrapper and options
+├── backend                     The selected backend's Runtime and Connector
+├── egress/                     Backend-neutral egress: PeerSpec, Connector, Session
+│   ├── peer                    PeerSpec and Upstream resolution
+│   ├── session                 Connector and Session traits
+│   ├── unavailable             Stand-in connector for a build with no backend
+│   └── pingora                 Pingora connector and session (feature `pingora`)
+├── server/                     Server runtime contract and factories
+│   ├── contract                ServerRuntime trait
+│   ├── pingora                 Pingora server configuration (feature `pingora`)
+│   ├── runtime                 Runtime options and thread count
+│   └── unavailable             Stand-in runtime for a build with no backend
 └── time                        Wall-clock time abstraction for filters
 
 praxis-filter                   Filter pipeline engine
@@ -172,17 +185,20 @@ praxis-filter                   Filter pipeline engine
             └── tcp_load_balancer  TCP upstream load balancing
 
 praxis-protocol                 Protocol adapters
+├── backend                     The selected backend's Http, Tcp and admin registration
 ├── connections                 Process-wide connection limit
 ├── pipelines                   Hot-swappable pipeline storage (ArcSwap)
-├── tls_setup                   Shared TLS settings builder for listeners
-├── http/                       HTTP (Pingora)
-│   └── pingora/                Pingora ProxyHttp integration
+├── tls_setup                   Listener TLS: neutral ServerConfig builder, Pingora settings
+├── http/                       HTTP (re-exports health, metrics, kv at this level)
+│   └── pingora/                Pingora ProxyHttp integration (feature `pingora`)
 │       ├── context             Per-request state through lifecycle hooks
 │       ├── convert             Pingora <-> Praxis type conversions
-│       ├── health/             Active health checking
+│       ├── health/             Active health checking and admin handlers (backend-neutral)
+│       │   ├── admin_request   AdminRequest: the backend-neutral request view
+│       │   ├── pingora_glue    Pingora listeners and request view (feature `pingora`)
 │       │   ├── probe           HTTP and TCP health check probes
 │       │   ├── runner          Background health check runner
-│       │   └── service         Admin API and health/metrics services
+│       │   └── service         Admin API and health/metrics handlers
 │       ├── json                JSON HTTP response builder
 │       ├── kv                  KV store admin CRUD endpoints
 │       ├── listener            TCP/TLS listener setup
@@ -204,8 +220,10 @@ praxis-protocol                 Protocol adapters
 │           ├── upstream_response    Response-path hop-by-hop stripping
 │           └── via                  Via header injection (RFC 9110)
 └── tcp/                        L4 bidirectional forwarding
-    ├── proxy                   Bidirectional TCP proxy application
-    └── tls_setup               TCP TLS configuration and listener grouping
+    ├── groups                  Listener grouping and validation (backend-neutral)
+    ├── proxy                   Bidirectional TCP proxy application (feature `pingora`)
+    ├── service                 PingoraTcp registration (feature `pingora`)
+    └── tls                     TCP listener registration (feature `pingora`)
 
 praxis-tls                      TLS configuration types and setup
 ├── cached                      Pre-parsed TLS certificate data caching
@@ -264,7 +282,7 @@ sequenceDiagram
     participant C as Config
     participant R as FilterRegistry
     participant LP as ListenerPipelines
-    participant S as PingoraServerRuntime
+    participant S as backend::Runtime
 
     M->>C: load_config(explicit_path)
     C->>C: serde_yaml → Config{listeners, filter_chains, clusters}
@@ -286,17 +304,17 @@ sequenceDiagram
         M->>LP: insert(listener.name, Arc<FilterPipeline>)
     end
 
-    M->>S: PingoraServerRuntime::new(&config)
-    S->>S: Pingora Server::new + bootstrap()
+    M->>S: Runtime::from_config(&config)
+    S->>S: backend runtime built (Pingora: Server::new + bootstrap())
 
     opt HTTP listeners present
-        M->>S: PingoraHttp.register(server, config, pipelines)
-        S->>S: per listener: bind + PingoraHttpHandler(pipeline)
+        M->>S: backend::Http.register(server, config, pipelines)
+        S->>S: per listener: bind + HTTP handler(pipeline)
     end
 
     opt TCP listeners present
-        M->>S: PingoraTcp.register(server, config, pipelines)
-        S->>S: per listener: bind + PingoraTcpProxy(pipeline)
+        M->>S: backend::Tcp.register(server, config, pipelines)
+        S->>S: per listener: bind + TCP proxy(pipeline)
     end
 
     M->>S: server.run_until_shutdown() (blocks until shutdown)
@@ -318,16 +336,19 @@ into `ListenerPipelines` (listener name →
 bind sockets per listener, attaching handlers that hold
 a reference to the listener's resolved pipeline.
 
-### PingoraServerRuntime
+### The backend runtime
 
-`PingoraServerRuntime` wraps the underlying Pingora server. Protocols call
+`praxis_core::backend::Runtime` is the selected network backend's runtime
+(`PingoraServerRuntime` under the default `pingora` feature); every backend
+implements `praxis_core::server::ServerRuntime`. Protocols call
 `Protocol::register()` to add their listeners, then the
 runtime runs all protocols on a single server. This enables
 mixed HTTP + TCP listeners in one process.
 
 Add new protocols by writing an adapter that implements
-`Protocol::register()`. Contribute missing capabilities
-upstream.
+`Protocol::register()`. Add a new backend by implementing the
+contract described in
+[Adding a Network Backend](../developing/adding-backends.md).
 
 ## Test Structure
 

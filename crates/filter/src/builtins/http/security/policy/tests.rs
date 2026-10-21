@@ -9,12 +9,17 @@
 //! deployments use RS256 with JWKS endpoints; the YAML schema
 //! supports both via the `decoding_key.kind` discriminant.
 
+use std::collections::HashMap;
+
 use http::{HeaderValue, Method};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::json;
 use tempfile::TempDir;
 
-use super::{config::PolicyFilterConfig, filter::PolicyFilter};
+use super::{
+    config::{BodyAccessMode, ContextField, ContextMetaConfig, PolicyFilterConfig},
+    filter::PolicyFilter,
+};
 use crate::{
     AuthenticatedIdentity, BodyAccess, BodyMode, FilterAction, FilterEntry, FilterFactory, FilterPipeline,
     FilterRegistry,
@@ -807,6 +812,334 @@ async fn route_scoped_identity_is_published_only_after_authoritative_resolution(
     );
 }
 
+// ---------------------------------------------------------------------------
+// context_meta.scope → identity_extensions + llm_route_selects
+// ---------------------------------------------------------------------------
+
+/// Policy config identical to `write_route_scoped_identity_config` except
+/// the `scoped-tool` route carries `meta.scope: staging` so it matches ONLY
+/// when the request scope equals `staging`. This verifies that the proxy
+/// passes `context_meta.scope` through `identity_extensions` — without it
+/// the PPE's route resolver never sees the scope and the scoped
+/// authentication block is unreachable.
+#[expect(clippy::too_many_lines, reason = "test fixture — YAML literal is the bulk")]
+fn write_meta_scope_identity_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+
+    let yaml = format!(
+        r#"engine_settings:
+  dispatch: policy
+plugins:
+  - name: id-global
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+  - name: id-route
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    on_error: fail
+    config:
+      header: X-Route-Token
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - id-global
+routes:
+  - tool: scoped-tool
+    meta:
+      scope: staging
+    authentication:
+      replace_inherited: true
+      steps:
+        - id-route
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+"#
+    );
+
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+/// Build a `PolicyFilter` with a custom `ContextMetaConfig`.
+fn build_filter_with_meta(config_path: String, context_meta: ContextMetaConfig) -> PolicyFilter {
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            body_access: BodyAccessMode::ReadOnly,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm: super::config::LlmOptions::default(),
+            context_headers: HashMap::default(),
+            context_meta,
+        },
+        None,
+    )
+    .expect("filter should construct")
+}
+
+/// When `context_meta.scope` matches a route's `meta.scope`, the route's
+/// `authentication: replace_inherited` block must run — i.e. a request
+/// carrying only `X-Route-Token` (read by the route-specific `id-route`
+/// resolver) is accepted because `identity_extensions` now passes the
+/// scope so the PPE sees the scoped route during authentication.
+#[tokio::test(flavor = "multi_thread")]
+async fn context_meta_scope_enables_scoped_authentication() {
+    let (_dir, path) = write_meta_scope_identity_config();
+    let filter = build_filter_with_meta(
+        path,
+        ContextMetaConfig {
+            scope: Some("staging".to_owned()),
+            ..Default::default()
+        },
+    );
+    let token = mint_jwt(&standard_claims("alice"));
+
+    let action = dispatch_tool_with_header(&filter, "scoped-tool", "X-Route-Token", &token).await;
+    assert!(
+        !matches!(action, FilterAction::Reject(_)),
+        "scoped-tool with meta.scope: staging must resolve via id-route when \
+         context_meta.scope = staging; got {action:?}",
+    );
+}
+
+/// Without a matching `context_meta.scope` the scoped route is invisible
+/// to the identity resolver and the request must be rejected (no matching
+/// authentication block).
+#[tokio::test(flavor = "multi_thread")]
+async fn context_meta_scope_mismatch_rejects_scoped_route() {
+    let (_dir, path) = write_meta_scope_identity_config();
+    let filter = build_filter_with_meta(
+        path,
+        ContextMetaConfig {
+            scope: Some("production".to_owned()),
+            ..Default::default()
+        },
+    );
+    let token = mint_jwt(&standard_claims("alice"));
+
+    let action = dispatch_tool_with_header(&filter, "scoped-tool", "X-Route-Token", &token).await;
+    assert!(
+        matches!(&action, FilterAction::Reject(rej) if rej.status == 401),
+        "scope mismatch (production vs staging) must leave the scoped route unreachable; got {action:?}",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// context_headers flow through extensions_from_identity into APL evaluation
+// ---------------------------------------------------------------------------
+
+/// Policy config where the `tool: ctx-tool` route's APL rule references
+/// `agent.agent_id`. If `context_headers` injects the value, the rule fires
+/// and denies the request with `agent_id_seen`; if the plumbing is broken
+/// the value never reaches the bag and the request is allowed.
+#[expect(clippy::too_many_lines, reason = "test fixture — YAML literal is the bulk")]
+fn write_context_headers_apl_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+
+    let yaml = format!(
+        r#"engine_settings:
+  dispatch: policy
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+routes:
+  - tool: ctx-tool
+    authorization:
+      pre_invocation:
+        - "agent.agent_id == 'planner': deny('agent_id reached the bag', 'agent_id_seen')"
+"#
+    );
+
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+/// Build a filter with custom `context_headers` and `context_meta`.
+fn build_filter_with_context(
+    config_path: String,
+    context_headers: HashMap<ContextField, String>,
+    context_meta: ContextMetaConfig,
+) -> PolicyFilter {
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            body_access: BodyAccessMode::ReadOnly,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm: super::config::LlmOptions::default(),
+            context_headers,
+            context_meta,
+        },
+        None,
+    )
+    .expect("filter should construct")
+}
+
+/// Dispatch a tool call carrying `Authorization` plus optional extra headers.
+async fn dispatch_tool_with_extra_headers(
+    filter: &PolicyFilter,
+    tool: &str,
+    subject: &str,
+    extra: &[(&'static str, &str)],
+) -> FilterAction {
+    let token = mint_jwt(&standard_claims(subject));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    for &(name, value) in extra {
+        req.headers
+            .insert(name, HeaderValue::from_str(value).expect("header value"));
+    }
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", tool);
+    let body = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
+    );
+    filter
+        .on_request_body(&mut ctx, &mut Some(body), true)
+        .await
+        .expect("filter ran")
+}
+
+/// `context_headers` maps `agent.agent_id` → `x-ext-agent-id`. When the
+/// request carries that header the value flows through
+/// `extensions_from_identity` into the APL bag so the rule fires.
+#[tokio::test(flavor = "multi_thread")]
+async fn context_headers_flow_into_apl_evaluation() {
+    let (_dir, path) = write_context_headers_apl_config();
+    let mut ch = HashMap::new();
+    ch.insert(ContextField::AgentAgentId, "x-ext-agent-id".to_owned());
+
+    let filter = build_filter_with_context(path, ch, ContextMetaConfig::default());
+
+    let action = dispatch_tool_with_extra_headers(&filter, "ctx-tool", "alice", &[("x-ext-agent-id", "planner")]).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("the APL rule referencing agent.agent_id must fire; got {action:?}");
+    };
+    assert!(
+        has_header(&rejection, "x-policy-violation", "agent_id_seen"),
+        "`agent.agent_id` from context_headers must be readable in APL; got {:?}",
+        rejection.headers,
+    );
+}
+
+/// Without the mapped header, `agent.agent_id` is absent and the APL rule
+/// does not fire — the request proceeds normally.
+#[tokio::test(flavor = "multi_thread")]
+async fn context_headers_absent_header_skips_apl_rule() {
+    let (_dir, path) = write_context_headers_apl_config();
+    let mut ch = HashMap::new();
+    ch.insert(ContextField::AgentAgentId, "x-ext-agent-id".to_owned());
+
+    let filter = build_filter_with_context(path, ch, ContextMetaConfig::default());
+
+    let action = dispatch_tool_with_extra_headers(&filter, "ctx-tool", "alice", &[]).await;
+    assert!(
+        !matches!(action, FilterAction::Reject(_)),
+        "without the header the rule must not fire; got {action:?}",
+    );
+}
+
+/// A header set via `request_headers_to_set` (pending mutation from an
+/// earlier filter) must be visible to `apply_context_headers` through
+/// the `EffectiveHeaders` overlay, even though it is absent from the
+/// original request.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "inline setup for pending-mutation scenario")]
+async fn context_headers_pending_mutation_flows_into_apl() {
+    let (_dir, path) = write_context_headers_apl_config();
+    let mut ch = HashMap::new();
+    ch.insert(ContextField::AgentAgentId, "x-ext-agent-id".to_owned());
+
+    let filter = build_filter_with_context(path, ch, ContextMetaConfig::default());
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    // Header is NOT on the original request — it comes from a pending mutation.
+    let mut ctx = make_filter_context(&req);
+    ctx.request_headers_to_set.push((
+        http::header::HeaderName::from_static("x-ext-agent-id"),
+        HeaderValue::from_static("planner"),
+    ));
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "ctx-tool");
+    let body = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
+    );
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(body), true)
+        .await
+        .expect("filter ran");
+    let FilterAction::Reject(rejection) = action else {
+        panic!("a pending-mutation header must reach the APL bag via EffectiveHeaders; got {action:?}");
+    };
+    assert!(
+        has_header(&rejection, "x-policy-violation", "agent_id_seen"),
+        "`agent.agent_id` from a pending mutation must be readable in APL; got {:?}",
+        rejection.headers,
+    );
+}
+
 /// Write a policy document selecting the Valkey-backed session store via a
 /// flat `global.session_store` block. The `valkey` factory connects
 /// lazily (the pool dials on first request), so this config loads
@@ -870,11 +1203,13 @@ fn build_filter(config_path: String) -> PolicyFilter {
         config_path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadOnly,
+        body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
+        context_headers: HashMap::default(),
+        context_meta: ContextMetaConfig::default(),
     };
     PolicyFilter::new(cfg, None).expect("filter should construct")
 }
@@ -1104,11 +1439,13 @@ fn rejects_zero_max_buffer_bytes() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadWrite,
+        body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 0,
         llm: super::config::LlmOptions::default(),
+        context_headers: HashMap::default(),
+        context_meta: ContextMetaConfig::default(),
     };
     let err = match PolicyFilter::new(cfg, None) {
         Ok(_) => panic!("zero max_buffer_bytes must be rejected"),
@@ -1123,11 +1460,13 @@ fn rejects_oversized_max_buffer_bytes() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadWrite,
+        body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1,
         llm: super::config::LlmOptions::default(),
+        context_headers: HashMap::default(),
+        context_meta: ContextMetaConfig::default(),
     };
     let err = match PolicyFilter::new(cfg, None) {
         Ok(_) => panic!("oversized max_buffer_bytes must be rejected"),
@@ -1331,7 +1670,7 @@ async fn request_assertions_reach_the_upstream_request() {
         "the route allows, and the body phase signals that with BodyDone; got {action:?}"
     );
 
-    let set: std::collections::HashMap<String, String> = ctx
+    let set: HashMap<String, String> = ctx
         .request_headers_to_set
         .iter()
         .map(|(n, v)| (n.as_str().to_owned(), v.to_str().unwrap_or_default().to_owned()))
@@ -2117,11 +2456,13 @@ async fn missing_protocol_metadata_passes_when_not_required() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadOnly,
+        body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: false,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
+        context_headers: HashMap::default(),
+        context_meta: ContextMetaConfig::default(),
     };
     let filter = PolicyFilter::new(cfg, None).expect("filter should construct");
 
@@ -2267,8 +2608,6 @@ fn http_authz_rejection_defaults_without_details() {
 
 #[test]
 fn http_authz_rejection_applies_custom_denywith() {
-    use std::collections::HashMap;
-
     use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
@@ -2295,8 +2634,6 @@ fn http_authz_rejection_applies_custom_denywith() {
 
 #[test]
 fn http_authz_rejection_clamps_out_of_range_status() {
-    use std::collections::HashMap;
-
     use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
@@ -2310,8 +2647,6 @@ fn http_authz_rejection_clamps_out_of_range_status() {
 
 #[test]
 fn http_authz_rejection_drops_control_char_headers() {
-    use std::collections::HashMap;
-
     use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
@@ -2517,7 +2852,7 @@ fn reserialize_tools_call_round_trips_with_mutated_args() {
         br#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
              "params":{"name":"echo","arguments":{"a":1}}}"#,
     );
-    let mut new_args: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    let mut new_args: HashMap<String, serde_json::Value> = HashMap::new();
     new_args.insert("a".to_owned(), serde_json::json!("[REDACTED]"));
     let message = Message::with_content(
         Role::User,
@@ -2961,11 +3296,13 @@ async fn response_phase_without_request_identity_fails_closed() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadWrite,
+        body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
+        context_headers: HashMap::default(),
+        context_meta: ContextMetaConfig::default(),
     };
     let filter = PolicyFilter::new(cfg, None).expect("filter should construct");
 
@@ -3248,11 +3585,13 @@ fn try_build_filter_allowing_private(
             config_path,
             allow_private_idp,
             trusted_private_endpoints: vec![],
-            body_access: super::config::BodyAccessMode::ReadOnly,
+            body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
             max_buffer_bytes: 10_485_760,
             llm: super::config::LlmOptions::default(),
+            context_headers: HashMap::default(),
+            context_meta: ContextMetaConfig::default(),
         },
         Some(connector),
     )
@@ -3572,7 +3911,7 @@ routes:
 
 /// Request header mutations queued by the policy filter.
 struct Queued {
-    set: std::collections::HashMap<String, String>,
+    set: HashMap<String, String>,
     removed: Vec<String>,
     extra: Vec<(String, String)>,
 }
@@ -3880,11 +4219,13 @@ routes:
         config_path: cfg_path.to_str().expect("utf8 path").to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadOnly,
+        body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
+        context_headers: HashMap::default(),
+        context_meta: ContextMetaConfig::default(),
     };
     let err = PolicyFilter::new(cfg, None)
         .err()
@@ -4248,11 +4589,13 @@ fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) ->
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
-            body_access: super::config::BodyAccessMode::ReadOnly,
+            body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
             max_buffer_bytes: 10_485_760,
             llm,
+            context_headers: HashMap::default(),
+            context_meta: ContextMetaConfig::default(),
         },
         None,
     )
@@ -4619,7 +4962,7 @@ fn the_lower_ceiling_binds_when_both_apply() {
             config_path: path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
-            body_access: super::config::BodyAccessMode::ReadWrite,
+            body_access: BodyAccessMode::ReadWrite,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
             max_buffer_bytes: 10_485_760,
@@ -4627,6 +4970,8 @@ fn the_lower_ceiling_binds_when_both_apply() {
                 max_request_bytes: 4096,
                 ..Default::default()
             },
+            context_headers: HashMap::default(),
+            context_meta: ContextMetaConfig::default(),
         },
         None,
     )
@@ -4653,7 +4998,7 @@ fn rejects_an_out_of_range_inference_ceiling() {
                 config_path: path,
                 allow_private_idp: false,
                 trusted_private_endpoints: vec![],
-                body_access: super::config::BodyAccessMode::ReadOnly,
+                body_access: BodyAccessMode::ReadOnly,
                 require_protocol_metadata: true,
                 init_timeout_secs: 30,
                 max_buffer_bytes: 10_485_760,
@@ -4661,6 +5006,8 @@ fn rejects_an_out_of_range_inference_ceiling() {
                     max_request_bytes,
                     ..Default::default()
                 },
+                context_headers: HashMap::default(),
+                context_meta: ContextMetaConfig::default(),
             },
             None,
         )
@@ -4726,11 +5073,13 @@ fn build_read_write_filter(config_path: String) -> PolicyFilter {
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
-            body_access: super::config::BodyAccessMode::ReadWrite,
+            body_access: BodyAccessMode::ReadWrite,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
             max_buffer_bytes: 10_485_760,
             llm: super::config::LlmOptions::default(),
+            context_headers: HashMap::default(),
+            context_meta: ContextMetaConfig::default(),
         },
         None,
     )
@@ -6210,11 +6559,13 @@ fn an_http_route_beside_entity_routes_fails_filter_construction() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
-        body_access: super::config::BodyAccessMode::ReadWrite,
+        body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
         llm: super::config::LlmOptions::default(),
+        context_headers: HashMap::default(),
+        context_meta: ContextMetaConfig::default(),
     };
     let err = PolicyFilter::new(cfg, None).err().expect("construction must fail");
     assert!(
@@ -6395,4 +6746,312 @@ fn build_in_concurrent_runtimes(
             .map(|runtime| runtime.join().expect("a runtime must not panic"))
             .collect()
     })
+}
+
+// =============================================================================
+// context_headers / context_meta — config validation
+// =============================================================================
+
+fn minimal_cfg() -> PolicyFilterConfig {
+    PolicyFilterConfig {
+        body_access: BodyAccessMode::default(),
+        config_path: String::new(),
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+        require_protocol_metadata: true,
+        allow_private_idp: false,
+        trusted_private_endpoints: vec![],
+        llm: super::config::LlmOptions::default(),
+        context_headers: HashMap::default(),
+        context_meta: ContextMetaConfig::default(),
+    }
+}
+
+#[test]
+fn context_headers_accepts_reserved_prefix_headers() {
+    let mut cfg = minimal_cfg();
+    cfg.context_headers
+        .insert(ContextField::AgentAgentId, "x-ext-agent-id".into());
+    cfg.context_headers
+        .insert(ContextField::FrameworkFramework, "x-ext-agent-framework".into());
+    cfg.context_headers
+        .insert(ContextField::FrameworkNodeId, "x-praxis-framework-node".into());
+    cfg.context_headers
+        .insert(ContextField::FrameworkGraphId, "x-ext-protocol-graph".into());
+    cfg.validate_context_headers().unwrap();
+}
+
+#[test]
+fn context_headers_rejects_non_reserved_header() {
+    let mut cfg = minimal_cfg();
+    cfg.context_headers
+        .insert(ContextField::AgentAgentId, "x-custom-agent-id".into());
+    let err = cfg.validate_context_headers().unwrap_err();
+    assert!(
+        err.contains("reserved prefix"),
+        "error should mention reserved prefix: {err}"
+    );
+}
+
+/// Builds through `PolicyFilter::new` (not a direct `validate_context_headers`
+/// call) to ensure the constructor's validation gate is wired up.
+#[test]
+fn policy_filter_new_rejects_non_reserved_context_header() {
+    let mut context_headers = HashMap::new();
+    context_headers.insert(ContextField::AgentAgentId, "x-custom-agent-id".to_owned());
+    let cfg = PolicyFilterConfig {
+        config_path: "/nonexistent/policy.yaml".to_owned(),
+        allow_private_idp: false,
+        trusted_private_endpoints: vec![],
+        body_access: BodyAccessMode::ReadOnly,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
+        context_headers,
+        context_meta: ContextMetaConfig::default(),
+    };
+    let err = match PolicyFilter::new(cfg, None) {
+        Ok(_) => panic!("a non-reserved context_header must be rejected at construction"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("reserved prefix"),
+        "error should mention reserved prefix: {err}",
+    );
+}
+
+#[test]
+fn context_headers_rejects_session_id_at_deser() {
+    let yaml = "
+config_path: /tmp/test.yaml
+context_headers:
+  agent.session_id: x-ext-agent-session
+";
+    let err = serde_yaml::from_str::<PolicyFilterConfig>(yaml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unknown variant") || msg.contains("session_id"),
+        "serde should reject agent.session_id: {msg}"
+    );
+}
+
+#[test]
+fn context_headers_rejects_unknown_field_at_deser() {
+    let yaml = "
+config_path: /tmp/test.yaml
+context_headers:
+  agent.nonexistent_field: x-ext-agent-foo
+";
+    let err = serde_yaml::from_str::<PolicyFilterConfig>(yaml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unknown variant"),
+        "serde should reject unknown fields: {msg}"
+    );
+}
+
+#[test]
+fn context_headers_rejects_meta_field_at_deser() {
+    let yaml = "
+config_path: /tmp/test.yaml
+context_headers:
+  meta.scope: x-ext-agent-scope
+";
+    let err = serde_yaml::from_str::<PolicyFilterConfig>(yaml).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unknown variant"),
+        "meta fields belong in context_meta, not context_headers: {msg}"
+    );
+}
+
+#[test]
+fn context_headers_empty_passes() {
+    let cfg = minimal_cfg();
+    cfg.validate_context_headers().unwrap();
+}
+
+// =============================================================================
+// context_headers — apply_context_headers unit tests
+// =============================================================================
+
+#[test]
+fn apply_context_headers_populates_agent_fields() {
+    use ppe::praxis_policy_core::hooks::Extensions;
+
+    let mut headers = HashMap::new();
+    headers.insert("x-ext-agent-id".to_owned(), "planner-v2".to_owned());
+    headers.insert("x-ext-agent-conversation-id".to_owned(), "conv-42".to_owned());
+    headers.insert("x-ext-agent-turn".to_owned(), "7".to_owned());
+    headers.insert("x-ext-agent-parent".to_owned(), "orchestrator".to_owned());
+
+    let mut context_headers = HashMap::new();
+    context_headers.insert(ContextField::AgentAgentId, "x-ext-agent-id".to_owned());
+    context_headers.insert(
+        ContextField::AgentConversationId,
+        "x-ext-agent-conversation-id".to_owned(),
+    );
+    context_headers.insert(ContextField::AgentTurn, "x-ext-agent-turn".to_owned());
+    context_headers.insert(ContextField::AgentParentAgentId, "x-ext-agent-parent".to_owned());
+
+    let mut ext = Extensions::default();
+    PolicyFilter::apply_context_headers(&headers, &context_headers, &mut ext);
+
+    let agent = ext.agent.as_ref().expect("agent slot should be populated");
+    assert_eq!(agent.agent_id.as_deref(), Some("planner-v2"));
+    assert_eq!(agent.conversation_id.as_deref(), Some("conv-42"));
+    assert_eq!(agent.turn, Some(7));
+    assert_eq!(agent.parent_agent_id.as_deref(), Some("orchestrator"));
+    assert!(agent.session_id.is_none());
+}
+
+#[test]
+fn apply_context_headers_populates_framework_fields() {
+    use ppe::praxis_policy_core::hooks::Extensions;
+
+    let mut headers = HashMap::new();
+    headers.insert("x-ext-agent-framework".to_owned(), "langchain".to_owned());
+    headers.insert("x-ext-agent-framework-version".to_owned(), "0.1.42".to_owned());
+    headers.insert("x-ext-agent-framework-node".to_owned(), "retriever".to_owned());
+    headers.insert("x-ext-agent-framework-graph".to_owned(), "rag-pipeline".to_owned());
+
+    let mut context_headers = HashMap::new();
+    context_headers.insert(ContextField::FrameworkFramework, "x-ext-agent-framework".to_owned());
+    context_headers.insert(
+        ContextField::FrameworkFrameworkVersion,
+        "x-ext-agent-framework-version".to_owned(),
+    );
+    context_headers.insert(ContextField::FrameworkNodeId, "x-ext-agent-framework-node".to_owned());
+    context_headers.insert(ContextField::FrameworkGraphId, "x-ext-agent-framework-graph".to_owned());
+
+    let mut ext = Extensions::default();
+    PolicyFilter::apply_context_headers(&headers, &context_headers, &mut ext);
+
+    let fw = ext.framework.as_ref().expect("framework slot should be populated");
+    assert_eq!(fw.framework.as_deref(), Some("langchain"));
+    assert_eq!(fw.framework_version.as_deref(), Some("0.1.42"));
+    assert_eq!(fw.node_id.as_deref(), Some("retriever"));
+    assert_eq!(fw.graph_id.as_deref(), Some("rag-pipeline"));
+}
+
+#[test]
+fn apply_context_headers_skips_empty_and_absent_headers() {
+    use ppe::praxis_policy_core::hooks::Extensions;
+
+    let mut headers = HashMap::new();
+    headers.insert("x-ext-agent-id".to_owned(), String::new());
+
+    let mut context_headers = HashMap::new();
+    context_headers.insert(ContextField::AgentAgentId, "x-ext-agent-id".to_owned());
+    context_headers.insert(
+        ContextField::AgentConversationId,
+        "x-ext-agent-conversation-id".to_owned(),
+    );
+
+    let mut ext = Extensions::default();
+    PolicyFilter::apply_context_headers(&headers, &context_headers, &mut ext);
+
+    assert!(ext.agent.is_none(), "empty/absent headers should not create a slot");
+}
+
+#[test]
+fn apply_context_headers_invalid_turn_is_skipped() {
+    use ppe::praxis_policy_core::hooks::Extensions;
+
+    let mut headers = HashMap::new();
+    headers.insert("x-ext-agent-turn".to_owned(), "not-a-number".to_owned());
+    headers.insert("x-ext-agent-id".to_owned(), "planner".to_owned());
+
+    let mut context_headers = HashMap::new();
+    context_headers.insert(ContextField::AgentTurn, "x-ext-agent-turn".to_owned());
+    context_headers.insert(ContextField::AgentAgentId, "x-ext-agent-id".to_owned());
+
+    let mut ext = Extensions::default();
+    PolicyFilter::apply_context_headers(&headers, &context_headers, &mut ext);
+
+    let agent = ext.agent.as_ref().expect("agent slot should exist from agent_id");
+    assert_eq!(agent.agent_id.as_deref(), Some("planner"));
+    assert!(agent.turn.is_none(), "unparseable turn should be skipped");
+}
+
+#[test]
+fn apply_context_headers_preserves_existing_session_id() {
+    use std::sync::Arc;
+
+    use ppe::praxis_policy_core::{extensions::AgentExtension, hooks::Extensions};
+
+    let mut headers = HashMap::new();
+    headers.insert("x-ext-agent-id".to_owned(), "planner".to_owned());
+
+    let mut context_headers = HashMap::new();
+    context_headers.insert(ContextField::AgentAgentId, "x-ext-agent-id".to_owned());
+
+    let mut ext = Extensions {
+        agent: Some(Arc::new(AgentExtension {
+            session_id: Some("existing-session".into()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+
+    PolicyFilter::apply_context_headers(&headers, &context_headers, &mut ext);
+
+    let agent = ext.agent.as_ref().unwrap();
+    assert_eq!(agent.session_id.as_deref(), Some("existing-session"));
+    assert_eq!(agent.agent_id.as_deref(), Some("planner"));
+}
+
+// =============================================================================
+// context_meta / context_headers deserialization
+// =============================================================================
+
+#[test]
+fn context_meta_deserializes_from_yaml() {
+    let yaml = "
+config_path: /tmp/test.yaml
+context_meta:
+  scope: production
+  tags:
+    - regulated
+    - tier-1
+  properties:
+    team: compliance
+    region: eu-west-1
+";
+    let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("should parse");
+    assert_eq!(cfg.context_meta.scope.as_deref(), Some("production"));
+    assert!(cfg.context_meta.tags.iter().any(|t| t == "regulated"));
+    assert!(cfg.context_meta.tags.iter().any(|t| t == "tier-1"));
+    assert_eq!(
+        cfg.context_meta.properties.get("team").map(String::as_str),
+        Some("compliance")
+    );
+}
+
+#[test]
+fn context_meta_defaults_to_empty() {
+    let yaml = "config_path: /tmp/test.yaml\n";
+    let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("should parse");
+    assert!(cfg.context_meta.tags.is_empty());
+    assert!(cfg.context_meta.scope.is_none());
+    assert!(cfg.context_meta.properties.is_empty());
+}
+
+#[test]
+fn context_headers_deserializes_from_yaml() {
+    let yaml = "
+config_path: /tmp/test.yaml
+context_headers:
+  agent.agent_id: x-ext-agent-id
+  agent.conversation_id: x-ext-agent-conversation-id
+  framework.framework: x-ext-agent-framework
+";
+    let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("should parse");
+    assert_eq!(cfg.context_headers.len(), 3);
+    assert_eq!(
+        cfg.context_headers.get(&ContextField::AgentAgentId).map(String::as_str),
+        Some("x-ext-agent-id")
+    );
+    cfg.validate_context_headers().unwrap();
 }

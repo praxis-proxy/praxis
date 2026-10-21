@@ -314,6 +314,9 @@ impl PolicyFilter {
         cfg: PolicyFilterConfig,
         subrequest_connector: Option<SubRequestConnector>,
     ) -> Result<Self, FilterError> {
+        cfg.validate_context_headers()
+            .map_err(|e| -> FilterError { format!("policy: {e}").into() })?;
+
         // Bound the per-request ReadWrite buffer ceiling: 0 makes every
         // non-empty body fail, and an unbounded value multiplies per-request
         // memory by concurrency. The pipeline's unbounded-buffer startup check
@@ -791,6 +794,39 @@ impl PolicyFilter {
         map
     }
 
+    /// Overlay effective header values for `context_headers` targets onto
+    /// a pre-built snapshot. [`snapshot_headers`] reads only the original
+    /// request; a filter ahead of `policy` that sets a reserved-prefix
+    /// header in `on_request` (or promotes one during pre-read) writes to
+    /// the pending-mutation queues, not to `ctx.request.headers`. This
+    /// method reads those pending writes through [`EffectiveHeaders`] for
+    /// the specific header names referenced by `context_headers`, so the
+    /// body-phase `extensions_from_identity` sees them.
+    ///
+    /// [`snapshot_headers`]: Self::snapshot_headers
+    /// [`EffectiveHeaders`]: crate::context::EffectiveHeaders
+    fn overlay_effective_context_headers(
+        ctx: &HttpFilterContext<'_>,
+        snapshot: &mut std::collections::HashMap<String, String>,
+        context_headers: &std::collections::HashMap<super::config::ContextField, String>,
+    ) {
+        use crate::{condition::HeaderSource as _, context::EffectiveHeaders};
+
+        if context_headers.is_empty() {
+            return;
+        }
+        let effective = EffectiveHeaders(ctx);
+        for header_name in context_headers.values() {
+            let lower = header_name.to_ascii_lowercase();
+            let Ok(hname) = http::header::HeaderName::from_bytes(lower.as_bytes()) else {
+                continue;
+            };
+            if let Ok(Some(v)) = effective.header(&hname) {
+                snapshot.insert(lower, v.into_owned());
+            }
+        }
+    }
+
     /// Build a fresh `IdentityPayload` from pre-snapshotted headers.
     /// `raw_token` is left empty: each registered identity plugin
     /// reads its own configured header from `headers` instead.
@@ -807,11 +843,13 @@ impl PolicyFilter {
         headers: std::collections::HashMap<String, String>,
         entity_type: &str,
         entity_name: &str,
+        scope: Option<&str>,
     ) -> Extensions {
         let mut ext = Extensions {
             meta: Some(Arc::new(MetaExtension {
                 entity_type: Some(entity_type.to_owned()),
                 entity_name: Some(entity_name.to_owned()),
+                scope: scope.map(ToOwned::to_owned),
                 ..Default::default()
             })),
             ..Default::default()
@@ -836,7 +874,13 @@ impl PolicyFilter {
         entity_type: &str,
         entity_name: &str,
     ) -> Result<IdentityPayload, Rejection> {
-        let route_ext = Self::identity_extensions(ctx, headers.clone(), entity_type, entity_name);
+        let route_ext = Self::identity_extensions(
+            ctx,
+            headers.clone(),
+            entity_type,
+            entity_name,
+            self.cfg.context_meta.scope.as_deref(),
+        );
 
         let (id_result, _bg) = self
             .mgr
@@ -866,21 +910,95 @@ impl PolicyFilter {
         identity: &IdentityPayload,
         entity_type: &str,
         entity_name: &str,
+        cfg: &PolicyFilterConfig,
     ) -> Extensions {
         let mut ext = identity.apply_to_extensions(Extensions::default());
 
+        // -- meta: entity identity (from protocol classifier) + operator config --
         let mut meta = ext.meta.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
         meta.entity_type = Some(entity_type.to_owned());
         meta.entity_name = Some(entity_name.to_owned());
+        if let Some(scope) = &cfg.context_meta.scope {
+            meta.scope = Some(scope.clone());
+        }
+        if !cfg.context_meta.tags.is_empty() {
+            meta.tags.extend(cfg.context_meta.tags.iter().cloned());
+        }
+        if !cfg.context_meta.properties.is_empty() {
+            meta.properties
+                .extend(cfg.context_meta.properties.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
         ext.meta = Some(Arc::new(meta));
 
+        // -- agent.session_id: dedicated handling (bound to subject) --
         if let Some(session_id) = headers.get("x-session-id").filter(|value| !value.is_empty()).cloned() {
             let mut agent = ext.agent.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
             agent.session_id = Some(session_id);
             ext.agent = Some(Arc::new(agent));
         }
 
+        // -- context_headers: map reserved-prefix headers → extension fields --
+        if !cfg.context_headers.is_empty() {
+            Self::apply_context_headers(headers, &cfg.context_headers, &mut ext);
+        }
+
         ext
+    }
+
+    /// Read headers named in `context_headers` and write their values
+    /// into the corresponding `agent.*` / `framework.*` extension fields.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "single match over ContextField variants; splitting obscures the mapping"
+    )]
+    pub(super) fn apply_context_headers(
+        headers: &std::collections::HashMap<String, String>,
+        context_headers: &std::collections::HashMap<super::config::ContextField, String>,
+        ext: &mut Extensions,
+    ) {
+        use super::config::ContextField;
+        macro_rules! set {
+            ($f:expr, $d:expr, $v:expr) => {{
+                $f = Some($v.to_owned());
+                $d = true;
+            }};
+        }
+
+        let mut agent = ext.agent.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
+        let mut fw = ext.framework.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
+        let (mut ad, mut fd) = (false, false);
+
+        for (field, hdr) in context_headers {
+            let lc = hdr.to_ascii_lowercase();
+            let Some(value) = headers.get(&lc).filter(|v| !v.is_empty()) else {
+                continue;
+            };
+            match field {
+                ContextField::AgentConversationId => set!(agent.conversation_id, ad, value),
+                ContextField::AgentAgentId => set!(agent.agent_id, ad, value),
+                ContextField::AgentParentAgentId => set!(agent.parent_agent_id, ad, value),
+                ContextField::AgentInput => set!(agent.input, ad, value),
+                ContextField::AgentTurn => {
+                    if let Ok(n) = value.parse::<u32>() {
+                        agent.turn = Some(n);
+                        ad = true;
+                    } else {
+                        tracing::trace!(target: "policy.filter", header = %hdr, value_len = value.len(),
+                        "context_headers: skipping agent.turn — not a valid u32");
+                    }
+                },
+                ContextField::FrameworkFramework => set!(fw.framework, fd, value),
+                ContextField::FrameworkFrameworkVersion => set!(fw.framework_version, fd, value),
+                ContextField::FrameworkNodeId => set!(fw.node_id, fd, value),
+                ContextField::FrameworkGraphId => set!(fw.graph_id, fd, value),
+            }
+        }
+        if ad {
+            ext.agent = Some(Arc::new(agent));
+        }
+        if fd {
+            ext.framework = Some(Arc::new(fw));
+        }
     }
 
     /// Publish the raw-credential-free subject projection for downstream filters.
@@ -1013,7 +1131,13 @@ impl PolicyFilter {
         ctx: &HttpFilterContext<'_>,
     ) -> Result<Option<AuthenticatedIdentity>, Rejection> {
         let headers = Self::snapshot_headers(ctx);
-        let gate_ext = Self::identity_extensions(ctx, headers.clone(), ENTITY_HTTP, ENTITY_NAME_GLOBAL);
+        let gate_ext = Self::identity_extensions(
+            ctx,
+            headers.clone(),
+            ENTITY_HTTP,
+            ENTITY_NAME_GLOBAL,
+            self.cfg.context_meta.scope.as_deref(),
+        );
         let (result, _bg) = self
             .mgr
             .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, Self::identity_payload(headers), gate_ext, None)
@@ -1118,7 +1242,8 @@ impl PolicyFilter {
             return Ok(FilterAction::Reject(llm_deny_rejection(Some(&no_route_violation()))));
         }
 
-        let headers = Self::snapshot_headers(ctx);
+        let mut headers = Self::snapshot_headers(ctx);
+        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
 
         let identity = match self.resolve_identity(ctx, headers.clone(), entity_type, &model).await {
             Ok(id) => id,
@@ -1133,7 +1258,7 @@ impl PolicyFilter {
         };
         let streaming = parsed.is_streaming();
 
-        let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &model);
+        let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &model, &self.cfg);
         Self::attach_http_attributes(ctx, &mut extensions, headers);
         self.attach_llm_attributes(&mut extensions, parsed, &model);
         ctx.extensions.insert(ResolvedIdentity(identity));
@@ -1204,9 +1329,10 @@ impl PolicyFilter {
         let Some(config) = self.llm_route_table.as_ref() else {
             return false;
         };
+        let scope = self.cfg.context_meta.scope.as_deref();
         ppe::praxis_policy_core::config::resolve_route(
             config,
-            ppe::praxis_policy_core::config::RouteQuery::named(ENTITY_LLM, model),
+            ppe::praxis_policy_core::config::RouteQuery::named(ENTITY_LLM, model).with_scope(scope),
         )
         .is_some()
     }
@@ -1278,7 +1404,8 @@ impl PolicyFilter {
         }
 
         let (entity_type, hook_name) = (ENTITY_LLM, HOOK_CMF_LLM_OUTPUT);
-        let headers = Self::snapshot_headers(ctx);
+        let mut headers = Self::snapshot_headers(ctx);
+        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
         let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
             // Missing request identity would otherwise skip response policy.
             tracing::error!(
@@ -1296,7 +1423,7 @@ impl PolicyFilter {
             return Ok(FilterAction::Continue);
         };
 
-        let mut extensions = Self::extensions_from_identity(&headers, identity, entity_type, &model);
+        let mut extensions = Self::extensions_from_identity(&headers, identity, entity_type, &model, &self.cfg);
         extensions.llm = Some(Arc::new(LLMExtension {
             model_id: Some(model.clone()),
             provider: self.cfg.llm.provider.clone(),
@@ -1405,7 +1532,8 @@ impl PolicyFilter {
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
     )]
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let headers = Self::snapshot_headers(ctx);
+        let mut headers = Self::snapshot_headers(ctx);
+        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
         let identity = match self
             .resolve_identity(ctx, headers.clone(), ENTITY_HTTP, ENTITY_NAME_GLOBAL)
             .await
@@ -1414,7 +1542,8 @@ impl PolicyFilter {
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
         Self::publish_authenticated_identity(ctx, &identity);
-        let mut extensions = Self::extensions_from_identity(&headers, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL);
+        let mut extensions =
+            Self::extensions_from_identity(&headers, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
         Self::attach_http_attributes(ctx, &mut extensions, headers);
 
         // Awaited on the worker runtime on purpose. The engine runs every
@@ -1470,17 +1599,25 @@ impl PolicyFilter {
         ctx: &HttpFilterContext<'_>,
         response_headers: std::collections::HashMap<String, String>,
         status: u16,
+        cfg: &PolicyFilterConfig,
     ) -> Extensions {
-        let request_headers = Self::snapshot_headers(ctx);
+        let mut request_headers = Self::snapshot_headers(ctx);
+        Self::overlay_effective_context_headers(ctx, &mut request_headers, &cfg.context_headers);
         let mut extensions = if let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() {
-            Self::extensions_from_identity(&request_headers, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL)
+            Self::extensions_from_identity(&request_headers, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, cfg)
         } else {
             tracing::debug!(
                 target: "policy.filter",
                 "no request-phase identity stashed for the response half; \
                  an entry sourced from it renders nothing",
             );
-            Self::entity_less_extensions()
+            let mut ext = Self::entity_less_extensions();
+            if let (Some(scope), Some(meta)) = (&cfg.context_meta.scope, ext.meta.as_ref()) {
+                let mut m = (**meta).clone();
+                m.scope = Some(scope.clone());
+                ext.meta = Some(Arc::new(m));
+            }
+            ext
         };
         // Keep the request line, so a response contract resolves the same route
         // the request half did.
@@ -1962,7 +2099,8 @@ impl HttpFilter for PolicyFilter {
 
         // Snapshot headers once for both identity resolution and
         // extensions building (avoids iterating the header map twice).
-        let headers = Self::snapshot_headers(ctx);
+        let mut headers = Self::snapshot_headers(ctx);
+        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
 
         // Resolve identity once here, then stash it so the response phase
         // can rebuild `Extensions` without re-validating the token.
@@ -1975,7 +2113,7 @@ impl HttpFilter for PolicyFilter {
         };
         Self::take_gated_identity(ctx);
         Self::publish_authenticated_identity(ctx, &identity);
-        let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &entity_name);
+        let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &entity_name, &self.cfg);
         // Attach the HTTP request line + headers so a single policy can combine
         // entity/`args.*` checks with `http.*` predicates in one evaluation.
         // The engine grants entity route handlers the `read_headers` capability, so
@@ -2106,6 +2244,7 @@ impl HttpFilter for PolicyFilter {
             ctx,
             snapshot_response_headers(&response.headers),
             response.status.as_u16(),
+            &self.cfg,
         );
 
         let result = self.dispatch_response_hook(hook, extensions).await;
@@ -2206,8 +2345,9 @@ impl HttpFilter for PolicyFilter {
             ));
             return Ok(FilterAction::Continue);
         };
-        let headers = Self::snapshot_headers(ctx);
-        let extensions = Self::extensions_from_identity(&headers, identity, entity_type, &entity_name);
+        let mut headers = Self::snapshot_headers(ctx);
+        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
+        let extensions = Self::extensions_from_identity(&headers, identity, entity_type, &entity_name, &self.cfg);
 
         let content = build_response_content_for_method(&method, &entity_name, &id_str, &parsed);
         // For tools/call, empty content means the upstream returned an error

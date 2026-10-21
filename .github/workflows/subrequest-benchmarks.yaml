@@ -1,0 +1,70 @@
+name: Subrequest performance comparison
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/subrequest-benchmarks.yaml"
+      - "tests/benches/subrequest-comparison.py"
+      - "tests/benches/benches/subrequest_*.rs"
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: "Pre-seam baseline commit"
+        default: "ab616c1fc0d7a52b5148ea65c86e03e9a9873421"
+        type: string
+      before_ref:
+        description: "Seam commit before the borrowed-header optimization"
+        default: "91a5f4a970b5a6500c717ff99fee0bc388915f2e"
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+        with:
+          cache-suffix: subrequest-bench
+
+      - name: Compare base, original seam, and candidate on this runner
+        env:
+          # Pinned review snapshots make repeated PR runs comparable. Manual
+          # runs can select new references for subsequent investigations.
+          BASE_REF: ${{ inputs.base_ref || 'ab616c1fc0d7a52b5148ea65c86e03e9a9873421' }}
+          BEFORE_REF: ${{ inputs.before_ref || '91a5f4a970b5a6500c717ff99fee0bc388915f2e' }}
+          # The paired investigation verifies this head differs from the guard
+          # snapshot only in the three benchmark harness files.
+          CANDIDATE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+          COMPLETION_PARENT_REF: ${{ github.event.pull_request.number == 1407 && '3141d5b9a19fa1688cf0fcd26cd036d35918df6d' || '' }}
+        run: >-
+          python3 tests/benches/subrequest-comparison.py
+          --base "$BASE_REF" --before "$BEFORE_REF"
+          --candidate "$CANDIDATE_REF" --output subrequest-results
+          --completion-parent "$COMPLETION_PARENT_REF"
+
+      - name: Upload raw measurements and build logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: subrequest-comparison-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            subrequest-results/*.json
+            subrequest-results/*.jsonl
+            subrequest-results/*.md
+            subrequest-results/*.stderr

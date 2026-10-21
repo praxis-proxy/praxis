@@ -26,7 +26,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.7.4"
+version = "0.7.5"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Shane Utt <shaneutt@linux.com>"]
@@ -35,7 +35,7 @@ repository = "https://github.com/praxis-proxy/praxis"
 readme = "README.md"
 
 [workspace.dependencies]
-arc-swap = "1.9.2"
+arc-swap = "1.9.3"
 async-trait = "0.1.92"
 base64 = "0.23.1"
 bytes = "1.12.1"
@@ -49,7 +49,7 @@ dashmap = "6.2.1"
 futures = "0.3.34"
 # Same backend pingora already builds (zlib-ng), so xtask adds no crate to the lockfile.
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-ng"] }
-h2 = "0.4.19"
+h2 = "0.4.20"
 http = "1.5.0"
 jsonwebtoken = { version = "11.1.0", features = ["aws_lc_rs"] }
 loom = "0.7.2"
@@ -58,10 +58,10 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "resource", "signal", "user"] }
 notify = "8.2.0"
 object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
-opentelemetry = { version = "0.33.0", default-features = false, features = ["trace"] }
-opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-provider-agnostic", "tls-roots", "trace"] }
-opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic", "trace"] }
+opentelemetry = { version = "0.33.1", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-provider-agnostic", "tls-roots", "trace"] }
+opentelemetry-proto = { version = "0.33.1", default-features = false, features = ["gen-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
 pingora-core = { version = "0.11.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
 pingora-http = { version = "0.11.0", package = "quixotic-plecostomus-http" }
@@ -72,7 +72,7 @@ plotters = { version = "0.3.7", default-features = false, features = ["svg_backe
 ppe = { version = "0.4.1", package = "praxis-policy", features = ["builtins"] }
 parking_lot = "0.12.5"
 portable-atomic = "1.15.0"
-proptest = "1.11.0"
+proptest = "1.12.0"
 quote = "1.0.47"
 # default-features = false for the same reason as praxis-filter below: the
 # binary's default set includes `policy-engine`, and the test harness depends
@@ -82,15 +82,22 @@ quote = "1.0.47"
 # crates keep `policy-engine` in their own defaults, so the standard test run is
 # unchanged, and `--no-default-features` gives the FIPS build's feature set.
 praxis = { path = "crates/server", package = "praxis-proxy", default-features = false }
-praxis-core = { version = "0.7.4", path = "crates/core", package = "praxis-proxy-core" }
+# default-features = false, like praxis-filter below: the core crate's only
+# default is the `pingora` network backend, and the backend is chosen once, by
+# the `praxis-proxy` binary's own `pingora` feature, which forwards it here
+# through praxis-protocol. A member that inherits this entry gets the backend
+# through that chain, never by accident.
+praxis-core = { version = "0.7.5", path = "crates/core", package = "praxis-proxy-core", default-features = false }
 # default-features = false: the filter crate's own default (`policy-engine`)
 # must not leak in through this dependency edge, or a build that turns the
 # policy engine off at the binary (`--no-default-features`, the FIPS build)
 # would still link it. The `praxis-proxy` binary's default feature set forwards
 # `policy-engine` explicitly, so the standard build is unchanged.
-praxis-filter = { version = "0.7.4", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
-praxis-protocol = { version = "0.7.4", path = "crates/protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.7.4", path = "crates/tls", package = "praxis-proxy-tls" }
+praxis-filter = { version = "0.7.5", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
+# default-features = false for the same reason as praxis-core: the protocol
+# crate's default is the `pingora` backend, selected by the binary's feature.
+praxis-protocol = { version = "0.7.5", path = "crates/protocol", package = "praxis-proxy-protocol", default-features = false }
+praxis-tls = { version = "0.7.5", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 praxis-proxy-benchmarks = "0.2.2"
 # System OpenSSL bindings, the same crate the rustls provider below uses; never
@@ -98,8 +105,8 @@ praxis-proxy-benchmarks = "0.2.2"
 openssl = "0.10.81"
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
-smallvec = "1.16.2"
-serde_json = "1.0.151"
+smallvec = "1.16.3"
+serde_json = "1.0.154"
 subtle = "2.6.1"
 rcgen = "0.14.10"
 regex = "1.13.1"
@@ -118,7 +125,7 @@ x509-parser = { version = "0.18.1", default-features = false }
 spiffe = { version = "0.18.0", default-features = false }
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
-syn = { version = "3.0.6", features = ["full", "extra-traits", "visit"] }
+syn = { version = "3.0.9", features = ["full", "extra-traits", "visit"] }
 syslog = "7.0.0"
 tempfile = "3.27.0"
 # Test-only. Its default features turn on rustls' `aws_lc_rs`, which would put
@@ -131,16 +138,19 @@ thiserror = "2.0.21"
 tikv-jemallocator = "0.7.0"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
-tokio = { version = "1.53.1", features = ["macros", "rt"] }
+# Pingora 0.11 creates zero-capacity BufStreams, which Tokio 1.54 rejects.
+# Keep the 1.53 patch line until Pingora supports the new constructor contract.
+# https://github.com/tokio-rs/tokio/pull/8494
+tokio = { version = "~1.53.3", features = ["macros", "rt"] }
 tokio-stream = "0.1.19"
-tokio-util = "0.7.19"
+tokio-util = "0.7.20"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-opentelemetry = "0.34.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "registry"] }
-unicase = "2.9.0"
+unicase = "2.10.0"
 url = "2.5.8"
-zeroize = "1.9.0"
+zeroize = "1.9.1"
 
 [profile.release]
 codegen-units = 1

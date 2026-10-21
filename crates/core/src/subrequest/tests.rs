@@ -16,7 +16,10 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue};
 
 use super::{internals::*, types::*};
-use crate::circuit::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitCheck, PeerKey};
+use crate::{
+    circuit::{CircuitBreakerConfig, CircuitBreakerRegistry, CircuitCheck, PeerKey},
+    egress::PeerSpec,
+};
 
 // -----------------------------------------------------------------------------
 // Metrics test utilities
@@ -48,6 +51,11 @@ fn test_connector(keepalive_pool_size: usize, max_connections: Option<usize>) ->
 fn test_connector_with_options(options: SubRequestConnectorOptions) -> SubRequestConnector {
     praxis_tls::provider::install();
     SubRequestConnector::with_options(options)
+}
+
+/// A body already in its terminal state, on the build's connector.
+fn done_body() -> SubResponseBody {
+    SubResponseBody::new_done()
 }
 
 
@@ -458,30 +466,16 @@ fn min_timeout_preserves_stricter_cluster_limit() {
 }
 
 #[test]
-fn clamp_peer_timeouts_bounds_connection_setup() {
-    use pingora_core::upstreams::peer::HttpPeer;
-    let mut peer = HttpPeer::new("127.0.0.1:8080", false, String::new());
-    peer.options.connection_timeout = Some(Duration::from_secs(1));
-    peer.options.total_connection_timeout = Some(Duration::from_secs(20));
-
-    clamp_peer_timeouts(&mut peer, Duration::from_secs(10));
-
-    assert_eq!(peer.options.connection_timeout, Some(Duration::from_secs(1)));
-    assert_eq!(peer.options.total_connection_timeout, Some(Duration::from_secs(10)));
-}
-
-#[test]
 fn ensure_host_header_uses_peer_address_without_overwriting_explicit_host() {
-    use pingora_core::upstreams::peer::HttpPeer;
-    let peer = HttpPeer::new("127.0.0.1:8443", false, String::new());
-    let mut generated = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
-    ensure_host_header(&mut generated, &peer).unwrap();
-    assert_eq!(generated.headers.get(http::header::HOST).unwrap(), "127.0.0.1:8443");
+    let address: std::net::SocketAddr = "127.0.0.1:8443".parse().unwrap();
+    let mut generated = HeaderMap::new();
+    ensure_host_header(&mut generated, address).unwrap();
+    assert_eq!(generated.get(http::header::HOST).unwrap(), "127.0.0.1:8443");
 
-    let mut explicit = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
-    explicit.insert_header(http::header::HOST, "model.example").unwrap();
-    ensure_host_header(&mut explicit, &peer).unwrap();
-    assert_eq!(explicit.headers.get(http::header::HOST).unwrap(), "model.example");
+    let mut explicit = HeaderMap::new();
+    explicit.insert(http::header::HOST, HeaderValue::from_static("model.example"));
+    ensure_host_header(&mut explicit, address).unwrap();
+    assert_eq!(explicit.get(http::header::HOST).unwrap(), "model.example");
 }
 
 // -----------------------------------------------------------------------------
@@ -490,7 +484,6 @@ fn ensure_host_header_uses_peer_address_without_overwriting_explicit_host() {
 
 #[tokio::test]
 async fn deadline_bounds_the_complete_exchange() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let backend = tokio::spawn(async move {
@@ -499,7 +492,7 @@ async fn deadline_bounds_the_complete_exchange() {
     });
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(address.to_string(), false, String::new());
+    let peer = PeerSpec::plain(address);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/".parse().unwrap(),
@@ -971,7 +964,7 @@ fn stream_limits_no_optional_bounds() {
 
 #[test]
 fn streaming_sub_response_exposes_status_and_headers() {
-    let body = SubResponseBody::new_done();
+    let body = done_body();
     let resp = StreamingSubResponse {
         status: 200,
         headers: {
@@ -992,7 +985,7 @@ fn streaming_sub_response_exposes_status_and_headers() {
 
 #[tokio::test]
 async fn sub_response_body_done_returns_none() {
-    let mut body = SubResponseBody::new_done();
+    let mut body = done_body();
     assert!(body.is_done());
     let result = body.next_chunk().await;
     drop(body);
@@ -1060,13 +1053,12 @@ async fn spawn_stalling_backend() -> (std::net::SocketAddr, tokio::task::JoinHan
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "test setup and validation")]
 async fn send_streaming_receives_chunks_incrementally() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let chunks: Vec<&[u8]> = vec![b"chunk1", b"chunk2", b"chunk3"];
     let (addr, backend) = spawn_http_backend(chunks.clone(), Duration::ZERO).await;
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/stream".parse().unwrap(),
@@ -1101,7 +1093,6 @@ async fn send_streaming_receives_chunks_incrementally() {
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "test setup and validation")]
 async fn send_streaming_records_metrics() {
-    use pingora_core::upstreams::peer::HttpPeer;
     install_metrics_recorder();
 
     let chunks: Vec<&[u8]> = vec![b"hello", b"world"];
@@ -1109,7 +1100,7 @@ async fn send_streaming_records_metrics() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/metrics-test".parse().unwrap(),
@@ -1144,12 +1135,11 @@ async fn send_streaming_records_metrics() {
 
 #[tokio::test]
 async fn send_streaming_idle_timeout_fires() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_stalling_backend().await;
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/stall".parse().unwrap(),
@@ -1183,13 +1173,12 @@ async fn send_streaming_idle_timeout_fires() {
 
 #[tokio::test]
 async fn send_streaming_read_timeout_fires_as_io_error() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_stalling_backend().await;
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let mut peer = HttpPeer::new(addr.to_string(), false, String::new());
-    peer.options.read_timeout = Some(Duration::from_millis(30));
+    let mut peer = PeerSpec::plain(addr);
+    Arc::make_mut(&mut peer.connection).read_timeout = Some(Duration::from_millis(30));
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/stall".parse().unwrap(),
@@ -1222,7 +1211,7 @@ async fn send_streaming_read_timeout_fires_as_io_error() {
 
 #[test]
 fn cap_read_timeout_tightens_the_dispatch_snapshot() {
-    let mut body = SubResponseBody::new_done();
+    let mut body = done_body();
     body.read_timeout = Some(Duration::from_secs(30));
     body.cap_read_timeout(Duration::from_millis(250));
     assert_eq!(
@@ -1235,7 +1224,7 @@ fn cap_read_timeout_tightens_the_dispatch_snapshot() {
 
 #[test]
 fn cap_read_timeout_keeps_a_tighter_existing_snapshot() {
-    let mut body = SubResponseBody::new_done();
+    let mut body = done_body();
     body.read_timeout = Some(Duration::from_millis(100));
     body.cap_read_timeout(Duration::from_secs(1));
     assert_eq!(
@@ -1248,7 +1237,7 @@ fn cap_read_timeout_keeps_a_tighter_existing_snapshot() {
 
 #[test]
 fn cap_stream_deadline_tightens_the_dispatch_snapshot() {
-    let mut body = SubResponseBody::new_done();
+    let mut body = done_body();
     let later = tokio::time::Instant::now() + Duration::from_secs(30);
     let sooner = tokio::time::Instant::now() + Duration::from_secs(1);
     body.stream_deadline = Some(later);
@@ -1263,7 +1252,7 @@ fn cap_stream_deadline_tightens_the_dispatch_snapshot() {
 
 #[test]
 fn cap_stream_deadline_keeps_a_tighter_existing_snapshot() {
-    let mut body = SubResponseBody::new_done();
+    let mut body = done_body();
     let sooner = tokio::time::Instant::now() + Duration::from_millis(100);
     let later = tokio::time::Instant::now() + Duration::from_secs(1);
     body.stream_deadline = Some(sooner);
@@ -1336,13 +1325,12 @@ async fn cap_read_timeout_shortens_the_next_chunk_wait() {
 
 #[tokio::test]
 async fn send_streaming_cancel_after_eof_is_noop() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let chunks: Vec<&[u8]> = vec![b"one", b"two"];
     let (addr, backend) = spawn_http_backend(chunks, Duration::ZERO).await;
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/eof".parse().unwrap(),
@@ -1371,13 +1359,12 @@ async fn send_streaming_cancel_after_eof_is_noop() {
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "test setup and validation")]
 async fn send_streaming_max_stream_duration_fires() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let chunks: Vec<&[u8]> = vec![b"a"; 100];
     let (addr, backend) = spawn_http_backend(chunks, Duration::from_millis(10)).await;
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/slow".parse().unwrap(),
@@ -1416,13 +1403,12 @@ async fn send_streaming_max_stream_duration_fires() {
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "test setup and validation")]
 async fn send_streaming_max_total_bytes_enforced() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let chunks: Vec<&[u8]> = vec![b"12345"; 10];
     let (addr, backend) = spawn_http_backend(chunks, Duration::ZERO).await;
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/limited".parse().unwrap(),
@@ -1460,12 +1446,11 @@ async fn send_streaming_max_total_bytes_enforced() {
 
 #[tokio::test]
 async fn send_streaming_cancel_shuts_down_session() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_stalling_backend().await;
 
     let connector = test_connector(1, Some(1));
     let client = super::client::SubRequestClient::new(connector.clone());
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/cancel-test".parse().unwrap(),
@@ -1499,12 +1484,11 @@ async fn send_streaming_cancel_shuts_down_session() {
 
 #[tokio::test]
 async fn send_streaming_drop_before_eof_releases_permit() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_stalling_backend().await;
 
     let connector = test_connector(1, Some(1));
     let client = super::client::SubRequestClient::new(connector.clone());
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/drop-test".parse().unwrap(),
@@ -1539,7 +1523,6 @@ async fn send_streaming_drop_before_eof_releases_permit() {
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "test setup and validation")]
 async fn send_streaming_circuit_success_at_headers() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let chunks: Vec<&[u8]> = vec![b"data"];
     let (addr, backend) = spawn_http_backend(chunks, Duration::ZERO).await;
 
@@ -1553,7 +1536,7 @@ async fn send_streaming_circuit_success_at_headers() {
         }),
     });
     let client = super::client::SubRequestClient::new(connector.clone());
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/circuit".parse().unwrap(),
@@ -1585,13 +1568,12 @@ async fn send_streaming_circuit_success_at_headers() {
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "test setup and validation")]
 async fn send_streaming_permit_held_until_completion() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let chunks: Vec<&[u8]> = vec![b"a", b"b", b"c"];
     let (addr, backend) = spawn_http_backend(chunks, Duration::from_millis(20)).await;
 
     let connector = test_connector(1, Some(1));
     let client = super::client::SubRequestClient::new(connector.clone());
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/permit-test".parse().unwrap(),
@@ -1631,7 +1613,6 @@ async fn send_streaming_permit_held_until_completion() {
 async fn send_streaming_backpressure_blocks_producer() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::AsyncWriteExt as _;
 
     let chunk_count: usize = 500;
@@ -1665,7 +1646,7 @@ async fn send_streaming_backpressure_blocks_producer() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/backpressure".parse().unwrap(),
@@ -1713,7 +1694,6 @@ async fn send_streaming_backpressure_blocks_producer() {
 async fn send_streaming_connection_reused_after_clean_eof() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::AsyncWriteExt as _;
 
     let connections = Arc::new(AtomicUsize::new(0));
@@ -1738,7 +1718,7 @@ async fn send_streaming_connection_reused_after_clean_eof() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/reuse".parse().unwrap(),
@@ -1779,7 +1759,6 @@ async fn send_streaming_connection_reused_after_clean_eof() {
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "test setup and validation")]
 async fn send_streaming_circuit_half_open_probe_recovers() {
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::AsyncWriteExt as _;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1810,7 +1789,7 @@ async fn send_streaming_circuit_half_open_probe_recovers() {
         }),
     });
     let client = super::client::SubRequestClient::new(connector.clone());
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let peer_key = PeerKey::new(addr, "");
     let request = SubRequest {
         method: http::Method::GET,
@@ -1895,9 +1874,9 @@ async fn spawn_h2_backend(
     (addr, handle)
 }
 
-fn h2_peer(addr: std::net::SocketAddr) -> pingora_core::upstreams::peer::HttpPeer {
-    let mut peer = pingora_core::upstreams::peer::HttpPeer::new(addr.to_string(), false, String::new());
-    peer.options.set_http_version(2, 2);
+fn h2_peer(addr: std::net::SocketAddr) -> PeerSpec {
+    let mut peer = PeerSpec::plain(addr);
+    Arc::make_mut(&mut peer.connection).http_version = crate::config::UpstreamHttpVersion::H2;
     peer
 }
 
@@ -2104,7 +2083,6 @@ async fn send_streaming_h2_cleartext_connection_reused() {
 async fn send_streaming_h1_incomplete_body_not_reused() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::AsyncWriteExt as _;
 
     let connections = Arc::new(AtomicUsize::new(0));
@@ -2130,7 +2108,7 @@ async fn send_streaming_h1_incomplete_body_not_reused() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/incomplete".parse().unwrap(),
@@ -2175,7 +2153,6 @@ async fn send_streaming_h1_incomplete_body_not_reused() {
 async fn send_streaming_h1_cancel_does_not_reuse_connection() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::AsyncWriteExt as _;
 
     let connections = Arc::new(AtomicUsize::new(0));
@@ -2211,7 +2188,7 @@ async fn send_streaming_h1_cancel_does_not_reuse_connection() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/h1-cancel".parse().unwrap(),
@@ -2273,12 +2250,11 @@ async fn spawn_204_backend() -> (std::net::SocketAddr, tokio::task::JoinHandle<(
 
 #[tokio::test]
 async fn send_streaming_204_returns_done_body() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_204_backend().await;
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/empty".parse().unwrap(),
@@ -2336,14 +2312,12 @@ async fn spawn_echo_headers_backend() -> (std::net::SocketAddr, tokio::task::Joi
 }
 
 #[tokio::test]
-#[expect(clippy::too_many_lines, reason = "test setup and validation")]
 async fn send_streaming_propagates_framework_headers() {
-    use pingora_core::upstreams::peer::HttpPeer;
     let (addr, backend) = spawn_echo_headers_backend().await;
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/fw-test".parse().unwrap(),
@@ -2381,8 +2355,8 @@ async fn send_streaming_propagates_framework_headers() {
 // -----------------------------------------------------------------------------
 
 /// A no-op HTTP peer for constructing client calls.
-fn peer_for(addr: std::net::SocketAddr) -> pingora_core::upstreams::peer::HttpPeer {
-    pingora_core::upstreams::peer::HttpPeer::new(addr.to_string(), false, String::new())
+fn peer_for(addr: std::net::SocketAddr) -> PeerSpec {
+    PeerSpec::plain(addr)
 }
 
 /// A minimal GET sub-request.
@@ -2582,7 +2556,7 @@ async fn execute_applies_peer_read_timeout_to_each_body_read() {
     });
 
     let mut peer = peer_for(addr);
-    peer.options.read_timeout = Some(Duration::from_millis(50));
+    Arc::make_mut(&mut peer.connection).read_timeout = Some(Duration::from_millis(50));
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
     let started = tokio::time::Instant::now();
@@ -2684,13 +2658,11 @@ async fn open_stalled_stream_with_read_timeout(
     read_timeout: Option<Duration>,
     limits: StreamLimits,
 ) -> (SubResponseBody, tokio::task::JoinHandle<()>) {
-    use pingora_core::upstreams::peer::HttpPeer;
-
     let (addr, backend) = spawn_stalling_backend().await;
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let mut peer = HttpPeer::new(addr.to_string(), false, String::new());
-    peer.options.read_timeout = read_timeout;
+    let mut peer = PeerSpec::plain(addr);
+    Arc::make_mut(&mut peer.connection).read_timeout = read_timeout;
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/stall".parse().unwrap(),
@@ -2705,13 +2677,11 @@ async fn open_stalled_stream_with_read_timeout(
 
 #[tokio::test]
 async fn streaming_body_counts_chunks() {
-    use pingora_core::upstreams::peer::HttpPeer;
-
     let chunks: Vec<&[u8]> = vec![b"one", b"two"];
     let (addr, backend) = spawn_http_backend(chunks, Duration::ZERO).await;
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/count".parse().unwrap(),
@@ -2804,7 +2774,6 @@ async fn streaming_body_enforces_total_byte_limit() {
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "test setup and validation")]
 async fn streaming_body_maps_unclean_close_to_io_error() {
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2823,7 +2792,7 @@ async fn streaming_body_maps_unclean_close_to_io_error() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/broken".parse().unwrap(),
@@ -2859,7 +2828,6 @@ async fn streaming_body_maps_unclean_close_to_io_error() {
 #[tokio::test]
 #[expect(clippy::too_many_lines, reason = "test setup and validation")]
 async fn interim_1xx_response_is_skipped_not_panicked() {
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     // A backend that emits an unsolicited 103 Early Hints (RFC 8297) ahead of
@@ -2875,7 +2843,10 @@ async fn interim_1xx_response_is_skipped_not_panicked() {
         socket
             .write_all(
                 b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n\
-                  HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+                  HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\
+                  Connection: x-private\r\nX-Private: hidden\r\n\
+                  X-Praxis-Internal: hidden\r\n\
+                  Set-Cookie: first=1\r\nSet-Cookie: second=2\r\n\r\nhello",
             )
             .await
             .unwrap();
@@ -2885,7 +2856,7 @@ async fn interim_1xx_response_is_skipped_not_panicked() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/".parse().unwrap(),
@@ -2903,11 +2874,28 @@ async fn interim_1xx_response_is_skipped_not_panicked() {
         "the final status, not the interim 103, must be returned"
     );
     assert_eq!(response.body.as_ref(), b"hello", "the final response body must be read");
+    let cookies: Vec<_> = response
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect();
+    assert_eq!(cookies, vec!["first=1", "second=2"], "duplicate final headers survive");
+    assert_eq!(
+        response.headers.get("content-length").unwrap(),
+        "5",
+        "response framing metadata survives"
+    );
+    for name in ["link", "connection", "x-private", "x-praxis-internal"] {
+        assert!(
+            response.headers.get(name).is_none(),
+            "unexpected response header: {name}"
+        );
+    }
 }
 
 #[tokio::test]
 async fn excessive_interim_1xx_responses_are_rejected() {
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2926,7 +2914,7 @@ async fn excessive_interim_1xx_responses_are_rejected() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/".parse().unwrap(),
@@ -2954,7 +2942,7 @@ fn sub_response_body_accessors_on_done_body() {
     let body = StreamingSubResponse {
         status: 200,
         headers: HeaderMap::new(),
-        body: SubResponseBody::new_done(),
+        body: done_body(),
     };
     assert!(body.body.is_done());
     assert_eq!(body.body.received_bytes(), 0);
@@ -2963,7 +2951,6 @@ fn sub_response_body_accessors_on_done_body() {
 
 #[tokio::test]
 async fn streaming_body_deadline_expires_before_first_read() {
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2981,7 +2968,7 @@ async fn streaming_body_deadline_expires_before_first_read() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/".parse().unwrap(),
@@ -3017,7 +3004,6 @@ async fn streaming_body_deadline_expires_before_first_read() {
 
 #[tokio::test]
 async fn streaming_body_read_timeout_distinct_from_idle() {
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3036,13 +3022,9 @@ async fn streaming_body_read_timeout_distinct_from_idle() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
-    let mut peer_opts = peer.options.clone();
-    peer_opts.read_timeout = Some(Duration::from_millis(50));
-    let peer_with_read_timeout = HttpPeer {
-        options: peer_opts,
-        ..peer
-    };
+    let peer = PeerSpec::plain(addr);
+    let mut peer_with_read_timeout = peer.clone();
+    Arc::make_mut(&mut peer_with_read_timeout.connection).read_timeout = Some(Duration::from_millis(50));
 
     let request = SubRequest {
         method: http::Method::GET,
@@ -3090,7 +3072,6 @@ async fn streaming_body_cancel_is_idempotent() {
 
 #[tokio::test]
 async fn streaming_body_byte_limit_boundary() {
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3108,7 +3089,7 @@ async fn streaming_body_byte_limit_boundary() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/".parse().unwrap(),
@@ -3145,7 +3126,7 @@ async fn streaming_body_byte_limit_boundary() {
 
 #[test]
 fn cap_read_timeout_with_existing_tighter_timeout_kept() {
-    let mut body = SubResponseBody::new_done();
+    let mut body = done_body();
 
     body.cap_read_timeout(Duration::from_millis(100));
 
@@ -3154,7 +3135,7 @@ fn cap_read_timeout_with_existing_tighter_timeout_kept() {
 
 #[test]
 fn cap_read_timeout_with_looser_existing_timeout_replaced() {
-    let mut body = SubResponseBody::new_done();
+    let mut body = done_body();
 
     body.cap_read_timeout(Duration::from_secs(2));
 
@@ -3163,7 +3144,6 @@ fn cap_read_timeout_with_looser_existing_timeout_replaced() {
 
 #[tokio::test]
 async fn streaming_body_metrics_recorded_on_idle_timeout() {
-    use pingora_core::upstreams::peer::HttpPeer;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     install_metrics_recorder();
@@ -3184,7 +3164,7 @@ async fn streaming_body_metrics_recorded_on_idle_timeout() {
 
     let connector = test_connector(1, None);
     let client = super::client::SubRequestClient::new(connector);
-    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let peer = PeerSpec::plain(addr);
     let request = SubRequest {
         method: http::Method::GET,
         uri: "/".parse().unwrap(),

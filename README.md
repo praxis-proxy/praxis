@@ -6,6 +6,7 @@
 [![MSRV: 1.92](https://img.shields.io/badge/MSRV-1.92-brightgreen.svg)](https://blog.rust-lang.org/)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13756/badge)](https://www.bestpractices.dev/projects/13756)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fpraxis.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fpraxis?ref=badge_shield)
 
 Praxis is a [Rust]-based framework for building **proxy servers**.
 
@@ -65,3 +66,6 @@ Or please join us in our Slack channel on [CNCF Slack]: [#praxis] channel
 ## License
 
 [Apache-2.0](LICENSE)
+
+
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fpraxis.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fpraxis?ref=badge_large)

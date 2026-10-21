@@ -2,16 +2,16 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! HTTPS IP-literal SNI drives certificate IP-SAN validation, exercised through
-//! the peer built by the prepared sub-request (`peer_for` → `HttpPeer`) and the
-//! real sub-request connector — not an independent rustls client. A regression
-//! that made `peer_for` build an insecure or incorrect peer would flip these.
+//! the peer built by the prepared sub-request (`peer_for` yields a `PeerSpec`)
+//! and the real sub-request connector, not an independent rustls client. A
+//! regression that made `peer_for` build an insecure or incorrect peer would
+//! flip these.
 
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use pingora_core::utils::tls::WrappedX509;
 use praxis_core::{
     connectivity::prepare_url_target,
     subrequest::{SubRequest, SubRequestClient, SubRequestConnector, SubResponse},
@@ -41,8 +41,7 @@ async fn request_via_prepared_peer(url: &str, ca_der: &[u8]) -> Option<SubRespon
     let mut peer = prepared.peer_at(0).expect("one validated peer");
     // Inject only the trust anchor; SNI, TLS mode, and cert/hostname
     // verification stay exactly as `peer_for` built them.
-    let ca = WrappedX509::parse(ca_der.to_vec()).expect("parse test CA DER");
-    peer.options.ca = Some(Arc::from(vec![ca]));
+    peer.trust_anchors = Some(Arc::new(praxis_tls::CachedCaCerts::new(vec![ca_der.to_vec()])));
 
     let client = SubRequestClient::new(SubRequestConnector::new(1, None));
     Box::pin(client.execute(&peer, prepared.request(), 64 * 1024, Duration::from_secs(5), None))

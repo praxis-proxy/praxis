@@ -3,6 +3,8 @@
 
 //! Deserialized YAML configuration for the policy security filter.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 // -----------------------------------------------------------------------------
@@ -118,6 +120,163 @@ pub(crate) struct PolicyFilterConfig {
     /// Inference authorization options.
     #[serde(default)]
     pub llm: LlmOptions,
+
+    /// Maps extension field names to HTTP header names for populating
+    /// host-supplied `agent.*` and `framework.*` context slots. The accepted
+    /// keys are `agent.conversation_id`, `agent.turn`, `agent.agent_id`,
+    /// `agent.parent_agent_id`, `agent.input`, `framework.framework`,
+    /// `framework.framework_version`, `framework.node_id`, and `framework.graph_id`.
+    ///
+    /// Only headers with a reserved prefix (`x-praxis-*`, `x-ext-agent-*`,
+    /// or `x-ext-protocol-*`) are accepted — this guarantees the value was set
+    /// by a trusted gateway filter, not spoofed by the client (Praxis
+    /// ingress strips reserved-prefix headers from client requests
+    /// with a 400 reject).
+    ///
+    /// `agent.session_id` keeps its dedicated `X-Session-Id` handling
+    /// and must not appear in this map.
+    ///
+    /// An absent or empty header leaves the extension field unset.
+    /// A slot with no populated fields is left `None` on `Extensions`.
+    ///
+    /// ```yaml
+    /// context_headers:
+    ///   agent.conversation_id: x-ext-agent-conversation-id
+    ///   agent.turn: x-ext-agent-turn
+    ///   agent.agent_id: x-ext-agent-id
+    ///   agent.parent_agent_id: x-ext-agent-parent-id
+    ///   framework.framework: x-ext-agent-framework
+    ///   framework.framework_version: x-ext-agent-framework-version
+    ///   framework.node_id: x-ext-agent-framework-node
+    ///   framework.graph_id: x-ext-agent-framework-graph
+    /// ```
+    #[serde(default)]
+    pub context_headers: HashMap<ContextField, String>,
+
+    /// Static operator-supplied metadata for the `meta` extension slot.
+    ///
+    /// These values are per-deployment (not per-request) and populate
+    /// `meta.tags`, `meta.scope`, and `meta.properties` on every
+    /// request processed by this filter instance.
+    ///
+    /// **Important:** the PPE uses `meta.scope` for route resolution.
+    /// Setting it here can change which policy route a request
+    /// resolves to, not just what the audit record says.
+    ///
+    /// ```yaml
+    /// context_meta:
+    ///   scope: production
+    ///   tags:
+    ///     - regulated
+    ///     - tier-1
+    ///   properties:
+    ///     team: compliance
+    ///     region: eu-west-1
+    /// ```
+    #[serde(default)]
+    pub context_meta: ContextMetaConfig,
+}
+
+// -----------------------------------------------------------------------------
+// ContextMetaConfig
+// -----------------------------------------------------------------------------
+
+/// Static operator-supplied metadata merged into `MetaExtension`.
+///
+/// Deserialized from the `context_meta:` block in the policy filter
+/// YAML. All fields are optional — an absent block means no static
+/// metadata.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ContextMetaConfig {
+    /// Operational tags; the only source of `meta.tags` in rules. A route's own
+    /// `meta.tags` are not merged in, and these do not join `groups:` bundles.
+    #[serde(default)]
+    pub tags: Vec<String>,
+
+    /// Host-defined grouping (virtual server ID, namespace, etc.).
+    ///
+    /// **Caution:** PPE scores route resolution on `meta.scope`, so
+    /// setting it here changes which policy route a request resolves
+    /// to, not just what the audit record says.
+    #[serde(default)]
+    pub scope: Option<String>,
+
+    /// Arbitrary key-value metadata, available as
+    /// `meta.properties.<key>` in APL predicates.
+    #[serde(default)]
+    pub properties: HashMap<String, String>,
+}
+
+// -----------------------------------------------------------------------------
+// ContextField — typed key for context_headers
+// -----------------------------------------------------------------------------
+
+/// Extension field that a `context_headers` entry can target.
+///
+/// The enum enforces the supported target set during deserialization,
+/// so unknown fields and `agent.session_id` (which has dedicated
+/// handling bound to the subject via `H(subject : session_id)`) are
+/// rejected by serde before any runtime validation runs.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
+pub(crate) enum ContextField {
+    // -- agent.* --------------------------------------------------------
+    /// Maps to `AgentExtension::conversation_id`.
+    #[serde(rename = "agent.conversation_id")]
+    AgentConversationId,
+    /// Maps to `AgentExtension::turn` (parsed as `u32`).
+    #[serde(rename = "agent.turn")]
+    AgentTurn,
+    /// Maps to `AgentExtension::agent_id`.
+    #[serde(rename = "agent.agent_id")]
+    AgentAgentId,
+    /// Maps to `AgentExtension::parent_agent_id`.
+    #[serde(rename = "agent.parent_agent_id")]
+    AgentParentAgentId,
+    /// Maps to `AgentExtension::input`.
+    #[serde(rename = "agent.input")]
+    AgentInput,
+
+    // -- framework.* ----------------------------------------------------
+    /// Maps to `FrameworkExtension::framework`.
+    #[serde(rename = "framework.framework")]
+    FrameworkFramework,
+    /// Maps to `FrameworkExtension::framework_version`.
+    #[serde(rename = "framework.framework_version")]
+    FrameworkFrameworkVersion,
+    /// Maps to `FrameworkExtension::node_id`.
+    #[serde(rename = "framework.node_id")]
+    FrameworkNodeId,
+    /// Maps to `FrameworkExtension::graph_id`.
+    #[serde(rename = "framework.graph_id")]
+    FrameworkGraphId,
+}
+
+impl PolicyFilterConfig {
+    /// Validate `context_headers` at config load time.
+    ///
+    /// The target field is already validated by `ContextField`
+    /// deserialization (unknown fields and `agent.session_id` are
+    /// rejected by serde). This method checks the remaining
+    /// constraint: header names must use a reserved prefix.
+    ///
+    /// Called from `PolicyFilter::new` so misconfiguration is caught at
+    /// startup, not at first request.
+    pub(crate) fn validate_context_headers(&self) -> Result<(), String> {
+        let mut headers: Vec<_> = self.context_headers.values().collect();
+        headers.sort();
+        for header in &headers {
+            let header_lower = header.to_ascii_lowercase();
+            if !praxis_core::reserved_headers::is_reserved(&header_lower) {
+                return Err(format!(
+                    "context_headers: header `{header}` does not use a reserved prefix \
+                     (x-praxis-*, x-ext-agent-*, x-ext-protocol-*); only headers that \
+                     the gateway itself sets are trusted — see reserved_headers.rs"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Serde default for `require_protocol_metadata`: `true`.

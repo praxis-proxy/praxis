@@ -86,10 +86,12 @@ fn require_fips_fails_closed_unless_the_host_is_in_fips_mode() {
             stderr.contains("PRAXIS_REQUIRE_FIPS") && stderr.contains("not in effect"),
             "the refusal must name the variable and say FIPS mode is not in effect, got: {stderr}"
         );
-        assert!(
-            stderr.contains("kernel is not in FIPS mode") || stderr.contains("OpenSSL provider"),
-            "the refusal must say which signal is missing, got: {stderr}"
-        );
+        for reason in praxis_tls::provider::status().unmet() {
+            assert!(
+                stderr.contains(&reason),
+                "the refusal must name every missing signal, missing {reason:?}: {stderr}"
+            );
+        }
     }
 }
 

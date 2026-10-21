@@ -3,14 +3,17 @@
 
 //! The [`Protocol`] trait implemented by each listener protocol adapter.
 //!
-//! An implementor binds its listeners and registers the matching Pingora
-//! services onto the shared [`PingoraServerRuntime`]. The server crate calls
-//! [`Protocol::register`] once per configured protocol at startup; the HTTP and
-//! TCP adapters live in [`crate::http`] and [`crate::tcp`].
+//! An implementor binds its listeners and registers the matching services
+//! onto the shared backend [`Runtime`]. The server crate calls
+//! [`Protocol::register`] once per configured protocol at startup; the HTTP
+//! and TCP adapters of the selected backend are exposed as [`Http`] and
+//! [`Tcp`].
 //!
-//! [`PingoraServerRuntime`]: praxis_core::PingoraServerRuntime
+//! [`Http`]: crate::backend::Http
+//! [`Runtime`]: praxis_core::backend::Runtime
+//! [`Tcp`]: crate::backend::Tcp
 
-use praxis_core::{PingoraServerRuntime, ProxyError, config::Config};
+use praxis_core::{ProxyError, backend::Runtime, config::Config};
 use tokio::sync::watch;
 
 use crate::ListenerPipelines;
@@ -31,7 +34,7 @@ pub trait Protocol: Send {
     /// [`ProxyError`]: praxis_core::ProxyError
     fn register(
         self: Box<Self>,
-        server: &mut PingoraServerRuntime,
+        server: &mut Runtime,
         config: &Config,
         pipelines: &ListenerPipelines,
     ) -> Result<Vec<watch::Sender<bool>>, ProxyError>;

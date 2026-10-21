@@ -654,13 +654,13 @@ mod tests {
 
     #[tokio::test]
     async fn body_filter_deadline_is_applied_to_live_body() {
-        use pingora_core::upstreams::peer::HttpPeer;
+        use praxis_core::egress::PeerSpec;
 
         let (addr, backend) = spawn_stalling_backend().await;
         praxis_tls::provider::install();
         let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
         let client = SubRequestClient::new(connector);
-        let peer = HttpPeer::new(addr.to_string(), false, String::new());
+        let peer = PeerSpec::plain(addr);
         let request = SubRequest {
             method: http::Method::GET,
             uri: http::Uri::from_static("/deadline-wire"),
@@ -747,13 +747,13 @@ mod tests {
 
     #[tokio::test]
     async fn step_deadline_is_observed_by_the_underlying_stream_body() {
-        use pingora_core::upstreams::peer::HttpPeer;
+        use praxis_core::egress::PeerSpec;
 
         let (addr, backend) = spawn_stalling_backend().await;
         praxis_tls::provider::install();
         let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
         let client = SubRequestClient::new(connector);
-        let peer = HttpPeer::new(addr.to_string(), false, String::new());
+        let peer = PeerSpec::plain(addr);
         let request = SubRequest {
             method: http::Method::GET,
             uri: http::Uri::from_static("/step-deadline-wire"),

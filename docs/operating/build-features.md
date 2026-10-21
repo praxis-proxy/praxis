@@ -16,13 +16,13 @@ which includes hot-reload, the admin surface, and the `policy` filter.
 Build the leanest possible binary (every optional subsystem off) with:
 
 ```console
-cargo build -p praxis-proxy --release --no-default-features
+cargo build -p praxis-proxy --release --no-default-features --features pingora
 ```
 
 and add back individual features as needed:
 
 ```console
-cargo build -p praxis-proxy --release --no-default-features --features admin-api
+cargo build -p praxis-proxy --release --no-default-features --features pingora,admin-api
 ```
 
 For a policy-free build that keeps everything else, name the features you want
@@ -30,8 +30,11 @@ instead:
 
 ```console
 cargo build -p praxis-proxy --release --no-default-features \
-    --features config-reload,admin-api
+    --features pingora,config-reload,admin-api
 ```
+
+A `--no-default-features` build always names its network backend (`pingora`
+today); see [Network backends](#network-backends).
 
 For that exact invocation the guarantee holds: every Praxis crate depends on
 `praxis-proxy-filter` without dependency defaults, so dropping the server's
@@ -62,10 +65,32 @@ nameable in config in a build believed to be policy-free. Verify with
 `cargo tree -e normal -i praxis-policy`: no output means the policy engine
 really is out of the build.
 
+## Network backends
+
+The layer that owns sockets, TLS acceptors, HTTP framing, connection pooling
+and the async runtime is a *backend*, and a build carries exactly one.
+Pingora is the only backend today and the `pingora` feature is on by
+default. Everything above it (configuration, filters, routing, health
+checks, retries, the admin handlers, the sub-request client) is
+backend-neutral and does not change with the backend.
+
+Because Cargo features are additive, a backend cannot be turned off by
+turning another on; the build that wants a different backend starts from
+`--no-default-features` and names the one it wants. A build with no backend
+feature refuses to compile the `praxis-proxy` binary. The library crates do
+compile that way, with a stand-in connector that refuses every connection,
+so lean-build checks still work.
+
+Library consumers that depend on `praxis-proxy`, `praxis-proxy-protocol` or
+`praxis-proxy-core` with `default-features = false` name the backend feature
+on that edge too. Adding a backend is described in
+[Adding a Network Backend](../developing/adding-backends.md).
+
 ## Feature summary
 
 | Feature | Default | Enables | Turn it off / on when |
 | ------- | ------- | ------- | --------------------- |
+| `pingora` | on | The Pingora network backend: listeners, HTTP/1 and HTTP/2 framing, connection pooling and the async runtime, from the [Pingora fork](https://github.com/praxis-proxy/pingora). | Never off on its own: a build needs exactly one backend. A `--no-default-features` build names it explicitly. |
 | `config-reload` | on | Config-file and TLS-certificate hot-reload (filesystem watching). | Off for a static-config deployment: drops both watchers and the `notify`, `arc-swap`, and `tokio` dependencies they pull into the TLS crate. |
 | `admin-api` | on | The admin HTTP services: management API (`/api/*`) on `admin.address`, and `/healthy`, `/ready`, `/metrics` on `admin.metrics_address`. | Off when the proxy exposes no monitoring or management surface. The data path and background health checks are unaffected; only the HTTP endpoints go away. |
 | `otel` | off | OpenTelemetry / OTLP span export for traces. | On for distributed tracing. Pulls in a heavy `opentelemetry` + `tonic` dependency graph. |
@@ -75,7 +100,7 @@ really is out of the build.
 | `upstream-binding` | off (experimental) | Logical upstream binding: the `router` publishes the matched cluster as a request-wide binding that `bound_upstream` conditions and `cluster_source: bound_upstream` load balancers read. | On when a pipeline gates filters on the bound cluster's application metadata or dispatches from the binding. Implied by the two features below. Off, those config forms are rejected at load time and the router never touches request extensions. |
 | `iterative-request-router` | off (experimental) | The `iterative_request_router` filter: a bounded loop of sub-requests for provider failover and agentic/tool loops. | On for callout and failover pipelines (the AI gateway relies on it). No extra dependencies; pulls in `upstream-binding`, since its steps dispatch from the binding. |
 | `router-json-aliases` | off (experimental) | The `router` filter's JSON-alias body-routing groundwork. | Groundwork only: it is not wired into routing, and a route that sets `json_aliases` is rejected at build even with the feature on. Default builds do not accept the keys. |
-| `slow-start` | off (experimental) | Per-cluster `slow_start` config. | The key is rejected unless the feature is on. Selection does not read the ramp yet; the feature only accepts and stores the window. |
+| `slow-start` | off (experimental) | Per-cluster `slow_start` config. | The key is rejected unless the feature is on. With the feature on, weighted strategies apply the ramp. Hash strategies do not. |
 | `bound-upstream-request-body` | off (experimental) | The `HttpFilter::on_bound_upstream_request_body` hook, run once at the logical-binding barrier. | For out-of-tree filters that must inspect or rewrite the request body against the bound upstream; no in-tree filter uses it yet. Pulls in `upstream-binding`. |
 | `chain-binding` | off (experimental) | The `register_chain_binding` outbound-callout API (`ChainBindingContext::bind_chain`) and its authority-bound deferred credentials (`PendingCredentials`, `DeferredCredential`). | For out-of-tree callout filters; no in-tree consumer yet. |
 | `spiffe` | off (experimental) | SPIFFE X.509-SVID mTLS peer identity (the `require_named` listener mode) and the `peer_identity_trust` filter. | On for mTLS peer-identity authorization. Adds `spiffe` and `x509-parser`. |
@@ -116,8 +141,9 @@ production` at startup. Do not run an experimental build in production.
   at build even with the feature on. It is kept behind the flag for a future
   implementation; default builds do not carry the `json_aliases` keys at all.
 - **`slow-start`**: per-cluster `slow_start` window. Default builds reject the
-  key. With the feature on, the window is accepted and stored, but
-  load-balancer selection does not read the ramp yet.
+  key. With the feature on, round robin, random, least-connections, and
+  power-of-two-choices apply the ramp. Hash strategies keep the configured
+  weight.
 - **`bound-upstream-request-body`**: the once-per-request bound-upstream
   request-body hook (`bound_upstream_request_body_access` and
   `on_bound_upstream_request_body` on `HttpFilter`). It runs right after the

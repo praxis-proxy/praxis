@@ -6,9 +6,9 @@
 mod classification;
 mod connection_options;
 mod network;
-/// Shared [`HttpPeer`] construction utilities for TLS and connection options.
-///
-/// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
+/// Address resolution, server-name derivation, and (under the `pingora`
+/// feature) the mapping of connection options and TLS material onto a
+/// Pingora peer.
 pub mod peer;
 mod target;
 mod trusted_private;
@@ -18,6 +18,7 @@ pub(crate) use classification::classify_without_nat64;
 pub use classification::{IpClassification, classify_ip};
 pub use connection_options::ConnectionOptions;
 pub use network::{CidrRange, is_private_ip, is_private_upstream_ip, normalize_mapped_ipv4};
+pub(crate) use target::URL_TARGET_MARKER;
 pub use target::{
     InvalidTarget, PreparedSubrequest, PreparedTarget, UrlResolutionPolicy, UrlTargetError, prepare_url_target,
     prepare_url_target_with_policy, validate_url_target,

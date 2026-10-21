@@ -6,6 +6,9 @@
 /// DNS rebinding defense (`Host` check) for loopback-bound management listeners.
 #[cfg(feature = "admin-api")]
 pub(crate) mod admin_host;
+/// The backend-neutral view of a management request.
+#[cfg(feature = "admin-api")]
+mod admin_request;
 /// Cluster endpoint metadata for `/api/stats`. Kept ungated for reload.
 pub mod cluster_meta;
 /// gRPC health check probe (`grpc.health.v1.Health/Check`).
@@ -18,6 +21,9 @@ pub mod listener_meta;
 /// `/api/log-level` admin dispatch.
 #[cfg(feature = "admin-api")]
 mod log_level_admin;
+/// Pingora's listeners and request view for the management surface.
+#[cfg(all(feature = "admin-api", feature = "pingora"))]
+mod pingora_glue;
 #[cfg(feature = "admin-api")]
 mod pipelines_admin;
 /// Health check probe functions (HTTP and TCP).
@@ -30,15 +36,21 @@ mod service;
 #[cfg(feature = "admin-api")]
 mod stats_admin;
 
+#[cfg(feature = "admin-api")]
+pub use admin_request::{AdminRequest, BodyReadError};
 pub use cluster_meta::{ClusterMeta, ClusterMetaStore, cluster_meta_from_config, new_cluster_meta_store};
 pub use listener_meta::{ListenerMeta, ListenerMetaStore, listener_meta_from_config, new_listener_meta_store};
+#[cfg(all(feature = "admin-api", feature = "pingora"))]
+pub use pingora_glue::{
+    add_admin_api, add_admin_api_to_pingora_server, add_health_endpoint, add_health_endpoint_to_pingora_server,
+    add_health_endpoint_to_pingora_server_with_pipelines, add_health_endpoint_with_pipelines, add_prometheus_upkeep,
+    add_prometheus_upkeep_to_pingora_server,
+};
 #[cfg(feature = "admin-api")]
 pub(in crate::http::pingora) use service::escape_json_string;
 #[cfg(feature = "admin-api")]
 pub use service::{
     AdminEndpointOptions, PingoraAdminService, PingoraHealthService, PrometheusAdminRecorder,
-    add_admin_api_to_pingora_server, add_health_endpoint_to_pingora_server,
-    add_health_endpoint_to_pingora_server_with_pipelines, add_prometheus_upkeep_to_pingora_server,
     install_prometheus_admin_recorder,
 };
 #[cfg(feature = "admin-api")]

@@ -13,7 +13,14 @@ readme.workspace = true
 name = "praxis_protocol"
 
 [features]
-default = []
+# The Pingora network backend: the HTTP and TCP protocol adapters, the
+# admin-surface glue and `backend::{Http, Tcp}` resolve to Pingora and the
+# fork crates are linked. On by default. Without any backend feature the
+# crate still compiles (the backend-neutral handlers, metrics and health
+# probes stay) so lean builds can be checked. See
+# docs/developing/adding-backends.md.
+default = ["pingora"]
+pingora = ["dep:pingora-core", "dep:pingora-http", "dep:pingora-proxy", "praxis-core/pingora"]
 # Certificate + config hot-reload (filesystem watching). Enables the
 # reload/watcher machinery in praxis-tls. Off => static TLS, no notify.
 # Off by default at the library level; the `praxis-proxy` binary turns it
@@ -56,16 +63,21 @@ h2 = { workspace = true }
 http = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-pingora-core = { workspace = true }
-pingora-http = { workspace = true }
-pingora-proxy = { workspace = true }
+pingora-core = { workspace = true, optional = true }
+pingora-http = { workspace = true, optional = true }
+pingora-proxy = { workspace = true, optional = true }
+# The workspace entry carries no defaults: the backend is chosen here, by this
+# crate's `pingora` feature.
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
+# Names the listener `ServerConfig` the backend-neutral TLS builder returns.
+rustls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -74,7 +86,6 @@ tracing-opentelemetry = { workspace = true, optional = true }
 [dev-dependencies]
 praxis-core = { workspace = true, features = ["test-support"] }
 rcgen = { workspace = true }
-rustls = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }

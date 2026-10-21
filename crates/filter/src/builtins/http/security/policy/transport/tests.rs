@@ -18,8 +18,8 @@ use std::{
 
 use bytes::Bytes;
 use http::Method;
-use pingora_core::upstreams::peer::Peer as _;
 use ppe::praxis_policy_core::http_retry::RetryPolicy;
+use praxis_core::egress::DEFAULT_POOL_GROUP;
 
 use super::*;
 
@@ -448,51 +448,69 @@ fn a_bracketed_ipv6_host_without_a_port_still_gets_the_scheme_default() {
 }
 
 #[test]
-fn a_tls_peer_verifies_the_certificate_and_the_hostname() {
+fn a_tls_peer_dials_with_tls_and_its_hostname_as_server_name() {
     let target = Target::parse("https://idp.example.com/jwks").unwrap();
+
     let peer = target.peer("203.0.113.10:443".parse().unwrap(), None);
-    assert!(peer.options.verify_cert);
-    assert!(peer.options.verify_hostname);
-    assert_eq!(peer.sni, "idp.example.com");
+
+    assert!(peer.tls, "an https target dials over TLS");
+    assert!(
+        peer.tls_config.is_none(),
+        "no cluster TLS config, so the backend keeps certificate and hostname verification on"
+    );
+    assert_eq!(&*peer.sni, "idp.example.com", "the target host is the server name");
 }
 
 #[test]
 fn a_request_without_a_connect_bound_gets_the_engine_default() {
     let target = Target::parse("https://idp.example.com/jwks").unwrap();
+
     let peer = target.peer("203.0.113.10:443".parse().unwrap(), None);
-    assert_eq!(peer.options.connection_timeout, Some(DEFAULT_CONNECT_TIMEOUT));
-    assert_eq!(peer.options.total_connection_timeout, Some(DEFAULT_CONNECT_TIMEOUT));
+
+    assert_eq!(
+        peer.connection.connection_timeout,
+        Some(DEFAULT_CONNECT_TIMEOUT),
+        "the connect attempt gets the engine default"
+    );
+    assert_eq!(
+        peer.connection.total_connection_timeout,
+        Some(DEFAULT_CONNECT_TIMEOUT),
+        "the whole connection setup gets the engine default"
+    );
 }
 
 #[test]
 fn an_explicit_connect_bound_is_kept() {
     let target = Target::parse("https://idp.example.com/jwks").unwrap();
+
     let peer = target.peer("203.0.113.10:443".parse().unwrap(), Some(Duration::from_millis(250)));
-    assert_eq!(peer.options.connection_timeout, Some(Duration::from_millis(250)));
+
+    assert_eq!(
+        peer.connection.connection_timeout,
+        Some(Duration::from_millis(250)),
+        "the caller's connect bound is kept"
+    );
 }
 
 #[test]
-fn a_policy_peer_never_shares_a_pool_entry_with_a_data_plane_peer() {
+fn a_policy_peer_never_shares_a_pool_partition_with_a_data_plane_peer() {
     let address: SocketAddr = "203.0.113.10:443".parse().unwrap();
-    let sni = "idp.internal".to_owned();
+    let data_plane = PeerSpec::new(address, true, "idp.internal");
 
-    let mut with_ca = HttpPeer::new(address, true, sni.clone());
-    with_ca.options.ca = Some(Arc::from(Vec::new()));
-    let without_ca = HttpPeer::new(address, true, sni.clone());
     assert_eq!(
-        with_ca.reuse_hash(),
-        without_ca.reuse_hash(),
-        "if these ever differ, the group key below is no longer the thing keeping them apart"
+        data_plane.pool_group, DEFAULT_POOL_GROUP,
+        "a cluster peer lives in the default pool partition"
     );
 
     let policy = Target::parse("https://idp.internal/jwks")
         .unwrap()
         .peer(address, Some(Duration::from_secs(1)));
     assert_ne!(
-        policy.reuse_hash(),
-        without_ca.reuse_hash(),
+        policy.pool_group, data_plane.pool_group,
         "a policy call must not be handed a data-plane connection, or the reverse"
     );
+    assert_eq!(&*policy.sni, "idp.internal", "the policy peer keeps its server name");
+    assert!(policy.tls, "an https target dials over TLS");
 }
 
 #[tokio::test(flavor = "multi_thread")]

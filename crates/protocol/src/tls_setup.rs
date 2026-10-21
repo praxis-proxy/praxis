@@ -3,9 +3,11 @@
 
 //! Shared TLS settings builder for HTTP and TCP listeners.
 //!
-//! This module provides [`build_tls_settings`], the unified entry point for
-//! constructing Pingora [`TlsSettings`] from a Praxis [`ListenerTls`] config.
-//! It is used by both HTTP and TCP protocol adapters to set up listener TLS,
+//! This module provides [`build_listener_tls`], the backend-neutral entry
+//! point that turns a Praxis [`ListenerTls`] config into the rustls
+//! `ServerConfig` a listener serves, and, under the `pingora` feature,
+//! `build_tls_settings`, which wraps that config in Pingora's `TlsSettings`.
+//! Both HTTP and TCP protocol adapters set up listener TLS through them,
 //! handling the distinction between hot-reload and static certificate modes.
 //!
 //! # Hot-reload vs static certificates
@@ -28,21 +30,32 @@
 //! it continues monitoring until explicitly stopped or the process exits.
 //! Callers typically keep the sender alive for the server lifetime.
 //!
-//! [`build_tls_settings`]: crate::tls_setup::build_tls_settings
-//! [`TlsSettings`]: pingora_core::listeners::tls::TlsSettings
+//! [`build_listener_tls`]: crate::tls_setup::build_listener_tls
 //! [`ListenerTls`]: praxis_tls::ListenerTls
 //! [`CertWatcher`]: praxis_tls::watcher::CertWatcher
 
+use std::sync::Arc;
+
+#[cfg(feature = "pingora")]
 use pingora_core::listeners::tls::TlsSettings;
 use praxis_core::ProxyError;
 use praxis_tls::ListenerTls;
+use rustls::ServerConfig;
 use tokio::sync::watch;
+
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
+
+/// A listener's rustls config and, when its certificates hot-reload, the
+/// sender that stops the watcher early.
+pub type BuiltListenerTls = (Arc<ServerConfig>, Option<watch::Sender<bool>>);
 
 // -----------------------------------------------------------------------------
 // TLS Settings Builder
 // -----------------------------------------------------------------------------
 
-/// Build [`TlsSettings`] for a listener.
+/// Build the rustls [`ServerConfig`] a listener serves.
 ///
 /// When `hot_reload` is enabled (and the `config-reload` feature is
 /// compiled in), uses a [`ReloadableCertResolver`] and spawns a
@@ -53,24 +66,29 @@ use tokio::sync::watch;
 /// `context_label` appears in debug tracing to distinguish HTTP
 /// from TCP callers (e.g. `"HTTP"`, `"TCP"`).
 ///
-/// Returns the settings and an optional shutdown sender for the
+/// Returns the config and an optional shutdown sender for the
 /// cert watcher. The watcher runs for the process lifetime; the caller
 /// keeps the sender to stop it early via `send(true)` (dropping it does
-/// not stop the watcher).
+/// not stop the watcher). Backend-neutral: every backend's listener wraps
+/// this config in its own acceptor.
 ///
-/// [`TlsSettings`]: pingora_core::listeners::tls::TlsSettings
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] naming `address` when the certificate
+/// material cannot be loaded or the listener config cannot be built.
+///
 /// [`build_server_config`]: praxis_tls::setup::build_server_config
 /// [`ReloadableCertResolver`]: praxis_tls::reload::ReloadableCertResolver
 /// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
-pub(crate) fn build_tls_settings(
+pub fn build_listener_tls(
     tls: &ListenerTls,
     address: &str,
     context_label: &str,
     advertise_http_alpn: bool,
-) -> Result<(TlsSettings, Option<watch::Sender<bool>>), ProxyError> {
+) -> Result<BuiltListenerTls, ProxyError> {
     #[cfg(feature = "config-reload")]
     if tls.is_hot_reload() {
-        return build_reloadable_tls_settings(tls, address, context_label, advertise_http_alpn);
+        return build_reloadable_listener_tls(tls, address, context_label, advertise_http_alpn);
     }
 
     // Built without the `config-reload` feature: honor the static cert but warn
@@ -88,23 +106,37 @@ pub(crate) fn build_tls_settings(
     tracing::debug!(address, context_label, "building TLS ServerConfig");
     let server_config = praxis_tls::setup::build_server_config(tls, advertise_http_alpn)
         .map_err(|e| ProxyError::Config(format!("TLS for {address}: {e}")))?;
-    let settings = TlsSettings::with_server_config(server_config)
-        .map_err(|e| ProxyError::Config(format!("TLS for {address}: {e}")))?;
-    Ok((settings, None))
+    Ok((server_config, None))
 }
 
-/// Build reloadable [`TlsSettings`] and spawn a [`CertWatcher`] to swap
-/// certificates atomically as they change on disk.
+/// Build Pingora `TlsSettings` for a listener from [`build_listener_tls`].
 ///
-/// [`TlsSettings`]: pingora_core::listeners::tls::TlsSettings
-/// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
-#[cfg(feature = "config-reload")]
-fn build_reloadable_tls_settings(
+/// Returns the settings and the cert watcher's optional shutdown sender,
+/// exactly as [`build_listener_tls`] does.
+#[cfg(feature = "pingora")]
+pub(crate) fn build_tls_settings(
     tls: &ListenerTls,
     address: &str,
     context_label: &str,
     advertise_http_alpn: bool,
 ) -> Result<(TlsSettings, Option<watch::Sender<bool>>), ProxyError> {
+    let (server_config, shutdown_tx) = build_listener_tls(tls, address, context_label, advertise_http_alpn)?;
+    let settings = TlsSettings::with_server_config(server_config)
+        .map_err(|error| ProxyError::Config(format!("TLS for {address}: {error}")))?;
+    Ok((settings, shutdown_tx))
+}
+
+/// Build a reloadable [`ServerConfig`] and spawn a [`CertWatcher`] to swap
+/// certificates atomically as they change on disk.
+///
+/// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
+#[cfg(feature = "config-reload")]
+fn build_reloadable_listener_tls(
+    tls: &ListenerTls,
+    address: &str,
+    context_label: &str,
+    advertise_http_alpn: bool,
+) -> Result<BuiltListenerTls, ProxyError> {
     tracing::debug!(address, context_label, "building TLS ServerConfig with hot-reload");
     let result = praxis_tls::setup::build_reloadable_server_config(tls, advertise_http_alpn)
         .map_err(|e| ProxyError::Config(format!("TLS hot-reload for {address}: {e}")))?;
@@ -130,9 +162,7 @@ fn build_reloadable_tls_settings(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     praxis_tls::watcher::CertWatcher::spawn(result.cert_handle, pair, verifier_reload, shutdown_rx);
 
-    let settings = TlsSettings::with_server_config(result.config)
-        .map_err(|e| ProxyError::Config(format!("TLS for {address}: {e}")))?;
-    Ok((settings, Some(shutdown_tx)))
+    Ok((result.config, Some(shutdown_tx)))
 }
 
 // -----------------------------------------------------------------------------
@@ -219,13 +249,11 @@ mod tests {
             min_version: None,
         };
 
-        let (settings, shutdown_tx) = build_tls_settings(&tls, "127.0.0.1:8443", "TEST", false)?;
+        let (_config, shutdown_tx) = build_listener_tls(&tls, "127.0.0.1:8443", "TEST", false)?;
         assert!(
             shutdown_tx.is_none(),
             "static config should not return a cert-watcher shutdown sender"
         );
-
-        drop(settings);
         Ok(())
     }
 
@@ -249,7 +277,7 @@ mod tests {
             min_version: None,
         };
 
-        let (_settings, shutdown_tx) = build_tls_settings(&tls, "127.0.0.1:8443", "HTTP", true)?;
+        let (_config, shutdown_tx) = build_listener_tls(&tls, "127.0.0.1:8443", "HTTP", true)?;
         assert!(
             shutdown_tx.is_none(),
             "static config with HTTP ALPN should not return a cert-watcher shutdown sender"
@@ -287,7 +315,7 @@ mod tests {
 
         assert!(!tls.is_hot_reload(), "a multi-cert config must disable hot-reload");
 
-        let (_settings, shutdown_tx) = build_tls_settings(&tls, "127.0.0.1:8443", "HTTP", true)?;
+        let (_config, shutdown_tx) = build_listener_tls(&tls, "127.0.0.1:8443", "HTTP", true)?;
         assert!(
             shutdown_tx.is_none(),
             "a multi-cert config should use the static path and not return a shutdown sender"
@@ -318,7 +346,7 @@ mod tests {
             min_version: None,
         };
 
-        let (_settings, shutdown_tx) = build_tls_settings(&tls, "127.0.0.1:8443", "mTLS", false)?;
+        let (_config, shutdown_tx) = build_listener_tls(&tls, "127.0.0.1:8443", "mTLS", false)?;
         assert!(
             shutdown_tx.is_none(),
             "static mTLS config should not return a cert-watcher shutdown sender"
@@ -347,7 +375,7 @@ mod tests {
 
         assert!(
             matches!(
-                build_tls_settings(&tls, "127.0.0.1:8443", "TEST", false),
+                build_listener_tls(&tls, "127.0.0.1:8443", "TEST", false),
                 Err(ProxyError::Config(msg)) if msg.contains("127.0.0.1:8443")
             ),
             "an invalid cert path should fail with a config error naming the listener address 127.0.0.1:8443"
@@ -380,7 +408,7 @@ mod tests {
             "a single cert with hot_reload=None should default to hot-reload"
         );
 
-        let (_settings, shutdown_tx) = build_tls_settings(&tls, "127.0.0.1:8443", "HTTP", true)?;
+        let (_config, shutdown_tx) = build_listener_tls(&tls, "127.0.0.1:8443", "HTTP", true)?;
         assert!(
             shutdown_tx.is_none(),
             "without the config-reload feature the builder should fall back to a static config and not return a watcher"
@@ -411,7 +439,7 @@ mod tests {
 
         assert!(tls.is_hot_reload(), "a single cert should enable hot-reload by default");
 
-        let (_settings, shutdown_tx) = build_tls_settings(&tls, "127.0.0.1:8443", "HTTP", true)?;
+        let (_config, shutdown_tx) = build_listener_tls(&tls, "127.0.0.1:8443", "HTTP", true)?;
         assert!(
             shutdown_tx.is_some(),
             "with the config-reload feature the builder should return a cert-watcher shutdown sender"
@@ -447,7 +475,7 @@ mod tests {
             min_version: None,
         };
 
-        let (_settings, shutdown_tx) = build_tls_settings(&tls, "127.0.0.1:8443", "mTLS", false)?;
+        let (_config, shutdown_tx) = build_listener_tls(&tls, "127.0.0.1:8443", "mTLS", false)?;
         assert!(
             shutdown_tx.is_some(),
             "hot-reload with a client CA should spawn a watcher and return a shutdown sender"
@@ -480,7 +508,7 @@ mod tests {
             min_version: None,
         };
 
-        let (_settings, shutdown_tx) = build_tls_settings(&tls, "127.0.0.1:8443", "HTTP", true)?;
+        let (_config, shutdown_tx) = build_listener_tls(&tls, "127.0.0.1:8443", "HTTP", true)?;
         assert!(
             shutdown_tx.is_some(),
             "hot-reload without a client CA should still spawn a watcher and return a shutdown sender"
@@ -512,9 +540,9 @@ mod tests {
             min_version: None,
         };
 
-        build_tls_settings(&tls, "127.0.0.1:8443", "HTTP", true)?;
-        build_tls_settings(&tls, "127.0.0.1:8443", "TCP", false)?;
-        build_tls_settings(&tls, "127.0.0.1:8443", "CUSTOM", false)?;
+        build_listener_tls(&tls, "127.0.0.1:8443", "HTTP", true)?;
+        build_listener_tls(&tls, "127.0.0.1:8443", "TCP", false)?;
+        build_listener_tls(&tls, "127.0.0.1:8443", "CUSTOM", false)?;
         Ok(())
     }
 
@@ -539,7 +567,7 @@ mod tests {
 
         assert!(
             matches!(
-                build_tls_settings(&tls, "192.168.1.1:443", "HTTP", false),
+                build_listener_tls(&tls, "192.168.1.1:443", "HTTP", false),
                 Err(ProxyError::Config(msg)) if msg.contains("192.168.1.1:443")
             ),
             "the config error should name the failing listener address 192.168.1.1:443"
@@ -547,7 +575,7 @@ mod tests {
 
         assert!(
             matches!(
-                build_tls_settings(&tls, "[::1]:8443", "TCP", false),
+                build_listener_tls(&tls, "[::1]:8443", "TCP", false),
                 Err(ProxyError::Config(msg)) if msg.contains("[::1]:8443")
             ),
             "the config error should name the failing IPv6 listener address [::1]:8443"
@@ -574,8 +602,8 @@ mod tests {
             min_version: None,
         };
 
-        build_tls_settings(&tls, "127.0.0.1:8443", "HTTP", true)?;
-        build_tls_settings(&tls, "127.0.0.1:8443", "TCP", false)?;
+        build_listener_tls(&tls, "127.0.0.1:8443", "HTTP", true)?;
+        build_listener_tls(&tls, "127.0.0.1:8443", "TCP", false)?;
         Ok(())
     }
 }

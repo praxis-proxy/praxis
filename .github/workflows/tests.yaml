@@ -108,3 +108,6 @@ jobs:
 
       - name: Check each optional feature in isolation
         run: make check-features
+
+      - name: Check backend-neutral admin handlers
+        run: cargo check -p praxis-proxy-protocol --no-default-features --features admin-api --all-targets
