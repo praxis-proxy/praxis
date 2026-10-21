@@ -29,7 +29,7 @@ use crate::http::pingora::{json::json_response, kv::dispatch_kv_request, metrics
 
 /// Recorder upkeep runs independently of Prometheus scrape traffic.
 #[cfg_attr(
-    not(feature = "pingora"),
+    not(any(feature = "pingora", feature = "hyper")),
     expect(dead_code, reason = "only a backend's upkeep service uses the default interval")
 )]
 pub(crate) const PROMETHEUS_UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
@@ -132,7 +132,7 @@ impl PingoraHealthService {
 
     /// Resolve readiness against current pipelines after a config reload.
     #[cfg_attr(
-        all(not(feature = "pingora"), not(test)),
+        all(not(any(feature = "pingora", feature = "hyper")), not(test)),
         expect(
             dead_code,
             reason = "only a backend's listener glue or tests configure live readiness"
@@ -407,7 +407,7 @@ pub(crate) type UpkeepFn = Arc<dyn Fn() + Send + Sync>;
 /// Backend-neutral: the backend runs this as one of its background
 /// services and hands it its own shutdown watch.
 #[cfg_attr(
-    all(not(feature = "pingora"), not(test)),
+    all(not(any(feature = "pingora", feature = "hyper")), not(test)),
     expect(
         dead_code,
         reason = "only a backend's upkeep service or tests run recorder maintenance"
@@ -448,7 +448,7 @@ pub(crate) async fn run_prometheus_upkeep(mut shutdown: watch::Receiver<bool>, i
 pub struct PrometheusAdminRecorder {
     /// Exporter handle shared by metrics rendering and recorder upkeep.
     #[cfg_attr(
-        not(feature = "pingora"),
+        not(any(feature = "pingora", feature = "hyper")),
         expect(dead_code, reason = "only a backend's upkeep service reads the recorder handle")
     )]
     pub(crate) handle: metrics_exporter_prometheus::PrometheusHandle,

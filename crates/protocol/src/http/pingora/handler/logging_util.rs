@@ -23,7 +23,11 @@ use crate::http::pingora::context::PingoraRequestCtx;
 /// emits. Only fires when the pipeline configures an `access_log`
 /// filter; these records bypass the filter's sampling because
 /// incomplete requests are always worth a record.
-pub(super) fn maybe_emit_fallback_access_log(pipeline: &FilterPipeline, status: u16, ctx: &mut PingoraRequestCtx) {
+pub(in crate::http) fn maybe_emit_fallback_access_log(
+    pipeline: &FilterPipeline,
+    status: u16,
+    ctx: &mut PingoraRequestCtx,
+) {
     if ctx.response_delivery_complete || ctx.connection_upgraded || !pipeline.contains_filter("access_log") {
         return;
     }
@@ -57,7 +61,7 @@ pub(super) fn maybe_emit_fallback_access_log(pipeline: &FilterPipeline, status: 
 /// Run response filters during the logging phase if the
 /// response phase never executed (upstream error, filter
 /// rejection, etc.).
-pub(super) async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx) {
+pub(in crate::http) async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx) {
     if !ctx.response_phase_done
         && let Some(mut filter_ctx) = ctx.filter_context_for(pipeline, None)
     {

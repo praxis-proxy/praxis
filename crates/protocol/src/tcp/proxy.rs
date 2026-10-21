@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Pingora-backed bidirectional TCP proxy application.
+//! The bidirectional TCP proxy every backend runs.
+//!
+//! A backend accepts the connection (and terminates TLS where the listener
+//! asks for it); everything after that, from admission to the disconnect
+//! filters, is the shared [`PingoraTcpProxy::serve_connection`].
+//!
+//! [`PingoraTcpProxy::serve_connection`]: crate::tcp::proxy::PingoraTcpProxy::serve_connection
 
 use std::{
     borrow::Cow,
@@ -18,9 +24,14 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
+#[cfg(any(feature = "pingora", test))]
 use async_trait::async_trait;
+#[cfg(feature = "pingora")]
 use pingora_core::{apps::ServerApp, protocols::Stream, server::ShutdownWatch};
-use praxis_core::connectivity::is_private_upstream_ip;
+use praxis_core::{
+    config::{Config, Listener},
+    connectivity::is_private_upstream_ip,
+};
 use praxis_filter::{FilterAction, FilterPipeline, TcpFilterContext};
 use praxis_tls::sni;
 use tokio::{
@@ -29,6 +40,9 @@ use tokio::{
     sync::{Semaphore, watch},
 };
 use tracing::{Instrument as _, Span, debug, error, info, info_span, trace, warn};
+
+use super::groups::TcpGroupKey;
+use crate::ListenerPipelines;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -54,7 +68,7 @@ const SNI_PEEK_TIMEOUT: Duration = Duration::from_secs(5);
 // PingoraTcpProxy
 // -----------------------------------------------------------------------------
 
-/// Pingora-backed bidirectional TCP proxy.
+/// Bidirectional TCP proxy, shared by every backend.
 ///
 /// Supports two modes:
 /// - **Static upstream**: the listener config provides a fixed `upstream` address.
@@ -164,14 +178,17 @@ impl PingoraTcpProxy {
     /// from a genuine completion. The copy is optionally wrapped in a
     /// max-duration timeout.
     #[expect(clippy::too_many_arguments, reason = "per-connection forwarding state")]
-    async fn forward(
+    async fn forward<S>(
         &self,
-        session: &mut Stream,
+        session: &mut S,
         upstream: &mut TcpStream,
         shutdown_rx: &mut watch::Receiver<bool>,
         upstream_addr: &str,
         counters: &ByteCounters,
-    ) -> TcpCloseReason {
+    ) -> TcpCloseReason
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
         let mut counted = CountingStream {
             inner: session,
             counters,
@@ -269,18 +286,27 @@ impl PingoraTcpProxy {
         };
         let _result = pipeline.execute_tcp_disconnect(&mut ctx).await;
     }
-}
 
-#[async_trait]
-impl ServerApp for PingoraTcpProxy {
+    /// Serve one accepted connection to completion, through the proxy's whole
+    /// lifecycle.
+    ///
+    /// `remote_addr` and `local_addr` are the client's and the listener's
+    /// socket addresses; forwarding ends early once `shutdown` flips.
     #[expect(
         clippy::too_many_lines,
         clippy::large_stack_frames,
         reason = "linear connection lifecycle"
     )]
-    async fn process_new(self: &Arc<Self>, mut session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
+    pub(super) async fn serve_connection<S>(
+        &self,
+        mut session: S,
+        remote_addr: &str,
+        local_addr: &str,
+        shutdown: &watch::Receiver<bool>,
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send,
+    {
         let connect_time = std::time::Instant::now();
-        let (remote_addr, local_addr) = extract_addrs(&session);
 
         let span = info_span!(
             "tcp_connection",
@@ -295,7 +321,7 @@ impl ServerApp for PingoraTcpProxy {
                 crate::http::pingora::metrics::record_overload_reject(
                     crate::http::pingora::metrics::OVERLOAD_REASON_MEMORY,
                 );
-                return None;
+                return;
             }
 
             let Some(mut fd_admission) = praxis_core::fd::try_admit() else {
@@ -303,7 +329,7 @@ impl ServerApp for PingoraTcpProxy {
                 crate::http::pingora::metrics::record_overload_reject(
                     crate::http::pingora::metrics::OVERLOAD_REASON_FILE_DESCRIPTORS,
                 );
-                return None;
+                return;
             };
 
             let (exceeded, _global_permit) = crate::connections::try_acquire_global();
@@ -312,7 +338,7 @@ impl ServerApp for PingoraTcpProxy {
                 crate::http::pingora::metrics::record_overload_reject(
                     crate::http::pingora::metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS,
                 );
-                return None;
+                return;
             }
 
             let _permit = if let Some(sem) = &self.connection_semaphore {
@@ -323,13 +349,13 @@ impl ServerApp for PingoraTcpProxy {
                     crate::http::pingora::metrics::record_overload_reject(
                         crate::http::pingora::metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS,
                     );
-                    return None;
+                    return;
                 }
             } else {
                 None
             };
 
-            let listener_label = self.listener_label_for(&local_addr);
+            let listener_label = self.listener_label_for(local_addr);
             let _active_tcp_connection = super::metrics::TcpActiveConnectionGuard::acquire(listener_label.clone());
             super::metrics::record_tcp_connection_accepted(listener_label);
 
@@ -339,12 +365,12 @@ impl ServerApp for PingoraTcpProxy {
                 let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {
                     warn!(remote = %remote_addr, "SNI peek timed out, closing connection");
                     super::metrics::record_tcp_connection_duration(
-                        self.listener_label_for(&local_addr),
+                        self.listener_label_for(local_addr),
                         "sni_timeout",
                         connect_time.elapsed().as_secs_f64(),
                     );
                     log_early_close(connect_time, "sni_timeout");
-                    return None;
+                    return;
                 };
                 result
             } else {
@@ -357,15 +383,18 @@ impl ServerApp for PingoraTcpProxy {
             // stays on the same instance across a hot reload.
             let pipeline = self.pipeline.load_full();
 
-            let upstream_addr = self
+            let Some(upstream_addr) = self
                 .run_connect_filters(
                     &pipeline,
-                    &remote_addr,
-                    &local_addr,
+                    remote_addr,
+                    local_addr,
                     sni_hostname.as_deref(),
                     connect_time,
                 )
-                .await?;
+                .await
+            else {
+                return;
+            };
 
             Span::current().record("upstream.address", upstream_addr.as_str());
 
@@ -387,8 +416,8 @@ impl ServerApp for PingoraTcpProxy {
                     // counters leak permanently.
                     self.run_disconnect_filters(
                         &pipeline,
-                        &remote_addr,
-                        &local_addr,
+                        remote_addr,
+                        local_addr,
                         &upstream_addr,
                         sni_hostname.as_deref(),
                         connect_time,
@@ -397,12 +426,12 @@ impl ServerApp for PingoraTcpProxy {
                     )
                     .await;
                     super::metrics::record_tcp_connection_duration(
-                        self.listener_label_for(&local_addr),
+                        self.listener_label_for(local_addr),
                         "connect_failure",
                         connect_time.elapsed().as_secs_f64(),
                     );
                     log_early_close(connect_time, "connect_failure");
-                    return None;
+                    return;
                 };
 
             if !peeked_bytes.is_empty()
@@ -416,8 +445,8 @@ impl ServerApp for PingoraTcpProxy {
                 );
                 self.run_disconnect_filters(
                     &pipeline,
-                    &remote_addr,
-                    &local_addr,
+                    remote_addr,
+                    local_addr,
                     &upstream_addr,
                     sni_hostname.as_deref(),
                     connect_time,
@@ -426,12 +455,12 @@ impl ServerApp for PingoraTcpProxy {
                 )
                 .await;
                 super::metrics::record_tcp_connection_duration(
-                    self.listener_label_for(&local_addr),
+                    self.listener_label_for(local_addr),
                     "peeked_write_error",
                     connect_time.elapsed().as_secs_f64(),
                 );
                 log_early_close(connect_time, "peeked_write_error");
-                return None;
+                return;
             }
 
             // The peeked hello has been forwarded; a long-lived session
@@ -452,8 +481,8 @@ impl ServerApp for PingoraTcpProxy {
 
             self.run_disconnect_filters(
                 &pipeline,
-                &remote_addr,
-                &local_addr,
+                remote_addr,
+                local_addr,
                 &upstream_addr,
                 sni_hostname.as_deref(),
                 connect_time,
@@ -472,19 +501,100 @@ impl ServerApp for PingoraTcpProxy {
                 reason = close_reason.as_str(),
                 "connection_close"
             );
-            let listener_label = self.listener_label_for(&local_addr);
+            let listener_label = self.listener_label_for(local_addr);
             super::metrics::record_tcp_bytes(listener_label.clone(), bytes_in, bytes_out);
             super::metrics::record_tcp_connection_duration(
                 listener_label,
                 close_reason.as_str(),
                 connect_time.elapsed().as_secs_f64(),
             );
-
-            None
         }
         .instrument(span)
-        .await
+        .await;
     }
+}
+
+#[cfg(feature = "pingora")]
+#[async_trait]
+impl ServerApp for PingoraTcpProxy {
+    async fn process_new(self: &Arc<Self>, session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
+        let (remote_addr, local_addr) = extract_addrs(&session);
+        self.serve_connection(session, &remote_addr, &local_addr, shutdown)
+            .await;
+        None
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Listener Groups
+// -----------------------------------------------------------------------------
+
+/// Build the proxy that serves one TCP listener group.
+///
+/// The group runs the first listener's pipeline (`fallback_pipeline` when
+/// it has none) and connection limit; config validation keeps those the
+/// same across the group.
+pub(super) fn build_group_proxy(
+    group_key: &TcpGroupKey,
+    listeners: &[&Listener],
+    pipelines: &ListenerPipelines,
+    fallback_pipeline: &Arc<ArcSwap<FilterPipeline>>,
+    config: &Config,
+) -> PingoraTcpProxy {
+    let (upstream_opt, cluster_opt, timeout_ms, max_dur_secs) = group_key;
+    let pipeline = listeners
+        .first()
+        .and_then(|l| pipelines.get(&l.name))
+        .map_or_else(|| Arc::clone(fallback_pipeline), Arc::clone);
+    let session_timeout = timeout_ms.map(Duration::from_millis);
+    let max_duration = max_dur_secs.map(Duration::from_secs);
+    let connection_semaphore = listeners
+        .first()
+        .and_then(|l| l.max_connections)
+        .map(|max| Arc::new(Semaphore::new(max as usize)));
+    let (listener_names, default_listener_name) = build_listener_labels(listeners);
+    PingoraTcpProxy::new(
+        upstream_opt.clone(),
+        cluster_opt.clone().map(Arc::from),
+        pipeline,
+        session_timeout,
+        max_duration,
+        connection_semaphore,
+        config.insecure_options.allow_private_upstreams,
+        listener_names,
+        default_listener_name,
+    )
+}
+
+/// Derive the service name for a TCP listener group.
+pub(super) fn tcp_service_name(upstream: Option<&str>, cluster: Option<&str>) -> String {
+    match (upstream, cluster) {
+        (Some(addr), _) => format!("tcp-proxy:{addr}"),
+        (_, Some(cluster)) => format!("tcp-proxy:cluster:{cluster}"),
+        _ => "tcp-proxy:filter-routed".to_owned(),
+    }
+}
+
+/// Build the per-address metric label map and the default listener label.
+fn build_listener_labels(
+    listeners: &[&Listener],
+) -> (HashMap<String, ::metrics::SharedString>, ::metrics::SharedString) {
+    // `from_shared` keeps labels as refcounted `Arc<str>`s: they are cloned
+    // per connection, and owned `String` labels would deep-copy on every clone.
+    let by_address = listeners
+        .iter()
+        .map(|l| {
+            (
+                l.address.clone(),
+                ::metrics::SharedString::from_shared(Arc::from(l.name.as_str())),
+            )
+        })
+        .collect();
+    let default = listeners.first().map_or_else(
+        || ::metrics::SharedString::const_str("unknown"),
+        |l| ::metrics::SharedString::from_shared(Arc::from(l.name.as_str())),
+    );
+    (by_address, default)
 }
 
 // -----------------------------------------------------------------------------
@@ -573,7 +683,7 @@ enum SniPeekResult {
 /// Returns `(sni_hostname, peeked_bytes)`. The peeked bytes must be
 /// forwarded to the upstream before starting bidirectional copy.
 #[expect(clippy::indexing_slicing, reason = "filled <= buf.len() maintained by loop")]
-async fn peek_sni(session: &mut Stream) -> (Option<String>, Vec<u8>) {
+async fn peek_sni<S: AsyncRead + Unpin>(session: &mut S) -> (Option<String>, Vec<u8>) {
     let mut buf = vec![0_u8; PEEK_INITIAL];
     let mut filled = 0;
     // Engaged after the first incomplete parse: resumes record scanning
@@ -692,6 +802,7 @@ fn log_early_close(connect_time: std::time::Instant, reason: &str) {
 }
 
 /// Extract remote and local address strings from a session.
+#[cfg(feature = "pingora")]
 fn extract_addrs(session: &Stream) -> (String, String) {
     let digest = session.get_socket_digest();
     let remote = digest
@@ -809,15 +920,15 @@ impl ByteCounters {
 /// Wrapping only the client side is sufficient: bytes read from the client
 /// are the client-to-upstream direction and bytes written to the client are
 /// the upstream-to-client direction.
-struct CountingStream<'a> {
+struct CountingStream<'a, S> {
     /// The wrapped downstream session.
-    inner: &'a mut Stream,
+    inner: &'a mut S,
 
     /// Shared totals updated on every successful poll.
     counters: &'a ByteCounters,
 }
 
-impl AsyncRead for CountingStream<'_> {
+impl<S: AsyncRead + Unpin> AsyncRead for CountingStream<'_, S> {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let before = buf.filled().len();
         let poll = Pin::new(&mut *self.inner).poll_read(cx, buf);
@@ -829,7 +940,7 @@ impl AsyncRead for CountingStream<'_> {
     }
 }
 
-impl AsyncWrite for CountingStream<'_> {
+impl<S: AsyncWrite + Unpin> AsyncWrite for CountingStream<'_, S> {
     fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         let poll = Pin::new(&mut *self.inner).poll_write(cx, buf);
         if let Poll::Ready(Ok(written)) = &poll {
@@ -1048,10 +1159,9 @@ mod tests {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let counters = ByteCounters::default();
-        let (client, mut peer) = tokio::io::duplex(64);
-        let mut stream: Stream = Box::new(client);
+        let (mut client, mut peer) = tokio::io::duplex(64);
         let mut counted = CountingStream {
-            inner: &mut stream,
+            inner: &mut client,
             counters: &counters,
         };
 
@@ -1073,10 +1183,9 @@ mod tests {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let counters = ByteCounters::default();
-        let (client, mut peer) = tokio::io::duplex(64);
-        let mut stream: Stream = Box::new(client);
+        let (mut client, mut peer) = tokio::io::duplex(64);
         let mut counted = CountingStream {
-            inner: &mut stream,
+            inner: &mut client,
             counters: &counters,
         };
 

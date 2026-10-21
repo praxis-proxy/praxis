@@ -5,6 +5,7 @@
 
 use std::{collections::VecDeque, fmt::Write as _};
 
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
 use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
 use praxis_filter::{
@@ -52,10 +53,22 @@ const TRACE_ALLOWED_HEADERS: &[&str] = &[
 /// TRACE-based reconnaissance should block it via filter conditions.
 ///
 /// [RFC 9110 Section 9.3.8]: https://datatracker.ietf.org/doc/html/rfc9110#section-9.3.8
+#[cfg(feature = "pingora")]
 pub(super) fn build_trace_response(session: &Session) -> Rejection {
     let req = session.req_header();
-    let mut body = format!("{} {} {:?}\r\n", req.method, req.uri, req.version);
-    for (name, value) in &req.headers {
+    trace_response_for(&req.method, &req.uri, req.version, &req.headers)
+}
+
+/// Build a TRACE echo response from the request line and headers; the
+/// backend-neutral core of `build_trace_response`.
+pub(in crate::http) fn trace_response_for(
+    method: &http::Method,
+    uri: &http::Uri,
+    version: http::Version,
+    headers: &http::HeaderMap,
+) -> Rejection {
+    let mut body = format!("{method} {uri} {version:?}\r\n");
+    for (name, value) in headers {
         if !TRACE_ALLOWED_HEADERS.contains(&name.as_str()) {
             tracing::debug!(header = %name, "redacting header from TRACE response");
             continue;
@@ -77,12 +90,13 @@ pub(super) fn build_trace_response(session: &Session) -> Rejection {
 // -----------------------------------------------------------------------------
 
 /// Holds ordered trusted mutation log for provenance resolution.
-pub(super) struct PreReadMutations {
+pub(in crate::http) struct PreReadMutations {
     /// Ordered trusted header mutation log.
     pub mutations: Vec<TrustedHeaderMutation>,
 }
 
 /// Errors that can occur during body pre-reading in `StreamBuffer` mode.
+#[cfg(feature = "pingora")]
 pub(super) enum PreReadError {
     /// A filter rejected the request during body processing.
     Rejected(Rejection),
@@ -94,26 +108,39 @@ pub(super) enum PreReadError {
     Io(Box<pingora_core::Error>),
 }
 
+#[cfg(feature = "pingora")]
+impl From<PreReadStop> for PreReadError {
+    fn from(stop: PreReadStop) -> Self {
+        match stop {
+            PreReadStop::Rejected(rejection) => Self::Rejected(rejection),
+            PreReadStop::Filter(error) => Self::Filter(error),
+        }
+    }
+}
+
+/// Why a pre-read pass stopped before the body ended.
+pub(in crate::http) enum PreReadStop {
+    /// A filter rejected the request during body processing.
+    Rejected(Rejection),
+
+    /// A filter returned an error during body processing.
+    Filter(FilterError),
+}
+
 /// Pre-read the request body from the session and run body filters.
 ///
 /// Returns the ordered trusted mutation log emitted by body filters.
 /// The accumulated body is stored in `ctx.pre_read_body` for later
 /// forwarding by `request_body_filter`.
-#[expect(
-    clippy::too_many_lines,
-    unused_assignments,
-    reason = "buffer management orchestration"
-)]
+#[cfg(feature = "pingora")]
 pub(super) async fn pre_read_body(
     pipeline: &FilterPipeline,
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
     request: &Request,
 ) -> Result<PreReadMutations, PreReadError> {
-    let caps = pipeline.body_capabilities();
-    let max_bytes = match caps.request_body_mode {
-        BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
-        _ => return Ok(PreReadMutations { mutations: Vec::new() }),
+    let Some(mut pass) = PreReadPass::new(pipeline) else {
+        return Ok(PreReadMutations { mutations: Vec::new() });
     };
 
     // Pingora only calls `request_body_filter` after pre-read when its
@@ -122,19 +149,82 @@ pub(super) async fn pre_read_body(
     // Pingora's fixed retry buffer and are guarded in `handle_connect_failure`.
     session.downstream_session.enable_retry_buffering();
 
-    let mut buffer = BodyBuffer::new(max_bytes);
-    let mut mutation_log: Vec<TrustedHeaderMutation> = Vec::new();
-    let mut released = false;
-    let mut eos_body = None;
-    let mut original_body_bytes: u64 = 0;
-
     loop {
         let chunk = session
             .downstream_session
             .read_request_body()
             .await
             .map_err(PreReadError::Io)?;
+        if pass.feed(pipeline, ctx, request, chunk).await? {
+            break;
+        }
+    }
 
+    Ok(pass.finish(pipeline, ctx))
+}
+
+/// One `StreamBuffer` pre-read of a request body: the chunks seen so far
+/// and the filters' state across them, fed one downstream chunk at a time.
+///
+/// The backend-neutral core of `pre_read_body`: a backend reads the body
+/// its own way, feeds each chunk (and `None` at the end) to [`feed`], and
+/// stores the result with [`finish`].
+///
+/// [`feed`]: Self::feed
+/// [`finish`]: Self::finish
+pub(in crate::http) struct PreReadPass {
+    /// Accumulated body, frozen and handed to the filters at end of stream.
+    buffer: BodyBuffer,
+
+    /// The body the filters left at end of stream.
+    eos_body: Option<bytes::Bytes>,
+
+    /// Buffering cap from the pipeline's `StreamBuffer` mode.
+    max_bytes: usize,
+
+    /// Ordered trusted header mutations the passes emitted.
+    mutation_log: Vec<TrustedHeaderMutation>,
+
+    /// Downstream bytes read so far, before any filter rewrote them.
+    original_body_bytes: u64,
+
+    /// Whether a filter released the buffer during pre-read.
+    released: bool,
+}
+
+impl PreReadPass {
+    /// Start a pre-read when the pipeline buffers request bodies in
+    /// `StreamBuffer` mode; `None` otherwise.
+    pub(in crate::http) fn new(pipeline: &FilterPipeline) -> Option<Self> {
+        let BodyMode::StreamBuffer { max_bytes } = pipeline.body_capabilities().request_body_mode else {
+            return None;
+        };
+        let max_bytes = max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES);
+        Some(Self {
+            buffer: BodyBuffer::new(max_bytes),
+            eos_body: None,
+            max_bytes,
+            mutation_log: Vec::new(),
+            original_body_bytes: 0,
+            released: false,
+        })
+    }
+
+    /// Feed the next downstream chunk, `None` at end of stream, through the
+    /// request body filters. Returns `true` once the body has ended.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PreReadStop`] when the body outgrows the buffer (a 413) or
+    /// a filter rejects or fails.
+    #[expect(clippy::too_many_lines, reason = "buffer management orchestration")]
+    pub(in crate::http) async fn feed(
+        &mut self,
+        pipeline: &FilterPipeline,
+        ctx: &mut PingoraRequestCtx,
+        request: &Request,
+        chunk: Option<bytes::Bytes>,
+    ) -> Result<bool, PreReadStop> {
         let end_of_stream = chunk.is_none();
         let mut body = chunk;
         let downstream_chunk_len = body.as_ref().map_or(0, bytes::Bytes::len) as u64;
@@ -143,32 +233,32 @@ pub(super) async fn pre_read_body(
         // body is created. This stays separate from the pipeline's
         // accumulate_body_bytes so the retry guard sees the original
         // size even when a ReadWrite filter shrinks or grows the body.
-        original_body_bytes += downstream_chunk_len;
+        self.original_body_bytes += downstream_chunk_len;
 
         if let Some(b) = &body
-            && buffer.push(b.clone()).is_err()
+            && self.buffer.push(b.clone()).is_err()
         {
-            return Err(PreReadError::Rejected(Rejection::status(413)));
+            return Err(PreReadStop::Rejected(Rejection::status(413)));
         }
 
         // At EOS, deliver the accumulated body to filters so
         // body writers receive the complete payload — even when
         // a read-only filter returned Release before EOS.
         if end_of_stream {
-            body = Some(buffer.freeze());
-            buffer = BodyBuffer::new(max_bytes);
+            let accumulated = std::mem::replace(&mut self.buffer, BodyBuffer::new(self.max_bytes));
+            body = Some(accumulated.freeze());
         }
 
         ctx.request_body_bytes = if end_of_stream {
             0
         } else {
-            original_body_bytes.saturating_sub(downstream_chunk_len)
+            self.original_body_bytes.saturating_sub(downstream_chunk_len)
         };
 
         let mut filter_ctx = ctx.build_filter_context(pipeline, request, None);
         // Seed the read-only prior log so this pass's condition evaluation
         // sees headers earlier passes promoted from the body.
-        filter_ctx.prior_pre_read_mutations = std::mem::take(&mut mutation_log);
+        filter_ctx.prior_pre_read_mutations = std::mem::take(&mut self.mutation_log);
 
         let action = pipeline
             .execute_http_request_body(&mut filter_ctx, &mut body, end_of_stream)
@@ -176,7 +266,7 @@ pub(super) async fn pre_read_body(
 
         // Restore the prior log (filters never write it) and append this
         // pass's mutations, before the copy-backs partially move filter_ctx.
-        mutation_log = std::mem::take(&mut filter_ctx.prior_pre_read_mutations);
+        self.mutation_log = std::mem::take(&mut filter_ctx.prior_pre_read_mutations);
         if filter_ctx.pre_read_mutations.is_empty() {
             // Fallback for filters that only populate the legacy grouped
             // mutation queues. This preserves their existing remove -> set
@@ -186,12 +276,12 @@ pub(super) async fn pre_read_body(
             // header provenance: either the ordered pre_read_mutations log or
             // these legacy grouped queues. Mixing them would make ordering
             // ambiguous, so the ordered log takes precedence when present.
-            push_grouped_queues(&filter_ctx, &mut mutation_log);
+            push_grouped_queues(&filter_ctx, &mut self.mutation_log);
         } else {
-            mutation_log.extend(filter_ctx.pre_read_mutations);
+            self.mutation_log.extend(filter_ctx.pre_read_mutations);
         }
 
-        ctx.request_body_bytes = original_body_bytes;
+        ctx.request_body_bytes = self.original_body_bytes;
         ctx.cluster = filter_ctx.cluster;
         ctx.rewritten_path = filter_ctx.rewritten_path;
         ctx.upstream = filter_ctx.upstream;
@@ -219,56 +309,60 @@ pub(super) async fn pre_read_body(
                 | FilterAction::StreamingTerminalResponse(_),
             ) => {},
             Ok(FilterAction::Release) => {
-                if !released {
+                if !self.released {
                     debug!("StreamBuffer released during pre-read");
-                    released = true;
+                    self.released = true;
                 }
             },
             Ok(FilterAction::Reject(rejection)) => {
-                return Err(PreReadError::Rejected(rejection));
+                return Err(PreReadStop::Rejected(rejection));
             },
-            Err(e) => return Err(PreReadError::Filter(e)),
+            Err(e) => return Err(PreReadStop::Filter(e)),
         }
 
         if end_of_stream {
-            eos_body = body;
-            break;
+            self.eos_body = body;
+        }
+        Ok(end_of_stream)
+    }
+
+    /// Store the pre-read body on `ctx` for forwarding and retry replay,
+    /// and return the trusted header mutations the passes emitted.
+    pub(in crate::http) fn finish(self, pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx) -> PreReadMutations {
+        tracing::debug!("storing pre-read body for forwarding by request_body_filter");
+        let forwarded = self.eos_body.unwrap_or_else(|| self.buffer.freeze());
+
+        // The retry guard compares max(request_body_bytes, mutated_request_body_len)
+        // against Pingora's fixed retry buffer. Keeping the original downstream
+        // size here ensures a large original body still prevents retries even
+        // when a ReadWrite filter shrinks the forwarded payload.
+        ctx.request_body_bytes = self.original_body_bytes;
+        let writer_ran = pipeline.body_capabilities().any_request_body_writer;
+        let forwarded_len = forwarded.len();
+        if writer_ran {
+            ctx.mutated_request_body_len = Some(forwarded_len);
+        }
+        let chunks = if forwarded.is_empty() {
+            VecDeque::new()
+        } else {
+            VecDeque::from([forwarded])
+        };
+        // A body writer may have changed the forwarded bytes (or their length). The
+        // first attempt forwards them from pre_read_body; retries replay from
+        // Pingora's fixed buffer (the ORIGINAL bytes). Retain the mutated body so
+        // upstream_request_filter can re-seed it per retry, keeping the replayed
+        // body matched to the re-stamped Content-Length.
+        if writer_ran {
+            ctx.retained_pre_read_body = super::body_handling::retry_copy(&chunks, forwarded_len);
+        }
+        ctx.pre_read_body = Some(chunks);
+
+        ctx.request_body_released = true;
+
+        PreReadMutations {
+            mutations: self.mutation_log,
         }
     }
-
-    tracing::debug!("storing pre-read body for forwarding by request_body_filter");
-    let forwarded = eos_body.unwrap_or_else(|| buffer.freeze());
-
-    // The retry guard compares max(request_body_bytes, mutated_request_body_len)
-    // against Pingora's fixed retry buffer. Keeping the original downstream
-    // size here ensures a large original body still prevents retries even
-    // when a ReadWrite filter shrinks the forwarded payload.
-    ctx.request_body_bytes = original_body_bytes;
-    let writer_ran = caps.any_request_body_writer;
-    let forwarded_len = forwarded.len();
-    if writer_ran {
-        ctx.mutated_request_body_len = Some(forwarded_len);
-    }
-    let chunks = if forwarded.is_empty() {
-        VecDeque::new()
-    } else {
-        VecDeque::from([forwarded])
-    };
-    // A body writer may have changed the forwarded bytes (or their length). The
-    // first attempt forwards them from pre_read_body; retries replay from
-    // Pingora's fixed buffer (the ORIGINAL bytes). Retain the mutated body so
-    // upstream_request_filter can re-seed it per retry, keeping the replayed
-    // body matched to the re-stamped Content-Length.
-    if writer_ran {
-        ctx.retained_pre_read_body = super::body_handling::retry_copy(&chunks, forwarded_len);
-    }
-    ctx.pre_read_body = Some(chunks);
-
-    ctx.request_body_released = true;
-
-    Ok(PreReadMutations {
-        mutations: mutation_log,
-    })
 }
 
 /// Append a pre-read context's legacy grouped header queues to `log` as
@@ -395,6 +489,7 @@ mod tests {
     #[test]
     fn stream_buffer_max_bytes_uses_value_when_set() {
         let mode = BodyMode::StreamBuffer { max_bytes: Some(4096) };
+        #[expect(clippy::wildcard_enum_match_arm, reason = "BodyMode is non_exhaustive")]
         let resolved = match mode {
             BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
             _ => 0,
@@ -405,6 +500,7 @@ mod tests {
     #[test]
     fn stream_buffer_max_bytes_falls_back_to_absolute_max() {
         let mode = BodyMode::StreamBuffer { max_bytes: None };
+        #[expect(clippy::wildcard_enum_match_arm, reason = "BodyMode is non_exhaustive")]
         let resolved = match mode {
             BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
             _ => 0,

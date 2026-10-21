@@ -27,6 +27,14 @@ use tracing::Span;
 /// assert_eq!(ctx.cluster.as_deref(), Some("api-cluster"));
 /// ```
 #[expect(clippy::struct_excessive_bools, reason = "lifecycle flags")]
+#[cfg_attr(
+    not(feature = "pingora"),
+    expect(
+        clippy::partial_pub_fields,
+        clippy::pub_underscore_fields,
+        reason = "the context's field visibility and names are the Pingora handler's"
+    )
+)]
 pub struct PingoraRequestCtx {
     /// Connection permit from the per-listener semaphore.
     ///

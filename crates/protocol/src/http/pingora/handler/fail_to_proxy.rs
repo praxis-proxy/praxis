@@ -3,11 +3,15 @@
 
 //! Structured error responses for fatal proxy errors.
 
+#[cfg(feature = "pingora")]
 use bytes::Bytes;
 use http::HeaderValue;
+#[cfg(feature = "pingora")]
 use pingora_core::ErrorType;
+#[cfg(feature = "pingora")]
 use pingora_proxy::{FailToProxy, Session};
 use praxis_filter::{ErrorResponseContext, ErrorResponseFormatterHandle, FormattedErrorResponse, Rejection};
+#[cfg(feature = "pingora")]
 use tracing::{debug, error, warn};
 
 use crate::http::pingora::context::PingoraRequestCtx;
@@ -17,13 +21,13 @@ use crate::http::pingora::context::PingoraRequestCtx;
 // -----------------------------------------------------------------------------
 
 /// Classified proxy error with HTTP status and machine-readable fields.
-struct ProxyError {
+pub(in crate::http) struct ProxyError {
     /// Machine-readable error code (e.g. `upstream_connect_refused`).
-    code: &'static str,
+    pub(in crate::http) code: &'static str,
     /// Human-readable error message.
-    message: &'static str,
+    pub(in crate::http) message: &'static str,
     /// HTTP status code (e.g. 502, 504).
-    status: u16,
+    pub(in crate::http) status: u16,
 }
 
 // -----------------------------------------------------------------------------
@@ -41,6 +45,7 @@ struct ProxyError {
 /// response), dead downstream connections, and HEAD requests (body
 /// suppressed). Writable downstream failures (e.g. client body read
 /// timeout) receive a structured 400 response.
+#[cfg(feature = "pingora")]
 #[expect(
     clippy::large_stack_frames,
     clippy::too_many_lines,
@@ -120,6 +125,7 @@ pub(super) async fn execute(
 /// Only timeouts qualify: a connection refused mid-deadline is still a
 /// connection refused, and reporting it as `DEADLINE_EXCEEDED` would
 /// hide a real upstream failure.
+#[cfg(feature = "pingora")]
 fn grpc_deadline_rejection(etype: &ErrorType, ctx: &PingoraRequestCtx) -> Option<Rejection> {
     if !matches!(
         *etype,
@@ -127,6 +133,14 @@ fn grpc_deadline_rejection(etype: &ErrorType, ctx: &PingoraRequestCtx) -> Option
     ) {
         return None;
     }
+    deadline_exceeded_rejection(ctx)
+}
+
+/// The gRPC `DEADLINE_EXCEEDED` response for a request whose gRPC deadline
+/// has passed; `None` when it has none or it has not passed. The caller
+/// decides that the failure was a timeout. The backend-neutral core of
+/// `grpc_deadline_rejection`.
+pub(in crate::http) fn deadline_exceeded_rejection(ctx: &PingoraRequestCtx) -> Option<Rejection> {
     let deadline = ctx.extensions.get::<praxis_core::grpc::GrpcDeadline>()?;
     if !deadline.is_expired() {
         return None;
@@ -150,6 +164,7 @@ fn grpc_deadline_rejection(etype: &ErrorType, ctx: &PingoraRequestCtx) -> Option
 ///
 /// Filter rejections typically write their own response before raising
 /// `HTTPStatus`; the double-write guard returns immediately in that case.
+#[cfg(feature = "pingora")]
 async fn handle_http_status(
     session: &mut Session,
     code: u16,
@@ -173,6 +188,7 @@ async fn handle_http_status(
 /// A response-phase `Reject` cannot write to the session directly (the
 /// upstream response is mid-flight), so the rejection crosses the error
 /// boundary via the request context and is written here.
+#[cfg(feature = "pingora")]
 async fn handle_pending_rejection(
     session: &mut Session,
     code: u16,
@@ -192,7 +208,7 @@ async fn handle_pending_rejection(
 }
 
 /// The text to carry as `grpc-message` for a rejection.
-fn rejection_message(rejection: &Rejection) -> &str {
+pub(in crate::http) fn rejection_message(rejection: &Rejection) -> &str {
     rejection
         .body
         .as_deref()
@@ -206,6 +222,7 @@ fn rejection_message(rejection: &Rejection) -> &str {
 /// Dead connections (write failure, read failure, closed) are silently
 /// abandoned. Writable failures (e.g. body read timeout) receive a
 /// structured 400 response, matching Pingora's default status choice.
+#[cfg(feature = "pingora")]
 async fn handle_downstream(
     session: &mut Session,
     etype: &ErrorType,
@@ -228,6 +245,7 @@ async fn handle_downstream(
 }
 
 /// Whether the downstream connection is too broken to write a response.
+#[cfg(feature = "pingora")]
 fn is_connection_dead(etype: &ErrorType) -> bool {
     matches!(
         etype,
@@ -240,6 +258,7 @@ fn is_connection_dead(etype: &ErrorType) -> bool {
 // -----------------------------------------------------------------------------
 
 /// Build and write the error response to the downstream session.
+#[cfg(feature = "pingora")]
 async fn write_error_response(
     session: &mut Session,
     err: ProxyError,
@@ -265,7 +284,10 @@ async fn write_error_response(
 }
 
 /// Format an error with an installed formatter or the default RFC 9457 envelope.
-fn format_error_response(err: &ProxyError, formatter: Option<&ErrorResponseFormatterHandle>) -> FormattedErrorResponse {
+pub(in crate::http) fn format_error_response(
+    err: &ProxyError,
+    formatter: Option<&ErrorResponseFormatterHandle>,
+) -> FormattedErrorResponse {
     if let Some(formatter) = formatter {
         let context = ErrorResponseContext::new(err.code, err.message, err.status);
         return formatter.format(&context);
@@ -283,7 +305,7 @@ fn format_error_response(err: &ProxyError, formatter: Option<&ErrorResponseForma
 }
 
 /// Canonical HTTP reason phrase for RFC 9457 `about:blank` titles.
-fn status_title(status: u16) -> &'static str {
+pub(in crate::http) fn status_title(status: u16) -> &'static str {
     http::StatusCode::from_u16(status)
         .ok()
         .and_then(|s| s.canonical_reason())
@@ -295,6 +317,7 @@ fn status_title(status: u16) -> &'static str {
 /// The raw downstream writer intentionally bypasses response modules. Synthetic
 /// proxy errors must not be transformed by filters such as compression after
 /// their content length and provider envelope have been finalized.
+#[cfg(feature = "pingora")]
 async fn send_error_response(session: &mut Session, header: pingora_http::ResponseHeader, body: Bytes, is_head: bool) {
     let response_body = if is_head { Bytes::new() } else { body };
     if let Err(e) = session
@@ -307,6 +330,7 @@ async fn send_error_response(session: &mut Session, header: pingora_http::Respon
 }
 
 /// Build a response header with content-type and content-length.
+#[cfg(feature = "pingora")]
 fn build_header(status: u16, content_length: usize, content_type: HeaderValue) -> Option<pingora_http::ResponseHeader> {
     let mut header = match pingora_http::ResponseHeader::build(status, Some(3)) {
         Ok(h) => h,
@@ -336,16 +360,19 @@ fn build_header(status: u16, content_length: usize, content_type: HeaderValue) -
 // -----------------------------------------------------------------------------
 
 /// Whether a final downstream response has already been written.
+#[cfg(feature = "pingora")]
 fn final_response_written(session: &Session) -> bool {
     session.response_written().is_some_and(is_final_response)
 }
 
 /// Whether a response header blocks a later final error response.
+#[cfg(feature = "pingora")]
 pub(super) fn is_final_response(header: &pingora_http::ResponseHeader) -> bool {
     !header.status.is_informational() || header.status == http::StatusCode::SWITCHING_PROTOCOLS
 }
 
 /// Construct a `FailToProxy` result.
+#[cfg(feature = "pingora")]
 const fn done(error_code: u16) -> FailToProxy {
     FailToProxy {
         error_code,
@@ -354,12 +381,14 @@ const fn done(error_code: u16) -> FailToProxy {
 }
 
 /// Map a Pingora error type and source to a classified proxy error.
+#[cfg(feature = "pingora")]
 fn classify_error(etype: &ErrorType, source: &pingora_core::ErrorSource) -> ProxyError {
     let (status, code, message) = classify_error_tuple(etype, source);
     ProxyError { code, message, status }
 }
 
 /// Error classification lookup table.
+#[cfg(feature = "pingora")]
 fn classify_error_tuple(etype: &ErrorType, source: &pingora_core::ErrorSource) -> (u16, &'static str, &'static str) {
     use pingora_core::ErrorSource::{Internal, Unset, Upstream};
     match (etype, source) {
@@ -386,6 +415,7 @@ fn classify_error_tuple(etype: &ErrorType, source: &pingora_core::ErrorSource) -
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {

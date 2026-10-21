@@ -21,6 +21,20 @@ name = "praxis_protocol"
 # docs/developing/adding-backends.md.
 default = ["pingora"]
 pingora = ["dep:pingora-core", "dep:pingora-http", "dep:pingora-proxy", "praxis-core/pingora"]
+# The hyper network backend: the HTTP and TCP adapters, the admin glue and
+# `backend::{Http, Tcp}` resolve to hyper. Off by default and experimental.
+# The two backend features are mutually exclusive; a hyper build starts from
+# `--no-default-features`. See docs/developing/adding-backends.md.
+hyper = [
+    "dep:http-body-util",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:tokio-rustls",
+    "praxis-core/hyper",
+    "tokio/io-util",
+    "tokio/net",
+    "tokio/rt",
+]
 # Certificate + config hot-reload (filesystem watching). Enables the
 # reload/watcher machinery in praxis-tls. Off => static TLS, no notify.
 # Off by default at the library level; the `praxis-proxy` binary turns it
@@ -61,6 +75,9 @@ bytes = { workspace = true }
 futures = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
+http-body-util = { workspace = true, optional = true }
+hyper = { workspace = true, features = ["http1", "http2", "server"], optional = true }
+hyper-util = { workspace = true, features = ["http1", "http2", "server", "server-auto", "server-graceful", "tokio"], optional = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 pingora-core = { workspace = true, optional = true }
@@ -79,6 +96,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
+tokio-rustls = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true, optional = true }

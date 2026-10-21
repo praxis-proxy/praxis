@@ -9,6 +9,7 @@
 
 use std::borrow::Cow;
 
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
 use praxis_filter::{Request, TrustedHeaderMutation};
 use tracing::warn;
@@ -17,6 +18,7 @@ use tracing::warn;
 ///
 /// Replays the ordered mutation log against the session and the request
 /// so that both the protocol layer and filter layer see consistent headers.
+#[cfg(feature = "pingora")]
 pub(super) fn apply_pre_read_mutations(
     session: &mut Session,
     request: &mut Request,
@@ -76,7 +78,7 @@ pub(super) fn apply_pending_header_mutations(
 }
 
 /// Apply pre-read mutations to the Praxis [`Request`] struct.
-fn apply_pre_read_mutations_to_request(request: &mut Request, mutations: &[TrustedHeaderMutation]) {
+pub(in crate::http) fn apply_pre_read_mutations_to_request(request: &mut Request, mutations: &[TrustedHeaderMutation]) {
     for mutation in mutations {
         match mutation {
             TrustedHeaderMutation::Remove(name) => {
@@ -102,6 +104,7 @@ fn apply_pre_read_mutations_to_request(request: &mut Request, mutations: &[Trust
 }
 
 /// Apply pre-read mutations to the Pingora session headers.
+#[cfg(feature = "pingora")]
 fn apply_pre_read_mutations_to_session(session: &mut Session, mutations: &[TrustedHeaderMutation]) {
     let req_headers = session.req_header_mut();
     for mutation in mutations {

@@ -13,12 +13,20 @@
 //! applied physically to the session and request, where they are trusted by
 //! construction because reserved-header validation already ran.
 
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
-use praxis_filter::{FilterAction, FilterError, FilterPipeline, Rejection, Request};
+#[cfg(feature = "pingora")]
+use praxis_filter::Rejection;
+use praxis_filter::{FilterAction, FilterError, FilterPipeline, Request, TrustedHeaderMutation};
+#[cfg(feature = "pingora")]
 use tracing::error;
 
-use super::{header_mutations::apply_pre_read_mutations, stream_buffer::push_grouped_queues};
-use crate::http::pingora::{context::PingoraRequestCtx, convert::send_rejection_for, metrics};
+#[cfg(feature = "pingora")]
+use super::header_mutations::apply_pre_read_mutations;
+use super::stream_buffer::push_grouped_queues;
+use crate::http::pingora::context::PingoraRequestCtx;
+#[cfg(feature = "pingora")]
+use crate::http::pingora::{convert::send_rejection_for, metrics};
 
 // -----------------------------------------------------------------------------
 // RequestHeadOutcome
@@ -28,6 +36,7 @@ use crate::http::pingora::{context::PingoraRequestCtx, convert::send_rejection_f
 ///
 /// `on_request_head` is restricted to Continue/Reject, so the phase either
 /// proceeds or short-circuits with a local rejection.
+#[cfg(feature = "pingora")]
 enum RequestHeadOutcome {
     /// Proceed to pre-read and the request phase.
     Continue,
@@ -52,6 +61,7 @@ enum RequestHeadOutcome {
 /// request phase. `request` is borrowed (not moved) so the common continue path
 /// keeps the large request on the caller's frame; the cold rejection and error
 /// paths clone it into the snapshot.
+#[cfg(feature = "pingora")]
 #[expect(
     clippy::large_stack_frames,
     reason = "embeds the filter-context future, like the request-phase execute and pre_read_body; \
@@ -92,12 +102,45 @@ pub(super) async fn execute(
 ///
 /// Returns [`FilterError`] when a head filter fails with a closed
 /// `failure_mode`; the caller maps this to a 500 response.
+#[cfg(feature = "pingora")]
 async fn run(
     pipeline: &FilterPipeline,
     session: &mut Session,
     request: &mut Request,
     ctx: &mut PingoraRequestCtx,
 ) -> Result<RequestHeadOutcome, FilterError> {
+    let (action, mutations) = run_head_filters(pipeline, request, ctx).await?;
+
+    if let FilterAction::Reject(rejection) = action {
+        return Ok(RequestHeadOutcome::Reject(rejection));
+    }
+
+    // Apply head mutations physically so every later reader (pre-read
+    // conditions, body filters, router matching in the request phase, and the
+    // upstream) observes them. They are not threaded through
+    // `ctx.pre_read_mutations`: that channel is re-applied after pre-read and
+    // would double-apply Add mutations.
+    if !mutations.is_empty() {
+        apply_pre_read_mutations(session, request, &mutations);
+    }
+
+    Ok(RequestHeadOutcome::Continue)
+}
+
+/// Run every opted-in filter's `on_request_head` against `request`, write
+/// the published facts back to `ctx`, and return the head action with the
+/// trusted header mutations the caller applies on a continue; the
+/// backend-neutral core of `run`.
+///
+/// # Errors
+///
+/// Returns [`FilterError`] when a head filter fails with a closed
+/// `failure_mode`.
+pub(in crate::http) async fn run_head_filters(
+    pipeline: &FilterPipeline,
+    request: &Request,
+    ctx: &mut PingoraRequestCtx,
+) -> Result<(FilterAction, Vec<TrustedHeaderMutation>), FilterError> {
     let (action, mutations) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, request, None);
         let action = pipeline.execute_http_request_head(&mut filter_ctx).await;
@@ -125,20 +168,7 @@ async fn run(
         (action?, mutations)
     };
 
-    if let FilterAction::Reject(rejection) = action {
-        return Ok(RequestHeadOutcome::Reject(rejection));
-    }
-
-    // Apply head mutations physically so every later reader (pre-read
-    // conditions, body filters, router matching in the request phase, and the
-    // upstream) observes them. They are not threaded through
-    // `ctx.pre_read_mutations`: that channel is re-applied after pre-read and
-    // would double-apply Add mutations.
-    if !mutations.is_empty() {
-        apply_pre_read_mutations(session, request, &mutations);
-    }
-
-    Ok(RequestHeadOutcome::Continue)
+    Ok((action, mutations))
 }
 
 // -----------------------------------------------------------------------------
@@ -146,6 +176,7 @@ async fn run(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
@@ -162,9 +193,7 @@ mod tests {
         header::{HeaderName, HeaderValue},
     };
     use praxis_core::config::FailureMode;
-    use praxis_filter::{
-        FilterEntry, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext, TrustedHeaderMutation,
-    };
+    use praxis_filter::{FilterEntry, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext};
 
     use super::*;
 

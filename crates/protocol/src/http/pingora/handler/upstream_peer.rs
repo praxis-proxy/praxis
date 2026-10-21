@@ -5,18 +5,20 @@
 //!
 //! [`Upstream`]: praxis_core::connectivity::Upstream
 
+#[cfg(feature = "pingora")]
+use std::net::SocketAddr;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::{
     Condvar, Mutex,
     atomic::{AtomicBool, Ordering},
 };
-use std::{net::SocketAddr, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
-use pingora_core::{
-    Result,
-    upstreams::peer::{HttpPeer, HttpUpstreamRequestPolicy},
-};
-use praxis_core::connectivity::{Upstream, peer as peer_utils};
+#[cfg(feature = "pingora")]
+use pingora_core::upstreams::peer::{HttpPeer, HttpUpstreamRequestPolicy};
+use praxis_core::connectivity::Upstream;
+#[cfg(feature = "pingora")]
+use praxis_core::connectivity::peer as peer_utils;
 use tracing::debug;
 
 use super::super::context::PingoraRequestCtx;
@@ -111,8 +113,32 @@ fn wait_for_upstream_retry_gate(retries: u32) {
 /// `ctx.upstream_for_retry` and borrows it. On retries with
 /// `reselect_on_retry`, asks the `EndpointReselector` for an
 /// alternate host (after applying any pending backoff).
+#[cfg(feature = "pingora")]
+pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> pingora_core::Result<Box<HttpPeer>> {
+    let target = prepare_attempt(ctx)
+        .await
+        .map_err(|message| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, message))?;
+    build_peer(target.upstream, target.allow_private).await
+}
+
+/// What one upstream attempt dials.
+pub(in crate::http) struct AttemptTarget<'ctx> {
+    /// Whether a hostname may resolve into a private or reserved range
+    /// (`insecure_options.allow_private_upstreams` on the pinned pipeline).
+    pub(in crate::http) allow_private: bool,
+
+    /// The upstream this attempt connects to.
+    pub(in crate::http) upstream: &'ctx Upstream,
+}
+
+/// Choose and prepare the upstream for the next attempt: the backend-neutral
+/// core of `execute`.
+///
+/// # Errors
+///
+/// Returns why there is nothing to dial: no upstream was selected.
 #[expect(clippy::too_many_lines, reason = "retry orchestration reads clearer as one function")]
-pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>> {
+pub(in crate::http) async fn prepare_attempt(ctx: &mut PingoraRequestCtx) -> Result<AttemptTarget<'_>, String> {
     #[cfg(any(test, feature = "test-support"))]
     wait_for_upstream_retry_gate(ctx.retries);
 
@@ -179,10 +205,7 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
 
     let upstream = ctx.upstream_for_retry.as_ref().ok_or_else(|| {
         let cluster = &ctx.cluster;
-        pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            format!("no upstream selected (cluster: {cluster:?}); is a load_balancer configured?"),
-        )
+        format!("no upstream selected (cluster: {cluster:?}); is a load_balancer configured?")
     })?;
 
     // `allow_private_upstreams` is carried on the pipeline pinned for this
@@ -193,7 +216,10 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
         .as_ref()
         .is_some_and(|pipeline| pipeline.allow_private_upstreams());
 
-    build_peer(upstream, allow_private).await
+    Ok(AttemptTarget {
+        allow_private,
+        upstream,
+    })
 }
 
 /// Resolve the passive-health endpoint index for a reselected address.
@@ -278,7 +304,8 @@ fn apply_per_try_timeout(ctx: &PingoraRequestCtx, upstream: &mut Upstream) {
 ///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
-pub(super) async fn build_peer(upstream: &Upstream, allow_private: bool) -> Result<Box<HttpPeer>> {
+#[cfg(feature = "pingora")]
+pub(super) async fn build_peer(upstream: &Upstream, allow_private: bool) -> pingora_core::Result<Box<HttpPeer>> {
     let addr: SocketAddr = resolve_upstream(upstream, allow_private).await?;
 
     let tls_enabled = upstream.tls.is_some();
@@ -329,7 +356,8 @@ pub(super) async fn build_peer(upstream: &Upstream, allow_private: bool) -> Resu
 ///
 /// [`SocketAddr`]: std::net::SocketAddr
 /// [`spawn_blocking`]: tokio::task::spawn_blocking
-async fn resolve_upstream(upstream: &Upstream, allow_private: bool) -> Result<SocketAddr> {
+#[cfg(feature = "pingora")]
+async fn resolve_upstream(upstream: &Upstream, allow_private: bool) -> pingora_core::Result<SocketAddr> {
     peer_utils::resolve_upstream_checked(upstream, allow_private)
         .await
         .map_err(|error| {
@@ -350,6 +378,7 @@ async fn resolve_upstream(upstream: &Upstream, allow_private: bool) -> Result<So
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,

@@ -8,6 +8,7 @@
 //! `fail_to_connect` accepts a retry. That lifecycle lets failed dials have
 //! real client spans without fabricating a span after the failure.
 
+#[cfg(feature = "pingora")]
 use pingora_core::{protocols::Digest, upstreams::peer::HttpPeer};
 use tracing::Span;
 
@@ -21,23 +22,35 @@ use super::super::context::PingoraRequestCtx;
 ///
 /// Called from `upstream_peer`, once a peer has been selected. Connection reuse
 /// and TLS details are recorded later by [`record_connected`].
+#[cfg(feature = "pingora")]
 pub(super) fn open_attempt(peer: &HttpPeer, ctx: &mut PingoraRequestCtx) {
+    if ctx.request_span.is_disabled() {
+        close_attempt(ctx);
+        return;
+    }
+    let (address, port) = peer_address_and_port(peer);
+    open_attempt_at(&address, port, ctx);
+}
+
+/// Open spans for an attempt at the upstream `address` and `port`; the
+/// backend-neutral core of `open_attempt`.
+pub(in crate::http) fn open_attempt_at(address: &str, port: u16, ctx: &mut PingoraRequestCtx) {
     close_attempt(ctx);
     if ctx.request_span.is_disabled() {
         return;
     }
 
-    let (address, port) = peer_address_and_port(peer);
     let method = ctx
         .request_snapshot
         .as_ref()
         .map_or("HTTP", |request| request.method.as_str());
-    let client_span = make_client_span(&ctx.request_span, method, &address, port);
+    let client_span = make_client_span(&ctx.request_span, method, address, port);
     ctx.upstream_client_span = client_span.clone();
-    ctx.upstream_exchange_span = make_exchange_span(&client_span, &address, port);
+    ctx.upstream_exchange_span = make_exchange_span(&client_span, address, port);
 }
 
 /// Record connection metadata after the dial succeeds or a pooled connection is reused.
+#[cfg(feature = "pingora")]
 pub(super) fn record_connected(reused: bool, digest: Option<&Digest>, ctx: &PingoraRequestCtx) {
     if ctx.upstream_client_span.is_disabled() {
         return;
@@ -54,6 +67,7 @@ pub(super) fn record_connected(reused: bool, digest: Option<&Digest>, ctx: &Ping
 }
 
 /// Record a bounded upstream error and close the failed attempt spans.
+#[cfg(feature = "pingora")]
 pub(super) fn record_attempt_failure(error: &pingora_core::Error, ctx: &mut PingoraRequestCtx) {
     if ctx.upstream_client_span.is_disabled() {
         return;
@@ -70,6 +84,7 @@ pub(super) fn record_attempt_failure(error: &pingora_core::Error, ctx: &mut Ping
 }
 
 /// Return a low-cardinality error type without exposing error context strings.
+#[cfg(feature = "pingora")]
 fn bounded_upstream_error_type(error: &pingora_core::ErrorType) -> String {
     use pingora_core::ErrorType;
     let error_type = match error {
@@ -92,7 +107,7 @@ fn bounded_upstream_error_type(error: &pingora_core::ErrorType) -> String {
 }
 
 /// Drop the attempt's child spans, with the exchange ending before its client.
-fn close_attempt(ctx: &mut PingoraRequestCtx) {
+pub(in crate::http) fn close_attempt(ctx: &mut PingoraRequestCtx) {
     let exchange_span = std::mem::replace(&mut ctx.upstream_exchange_span, Span::none());
     exchange_span.in_scope(|| {});
     drop(exchange_span);
@@ -139,6 +154,7 @@ fn make_exchange_span(client_span: &Span, address: &str, port: u16) -> Span {
 ///
 /// Inet sockets yield the IP string and port; other socket types
 /// yield `"unix"` and port 0.
+#[cfg(feature = "pingora")]
 fn peer_address_and_port(peer: &HttpPeer) -> (String, u16) {
     match peer._address.as_inet() {
         Some(inet) => (inet.ip().to_string(), inet.port()),
@@ -151,6 +167,7 @@ fn peer_address_and_port(peer: &HttpPeer) -> (String, u16) {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,

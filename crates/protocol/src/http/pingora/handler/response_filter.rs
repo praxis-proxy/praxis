@@ -9,15 +9,17 @@
 //! runs, then diffs the header map to sync additions, removals,
 //! and modifications back into Pingora's response object.
 
+#[cfg(feature = "pingora")]
 use std::{collections::hash_map::DefaultHasher, hash::Hasher as _};
 
-use pingora_core::Result;
-use praxis_filter::{FilterAction, FilterPipeline};
+use praxis_filter::{FilterAction, FilterError, FilterPipeline};
+#[cfg(feature = "pingora")]
 use tracing::{debug, error, warn};
 
+use super::{super::context::PingoraRequestCtx, body_util::clamp_body_mode_to_ceiling};
+#[cfg(feature = "pingora")]
 use super::{
-    super::{context::PingoraRequestCtx, convert::response_header_from_pingora},
-    body_util::clamp_body_mode_to_ceiling,
+    super::convert::response_header_from_pingora,
     hop_by_hop::{self, RemoveHeader as _},
     retry_util::maybe_retry_response,
 };
@@ -35,12 +37,13 @@ use super::{
 /// client.
 ///
 /// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
+#[cfg(feature = "pingora")]
 #[expect(clippy::too_many_lines, reason = "linear response orchestration")]
 pub(super) async fn execute(
     pipeline: &FilterPipeline,
     upstream_response: &mut pingora_http::ResponseHeader,
     ctx: &mut PingoraRequestCtx,
-) -> Result<()> {
+) -> pingora_core::Result<()> {
     if upstream_response.status == 101 && !request_has_upgrade(ctx) {
         error!("upstream sent unsolicited 101 without matching request Upgrade header");
         return Err(pingora_core::Error::explain(
@@ -134,7 +137,7 @@ pub(super) async fn execute(
 }
 
 /// A successful CONNECT switches to tunnel bytes instead of a response body.
-fn successful_connect_tunnel(method: &http::Method, status: http::StatusCode) -> bool {
+pub(in crate::http) fn successful_connect_tunnel(method: &http::Method, status: http::StatusCode) -> bool {
     method == http::Method::CONNECT && status.is_success()
 }
 
@@ -143,7 +146,7 @@ fn successful_connect_tunnel(method: &http::Method, status: http::StatusCode) ->
 ///
 /// [RFC 9112 Section 6.3]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.3
 /// [RFC 9112 Section 9.3]: https://datatracker.ietf.org/doc/html/rfc9112#section-9.3
-fn restore_http11_framing(
+pub(in crate::http) fn restore_http11_framing(
     resp: &mut praxis_filter::Response,
     client_version: Option<http::Version>,
     is_bodyless: bool,
@@ -164,12 +167,30 @@ fn restore_http11_framing(
 }
 
 /// Run the response pipeline and capture the result plus header-modified flag.
-#[expect(clippy::too_many_lines, reason = "writeback destructuring")]
+#[cfg(feature = "pingora")]
 async fn run_response_pipeline(
     pipeline: &FilterPipeline,
     ctx: &mut PingoraRequestCtx,
     resp: &mut praxis_filter::Response,
-) -> Result<(std::result::Result<FilterAction, praxis_filter::FilterError>, bool)> {
+) -> pingora_core::Result<(Result<FilterAction, FilterError>, bool)> {
+    run_response_filters(pipeline, ctx, resp).await.ok_or_else(|| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            "request snapshot not set during response phase",
+        )
+    })
+}
+
+/// Run the response pipeline over `resp` and write its request-scoped state
+/// back to `ctx`, returning the result plus whether a filter reported a
+/// header change; `None` when no request snapshot exists. The
+/// backend-neutral core of `run_response_pipeline`.
+#[expect(clippy::too_many_lines, reason = "writeback destructuring")]
+pub(in crate::http) async fn run_response_filters(
+    pipeline: &FilterPipeline,
+    ctx: &mut PingoraRequestCtx,
+    resp: &mut praxis_filter::Response,
+) -> Option<(Result<FilterAction, FilterError>, bool)> {
     let baseline_response_body_mode = ctx.response_body_mode;
     let (
         r,
@@ -185,12 +206,7 @@ async fn run_response_pipeline(
         body_done,
         attempted_endpoints,
     ) = {
-        let mut fctx = ctx.filter_context_for(pipeline, Some(resp)).ok_or_else(|| {
-            pingora_core::Error::explain(
-                pingora_core::ErrorType::InternalError,
-                "request snapshot not set during response phase",
-            )
-        })?;
+        let mut fctx = ctx.filter_context_for(pipeline, Some(resp))?;
         let r = pipeline.execute_http_response(&mut fctx).await;
         (
             r,
@@ -217,7 +233,7 @@ async fn run_response_pipeline(
     ctx.cached_executed_filter_indices = executed_indices;
     ctx.cached_body_done_indices = body_done;
     ctx.attempted_endpoints = attempted_endpoints;
-    Ok((r, headers_modified))
+    Some((r, headers_modified))
 }
 
 /// Map the filter pipeline result to a Pingora Result, restoring headers on success.
@@ -234,19 +250,20 @@ async fn run_response_pipeline(
 ///
 /// [`HeaderMap`]: http::HeaderMap
 /// [`RespParts`]: http::response::Parts
+#[cfg(feature = "pingora")]
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "linear result dispatch"
 )]
 fn handle_response_result(
-    result: std::result::Result<FilterAction, praxis_filter::FilterError>,
+    result: Result<FilterAction, FilterError>,
     upstream_response: &mut pingora_http::ResponseHeader,
     mut resp: praxis_filter::Response,
     headers_modified: bool,
     is_bodyless: bool,
     ctx: &mut PingoraRequestCtx,
-) -> Result<()> {
+) -> pingora_core::Result<()> {
     match result {
         Ok(
             FilterAction::Continue
@@ -298,6 +315,7 @@ fn handle_response_result(
 /// depend on whether headers happened to change.
 ///
 /// [`RespParts`]: http::response::Parts
+#[cfg(feature = "pingora")]
 fn write_back_response(
     upstream_response: &mut pingora_http::ResponseHeader,
     resp: &mut praxis_filter::Response,
@@ -337,6 +355,7 @@ fn write_back_response(
 /// [`ResponseHeader`]: pingora_http::ResponseHeader
 /// [`HeaderMap`]: http::HeaderMap
 /// [`append_header`]: pingora_http::ResponseHeader::append_header
+#[cfg(feature = "pingora")]
 fn write_headers_to_pingora(src: &http::HeaderMap, status: http::StatusCode, dst: &mut pingora_http::ResponseHeader) {
     #[expect(clippy::expect_used, reason = "valid upstream status")]
     let mut rebuilt = pingora_http::ResponseHeader::build(status, Some(src.len())).expect("valid status");
@@ -361,6 +380,7 @@ fn write_headers_to_pingora(src: &http::HeaderMap, status: http::StatusCode, dst
 /// Header *values* are deliberately excluded: they are not part of the
 /// name map, so a value-only edit stays safe on the direct path and does
 /// not need to pay for a rebuild.
+#[cfg(feature = "pingora")]
 fn header_name_fingerprint(headers: &http::HeaderMap) -> u64 {
     let mut hasher = DefaultHasher::new();
     for (name, _value) in headers {
@@ -378,6 +398,7 @@ fn header_name_fingerprint(headers: &http::HeaderMap) -> u64 {
 ///
 /// Returns `false` when the request snapshot is missing (should not
 /// happen in normal flow since `request_filter` always sets it).
+#[cfg(feature = "pingora")]
 fn request_has_upgrade(ctx: &PingoraRequestCtx) -> bool {
     ctx.request_snapshot
         .as_ref()
@@ -390,6 +411,7 @@ fn request_has_upgrade(ctx: &PingoraRequestCtx) -> bool {
 /// whose value is exactly `websocket` (case-insensitive). A bare 101
 /// without proper `WebSocket` headers (e.g. from a buggy upstream)
 /// should not be treated as a successful upgrade.
+#[cfg(feature = "pingora")]
 fn is_websocket_101(headers: &http::HeaderMap) -> bool {
     hop_by_hop::has_websocket_upgrade(headers) && headers.get("sec-websocket-accept").is_some()
 }
@@ -399,6 +421,7 @@ fn is_websocket_101(headers: &http::HeaderMap) -> bool {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
