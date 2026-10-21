@@ -123,8 +123,10 @@ period can still be missed. Use an HTTPS response check to verify
 client authorization and application health. Upstream revocation checking is
 not supported; these probes make no certificate revocation guarantee.
 
-See the [TLS health-check example](../../examples/configs/observability/tls-health-check.yaml)
+See the [TLS health-check example][tls-health-check]
 for both modes. TCP stays connect-only, and gRPC probes remain plaintext.
+
+[tls-health-check]: ../../examples/configs/observability/tls-health-check.yaml
 
 ### TCP Probes
 
