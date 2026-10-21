@@ -107,10 +107,12 @@ Each probe uses a new connection with session resumption disabled, so a
 resumed session cannot conceal a changed server certificate. One timeout
 covers DNS, connection, handshake, HTTP exchange and close. Successful probes
 send `close_notify`. Handshake-only probes then wait up to 100 ms, within that
-same timeout, for a TLS alert rejecting client credentials. TLS alerts and read
-errors fail the probe; EOF, application data, or a silent peer after that grace
-period succeed. HTTPS probes read only a bounded HTTP status line, not the
-entire response body, and do not wait for a reciprocal close alert.
+same timeout, for a fatal TLS alert rejecting client credentials. A normal
+`close_notify` is returned as EOF and succeeds. Application data, EOF without
+`close_notify` (`UnexpectedEof`), or a silent peer after that grace period also
+succeed. Other read errors and fatal TLS alerts fail the probe. HTTPS probes
+read only a bounded HTTP status line, not the entire response body, and do not
+wait for a reciprocal close alert.
 
 A verified handshake establishes server identity and sends configured client
 credentials. TLS 1.3 client-side handshake completion does not prove that the
