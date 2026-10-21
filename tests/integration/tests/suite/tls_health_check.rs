@@ -309,15 +309,27 @@ async fn hostname_probes_use_the_upstream_address_policy() {
 #[tokio::test]
 async fn handshake_probe_honors_h2_only_alpn() {
     let certs = TestCertificates::generate();
-    let backend = Backend::new(&certs, false).await;
-    let mut server = server_config(&certs, false);
-    server.alpn_protocols = vec![b"h2".to_vec()];
-    backend.config.store(Arc::new(server));
-    let mut config = cluster(&certs, &backend.address, HealthCheckType::Tls);
-    config.http.version = praxis_core::config::UpstreamHttpVersion::H2;
-    assert_health(config.clone(), None, true).await;
-    config.http.version = praxis_core::config::UpstreamHttpVersion::Auto;
-    assert_health(config, None, true).await;
+    for version in [
+        praxis_core::config::UpstreamHttpVersion::H2,
+        praxis_core::config::UpstreamHttpVersion::Auto,
+    ] {
+        let backend = Backend::new(&certs, false).await;
+        let mut server = server_config(&certs, false);
+        server.alpn_protocols = vec![b"h2".to_vec()];
+        backend.config.store(Arc::new(server));
+        let mut config = cluster(&certs, &backend.address, HealthCheckType::Tls);
+        config.http.version = version;
+        assert_health(config, None, true).await;
+        let protocols = backend.protocols.lock().unwrap();
+        assert!(!protocols.is_empty(), "{version:?} must complete a handshake");
+        assert!(
+            protocols
+                .iter()
+                .all(|protocol| protocol.as_deref() == Some(b"h2".as_slice())),
+            "{version:?} must negotiate h2: {protocols:?}"
+        );
+        drop(protocols);
+    }
 }
 
 #[tokio::test]
@@ -480,6 +492,9 @@ async fn delayed_server_traffic(upstream: &str) -> (String, tokio::task::JoinHan
     (address, task)
 }
 
+/// Negotiated protocols, including peers that omit ALPN.
+type AlpnProtocols = Vec<Option<Vec<u8>>>;
+
 /// A TLS 1.3 backend with observable requests and clean TLS shutdowns.
 pub(super) struct Backend {
     /// Bound endpoint.
@@ -490,6 +505,8 @@ pub(super) struct Backend {
     pub(super) closes: Arc<AtomicUsize>,
     /// Observed TLS SNI values.
     pub(super) names: Arc<Mutex<Vec<Option<String>>>>,
+    /// Observed negotiated TLS application protocols.
+    pub(super) protocols: Arc<Mutex<AlpnProtocols>>,
     /// Bounded request header recordings.
     pub(super) requests: Arc<Mutex<Vec<String>>>,
     /// Number of resumed TLS sessions.
@@ -508,6 +525,7 @@ impl Backend {
         let config = Arc::new(ArcSwap::from_pointee(server_config(certs, mtls)));
         let closes = Arc::new(AtomicUsize::new(0));
         let names = Arc::new(Mutex::new(Vec::new()));
+        let protocols = Arc::new(Mutex::new(Vec::new()));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let resumed = Arc::new(AtomicUsize::new(0));
         let status = Arc::new(AtomicUsize::new(200));
@@ -515,13 +533,14 @@ impl Backend {
             Arc::clone(&config),
             Arc::clone(&closes),
             Arc::clone(&names),
+            Arc::clone(&protocols),
             Arc::clone(&requests),
             Arc::clone(&resumed),
             Arc::clone(&status),
         );
         let task = tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
-                let (config, closes, names, requests, resumed, status) = shared.clone();
+                let (config, closes, names, protocols, requests, resumed, status) = shared.clone();
                 tokio::spawn(async move {
                     let exchange = async {
                         let Ok(mut stream) = tokio_rustls::TlsAcceptor::from(config.load_full()).accept(socket).await
@@ -532,6 +551,10 @@ impl Backend {
                             .lock()
                             .unwrap()
                             .push(stream.get_ref().1.server_name().map(str::to_owned));
+                        protocols
+                            .lock()
+                            .unwrap()
+                            .push(stream.get_ref().1.alpn_protocol().map(<[u8]>::to_vec));
                         if stream.get_ref().1.handshake_kind() == Some(rustls::HandshakeKind::Resumed) {
                             resumed.fetch_add(1, Ordering::Relaxed);
                         }
@@ -575,6 +598,7 @@ impl Backend {
             config,
             closes,
             names,
+            protocols,
             requests,
             resumed,
             status,
