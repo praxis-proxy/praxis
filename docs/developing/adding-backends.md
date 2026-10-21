@@ -5,7 +5,10 @@
 A network backend is the layer that owns sockets, TLS acceptors, HTTP
 framing, connection pooling and the async runtime. Praxis runs on one
 backend per binary, selected at build time with a Cargo feature. Pingora
-is the only backend today and is on by default.
+is the default backend; hyper is the experimental second one, and its
+modules (`crates/core/src/server/hyper.rs`, `crates/core/src/egress/hyper.rs`,
+`crates/protocol/src/http/hyper.rs`, `crates/protocol/src/tcp/hyper.rs`)
+are the worked example of everything below.
 
 Everything above the backend is backend-neutral and stays untouched when a
 backend is added: configuration, validation, the filter engine, routing,
@@ -57,15 +60,17 @@ Keep the backend's dependencies `optional = true`. A backend that is not yet
 supported implies `experimental`, which turns on the startup warning.
 
 Then add the arms to the `backend` module at the end of
-`crates/core/src/lib.rs` and of `crates/protocol/src/lib.rs`, and extend
-the guards in `crates/server/src/lib.rs`: the existing `compile_error!`
-refuses a build with no backend; with two backends, add one that refuses
-both at once.
+`crates/core/src/lib.rs` and of `crates/protocol/src/lib.rs`, including
+`backend::NAME`, and keep the guard in `crates/server/src/lib.rs` naming
+the new feature: a build with no backend refuses to compile.
 
-```rust
-#[cfg(all(feature = "pingora", feature = "hyper"))]
-compile_error!("praxis-proxy takes exactly one network backend feature");
-```
+Backends are mutually exclusive: the `backend` modules and the server
+crate carry a `compile_error!` for two backend features at once, so add
+the new feature to those guards. One consequence: nothing in the workspace
+may build with `--all-features`. The Makefile names every feature except
+the other backend through `cargo xtask features --except <name>`, which
+reads the manifests, so extend that `--except` list and give the backend
+its own `*-<name>` targets for its builds, lints and tests.
 
 ### 2. Implement `ServerRuntime`
 
@@ -160,19 +165,24 @@ The Pingora glue is `crates/protocol/src/http/pingora/health/pingora_glue.rs`.
 
 - Add a separate invocation to `check-features` in the `Makefile` that uses
   `--no-default-features --features <name> --all-targets`. The existing
-  optional-feature loop always enables `pingora`, so adding another backend
-  to that loop would enable mutually exclusive backends together.
-- Add the feature to the `not(...)` list of the dead-code expectation at
-  the top of `crates/protocol/src/http/pingora/metrics.rs`: with your
-  backend compiled in, the recording helpers have a caller again.
-- Add a nightly job that runs the integration, conformance and `h2spec`
-  suites on the backend. The harness builds every proxy through the
-  contract, so no suite file changes:
-
-  ```console
-  cargo test --no-default-features --features <name>,config-reload,admin-api,policy-engine
-  ```
-
+  optional-feature loop always enables `pingora`, so it never builds yours.
+- Add the feature to the `not(any(...))` lists of the dead-code
+  expectations in `crates/protocol/src/http/pingora/metrics.rs` and
+  `health/service.rs`: with your backend compiled in, the recording helpers
+  and the admin glue hooks have a caller again.
+- Give the backend its own Makefile block, like the `*-hyper` targets:
+  a build into its own target directory, clippy over the feature set, the
+  unit tests of the crates that carry the backend resolved as that build,
+  and the suites with the backend forwarded through the harness
+  (`praxis-test-utils` has one feature per backend; each suite crate
+  forwards it). The harness builds every proxy through the contract, so
+  the suites run unchanged on any backend; the few tests that reach into
+  Pingora directly are gated on `pingora`.
+- Add a workflow that runs those targets on every pull request and push to
+  `main`, as `.github/workflows/hyper.yaml` does; a test that does not
+  pass on the backend yet is listed in the backend's skip list
+  (`tests/hyper-skip.txt` for hyper, read by its Makefile targets) with
+  its bucket, rather than ignored in the suite.
 - Promotion out of `experimental` requires the security, conformance,
   integration and resilience suites green on the backend; see
   `docs/developing/project-management.md` and the enhancements process.

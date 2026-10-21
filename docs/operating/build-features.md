@@ -68,18 +68,29 @@ really is out of the build.
 ## Network backends
 
 The layer that owns sockets, TLS acceptors, HTTP framing, connection pooling
-and the async runtime is a *backend*, and a build carries exactly one.
-Pingora is the only backend today and the `pingora` feature is on by
-default. Everything above it (configuration, filters, routing, health
-checks, retries, the admin handlers, the sub-request client) is
-backend-neutral and does not change with the backend.
+and the async runtime is a *backend*, and a build runs on exactly one.
+Pingora is the production backend and the `pingora` feature is on by
+default; `hyper` is an experimental second backend, off by default (see
+[hyper backend](../architecture/hyper-backend.md) for what it covers and
+what is not at parity yet). Everything above the backend (configuration,
+filters, routing, health checks, retries, the admin handlers, the
+sub-request client) is backend-neutral and does not change with it.
 
 Because Cargo features are additive, a backend cannot be turned off by
-turning another on; the build that wants a different backend starts from
-`--no-default-features` and names the one it wants. A build with no backend
-feature refuses to compile the `praxis-proxy` binary. The library crates do
-compile that way, with a stand-in connector that refuses every connection,
-so lean-build checks still work.
+turning another on, and the two backends are mutually exclusive: a build
+with both refuses to compile. The build that wants the hyper backend
+therefore starts from `--no-default-features` and names it:
+
+```console
+cargo build -p praxis-proxy --release --no-default-features \
+    --features hyper,config-reload,admin-api,policy-engine
+```
+
+`make build-hyper` is the same build without `--release`, into
+`target/hyper`, and `make test-integration BACKEND=hyper` runs the suites on
+it. A build with no backend feature refuses to compile the `praxis-proxy`
+binary. The library crates do compile that way, with a stand-in connector
+that refuses every connection, so lean-build checks still work.
 
 Library consumers that depend on `praxis-proxy`, `praxis-proxy-protocol` or
 `praxis-proxy-core` with `default-features = false` name the backend feature
@@ -90,7 +101,8 @@ on that edge too. Adding a backend is described in
 
 | Feature | Default | Enables | Turn it off / on when |
 | ------- | ------- | ------- | --------------------- |
-| `pingora` | on | The Pingora network backend: listeners, HTTP/1 and HTTP/2 framing, connection pooling and the async runtime, from the [Pingora fork](https://github.com/praxis-proxy/pingora). | Never off on its own: a build needs exactly one backend. A `--no-default-features` build names it explicitly. |
+| `pingora` | on | The Pingora network backend: listeners, HTTP/1 and HTTP/2 framing, connection pooling and the async runtime, from the [Pingora fork](https://github.com/praxis-proxy/pingora). | Never off on its own: a build needs a backend. A `--no-default-features` build names it explicitly. Mutually exclusive with `hyper`. |
+| `hyper` | off (experimental) | The hyper network backend: listeners, HTTP/1 and HTTP/2 framing, a Praxis-owned connection pool and a tokio runtime, on [hyper](https://github.com/hyperium/hyper) 1.x with `tokio-rustls`. | On, from `--no-default-features`, to run the proxy on hyper for testing and evaluation. Not at parity with Pingora yet; see [hyper backend](../architecture/hyper-backend.md). |
 | `config-reload` | on | Config-file and TLS-certificate hot-reload (filesystem watching). | Off for a static-config deployment: drops both watchers and the `notify`, `arc-swap`, and `tokio` dependencies they pull into the TLS crate. |
 | `admin-api` | on | The admin HTTP services: management API (`/api/*`) on `admin.address`, and `/healthy`, `/ready`, `/metrics` on `admin.metrics_address`. | Off when the proxy exposes no monitoring or management surface. The data path and background health checks are unaffected; only the HTTP endpoints go away. |
 | `otel` | off | OpenTelemetry / OTLP span export for traces. | On for distributed tracing. Pulls in a heavy `opentelemetry` + `tonic` dependency graph. |
@@ -116,6 +128,13 @@ Several features are *experimental*: each is off by default, each turns on the
 server log `experimental features are enabled that should not be used in
 production` at startup. Do not run an experimental build in production.
 
+- **`hyper`**: the hyper network backend. Off by default; a build that
+  wants it starts from `--no-default-features` and names it, since the two
+  backends refuse to build together. It runs the same
+  filter pipeline, admin surface and sub-request client on hyper 1.x, but
+  several data-path behaviours are not at parity yet (compression,
+  WebSocket upgrades, hedging, the graceful drain sequence); see
+  [hyper backend](../architecture/hyper-backend.md).
 - **`basic-auth-filter`** (deprecated): the `basic_auth` filter. Credentials
   live in plaintext config, so it is for development and testing only. Prefer
   the policy engine for authentication.

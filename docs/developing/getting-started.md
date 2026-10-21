@@ -149,6 +149,26 @@ stage installs nothing on `ubi9/ubi-minimal` beyond the binary and its config.
 See [FIPS Tooling](fips.md) for what the report checks, the provenance of the
 pinned images and signing key, and why the build uses cargo's SBOM precursor.
 
+### Hyper Backend (experimental)
+
+The proxy can be built on the experimental hyper backend instead of Pingora.
+Its feature set is defined once, as `HYPER_FEATURES` in the `Makefile`, and
+its builds go to `target/hyper`. `BACKEND=hyper` routes the standard test
+targets to these, so `make test-integration BACKEND=hyper` runs the same
+suites on hyper. CI runs the lint and test targets below.
+
+```console
+make build-hyper              # hyper build, debug profile, into target/hyper
+make check-hyper              # cargo check of the hyper feature set, all targets
+make lint-hyper               # clippy and rustfmt for the hyper feature set
+make test-hyper               # unit tests resolved as the hyper build
+make test-integration-hyper   # the integration suites on hyper
+make test-conformance-hyper   # the conformance suite on hyper
+```
+
+See [hyper backend](../architecture/hyper-backend.md) for what the backend
+covers and what is not at parity with Pingora yet.
+
 ## Security: Binding Low Ports
 
 Praxis refuses to start when running as root (UID 0)

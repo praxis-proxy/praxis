@@ -14,7 +14,8 @@ dynamic key-value stores with pluggable backends), and
 the network backend contract: the `ServerRuntime` trait,
 the `egress` connector and session traits with `PeerSpec`,
 and the `backend` module that resolves them to the
-selected backend (Pingora by default).
+selected backend (Pingora by default; hyper under the
+experimental `hyper` feature).
 
 **`praxis-filter`** : Filter pipeline engine. Defines the
 `HttpFilter` and `TcpFilter` traits, condition evaluation,
@@ -22,11 +23,11 @@ body access declarations, the `FilterPipeline` executor,
 `FilterRegistry`, and all built-in filter implementations.
 
 **`praxis-protocol`** : Thin protocol adapters that translate
-the network backend's callbacks (Pingora) into filter pipeline
-invocations. `Protocol` trait, `ListenerPipelines`, HTTP and
-TCP implementations, the backend-neutral admin, health and
-metrics handlers, and the `backend` module that exposes the
-selected backend's adapters.
+the network backend's callbacks (Pingora, or hyper) into
+filter pipeline invocations. `Protocol` trait,
+`ListenerPipelines`, HTTP and TCP implementations, the
+backend-neutral admin, health and metrics handlers, and the
+`backend` module that exposes the selected backend's adapters.
 
 **`praxis-tls`** : TLS configuration types and runtime
 setup. Defines `ListenerTls` (certificate list, client CA,
@@ -96,9 +97,11 @@ praxis-core                     Configuration, errors, and server factory
 │   ├── peer                    PeerSpec and Upstream resolution
 │   ├── session                 Connector and Session traits
 │   ├── unavailable             Stand-in connector for a build with no backend
+│   ├── hyper                   hyper connector, sessions and pool (feature `hyper`)
 │   └── pingora                 Pingora connector and session (feature `pingora`)
 ├── server/                     Server runtime contract and factories
 │   ├── contract                ServerRuntime trait
+│   ├── hyper                   hyper tokio runtime and services (feature `hyper`)
 │   ├── pingora                 Pingora server configuration (feature `pingora`)
 │   ├── runtime                 Runtime options and thread count
 │   └── unavailable             Stand-in runtime for a build with no backend
@@ -190,6 +193,8 @@ praxis-protocol                 Protocol adapters
 ├── pipelines                   Hot-swappable pipeline storage (ArcSwap)
 ├── tls_setup                   Listener TLS: neutral ServerConfig builder, Pingora settings
 ├── http/                       HTTP (re-exports health, metrics, kv at this level)
+│   ├── hyper/                  hyper listeners and proxy service (feature `hyper`)
+│   │   └── admin               hyper admin, health and metrics listeners
 │   └── pingora/                Pingora ProxyHttp integration (feature `pingora`)
 │       ├── context             Per-request state through lifecycle hooks
 │       ├── convert             Pingora <-> Praxis type conversions
@@ -221,7 +226,8 @@ praxis-protocol                 Protocol adapters
 │           └── via                  Via header injection (RFC 9110)
 └── tcp/                        L4 bidirectional forwarding
     ├── groups                  Listener grouping and validation (backend-neutral)
-    ├── proxy                   Bidirectional TCP proxy application (feature `pingora`)
+    ├── hyper                   HyperTcp accept loop and TLS (feature `hyper`)
+    ├── proxy                   Bidirectional TCP proxy application, shared by every backend
     ├── service                 PingoraTcp registration (feature `pingora`)
     └── tls                     TCP listener registration (feature `pingora`)
 
@@ -339,8 +345,9 @@ a reference to the listener's resolved pipeline.
 ### The backend runtime
 
 `praxis_core::backend::Runtime` is the selected network backend's runtime
-(`PingoraServerRuntime` under the default `pingora` feature); every backend
-implements `praxis_core::server::ServerRuntime`. Protocols call
+(`PingoraServerRuntime` under the default `pingora` feature, `HyperRuntime`
+under `hyper`); every backend implements
+`praxis_core::server::ServerRuntime`. Protocols call
 `Protocol::register()` to add their listeners, then the
 runtime runs all protocols on a single server. This enables
 mixed HTTP + TCP listeners in one process.
