@@ -117,6 +117,7 @@ mod tests {
             clusters: vec![],
             filter_chains: vec![],
             insecure_options: InsecureOptions::default(),
+            jobs: None,
             listeners,
             metrics: MetricsConfig::default(),
             runtime: RuntimeConfig::default(),

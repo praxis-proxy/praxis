@@ -26,6 +26,7 @@ mod expanded_chains;
 mod filters;
 mod hedge_policy;
 mod insecure_options;
+mod jobs;
 mod listener;
 mod logging;
 mod metrics;
@@ -56,6 +57,7 @@ pub use expanded_chains::ExpandedFilterChains;
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use hedge_policy::{HedgePolicy, MAX_HEDGE_ATTEMPTS};
 pub use insecure_options::{InsecureFlag, InsecureOptions, SkipPipelineChecks};
+pub use jobs::{JobQueueSize, JobQueuedBytes, JobTimeoutSecs, JobWorkers, JobsConfig};
 pub use listener::{Listener, ListenerTls, ProtocolKind};
 pub use logging::{DEFAULT_BUFFER_SIZE_LINES, LogOutput, LoggingConfig};
 pub use metrics::{MetricLabel, MetricLabelsConfig, MetricsConfig, RouteTemplates};
@@ -121,6 +123,10 @@ pub struct Config {
     /// Consolidated security overrides. All default to `false`.
     #[serde(default)]
     pub insecure_options: InsecureOptions,
+
+    /// Background job queue settings. Absent means no job runtime is started.
+    #[serde(default)]
+    pub jobs: Option<JobsConfig>,
 
     /// Proxy listeners to bind.
     pub listeners: Vec<Listener>,
