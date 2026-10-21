@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Integration tests for `runtime.logging` file output.
+//! Integration tests for the process's own logs: `runtime.logging` file
+//! output, and the startup line naming the network backend.
 
 use std::{
     fs, io,
@@ -9,7 +10,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use praxis_test_utils::{free_port, praxis_bin, wait_for_tcp};
+use praxis_test_utils::{PraxisProcess, free_port, praxis_bin, wait_for_tcp};
 
 // -----------------------------------------------------------------------------
 // Utilities
@@ -106,5 +107,41 @@ filter_chains:
     assert!(
         active.contains("INFO"),
         "non-blocking logs should flush to disk on graceful shutdown: {active:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    coverage,
+    ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
+)]
+fn startup_log_names_the_network_backend() {
+    let port = free_port();
+    let config = format!(
+        r#"
+shutdown_timeout_secs: 1
+listeners:
+  - name: web
+    address: "127.0.0.1:{port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        body: "ok"
+"#
+    );
+    let mut proxy = PraxisProcess::spawn(&config, &format!("127.0.0.1:{port}"));
+
+    let status = proxy.terminate();
+
+    let logs = proxy.logs();
+    let backend = if cfg!(feature = "hyper") { "hyper" } else { "pingora" };
+    let startup = logs.lines().find(|line| line.contains("initializing server"));
+    assert!(status.success(), "graceful shutdown should exit zero:\n{logs}");
+    assert!(
+        startup.is_some_and(|line| line.contains(&format!("backend=\"{backend}\""))),
+        "the startup line must name the {backend} backend this suite runs on:\n{logs}"
     );
 }

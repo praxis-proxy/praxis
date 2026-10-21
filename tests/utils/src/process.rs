@@ -106,6 +106,42 @@ impl PraxisProcess {
         child.wait().expect("wait for praxis")
     }
 
+    /// Send `signal`, a signal name `kill` accepts such as `INT` or `TERM`,
+    /// without waiting for the process to exit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process was already terminated or cannot be signalled.
+    pub fn signal(&self, signal: &str) {
+        let pid = self.pid().to_string();
+        let status = Command::new("kill")
+            .args([format!("-{signal}").as_str(), pid.as_str()])
+            .status()
+            .expect("run kill");
+        assert!(status.success(), "kill -{signal} {pid} failed");
+    }
+
+    /// Wait up to `timeout` for the process to exit and return its status,
+    /// or `None` if it is still running then.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process was already terminated or cannot be waited on.
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let child = self.child.as_mut().expect("process was terminated");
+            if let Some(status) = child.try_wait().expect("wait for praxis") {
+                self.child = None;
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Number of descriptors the process holds open right now.
     ///
     /// # Panics

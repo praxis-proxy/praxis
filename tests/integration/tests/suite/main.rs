@@ -76,6 +76,8 @@ mod guardrails;
 mod health_check;
 mod hot_reload;
 mod http_active_requests;
+#[cfg(feature = "hyper")]
+mod hyper_backend;
 mod ip_acl;
 #[cfg(feature = "iterative-request-router")]
 mod iterative_request_router;
