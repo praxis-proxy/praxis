@@ -149,6 +149,9 @@ runtime from `runtime.threads` and `runtime.global_queue_interval` (a knob
 that is a logged no-op on Pingora and takes effect here) and runs the
 registered services. The signal handlers are installed before any
 listener accepts, so a signal that lands during startup is honoured.
+HTTP, TCP and management listeners are required services: an unexpected exit
+stops the other services within the fast shutdown bound and fails the runtime.
+A failed socket in a TCP listener group stops the whole group.
 `SIGTERM` and `SIGHUP` start a graceful shutdown: listeners stop accepting,
 in-flight connections finish through hyper's graceful shutdown, bounded by
 `shutdown_timeout_secs`; `SIGINT` stops quickly. The harness path

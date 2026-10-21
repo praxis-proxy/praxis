@@ -208,7 +208,7 @@ pub(super) fn register(
         drain_bound: runtime.shutdown_timeout().saturating_sub(DRAIN_HEADROOM),
         shared: Arc::new(shared),
     };
-    runtime.add_service(&format!("http-proxy:{name}", name = listener.name), move |shutdown| {
+    runtime.add_required_service(&format!("http-proxy:{name}", name = listener.name), move |shutdown| {
         accept.run(socket, shutdown)
     });
     Ok(())

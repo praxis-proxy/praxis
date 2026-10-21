@@ -195,7 +195,7 @@ impl ManagementHandler {
 /// Register the runtime service `name` that serves `handler` on `socket`.
 fn serve_on(runtime: &mut HyperRuntime, name: &'static str, socket: TcpSocket, handler: ManagementHandler) {
     let handler = Arc::new(handler);
-    runtime.add_service(name, move |shutdown| serve_management(name, socket, handler, shutdown));
+    runtime.add_required_service(name, move |shutdown| serve_management(name, socket, handler, shutdown));
 }
 
 /// Listen on `socket` and serve management connections until `shutdown`

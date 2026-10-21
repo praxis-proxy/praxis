@@ -56,6 +56,38 @@ async fn get_round_trips_over_http11() {
     assert_eq!(seen.header("host"), Some("example.test"), "Host is forwarded");
 }
 
+#[test]
+fn listener_startup_failure_stops_the_runtime() {
+    let yaml = routed_yaml("127.0.0.1:1".parse().unwrap(), "");
+    let mut config = Config::from_yaml(&yaml).unwrap();
+    let mut second = config.listeners[0].clone();
+    second.name = "second".to_owned();
+    second.address = closed_port().to_string();
+    let blocked_address = second.address.clone();
+    config.listeners.push(second);
+    let address = config.listeners[0].address.clone();
+    let mut runtime = HyperRuntime::new(&config);
+    HyperHttp::register_on(
+        &mut runtime,
+        &config,
+        &pipelines(&config, &FilterRegistry::with_builtins()),
+    )
+    .unwrap();
+    let occupied = std::net::TcpListener::bind(blocked_address).unwrap();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.run_with_shutdown(Box::pin(async { tokio::time::sleep(Duration::from_secs(2)).await }));
+    }));
+    drop(occupied);
+    assert!(
+        failed.is_err(),
+        "a configured HTTP listener that cannot listen must fail startup"
+    );
+    assert!(
+        std::net::TcpListener::bind(address).is_ok(),
+        "other listeners must close too"
+    );
+}
+
 #[tokio::test]
 async fn post_body_is_forwarded() {
     let backend = Backend::start(Reply::Fixed(ok("done"))).await;

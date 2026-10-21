@@ -202,7 +202,7 @@ impl GroupContext<'_> {
             self.config,
         ));
         let name = proxy::tcp_service_name(upstream.as_deref(), cluster.as_deref());
-        runtime.add_service(&name, move |shutdown| serve_group(proxy, sockets, shutdown));
+        runtime.add_required_service(&name, move |shutdown| serve_group(proxy, sockets, shutdown));
         Ok(())
     }
 }
@@ -267,7 +267,9 @@ async fn serve_group(proxy: Arc<PingoraTcpProxy>, sockets: Vec<BoundListener>, s
     let accept_loops = sockets
         .into_iter()
         .map(|bound| accept_until_shutdown(Arc::clone(&proxy), bound, shutdown.clone()));
-    futures::future::join_all(accept_loops).await;
+    if let Err(err) = futures::future::try_join_all(accept_loops).await {
+        error!(error = %err, "TCP listener group failed");
+    }
 }
 
 /// Accept connections on `bound`, serving each on its own task, until
@@ -276,13 +278,17 @@ async fn serve_group(proxy: Arc<PingoraTcpProxy>, sockets: Vec<BoundListener>, s
 /// Connections already forwarding watch `shutdown` too and close on the
 /// flip, so waiting for them only covers their disconnect filters, metrics
 /// and logs.
-async fn accept_until_shutdown(proxy: Arc<PingoraTcpProxy>, bound: BoundListener, mut shutdown: ShutdownWatch) {
+async fn accept_until_shutdown(
+    proxy: Arc<PingoraTcpProxy>,
+    bound: BoundListener,
+    mut shutdown: ShutdownWatch,
+) -> io::Result<()> {
     let BoundListener { address, socket, tls } = bound;
     let listener = match socket.listen(LISTEN_BACKLOG) {
         Ok(listener) => listener,
         Err(err) => {
             error!(address = %address, error = %err, "TCP listener could not listen; it will not accept");
-            return;
+            return Err(err);
         },
     };
     let mut connections = JoinSet::new();
@@ -306,6 +312,7 @@ async fn accept_until_shutdown(proxy: Arc<PingoraTcpProxy>, bound: BoundListener
     while let Some(joined) = connections.join_next().await {
         log_connection_end(&joined);
     }
+    Ok(())
 }
 
 /// Serve one accepted connection through `proxy`, completing the TLS
@@ -463,6 +470,32 @@ mod tests {
                 "{addr} must forward to the group's upstream and back"
             );
         }
+    }
+
+    #[test]
+    fn grouped_listener_startup_failure_stops_the_runtime() {
+        let address = free_addr();
+        let blocked_address = free_addr();
+        let config = tcp_config(&format!(
+            "{}{}",
+            tcp_listener("first", &address, "127.0.0.1:1", ""),
+            tcp_listener("second", &blocked_address, "127.0.0.1:1", "")
+        ));
+        let mut runtime = HyperRuntime::new(&config);
+        HyperTcp::register_on(&mut runtime, &config, &no_pipelines()).unwrap();
+        let occupied = StdTcpListener::bind(blocked_address).unwrap();
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.run_with_shutdown(Box::pin(async { tokio::time::sleep(Duration::from_secs(2)).await }));
+        }));
+        drop(occupied);
+        assert!(
+            failed.is_err(),
+            "one listener failing to listen must stop its whole group and runtime"
+        );
+        assert!(
+            StdTcpListener::bind(address).is_ok(),
+            "the other grouped socket must close"
+        );
     }
 
     #[test]
