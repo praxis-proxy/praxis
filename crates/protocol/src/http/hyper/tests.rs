@@ -89,6 +89,116 @@ fn listener_startup_failure_stops_the_runtime() {
 }
 
 #[tokio::test]
+async fn request_trailers_survive_streaming_and_pre_read_to_http2() {
+    for filter in [
+        "",
+        "\n      - filter: json_body_field\n        field: model\n        header: X-Model\n",
+    ] {
+        let (backend, captured) = trailer_backend().await;
+        let yaml = with_cluster(
+            &routed_yaml(backend, filter),
+            "            http:\n              version: h2\n",
+        );
+        let proxy = Proxy::start(&yaml).await;
+        let response = proxy.send(&request_with_trailers()).await;
+        assert_eq!(response.status, 200, "HTTP/2 upstreams support request trailers");
+        let (body, trailers) = captured.await.unwrap();
+        assert_eq!(body, br#"{"model":"m1"}"#, "the body arrives before its trailers");
+        assert_eq!(
+            trailers.get("x-checksum").unwrap(),
+            "abc",
+            "pre-read must retain trailers"
+        );
+    }
+}
+
+#[tokio::test]
+async fn request_trailers_are_rejected_for_http1_in_streaming_and_pre_read() {
+    for filter in [
+        "",
+        "\n      - filter: json_body_field\n        field: model\n        header: X-Model\n",
+    ] {
+        let backend = Backend::start(Reply::Absorb).await;
+        let proxy = Proxy::start(&routed_yaml(backend.addr, filter)).await;
+        let response = proxy.send(&request_with_trailers()).await;
+        assert_eq!(
+            response.status, 400,
+            "unsupported trailers must never become a successful truncated upload"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unsupported_request_trailers_abort_an_early_response() {
+    let backend = Backend::start(Reply::Early(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n".to_vec(),
+    ))
+    .await;
+    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let mut client = TcpStream::connect(proxy.addr).await.unwrap();
+    client
+        .write_all(b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), read_head(&mut client, &mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    client.write_all(b"0\r\nx-checksum: abc\r\n\r\n").await.unwrap();
+    let (mut reader, _writer) = client.into_split();
+    let remaining = tokio::time::timeout(Duration::from_secs(2), read_to_close(&mut reader))
+        .await
+        .unwrap();
+    response.extend_from_slice(&remaining);
+    assert!(
+        response.starts_with(b"HTTP/1.1 200"),
+        "the response had already started"
+    );
+    assert!(
+        !response.ends_with(b"0\r\n\r\n"),
+        "unsupported trailers must abort the response, not end it cleanly"
+    );
+}
+
+/// A chunked HTTP/1 request with a trailer per [RFC 9112 Section 7.1.2].
+///
+/// [RFC 9112 Section 7.1.2]: https://datatracker.ietf.org/doc/html/rfc9112#section-7.1.2
+fn request_with_trailers() -> String {
+    let body = r#"{"model":"m1"}"#;
+    format!(
+        "POST / HTTP/1.1\r\nHost: a\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nTrailer: x-checksum\r\n\r\n{:x}\r\n{body}\r\n0\r\nx-checksum: abc\r\n\r\n",
+        body.len()
+    )
+}
+
+/// Capture one complete HTTP/2 upload, then acknowledge it.
+async fn trailer_backend() -> (SocketAddr, tokio::sync::oneshot::Receiver<(Vec<u8>, http::HeaderMap)>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (sent, received) = tokio::sync::oneshot::channel();
+    drop(tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut connection = h2::server::handshake(socket).await.unwrap();
+        let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+        drop(tokio::spawn(async move {
+            let mut incoming = request.into_body();
+            let mut body = Vec::new();
+            while let Some(chunk) = incoming.data().await {
+                let chunk = chunk.unwrap();
+                incoming.flow_control().release_capacity(chunk.len()).unwrap();
+                body.extend_from_slice(&chunk);
+            }
+            let trailers = incoming.trailers().await.unwrap().unwrap_or_default();
+            sent.send((body, trailers)).unwrap();
+            respond.send_response(http::Response::new(()), true).unwrap();
+        }));
+        while connection.accept().await.is_some() {}
+    }));
+    (address, received)
+}
+
+#[tokio::test]
 async fn post_body_is_forwarded() {
     let backend = Backend::start(Reply::Fixed(ok("done"))).await;
     let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;

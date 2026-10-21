@@ -164,6 +164,11 @@ change behind the same feature; promotion out of `experimental` requires
 the security, conformance, integration and resilience suites green on
 hyper.
 
+- **Request trailers to HTTP/1 upstreams.** These requests are rejected with
+  400 when trailers are encountered, because the Hyper egress does not encode
+  HTTP/1 chunked trailers. HTTP/2 upstreams receive trailers from streaming,
+  pre-read and replayed bodies. If a response is already streaming when an
+  unsupported trailer arrives, the exchange is aborted.
 - **Response compression.** Pingora's compression module has no hyper
   equivalent yet; a hyper build does not compress responses.
 - **Upgrades.** WebSocket and other `Upgrade` tunnels are not supported:

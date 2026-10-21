@@ -28,7 +28,7 @@ use tokio::time::Instant;
 
 use super::{
     downstream::{DownstreamBody, DownstreamFrame},
-    failure::Failure,
+    failure::{Failure, FailureKind},
     service::Flight,
 };
 use crate::http::pingora::{
@@ -114,7 +114,7 @@ impl UploadEnd {
 
 impl Upload {
     /// The upload of `body` for a request whose phase left `ctx`.
-    pub(super) fn new(body: DownstreamBody, ctx: &PingoraRequestCtx) -> Self {
+    pub(super) fn new(mut body: DownstreamBody, ctx: &PingoraRequestCtx) -> Self {
         let mode = if ctx.pre_read_body.is_some() || ctx.retained_adapted_request_body.is_some() {
             Mode::Buffered
         } else if body.is_done() {
@@ -125,13 +125,13 @@ impl Upload {
         Self {
             buffered: None,
             ended: mode != Mode::Streaming,
+            trailers: body.pre_read_trailers.take(),
             live: (mode == Mode::Streaming).then_some(body),
             mode,
             outgoing: VecDeque::new(),
             replay: Vec::new(),
             replay_bytes: 0,
             stalled_since: None,
-            trailers: None,
             truncated: false,
             write_timeout: None,
         }
@@ -144,7 +144,7 @@ impl Upload {
     }
 
     /// Run one client frame through the body filters and queue what they
-    /// leave; trailers go upstream only when `h2`.
+    /// leave; reject trailers when the upstream transport cannot carry them.
     ///
     /// # Errors
     ///
@@ -172,15 +172,16 @@ impl Upload {
             },
             DownstreamFrame::Trailers(trailers) => {
                 self.trailers = Some(trailers);
-                self.accept_end(flight, h2).await
+                self.validate_trailers(h2)?;
+                self.accept_end(flight).await
             },
-            DownstreamFrame::End => self.accept_end(flight, h2).await,
+            DownstreamFrame::End => self.accept_end(flight).await,
         }
     }
 
     /// The client's body ended: run the end-of-stream body filters and queue
     /// the end of the upstream body.
-    async fn accept_end(&mut self, flight: &mut Flight, h2: bool) -> Result<(), UploadEnd> {
+    async fn accept_end(&mut self, flight: &mut Flight) -> Result<(), UploadEnd> {
         self.live = None;
         self.ended = true;
         let mut last = None;
@@ -189,7 +190,7 @@ impl Upload {
         if let Some(chunk) = &last {
             self.keep(chunk);
         }
-        self.queue_end(last, h2);
+        self.queue_end(last);
         Ok(())
     }
 
@@ -197,12 +198,22 @@ impl Upload {
     /// that speaks HTTP/2 when `h2` and bounds each write by
     /// `write_timeout`: the whole in-memory body, or the streamed chunks
     /// taken so far and, once the client's body ended, its end.
-    pub(super) fn begin(&mut self, ctx: &mut PingoraRequestCtx, h2: bool, write_timeout: Option<Duration>) {
+    ///
+    /// # Errors
+    ///
+    /// Refuses retained request trailers on an HTTP/1 upstream.
+    pub(super) fn begin(
+        &mut self,
+        ctx: &mut PingoraRequestCtx,
+        h2: bool,
+        write_timeout: Option<Duration>,
+    ) -> Result<(), UploadEnd> {
+        self.validate_trailers(h2)?;
         self.outgoing.clear();
         self.stalled_since = None;
         self.write_timeout = write_timeout;
         match self.mode {
-            Mode::Empty => self.outgoing.push_back(Outgoing::Finish),
+            Mode::Empty => self.queue_end(None),
             Mode::Buffered => {
                 let chunks = self.take_buffered(ctx);
                 self.queue_whole(chunks);
@@ -211,10 +222,22 @@ impl Upload {
                 let replayed = self.replay.iter().cloned().map(Outgoing::Chunk);
                 self.outgoing.extend(replayed);
                 if self.ended {
-                    self.queue_end(None, h2);
+                    self.queue_end(None);
                 }
             },
         }
+        Ok(())
+    }
+
+    /// Refuse unsupported request trailers before any clean body ending.
+    fn validate_trailers(&self, h2: bool) -> Result<(), UploadEnd> {
+        if self.trailers.is_some() && !h2 {
+            return Err(UploadEnd::Client(Failure::new(
+                FailureKind::BadRequest,
+                "the Hyper backend cannot forward request trailers to HTTP/1 upstreams",
+            )));
+        }
+        Ok(())
     }
 
     /// Hand the queue to the session, giving each item up to `slice`.
@@ -293,9 +316,9 @@ impl Upload {
     }
 
     /// Queue the end of the body after `last`, with the client's trailers
-    /// when the session speaks HTTP/2 (HTTP/1 cannot carry request trailers).
-    fn queue_end(&mut self, last: Option<Bytes>, h2: bool) {
-        let trailers = self.trailers.clone().filter(|_| h2);
+    /// retained across buffered uploads and retries.
+    fn queue_end(&mut self, last: Option<Bytes>) {
+        let trailers = self.trailers.clone();
         match (last, trailers) {
             (Some(chunk), Some(trailers)) => {
                 self.outgoing.push_back(Outgoing::Chunk(chunk));
@@ -307,20 +330,20 @@ impl Upload {
         }
     }
 
-    /// Queue a whole body; the last chunk ends it, so a single chunk goes
-    /// with a known length.
+    /// Queue a whole body, ending with trailers when present or the last
+    /// chunk otherwise, so a single chunk can carry a known length.
     fn queue_whole(&mut self, chunks: VecDeque<Bytes>) {
         let mut chunks = chunks.into_iter().peekable();
         while let Some(chunk) = chunks.next() {
-            let item = if chunks.peek().is_some() {
+            let item = if chunks.peek().is_some() || self.trailers.is_some() {
                 Outgoing::Chunk(chunk)
             } else {
                 Outgoing::Last(chunk)
             };
             self.outgoing.push_back(item);
         }
-        if self.outgoing.is_empty() {
-            self.outgoing.push_back(Outgoing::Finish);
+        if self.outgoing.is_empty() || self.trailers.is_some() {
+            self.queue_end(None);
         }
     }
 
@@ -433,11 +456,8 @@ mod tests {
     use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection};
 
     use super::*;
-    use crate::http::hyper::{
-        failure::FailureKind,
-        test_utils::{
-            BodyHook, Script, Upstream, client_request, empty_pipeline, scripted_pipeline, session_to, streaming_upload,
-        },
+    use crate::http::hyper::test_utils::{
+        BodyHook, Script, Upstream, client_request, empty_pipeline, scripted_pipeline, session_to, streaming_upload,
     };
 
     #[tokio::test]
@@ -447,7 +467,7 @@ mod tests {
         let mut upload = Upload::new(DownstreamBody::new(request.into_body(), None), &flight.ctx);
         let mut ctx = PingoraRequestCtx::default();
 
-        upload.begin(&mut ctx, false, None);
+        assert!(upload.begin(&mut ctx, false, None).is_ok());
 
         assert_eq!(queued(&upload), ["finish"], "the request goes out with an empty body");
         assert!(!upload.is_live(), "there is nothing to read from the client");
@@ -460,9 +480,9 @@ mod tests {
         flight.ctx.pre_read_body = Some(chunks(&["ab", "cd"]));
         let (mut upload, _client) = streaming_upload(&flight.ctx).await;
 
-        upload.begin(&mut flight.ctx, false, None);
+        assert!(upload.begin(&mut flight.ctx, false, None).is_ok());
         let first = queued(&upload);
-        upload.begin(&mut flight.ctx, false, None);
+        assert!(upload.begin(&mut flight.ctx, false, None).is_ok());
 
         assert_eq!(first, ["chunk:ab", "last:cd"], "the last chunk ends the body");
         assert_eq!(
@@ -482,8 +502,8 @@ mod tests {
         let (mut single_upload, _single_client) = streaming_upload(&single.ctx).await;
         let (mut empty_upload, _empty_client) = streaming_upload(&empty.ctx).await;
 
-        single_upload.begin(&mut single.ctx, false, None);
-        empty_upload.begin(&mut empty.ctx, false, None);
+        assert!(single_upload.begin(&mut single.ctx, false, None).is_ok());
+        assert!(empty_upload.begin(&mut empty.ctx, false, None).is_ok());
 
         assert_eq!(
             queued(&single_upload),
@@ -501,7 +521,7 @@ mod tests {
         flight.ctx.adapted_request_body = Some(chunks(&["adapted"]));
         let (mut upload, _client) = streaming_upload(&flight.ctx).await;
 
-        upload.begin(&mut flight.ctx, false, None);
+        assert!(upload.begin(&mut flight.ctx, false, None).is_ok());
 
         assert_eq!(
             queued(&upload),
@@ -517,7 +537,7 @@ mod tests {
 
         accept_data(&mut upload, &mut flight, &["ab", "cd"]).await;
         let queued_live = queued(&upload);
-        upload.begin(&mut flight.ctx, false, None);
+        assert!(upload.begin(&mut flight.ctx, false, None).is_ok());
 
         assert_eq!(
             queued_live,
@@ -540,7 +560,7 @@ mod tests {
 
         let ended = upload.accept(&mut flight, Ok(DownstreamFrame::End), false).await;
         let queued_live = queued(&upload);
-        upload.begin(&mut flight.ctx, false, None);
+        assert!(upload.begin(&mut flight.ctx, false, None).is_ok());
 
         assert!(ended.is_ok(), "the end of the body is accepted");
         assert_eq!(queued_live, ["chunk:ab", "finish"], "the end follows the chunks");
@@ -549,7 +569,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn trailers_go_upstream_on_http2_only() {
+    async fn trailers_are_replayed_on_http2_and_rejected_on_http1() {
         let mut flight = Flight::for_tests(empty_pipeline());
         let (mut upload, _client) = streaming_upload(&flight.ctx).await;
         accept_data(&mut upload, &mut flight, &["ab"]).await;
@@ -560,22 +580,50 @@ mod tests {
             .accept(&mut flight, Ok(DownstreamFrame::Trailers(trailers)), true)
             .await;
         let over_http2 = queued(&upload);
-        upload.begin(&mut flight.ctx, false, None);
-        let replayed_over_http1 = queued(&upload);
-        upload.begin(&mut flight.ctx, true, None);
+        let replayed_over_http1 = upload.begin(&mut flight.ctx, false, None);
+        assert!(upload.begin(&mut flight.ctx, true, None).is_ok());
 
         assert!(ended.is_ok(), "trailers end the body");
         assert_eq!(over_http2, ["chunk:ab", "trailers"], "HTTP/2 carries the trailers");
-        assert_eq!(
-            replayed_over_http1,
-            ["chunk:ab", "finish"],
-            "a retry over HTTP/1 ends the body without them"
+        assert!(
+            matches!(replayed_over_http1, Err(UploadEnd::Client(failure)) if failure.kind == FailureKind::BadRequest),
+            "a retry over HTTP/1 must refuse trailers instead of dropping them"
         );
         assert_eq!(
             queued(&upload),
             ["chunk:ab", "trailers"],
             "a retry over HTTP/2 replays them"
         );
+    }
+
+    #[tokio::test]
+    async fn pre_read_trailers_survive_empty_and_chunked_body_retries() {
+        for body_chunks in [vec![], vec!["ab", "cd"]] {
+            let mut flight = Flight::for_tests(empty_pipeline());
+            flight.ctx.pre_read_body = Some(chunks(&body_chunks));
+            let (request, _client) = client_request(b"GET / HTTP/1.1\r\nhost: a\r\n\r\n").await;
+            let mut body = DownstreamBody::new(request.into_body(), None);
+            let mut trailers = HeaderMap::new();
+            trailers.insert("x-checksum", HeaderValue::from_static("abc"));
+            body.pre_read_trailers = Some(trailers);
+            let mut upload = Upload::new(body, &flight.ctx);
+            for _attempt in 0..2 {
+                assert!(upload.begin(&mut flight.ctx, true, None).is_ok());
+                let mut expected: Vec<String> = body_chunks.iter().map(|chunk| format!("chunk:{chunk}")).collect();
+                expected.push("trailers".to_owned());
+                assert_eq!(
+                    queued(&upload),
+                    expected,
+                    "trailers must be the only end marker on each attempt"
+                );
+                assert!(
+                    matches!(upload.outgoing.back(), Some(Outgoing::Trailers(map)) if map.get("x-checksum").unwrap() == "abc")
+                );
+            }
+            assert!(
+                matches!(upload.begin(&mut flight.ctx, false, None), Err(UploadEnd::Client(failure)) if failure.kind == FailureKind::BadRequest)
+            );
+        }
     }
 
     #[tokio::test]
@@ -686,7 +734,7 @@ mod tests {
         accept_data(&mut upload, &mut flight, &["ab"]).await;
 
         assert_eq!(queued(&upload), ["chunk:X"], "the filtered chunk is what goes upstream");
-        upload.begin(&mut flight.ctx, false, None);
+        assert!(upload.begin(&mut flight.ctx, false, None).is_ok());
         assert_eq!(queued(&upload), ["chunk:X"], "and what a retry replays");
     }
 
@@ -821,7 +869,11 @@ mod tests {
     async fn write_timeout_counts_from_the_first_refusal() {
         let mut flight = Flight::for_tests(empty_pipeline());
         let (mut upload, _client) = streaming_upload(&flight.ctx).await;
-        upload.begin(&mut flight.ctx, false, Some(Duration::from_millis(100)));
+        assert!(
+            upload
+                .begin(&mut flight.ctx, false, Some(Duration::from_millis(100)))
+                .is_ok()
+        );
 
         let first = upload.stalled();
         let since = upload.stalled_since;
@@ -846,7 +898,7 @@ mod tests {
     async fn stall_without_a_write_timeout_never_fails() {
         let mut flight = Flight::for_tests(empty_pipeline());
         let (mut upload, _client) = streaming_upload(&flight.ctx).await;
-        upload.begin(&mut flight.ctx, false, None);
+        assert!(upload.begin(&mut flight.ctx, false, None).is_ok());
 
         let first = upload.stalled();
         tokio::time::advance(Duration::from_secs(3600)).await;
@@ -863,10 +915,18 @@ mod tests {
     async fn a_new_attempt_restarts_the_stall_clock() {
         let mut flight = Flight::for_tests(empty_pipeline());
         let (mut upload, _client) = streaming_upload(&flight.ctx).await;
-        upload.begin(&mut flight.ctx, false, Some(Duration::from_millis(100)));
+        assert!(
+            upload
+                .begin(&mut flight.ctx, false, Some(Duration::from_millis(100)))
+                .is_ok()
+        );
         let _blocked = upload.stalled();
 
-        upload.begin(&mut flight.ctx, false, Some(Duration::from_millis(100)));
+        assert!(
+            upload
+                .begin(&mut flight.ctx, false, Some(Duration::from_millis(100)))
+                .is_ok()
+        );
 
         assert!(upload.stalled_since.is_none(), "each attempt times its own stalls");
     }

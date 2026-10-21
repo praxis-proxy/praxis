@@ -191,7 +191,11 @@ async fn read_body(
     loop {
         let chunk = match body.next().await.map_err(PreReadEnd::Client)? {
             DownstreamFrame::Data(chunk) => Some(chunk),
-            DownstreamFrame::End | DownstreamFrame::Trailers(_) => None,
+            DownstreamFrame::Trailers(trailers) => {
+                body.pre_read_trailers = Some(trailers);
+                None
+            },
+            DownstreamFrame::End => None,
         };
         let ended = Box::pin(pass.feed(&flight.pipeline, &mut flight.ctx, request, chunk))
             .await

@@ -27,6 +27,9 @@ pub(super) struct DownstreamBody {
     /// The body still to read; `None` once it ended.
     body: Option<Incoming>,
 
+    /// Trailers consumed by pre-read, retained for upstream forwarding.
+    pub(super) pre_read_trailers: Option<HeaderMap>,
+
     /// Bound on each frame read.
     read_timeout: Option<Duration>,
 }
@@ -35,7 +38,11 @@ impl DownstreamBody {
     /// Read `body` with each frame bounded by `read_timeout`.
     pub(super) fn new(body: Incoming, read_timeout: Option<Duration>) -> Self {
         let body = (!body.is_end_stream()).then_some(body);
-        Self { body, read_timeout }
+        Self {
+            body,
+            pre_read_trailers: None,
+            read_timeout,
+        }
     }
 
     /// Turn what the body yielded into a frame, or `None` for an empty one.

@@ -27,7 +27,7 @@ use tracing::{debug, error};
 use super::{
     body::Relay,
     downstream::DownstreamFrame,
-    failure::Failure,
+    failure::{Failure, FailureKind},
     service::Flight,
     upload::{Flush, Upload, UploadEnd},
     upstream::record_attempt_failure,
@@ -147,12 +147,17 @@ impl Relaying {
     }
 
     /// Filter and queue one more frame of the client's body.
-    async fn forward(&mut self, frame: Result<DownstreamFrame, Failure>) {
+    async fn forward(&mut self, frame: Result<DownstreamFrame, Failure>) -> Option<Ended> {
         let h2 = self.session.negotiated_version() == Version::HTTP_2;
         let accepted = Box::pin(self.upload.accept(&mut self.flight, frame, h2)).await;
-        if let Err(end) = accepted {
-            self.stop_upload(end);
+        match accepted {
+            Err(UploadEnd::Client(failure)) if failure.kind == FailureKind::BadRequest => {
+                return Some(Ended::Downstream(failure));
+            },
+            Err(end) => self.stop_upload(end),
+            Ok(()) => {},
         }
+        None
     }
 
     /// Wait for whatever happens next: the client leaving, an upstream
@@ -270,10 +275,7 @@ impl Relaying {
             Step::Upstream(Ok(Some(chunk))) => self.deliver(chunk).await.err(),
             Step::Upstream(Ok(None)) => Some(Box::pin(self.deliver_end()).await),
             Step::Upstream(Err(failure)) => Some(Ended::Upstream(failure)),
-            Step::Client(frame) => {
-                self.forward(frame).await;
-                None
-            },
+            Step::Client(frame) => self.forward(frame).await,
         }
     }
 
@@ -316,6 +318,9 @@ enum Step {
 enum Ended {
     /// The client stopped reading.
     ClientGone,
+
+    /// The request body cannot be forwarded after the response started.
+    Downstream(Failure),
 
     /// A response body filter aborted the response.
     Filter(String),
@@ -390,12 +395,12 @@ fn settle(flight: &mut Flight, session: &mut HyperSession, ended: &Ended) -> boo
             flight.error = Some(ErrorOrigin::Other);
             false
         },
-        Ended::Upstream(failure) => {
+        Ended::Upstream(failure) | Ended::Downstream(failure) => {
             record_attempt_failure(failure, &mut flight.ctx);
             if let Some(error_type) = failure.error_type() {
                 flight.ctx.stamp_error_type(error_type);
             }
-            error!(error = %failure, "upstream error while relaying the response body");
+            error!(error = %failure, "exchange failed while relaying the response body");
             flight.error = Some(failure.origin());
             false
         },
@@ -426,7 +431,6 @@ mod tests {
     use crate::http::hyper::{
         body::ProxyBody,
         downstream::DownstreamBody,
-        failure::FailureKind,
         test_utils::{
             Script, Upstream, answered, client_request, empty_pipeline, queue_unread_body, scripted_pipeline,
             session_to, streaming_upload,

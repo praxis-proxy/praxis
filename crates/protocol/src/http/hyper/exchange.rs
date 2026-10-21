@@ -81,7 +81,7 @@ pub(super) async fn send_until_head(
     timeouts: Timeouts,
 ) -> Result<(), UploadEnd> {
     let h2 = session.negotiated_version() == Version::HTTP_2;
-    upload.begin(&mut flight.ctx, h2, timeouts.write);
+    upload.begin(&mut flight.ctx, h2, timeouts.write)?;
     let read_timeout = timeouts.read;
     loop {
         if Box::pin(drain(upload, session, read_timeout)).await? {

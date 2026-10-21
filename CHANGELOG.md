@@ -27,6 +27,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - The Hyper backend stops the runtime if a required listener exits during
   startup or serving, including a failed socket in a TCP listener group.
+- The Hyper backend preserves request trailers through pre-read and retries
+  to HTTP/2 upstreams, and rejects unsupported HTTP/1 uploads with trailers.
 - The Hyper backend rejects strict HTTP/2 TLS upstreams that do not negotiate
   `h2` through ALPN. Automatic HTTP version selection still allows HTTP/1.1.
 
