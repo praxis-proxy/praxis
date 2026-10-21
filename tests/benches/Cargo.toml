@@ -102,7 +102,7 @@ harness = false
 
 # Lets the policy filter be compiled into the benchmark binaries so the policy
 # hot path can be measured. Opted into explicitly so a plain bench build
-# stays lean; `make build-benches` builds these with --all-features.
+# stays lean; `make build-benches` turns them all on.
 [features]
 policy-engine = ["praxis-filter/policy-engine"]
 upstream-binding = ["praxis-filter/upstream-binding"]

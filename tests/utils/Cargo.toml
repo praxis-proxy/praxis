@@ -7,16 +7,26 @@ license.workspace = true
 readme.workspace = true
 publish = false
 
+[features]
+# The network backend the proxies the harness starts run on. Each suite crate
+# depends on the harness without defaults and forwards exactly one of these:
+# `pingora` in its own default set, `hyper` as the opt-in that
+# `make test-integration-hyper` and its siblings select.
+default = ["pingora"]
+pingora = ["praxis/pingora"]
+hyper = ["praxis/hyper"]
+
 [lints]
 workspace = true
 
 [dependencies]
-# The same two features as praxis-protocol below, and nothing else: the
-# workspace declares the binary crate without its defaults so the policy engine
-# is a choice each test crate makes (its `policy-engine` feature), not a
-# side effect of depending on the harness. `--no-default-features` on a test
-# crate therefore builds the proxy exactly as the FIPS build does.
-praxis = { workspace = true, features = ["pingora", "config-reload", "admin-api"] }
+# The same two features as praxis-protocol below, plus the backend the suite
+# crate forwards, and nothing else: the workspace declares the binary crate
+# without its defaults so the policy engine is a choice each test crate makes
+# (its `policy-engine` feature), not a side effect of depending on the
+# harness. `--no-default-features` on a test crate therefore builds the proxy
+# exactly as the FIPS build does, once it names the backend.
+praxis = { workspace = true, features = ["config-reload", "admin-api"] }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 # The shared harness exercises admin/health/metrics endpoints and cert hot-reload;

@@ -50,11 +50,15 @@ tracing-subscriber = { workspace = true }
 [features]
 default = ["pingora", "config-reload", "admin-api", "policy-engine"]
 
-# The network backend. Exactly one backend feature must be on; a build with
-# none refuses to compile (see src/lib.rs). `pingora` is the only backend
-# today and is on by default. A `--no-default-features` build names it
-# explicitly, as `make release-fips` does. See docs/developing/adding-backends.md.
+# The network backend. A build with no backend feature refuses to compile
+# (see src/lib.rs). `pingora` is on by default; a `--no-default-features`
+# build names the backend it wants, as `make release-fips` and `make
+# build-hyper` do. See docs/developing/adding-backends.md.
 pingora = ["praxis-core/pingora", "praxis-protocol/pingora"]
+# The hyper network backend. Off by default; experimental. The two backend
+# features are mutually exclusive; a hyper build starts from
+# `--no-default-features`.
+hyper = ["praxis-core/hyper", "praxis-protocol/hyper", "experimental"]
 
 # Config-file and TLS certificate hot-reload (filesystem watching via
 # `notify`). On by default; disable for a leaner build that drops the

@@ -2,6 +2,9 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Integration scrape coverage for the expanded Prometheus metrics surface (#794).
+//!
+//! The tests gated on `pingora` drive the Pingora handler's test-only retry
+//! gate.
 
 use std::{io::Write as _, net::TcpStream, time::Duration};
 
@@ -162,6 +165,7 @@ fn metrics_overload_rejects_listener_connections() {
 // `reason=memory` and `reason=global_connections` is covered by
 // `overload_reject_reasons_appear_in_scrape` in `protocol` metrics unit tests.
 
+#[cfg(feature = "pingora")]
 #[test]
 fn metrics_upstream_connect_failure_and_retry_exhausted() {
     // Serialize against the retry-success gate test (shared process-global gate).
@@ -190,6 +194,7 @@ fn metrics_upstream_connect_failure_and_retry_exhausted() {
     );
 }
 
+#[cfg(feature = "pingora")]
 #[test]
 fn metrics_upstream_retry_success_after_transient_connect_failure() {
     use std::{

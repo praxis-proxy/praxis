@@ -2,15 +2,18 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Multiple listeners and per-listener pipeline tests.
+//!
+//! The test gated on `pingora` builds a Pingora server directly.
 
 use praxis_core::config::Config;
+#[cfg(feature = "pingora")]
 use praxis_protocol::http::load_http_handler;
-use praxis_test_utils::{
-    build_pipeline, free_port, http_get, http_send, parse_status, start_backend_with_shutdown, start_proxy,
-    wait_for_tcp,
-};
+#[cfg(feature = "pingora")]
+use praxis_test_utils::{build_pipeline, http_get};
+use praxis_test_utils::{free_port, http_send, parse_status, start_backend_with_shutdown, start_proxy, wait_for_tcp};
 
 /// Wrap a pipeline [`Arc`] in [`ArcSwap`] for handler registration.
+#[cfg(feature = "pingora")]
 fn swappable(
     pipeline: std::sync::Arc<praxis_filter::FilterPipeline>,
 ) -> std::sync::Arc<arc_swap::ArcSwap<praxis_filter::FilterPipeline>> {
@@ -21,6 +24,7 @@ fn swappable(
 // Tests
 // -----------------------------------------------------------------------------
 
+#[cfg(feature = "pingora")]
 #[test]
 fn multiple_listeners() {
     let backend_port_guard = start_backend_with_shutdown("multi listener");

@@ -323,7 +323,7 @@ pub fn try_run_server_with_composition(
     let health_registry = build_health_registry(&config.clusters);
     let (state, registry) = build_server_state(&config, composition, &health_registry, log_level)?;
 
-    info!("initializing server");
+    info!(backend = praxis_core::backend::NAME, "initializing server");
     let mut server = Runtime::from_config(&config);
     let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines)?;
     #[cfg(feature = "admin-api")]

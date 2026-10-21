@@ -1,0 +1,71 @@
+# Tests that do not pass on the hyper backend yet.
+#
+# One test name per line, matched as a substring by the test harness
+# (`cargo test -- --skip <name>`), so each name is the full path inside its
+# suite binary. `make test-integration-hyper` and the hyper CI workflow skip
+# exactly these and run everything else; the tests that reach into Pingora
+# directly are compiled out under hyper instead of listed. Each entry names
+# its bucket; a bucket disappears from this file when its follow-up lands. See
+# docs/architecture/hyper-backend.md, "What is not at parity".
+
+# WebSocket and other upgrades: the hyper adapter strips the upgrade headers
+# instead of tunnelling them.
+adversarial::header_smuggling::hop_by_hop_upgrade_header_preserved_for_upgrade_requests
+examples::websocket::websocket_example_config_proxies_upgrade
+rfcs::rfc6455::rfc6455_101_response_forwarded
+rfcs::rfc6455::rfc6455_connection_upgrade_forwarded
+rfcs::rfc6455::rfc6455_sec_websocket_accept_forwarded_unchanged
+rfcs::rfc6455::rfc6455_upgrade_header_forwarded
+websocket::upgrade_request_preserves_upgrade_headers
+websocket::websocket_binary_messages
+websocket::websocket_close_with_status_code
+websocket::websocket_large_message
+websocket::websocket_message_ordering_preserved
+websocket::websocket_multiple_simultaneous_connections
+websocket::websocket_ping_pong_frames
+websocket::websocket_rate_limit_applies_to_upgrade
+websocket::websocket_upgrade_succeeds
+websocket::websocket_via_header_on_upgrade_response
+
+# Response compression: no hyper equivalent of Pingora's compression module.
+compression::compression_with_accept_encoding_gzip
+compression::gzip_compresses_the_final_response_after_early_hints
+compression::gzip_configuration_reload_uses_current_levels_and_honors_removal
+compression::gzip_overrides_and_disablement_apply_before_negotiation_on_both_paths
+compression::high_shared_level_round_trips_a_chunked_upstream_body
+compression::high_shared_levels_round_trip_gzip_for_upstream_and_static_responses
+
+# mTLS peer identity: the client certificate's digest, organization and
+# serial are not extracted on hyper.
+tls::peer_identity_has_organization_when_cert_has_org
+tls::peer_identity_has_serial_number_for_mtls_connection
+tls::peer_identity_set_for_mtls_connection
+tls::peer_identity_survives_stream_buffer_pre_read_regression
+tls::peer_identity_trust_allows_matching_org
+
+# hyper's HTTP/1 parser: pipelining is served, a chunk size of u64::MAX is
+# accepted, and an over-long request target gets 414 rather than 400.
+connection_lifecycle::http11_pipelining_drops_overread_without_mixing_responses
+protocol_parsing::chunked_encoding_maximum_size_rejected
+protocol_parsing::request_target_exceeding_parser_limit_rejected
+
+# Hedged requests: the hyper data path does not race hedges.
+examples::hedged_requests::hedged_request_returns_the_faster_endpoint
+
+# Interim 1xx responses: hyper's server cannot relay a 103 to the client.
+response_attempt_client_spans_record_final_status_and_actual_close
+
+# Expect: 100-continue: hyper's server answers 100 Continue itself as soon
+# as the body is read, while Pingora sends no 100 Continue of its own (it
+# forwards the body and relays an upstream's 100 if one comes); the raw
+# clients in these tests read the first status line.
+rfcs::rfc9110::rfc9110_100_continue_allows_body_upload
+rfcs::rfc9112::rfc9112_expect_100_continue_417_forwarded
+rfcs::rfc9112::rfc9112_expect_100_continue_post_succeeds
+
+# Header name case: hyper writes every response header name in lowercase,
+# while Pingora keeps the spelling a filter wrote; these tests look for the
+# mixed-case spelling in the raw bytes.
+examples::policy_api_key::policy_api_key_missing_key_is_rejected
+examples::policy_api_key::policy_api_key_unknown_key_is_rejected
+examples::policy_api_key::policy_api_key_unrecognized_credential_is_rejected

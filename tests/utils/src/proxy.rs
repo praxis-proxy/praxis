@@ -74,14 +74,17 @@ const TEST_WORKER_THREADS: usize = 2;
 ///
 /// The fallback below builds the standard binary, so a run against another
 /// feature set has to say which binary it means: `make test-integration-fips`
-/// points this at the FIPS build.
+/// points this at the FIPS build and `make test-integration-hyper` at the
+/// hyper build.
 pub const PRAXIS_BIN_ENV: &str = "PRAXIS_BIN";
 
 /// Path to the `praxis` binary for subprocess integration tests.
 ///
 /// Uses [`PRAXIS_BIN_ENV`] when set, then `CARGO_BIN_EXE_praxis`; otherwise
 /// resolves under `CARGO_TARGET_DIR` (including llvm-cov's alternate target
-/// dir) and builds the binary if it is not already present.
+/// dir), in its `hyper` subdirectory when this harness tests the hyper
+/// backend, and builds the binary for that backend if it is not already
+/// present.
 ///
 /// # Panics
 ///
@@ -105,7 +108,9 @@ pub fn praxis_bin() -> PathBuf {
     }
 
     let status = std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "praxis-proxy", "--bin", "praxis", "-q"])
+        .args(["build", "-p", "praxis-proxy", "--bin", "praxis", "-q", "--target-dir"])
+        .arg(build_target_dir())
+        .args(backend_build_args())
         .status()
         .expect("spawn cargo build for praxis binary");
     assert!(status.success(), "cargo build -p praxis-proxy --bin praxis failed");
@@ -119,15 +124,41 @@ pub fn praxis_bin() -> PathBuf {
 fn resolve_praxis_bin_path() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_praxis").map_or_else(
         || {
-            let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-                || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
-                PathBuf::from,
-            );
             let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
-            target.join(profile).join("praxis")
+            build_target_dir().join(profile).join("praxis")
         },
         PathBuf::from,
     )
+}
+
+/// The target directory the fallback build uses: cargo's, with a `hyper`
+/// subdirectory when this harness tests the hyper backend, so neither
+/// backend's binary stands in for the other's.
+fn build_target_dir() -> PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+        PathBuf::from,
+    );
+    if cfg!(feature = "hyper") {
+        target.join("hyper")
+    } else {
+        target
+    }
+}
+
+/// The feature arguments selecting the backend this harness tests: the
+/// binary's defaults, or under `hyper` that backend with the binary's other
+/// default features, as `make build-hyper` builds it.
+fn backend_build_args() -> &'static [&'static str] {
+    if cfg!(feature = "hyper") {
+        &[
+            "--no-default-features",
+            "--features",
+            "hyper,config-reload,admin-api,policy-engine",
+        ]
+    } else {
+        &[]
+    }
 }
 
 // -----------------------------------------------------------------------------

@@ -35,11 +35,15 @@ RUST_TARGETS := all build release check \
 	bench build-benches check-features \
 	lint fmt doc audit coverage coverage-check \
 	build-fips release-fips check-fips lint-fips test-fips fips-deps fips-report \
+	build-hyper check-hyper lint-hyper test-hyper \
+	test-integration-hyper test-conformance-hyper test-schema-hyper \
+	test-security-hyper test-resilience-hyper \
 	run-echo run-debug
-NIGHTLY_FMT_TARGETS  := lint lint-fips fmt
+NIGHTLY_FMT_TARGETS  := lint lint-fips lint-hyper fmt
 CMAKE_TARGETS := all build release check \
 	test test-unit \
 	test-schema test-integration test-conformance \
+	test-integration-hyper \
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
 	bench \
@@ -67,6 +71,9 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	test-container test-container-run \
 	build-fips release-fips check-fips lint-fips test-fips \
 	container-fips container-fips-run \
+	build-hyper check-hyper lint-hyper test-hyper \
+	test-integration-hyper test-conformance-hyper test-schema-hyper \
+	test-security-hyper test-resilience-hyper \
 	fips-check fips-check-ubi fips-deps fips-report fips-signature-store fips-verify-image \
 	fips-scan fips-scanner fips-smoke \
 	run-echo run-debug \
@@ -135,16 +142,18 @@ check: ## cargo check of the default and lean feature sets
 	cargo check --workspace
 	cargo check -p praxis-proxy --no-default-features --features pingora
 	cargo check -p praxis-proxy --no-default-features --features pingora,config-reload,admin-api
+	cargo check -p praxis-proxy --no-default-features --features hyper
 	cargo check -p praxis-proxy-filter --no-default-features
 	cargo check -p praxis-proxy-core --no-default-features
 	cargo check -p praxis-proxy-protocol --no-default-features
 	cargo check -p praxis-proxy-protocol --no-default-features --features admin-api --all-targets
 
 # Verify every optional and experimental feature compiles in isolation.
-# `lint` and `test` build the extremes (--all-features and
-# --no-default-features); this builds each flag on its own, so an inter-feature
-# dependency (a feature that only compiles when another is also enabled) is
-# caught on every PR rather than only in the all-on or all-off build.
+# `lint` and `test` build the extremes (every feature but the other backend,
+# and --no-default-features); this builds each flag on its own, so an
+# inter-feature dependency (a feature that only compiles when another is also
+# enabled) is caught on every PR rather than only in the all-on or all-off
+# build.
 check-features: ## check each optional feature on its own
 	@for f in policy-engine config-reload admin-api otel basic-auth-filter \
 	          cloud-events-filter upstream-binding iterative-request-router \
@@ -153,6 +162,9 @@ check-features: ## check each optional feature on its own
 		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f --all-targets =="; \
 		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f" --all-targets || exit 1; \
 	done
+	# The other backend, on its own: the loop above always names pingora, and
+	# the two backends refuse to build together.
+	cargo check -p praxis-proxy --no-default-features --features hyper --all-targets
 
 clean: ## cargo clean
 	cargo clean
@@ -334,6 +346,9 @@ FIPS_CARGO_ARGS         := -p praxis-proxy --no-default-features --features $(FI
 # runs separately because it needs h2spec on PATH.
 FIPS_TEST_SUITES        := -p praxis-tests-schema -p praxis-tests-security \
 	-p praxis-tests-integration -p praxis-tests-resilience
+# A suite names its backend itself (the harness has no backend without
+# defaults), so the FIPS runs, which drop every default, name Pingora.
+FIPS_TEST_SUITE_FEATURES := praxis-tests-schema/pingora,praxis-tests-security/pingora,praxis-tests-integration/pingora,praxis-tests-resilience/pingora
 # The toolchain stage of Containerfile.fips, built by `fips-toolchain`.
 FIPS_TOOLCHAIN_IMAGE    ?= praxis-fips-toolchain
 # Multiplier for the resilience suite's throughput floors when the suites run
@@ -451,12 +466,13 @@ test-fips: ## unit tests resolved as the FIPS build
 test-integration-fips: build-fips ## integration suites against the FIPS build
 	PRAXIS_BIN=$(abspath $(FIPS_TARGET_DIR))/debug/praxis \
 	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
-		$(FIPS_TEST_SUITES) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
+		$(FIPS_TEST_SUITES) --features $(FIPS_TEST_SUITE_FEATURES) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
 
 test-conformance-fips: build-fips $(H2SPEC) ## conformance suite against the FIPS build
 	PATH="$(BINUTILS_PATH):$(PATH)" PRAXIS_BIN=$(abspath $(FIPS_TARGET_DIR))/debug/praxis \
 	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
-		-p praxis-tests-conformance $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
+		-p praxis-tests-conformance --features praxis-tests-conformance/pingora \
+		$(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
 
 # The whole test suite as the FIPS build, inside the toolchain image, on a
 # FIPS-enabled host: the runtime proof the hosted checks cannot give. The
@@ -637,12 +653,131 @@ fips-version: ## print the version the FIPS image is tagged with
 	@echo $(VERSION)
 
 # -------------------------------------------------------------------
+# Hyper backend (experimental)
+# -------------------------------------------------------------------
+#
+# The hyper network backend is off by default and experimental. A hyper
+# build starts from --no-default-features and names the backend, because
+# the two backends are mutually exclusive and refuse to build together; it
+# goes to its own target directory so it never overwrites, or is mistaken
+# for, the standard build. The targets mirror the FIPS ones:
+#
+#   make build-hyper              hyper build, debug profile
+#   make check-hyper              cargo check of the hyper feature set
+#   make lint-hyper               clippy + rustfmt for the hyper feature set
+#   make test-hyper               unit tests resolved as the hyper build
+#   make test-integration-hyper   the integration suites on hyper
+#   make test-conformance-hyper   the conformance suite on hyper
+#
+# BACKEND=hyper routes the standard test targets to these, so
+# `make test-integration BACKEND=hyper` runs the same suites on hyper. See
+# docs/architecture/hyper-backend.md.
+
+BACKEND                 ?= pingora
+HYPER_FEATURES          := hyper,config-reload,admin-api,policy-engine
+HYPER_FEATURES_QUALIFIED := $(subst $(_COMMA),$(_COMMA)praxis-proxy/,praxis-proxy/$(HYPER_FEATURES))
+HYPER_TARGET_DIR        ?= target/hyper
+HYPER_CARGO_ARGS        := -p praxis-proxy --no-default-features --features $(HYPER_FEATURES) --target-dir $(HYPER_TARGET_DIR)
+# $(call hyper-suite-features,pkg1 pkg2 ...): every feature of those suite
+# crates except the Pingora backend, from the same `cargo xtask features`
+# listing the standard targets use (see "Feature lists" below), so the hyper
+# run turns on exactly what the standard run does.
+hyper-suite-features = $(shell $(XTASK_FIPS) features --except pingora $(foreach pkg,$(1),-p $(pkg)))
+HYPER_BIN               := PRAXIS_BIN=$(abspath $(HYPER_TARGET_DIR))/debug/praxis
+# The parity record: tests that do not pass on hyper yet, one per line with
+# its bucket in a comment, skipped by name so the suites stay untouched. A
+# missing list stops the run rather than quietly running those tests.
+HYPER_SKIP_FILE         := tests/hyper-skip.txt
+HYPER_SKIP_ARGS         = $(if $(wildcard $(HYPER_SKIP_FILE)),$(shell sed -e 's/\#.*//' -e '/^[[:space:]]*$$/d' -e 's/^[[:space:]]*/--skip /' $(HYPER_SKIP_FILE) | tr '\n' ' '),$(error $(HYPER_SKIP_FILE) is missing))
+# Test-binary arguments for the hyper suite runs: the skip list, plus
+# --nocapture when V=1 (the `--` separator is shared with _NOCAPTURE).
+HYPER_TEST_ARGS         = -- $(if $(V),--nocapture) $(HYPER_SKIP_ARGS)
+
+##@ Hyper backend (experimental; see HYPER_FEATURES)
+build-hyper: ## hyper build, debug profile, into target/hyper
+	cargo build $(HYPER_CARGO_ARGS)
+
+check-hyper: ## cargo check of the hyper build, all targets
+	cargo check $(HYPER_CARGO_ARGS) --all-targets
+
+# Clippy over the hyper binary and over the two library crates that carry
+# the backend, alone, so the hyper arms are linted without Pingora's.
+lint-hyper: ## clippy (all targets) + rustfmt for the hyper feature set
+	cargo clippy $(HYPER_CARGO_ARGS) --all-targets -- -D warnings
+	cargo clippy -p praxis-proxy-core --no-default-features --features hyper --all-targets --target-dir $(HYPER_TARGET_DIR) -- -D warnings
+	cargo clippy -p praxis-proxy-protocol --no-default-features --features hyper,admin-api --all-targets --target-dir $(HYPER_TARGET_DIR) -- -D warnings
+	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
+
+# The crates that carry the backend, resolved as the hyper build. The filter
+# crate is left out: its own tests dial through a Pingora connector by way
+# of a dev-dependency feature, which would select Pingora for the whole run.
+test-hyper: ## unit tests resolved as the hyper build
+	cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features \
+		-p praxis-proxy -p praxis-proxy-protocol -p praxis-proxy-core \
+		--features $(HYPER_FEATURES_QUALIFIED) $(_NOCAPTURE)
+
+# The suites on hyper. The proxy each suite starts in process is the hyper
+# build, and the tests that spawn the binary get the hyper binary through
+# PRAXIS_BIN.
+# --no-fail-fast: this run is the parity record, so every suite reports.
+test-integration-hyper: build-hyper ## schema, security, resilience and integration suites on hyper
+	$(call require-features,$(call hyper-suite-features,$(SUITE_PACKAGES)))
+	$(HYPER_BIN) cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features --no-fail-fast \
+		$(foreach pkg,$(SUITE_PACKAGES),-p $(pkg)) \
+		--features $(call hyper-suite-features,$(SUITE_PACKAGES)) \
+		$(HYPER_TEST_ARGS)
+
+test-schema-hyper: build-hyper ## config parsing + example validation suite on hyper
+	$(call require-features,$(call hyper-suite-features,praxis-tests-schema))
+	$(HYPER_BIN) cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features \
+		-p praxis-tests-schema --features $(call hyper-suite-features,praxis-tests-schema) $(HYPER_TEST_ARGS)
+
+test-security-hyper: build-hyper ## security suite on hyper
+	$(call require-features,$(call hyper-suite-features,praxis-tests-security))
+	$(HYPER_BIN) cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features \
+		-p praxis-tests-security --features $(call hyper-suite-features,praxis-tests-security) $(HYPER_TEST_ARGS)
+
+test-resilience-hyper: build-hyper ## resilience suite on hyper
+	$(call require-features,$(call hyper-suite-features,praxis-tests-resilience))
+	$(HYPER_BIN) cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features \
+		-p praxis-tests-resilience --features $(call hyper-suite-features,praxis-tests-resilience) $(HYPER_TEST_ARGS)
+
+test-conformance-hyper: build-hyper $(H2SPEC) ## RFC conformance suite on hyper (fetches h2spec)
+	$(call require-features,$(call hyper-suite-features,praxis-tests-conformance))
+	PATH="$(BINUTILS_PATH):$(PATH)" $(HYPER_BIN) cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features \
+		-p praxis-tests-conformance --features $(call hyper-suite-features,praxis-tests-conformance) $(HYPER_TEST_ARGS)
+
+# -------------------------------------------------------------------
+# Feature lists
+# -------------------------------------------------------------------
+#
+# The network backends are mutually exclusive, so --all-features no longer
+# compiles the workspace. `cargo xtask features` lists every feature of the
+# selected packages except the backend named here, from cargo metadata, so a
+# feature added to any manifest is picked up without editing this file. The
+# variables expand when a recipe runs, not when make parses this file.
+
+XTASK_FEATURES   = $(XTASK_FIPS) features --except hyper
+ALL_FEATURES     = $(shell $(XTASK_FEATURES))
+UNIT_FEATURES    = $(shell $(XTASK_FEATURES) --exclude praxis-tests-schema --exclude praxis-tests-security \
+	--exclude praxis-tests-resilience --exclude praxis-tests-integration --exclude praxis-tests-conformance \
+	--exclude praxis-test-utils --exclude praxis-tests-benches)
+# $(call package-features,pkg1 pkg2 ...): the features of those packages only,
+# which is what a `-p` invocation may name.
+package-features = $(shell $(XTASK_FEATURES) $(foreach pkg,$(1),-p $(pkg)))
+SUITE_PACKAGES   := praxis-tests-schema praxis-tests-security praxis-tests-resilience praxis-tests-integration
+# A failed feature listing must not quietly run a lean build.
+define require-features
+	@[ -n "$(1)" ] || { echo "cargo xtask features produced no feature list" >&2; exit 1; }
+endef
+
+# -------------------------------------------------------------------
 # Test
 # -------------------------------------------------------------------
 
 ##@ Test
-# Tests are split into three groups, each a single cargo invocation with all
-# features enabled and its own CI job:
+# Tests are split into three groups, each a single cargo invocation with every
+# feature but the other backend enabled and its own CI job:
 #   test              unit tests, i.e. everything outside tests/ (the product
 #                     crates: server, core, filter, protocol, tls)
 #   test-integration  the heavier suites under tests/ (schema, security,
@@ -650,12 +785,23 @@ fips-version: ## print the version the FIPS image is tagged with
 #   test-conformance  RFC conformance (needs the h2spec binary)
 test: test-unit ## unit tests (alias for test-unit)
 
+# BACKEND=hyper routes each standard target to its -hyper twin above; the
+# default recipes below are the Pingora ones.
+ifeq ($(BACKEND),hyper)
+test-unit: test-hyper
+test-schema: test-schema-hyper
+test-integration: test-integration-hyper
+test-conformance: test-conformance-hyper
+test-security-suite: test-security-hyper
+test-resilience: test-resilience-hyper
+else
 # Everything outside tests/, one pass, every feature on, then the filter and
-# core crates in their lean configs: --all-features compiles out the tests that
-# only exist without `policy-engine` or `upstream-binding`, so nothing else
-# ever runs them.
+# core crates in their lean configs: the full feature set compiles out the
+# tests that only exist without `policy-engine` or `upstream-binding`, so
+# nothing else ever runs them.
 test-unit: ## everything outside tests/, all features, plus lean runs
-	cargo test --workspace --all-features \
+	$(call require-features,$(UNIT_FEATURES))
+	cargo test --workspace --features $(UNIT_FEATURES) \
 		--exclude praxis-tests-schema \
 		--exclude praxis-tests-security \
 		--exclude praxis-tests-resilience \
@@ -667,37 +813,43 @@ test-unit: ## everything outside tests/, all features, plus lean runs
 	cargo test -p praxis-proxy-filter --no-default-features $(_NOCAPTURE)
 	cargo test -p praxis-proxy-core --no-default-features $(_NOCAPTURE)
 
-# The single-suite targets use the same --all-features as test-integration,
-# so running one suite runs the same tests it would there.
+# The single-suite targets use the same feature set as test-integration, so
+# running one suite runs the same tests it would there.
 test-schema: ## config parsing + example validation suite
-	cargo test --all-features -p praxis-tests-schema $(_NOCAPTURE)
+	$(call require-features,$(call package-features,praxis-tests-schema))
+	cargo test --features $(call package-features,praxis-tests-schema) -p praxis-tests-schema $(_NOCAPTURE)
 
 # Everything under tests/ (schema, security, resilience, integration) in a
 # single pass, every feature on. Conformance is separate (test-conformance).
 test-integration: ## schema, security, resilience and integration suites
-	cargo test --all-features \
+	$(call require-features,$(call package-features,$(SUITE_PACKAGES)))
+	cargo test --features $(call package-features,$(SUITE_PACKAGES)) \
 		-p praxis-tests-schema \
 		-p praxis-tests-security \
 		-p praxis-tests-resilience \
 		-p praxis-tests-integration \
 		$(_NOCAPTURE)
 
+test-conformance: $(H2SPEC) ## RFC conformance suite (fetches h2spec)
+	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-conformance $(_NOCAPTURE)
+
+test-security-suite: ## security suite
+	$(call require-features,$(call package-features,praxis-tests-security))
+	cargo test --features $(call package-features,praxis-tests-security) -p praxis-tests-security $(_NOCAPTURE)
+
+test-resilience: ## resilience suite
+	$(call require-features,$(call package-features,praxis-tests-resilience))
+	cargo test --features $(call package-features,praxis-tests-resilience) -p praxis-tests-resilience $(_NOCAPTURE)
+endif
+
 # Compile the benchmark harness without running it, to catch bench
 # build breakage. Split out of test-integration so PR CI skips it;
 # main CI still runs it (see .github/workflows/integration.yaml).
 build-benches: ## compile the benchmarks without running them
-	cargo build --benches --all-features -p praxis-tests-benches
-
-test-conformance: $(H2SPEC) ## RFC conformance suite (fetches h2spec)
-	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-conformance $(_NOCAPTURE)
+	$(call require-features,$(call package-features,praxis-tests-benches))
+	cargo build --benches --features $(call package-features,praxis-tests-benches) -p praxis-tests-benches
 
 test-security: test-security-suite ## security suite (alias for test-security-suite)
-
-test-security-suite: ## security suite
-	cargo test --all-features -p praxis-tests-security $(_NOCAPTURE)
-
-test-resilience: ## resilience suite
-	cargo test --all-features -p praxis-tests-resilience $(_NOCAPTURE)
 
 test-config-validation: test-schema ## alias for test-schema
 
@@ -732,11 +884,13 @@ bench: $(VEGETA) $(FORTIO_DEP) ## Criterion microbenchmarks
 
 ##@ Quality
 lint: ## clippy, fmt check, machete, xtask lints, FIPS deps, containers
-	cargo clippy --workspace --all-targets --all-features -- -D warnings
+	$(call require-features,$(ALL_FEATURES))
+	cargo clippy --workspace --all-targets --features $(ALL_FEATURES) -- -D warnings
 	cargo clippy -p praxis-proxy --no-default-features --features pingora --all-targets -- -D warnings
 	cargo clippy -p praxis-proxy --no-default-features --features pingora,config-reload,admin-api --all-targets -- -D warnings
 	cargo clippy -p praxis-proxy-filter --no-default-features --all-targets -- -D warnings
 	cargo clippy -p praxis-proxy-core --no-default-features --all-targets -- -D warnings
+	cargo clippy -p praxis-proxy-protocol --no-default-features --features admin-api --all-targets -- -D warnings
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
 	cargo machete
 	cargo xtask lint-deps
@@ -778,7 +932,8 @@ fmt: ## format with nightly rustfmt
 	cargo +$(NIGHTLY_VERSION) fmt --all
 
 doc: ## rustdoc with -D warnings, private items included
-	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --all-features
+	$(call require-features,$(ALL_FEATURES))
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items --features $(ALL_FEATURES)
 
 audit: ## cargo audit + cargo deny
 	cargo audit

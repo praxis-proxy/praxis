@@ -2,24 +2,29 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Health endpoints, config parsing, and admin tests.
+//!
+//! The tests gated on `pingora` build a Pingora server directly.
 
 use praxis_core::config::Config;
+#[cfg(feature = "pingora")]
 use praxis_protocol::http::load_http_handler;
+#[cfg(feature = "pingora")]
+use praxis_test_utils::{build_pipeline, wait_for_tcp};
+use praxis_test_utils::{free_port, http_get, simple_proxy_yaml, start_backend_with_shutdown, start_proxy};
 
 /// Wrap a pipeline [`Arc`] in [`ArcSwap`] for handler registration.
+#[cfg(feature = "pingora")]
 fn swappable(
     pipeline: std::sync::Arc<praxis_filter::FilterPipeline>,
 ) -> std::sync::Arc<arc_swap::ArcSwap<praxis_filter::FilterPipeline>> {
     std::sync::Arc::new(arc_swap::ArcSwap::from(pipeline))
 }
-use praxis_test_utils::{
-    build_pipeline, free_port, http_get, simple_proxy_yaml, start_backend_with_shutdown, start_proxy, wait_for_tcp,
-};
 
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
+#[cfg(feature = "pingora")]
 #[test]
 fn health_endpoints() {
     let backend_port_guard = start_backend_with_shutdown("ok");
@@ -83,6 +88,7 @@ insecure_options:
     assert_eq!(status, 404, "unknown metrics path should return 404");
 }
 
+#[cfg(feature = "pingora")]
 #[test]
 fn runtime_config_parsed_from_yaml_and_proxies() {
     let backend_port_guard = start_backend_with_shutdown("runtime ok");

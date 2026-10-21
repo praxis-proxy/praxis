@@ -27,8 +27,9 @@ const ABANDONED: &str = "Downstream handshake abandoned";
 /// Error line the accept loop writes for a handshake that really failed.
 const HANDSHAKE_ERROR: &str = "Downstream handshake error";
 
-/// `RUST_LOG` for the child: the default level, plus debug for the accept loop.
-const LOG_FILTER: &str = "info,pingora_core::services::listening=debug";
+/// `RUST_LOG` for the child: the default level, plus debug for the accept
+/// loop of whichever backend the binary runs on.
+const LOG_FILTER: &str = "info,pingora_core::services::listening=debug,praxis_protocol::http::hyper::listener=debug";
 
 /// How long to wait for the accept loop to log every handshake it was given.
 const LOG_WAIT: Duration = Duration::from_secs(10);

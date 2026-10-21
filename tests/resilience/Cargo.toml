@@ -9,7 +9,9 @@ publish = false
 
 [features]
 # Matches the binary's default; see tests/integration/Cargo.toml.
-default = ["policy-engine"]
+default = ["pingora", "policy-engine"]
+pingora = ["praxis-test-utils/pingora", "praxis/pingora"]
+hyper = ["praxis-test-utils/hyper", "praxis/hyper"]
 policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine"]
 
 [lints]
@@ -18,7 +20,7 @@ workspace = true
 [dev-dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
-praxis = { workspace = true, features = ["pingora"] }
+praxis = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-protocol = { workspace = true }

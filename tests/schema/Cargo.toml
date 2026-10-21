@@ -8,6 +8,10 @@ readme.workspace = true
 publish = false
 
 [features]
+# The network backend of the proxy under test; see tests/integration/Cargo.toml.
+default = ["pingora"]
+pingora = ["praxis-test-utils/pingora"]
+hyper = ["praxis-test-utils/hyper"]
 spiffe = ["praxis-core/spiffe"]
 upstream-binding = ["praxis-core/upstream-binding"]
 slow-start = ["praxis-core/slow-start"]

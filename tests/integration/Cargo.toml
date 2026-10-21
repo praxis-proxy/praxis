@@ -12,7 +12,11 @@ publish = false
 # configuration the standard build ships. `--no-default-features` builds the
 # proxy under test with the FIPS build's feature set instead
 # (`make test-integration-fips`).
-default = ["policy-engine"]
+default = ["pingora", "policy-engine"]
+# The network backend of the proxy under test; exactly one. `make
+# test-integration-hyper` builds with `--no-default-features --features hyper`.
+pingora = ["praxis-test-utils/pingora", "praxis/pingora"]
+hyper = ["praxis-test-utils/hyper", "praxis/hyper"]
 policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter"]
 cloud-events-filter = ["praxis/cloud-events-filter"]
@@ -46,7 +50,7 @@ http = { workspace = true }
 openssl = { workspace = true }
 # Used by TLS target tests and compression codec round-trip tests.
 pingora-core = { workspace = true }
-praxis = { workspace = true, features = ["pingora"] }
+praxis = { workspace = true }
 praxis-core = { workspace = true, features = ["test-support"] }
 praxis-filter = { workspace = true }
 praxis-protocol = { workspace = true, features = ["test-support"] }

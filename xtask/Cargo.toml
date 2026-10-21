@@ -39,6 +39,7 @@ dev = [
 
 [dependencies]
 base64 = { workspace = true }
+cargo_metadata = { workspace = true }
 chrono = { workspace = true, optional = true }
 clap = { workspace = true }
 flate2 = { workspace = true }
