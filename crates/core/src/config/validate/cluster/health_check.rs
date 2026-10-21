@@ -35,7 +35,9 @@ pub(super) fn validate_health_check(
     validate_health_check_type(hc, cluster_name)?;
     validate_health_check_timing(hc, cluster_name)?;
     validate_health_check_thresholds(hc, cluster_name)?;
-    validate_expected_status(hc, cluster_name)?;
+    if hc.check_type != HealthCheckType::Tls {
+        validate_expected_status(hc, cluster_name)?;
+    }
     validate_passive_thresholds(hc, cluster_name)
 }
 
@@ -131,7 +133,9 @@ fn validate_health_check_timing(hc: &crate::config::HealthCheckConfig, cluster_n
             "cluster '{cluster_name}': health_check.timeout_ms must be greater than 0"
         )));
     }
-    validate_health_check_path(&hc.path, cluster_name)?;
+    if hc.check_type != HealthCheckType::Tls {
+        validate_health_check_path(&hc.path, cluster_name)?;
+    }
     if hc.timeout_ms >= hc.interval_ms {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': health check timeout_ms ({}) must be \
@@ -451,6 +455,78 @@ fn tls_http_probe_mismatch(has_tls: bool, check_type: HealthCheckType) -> bool {
 mod tests {
     use super::super::validate_clusters;
     use crate::config::{Cluster, Config, InsecureOptions};
+
+    #[cfg(feature = "tls-health-check")]
+    #[test]
+    fn tls_probe_ignores_http_only_fields() {
+        for (path, status) in [
+            ("/", 99),
+            ("/", 600),
+            ("not/a/path", 200),
+            ("/\r\nbad", 200),
+            ("bad", 0),
+        ] {
+            let mut cluster = serde_yaml::from_str::<Cluster>(
+                "name: secure\nendpoints: ['example.com:443']\ntls: { sni: example.com }\nhealth_check: { type: tls }",
+            )
+            .unwrap();
+            let health_check = cluster.health_check.as_mut().unwrap();
+            health_check.path = path.to_owned();
+            health_check.expected_status = status;
+            validate_clusters(&[cluster], &InsecureOptions::default())
+                .expect("TLS probes do not use HTTP path or expected_status");
+        }
+    }
+
+    #[test]
+    fn existing_probe_types_keep_http_field_validation() {
+        for kind in [
+            super::HealthCheckType::Http,
+            super::HealthCheckType::Tcp,
+            super::HealthCheckType::Grpc,
+        ] {
+            for (fields, message) in [
+                ("path: invalid", "path must start"),
+                ("expected_status: 600", "expected_status must"),
+            ] {
+                let config = serde_yaml::from_str(&format!("type: {kind}\n{fields}")).unwrap();
+                let error = super::validate_health_check(&config, "test").unwrap_err();
+                assert!(error.to_string().contains(message), "{kind}: {error}");
+            }
+        }
+    }
+
+    #[cfg(feature = "tls-health-check")]
+    #[test]
+    fn tls_probe_still_validates_timing_and_thresholds() {
+        for field in [
+            "interval_ms: 0",
+            "timeout_ms: 0",
+            "timeout_ms: 30000",
+            "healthy_threshold: 0",
+            "unhealthy_threshold: 0",
+            "passive_healthy_threshold: 0",
+            "passive_unhealthy_threshold: 0",
+        ] {
+            let config =
+                serde_yaml::from_str(&format!("type: tls\npath: ignored\nexpected_status: 0\n{field}")).unwrap();
+            let error = super::validate_health_check(&config, "test").unwrap_err();
+            assert!(
+                error.to_string().contains(field.split_once(':').unwrap().0),
+                "{field}: {error}"
+            );
+        }
+    }
+
+    #[cfg(not(feature = "tls-health-check"))]
+    #[test]
+    fn tls_probe_without_feature_rejects_ignored_http_fields() {
+        let mut config: crate::config::HealthCheckConfig =
+            serde_yaml::from_str("type: http\npath: ignored\nexpected_status: 0").unwrap();
+        config.check_type = super::HealthCheckType::Tls;
+        let error = super::validate_health_check(&config, "test").unwrap_err();
+        assert!(error.to_string().contains("tls-health-check build feature"), "{error}");
+    }
 
     #[cfg(feature = "tls-health-check")]
     #[test]
