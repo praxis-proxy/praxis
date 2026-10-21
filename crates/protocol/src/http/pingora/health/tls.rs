@@ -173,7 +173,7 @@ async fn finish_probe<Stream: tokio::io::AsyncWrite + Unpin>(
     healthy
 }
 
-/// Resolve the fixed authority fallback without overriding explicit SNI.
+/// Resolve a fixed DNS authority without overriding explicit SNI.
 fn cached_tls(cluster: &Cluster) -> Result<CachedClusterTls, String> {
     let config = cluster.tls.as_ref().ok_or("TLS probe requires cluster.tls")?;
     let mut tls = CachedClusterTls::try_from_config(config).map_err(|error| error.to_string())?;
@@ -183,10 +183,13 @@ fn cached_tls(cluster: &Cluster) -> Result<CachedClusterTls, String> {
         let parsed: http::uri::Authority = authority
             .parse()
             .map_err(|error: http::uri::InvalidUri| error.to_string())?;
-        tls.set_sni(praxis_core::connectivity::peer::derive_sni(&format!(
-            "{}:443",
-            parsed.host()
-        )));
+        let host = parsed.host().strip_suffix('.').unwrap_or_else(|| parsed.host());
+        if !praxis_core::connectivity::peer::is_ip_literal(host) {
+            tls.set_sni(praxis_core::connectivity::peer::derive_sni(&format!(
+                "{}:443",
+                parsed.host()
+            )));
+        }
     }
     Ok(tls)
 }

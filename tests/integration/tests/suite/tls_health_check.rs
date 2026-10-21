@@ -272,6 +272,33 @@ async fn fixed_authority_and_endpoint_fallback_control_sni_and_host() {
 }
 
 #[tokio::test]
+async fn ip_authorities_preserve_endpoint_identity_and_http_host() {
+    let certs = TestCertificates::generate();
+    for authority in ["127.0.0.2:8443", "[2001:db8::1]:8443", "127.0.0.2.:8443"] {
+        let backend = Backend::new(&certs, false).await;
+        let mut config = cluster(&certs, &backend.address, HealthCheckType::Tls);
+        config.tls.as_mut().unwrap().sni = None;
+        config.http.authority = Some(authority.into());
+        assert_health(config.clone(), None, true).await;
+        config.health_check.as_mut().unwrap().check_type = HealthCheckType::Http;
+        assert_health(config, None, true).await;
+        assert!(
+            backend.names.lock().unwrap().iter().all(Option::is_none),
+            "an IP endpoint must omit DNS SNI despite the configured authority"
+        );
+        assert!(
+            backend
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains(&format!("Host: {authority}\r\n"))),
+            "IP authority must preserve Host while verifying the endpoint certificate"
+        );
+    }
+}
+
+#[tokio::test]
 async fn hostname_probes_use_the_upstream_address_policy() {
     let certs = TestCertificates::generate();
     let backend = Backend::new(&certs, false).await;

@@ -96,12 +96,14 @@ requires a restart to change, including when probe tasks reload. Cluster TLS
 material reloads with the config. Failed certificate loading makes probes
 fail, without falling back to another trust source or plaintext.
 
-The verification name comes from explicit `tls.sni`, then a fixed
-`http.authority`, then the endpoint hostname or IP address. A background probe
-has no downstream Host to inherit. Existing SNI validation and opt-in rules
-still apply to cluster config. HTTPS Host uses `http.authority` when set
-(including `{ from: endpoint }`), otherwise explicit SNI or the endpoint. IPv6
-Hosts use brackets; endpoint-derived Hosts omit port 443 and keep other ports.
+The verification name comes from explicit `tls.sni`, then a fixed DNS
+`http.authority`, then the endpoint hostname or IP address. An IP authority
+keeps endpoint certificate verification when no explicit SNI is set. A
+background probe has no downstream Host to inherit. Existing SNI validation
+and opt-in rules still apply to cluster config. HTTPS Host uses configured
+`http.authority`, including IP literals and `{ from: endpoint }`; otherwise it
+uses explicit SNI or the endpoint. IPv6 Hosts use brackets; endpoint-derived
+Hosts omit port 443 and keep other ports.
 
 Each probe uses a new connection with session resumption disabled, so a
 resumed session cannot conceal a changed server certificate. One timeout
