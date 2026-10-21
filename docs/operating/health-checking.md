@@ -128,10 +128,12 @@ resource-limit guidance in [RFC 9110 Section 17.5]. See the
 [TLS conformance tests] for protocol-version and client-authentication
 coverage, and [HTTP correctness] for the proxy's protocol responsibilities.
 
-A verified handshake establishes server identity and sends configured client
-credentials. TLS 1.3 client-side handshake completion does not prove that the
-server accepted those credentials, and a rejection arriving after the grace
-period can still be missed. Use an HTTPS response check to verify
+A verified handshake establishes server identity. Configured client
+credentials are sent only when the server requests client authentication
+([RFC 8446 Section 4.4.2], [RFC 5246 Section 7.4.6]). TLS 1.3 client-side
+handshake completion does not prove that the server accepted those
+credentials, and a rejection arriving after the grace period can still be
+missed. Use an HTTPS response check to verify
 client authorization and application health. Upstream revocation checking is
 not supported; these probes make no certificate revocation guarantee.
 
@@ -143,6 +145,8 @@ for both modes. TCP stays connect-only, and gRPC probes remain plaintext.
 [RFC 5246 Section 7.2]: https://datatracker.ietf.org/doc/html/rfc5246#section-7.2
 [RFC 9112 Section 4]: https://datatracker.ietf.org/doc/html/rfc9112#section-4
 [RFC 9110 Section 17.5]: https://datatracker.ietf.org/doc/html/rfc9110#section-17.5
+[RFC 8446 Section 4.4.2]: https://datatracker.ietf.org/doc/html/rfc8446#section-4.4.2
+[RFC 5246 Section 7.4.6]: https://datatracker.ietf.org/doc/html/rfc5246#section-7.4.6
 [TLS conformance tests]: ../../tests/conformance/tests/suite/tls.rs
 [HTTP correctness]: ../architecture/http-correctness.md
 
