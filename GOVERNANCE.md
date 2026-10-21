@@ -124,7 +124,7 @@ or more repositories actively (e.g. issue triage, board management).
 
 ### Community Managers
 
-**Our community managers are liasons for the project**.
+**Our community managers are liaisons for the project**.
 They work across the entire the project, the wider CNCF community,
 and the industry as a whole to socialize and communicate on behalf
 of the project and it's community. This includes representation of
