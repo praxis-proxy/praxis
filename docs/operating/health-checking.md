@@ -106,11 +106,13 @@ Hosts use brackets; endpoint-derived Hosts omit port 443 and keep other ports.
 Each probe uses a new connection with session resumption disabled, so a
 resumed session cannot conceal a changed server certificate. One timeout
 covers DNS, connection, handshake, HTTP exchange and close. Successful probes
-send `close_notify`. Handshake-only probes then wait up to 100 ms, within that
-same timeout, for a fatal TLS alert rejecting client credentials. A normal
-`close_notify` is returned as EOF and succeeds. Application data, EOF without
-`close_notify` (`UnexpectedEof`), or a silent peer after that grace period also
-succeed. Other read errors and fatal TLS alerts fail the probe. HTTPS probes
+send `close_notify`. Handshake-only probes then wait for a fatal TLS alert
+rejecting client credentials. The grace period is the greater of 100 ms and
+the time spent resolving, connecting, and completing the handshake, within
+that same total probe timeout. A normal `close_notify` is returned as EOF and
+succeeds. Application data, EOF without `close_notify` (`UnexpectedEof`), or a
+silent peer after that grace period also succeed. Other read errors and fatal
+TLS alerts fail the probe. HTTPS probes
 read only a bounded HTTP status line, not the entire response body, and do not
 wait for a reciprocal close alert.
 

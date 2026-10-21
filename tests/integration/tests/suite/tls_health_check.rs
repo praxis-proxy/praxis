@@ -107,6 +107,15 @@ async fn tls_probe_rejects_missing_tls13_client_credentials() {
 }
 
 #[tokio::test]
+async fn tls_probe_waits_for_rejection_on_slow_tls13_connection() {
+    let certs = TestCertificates::generate();
+    let backend = Backend::new(&certs, true).await;
+    let (address, relay) = delayed_server_traffic(&backend.address).await;
+    assert_health(cluster(&certs, &address, HealthCheckType::Tls), None, false).await;
+    relay.abort();
+}
+
+#[tokio::test]
 async fn tls_probe_rejects_untrusted_tls13_client_credentials() {
     let certs = TestCertificates::generate();
     let backend = Backend::new(&certs, true).await;
@@ -371,6 +380,41 @@ async fn reload_keeps_startup_runtime_trust_across_two_generations() {
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Delay the server handshake flight by 300 ms and later TLS alerts by 150 ms.
+async fn delayed_server_traffic(upstream: &str) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let upstream = upstream.to_owned();
+    let task = tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let server = tokio::net::TcpStream::connect(&upstream).await.unwrap();
+            tokio::spawn(async move {
+                let (mut client_read, mut client_write) = client.into_split();
+                let (mut server_read, mut server_write) = server.into_split();
+                let to_client = async {
+                    let mut delay = Duration::from_millis(300);
+                    let mut buf = vec![0; 8192];
+                    while let Ok(count) = server_read.read(&mut buf).await {
+                        if count == 0 {
+                            break;
+                        }
+                        tokio::time::sleep(delay).await;
+                        if client_write.write_all(&buf[..count]).await.is_err() {
+                            break;
+                        }
+                        delay = Duration::from_millis(150);
+                    }
+                };
+                drop(tokio::join!(
+                    tokio::io::copy(&mut client_read, &mut server_write),
+                    to_client
+                ));
+            });
+        }
+    });
+    (address, task)
+}
 
 /// A TLS 1.3 backend with observable requests and clean TLS shutdowns.
 pub(super) struct Backend {

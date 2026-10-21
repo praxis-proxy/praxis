@@ -17,8 +17,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 // Constants
 // -----------------------------------------------------------------------------
 
-/// Maximum wait for a server's post-handshake rejection of client credentials.
-const HANDSHAKE_ALERT_GRACE: Duration = Duration::from_millis(100);
+/// Minimum wait for a server's post-handshake rejection of client credentials.
+const MIN_HANDSHAKE_ALERT_GRACE: Duration = Duration::from_millis(100);
 
 /// Configured certificate-verification exception using rustls signature checks.
 mod verify;
@@ -78,7 +78,9 @@ impl TlsProbe {
     /// Exchange over a new connection with session resumption disabled.
     async fn exchange(&self, address: &str) -> Result<bool, String> {
         let name = tls_server_name(&self.tls, address).map_err(|error| error.to_string())?;
+        let started = tokio::time::Instant::now();
         let mut stream = self.connect(address, name.clone()).await?;
+        let grace = MIN_HANDSHAKE_ALERT_GRACE.max(started.elapsed());
         let healthy = if let Some((path, expected)) = &self.http {
             let host = self.host(address, &name)?;
             let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
@@ -88,7 +90,7 @@ impl TlsProbe {
         };
         let healthy = finish_probe(&mut stream, address, healthy).await;
         if self.http.is_none() {
-            return handshake_result(&mut stream).await;
+            return handshake_result(&mut stream, grace).await;
         }
         Ok(healthy)
     }
@@ -131,9 +133,12 @@ impl TlsProbe {
 /// client authorization; use an HTTPS probe when that guarantee is needed.
 ///
 /// [RFC 8446 Section 4.4.2.4]: https://datatracker.ietf.org/doc/html/rfc8446#section-4.4.2.4
-async fn handshake_result<Stream: tokio::io::AsyncRead + Unpin>(stream: &mut Stream) -> Result<bool, String> {
+async fn handshake_result<Stream: tokio::io::AsyncRead + Unpin>(
+    stream: &mut Stream,
+    grace: Duration,
+) -> Result<bool, String> {
     let mut byte = [0];
-    match tokio::time::timeout(HANDSHAKE_ALERT_GRACE, stream.read(&mut byte)).await {
+    match tokio::time::timeout(grace, stream.read(&mut byte)).await {
         Ok(Ok(_)) | Err(_) => Ok(true),
         Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(true),
         Ok(Err(error)) => Err(error.to_string()),
@@ -289,23 +294,32 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn silent_handshake_peer_succeeds_after_bounded_grace() -> Result<(), String> {
-        let (mut stream, _peer) = tokio::io::duplex(1);
-        let started = tokio::time::Instant::now();
-        assert!(
-            handshake_result(&mut stream).await?,
-            "a silent peer need not send a close reply"
-        );
-        assert_eq!(started.elapsed(), HANDSHAKE_ALERT_GRACE, "silence has a bounded wait");
+        for grace in [MIN_HANDSHAKE_ALERT_GRACE, Duration::from_millis(300)] {
+            let (mut stream, _peer) = tokio::io::duplex(1);
+            let started = tokio::time::Instant::now();
+            assert!(
+                handshake_result(&mut stream, grace).await?,
+                "a silent peer need not send a close reply"
+            );
+            assert_eq!(started.elapsed(), grace, "silence has a bounded wait");
+        }
         Ok(())
     }
 
     #[tokio::test]
     async fn handshake_peer_data_and_eof_succeed() -> Result<(), String> {
         for mut response in [&b""[..], &b"ready"[..]] {
-            assert!(handshake_result(&mut response).await?, "data and clean EOF are healthy");
+            assert!(
+                handshake_result(&mut response, MIN_HANDSHAKE_ALERT_GRACE).await?,
+                "data and clean EOF are healthy"
+            );
         }
         assert!(
-            handshake_result(&mut FailedRead(std::io::ErrorKind::UnexpectedEof)).await?,
+            handshake_result(
+                &mut FailedRead(std::io::ErrorKind::UnexpectedEof),
+                MIN_HANDSHAKE_ALERT_GRACE
+            )
+            .await?,
             "EOF without close_notify is acceptable for a handshake-only probe"
         );
         Ok(())
@@ -315,7 +329,7 @@ mod tests {
     async fn handshake_peer_tls_alerts_and_transport_errors_fail() {
         for kind in [std::io::ErrorKind::InvalidData, std::io::ErrorKind::ConnectionReset] {
             assert!(
-                matches!(handshake_result(&mut FailedRead(kind)).await, Err(error) if !error.is_empty()),
+                matches!(handshake_result(&mut FailedRead(kind), MIN_HANDSHAKE_ALERT_GRACE).await, Err(error) if !error.is_empty()),
                 "TLS alerts and transport errors must reject the handshake"
             );
         }
