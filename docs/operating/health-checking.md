@@ -106,12 +106,16 @@ Hosts use brackets; endpoint-derived Hosts omit port 443 and keep other ports.
 Each probe uses a new connection with session resumption disabled, so a
 resumed session cannot conceal a changed server certificate. One timeout
 covers DNS, connection, handshake, HTTP exchange and close. Successful probes
-send `close_notify` without waiting for the server to reply with its own alert.
-Only a bounded HTTP status line is read, not the entire response body.
+send `close_notify`. Handshake-only probes then wait up to 100 ms, within that
+same timeout, for a TLS alert rejecting client credentials. TLS alerts and read
+errors fail the probe; EOF, application data, or a silent peer after that grace
+period succeed. HTTPS probes read only a bounded HTTP status line, not the
+entire response body, and do not wait for a reciprocal close alert.
 
 A verified handshake establishes server identity and sends configured client
 credentials. TLS 1.3 client-side handshake completion does not prove that the
-server accepted those credentials. Use an HTTPS response check to verify
+server accepted those credentials, and a rejection arriving after the grace
+period can still be missed. Use an HTTPS response check to verify
 client authorization and application health. Upstream revocation checking is
 not supported; these probes make no certificate revocation guarantee.
 

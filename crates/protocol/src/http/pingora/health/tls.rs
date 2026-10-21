@@ -11,7 +11,14 @@ use praxis_core::{
     connectivity::peer::tls_server_name,
 };
 use praxis_tls::{CachedCaCerts, CachedClusterTls};
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Maximum wait for a server's post-handshake rejection of client credentials.
+const HANDSHAKE_ALERT_GRACE: Duration = Duration::from_millis(100);
 
 /// Configured certificate-verification exception using rustls signature checks.
 mod verify;
@@ -79,7 +86,11 @@ impl TlsProbe {
         } else {
             true
         };
-        Ok(finish_probe(&mut stream, address, healthy).await)
+        let healthy = finish_probe(&mut stream, address, healthy).await;
+        if self.http.is_none() {
+            return handshake_result(&mut stream).await;
+        }
+        Ok(healthy)
     }
 
     /// Connect with the upstream resolver and a full, non-resumed handshake.
@@ -110,6 +121,22 @@ impl TlsProbe {
         };
         http::header::HeaderValue::from_str(&host).map_err(|error| error.to_string())?;
         Ok(host)
+    }
+}
+
+/// Reject late TLS alerts without requiring application data or a close reply.
+///
+/// TLS 1.3 servers can reject client credentials after the client finishes its
+/// handshake; see [RFC 8446 Section 4.4.2.4]. A silent peer is not proof of
+/// client authorization; use an HTTPS probe when that guarantee is needed.
+///
+/// [RFC 8446 Section 4.4.2.4]: https://datatracker.ietf.org/doc/html/rfc8446#section-4.4.2.4
+async fn handshake_result<Stream: tokio::io::AsyncRead + Unpin>(stream: &mut Stream) -> Result<bool, String> {
+    let mut byte = [0];
+    match tokio::time::timeout(HANDSHAKE_ALERT_GRACE, stream.read(&mut byte)).await {
+        Ok(Ok(_)) | Err(_) => Ok(true),
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(true),
+        Ok(Err(error)) => Err(error.to_string()),
     }
 }
 
@@ -260,6 +287,40 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn silent_handshake_peer_succeeds_after_bounded_grace() -> Result<(), String> {
+        let (mut stream, _peer) = tokio::io::duplex(1);
+        let started = tokio::time::Instant::now();
+        assert!(
+            handshake_result(&mut stream).await?,
+            "a silent peer need not send a close reply"
+        );
+        assert_eq!(started.elapsed(), HANDSHAKE_ALERT_GRACE, "silence has a bounded wait");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn handshake_peer_data_and_eof_succeed() -> Result<(), String> {
+        for mut response in [&b""[..], &b"ready"[..]] {
+            assert!(handshake_result(&mut response).await?, "data and clean EOF are healthy");
+        }
+        assert!(
+            handshake_result(&mut FailedRead(std::io::ErrorKind::UnexpectedEof)).await?,
+            "EOF without close_notify is acceptable for a handshake-only probe"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn handshake_peer_tls_alerts_and_transport_errors_fail() {
+        for kind in [std::io::ErrorKind::InvalidData, std::io::ErrorKind::ConnectionReset] {
+            assert!(
+                matches!(handshake_result(&mut FailedRead(kind)).await, Err(error) if !error.is_empty()),
+                "TLS alerts and transport errors must reject the handshake"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn failed_shutdown_preserves_successful_and_failed_probe_verdicts() {
         for healthy in [true, false] {
@@ -323,6 +384,23 @@ mod tests {
             "empty SNI cannot disable certificate verification"
         );
         Ok(())
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// A peer that fails when the probe reads its handshake result.
+    struct FailedRead(std::io::ErrorKind);
+
+    impl tokio::io::AsyncRead for FailedRead {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(self.0.into()))
+        }
     }
 
     /// A peer that accepts writes but has closed before shutdown.

@@ -100,6 +100,31 @@ async fn tls_probe_honors_verify_false() {
 }
 
 #[tokio::test]
+async fn tls_probe_rejects_missing_tls13_client_credentials() {
+    let certs = TestCertificates::generate();
+    let backend = Backend::new(&certs, true).await;
+    assert_health(cluster(&certs, &backend.address, HealthCheckType::Tls), None, false).await;
+}
+
+#[tokio::test]
+async fn tls_probe_rejects_untrusted_tls13_client_credentials() {
+    let certs = TestCertificates::generate();
+    let backend = Backend::new(&certs, true).await;
+    let other = TestCertificates::generate();
+    let untrusted = other.generate_client_cert();
+    let mut config = cluster(&certs, &backend.address, HealthCheckType::Tls);
+    config.tls.as_mut().unwrap().client_cert = Some(
+        serde_yaml::from_str(&format!(
+            "cert_path: {}\nkey_path: {}",
+            untrusted.cert_path.display(),
+            untrusted.key_path.display()
+        ))
+        .unwrap(),
+    );
+    assert_health(config, None, false).await;
+}
+
+#[tokio::test]
 async fn https_probe_requires_accepted_tls13_client_credentials() {
     let certs = TestCertificates::generate();
     let backend = Backend::new(&certs, true).await;
