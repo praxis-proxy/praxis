@@ -6,16 +6,17 @@ on:
     paths:
       - ".github/workflows/subrequest-benchmarks.yaml"
       - "tests/benches/subrequest-comparison.py"
+      - "tests/benches/test_subrequest_comparison.py"
       - "tests/benches/benches/subrequest_*.rs"
   workflow_dispatch:
     inputs:
       base_ref:
-        description: "Pre-seam baseline commit"
-        default: "ab616c1fc0d7a52b5148ea65c86e03e9a9873421"
+        description: "Baseline commit with the candidate's locked dependency versions"
+        required: true
         type: string
       before_ref:
-        description: "Seam commit before the borrowed-header optimization"
-        default: "91a5f4a970b5a6500c717ff99fee0bc388915f2e"
+        description: "Intermediate commit with the candidate's locked dependency versions"
+        required: true
         type: string
 
 permissions: {}
@@ -30,6 +31,11 @@ jobs:
     timeout-minutes: 90
     permissions:
       contents: read
+    env:
+      # Historical comparisons need explicit references. Only the original
+      # seam review retains its pinned three-revision study automatically.
+      BASE_REF: ${{ inputs.base_ref || (github.event.pull_request.number == 1407 && 'ab616c1fc0d7a52b5148ea65c86e03e9a9873421' || '') }}
+      BEFORE_REF: ${{ inputs.before_ref || (github.event.pull_request.number == 1407 && '91a5f4a970b5a6500c717ff99fee0bc388915f2e' || '') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -37,26 +43,40 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Fetch comparison snapshots
+        if: github.event_name == 'workflow_dispatch' || github.event.pull_request.number == 1407
+        # Full checkout history does not include unrelated review snapshots.
+        run: |
+          : "${BASE_REF:?comparison requires a baseline commit}"
+          : "${BEFORE_REF:?comparison requires an intermediate commit}"
+          for revision in "$BASE_REF" "$BEFORE_REF"; do
+            if ! git rev-parse --verify --quiet --end-of-options "${revision}^{commit}" >/dev/null; then
+              git fetch --no-tags --no-recurse-submodules -- origin "$revision"
+              git rev-parse --verify --end-of-options "${revision}^{commit}"
+            fi
+          done
+
+      - name: Check the comparison driver
+        run: python3 -B -m unittest discover -s tests/benches -p 'test_subrequest_comparison.py'
+
       - name: Set up Rust
         uses: praxis-proxy/conventions/.github/actions/setup-rust@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
         with:
           cache-suffix: subrequest-bench
 
-      - name: Compare base, original seam, and candidate on this runner
+      - name: Run the subrequest workload matrix
         env:
-          # Pinned review snapshots make repeated PR runs comparable. Manual
-          # runs can select new references for subsequent investigations.
-          BASE_REF: ${{ inputs.base_ref || 'ab616c1fc0d7a52b5148ea65c86e03e9a9873421' }}
-          BEFORE_REF: ${{ inputs.before_ref || '91a5f4a970b5a6500c717ff99fee0bc388915f2e' }}
           # The paired investigation verifies this head differs from the guard
-          # snapshot only in the three benchmark harness files.
+          # snapshot only in the benchmark harness files.
           CANDIDATE_REF: ${{ github.event.pull_request.head.sha || github.sha }}
           COMPLETION_PARENT_REF: ${{ github.event.pull_request.number == 1407 && '3141d5b9a19fa1688cf0fcd26cd036d35918df6d' || '' }}
-        run: >-
-          python3 tests/benches/subrequest-comparison.py
-          --base "$BASE_REF" --before "$BEFORE_REF"
-          --candidate "$CANDIDATE_REF" --output subrequest-results
-          --completion-parent "$COMPLETION_PARENT_REF"
+        run: |
+          comparison_args=()
+          if [ -n "$BASE_REF" ]; then
+            comparison_args=(--base "$BASE_REF" --before "$BEFORE_REF" --completion-parent "$COMPLETION_PARENT_REF")
+          fi
+          python3 tests/benches/subrequest-comparison.py \
+            --candidate "$CANDIDATE_REF" --output subrequest-results "${comparison_args[@]}"
 
       - name: Upload raw measurements and build logs
         if: always()

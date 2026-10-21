@@ -48,9 +48,20 @@ completed calls in each sample, rather than individual request latency.
 Allocation records include total `allocations` and `bytes` plus their
 per-call values. They contain no timing result.
 
-For comparisons across revisions, the CI driver
-[`subrequest-comparison.py`](subrequest-comparison.py) runs the same matrix
-on one runner, preserves raw JSON and produces a descriptive summary.
+The CI driver [`subrequest-comparison.py`](subrequest-comparison.py) runs all
+16 workload cells on pull requests: HTTP/1 and HTTP/2, 16 and 64 headers,
+one and two attempts, and separate timing and allocation modes. Ordinary PRs
+validate the current candidate without comparing it to historical snapshots
+whose dependency versions may have drifted. Metadata and the summary identify
+this as candidate validation, not comparative performance evidence.
+
+Manual workflow runs compare three revisions on one runner. Select the workflow
+branch or tag containing the candidate, then supply explicit `base_ref` and
+`before_ref` commits. CI fetches missing comparison snapshots; the driver requires
+all three revisions to use identical locked package versions and compiler
+profiles. Raw JSON and a descriptive comparison summary are preserved. Locally,
+omit both `--base` and `--before` for candidate validation, or supply both to
+enable comparison; either mode requires `--candidate` to match the checkout.
 Peer construction is adapted for the API before the backend seam;
 `subrequest_peer.rs` keeps that setup outside the common workload.
 The benchmark explicitly enables the Pingora backend. The comparison driver
@@ -60,8 +71,8 @@ unconditional and the feature did not exist.
 The completion-guard investigation pins parent `3141d5b9` and verifies the
 current harness head's tree is equivalent to the test-lint snapshot
 `e6f006bc`, which retains the runtime guard from `45bc8af2`: only this
-document, the comparison driver, and its workflow may differ. Any other
-changed path fails the investigation. Metadata records the
+document, the comparison driver, its regression tests, and its workflow may
+differ. Any other changed path fails the investigation. Metadata records the
 harness SHA and its runtime-equivalent guard SHA separately. The existing
 base/original/candidate matrix remains intact. An additional timing-only
 comparison builds the parent once and reuses the candidate binary. It runs
@@ -80,6 +91,7 @@ commit more closely, but shared-runner interference and process order can
 still affect results. It introduces no latency threshold or universal
 performance claim and does not measure tail latency or the hedge scheduler.
 
-The workflow enables this paired study automatically only for PR 1407. Other
-PRs and manual workflow runs retain the ordinary three-revision matrix; the
-optional CLI flag remains available for the pinned investigation.
+The workflow retains the pinned three-revision and paired study automatically
+only for PR 1407. Other PRs run candidate validation; manual workflow runs use
+their explicit three-revision inputs. The optional `--completion-parent` CLI
+flag remains available with `--base` and `--before` for the pinned investigation.
