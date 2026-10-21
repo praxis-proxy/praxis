@@ -31,6 +31,5 @@ Protocol-specific configurations for HTTP/1.1, HTTP/2, gRPC, WebSocket, TCP, and
 
 ## Related Documentation
 
-- [Protocol Support](../../../docs/architecture/protocols.md)
+- [Adding a Protocol](../../../docs/developing/adding-protocols.md)
 - [gRPC Configuration](../../../docs/filters/http/traffic_management/grpc_timeout.md)
-- [WebSocket Handling](../../../docs/operating/websocket.md)

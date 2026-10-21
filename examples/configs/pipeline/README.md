@@ -30,6 +30,6 @@ every filter it contains (effective = chain AND filter). See
 
 ## Related Documentation
 
-- [Pipeline Architecture](../../../docs/architecture/pipeline.md)
+- [Pipeline Concepts](../../../docs/architecture/pipeline-concepts.md)
 - [Filter Configuration](../../../docs/filters/README.md)
-- [Branch Chains](../../../docs/architecture/branch-chains.md)
+- [Branch Chains](../../../docs/filters/branch-chains.md)
