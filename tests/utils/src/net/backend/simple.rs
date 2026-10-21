@@ -461,6 +461,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
             filters,
         }],
         insecure_options: InsecureOptions::default(),
+        jobs: None,
         listeners: vec![Listener {
             address: address.to_owned(),
             cluster: None,
