@@ -37,7 +37,7 @@ jobs:
       contents: read
       pull-requests: write
       id-token: write
-    uses: praxis-proxy/conventions/.github/workflows/automated-review.yaml@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+    uses: praxis-proxy/conventions/.github/workflows/automated-review.yaml@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
     with:
       pr_number: ${{ inputs.pr_number }}
       model: ${{ inputs.model }}

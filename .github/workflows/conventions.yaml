@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    uses: praxis-proxy/conventions/.github/workflows/pr-conventions.yaml@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+    uses: praxis-proxy/conventions/.github/workflows/pr-conventions.yaml@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
     with:
       max-additions: 500
       conventions-doc: docs/developing/conventions.md
