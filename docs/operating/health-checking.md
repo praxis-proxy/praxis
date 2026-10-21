@@ -142,11 +142,15 @@ for both modes. TCP stays connect-only, and gRPC probes remain plaintext.
 
 [tls-health-check]: ../../examples/configs/observability/tls-health-check.yaml
 [RFC 8446 Section 6]: https://datatracker.ietf.org/doc/html/rfc8446#section-6
-[RFC 5246 Section 7.2]: https://datatracker.ietf.org/doc/html/rfc5246#section-7.2
+[RFC 5246 Section 7.2]:
+  https://datatracker.ietf.org/doc/html/rfc5246#section-7.2
 [RFC 9112 Section 4]: https://datatracker.ietf.org/doc/html/rfc9112#section-4
-[RFC 9110 Section 17.5]: https://datatracker.ietf.org/doc/html/rfc9110#section-17.5
-[RFC 8446 Section 4.4.2]: https://datatracker.ietf.org/doc/html/rfc8446#section-4.4.2
-[RFC 5246 Section 7.4.6]: https://datatracker.ietf.org/doc/html/rfc5246#section-7.4.6
+[RFC 9110 Section 17.5]:
+  https://datatracker.ietf.org/doc/html/rfc9110#section-17.5
+[RFC 8446 Section 4.4.2]:
+  https://datatracker.ietf.org/doc/html/rfc8446#section-4.4.2
+[RFC 5246 Section 7.4.6]:
+  https://datatracker.ietf.org/doc/html/rfc5246#section-7.4.6
 [TLS conformance tests]: ../../tests/conformance/tests/suite/tls.rs
 [HTTP correctness]: ../architecture/http-correctness.md
 
