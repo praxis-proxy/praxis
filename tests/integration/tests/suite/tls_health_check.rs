@@ -543,11 +543,11 @@ impl Backend {
                                 return;
                             }
                             request.extend_from_slice(&buf[..count]);
-                            if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                                break;
-                            }
                             if request.len() > 4096 {
                                 return;
+                            }
+                            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
                             }
                         }
                         requests
