@@ -892,6 +892,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strict_http2_refuses_tls_without_alpn_but_auto_falls_back() {
+        praxis_tls::provider::install();
+        let certs = praxis_tls::test_utils::gen_test_certs();
+        let upstream = Upstream::start_tls_with_alpn(&certs, false).await;
+        let mut peer = upstream.tls_peer("localhost", trusting_tls(&certs));
+        let connector = HyperConnector::new(4);
+        Arc::make_mut(&mut peer.connection).http_version = UpstreamHttpVersion::H2;
+        let result = connector.connect(&peer, Duration::from_secs(5)).await;
+        assert!(
+            matches!(result, Err(EgressError::Connect(message)) if message.contains("ALPN h2")),
+            "strict HTTP/2 must fail before sending an HTTP/1 request"
+        );
+        Arc::make_mut(&mut peer.connection).http_version = UpstreamHttpVersion::Auto;
+        let mut session = connector.connect(&peer, Duration::from_secs(5)).await.unwrap();
+        assert_eq!(
+            session.negotiated_version(),
+            Version::HTTP_11,
+            "auto can use HTTP/1 without ALPN"
+        );
+        exchange(&mut session).await;
+        assert_eq!(
+            read_body(&mut session).await,
+            b"ok",
+            "the fallback serves a real request"
+        );
+    }
+
+    #[tokio::test]
     async fn tls_refuses_a_certificate_for_another_name() {
         praxis_tls::provider::install();
         let certs = praxis_tls::test_utils::gen_test_certs();
@@ -1091,9 +1119,23 @@ mod tests {
         /// when ALPN picks it and HTTP/1.1 otherwise, and counting the
         /// handshakes that carried a server name.
         async fn start_tls(certs: &TestCerts) -> Self {
+            Self::start_tls_with_alpn(certs, true).await
+        }
+
+        /// The test upstream's certificate and optional ALPN advertisement.
+        fn tls_acceptor(certs: &TestCerts, alpn: bool) -> tokio_rustls::TlsAcceptor {
             let tls = ListenerTls::new_validated(certs.cert_path.to_str().unwrap(), certs.key_path.to_str().unwrap())
                 .unwrap();
-            let acceptor = tokio_rustls::TlsAcceptor::from(praxis_tls::setup::build_server_config(&tls, true).unwrap());
+            let mut config = praxis_tls::setup::build_server_config(&tls, true).unwrap();
+            if !alpn {
+                Arc::make_mut(&mut config).alpn_protocols.clear();
+            }
+            tokio_rustls::TlsAcceptor::from(config)
+        }
+
+        /// A TLS upstream with optional ALPN advertisement.
+        async fn start_tls_with_alpn(certs: &TestCerts, alpn: bool) -> Self {
+            let acceptor = Self::tls_acceptor(certs, alpn);
             let named_handshakes = Arc::new(AtomicUsize::new(0));
             let named = Arc::clone(&named_handshakes);
             let mut upstream = Self::listen(move |socket, closed| {

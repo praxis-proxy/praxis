@@ -17,6 +17,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- An experimental network backend behind the `hyper` feature, off by
+  default: the proxy data path, TCP forwarder, admin surface and sub-request
+  client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
+
+### Fixed
+
+- The Hyper backend rejects strict HTTP/2 TLS upstreams that do not negotiate
+  `h2` through ALPN. Automatic HTTP version selection still allows HTTP/1.1.
+
 ## [0.7.5] - 2026-10-21
 
 ### Added
@@ -28,9 +39,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   defined `scope`, `tags`, and `properties` onto every policy evaluation;
   `scope` feeds the PPE's scoped route resolver for both authentication and
   authorization. ([#1388](https://github.com/praxis-proxy/praxis/pull/1388))
-- An experimental network backend behind the `hyper` feature, off by
-  default: the proxy data path, TCP forwarder, admin surface and sub-request
-  client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
 - A network backend contract, so an alternative to Pingora can be dropped
   in behind a Cargo feature: `praxis_core::server::ServerRuntime`,
   `praxis_core::egress::{PeerSpec, Connector, Session}`,

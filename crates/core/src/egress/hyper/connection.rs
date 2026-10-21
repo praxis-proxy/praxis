@@ -91,15 +91,17 @@ impl HttpVersions {
 
     /// The protocol to speak once the transport is up.
     ///
-    /// `negotiated` is the ALPN result. A TLS server that picks nothing gets
-    /// HTTP/1.1, as with Pingora; over plain TCP only an HTTP/2-only peer
-    /// speaks HTTP/2, with prior knowledge.
-    pub(super) fn select(self, tls: bool, negotiated: Option<&[u8]>) -> Protocol {
+    /// Strict HTTP/2 requires ALPN `h2` over TLS and uses prior knowledge
+    /// over plain TCP. Only automatic selection permits a TLS fallback.
+    fn select(self, tls: bool, negotiated: Option<&[u8]>) -> Result<Protocol, EgressError> {
+        if tls && self == Self::Http2 && negotiated != Some(ALPN_H2) {
+            return Err(EgressError::Connect("HTTP/2 requires TLS ALPN h2".to_owned()));
+        }
         let http2 = match negotiated {
             Some(protocol) => protocol == ALPN_H2,
             None => !tls && self == Self::Http2,
         };
-        if http2 { Protocol::Http2 } else { Protocol::Http1 }
+        Ok(if http2 { Protocol::Http2 } else { Protocol::Http1 })
     }
 }
 
@@ -399,7 +401,7 @@ async fn establish(peer: &PeerSpec, tls: &TlsConfigs, connect_timeout: Duration)
         .transpose()?;
     let stream = connect_tcp(peer.address, connect_timeout).await?;
     let Some((config, name)) = tls_setup else {
-        let protocol = versions.select(false, None);
+        let protocol = versions.select(false, None)?;
         return Box::pin(handshake(Transport::Plain(stream), protocol, peer.address, None)).await;
     };
 
@@ -407,7 +409,7 @@ async fn establish(peer: &PeerSpec, tls: &TlsConfigs, connect_timeout: Duration)
         .await
         .map_err(|err| EgressError::Connect(format!("TLS handshake with {} failed: {err}", peer.address)))?;
     let (_, session) = stream.get_ref();
-    let protocol = versions.select(true, session.alpn_protocol());
+    let protocol = versions.select(true, session.alpn_protocol())?;
     let tls_version = session.protocol_version();
     Box::pin(handshake(
         Transport::Tls(Box::new(stream)),
@@ -697,17 +699,17 @@ mod tests {
     #[test]
     fn negotiated_alpn_picks_the_protocol() {
         assert_eq!(
-            HttpVersions::Either.select(true, Some(b"h2")),
+            HttpVersions::Either.select(true, Some(b"h2")).unwrap(),
             Protocol::Http2,
             "a server choosing h2 gets HTTP/2"
         );
         assert_eq!(
-            HttpVersions::Either.select(true, Some(b"http/1.1")),
+            HttpVersions::Either.select(true, Some(b"http/1.1")).unwrap(),
             Protocol::Http1,
             "a server choosing http/1.1 gets HTTP/1.1"
         );
         assert_eq!(
-            HttpVersions::Http2.select(true, None),
+            HttpVersions::Either.select(true, None).unwrap(),
             Protocol::Http1,
             "a TLS server that negotiates nothing falls back to HTTP/1.1"
         );
@@ -716,16 +718,31 @@ mod tests {
     #[test]
     fn plain_tcp_speaks_http2_only_when_told_to() {
         assert_eq!(
-            HttpVersions::Http2.select(false, None),
+            HttpVersions::Http2.select(false, None).unwrap(),
             Protocol::Http2,
             "an HTTP/2-only peer gets prior knowledge"
         );
         assert_eq!(
-            HttpVersions::Either.select(false, None),
+            HttpVersions::Either.select(false, None).unwrap(),
             Protocol::Http1,
             "with nothing to negotiate, either version means HTTP/1.1"
         );
-        assert_eq!(HttpVersions::Http1.select(false, None), Protocol::Http1, "HTTP/1 only");
+        assert_eq!(
+            HttpVersions::Http1.select(false, None).unwrap(),
+            Protocol::Http1,
+            "HTTP/1 only"
+        );
+    }
+
+    #[test]
+    fn strict_http2_requires_tls_alpn_h2() {
+        for negotiated in [None, Some(b"http/1.1".as_slice()), Some(b"unknown".as_slice())] {
+            assert!(
+                matches!(HttpVersions::Http2.select(true, negotiated), Err(EgressError::Connect(message)) if message.contains("ALPN h2")),
+                "strict HTTP/2 must refuse absent or different ALPN"
+            );
+        }
+        assert_eq!(HttpVersions::Http2.select(true, Some(b"h2")).unwrap(), Protocol::Http2);
     }
 
     #[test]
