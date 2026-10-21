@@ -1,0 +1,131 @@
+name: Hyper backend
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+#
+# The hyper network backend is experimental and off by default. The
+# standard workflows only type-check it (`make check-features`); this one
+# builds, lints and tests it, and every target here starts from
+# --no-default-features and names the backend (see the Makefile's hyper
+# section). The conformance and integration jobs are the parity record; a
+# test that does not pass on hyper yet is listed in tests/hyper-skip.txt.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Enable verbose test output (V=1)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  V: ${{ inputs.debug && '1' || '' }}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Lint (fmt + clippy) for the hyper feature set
+  # ----------------------------------------------------------------------------
+
+  lint:
+    name: lint (hyper)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust (stable + nightly fmt)
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+        with:
+          cache-suffix: hyper
+
+      - name: Lint the hyper build
+        run: make lint-hyper
+
+  # ----------------------------------------------------------------------------
+  # Unit tests resolved as the hyper build
+  # ----------------------------------------------------------------------------
+
+  test:
+    name: test (unit, hyper)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+        with:
+          cache-suffix: hyper
+
+      - name: Unit tests, hyper feature set
+        run: make test-hyper
+
+  # ----------------------------------------------------------------------------
+  # Integration suites on hyper
+  # ----------------------------------------------------------------------------
+
+  integration:
+    name: test (integration, hyper)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+        with:
+          cache-suffix: hyper
+
+      - name: Integration suites on hyper
+        run: make test-integration-hyper
+
+  # ----------------------------------------------------------------------------
+  # Conformance (h2spec, RFC compliance) on hyper
+  # ----------------------------------------------------------------------------
+
+  conformance:
+    name: test (conformance, hyper)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+        with:
+          cache-suffix: hyper
+
+      - name: Install Tools
+        run: make target/praxis-binutils/h2spec
+
+      - name: Conformance tests on hyper
+        run: make test-conformance-hyper
