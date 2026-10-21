@@ -4,15 +4,26 @@ This file lists the maintainers of the Praxis
 project. See [GOVERNANCE.md][gov] for role
 definitions and processes.
 
+[gov]: https://github.com/praxis-proxy/praxis/blob/main/GOVERNANCE.md
+
 ## Project Leads
+
+> **Note**: Project leads are effective maintainers for *all* repos.
 
 | Name      | GitHub      | Affiliation |
 | --------- | ----------- | ----------- |
 | Shane Utt | [@shaneutt] | Red Hat     |
 
-> **Note**: Project leads are effective maintainers for *all* repos.
-
 [@shaneutt]: https://github.com/shaneutt
+
+## Community Managers
+
+> **Note**: Community managers are responsible for socialization,
+> community health, and our work with the CNCF.
+
+| Name      | GitHub      | Affiliation |
+| --------- | ----------- | ----------- |
+| David G. Simmons | [@sdavidgs] | Red Hat     |
 
 ## Maintainers
 
@@ -29,14 +40,10 @@ definitions and processes.
 [@alexsnaps]: https://github.com/alexsnaps
 [@araujof]: https://github.com/araujof
 [@aslakknutsen]: https://github.com/aslakknutsen
+[@nerdalert]: https://github.com/nerdalert
 [@hexfusion]: https://github.com/hexfusion
 [@leseb]: https://github.com/leseb
 [@twghu]: https://github.com/twghu
-
-## Community
-| Name      | GitHub      | Affiliation |
-| --------- | ----------- | ----------- |
-| David G. Simmons | [@sdavidgs] | Red Hat     |
 
 ## Reviewers
 
@@ -90,5 +97,3 @@ definitions and processes.
 ## Emeritus
 
 None yet.
-
-[gov]: https://github.com/praxis-proxy/praxis/blob/main/GOVERNANCE.md

@@ -57,6 +57,8 @@ Everyone is expected to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Community
 
+Read [GOVERNANCE.md](GOVERNANCE.md) to see how our community works.
+
 Feel free to join our [discussion forums] to ask questions or share ideas.
 
 Or please join us in our Slack channel on [CNCF Slack]: [#praxis] channel
@@ -66,6 +68,5 @@ Or please join us in our Slack channel on [CNCF Slack]: [#praxis] channel
 ## License
 
 [Apache-2.0](LICENSE)
-
 
 [![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fpraxis.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2Fpraxis-proxy%2Fpraxis?ref=badge_large)
