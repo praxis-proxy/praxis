@@ -181,6 +181,7 @@ impl Drop for Flight {
             return;
         }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            debug!("request dropped without completion: no Tokio runtime context is available");
             return;
         };
         debug!("request ended before it completed; completing it in the background");
