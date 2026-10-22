@@ -5,7 +5,7 @@
 
 use std::{fmt::Debug, sync::Arc};
 
-use dashmap::DashMap;
+use dashmap::{DashMap, mapref::entry::Entry};
 
 /// A matched key-value entry: the stored key and its value.
 pub type KvEntry = (Arc<str>, Arc<str>);
@@ -61,7 +61,9 @@ pub enum MatchType {
 ///
 /// # Accessing from a filter
 ///
-/// Filters create stores on demand via [`get_or_create`]:
+/// Read a store the embedder configured with [`get`], which returns
+/// `None` for a missing name. Use [`get_or_create_memory`] only when the
+/// filter deliberately owns an in-memory store:
 ///
 /// ```ignore
 /// async fn on_request(
@@ -69,7 +71,7 @@ pub enum MatchType {
 ///     ctx: &mut HttpFilterContext<'_>,
 /// ) -> Result<FilterAction, FilterError> {
 ///     if let Some(registry) = ctx.kv_stores {
-///         let store = registry.get_or_create("routing_overrides");
+///         let store = registry.get_or_create_memory("routing_overrides");
 ///         if let Some(cluster) = store.get("preferred_cluster") {
 ///             ctx.cluster = Some(Arc::from(cluster.as_ref()));
 ///         }
@@ -98,7 +100,8 @@ pub enum MatchType {
 /// }
 /// ```
 ///
-/// [`get_or_create`]: KvStoreRegistry::get_or_create
+/// [`get`]: KvStoreRegistry::get
+/// [`get_or_create_memory`]: KvStoreRegistry::get_or_create_memory
 /// [`Arc<str>`]: std::sync::Arc
 pub trait KvBackend: Send + Sync + Debug {
     /// Retrieve a value by exact key.
@@ -228,16 +231,35 @@ impl KvLookup {
     }
 }
 
+
+// -----------------------------------------------------------------------------
+// KvRegistryError
+// -----------------------------------------------------------------------------
+
+/// Error returned when a store cannot be added to a [`KvStoreRegistry`].
+///
+/// ```
+/// use praxis_core::kv::KvRegistryError;
+///
+/// let err = KvRegistryError::AlreadyRegistered("flags".into());
+/// assert_eq!(err.to_string(), "kv store 'flags' is already registered");
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum KvRegistryError {
+    /// A store with the given name already exists in the registry.
+    #[error("kv store '{0}' is already registered")]
+    AlreadyRegistered(Arc<str>),
+}
 // -----------------------------------------------------------------------------
 // KvStoreRegistry
 // -----------------------------------------------------------------------------
 
 /// Concurrent registry of named key-value store backends.
 ///
-/// Stores are created on demand by filters at runtime
-/// via [`get_or_create`]. The registry is shared across
-/// all pipelines and filter contexts, and survives config
-/// reloads.
+/// Stores are added with [`register`] (any backend) or
+/// [`get_or_create_memory`] (in-memory); [`get`] and [`lookup`] never
+/// create one. The registry is shared across all pipelines and filter
+/// contexts, and survives config reloads.
 ///
 /// ```
 /// use praxis_core::kv::KvStoreRegistry;
@@ -245,12 +267,15 @@ impl KvLookup {
 /// let registry = KvStoreRegistry::new();
 /// assert!(registry.is_empty());
 ///
-/// let store = registry.get_or_create("flags");
+/// let store = registry.get_or_create_memory("flags");
 /// store.set("dark_mode", std::sync::Arc::from("true"));
 /// assert_eq!(registry.len(), 1);
 /// ```
 ///
-/// [`get_or_create`]: KvStoreRegistry::get_or_create
+/// [`get`]: KvStoreRegistry::get
+/// [`get_or_create_memory`]: KvStoreRegistry::get_or_create_memory
+/// [`lookup`]: KvStoreRegistry::lookup
+/// [`register`]: KvStoreRegistry::register
 #[derive(Clone, Debug)]
 pub struct KvStoreRegistry {
     /// Named store backends.
@@ -282,32 +307,70 @@ impl KvStoreRegistry {
     /// let registry = KvStoreRegistry::new();
     /// assert!(registry.get("missing").is_none());
     ///
-    /// registry.get_or_create("test");
+    /// registry.get_or_create_memory("test");
     /// assert!(registry.get("test").is_some());
     /// ```
     pub fn get(&self, name: &str) -> Option<Arc<dyn KvBackend>> {
         self.stores.get(name).map(|entry| Arc::clone(entry.value()))
     }
 
-    /// Get an existing store or create a new empty one.
+    /// Register a caller-provided backend under a name.
+    ///
+    /// The name must be new: registering over an existing store is an
+    /// error, never a silent replacement.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use praxis_core::kv::{KvRegistryError, KvStoreRegistry, memory::InMemoryKvBackend};
+    ///
+    /// let registry = KvStoreRegistry::new();
+    /// assert_eq!(
+    ///     registry.register("flags", Arc::new(InMemoryKvBackend::new())),
+    ///     Ok(())
+    /// );
+    /// assert_eq!(
+    ///     registry.register("flags", Arc::new(InMemoryKvBackend::new())),
+    ///     Err(KvRegistryError::AlreadyRegistered(Arc::from("flags")))
+    /// );
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KvRegistryError::AlreadyRegistered`] if a store with the given name already exists.
+    pub fn register(&self, name: &str, backend: Arc<dyn KvBackend>) -> Result<(), KvRegistryError> {
+        match self.stores.entry(Arc::from(name)) {
+            Entry::Occupied(_) => Err(KvRegistryError::AlreadyRegistered(Arc::from(name))),
+            Entry::Vacant(entry) => {
+                entry.insert(backend);
+                tracing::info!(store = name, "kv store registered");
+                Ok(())
+            },
+        }
+    }
+
+    /// Get the store named `name`, creating an empty in-memory store if none exists.
+    ///
+    /// Use this only when memory is the backend you want. To look up a store that is expected to be configured, use
+    /// [`get`](Self::get) instead, which leaves a missing name visible. An existing store is returned as-is,
+    /// whatever its backend.
     ///
     /// ```
     /// use praxis_core::kv::KvStoreRegistry;
     ///
     /// let registry = KvStoreRegistry::new();
-    /// let store = registry.get_or_create("flags");
+    /// let store = registry.get_or_create_memory("flags");
     /// assert!(store.is_empty());
     /// assert_eq!(registry.len(), 1);
     /// ```
-    pub fn get_or_create(&self, name: &str) -> Arc<dyn KvBackend> {
+    pub fn get_or_create_memory(&self, name: &str) -> Arc<dyn KvBackend> {
         if let Some(existing) = self.stores.get(name) {
             return Arc::clone(existing.value());
         }
 
-        let backend: Arc<dyn KvBackend> = Arc::new(memory::InMemoryKvBackend::new());
         let entry = self.stores.entry(Arc::from(name)).or_insert_with(|| {
             tracing::info!(store = name, "kv store created");
-            Arc::clone(&backend)
+            Arc::new(memory::InMemoryKvBackend::new())
         });
         Arc::clone(entry.value())
     }
@@ -320,7 +383,7 @@ impl KvStoreRegistry {
     /// use praxis_core::kv::KvStoreRegistry;
     ///
     /// let registry = KvStoreRegistry::new();
-    /// registry.get_or_create("temp");
+    /// registry.get_or_create_memory("temp");
     /// assert!(registry.remove("temp"));
     /// assert!(!registry.remove("temp"));
     /// ```
@@ -344,7 +407,7 @@ impl KvStoreRegistry {
     ///
     /// assert_eq!(registry.lookup("missing", "k"), KvLookup::StoreNotFound);
     ///
-    /// let store = registry.get_or_create("flags");
+    /// let store = registry.get_or_create_memory("flags");
     /// assert_eq!(registry.lookup("flags", "k"), KvLookup::KeyNotFound);
     ///
     /// store.set("k", Arc::from("v"));
@@ -369,8 +432,8 @@ impl KvStoreRegistry {
     /// use praxis_core::kv::KvStoreRegistry;
     ///
     /// let registry = KvStoreRegistry::new();
-    /// registry.get_or_create("a");
-    /// registry.get_or_create("b");
+    /// registry.get_or_create_memory("a");
+    /// registry.get_or_create_memory("b");
     /// let mut names = registry.store_names();
     /// names.sort();
     /// assert_eq!(names.len(), 2);
@@ -386,7 +449,7 @@ impl KvStoreRegistry {
     ///
     /// let registry = KvStoreRegistry::new();
     /// assert_eq!(registry.len(), 0);
-    /// registry.get_or_create("a");
+    /// registry.get_or_create_memory("a");
     /// assert_eq!(registry.len(), 1);
     /// ```
     pub fn len(&self) -> usize {
@@ -400,7 +463,7 @@ impl KvStoreRegistry {
     ///
     /// let registry = KvStoreRegistry::new();
     /// assert!(registry.is_empty());
-    /// registry.get_or_create("a");
+    /// registry.get_or_create_memory("a");
     /// assert!(!registry.is_empty());
     /// ```
     pub fn is_empty(&self) -> bool {
@@ -455,23 +518,23 @@ mod tests {
     }
 
     #[test]
-    fn get_or_create_creates_empty_store() {
+    fn get_or_create_creates_empty_store_memory() {
         let registry = KvStoreRegistry::new();
-        let store = registry.get_or_create("test");
+        let store = registry.get_or_create_memory("test");
         assert!(store.is_empty(), "newly created store should be empty");
         assert_eq!(registry.len(), 1, "registry should have 1 store");
     }
 
     #[test]
-    fn get_or_create_returns_same_store() {
+    fn get_or_create_returns_same_store_memory() {
         let registry = KvStoreRegistry::new();
-        let s1 = registry.get_or_create("test");
+        let s1 = registry.get_or_create_memory("test");
         s1.set("key", Arc::from("value"));
-        let s2 = registry.get_or_create("test");
+        let s2 = registry.get_or_create_memory("test");
         assert_eq!(
             s2.get("key").as_deref(),
             Some("value"),
-            "second get_or_create should return the same store"
+            "second get_or_create_memory should return the same store"
         );
         assert_eq!(registry.len(), 1, "registry should still have 1 store");
     }
@@ -479,7 +542,7 @@ mod tests {
     #[test]
     fn get_returns_existing_store() {
         let registry = KvStoreRegistry::new();
-        registry.get_or_create("test").set("k", Arc::from("v"));
+        registry.get_or_create_memory("test").set("k", Arc::from("v"));
         let store = registry.get("test").unwrap();
         assert_eq!(store.get("k").as_deref(), Some("v"), "get should return existing store");
     }
@@ -487,7 +550,7 @@ mod tests {
     #[test]
     fn remove_existing_store() {
         let registry = KvStoreRegistry::new();
-        registry.get_or_create("temp");
+        registry.get_or_create_memory("temp");
         assert!(registry.remove("temp"), "remove should return true for existing store");
         assert!(registry.is_empty(), "registry should be empty after removal");
     }
@@ -514,7 +577,7 @@ mod tests {
     #[test]
     fn lookup_key_not_found() {
         let registry = KvStoreRegistry::new();
-        registry.get_or_create("test");
+        registry.get_or_create_memory("test");
         assert_eq!(
             registry.lookup("test", "missing"),
             KvLookup::KeyNotFound,
@@ -525,7 +588,7 @@ mod tests {
     #[test]
     fn lookup_value_found() {
         let registry = KvStoreRegistry::new();
-        registry.get_or_create("test").set("k", Arc::from("v"));
+        registry.get_or_create_memory("test").set("k", Arc::from("v"));
         assert_eq!(
             registry.lookup("test", "k"),
             KvLookup::Value(Arc::from("v")),
@@ -536,8 +599,8 @@ mod tests {
     #[test]
     fn store_names_lists_all() {
         let registry = KvStoreRegistry::new();
-        registry.get_or_create("alpha");
-        registry.get_or_create("beta");
+        registry.get_or_create_memory("alpha");
+        registry.get_or_create_memory("beta");
         let mut names = registry.store_names();
         names.sort();
         assert_eq!(names.len(), 2, "should have 2 store names");
@@ -548,7 +611,7 @@ mod tests {
     #[test]
     fn clone_shares_state() {
         let r1 = KvStoreRegistry::new();
-        r1.get_or_create("shared").set("k", Arc::from("v"));
+        r1.get_or_create_memory("shared").set("k", Arc::from("v"));
         let r2 = r1.clone();
         assert_eq!(
             r2.lookup("shared", "k"),
@@ -582,12 +645,17 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_get_or_create_same_name() {
+    fn concurrent_get_or_create_same_memory_name() {
         let registry = Arc::new(KvStoreRegistry::new());
+        let barrier = Arc::new(std::sync::Barrier::new(10));
 
         let handles: Vec<_> = std::iter::repeat_with(|| {
             let reg = Arc::clone(&registry);
-            std::thread::spawn(move || reg.get_or_create("race"))
+            let gate = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                gate.wait();
+                reg.get_or_create_memory("race")
+            })
         })
         .take(10)
         .collect();
@@ -600,11 +668,10 @@ mod tests {
             "only one store should exist after concurrent creation"
         );
 
-        stores[0].set("k", Arc::from("v"));
-        assert_eq!(
-            stores[9].get("k").as_deref(),
-            Some("v"),
-            "all handles should reference the same underlying store"
+        let canonical = registry.get("race").unwrap();
+        assert!(
+            stores.iter().all(|store| Arc::ptr_eq(store, &canonical)),
+            "every caller must get the store the registry holds"
         );
     }
 
@@ -621,5 +688,79 @@ mod tests {
             None,
             "StoreNotFound should be None"
         );
+    }
+    /// Backend that answers every `get` with a fixed value.
+    #[derive(Debug)]
+    struct FixedBackend;
+
+    impl KvBackend for FixedBackend {
+        fn get(&self, _key: &str) -> Option<Arc<str>> {
+            Some(Arc::from("fixed"))
+        }
+
+        fn set(&self, _key: &str, _value: Arc<str>) -> bool {
+            false
+        }
+
+        fn delete(&self, _key: &str) -> bool {
+            false
+        }
+
+        fn entries(&self) -> Vec<KvEntry> {
+            Vec::new()
+        }
+
+        fn lookup(&self, _pattern: &str, _match_type: MatchType) -> Result<Option<KvEntry>, String> {
+            Ok(None)
+        }
+
+        fn len(&self) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn register_keeps_caller_backend() {
+        let registry = KvStoreRegistry::new();
+        registry.register("custom", Arc::new(FixedBackend)).unwrap();
+        assert_eq!(
+            registry.lookup("custom", "any"),
+            KvLookup::Value(Arc::from("fixed")),
+            "lookups must reach the registered backend, not a memory store"
+        );
+    }
+
+    #[test]
+    fn register_rejects_duplicate_name() {
+        let registry = KvStoreRegistry::new();
+        registry.register("custom", Arc::new(FixedBackend)).unwrap();
+        let again = registry.register("custom", Arc::new(memory::InMemoryKvBackend::new()));
+        assert_eq!(
+            again,
+            Err(KvRegistryError::AlreadyRegistered(Arc::from("custom"))),
+            "duplicate must fail"
+        );
+        assert_eq!(
+            registry.lookup("custom", "any"),
+            KvLookup::Value(Arc::from("fixed")),
+            "original must survive"
+        );
+    }
+
+    #[test]
+    fn missing_configured_store_stays_missing() {
+        let registry = KvStoreRegistry::new();
+        registry.register("routing_overrides", Arc::new(FixedBackend)).unwrap();
+
+        assert!(
+            registry.get("routing_overides").is_none(),
+            "misspelled name must not resolve"
+        );
+        assert_eq!(
+            registry.lookup("routing_overides", "k"),
+            KvLookup::StoreNotFound,
+            "lookup must report it"
+        );
+        assert_eq!(registry.len(), 1, "lookups must never add a store");
     }
 }

@@ -1094,7 +1094,7 @@ mod tests {
     #[cfg(feature = "pingora")]
     fn kv_admin(require_loopback_host: bool) -> (PingoraAdminService, KvStoreRegistry) {
         let registry = KvStoreRegistry::new();
-        registry.get_or_create("test").set("color", Arc::from("blue"));
+        registry.get_or_create_memory("test").set("color", Arc::from("blue"));
         let svc = PingoraAdminService::new(None, Some(registry.clone()), None, None, None, false)
             .require_loopback_host(require_loopback_host);
         (svc, registry)

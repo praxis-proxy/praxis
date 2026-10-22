@@ -30,6 +30,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- `KvStoreRegistry::register` adds a caller-supplied `KvBackend` under a
+  name, rejecting duplicates with `KvRegistryError::AlreadyRegistered`.
+- `KvStoreRegistry::get_or_create_memory` deliberately creates an
+  in-memory store.
+
+### Removed
+
+- `KvStoreRegistry::get_or_create`, which silently created an in-memory
+  store for any unknown name. Use `get` to look up a configured store, or
+  `get_or_create_memory` to choose memory explicitly.
 
 ### Fixed
 
