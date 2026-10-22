@@ -120,3 +120,6 @@ mod url_target_tls;
 mod via;
 mod websocket;
 mod wildcard_routing;
+
+#[cfg(feature = "tls-health-check")]
+mod tls_health_check;

@@ -132,3 +132,6 @@ mod virtual_hosts;
 mod websocket;
 mod weighted_load_balancing;
 mod zone_aware;
+
+#[cfg(feature = "tls-health-check")]
+mod tls_health_check;

@@ -17,6 +17,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Experimental `tls-health-check` feature for TLS handshake probes and HTTPS
+  health endpoints using cluster certificates and startup runtime trust.
+  Handshake probes detect client-certificate rejection alerts after sending
+  `close_notify`, allowing the greater of 100 ms and the connection and
+  handshake duration, capped by the remaining probe timeout. Completed
+  handshakes remain healthy when that deadline expires without a response.
+  Rust consumers matching `HealthCheckType` exhaustively must handle the new
+  `Tls` variant even when the feature is disabled.
+
 ## [0.7.5] - 2026-10-21
 
 ### Added

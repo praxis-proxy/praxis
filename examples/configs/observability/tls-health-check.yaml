@@ -1,0 +1,76 @@
+# TLS and HTTPS Health Checks
+#
+# Check upstream certificates with a TLS handshake or verify an HTTPS health
+# endpoint with the experimental tls-health-check feature.
+#
+# Supply a CA bundle at /etc/praxis/upstream-ca.pem. Add tls.client_cert with
+# cert_path and key_path when the backend requires mutual TLS. A handshake
+# alone cannot confirm TLS 1.3 client authorization; use the HTTPS mode for it.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features tls-health-check -- -c examples/configs/observability/tls-health-check.yaml
+
+listeners:
+  - name: proxy
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+clusters:
+  - name: handshake
+    endpoints: ["127.0.0.1:8443"]
+    tls:
+      sni: localhost
+      ca:
+        ca_path: /etc/praxis/upstream-ca.pem
+    health_check:
+      type: tls
+      interval_ms: 2000
+      timeout_ms: 1000
+      healthy_threshold: 1
+      unhealthy_threshold: 1
+  - name: https
+    endpoints: ["127.0.0.1:8444"]
+    tls:
+      sni: localhost
+      ca:
+        ca_path: /etc/praxis/upstream-ca.pem
+    health_check:
+      type: http
+      path: /health
+      expected_status: 200
+      interval_ms: 2000
+      timeout_ms: 1000
+      healthy_threshold: 1
+      unhealthy_threshold: 1
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: /handshake
+            cluster: handshake
+          - path_prefix: /
+            cluster: https
+      - filter: load_balancer
+        clusters:
+          - name: handshake
+            endpoints: ["127.0.0.1:8443"]
+            tls:
+              sni: localhost
+              ca:
+                ca_path: /etc/praxis/upstream-ca.pem
+          - name: https
+            endpoints: ["127.0.0.1:8444"]
+            tls:
+              sni: localhost
+              ca:
+                ca_path: /etc/praxis/upstream-ca.pem
+
+admin:
+  metrics_address: "127.0.0.1:9902"
+  verbose: true
+
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_health_checks: true

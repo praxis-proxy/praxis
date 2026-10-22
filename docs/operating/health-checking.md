@@ -41,7 +41,7 @@ clusters:
 
 | Field | Default | Description |
 | ----- | ------- | ----------- |
-| `type` | (required) | `http` or `tcp` |
+| `type` | (required) | `http`, `tcp`, `grpc`, or feature-gated `tls` |
 | `path` | `/` | HTTP path to probe |
 | `expected_status` | `200` | Status code that indicates healthy |
 | `interval_ms` | `5000` | Milliseconds between probe rounds |
@@ -54,12 +54,105 @@ The probe sends a raw `HTTP/1.1 GET` with a
 Any status code other than `expected_status` counts as
 a failure.
 
-HTTP probes connect in plaintext and cannot probe a
-cluster that terminates TLS: the handshake never
-completes, so the endpoint is marked unhealthy. Use a
-`tcp` probe (connect-only) for a TLS cluster. Praxis logs
-a warning at startup when a cluster has `tls` and an
-`http` health check.
+Without `tls-health-check`, HTTP probes connect in plaintext. A TLS cluster
+with an HTTP probe logs a startup warning; use a TCP probe or enable the
+feature described below. Plain HTTP retains `Host: health-check` with either
+build.
+
+### TLS and HTTPS Probes
+
+Build with `--features tls-health-check` to enable experimental TLS probes.
+The initial transport implementation uses the Pingora backend; selecting this
+feature also selects `pingora` in the protocol crate.
+
+```yaml
+clusters:
+  - name: secure
+    endpoints: ["backend.example.com:443"]
+    tls:
+      sni: backend.example.com
+      ca:
+        ca_path: /etc/praxis/upstream-ca.pem
+      # client_cert:
+      #   cert_path: /etc/praxis/client.pem
+      #   key_path: /etc/praxis/client-key.pem
+    health_check:
+      type: tls
+```
+
+`type: tls` requires cluster `tls` settings and completes a TLS handshake.
+To check an HTTPS application endpoint, use `type: http` on that TLS cluster
+and set `path` and `expected_status`. HTTPS probes use HTTP/1.1 even when
+`http.version` selects HTTP/2 for proxied traffic. Handshake-only probes honor
+`http.version` during ALPN negotiation and can check an h2-only TLS endpoint.
+The path still defaults to `/`, and the
+expected status defaults to `200`. Handshake-only probes ignore both fields.
+
+Probes use the cluster's CA, client certificate and `verify` settings.
+Disabling verification still requires the existing insecure opt-in. Without a
+cluster CA, `runtime.upstream_ca_file` replaces system trust when configured;
+otherwise system trust applies. Runtime trust is captured at startup and
+requires a restart to change, including when probe tasks reload. Cluster TLS
+material reloads with the config. Failed certificate loading makes probes
+fail, without falling back to another trust source or plaintext.
+
+The verification name comes from explicit `tls.sni`, then a fixed DNS
+`http.authority`, then the endpoint hostname or IP address. An IP authority
+keeps endpoint certificate verification when no explicit SNI is set. A
+background probe has no downstream Host to inherit. Existing SNI validation
+and opt-in rules still apply to cluster config. HTTPS Host uses configured
+`http.authority`, including IP literals and `{ from: endpoint }`; otherwise it
+uses explicit SNI or the endpoint. IPv6 Hosts use brackets; endpoint-derived
+Hosts omit port 443 and keep other ports.
+
+Each probe uses a new connection with session resumption disabled, so a
+resumed session cannot conceal a changed server certificate. One timeout
+covers DNS, connection, handshake, HTTP exchange and close. Successful probes
+send `close_notify`. Handshake-only probes then wait for a fatal TLS alert
+rejecting client credentials. The grace period is the greater of 100 ms and
+the time spent resolving, connecting, and completing the handshake, capped by
+the remaining probe timeout. Silence at that deadline succeeds if the
+handshake completed; a handshake that times out still fails. A normal
+`close_notify` is returned as EOF and succeeds. Application data, EOF without
+`close_notify` (`UnexpectedEof`), or a
+silent peer after that grace period also succeed. Other read errors and fatal
+TLS alerts fail the probe. HTTPS probes
+read only a bounded HTTP status line, not the entire response body, and do not
+wait for a reciprocal close alert.
+
+TLS closure and error alerts are defined in [RFC 8446 Section 6] for TLS 1.3
+and [RFC 5246 Section 7.2] for TLS 1.2. The grace period and acceptance of
+transport EOF above are Praxis health-check policy. HTTP/1.1 status-line
+syntax is defined in [RFC 9112 Section 4]; the bounded read follows the
+resource-limit guidance in [RFC 9110 Section 17.5]. See the
+[TLS conformance tests] for protocol-version and client-authentication
+coverage, and [HTTP correctness] for the proxy's protocol responsibilities.
+
+A verified handshake establishes server identity. Configured client
+credentials are sent only when the server requests client authentication
+([RFC 8446 Section 4.4.2], [RFC 5246 Section 7.4.6]). TLS 1.3 client-side
+handshake completion does not prove that the server accepted those
+credentials, and a rejection arriving after the grace period can still be
+missed. Use an HTTPS response check to verify
+client authorization and application health. Upstream revocation checking is
+not supported; these probes make no certificate revocation guarantee.
+
+See the [TLS health-check example][tls-health-check]
+for both modes. TCP stays connect-only, and gRPC probes remain plaintext.
+
+[tls-health-check]: ../../examples/configs/observability/tls-health-check.yaml
+[RFC 8446 Section 6]: https://datatracker.ietf.org/doc/html/rfc8446#section-6
+[RFC 5246 Section 7.2]:
+  https://datatracker.ietf.org/doc/html/rfc5246#section-7.2
+[RFC 9112 Section 4]: https://datatracker.ietf.org/doc/html/rfc9112#section-4
+[RFC 9110 Section 17.5]:
+  https://datatracker.ietf.org/doc/html/rfc9110#section-17.5
+[RFC 8446 Section 4.4.2]:
+  https://datatracker.ietf.org/doc/html/rfc8446#section-4.4.2
+[RFC 5246 Section 7.4.6]:
+  https://datatracker.ietf.org/doc/html/rfc5246#section-7.4.6
+[TLS conformance tests]: ../../tests/conformance/tests/suite/tls.rs
+[HTTP correctness]: ../architecture/http-correctness.md
 
 ### TCP Probes
 

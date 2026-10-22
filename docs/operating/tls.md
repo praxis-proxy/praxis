@@ -290,3 +290,10 @@ tls:
 ```
 
 [tls-cipher-suites]: ../../examples/configs/protocols/tls-cipher-suites.yaml
+
+### Active health probes
+
+Enable the experimental `tls-health-check` feature to verify upstream TLS
+identities or probe HTTPS endpoints using the cluster TLS settings. See
+[TLS and HTTPS probes](health-checking.md#tls-and-https-probes) for trust,
+server-name selection and the TLS 1.3 client-authentication limitation.
