@@ -378,6 +378,11 @@ clusters on the same listener have independent budgets, so
 saturating one leaves the others serving. Use the listener
 or `runtime` cap for a process- or port-wide bound.
 
+A request pinned by session affinity bypasses endpoint
+selection, and with it this ceiling: it is neither shed nor
+counted. Pair `max_connections` with one of those caps when
+a hard bound matters.
+
 ### Upstream HTTP Version
 
 Praxis speaks HTTP/1.1 to upstreams by default. A cluster
