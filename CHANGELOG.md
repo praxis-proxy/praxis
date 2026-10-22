@@ -33,6 +33,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- The Hyper backend applies the retry policy to failures on pooled
+  connections, preventing POST replays without opt-in and enforcing the
+  configured retry limit.
 - The Hyper backend stops the runtime if a required listener exits during
   startup or serving, including a failed socket in a TCP listener group.
 - The Hyper backend preserves request trailers through pre-read and retries

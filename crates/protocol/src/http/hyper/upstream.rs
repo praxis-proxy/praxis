@@ -7,8 +7,7 @@
 //! `connected_to_upstream` and `upstream_request_filter` hooks do, and a
 //! failed one goes through the same decisions as its `fail_to_connect` and
 //! `error_while_proxy` hooks: the retry policy for connect and exchange
-//! failures, a free replay for a pooled connection the upstream had
-//! closed, and no retry once the replay copy of the body is truncated.
+//! failures, and no retry once the replay copy of the body is truncated.
 
 use std::time::Duration;
 
@@ -19,7 +18,6 @@ use praxis_core::{
         Connector as _, PeerSpec, Session as _,
         hyper::{HyperConnector, HyperSession},
     },
-    retry::reused_only_replay_safe,
 };
 use tracing::{Instrument as _, debug};
 
@@ -137,12 +135,11 @@ async fn attempt(listener: &ListenerShared, flight: &mut Flight, upload: &mut Up
         read: peer.connection.read_timeout,
         write: peer.connection.write_timeout,
     };
-    let reused = session.reused();
     match Box::pin(exchange(flight, &mut session, upload, timeouts)).await {
         Ok(()) => Box::pin(response::head(listener, flight, session, upload, timeouts.read)).await,
         Err(end) => {
             release(&listener.connector, session, false);
-            exchange_failed(flight, upload, end, reused)
+            exchange_failed(flight, upload, end)
         },
     }
 }
@@ -234,10 +231,10 @@ async fn exchange(
 }
 
 /// Decide what follows an exchange that ended before a usable head.
-fn exchange_failed(flight: &mut Flight, upload: &Upload, end: UploadEnd, reused: bool) -> Outcome {
+fn exchange_failed(flight: &mut Flight, upload: &Upload, end: UploadEnd) -> Outcome {
     match end {
         UploadEnd::Client(failure) => Outcome::Failed(failure),
-        UploadEnd::Upstream(failure) => after_failure(flight, upload, failure, reused),
+        UploadEnd::Upstream(failure) => after_failure(flight, upload, failure),
         UploadEnd::Halted(halt) => {
             debug!(status = ?halt.status, reason = %halt.reason, "request body phase stopped the request");
             flight.error = Some(ErrorOrigin::Other);
@@ -249,19 +246,11 @@ fn exchange_failed(flight: &mut Flight, upload: &Upload, end: UploadEnd, reused:
     }
 }
 
-/// Decide whether a failure on an open connection is retried: never with a
-/// truncated replay copy; for free when a pooled connection turned out to
-/// be closed and the body can be replayed; else as the retry policy says.
-pub(super) fn after_failure(flight: &mut Flight, upload: &Upload, failure: Failure, reused: bool) -> Outcome {
+/// Apply the retry policy to an exchange failure, refusing a truncated
+/// replay copy even when the policy would otherwise allow a retry.
+pub(super) fn after_failure(flight: &mut Flight, upload: &Upload, failure: Failure) -> Outcome {
     record_attempt_failure(&failure, &mut flight.ctx);
     if upload.is_truncated() {
-        return Outcome::Failed(failure);
-    }
-    if reused && failure.is_stale_connection() {
-        if reused_only_replay_safe(reused, upload.is_truncated()) {
-            debug!(error = %failure, "replaying the request after a stale pooled upstream connection");
-            return Outcome::Retry(failure);
-        }
         return Outcome::Failed(failure);
     }
     if connect_failure_retry(&mut flight.ctx, failure.retry_outcome()) {
@@ -378,40 +367,43 @@ mod tests {
     #[tokio::test]
     async fn truncated_replay_copy_is_never_retried() {
         let mut flight = Flight::for_tests(empty_pipeline());
+        let mut policy = retrying_resets();
+        Arc::make_mut(&mut policy).allow_non_idempotent = Some(true);
+        flight.ctx.retry_policy = Some(policy);
         let (upload, _client) = truncated_upload(&mut flight).await;
 
-        let outcome = after_failure(&mut flight, &upload, closed(), true);
+        let outcome = after_failure(&mut flight, &upload, closed());
 
         assert!(
-            matches!(&outcome, Outcome::Failed(failure) if failure.is_stale_connection()),
+            matches!(&outcome, Outcome::Failed(failure) if failure.kind == FailureKind::ConnectionClosed),
             "a body that cannot be replayed is never sent twice"
         );
     }
 
     #[tokio::test]
-    async fn stale_pooled_connection_is_replayed_for_free() {
+    async fn opted_in_post_retries_consume_the_policy_limit() {
         let mut flight = Flight::for_tests(empty_pipeline());
+        let mut policy = retrying_resets();
+        Arc::make_mut(&mut policy).allow_non_idempotent = Some(true);
+        Arc::make_mut(&mut policy).max_retries = Some(1);
+        flight.ctx.retry_policy = Some(policy);
         let (upload, _client) = streaming_upload(&flight.ctx).await;
 
-        let outcome = after_failure(&mut flight, &upload, closed(), true);
+        let first = after_failure(&mut flight, &upload, closed());
+        let exhausted = after_failure(&mut flight, &upload, closed());
 
-        assert!(
-            matches!(&outcome, Outcome::Retry(failure) if failure.is_stale_connection()),
-            "a pooled connection the upstream had closed is replayed, even for a POST"
-        );
-        assert_eq!(
-            flight.ctx.retries, 0,
-            "the free replay is not one of the policy's retries"
-        );
+        assert!(matches!(first, Outcome::Retry(_)), "an opted-in POST can retry");
+        assert!(matches!(exhausted, Outcome::Failed(_)), "the retry limit is enforced");
+        assert_eq!(flight.ctx.retries, 1, "every permitted retry is counted");
     }
 
     #[tokio::test]
-    async fn closed_fresh_connection_follows_the_retry_policy() {
+    async fn closed_connection_follows_the_retry_policy() {
         let mut flight = Flight::for_tests(empty_pipeline());
         flight.ctx.request_is_idempotent = true;
         let (upload, _client) = streaming_upload(&flight.ctx).await;
 
-        let outcome = after_failure(&mut flight, &upload, closed(), false);
+        let outcome = after_failure(&mut flight, &upload, closed());
 
         assert!(
             matches!(outcome, Outcome::Failed(_)),
@@ -426,7 +418,7 @@ mod tests {
         flight.ctx.retry_policy = Some(retrying_resets());
         let (upload, _client) = streaming_upload(&flight.ctx).await;
 
-        let outcome = after_failure(&mut flight, &upload, closed(), false);
+        let outcome = after_failure(&mut flight, &upload, closed());
 
         assert!(matches!(outcome, Outcome::Retry(_)), "the policy retries a reset");
         assert_eq!(flight.ctx.retries, 1, "and counts the retry");
@@ -438,7 +430,7 @@ mod tests {
         flight.ctx.retry_policy = Some(retrying_resets());
         let (upload, _client) = streaming_upload(&flight.ctx).await;
 
-        let outcome = after_failure(&mut flight, &upload, closed(), false);
+        let outcome = after_failure(&mut flight, &upload, closed());
 
         assert!(
             matches!(outcome, Outcome::Failed(_)),
@@ -447,12 +439,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unparsable_answer_on_a_pooled_connection_is_not_replayed() {
+    async fn unparsable_answer_is_not_replayed() {
         let mut flight = Flight::for_tests(empty_pipeline());
         let (upload, _client) = streaming_upload(&flight.ctx).await;
         let invalid = Failure::new(FailureKind::InvalidResponse, "invalid HTTP status-code parsed");
 
-        let outcome = after_failure(&mut flight, &upload, invalid, true);
+        let outcome = after_failure(&mut flight, &upload, invalid);
 
         assert!(
             matches!(&outcome, Outcome::Failed(failure) if failure.kind == FailureKind::InvalidResponse),
@@ -466,7 +458,7 @@ mod tests {
         let (upload, _client) = streaming_upload(&flight.ctx).await;
         let failure = Failure::downstream(FailureKind::DownstreamClosed, "client hung up");
 
-        let outcome = exchange_failed(&mut flight, &upload, UploadEnd::Client(failure), true);
+        let outcome = exchange_failed(&mut flight, &upload, UploadEnd::Client(failure));
 
         assert!(
             matches!(&outcome, Outcome::Failed(failure) if failure.kind == FailureKind::DownstreamClosed),
@@ -484,7 +476,7 @@ mod tests {
             status: Some(413),
         };
 
-        let outcome = exchange_failed(&mut flight, &upload, UploadEnd::Halted(halt), false);
+        let outcome = exchange_failed(&mut flight, &upload, UploadEnd::Halted(halt));
 
         assert!(
             matches!(&outcome, Outcome::Reply(reply) if reply.status == StatusCode::PAYLOAD_TOO_LARGE),
@@ -503,7 +495,7 @@ mod tests {
             status: None,
         };
 
-        let outcome = exchange_failed(&mut flight, &upload, UploadEnd::Halted(halt), false);
+        let outcome = exchange_failed(&mut flight, &upload, UploadEnd::Halted(halt));
 
         assert!(
             matches!(&outcome, Outcome::Failed(failure) if failure.kind == FailureKind::Internal && failure.detail == "body filter broke"),
@@ -646,7 +638,7 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    /// A pooled connection the upstream had closed.
+    /// An incomplete response on an upstream connection.
     fn closed() -> Failure {
         Failure::new(
             FailureKind::ConnectionClosed,

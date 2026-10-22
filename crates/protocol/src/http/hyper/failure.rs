@@ -95,17 +95,6 @@ impl Failure {
         Self::new(FailureKind::Internal, detail)
     }
 
-    /// Whether the failure looks like a pooled connection the upstream had
-    /// already closed: worth one replay on a fresh connection.
-    ///
-    /// Only a closed or reset connection qualifies, as Pingora replays only
-    /// an end of stream or a reset before any response byte. A response
-    /// hyper could not parse came from a live upstream; replaying it would
-    /// repeat the request's side effects.
-    pub(super) fn is_stale_connection(&self) -> bool {
-        self.kind == FailureKind::ConnectionClosed
-    }
-
     /// Whether the failure is a connect, read or write timeout.
     pub(super) fn is_timeout(&self) -> bool {
         matches!(
@@ -561,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn unparsable_responses_are_neither_stale_nor_retried() {
+    fn unparsable_responses_are_not_retried() {
         for message in [
             "invalid HTTP header parsed",
             "invalid HTTP status-code parsed",
@@ -574,21 +563,27 @@ mod tests {
                 FailureKind::InvalidResponse,
                 "{message} is a parse failure"
             );
-            assert!(!failure.is_stale_connection(), "{message} came from a live upstream");
             assert_eq!(failure.retry_outcome(), RetryOutcome::Other, "{message} is not retried");
             assert_eq!(failure.classified().status, 502, "{message} is a 502");
         }
     }
 
     #[test]
-    fn only_a_closed_connection_is_stale() {
-        let closed = Failure::exchange(&EgressError::Io(
+    fn incomplete_response_is_a_reset_for_the_retry_policy() {
+        let failure = Failure::exchange(&EgressError::Io(
             "connection closed before message completed".to_owned(),
         ));
-        let read = Failure::exchange(&EgressError::Io("something odd".to_owned()));
 
-        assert!(closed.is_stale_connection(), "a closed pooled connection is stale");
-        assert!(!read.is_stale_connection(), "any other read failure is not");
+        assert_eq!(
+            failure.retry_outcome(),
+            RetryOutcome::Reset,
+            "EOF does not prove the request was unsent"
+        );
+        assert_eq!(
+            failure.classified().status,
+            502,
+            "an incomplete response is a bad gateway"
+        );
     }
 
     #[test]
@@ -614,7 +609,6 @@ mod tests {
             RetryOutcome::Other,
             "an invalid certificate is not retried"
         );
-        assert!(reset.is_stale_connection(), "a reset may be a stale pooled connection");
         assert_eq!(
             reset.kind,
             FailureKind::ConnectionClosed,

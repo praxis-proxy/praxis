@@ -122,8 +122,8 @@ clusters with different trust settings. The pool is bounded by
 config, the one unused longest evicted first), honours the cluster's idle
 timeout, discards HTTP/1 connections the peer closed instead of handing them
 out, and shares one HTTP/2 connection per key between streams. A session
-reports whether its connection served a request before, which the
-`ReusedOnly` retry rule needs.
+reports whether its connection served a request before for connection
+accounting and tracing.
 
 Upstream TLS is a `rustls::ClientConfig` built from the cluster's cached
 material: the cluster CA, else the runtime `upstream_ca_file`, else the
@@ -139,8 +139,9 @@ A request body forwarded upstream is also kept in a bounded replay buffer
 (64 KiB, the same limit Pingora applies) with a flag that records when the
 body outgrew it. A failed attempt is replayed only when the buffer is
 intact, no response byte has reached the client, and the retry policy
-allows it; a failure on a reused connection additionally requires
-`praxis_core::retry::reused_only_replay_safe`.
+allows it. This includes failures on reused connections: reuse and an EOF
+do not prove that the upstream processed nothing. Non-idempotent requests
+require `allow_non_idempotent`, and every retry consumes the policy budget.
 
 ## Runtime and shutdown
 

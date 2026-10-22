@@ -85,19 +85,18 @@ pub(super) async fn head(
     upload: &Upload,
     read_timeout: Option<Duration>,
 ) -> Outcome {
-    let reused = session.reused();
     let mut head = match copy_head(&session, read_timeout) {
         Ok(head) => head,
         Err(failure) => {
             release(&listener.connector, session, false);
-            return after_failure(flight, upload, failure, reused);
+            return after_failure(flight, upload, failure);
         },
     };
     if head.response.status == StatusCode::SWITCHING_PROTOCOLS {
         error!("upstream switched protocols; the hyper backend does not tunnel upgrades");
         release(&listener.connector, session, false);
         let failure = Failure::status(502, "unsolicited 101 response from upstream");
-        return after_failure(flight, upload, failure, reused);
+        return after_failure(flight, upload, failure);
     }
     strip_hop_by_hop_header_map(&mut head.response.headers, RESPONSE_HOP_BY_HOP);
     strip_reserved_internal_header_map(&mut head.response.headers);

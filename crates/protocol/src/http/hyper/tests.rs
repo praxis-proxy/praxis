@@ -693,6 +693,49 @@ async fn upstream_abort_mid_body_resets_the_http2_stream() {
 }
 
 #[tokio::test]
+async fn pooled_post_partial_response_is_not_replayed_without_opt_in() {
+    for policy in [
+        String::new(),
+        RESET_RETRIES.replace("allow_non_idempotent: true", "allow_non_idempotent: false"),
+    ] {
+        let backend = Backend::start(Reply::PartialHeadAfterWarm).await;
+        let proxy = Proxy::start(&with_cluster(&routed_yaml(backend.addr, ""), &policy)).await;
+        let warm = proxy.send("GET /warm HTTP/1.1\r\nHost: a\r\n\r\n").await;
+        assert_eq!(warm.status, 200, "warm the upstream connection");
+        tokio::time::sleep(POOL_SETTLE).await;
+
+        let response = proxy.send(&post_of(1_024)).await;
+
+        let requests = backend.requests();
+        let connections: Vec<_> = requests.iter().map(|seen| seen.connection).collect();
+        assert_eq!(connections, [0, 0], "a fully processed POST must not be repeated");
+        assert_eq!(requests[1].body.len(), 1_024, "the backend received the full POST");
+        assert_eq!(response.status, 502, "the partial response head fails the exchange");
+    }
+}
+
+#[tokio::test]
+async fn pooled_post_partial_response_opt_in_obeys_retry_limit() {
+    let backend = Backend::start(Reply::PartialHeadAfterWarm).await;
+    let policy = RESET_RETRIES.replace("max_retries: 2", "max_retries: 1");
+    let proxy = Proxy::start(&with_cluster(&routed_yaml(backend.addr, ""), &policy)).await;
+    let warm = proxy.send("GET /warm HTTP/1.1\r\nHost: a\r\n\r\n").await;
+    assert_eq!(warm.status, 200, "warm the upstream connection");
+    tokio::time::sleep(POOL_SETTLE).await;
+
+    let response = proxy.send(&post_of(1_024)).await;
+
+    let requests = backend.requests();
+    let connections: Vec<_> = requests.iter().map(|seen| seen.connection).collect();
+    assert_eq!(connections, [0, 0, 1], "the pooled failure consumes the sole retry");
+    assert!(
+        requests.iter().skip(1).all(|seen| seen.body.len() == 1_024),
+        "every attempt carries the full body"
+    );
+    assert_eq!(response.status, 502, "the retry limit ends the failed exchange");
+}
+
+#[tokio::test]
 async fn reset_post_within_the_replay_buffer_is_retried() {
     let backend = Backend::start(Reply::ResetFirst(ok("again"))).await;
     let proxy = Proxy::start(&with_cluster(&routed_yaml(backend.addr, ""), RESET_RETRIES)).await;
@@ -728,9 +771,9 @@ async fn reset_post_past_the_replay_buffer_is_not_retried() {
 }
 
 #[tokio::test]
-async fn stale_pooled_connection_is_not_replayed_for_a_post_past_the_replay_buffer() {
+async fn pooled_connection_failure_is_not_replayed_for_a_post_past_the_replay_buffer() {
     let backend = Backend::start(Reply::KillOnReuse(ok("warm"))).await;
-    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let proxy = Proxy::start(&with_cluster(&routed_yaml(backend.addr, ""), RESET_RETRIES)).await;
     let warm = proxy.send("GET /warm HTTP/1.1\r\nHost: a\r\n\r\n").await;
     assert_eq!(warm.status, 200, "the first exchange pools its upstream connection");
     tokio::time::sleep(POOL_SETTLE).await;
@@ -745,7 +788,7 @@ async fn stale_pooled_connection_is_not_replayed_for_a_post_past_the_replay_buff
     );
     assert_eq!(
         response.status, 502,
-        "a stale connection is not replayed once the body outgrew the replay buffer"
+        "a failed exchange is not replayed once the body outgrew the replay buffer"
     );
 }
 
@@ -1376,6 +1419,10 @@ enum Reply {
     /// after [`LATE_BODY_DELAY`].
     Late(&'static str),
 
+    /// Answer the warmup, then record each whole POST and close after a
+    /// partial response head, including on fresh connections.
+    PartialHeadAfterWarm,
+
     /// Read the first connection's request whole, then close it without
     /// answering; answer every later request with these bytes.
     ResetFirst(Vec<u8>),
@@ -1463,6 +1510,7 @@ async fn serve(mut socket: TcpStream, connection: usize, reply: Reply, log: Arc<
         | Reply::Fixed(_)
         | Reply::KillOnReuse(_)
         | Reply::Late(_)
+        | Reply::PartialHeadAfterWarm
         | Reply::ResetFirst(_)
         | Reply::Silent => {},
     }
@@ -1494,6 +1542,7 @@ async fn respond(socket: &mut TcpStream, reply: &Reply, turn: Turn) -> bool {
         Reply::Fixed(bytes) => socket.write_all(bytes).await.is_ok(),
         Reply::KillOnReuse(bytes) => turn.answered == 0 && socket.write_all(bytes).await.is_ok(),
         Reply::ResetFirst(bytes) => turn.connection > 0 && socket.write_all(bytes).await.is_ok(),
+        Reply::PartialHeadAfterWarm => partial_head_after_warm(socket, turn).await,
         Reply::AbortMidBody => {
             let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
             let _sent = socket.write_all(head).await;
@@ -1513,6 +1562,16 @@ async fn respond(socket: &mut TcpStream, reply: &Reply, turn: Turn) -> bool {
             true
         },
     }
+}
+
+/// Keep the warmup connection alive, then fail every later response after
+/// sending an incomplete head.
+async fn partial_head_after_warm(socket: &mut TcpStream, turn: Turn) -> bool {
+    if turn.connection == 0 && turn.answered == 0 {
+        return socket.write_all(&ok("warm")).await.is_ok();
+    }
+    socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: ").await.unwrap();
+    false
 }
 
 /// Write a `200` head and the start of its body, then the rest a byte at a
