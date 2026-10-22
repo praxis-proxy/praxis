@@ -27,6 +27,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- `praxis_cluster_overload_rejects_total{cluster}` counts requests shed by a
+  cluster's `max_connections` ceiling. Kept separate from
+  `praxis_overload_rejects_total`, which covers only the pre-filter
+  protections and carries no cluster label.
+- `praxis_core::retry::ClusterRetryState` gains `try_enter`,
+  `with_max_concurrent` and a `max_concurrent` field, exposing the per-cluster
+  admission counter the ceiling is built on.
+- `tcp_load_balancer` rejects a cluster that sets `max_connections` at startup
+  rather than ignoring it: a TCP connection has no status code to shed with.
+  Cap TCP concurrency on the listener instead.
+
+### Fixed
+
+- Cluster `max_connections` is now enforced. It was parsed, validated and
+  documented as shedding excess requests with 503, but nothing read it, so a
+  cluster accepted unlimited concurrent requests. The load balancer now claims
+  an in-flight slot before selecting an endpoint and sheds a request that would
+  exceed the ceiling with `503` and `Retry-After: 1`, matching the listener
+  cap. Operators who set `max_connections` expecting it to be inert will start
+  seeing 503s once a cluster saturates; raise or remove the value to restore
+  the previous behaviour. A request pinned by session affinity bypasses
+  endpoint selection and so is neither shed nor counted.
 
 ## [0.7.5] - 2026-10-21
 
