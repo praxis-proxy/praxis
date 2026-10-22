@@ -144,9 +144,11 @@ for later hooks.
    `x-ext-protocol-*`, or `x-ext-agent-*` headers
    with 400.
 4. **Max-Forwards handling** - for TRACE/OPTIONS with
-   `Max-Forwards: 0`, responds directly (TRACE echoes
-   safe headers; OPTIONS returns 200). Otherwise
-   decrements the counter.
+   `Max-Forwards: 0`, prepares a direct response
+   (TRACE echoes safe headers; OPTIONS returns 200)
+   that is sent only after the request-phase pipeline
+   admits the request, so filters such as `ip_acl`
+   still apply. Otherwise decrements the counter.
 
 **Client info capture:**
 
