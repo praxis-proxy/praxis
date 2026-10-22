@@ -1721,13 +1721,14 @@ async fn max_connections_takes_no_endpoint_slot_when_shedding() {
     drop(lb.on_request(&mut second).await.unwrap());
 
     let entry = lb.clusters.get("web").unwrap();
-    if let SharedStrategy::LeastConnections(lc) = entry.strategy.inner() {
-        assert_eq!(
-            lc.load_for("127.0.0.1:8080"),
-            1,
-            "a shed request must not take an endpoint slot it will never use"
-        );
-    }
+    let SharedStrategy::LeastConnections(lc) = entry.strategy.inner() else {
+        panic!("the capped cluster must keep its least_connections strategy for this assertion to mean anything");
+    };
+    assert_eq!(
+        lc.load_for("127.0.0.1:8080"),
+        1,
+        "a shed request must not take an endpoint slot it will never use"
+    );
 }
 
 #[tokio::test]
