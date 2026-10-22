@@ -42,7 +42,7 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 | `clusters[].health_check.unhealthy_threshold` | integer | no | Consecutive failures required to mark an endpoint unhealthy. |
 | `clusters[].idle_timeout_ms` | integer | no | Idle connection timeout in milliseconds. Closes pooled upstream connections that have been idle longer than this duration. `None` uses Pingora's default. |
 | `clusters[].load_balancer_strategy` | `round_robin` \| `least_connections` \| `p2c` \| `random` \| `consistent_hash` \| `maglev` \| `ring_hash` \| `subset` \| `zone_aware` \| `priority` | no | Load-balancing algorithm for this cluster. Defaults to `round_robin`. |
-| `clusters[].max_connections` | integer | no | Maximum concurrent in-flight requests to this cluster. When set, excess requests receive 503. Prevents a single slow upstream from consuming all available capacity. |
+| `clusters[].max_connections` | integer | no | Maximum concurrent in-flight requests to this cluster. When set, the load balancer sheds a request that would exceed the ceiling with `503` and `Retry-After: 1`, the same answer the listener cap gives, and counts it under `praxis_cluster_overload_rejects_total`.
 | `clusters[].read_timeout_ms` | integer | no | Per-read timeout in milliseconds. Applies to each individual read operation on an established upstream connection. For HTTP, a timeout before the response starts gets the client a 504; once the response is streaming, the client connection is closed with the body cut short. |
 | `clusters[].tls` | ClusterTls | no | TLS settings for upstream connections. Presence implies TLS is enabled. Omit for plaintext HTTP. |
 | `clusters[].tls.ca` | CaConfig | no | Custom CA. |

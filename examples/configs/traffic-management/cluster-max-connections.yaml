@@ -1,0 +1,56 @@
+# Per-Cluster Concurrency Ceiling
+#
+# Caps the concurrent in-flight requests the load balancer will send to one
+# cluster, so a single slow upstream cannot consume all available capacity.
+#
+# Each cluster below carries its own max_connections. A request routed to a
+# cluster already at its ceiling is shed with 503 and Retry-After: 1 before an
+# endpoint is selected, and counted under
+# praxis_cluster_overload_rejects_total. Traffic to the other cluster keeps
+# flowing: the ceilings are independent, which is what separates this from the
+# listener-level cap in operations/max-connections.yaml.
+#
+# A slot is held from endpoint selection until the response completes, so
+# retries within one request occupy the single slot that request admitted
+# rather than one slot per attempt.
+#
+# A request pinned by session affinity bypasses endpoint selection, and with it
+# this ceiling: it is neither shed nor counted. Pair max_connections with a
+# listener or runtime cap when a hard bound matters.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/cluster-max-connections.yaml
+#
+#   curl http://localhost:8080/slow/   # capped at 2 concurrent requests
+#   curl http://localhost:8080/fast/   # capped at 64 concurrent requests
+
+listeners:
+  - name: default
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/slow/"
+            cluster: slow-model
+          - path_prefix: "/"
+            cluster: fast-api
+      - filter: load_balancer
+        clusters:
+          # A latency-prone upstream given a tight ceiling: once two requests
+          # are in flight, further ones are shed rather than queued.
+          - name: slow-model
+            endpoints:
+              - "127.0.0.1:9000"
+            max_connections: 2
+          # A cheap upstream on the same listener, with its own headroom.
+          - name: fast-api
+            endpoints:
+              - "127.0.0.1:9001"
+            max_connections: 64
+
+insecure_options:
+  allow_private_endpoints: true
