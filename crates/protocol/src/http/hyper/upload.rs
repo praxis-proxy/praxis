@@ -569,6 +569,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reserved_trailers_arriving_during_a_retry_are_never_retained() {
+        let (request, _client) = client_request(
+            b"POST / HTTP/1.1\r\nhost: a\r\ntransfer-encoding: chunked\r\n\r\n2\r\nab\r\n0\r\nx-ext-protocol-spoof: forged\r\n\r\n",
+        ).await;
+        let mut flight = Flight::for_tests(empty_pipeline());
+        let mut upload = Upload::new(DownstreamBody::new(request.into_body(), None), &flight.ctx);
+        let chunk = upload.next_live().await;
+        assert!(upload.accept(&mut flight, chunk, true).await.is_ok());
+        assert!(upload.begin(&mut flight.ctx, true, None).is_ok());
+        assert_eq!(
+            queued(&upload),
+            ["chunk:ab"],
+            "the next attempt replays the consumed data"
+        );
+
+        let frame = upload.next_live().await;
+        let rejected = upload.accept(&mut flight, frame, true).await;
+
+        assert!(
+            matches!(rejected, Err(UploadEnd::Client(failure)) if failure.kind == FailureKind::BadRequest),
+            "the retry still rejects reserved client metadata"
+        );
+        assert!(
+            upload.trailers.is_none(),
+            "reserved trailers never enter replay storage"
+        );
+        assert_eq!(
+            queued(&upload),
+            ["chunk:ab"],
+            "no reserved trailer is queued for the upstream"
+        );
+        assert!(!upload.is_live(), "the rejected upload stops");
+    }
+
+    #[tokio::test]
     async fn trailers_are_replayed_on_http2_and_rejected_on_http1() {
         let mut flight = Flight::for_tests(empty_pipeline());
         let (mut upload, _client) = streaming_upload(&flight.ctx).await;

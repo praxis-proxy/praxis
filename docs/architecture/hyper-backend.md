@@ -143,6 +143,13 @@ allows it. This includes failures on reused connections: reuse and an EOF
 do not prove that the upstream processed nothing. Non-idempotent requests
 require `allow_non_idempotent`, and every retry consumes the policy budget.
 
+Client trailers with reserved `x-praxis-*`, `x-ext-protocol-*`, or
+`x-ext-agent-*` names are rejected before they can be forwarded or retained
+for replay. This applies to both streamed and pre-read bodies. Rejection
+returns 400 before response commitment and aborts an ongoing response after
+commitment. Ordinary trailers, including other `x-ext-*` names, are
+preserved for HTTP/2 upstreams and retries.
+
 ## Runtime and shutdown
 
 `praxis_core::server::hyper::HyperRuntime` builds a multi-thread tokio

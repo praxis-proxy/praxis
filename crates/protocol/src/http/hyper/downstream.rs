@@ -14,6 +14,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use http_body_util::BodyExt as _;
 use hyper::body::{Body as _, Incoming};
+use praxis_core::reserved_headers::is_reserved;
 
 use super::failure::{Failure, FailureKind};
 
@@ -69,7 +70,7 @@ impl DownstreamBody {
             Ok(chunk) => Ok(Some(DownstreamFrame::Data(chunk))),
             Err(frame) => {
                 self.body = None;
-                Ok(frame.into_trailers().ok().map(DownstreamFrame::Trailers))
+                frame.into_trailers().ok().map(accept_trailers).transpose()
             },
         }
     }
@@ -84,7 +85,7 @@ impl DownstreamBody {
     /// # Errors
     ///
     /// Returns a downstream [`Failure`] when the read timeout expires or
-    /// the client breaks the body off.
+    /// the client breaks the body off or sends reserved trailer names.
     pub(super) async fn next(&mut self) -> Result<DownstreamFrame, Failure> {
         loop {
             let Some(body) = self.body.as_mut() else {
@@ -128,6 +129,18 @@ pub(super) enum DownstreamFrame {
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
+
+/// Reject client-controlled internal metadata before forwarding or retaining
+/// request trailers for replay.
+fn accept_trailers(trailers: HeaderMap) -> Result<DownstreamFrame, Failure> {
+    if trailers.keys().any(|name| is_reserved(name.as_str())) {
+        return Err(Failure::downstream(
+            FailureKind::BadRequest,
+            "client request trailers contain a reserved header name",
+        ));
+    }
+    Ok(DownstreamFrame::Trailers(trailers))
+}
 
 /// What a failed client body read says about the client: a body that
 /// broke the framing rules is a bad request, anything else a client that
@@ -211,6 +224,45 @@ mod tests {
             matches!(body.next().await, Ok(DownstreamFrame::End)),
             "a read after the trailers is the end"
         );
+    }
+
+    #[tokio::test]
+    async fn reserved_trailers_fail_before_they_can_be_retained() {
+        for name in ["X-Praxis-Spoof", "X-Ext-Protocol-Spoof", "X-Ext-Agent-Spoof"] {
+            let raw =
+                format!("POST / HTTP/1.1\r\nhost: a\r\ntransfer-encoding: chunked\r\n\r\n0\r\n{name}: forged\r\n\r\n");
+            let (request, _client) = client_request(raw.as_bytes()).await;
+            let mut body = DownstreamBody::new(request.into_body(), None);
+
+            let failure = body
+                .next()
+                .await
+                .expect_err("reserved trailers must never yield a frame");
+
+            assert_eq!(failure.kind, FailureKind::BadRequest, "{name} is client input");
+            assert!(body.is_done(), "rejected trailers end the body");
+            assert!(
+                body.pre_read_trailers.is_none(),
+                "reserved trailers cannot be retained for replay"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reserved_http2_trailers_are_rejected() {
+        let (request, mut client) = client_request_h2().await;
+        let mut body = DownstreamBody::new(request.into_body(), None);
+        let mut trailers = HeaderMap::new();
+        trailers.insert("x-ext-agent-task", http::HeaderValue::from_static("forged"));
+        client.h2_body.as_mut().unwrap().send_trailers(trailers).unwrap();
+
+        let failure = body
+            .next()
+            .await
+            .expect_err("HTTP/2 trailers have the same trust boundary");
+
+        assert_eq!(failure.kind, FailureKind::BadRequest, "reject reserved client metadata");
+        assert!(body.is_done(), "the rejected body is not read again");
     }
 
     #[tokio::test]

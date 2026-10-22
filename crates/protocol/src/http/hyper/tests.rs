@@ -94,7 +94,7 @@ async fn request_trailers_survive_streaming_and_pre_read_to_http2() {
         "",
         "\n      - filter: json_body_field\n        field: model\n        header: X-Model\n",
     ] {
-        let (backend, captured) = trailer_backend().await;
+        let (backend, mut captured) = trailer_backend(false, &[200]).await;
         let yaml = with_cluster(
             &routed_yaml(backend, filter),
             "            http:\n              version: h2\n",
@@ -102,14 +102,116 @@ async fn request_trailers_survive_streaming_and_pre_read_to_http2() {
         let proxy = Proxy::start(&yaml).await;
         let response = proxy.send(&request_with_trailers()).await;
         assert_eq!(response.status, 200, "HTTP/2 upstreams support request trailers");
-        let (body, trailers) = captured.await.unwrap();
+        let (body, trailers) = captured.recv().await.unwrap();
         assert_eq!(body, br#"{"model":"m1"}"#, "the body arrives before its trailers");
         assert_eq!(
             trailers.get("x-checksum").unwrap(),
             "abc",
             "pre-read must retain trailers"
         );
+        assert_eq!(
+            trailers.get("x-ext-tenant").unwrap(),
+            "public",
+            "other x-ext names are ordinary trailers"
+        );
     }
+}
+
+#[tokio::test]
+async fn reserved_request_trailers_are_rejected_streaming_and_pre_read_to_http2() {
+    for filter in [
+        "",
+        "\n      - filter: json_body_field\n        field: model\n        header: X-Model\n",
+    ] {
+        for name in ["X-Praxis-Spoof", "X-Ext-Protocol-Spoof", "X-Ext-Agent-Spoof"] {
+            let (backend, mut captured) = trailer_backend(false, &[200]).await;
+            let yaml = with_cluster(
+                &routed_yaml(backend, filter),
+                "            http:\n              version: h2\n",
+            );
+            let proxy = Proxy::start(&yaml).await;
+
+            let response = proxy.send(&request_with_trailers().replace("x-checksum", name)).await;
+
+            assert_eq!(
+                response.status,
+                400,
+                "{name} must be rejected with pre-read={}",
+                !filter.is_empty()
+            );
+            if filter.is_empty() {
+                assert_upload_aborted(captured).await;
+            } else {
+                assert!(
+                    captured.try_recv().is_err(),
+                    "pre-read rejects before forwarding an upload"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn ordinary_request_trailers_survive_http2_retry_after_streaming_and_pre_read() {
+    for filter in [
+        "",
+        "\n      - filter: json_body_field\n        field: model\n        header: X-Model\n",
+    ] {
+        let (backend, mut captured) = trailer_backend(false, &[503, 200]).await;
+        let policy = RESET_RETRIES.replace("connect_failure, reset", "status_5xx");
+        let settings = format!("            http:\n              version: h2\n{policy}");
+        let proxy = Proxy::start(&with_cluster(&routed_yaml(backend, filter), &settings)).await;
+
+        let response = proxy.send(&request_with_trailers()).await;
+
+        assert_eq!(response.status, 200, "the retried response succeeds");
+        for _attempt in 0..2 {
+            let (body, trailers) = tokio::time::timeout(Duration::from_secs(2), captured.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(body, br#"{"model":"m1"}"#, "each attempt sends the whole body");
+            assert_eq!(
+                trailers.get("x-checksum").unwrap(),
+                "abc",
+                "each attempt retains the checksum"
+            );
+            assert_eq!(
+                trailers.get("x-ext-tenant").unwrap(),
+                "public",
+                "other x-ext names remain supported"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn reserved_request_trailers_abort_an_early_http2_response() {
+    let (backend, captured) = trailer_backend(true, &[200]).await;
+    let proxy = Proxy::start(&with_cluster(
+        &routed_yaml(backend, ""),
+        "            http:\n              version: h2\n",
+    ))
+    .await;
+    let (mut client, mut response) = begin_trailer_upload(&proxy).await;
+
+    client.write_all(b"0\r\nx-praxis-spoof: yes\r\n\r\n").await.unwrap();
+
+    let (mut reader, _writer) = client.into_split();
+    response.extend_from_slice(
+        &tokio::time::timeout(Duration::from_secs(2), read_to_close(&mut reader))
+            .await
+            .unwrap(),
+    );
+    assert!(
+        response.starts_with(b"HTTP/1.1 200"),
+        "the response was already committed"
+    );
+    assert!(
+        !response.ends_with(b"0\r\n\r\n"),
+        "reserved trailers must abort the response"
+    );
+    assert_upload_aborted(captured).await;
 }
 
 #[tokio::test]
@@ -118,7 +220,7 @@ async fn request_trailers_are_rejected_for_http1_in_streaming_and_pre_read() {
         "",
         "\n      - filter: json_body_field\n        field: model\n        header: X-Model\n",
     ] {
-        let backend = Backend::start(Reply::Absorb).await;
+        let backend = Backend::start(Reply::Deaf).await;
         let proxy = Proxy::start(&routed_yaml(backend.addr, filter)).await;
         let response = proxy.send(&request_with_trailers()).await;
         assert_eq!(
@@ -167,35 +269,96 @@ async fn unsupported_request_trailers_abort_an_early_response() {
 fn request_with_trailers() -> String {
     let body = r#"{"model":"m1"}"#;
     format!(
-        "POST / HTTP/1.1\r\nHost: a\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nTrailer: x-checksum\r\n\r\n{:x}\r\n{body}\r\n0\r\nx-checksum: abc\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: a\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nTrailer: x-checksum, x-ext-tenant\r\n\r\n{:x}\r\n{body}\r\n0\r\nx-checksum: abc\r\nx-ext-tenant: public\r\n\r\n",
         body.len()
     )
 }
 
-/// Capture one complete HTTP/2 upload, then acknowledge it.
-async fn trailer_backend() -> (SocketAddr, tokio::sync::oneshot::Receiver<(Vec<u8>, http::HeaderMap)>) {
+/// Capture HTTP/2 uploads and answer with `statuses`, optionally starting
+/// the response before the upload ends.
+async fn trailer_backend(
+    early: bool,
+    statuses: &'static [u16],
+) -> (SocketAddr, tokio::sync::mpsc::Receiver<(Vec<u8>, http::HeaderMap)>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let (sent, received) = tokio::sync::oneshot::channel();
+    let (sent, received) = tokio::sync::mpsc::channel(statuses.len());
     drop(tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         let mut connection = h2::server::handshake(socket).await.unwrap();
-        let (request, mut respond) = connection.accept().await.unwrap().unwrap();
-        drop(tokio::spawn(async move {
-            let mut incoming = request.into_body();
-            let mut body = Vec::new();
-            while let Some(chunk) = incoming.data().await {
-                let chunk = chunk.unwrap();
-                incoming.flow_control().release_capacity(chunk.len()).unwrap();
-                body.extend_from_slice(&chunk);
-            }
-            let trailers = incoming.trailers().await.unwrap().unwrap_or_default();
-            sent.send((body, trailers)).unwrap();
-            respond.send_response(http::Response::new(()), true).unwrap();
-        }));
+        for status in statuses {
+            let (request, respond) = connection.accept().await.unwrap().unwrap();
+            drop(tokio::spawn(answer_trailer_upload(
+                request,
+                respond,
+                sent.clone(),
+                *status,
+                early,
+            )));
+        }
+        drop(sent);
         while connection.accept().await.is_some() {}
     }));
     (address, received)
+}
+
+/// Start a chunked upload and wait for an early upstream response.
+async fn begin_trailer_upload(proxy: &Proxy) -> (TcpStream, Vec<u8>) {
+    let mut client = TcpStream::connect(proxy.addr).await.unwrap();
+    client
+        .write_all(b"POST / HTTP/1.1\r\nHost: a\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nx\r\n")
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), read_head(&mut client, &mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    (client, response)
+}
+
+/// Verify that the backend did not receive a complete upload with trailers.
+async fn assert_upload_aborted(mut captured: tokio::sync::mpsc::Receiver<(Vec<u8>, http::HeaderMap)>) {
+    let upload = tokio::time::timeout(Duration::from_secs(2), captured.recv())
+        .await
+        .unwrap();
+    assert!(upload.is_none(), "reserved trailers never reach the HTTP/2 backend");
+}
+
+/// Capture and answer one upload, or abandon it when the proxy resets it.
+async fn answer_trailer_upload(
+    request: http::Request<h2::RecvStream>,
+    mut respond: h2::server::SendResponse<Bytes>,
+    sent: tokio::sync::mpsc::Sender<(Vec<u8>, http::HeaderMap)>,
+    status: u16,
+    early: bool,
+) {
+    let mut outgoing = early.then(|| respond.send_response(http::Response::new(()), false).unwrap());
+    if let Some(stream) = outgoing.as_mut() {
+        stream.send_data(Bytes::from_static(b"hi"), false).unwrap();
+    }
+    let Some(captured) = capture_h2_upload(request.into_body()).await else {
+        return;
+    };
+    sent.send(captured).await.unwrap();
+    if let Some(mut stream) = outgoing {
+        stream.send_data(Bytes::new(), true).unwrap();
+    } else {
+        let response = http::Response::builder().status(status).body(()).unwrap();
+        respond.send_response(response, true).unwrap();
+    }
+}
+
+/// Read a complete HTTP/2 upload, or stop if the proxy resets it.
+async fn capture_h2_upload(mut incoming: h2::RecvStream) -> Option<(Vec<u8>, http::HeaderMap)> {
+    let mut body = Vec::new();
+    while let Some(chunk) = incoming.data().await {
+        let chunk = chunk.ok()?;
+        incoming.flow_control().release_capacity(chunk.len()).unwrap();
+        body.extend_from_slice(&chunk);
+    }
+    let trailers = incoming.trailers().await.ok()?.unwrap_or_default();
+    Some((body, trailers))
 }
 
 #[tokio::test]

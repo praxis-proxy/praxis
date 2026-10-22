@@ -33,6 +33,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- The Hyper backend rejects reserved client trailer names before forwarding
+  or retaining them for replay, including streamed and pre-read uploads.
 - The Hyper backend applies the retry policy to failures on pooled
   connections, preventing POST replays without opt-in and enforcing the
   configured retry limit.
