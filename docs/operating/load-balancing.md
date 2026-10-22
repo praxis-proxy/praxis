@@ -364,6 +364,20 @@ clusters:
 All fields are optional. Omitted fields use
 Pingora's built-in defaults.
 
+### Per-Cluster Concurrency Ceiling
+
+`max_connections` bounds the requests in flight to one
+cluster, so a single slow upstream cannot consume all
+available capacity. A request routed to a cluster already
+at its ceiling is shed with `503` and `Retry-After: 1`
+before an endpoint is selected, and counted under
+`praxis_cluster_overload_rejects_total{cluster}`.
+
+This is a per-cluster ceiling, not a per-listener one:
+clusters on the same listener have independent budgets, so
+saturating one leaves the others serving. Use the listener
+or `runtime` cap for a process- or port-wide bound.
+
 ### Upstream HTTP Version
 
 Praxis speaks HTTP/1.1 to upstreams by default. A cluster
