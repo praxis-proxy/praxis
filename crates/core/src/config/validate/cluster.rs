@@ -70,7 +70,7 @@ pub(in crate::config::validate) fn validate_clusters(
             health_check::validate_health_check(hc, &cluster.name)?;
         }
         validate_cluster_slow_start(cluster)?;
-        health_check::validate_grpc_probe_transport(cluster)?;
+        health_check::validate_probe_transport(cluster)?;
         health_check::validate_health_check_ssrf(cluster, insecure_options)?;
         health_check::warn_tls_http_probe_mismatch(cluster);
     }

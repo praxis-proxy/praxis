@@ -8,6 +8,8 @@ readme.workspace = true
 publish = false
 
 [features]
+# TLS and HTTPS active probes. Off by default.
+tls-health-check = ["praxis/tls-health-check"]
 # Matches the binary's default so a single-test run exercises the
 # configuration the standard build ships. `--no-default-features` builds the
 # proxy under test with the FIPS build's feature set instead

@@ -14,6 +14,10 @@ fn all_example_configs_parse() {
     let root = format!("{}/../../examples/configs", env!("CARGO_MANIFEST_DIR"));
     let mut count = 0;
     for entry in walkdir(&root) {
+        #[cfg(not(feature = "tls-health-check"))]
+        if entry.file_name().is_some_and(|name| name == "tls-health-check.yaml") {
+            continue;
+        }
         #[cfg(not(feature = "spiffe"))]
         if entry.file_name().is_some_and(|n| n == "tls-mtls-spiffe.yaml") {
             continue;

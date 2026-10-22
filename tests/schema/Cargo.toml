@@ -12,6 +12,8 @@ publish = false
 default = ["pingora"]
 pingora = ["praxis-test-utils/pingora"]
 hyper = ["praxis-test-utils/hyper"]
+# TLS and HTTPS active probes. Off by default.
+tls-health-check = ["praxis-test-utils/tls-health-check"]
 spiffe = ["praxis-core/spiffe"]
 upstream-binding = ["praxis-core/upstream-binding"]
 slow-start = ["praxis-core/slow-start"]

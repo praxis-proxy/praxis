@@ -178,7 +178,13 @@ pub(crate) fn reload_pipelines(
         new_config,
     )));
 
-    respawn_health_checks(old_config, new_config, &health_registry, health_shutdown);
+    respawn_health_checks(
+        old_config,
+        new_config,
+        &health_registry,
+        health_shutdown,
+        subrequest_client.upstream_ca(),
+    );
 
     info!(swapped = ?swapped, skipped = ?skipped, "config reload complete");
 
@@ -372,6 +378,7 @@ fn respawn_health_checks(
     config: &Config,
     health_registry: &HealthRegistry,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
+    upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
 ) {
     // One critical section swaps in the fresh token and hands back both
     // generations; re-locking below just to read the new token again
@@ -406,7 +413,7 @@ fn respawn_health_checks(
         .collect();
     let registry = Arc::clone(health_registry);
 
-    spawn_health_check_thread(clusters, registry, new_token);
+    spawn_health_check_thread(clusters, registry, new_token, upstream_ca);
 }
 
 /// Spawn the reloaded health-check probes on a dedicated thread + runtime.
@@ -419,6 +426,7 @@ fn spawn_health_check_thread(
     clusters: Vec<praxis_core::config::Cluster>,
     registry: HealthRegistry,
     new_token: CancellationToken,
+    upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
 ) {
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -429,7 +437,12 @@ fn spawn_health_check_thread(
             },
         };
         rt.block_on(async {
-            praxis_protocol::http::health::runner::spawn_health_checks(&clusters, &registry, &new_token);
+            praxis_protocol::http::health::runner::spawn_health_checks_with_ca(
+                &clusters,
+                &registry,
+                &new_token,
+                upstream_ca.as_deref(),
+            );
             new_token.cancelled().await;
         });
     });

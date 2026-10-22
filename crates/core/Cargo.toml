@@ -16,6 +16,8 @@ name = "praxis_core"
 workspace = true
 
 [features]
+# TLS and HTTPS active probes. Off by default.
+tls-health-check = []
 # The Pingora network backend: `backend::Runtime` and `backend::Connector`
 # resolve to the Pingora implementations and the fork crates are linked. On by
 # default. A build with no backend feature still compiles (the contract and

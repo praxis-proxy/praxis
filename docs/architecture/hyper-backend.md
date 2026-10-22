@@ -176,6 +176,9 @@ hyper.
   upstream `101` is answered with a 502.
 - **Hedged requests.** The `hedged-requests` feature compiles, but the
   hyper data path does not race hedges.
+- **TLS health probes.** The `tls-health-check` feature selects Pingora's
+  TLS transport, so it cannot be combined with `hyper`. TLS and HTTPS probe
+  tests run in the Pingora suite; Hyper suites omit this incompatible feature.
 - **Drain sequence.** Shutdown is one phase here; Pingora's grace period
   before the runtime drain is not mirrored.
 - **`Expect: 100-continue`.** hyper's server answers `100 Continue`
@@ -208,7 +211,8 @@ hyper.
 - **Suite parity.** Tests that do not pass on hyper yet are listed in
   `tests/hyper-skip.txt`, with the bucket each belongs to;
   `make test-integration-hyper` and the CI workflow skip exactly that list
-  and run everything else. The tests that reach into Pingora directly are
+  and run every other compatible test. Pingora-only features such as TLS
+  health probes are omitted, and tests that reach into Pingora directly are
   compiled out under hyper instead of listed.
 
 ## Related

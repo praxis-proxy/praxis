@@ -26,11 +26,7 @@ struct HealthCheckParams {
     /// Endpoint addresses to probe.
     endpoints: Vec<String>,
 
-    /// Probe type: [`Http`], [`Tcp`], or [`Grpc`].
-    ///
-    /// [`Http`]: HealthCheckType::Http
-    /// [`Tcp`]: HealthCheckType::Tcp
-    /// [`Grpc`]: HealthCheckType::Grpc
+    /// Configured active probe transport.
     check_type: HealthCheckType,
 
     /// Pre-built HTTP probe request bytes (ignored for TCP).
@@ -56,6 +52,10 @@ struct HealthCheckParams {
     /// Consecutive failures needed to mark unhealthy.
     unhealthy_threshold: u32,
 
+    /// Cached TLS probe, including initialization failures that must stay unhealthy.
+    #[cfg(feature = "tls-health-check")]
+    tls: Option<Result<super::tls::TlsProbe, String>>,
+
     /// Shared health state for all endpoints in this cluster.
     state: ClusterHealthState,
 }
@@ -77,6 +77,18 @@ struct HealthCheckParams {
 /// spawn_health_checks(&clusters, &registry, &shutdown);
 /// ```
 pub fn spawn_health_checks(clusters: &[Cluster], registry: &HealthRegistry, shutdown: &CancellationToken) {
+    spawn_health_checks_with_ca(clusters, registry, shutdown, None);
+}
+
+/// Spawn probes using the startup runtime CA bundle when a cluster supplies none.
+///
+/// Keep this bundle unchanged across config reloads, like upstream connectors.
+pub fn spawn_health_checks_with_ca(
+    clusters: &[Cluster],
+    registry: &HealthRegistry,
+    shutdown: &CancellationToken,
+    upstream_ca: Option<&praxis_tls::CachedCaCerts>,
+) {
     for cluster in clusters {
         let Some(hc) = &cluster.health_check else {
             continue;
@@ -94,7 +106,7 @@ pub fn spawn_health_checks(clusters: &[Cluster], registry: &HealthRegistry, shut
             "spawning health check task"
         );
 
-        let params = build_health_params(cluster, hc, state);
+        let params = build_health_params(cluster, hc, state, upstream_ca);
         let shutdown = shutdown.clone();
         tokio::spawn(async move {
             run_health_check_loop(&params, shutdown).await;
@@ -111,7 +123,15 @@ fn build_health_params(
     cluster: &Cluster,
     hc: &praxis_core::config::HealthCheckConfig,
     state: &ClusterHealthState,
+    upstream_ca: Option<&praxis_tls::CachedCaCerts>,
 ) -> HealthCheckParams {
+    #[cfg(not(feature = "tls-health-check"))]
+    {
+        let _ = upstream_ca;
+        if hc.check_type == HealthCheckType::Tls || (hc.check_type == HealthCheckType::Http && cluster.tls.is_some()) {
+            tracing::warn!(cluster = %cluster.name, "TLS health probes require the protocol tls-health-check build feature; HTTP probes remain plaintext");
+        }
+    }
     HealthCheckParams {
         cluster_name: Arc::clone(&cluster.name),
         endpoints: cluster.endpoints.iter().map(|e| e.address().to_owned()).collect(),
@@ -125,6 +145,14 @@ fn build_health_params(
         timeout: Duration::from_millis(hc.timeout_ms),
         healthy_threshold: hc.healthy_threshold,
         unhealthy_threshold: hc.unhealthy_threshold,
+        #[cfg(feature = "tls-health-check")]
+        tls: (hc.check_type == HealthCheckType::Tls
+            || (hc.check_type == HealthCheckType::Http && cluster.tls.is_some()))
+        .then(|| {
+            super::tls::TlsProbe::new(cluster, upstream_ca).inspect_err(|error| {
+                tracing::warn!(cluster = %cluster.name, %error, "TLS health probe initialization failed");
+            })
+        }),
         state: Arc::clone(state),
     }
 }
@@ -193,7 +221,20 @@ async fn spawn_probe<'ep>(idx: usize, addr: &'ep str, params: &HealthCheckParams
         check_type = %params.check_type,
         "probing health check endpoint"
     );
-    let success = match params.check_type {
+    #[cfg(feature = "tls-health-check")]
+    if let Some(tls) = &params.tls {
+        let success = match tls {
+            Ok(probe) => probe.probe(addr, params.timeout).await,
+            Err(_) => false,
+        };
+        return (idx, addr, success);
+    }
+    (idx, addr, probe_plaintext(addr, params).await)
+}
+
+/// Dispatch the backend-neutral probes, rejecting TLS without its adapter.
+async fn probe_plaintext(addr: &str, params: &HealthCheckParams) -> bool {
+    match params.check_type {
         HealthCheckType::Http => {
             crate::http::pingora::health::probe::http_probe_with_request(
                 addr,
@@ -203,6 +244,7 @@ async fn spawn_probe<'ep>(idx: usize, addr: &'ep str, params: &HealthCheckParams
             )
             .await
         },
+        HealthCheckType::Tls => false,
         HealthCheckType::Tcp => tcp_probe(addr, params.timeout).await,
         HealthCheckType::Grpc => {
             // Boxed: the h2 handshake future is large, and this arm sits
@@ -214,8 +256,7 @@ async fn spawn_probe<'ep>(idx: usize, addr: &'ep str, params: &HealthCheckParams
             ))
             .await
         },
-    };
-    (idx, addr, success)
+    }
 }
 
 /// Record a probe result, updating health state and logging transitions.
@@ -437,6 +478,8 @@ mod tests {
     /// Build test params for a single endpoint with TCP probing.
     fn test_params(endpoints: Vec<String>, state: ClusterHealthState, thresholds: (u32, u32)) -> HealthCheckParams {
         HealthCheckParams {
+            #[cfg(feature = "tls-health-check")]
+            tls: None,
             cluster_name: "test".into(),
             endpoints,
             check_type: HealthCheckType::Tcp,

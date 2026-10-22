@@ -13,6 +13,8 @@ readme.workspace = true
 name = "praxis_protocol"
 
 [features]
+# TLS and HTTPS active probes. Off by default.
+tls-health-check = ["pingora", "praxis-core/tls-health-check"]
 # The Pingora network backend: the HTTP and TCP protocol adapters, the
 # admin-surface glue and `backend::{Http, Tcp}` resolve to Pingora and the
 # fork crates are linked. On by default. Without any backend feature the

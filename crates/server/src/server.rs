@@ -556,7 +556,12 @@ fn build_server_state(
     );
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-    spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);
+    spawn_health_check_tasks(
+        config,
+        Arc::clone(health_registry),
+        &health_shutdown,
+        subrequest_client.upstream_ca(),
+    );
     spawn_housekeeping_tasks(&config.runtime, &subrequest_client, praxis_core::fd::usage().is_some());
 
     let state = ServerState {
@@ -804,6 +809,7 @@ fn spawn_health_check_tasks(
     config: &Config,
     registry: HealthRegistry,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
+    upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
 ) {
     if registry.is_empty() {
         return;
@@ -820,7 +826,12 @@ fn spawn_health_check_tasks(
         .collect();
 
     spawn_on_dedicated_runtime("health check runtime", async move {
-        praxis_protocol::http::health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
+        praxis_protocol::http::health::runner::spawn_health_checks_with_ca(
+            &clusters,
+            &registry,
+            &shutdown,
+            upstream_ca.as_deref(),
+        );
         shutdown.cancelled().await;
     });
 }
@@ -1246,7 +1257,7 @@ filter_chains:
         let config = Config::from_yaml(yaml).expect("test config should parse");
         let registry: HealthRegistry = Arc::new(std::collections::HashMap::new());
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        spawn_health_check_tasks(&config, registry, &health_shutdown);
+        spawn_health_check_tasks(&config, registry, &health_shutdown, None);
     }
 
     #[test]
@@ -1286,7 +1297,7 @@ filter_chains:
         let registry = build_health_registry(&config.clusters);
         assert!(!registry.is_empty(), "health-checked clusters must register");
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        spawn_health_check_tasks(&config, registry, &health_shutdown);
+        spawn_health_check_tasks(&config, registry, &health_shutdown, None);
         health_shutdown.lock().expect("health shutdown lock").cancel();
     }
 

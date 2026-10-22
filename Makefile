@@ -158,7 +158,7 @@ check-features: ## check each optional feature on its own
 	@for f in policy-engine config-reload admin-api otel basic-auth-filter \
 	          cloud-events-filter upstream-binding iterative-request-router \
 	          router-json-aliases slow-start bound-upstream-request-body chain-binding spiffe \
-	          access-log-syslog hedged-requests; do \
+	          access-log-syslog hedged-requests tls-health-check; do \
 		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f --all-targets =="; \
 		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f" --all-targets || exit 1; \
 	done
@@ -678,11 +678,11 @@ HYPER_FEATURES          := hyper,config-reload,admin-api,policy-engine
 HYPER_FEATURES_QUALIFIED := $(subst $(_COMMA),$(_COMMA)praxis-proxy/,praxis-proxy/$(HYPER_FEATURES))
 HYPER_TARGET_DIR        ?= target/hyper
 HYPER_CARGO_ARGS        := -p praxis-proxy --no-default-features --features $(HYPER_FEATURES) --target-dir $(HYPER_TARGET_DIR)
-# $(call hyper-suite-features,pkg1 pkg2 ...): every feature of those suite
-# crates except the Pingora backend, from the same `cargo xtask features`
-# listing the standard targets use (see "Feature lists" below), so the hyper
-# run turns on exactly what the standard run does.
-hyper-suite-features = $(shell $(XTASK_FIPS) features --except pingora $(foreach pkg,$(1),-p $(pkg)))
+# $(call hyper-suite-features,pkg1 pkg2 ...): compatible features of those suite
+# crates, from the same `cargo xtask features` listing the standard targets
+# use (see "Feature lists" below), excluding Pingora-only features.
+# TLS health probes select Pingora's transport and cannot join a hyper build.
+hyper-suite-features = $(shell $(XTASK_FIPS) features --except pingora --except tls-health-check $(foreach pkg,$(1),-p $(pkg)))
 HYPER_BIN               := PRAXIS_BIN=$(abspath $(HYPER_TARGET_DIR))/debug/praxis
 # The parity record: tests that do not pass on hyper yet, one per line with
 # its bucket in a comment, skipped by name so the suites stay untouched. A

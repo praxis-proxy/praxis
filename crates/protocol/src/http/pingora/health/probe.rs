@@ -222,12 +222,25 @@ async fn http_probe_inner(addr: &str, request: &str, expected_status: u16) -> bo
         },
     };
 
+    http_exchange(&mut stream, addr, request, expected_status).await
+}
+
+/// Write a probe request and check its bounded response status line.
+pub(super) async fn http_exchange<Stream>(stream: &mut Stream, addr: &str, request: &str, expected_status: u16) -> bool
+where
+    Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     if let Err(e) = stream.write_all(request.as_bytes()).await {
         trace!(addr, error = %e, "health check write failed");
         return false;
     }
 
-    match read_status_line(&mut stream, addr).await {
+    if let Err(error) = stream.flush().await {
+        trace!(addr, %error, "health check flush failed");
+        return false;
+    }
+
+    match read_status_line(stream, addr).await {
         Some(data) => parse_status_code(&data) == Some(expected_status),
         None => false,
     }
@@ -237,7 +250,7 @@ async fn http_probe_inner(addr: &str, request: &str, expected_status: u16) -> bo
 ///
 /// Returns `None` on empty response or I/O error.
 #[expect(clippy::indexing_slicing, reason = "bounded by filled counter")]
-async fn read_status_line(stream: &mut TcpStream, addr: &str) -> Option<String> {
+async fn read_status_line<Stream: tokio::io::AsyncRead + Unpin>(stream: &mut Stream, addr: &str) -> Option<String> {
     let mut buf = [0_u8; 256];
     let mut filled = 0;
     loop {
@@ -339,6 +352,34 @@ async fn h2_close_gracefully(stream: &mut TcpStream) {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn http_exchange_flushes_a_buffered_transport() {
+        let (client, mut server) = tokio::io::duplex(1024);
+        let response = tokio::spawn(async move {
+            let mut request = [0; 256];
+            let count = server.read(&mut request).await.unwrap();
+            assert!(
+                request[..count].starts_with(b"GET /health HTTP/1.1"),
+                "flushed request reaches the backend"
+            );
+            server.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
+        });
+        let mut buffered = tokio::io::BufStream::new(client);
+        let healthy = tokio::time::timeout(
+            Duration::from_secs(1),
+            http_exchange(
+                &mut buffered,
+                "buffered-test",
+                &build_http_probe_request("/health"),
+                200,
+            ),
+        )
+        .await
+        .expect("HTTP exchange must flush before waiting for a response");
+        response.await.unwrap();
+        assert!(healthy, "status check succeeds over a buffered transport");
+    }
 
     #[test]
     fn parse_status_200() {
