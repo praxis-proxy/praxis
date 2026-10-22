@@ -389,134 +389,24 @@ fn status_5xx_without_policy_is_forwarded() {
 
 #[test]
 fn reused_connection_failure_retries_replayable_post() {
-    let (backend, log) = start_reused_connection_kill_backend();
-    let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, backend.port());
-    let config = Config::from_yaml(&yaml).unwrap();
-    let proxy = start_proxy(&config);
-
-    // Connection pooling and reuse are timing-sensitive: under the heavy
-    // concurrency of the coverage / full-suite run the probe does not always
-    // land on the pooled connection that gets killed, so retry the
-    // warmup+probe exchange until we observe the intended reused-connection
-    // failure and its transparent retry.
-    //
-    // The guarantee under test holds on every successful attempt: a POST whose
-    // reused upstream connection dies before responding (Pingora ReusedOnly)
-    // is replayed on a fresh connection and still returns the pooled backend's
-    // 200 to the client, even though POST is non-idempotent — the peer closed
-    // the pooled keepalive before processing the request, so replay is safe.
-    // A regression that drops the replay keeps surfacing the failure as a 502
-    // until the deadline.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let (warmup_status, _body) = http_get(proxy.addr(), "/warmup", None);
-        assert_eq!(
-            warmup_status, 200,
-            "warmup request should succeed and pool the connection"
-        );
-
-        let logged_before = log.lock().unwrap().len();
-        let raw = http_send(
-            proxy.addr(),
-            "POST /probe HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
-        );
-        let last_status = parse_status(&raw);
-        let attempt = log.lock().unwrap()[logged_before..].to_vec();
-
-        // Did this probe reach the killed, reused connection? The backend
-        // records the doomed attempt with request_num > 0 before closing
-        // without a response.
-        let probe_hit_reused = attempt
-            .iter()
-            .any(|(_, request_num, method, path)| *request_num > 0 && method == "POST" && path == "/probe");
-
-        // Success: the probe hit the reused connection, and because the killed
-        // connection never answers, the client's 200 can only come from the
-        // transparent replay on a fresh connection.
-        if probe_hit_reused {
-            assert_eq!(
-                last_status, 200,
-                "a replayable POST whose reused upstream connection dies before responding must be \
-                 retried on a fresh connection, got {last_status} (attempt: {attempt:?})"
-            );
-            assert!(
-                raw.contains("pooled-ok"),
-                "the retried POST should return the pooled backend body, got: {raw:?}"
-            );
-            return;
-        }
-
-        assert!(
-            Instant::now() < deadline,
-            "a replayable POST on a reused, killed connection should be retried on a fresh \
-             connection within the retry window (last status {last_status}, attempt: {attempt:?})"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+    assert_reused_connection_retries_post(&reset_retry_policy(true));
 }
 
 #[test]
 fn reused_connection_failure_retries_idempotent_get() {
-    let (backend, log) = start_reused_connection_kill_backend();
-    let proxy_port = free_port();
-    let yaml = simple_proxy_yaml(proxy_port, backend.port());
-    let config = Config::from_yaml(&yaml).unwrap();
-    let proxy = start_proxy(&config);
+    assert_reused_connection_retries_get(&reset_retry_policy(false));
+}
 
-    // Connection pooling and reuse are timing-sensitive: under the heavy
-    // concurrency of the coverage / full-suite run the probe does not always
-    // land on the pooled connection that gets killed, so retry the
-    // warmup+probe exchange until we observe the intended reused-connection
-    // failure and its transparent retry.
-    //
-    // The guarantee under test holds on every successful attempt: an idempotent
-    // GET whose reused upstream connection dies mid-request is retried on a
-    // fresh connection and still returns the pooled backend's 200 to the
-    // client. A regression that drops the retry keeps surfacing the failure as
-    // a 502 until the deadline; one that simply never reuses a connection keeps
-    // retrying the exchange. The exact replay count is left unchecked on
-    // purpose: a retry can chain through more than one pooled, kill-on-reuse
-    // connection before landing on a fresh one, so the count is timing-derived.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let (warmup_status, _body) = http_get(proxy.addr(), "/warmup", None);
-        assert_eq!(
-            warmup_status, 200,
-            "warmup request should succeed and pool the connection"
-        );
+#[cfg(feature = "pingora")]
+#[test]
+fn reused_connection_failure_retries_replayable_post_with_pingora_default_policy() {
+    assert_reused_connection_retries_post("");
+}
 
-        let logged_before = log.lock().unwrap().len();
-        let (status, body) = http_get(proxy.addr(), "/probe", None);
-        let attempt = log.lock().unwrap()[logged_before..].to_vec();
-
-        // Did this probe reach the killed, reused connection? The backend
-        // records the doomed attempt with request_num > 0 before closing
-        // without a response.
-        let probe_hit_reused = attempt
-            .iter()
-            .any(|(_, request_num, method, path)| *request_num > 0 && method == "GET" && path == "/probe");
-
-        // Success: the probe hit the reused connection, and because the killed
-        // connection never answers, the client's 200 can only come from the
-        // transparent retry on a fresh connection.
-        if probe_hit_reused {
-            assert_eq!(
-                status, 200,
-                "reused-connection failure on an idempotent GET should be retried to success, \
-                 got {status} (attempt: {attempt:?})"
-            );
-            assert_eq!(body, "pooled-ok");
-            return;
-        }
-
-        assert!(
-            Instant::now() < deadline,
-            "an idempotent GET on a reused, killed connection should be retried on a fresh \
-             connection within the retry window (last status {status}, attempt: {attempt:?})"
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+#[cfg(feature = "pingora")]
+#[test]
+fn reused_connection_failure_retries_idempotent_get_with_pingora_default_policy() {
+    assert_reused_connection_retries_get("");
 }
 
 #[test]
@@ -595,5 +485,142 @@ insecure_options:
              Host-derived SNI for the endpoint's name fails verification; got {body}"
         );
         assert_eq!(body, "sni-kept", "request {i} should reach the live TLS backend");
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// Reset retries for the shared success cases; POST requires explicit opt-in.
+/// Empty policies in the Pingora-only cases preserve its default replay behavior.
+fn reset_retry_policy(allow_non_idempotent: bool) -> String {
+    format!(
+        r#"
+            retry_policy:
+              max_retries: 3
+              retriable_conditions: [reset]
+              allow_non_idempotent: {allow_non_idempotent}
+              backoff:
+                base_interval_ms: 1
+                max_interval_ms: 5
+"#
+    )
+}
+
+/// Exercise pooled POST replay under an explicit policy or Pingora's default.
+/// The fixture fully reads the request before closing without a response.
+fn assert_reused_connection_retries_post(retry_policy: &str) {
+    let (backend, log) = start_reused_connection_kill_backend();
+    let proxy_port = free_port();
+    let yaml = cluster_yaml(
+        proxy_port,
+        &format!("              - \"127.0.0.1:{}\"", backend.port()),
+        retry_policy,
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (warmup_status, _body) = http_get(proxy.addr(), "/warmup", None);
+        assert_eq!(
+            warmup_status, 200,
+            "warmup request should succeed and pool the connection"
+        );
+
+        let logged_before = log.lock().unwrap().len();
+        let raw = http_send(
+            proxy.addr(),
+            "POST /probe HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest",
+        );
+        let last_status = parse_status(&raw);
+        let attempt = log.lock().unwrap()[logged_before..].to_vec();
+
+        let probe_hit_reused = attempt
+            .iter()
+            .any(|(_, request_num, method, path)| *request_num > 0 && method == "POST" && path == "/probe");
+
+        if probe_hit_reused {
+            assert_eq!(
+                last_status, 200,
+                "a replayable POST whose reused upstream connection dies before responding must be \
+                 retried on a fresh connection, got {last_status} (attempt: {attempt:?})"
+            );
+            assert!(
+                attempt
+                    .iter()
+                    .any(|(_, request_num, method, path)| *request_num == 0 && method == "POST" && path == "/probe"),
+                "the replay must reach a fresh connection (attempt: {attempt:?})"
+            );
+            assert!(
+                raw.contains("pooled-ok"),
+                "the retried POST should return the pooled backend body, got: {raw:?}"
+            );
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "a replayable POST on a reused, killed connection should be retried on a fresh \
+             connection within the retry window (last status {last_status}, attempt: {attempt:?})"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Exercise pooled GET replay under an explicit policy or Pingora's default.
+fn assert_reused_connection_retries_get(retry_policy: &str) {
+    let (backend, log) = start_reused_connection_kill_backend();
+    let proxy_port = free_port();
+    let yaml = cluster_yaml(
+        proxy_port,
+        &format!("              - \"127.0.0.1:{}\"", backend.port()),
+        retry_policy,
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (warmup_status, _body) = http_get(proxy.addr(), "/warmup", None);
+        assert_eq!(
+            warmup_status, 200,
+            "warmup request should succeed and pool the connection"
+        );
+
+        let logged_before = log.lock().unwrap().len();
+        let (status, body) = http_get(proxy.addr(), "/probe", None);
+        let attempt = log.lock().unwrap()[logged_before..].to_vec();
+
+        let probe_hit_reused = attempt
+            .iter()
+            .any(|(_, request_num, method, path)| *request_num > 0 && method == "GET" && path == "/probe");
+
+        if probe_hit_reused {
+            assert_eq!(
+                status, 200,
+                "reused-connection failure on an idempotent GET should be retried to success, \
+                 got {status} (attempt: {attempt:?})"
+            );
+            assert!(
+                attempt
+                    .iter()
+                    .any(|(_, request_num, method, path)| *request_num == 0 && method == "GET" && path == "/probe"),
+                "the replay must reach a fresh connection (attempt: {attempt:?})"
+            );
+            assert_eq!(
+                body, "pooled-ok",
+                "the retried GET should return the pooled backend body"
+            );
+            return;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "an idempotent GET on a reused, killed connection should be retried on a fresh \
+             connection within the retry window (last status {status}, attempt: {attempt:?})"
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
