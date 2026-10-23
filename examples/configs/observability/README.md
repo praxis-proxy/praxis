@@ -29,6 +29,5 @@ Observability filters provide logging, metrics, and tracing to monitor proxy beh
 
 ## Related Documentation
 
-- [Metrics Reference](../../../docs/operating/metrics.md)
-- [Logging Configuration](../../../docs/operating/logging.md)
+- [Observability (Metrics, Logging & Tracing)](../../../docs/operating/observability.md)
 - [Tracing Integration](../../../docs/operating/tracing.md)
