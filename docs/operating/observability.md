@@ -273,6 +273,24 @@ descriptors neared the process limit (see
 `runtime.shed_on_fd_pressure`). A steady rate means
 the limit is too small for the traffic.
 
+#### `praxis_cluster_overload_rejects_total` (counter)
+
+Requests shed by a cluster's `max_connections` ceiling,
+answered with `503` and `Retry-After: 1`. Separate from
+`praxis_overload_rejects_total`, which counts only the
+protections that run before any filter and carries no
+cluster label.
+
+| Label | Values |
+| --------- | --------------------------------- |
+| `cluster` | The cluster name that shed the request |
+
+A steady rate on one cluster means its ceiling is below
+what the upstream can actually serve, or that the upstream
+has slowed down and requests are occupying slots longer.
+Requests pinned by session affinity bypass the ceiling and
+so are never counted here.
+
 #### `praxis_process_open_fds` / `praxis_process_max_fds` (gauges)
 
 File descriptors the process holds open, and its soft

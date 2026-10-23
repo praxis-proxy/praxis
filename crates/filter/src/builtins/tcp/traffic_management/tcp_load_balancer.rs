@@ -135,6 +135,16 @@ impl TcpLoadBalancerFilter {
             )
             .into());
         }
+        // Admission is enforced by the HTTP load balancer, which sheds with a
+        // 503 a TCP connection has no way to carry.
+        if let Some(cluster) = cfg.clusters.iter().find(|c| c.max_connections.is_some()) {
+            return Err(format!(
+                "tcp_load_balancer: cluster '{}' sets max_connections, which applies to HTTP upstreams only; \
+                 use the listener's max_connections for TCP",
+                cluster.name
+            )
+            .into());
+        }
         Ok(Box::new(Self::new(&cfg.clusters)))
     }
 
@@ -535,6 +545,30 @@ clusters:
         assert!(
             err.to_string().contains("HTTP upstreams only"),
             "error should say the field is HTTP-only: {err}"
+        );
+    }
+
+    #[test]
+    fn from_config_rejects_cluster_max_connections() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"
+clusters:
+  - name: "db_pool"
+    endpoints: ["10.0.0.1:5432"]
+    max_connections: 10
+"#,
+        )
+        .unwrap();
+        let Err(err) = TcpLoadBalancerFilter::from_config(&yaml) else {
+            panic!("a TCP cluster must not silently ignore max_connections");
+        };
+        assert!(
+            err.to_string().contains("HTTP upstreams only"),
+            "error should say the field is HTTP-only: {err}"
+        );
+        assert!(
+            err.to_string().contains("listener's max_connections"),
+            "error should point at the listener cap as the TCP alternative: {err}"
         );
     }
 

@@ -1663,12 +1663,147 @@ async fn bound_source_panic_mode_metric_uses_the_bound_cluster() {
 }
 
 // -----------------------------------------------------------------------------
+// Max Connections
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn max_connections_sheds_the_request_past_the_cap() {
+    let lb = LoadBalancerFilter::new(&[capped_cluster("web", &["127.0.0.1:8080"], 1)]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut first = crate::test_utils::make_filter_context(&req);
+    first.cluster = Some(Arc::from("web"));
+    let action = lb.on_request(&mut first).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the request filling the cap should be admitted"
+    );
+
+    let mut second = crate::test_utils::make_filter_context(&req);
+    second.cluster = Some(Arc::from("web"));
+    let action = lb.on_request(&mut second).await.unwrap();
+    let FilterAction::Reject(rejection) = action else {
+        panic!("a request past the cap should be rejected, got {action:?}");
+    };
+    assert_eq!(rejection.status, 503, "shedding should answer 503");
+    assert!(
+        rejection
+            .headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("Retry-After") && value == "1"),
+        "shedding should carry Retry-After: 1 like the listener cap"
+    );
+    assert!(
+        second.upstream.is_none(),
+        "a shed request must not be given an upstream"
+    );
+}
+
+#[tokio::test]
+async fn max_connections_takes_no_endpoint_slot_when_shedding() {
+    let cluster = Cluster {
+        max_connections: Some(1),
+        ..cluster_with_strategy(
+            "web",
+            &["127.0.0.1:8080"],
+            LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
+        )
+    };
+    let lb = LoadBalancerFilter::new(&[cluster]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut first = crate::test_utils::make_filter_context(&req);
+    first.cluster = Some(Arc::from("web"));
+    drop(lb.on_request(&mut first).await.unwrap());
+
+    let mut second = crate::test_utils::make_filter_context(&req);
+    second.cluster = Some(Arc::from("web"));
+    drop(lb.on_request(&mut second).await.unwrap());
+
+    let entry = lb.clusters.get("web").unwrap();
+    let SharedStrategy::LeastConnections(lc) = entry.strategy.inner() else {
+        panic!("the capped cluster must keep its least_connections strategy for this assertion to mean anything");
+    };
+    assert_eq!(
+        lc.load_for("127.0.0.1:8080"),
+        1,
+        "a shed request must not take an endpoint slot it will never use"
+    );
+}
+
+#[tokio::test]
+async fn max_connections_slot_returns_on_response() {
+    let lb = LoadBalancerFilter::new(&[capped_cluster("web", &["127.0.0.1:8080"], 1)]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut first = crate::test_utils::make_filter_context(&req);
+    first.cluster = Some(Arc::from("web"));
+    drop(lb.on_request(&mut first).await.unwrap());
+    drop(lb.on_response(&mut first).await.unwrap());
+
+    let mut second = crate::test_utils::make_filter_context(&req);
+    second.cluster = Some(Arc::from("web"));
+    let action = lb.on_request(&mut second).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the released slot should admit the next request"
+    );
+}
+
+#[tokio::test]
+async fn max_connections_unset_admits_beyond_any_ceiling() {
+    let lb = LoadBalancerFilter::new(&[test_cluster("web", &["127.0.0.1:8080"])]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    for attempt in 0..32 {
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.cluster = Some(Arc::from("web"));
+        let action = lb.on_request(&mut ctx).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "an uncapped cluster must admit request {attempt}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn max_connections_slot_returns_when_no_endpoint_is_selectable() {
+    let cluster = Cluster {
+        max_connections: Some(1),
+        ..test_cluster("web", &[])
+    };
+    let lb = LoadBalancerFilter::new(&[cluster]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    for attempt in 0..3 {
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.cluster = Some(Arc::from("web"));
+        let error = lb
+            .on_request(&mut ctx)
+            .await
+            .expect_err("an endpointless cluster should error");
+        assert!(
+            error.to_string().contains("no available endpoints"),
+            "attempt {attempt} should fail on selection, not on the cap: {error}"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
 /// Build a [`Cluster`] with default strategy for testing.
 fn test_cluster(name: &str, endpoints: &[&str]) -> Cluster {
     Cluster::with_defaults(name, endpoints.iter().map(|s| (*s).into()).collect())
+}
+
+/// Build a [`Cluster`] capped at `max_connections` concurrent requests.
+fn capped_cluster(name: &str, endpoints: &[&str], max_connections: u32) -> Cluster {
+    Cluster {
+        max_connections: Some(max_connections),
+        ..test_cluster(name, endpoints)
+    }
 }
 
 /// Build a [`Cluster`] tagged with application protocol and/or provider.
