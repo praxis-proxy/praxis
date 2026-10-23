@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- A [support diagnostics reference](docs/operating/diagnostics.md) covering
+  config checks, live state, logging, reloads and draining before shutdown.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.

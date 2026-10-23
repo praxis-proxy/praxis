@@ -17,7 +17,7 @@ admin:                 # Optional. Admin health endpoint.
 body_limits:           # Optional. Global body size ceilings.
 metrics:               # Optional. Prometheus metric collection toggles.
 runtime:               # Optional. Thread pool and logging tuning.
-shutdown_timeout_secs: # Optional. Graceful drain time (default: 30).
+shutdown_timeout_secs: # Optional. Shutdown budget (default: 30 seconds).
 insecure_options:      # Optional. Dev/test overrides. See developing/getting-started.md.
 ```
 
@@ -733,24 +733,30 @@ module docs for the trait definition.
 
 ## Graceful Shutdown
 
-The `shutdown_timeout_secs` field controls how long the
-server drains in-flight connections before forcing
+With the default Pingora backend, `shutdown_timeout_secs`
+sets the budget for the request grace period and runtime
 shutdown:
 
 ```yaml
 shutdown_timeout_secs: 60    # default: 30
 ```
 
-On SIGTERM listeners stop accepting new connections. The
-first up-to-5 s is a grace period in which in-flight
-requests keep running; the remainder bounds the runtime
-drain; the total never exceeds `shutdown_timeout_secs`.
+On SIGTERM listeners stop accepting new connections.
+In-flight requests have a grace period of
+`min(shutdown_timeout_secs, 5)` seconds. Runtime shutdown
+then cancels remaining async tasks; the rest of the budget
+bounds the wait for blocking work. A setting of `60`
+therefore still gives requests at most five seconds to
+finish. Drain traffic before SIGTERM when requests need
+longer; see [Diagnostics](diagnostics.md#draining-before-shutdown).
 
-Once the drain completes, Praxis flushes queued log lines
-and exports pending OTLP spans, then exits `0`. A startup
-failure after logging is initialized (a listener that
-cannot be registered, a filter that cannot be built) is
-logged the same way, flushed, and exits `1`.
+Once runtime shutdown completes, Praxis flushes queued
+log lines and attempts to export pending OTLP spans, then
+exits `0`. OTLP shutdown errors go to stderr and do not
+change the exit status.
+
+Praxis logs and flushes errors returned while building
+filters or registering listeners, then exits `1`.
 
 ## Default Configuration
 
