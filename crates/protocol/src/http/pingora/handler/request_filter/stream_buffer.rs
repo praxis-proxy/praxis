@@ -14,7 +14,10 @@ use praxis_filter::{
 };
 use tracing::{debug, warn};
 
-use crate::http::pingora::context::PingoraRequestCtx;
+use crate::http::{
+    body_limit::{BodyLimitPhase, body_limit_rejection},
+    pingora::context::PingoraRequestCtx,
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -239,17 +242,11 @@ impl PreReadPass {
             && let Err(overflow) = self.buffer.push(chunk.clone())
         {
             ctx.request_body_bytes = self.original_body_bytes;
-            warn!(
-                status = 413,
-                limit = overflow.limit,
-                attempted = overflow.attempted,
-                "request body exceeds StreamBuffer limit"
-            );
-            return Err(PreReadStop::Rejected(
-                Rejection::status(413)
-                    .with_header("content-type", "application/json")
-                    .with_body(r#"{"error":"request body too large"}"#),
-            ));
+            return Err(PreReadStop::Rejected(body_limit_rejection(
+                overflow.limit,
+                u64::try_from(overflow.attempted).unwrap_or(u64::MAX),
+                BodyLimitPhase::PreRead,
+            )));
         }
 
         // At EOS, deliver the accumulated body to filters so
@@ -595,8 +592,9 @@ mod tests {
             "overflow must reject the request"
         );
         let log = std::fs::read_to_string(output.path())?;
-        assert!(log.contains("WARN") && log.contains("request body exceeds StreamBuffer limit"));
+        assert!(log.contains("WARN") && log.contains("request body exceeds configured limit"));
         assert!(log.contains("status=413") && log.contains("limit=10") && log.contains("attempted=11"));
+        assert!(log.contains("bytes_seen=11") && log.contains("phase=PreRead"));
         Ok(())
     }
 
