@@ -676,7 +676,7 @@ flooding output from every module.
 
 In-memory key-value stores for runtime-updatable
 mappings. A store is created in code through
-`KvStoreRegistry::get_or_create`; the admin API reads
+`KvStoreRegistry::get_or_create_memory`; the admin API reads
 and updates entries in stores that already exist but
 does not create them. No built-in filter or
 configuration section creates a store yet, so in a
