@@ -19,6 +19,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- A [support diagnostics reference](docs/operating/diagnostics.md) covering
+  config checks, live state, logging, reloads and draining before shutdown.
 - `SUPPORT.md` with guidance on where to ask questions, report bugs,
   report security vulnerabilities, and propose enhancements.
 - An experimental network backend behind the `hyper` feature, off by
