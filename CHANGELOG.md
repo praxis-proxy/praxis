@@ -33,6 +33,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Request-body limit rejections log structured warnings and return JSON 413
+  responses across buffering and streaming paths. Oversized declared
+  Content-Length values are rejected before reading the body.
+- Early HTTP/1 responses with unread uploads use Pingora's write-side
+  shutdown and bounded cleanup before closing, including authentication
+  and rate-limit rejections. Cleanup has a 30-second deadline and a 128 MiB
+  discard budget checked between body reads.
 - The Hyper backend rejects reserved client trailer names before forwarding
   or retaining them for replay, including streamed and pre-read uploads.
 - The Hyper backend applies the retry policy to failures on pooled

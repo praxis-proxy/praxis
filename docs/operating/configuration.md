@@ -495,6 +495,21 @@ StreamBuffer). When a filter also declares a per-filter
 Requests exceeding the limit receive 413 (Payload Too
 Large).
 
+Request-body limit failures log a warning with the limit,
+bytes seen, and rejection phase, and return a JSON 413
+response. A declared `Content-Length` above the effective
+input limit is rejected before reading the body.
+
+For an HTTP/1 early response that closes the connection
+with an unread upload, the Pingora backend sends the
+response, shuts down the write side, and discards remaining
+body data. Cleanup has a 30-second deadline and a 128 MiB
+discard budget; downstream read timeouts still apply.
+The budget is checked between native body reads, so the
+last chunk can cross it. This also covers early responses
+such as 401, 403, and 429. HTTP/2 uses its native stream
+cleanup. Clients should stop uploading after a rejection.
+
 ```yaml
 body_limits:
   max_request_bytes: 10485760    # 10 MiB

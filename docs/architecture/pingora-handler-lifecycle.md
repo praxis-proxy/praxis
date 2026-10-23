@@ -162,6 +162,12 @@ The pipeline's pre-computed `BodyCapabilities` set
 context. These baseline modes establish the byte
 ceiling for body buffering.
 
+After opted-in request-head filters run, a validated
+Content-Length above the effective input ceiling is
+rejected before reading any body data. Body-size failures
+share structured warning and JSON 413 construction across
+the pre-read, streaming, selected-upstream, and hedge paths.
+
 **StreamBuffer pre-read:**
 
 When `request_body_mode` is `StreamBuffer`, the

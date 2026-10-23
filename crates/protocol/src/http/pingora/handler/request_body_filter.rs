@@ -30,6 +30,7 @@ use super::{
         suppress_stream_buffer_chunk,
     },
 };
+use crate::http::body_limit::{BodyLimitPhase, body_limit_rejection};
 
 // -----------------------------------------------------------------------------
 // RequestBodyHalt
@@ -113,6 +114,7 @@ pub(super) async fn execute(
     let Err(halt) = run_request_body(pipeline, body, end_of_stream, ctx).await else {
         return Ok(());
     };
+    ctx.request_body_buffer = None;
     if let Some(rejection) = halt.rejection {
         send_rejection_for(session, rejection, ctx).await;
     }
@@ -154,19 +156,25 @@ pub(in crate::http) async fn run_request_body(
     }
 
     let is_stream_buffer = matches!(ctx.request_body_mode, BodyMode::StreamBuffer { .. });
+    let attempted = ctx.request_body_bytes.saturating_add(
+        body.as_ref()
+            .map_or(0, |chunk| u64::try_from(chunk.len()).unwrap_or(u64::MAX)),
+    );
 
     // The global body_limits ceiling applies in every mode but SizeLimit,
     // which carries its own cap. StreamBuffer's buffering cap applies only
     // while accumulating; after Release, Stream still obeys this ceiling.
     // The projection does not mutate the counter; the filter pipeline below
     // is the accumulator. `None` is only reachable with allow_unbounded_body.
-    if !matches!(ctx.request_body_mode, BodyMode::SizeLimit { .. })
-        && exceeds_body_ceiling(pipeline.request_body_ceiling(), ctx.request_body_bytes, body.as_ref())
+    if let Some(limit) = pipeline.request_body_ceiling()
+        && !matches!(ctx.request_body_mode, BodyMode::SizeLimit { .. })
+        && exceeds_body_ceiling(Some(limit), ctx.request_body_bytes, body.as_ref())
     {
         ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
+        ctx.request_body_bytes = attempted;
         return Err(RequestBodyHalt::refused(
             "request body exceeds global body limit",
-            Rejection::status(413),
+            body_limit_rejection(limit, attempted, BodyLimitPhase::Global),
         ));
     }
 
@@ -176,7 +184,7 @@ pub(in crate::http) async fn run_request_body(
                 ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
                 return Err(RequestBodyHalt::refused(
                     "request body exceeds maximum size",
-                    Rejection::status(413),
+                    body_limit_rejection(max_bytes, ctx.request_body_bytes, BodyLimitPhase::SizeLimit),
                 ));
             }
             return Ok(());
@@ -185,9 +193,14 @@ pub(in crate::http) async fn run_request_body(
         BodyMode::StreamBuffer { max_bytes } if !ctx.request_body_released => {
             if accumulate_stream_buffer(body, &mut ctx.request_body_buffer, end_of_stream, max_bytes) {
                 ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
+                ctx.request_body_bytes = attempted;
                 return Err(RequestBodyHalt::refused(
                     "request body exceeds stream_buffer size limit",
-                    Rejection::status(413),
+                    body_limit_rejection(
+                        max_bytes.unwrap_or(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES),
+                        attempted,
+                        BodyLimitPhase::StreamBuffer,
+                    ),
                 ));
             }
             if end_of_stream {
@@ -278,8 +291,40 @@ mod tests {
 
     use bytes::Bytes;
 
-    use super::drain_pre_read_body;
+    use super::{drain_pre_read_body, run_request_body};
     use crate::http::pingora::context::PingoraRequestCtx;
+
+    #[tokio::test]
+    async fn runtime_body_limit_paths_return_the_shared_rejection()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use praxis_filter::{BodyMode, FilterPipeline, FilterRegistry};
+
+        for (mode, ceiling) in [
+            (BodyMode::Stream, 10),
+            (BodyMode::SizeLimit { max_bytes: 10 }, 20),
+            (BodyMode::StreamBuffer { max_bytes: Some(10) }, 20),
+        ] {
+            let mut pipeline = FilterPipeline::build(&mut [], &FilterRegistry::with_builtins())?;
+            pipeline.apply_body_limits(Some(ceiling), None, false)?;
+            let mut ctx = make_ctx();
+            ctx.request_body_mode = mode;
+            let mut body = Some(Bytes::from_static(b"hello world"));
+
+            let halt = run_request_body(&pipeline, &mut body, false, &mut ctx)
+                .await
+                .err()
+                .ok_or("the overflowing chunk must be rejected")?;
+            let rejection = halt.rejection.ok_or("the halt must include a response")?;
+
+            assert_eq!(rejection.status, 413);
+            assert_eq!(
+                rejection.body.as_deref(),
+                Some(b"{\"error\":\"request body too large\"}".as_slice())
+            );
+            assert_eq!(ctx.request_body_bytes, 11);
+        }
+        Ok(())
+    }
 
     #[test]
     fn pre_read_body_drains_chunks_in_order() {
