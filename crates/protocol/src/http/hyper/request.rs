@@ -121,12 +121,24 @@ fn capture_client(flight: &mut Flight, connection: &ConnectionFacts, parts: Part
     }
 }
 
-/// Run the request-head phase when a filter opted into it, applying its
-/// trusted header mutations to the request.
+/// Prepare the request head and reject an oversized declared input body.
 async fn head_phase(flight: &mut Flight, request: &mut Request) -> Result<(), RequestPhase> {
-    if !flight.pipeline.has_request_head_phase() {
-        return Ok(());
+    if flight.pipeline.has_request_head_phase() {
+        run_head_phase(flight, request).await?;
     }
+    let rejection = flight
+        .ctx
+        .request_span
+        .in_scope(|| crate::http::body_limit::declared_body_rejection(&request.headers, &flight.pipeline));
+    if let Some(rejection) = rejection {
+        flight.ctx.stamp_error_type(metrics::ERROR_TYPE_FILTER_REJECT);
+        return Err(refuse(flight, request, rejection));
+    }
+    Ok(())
+}
+
+/// Run opted-in head filters and apply their trusted header mutations.
+async fn run_head_phase(flight: &mut Flight, request: &mut Request) -> Result<(), RequestPhase> {
     let span = flight.ctx.request_span.clone();
     let ran = Box::pin(run_head_filters(&flight.pipeline, request, &mut flight.ctx).instrument(span)).await;
     match ran {

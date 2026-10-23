@@ -21,6 +21,54 @@ use super::test_utils::{
     start_417_backend, start_crlf_response_backend, start_request_line_echo_backend, start_status_line_backend,
 };
 
+/// [RFC 9112 Section 9.6]: a staged close delivers the complete rejection
+/// and EOF before discarding the unread request body, avoiding a TCP reset.
+///
+/// [RFC 9112 Section 9.6]: https://datatracker.ietf.org/doc/html/rfc9112#section-9.6
+#[cfg(feature = "pingora")]
+#[test]
+fn rfc9112_rejection_half_close_preserves_the_unread_upload() {
+    let port = free_port();
+    let yaml = format!(
+        r#"
+body_limits:
+  max_request_bytes: 1024
+listeners:
+  - name: web
+    address: "127.0.0.1:{port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        body: ok
+"#
+    );
+    let proxy = start_proxy(&Config::from_yaml(&yaml).unwrap());
+    let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .write_all(b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 16777216\r\n\r\n")
+        .unwrap();
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .expect("the response and write-side EOF must arrive before the body is sent");
+
+    assert_eq!(parse_status(&response), 413, "header admission must reject the upload");
+    assert_eq!(
+        parse_body(&response),
+        r#"{"error":"request body too large"}"#,
+        "the complete response must precede EOF"
+    );
+    stream
+        .write_all(&vec![b'a'; 16_777_216])
+        .expect("the read side must remain open after the response half-close");
+}
+
 /// [RFC 9112 Sections 6.3 and 9.3]: after a response filter removes a stale
 /// Content-Length, the HTTP/1.1 response needs self-defined framing to remain
 /// eligible for persistent connections.
