@@ -98,6 +98,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   views that request-body and response policy hooks receive, rather than
   reaching those plugins and PDPs in plaintext.
 
+- StreamBuffer body-limit rejections log a warning and return a JSON 413
+  response, with bounded HTTP/1 upload draining to avoid closing the
+  connection while clients are still sending the rejected body.
 - The FIPS runtime probe selects the Pingora backend when compiling its
   listener tests with default features disabled.
 - The Hyper backend rejects reserved client trailer names before forwarding
