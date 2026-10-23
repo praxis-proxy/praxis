@@ -27,10 +27,12 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      # A trusted filter (or ingress controller) populates the
-      # reserved-prefix headers before the policy filter reads them.
-      # In production these are injected by infrastructure; `headers`
-      # with `request_set` simulates this for the example.
+      # Praxis rejects any inbound request that already carries an
+      # x-praxis-*, x-ext-agent-* or x-ext-protocol-* header with 400,
+      # so these can only be set by a filter earlier in this chain.
+      # `headers` with `request_set` stands in for one here; it feeds
+      # the `global` HTTP policy path (with `llm:` or `read_write` the
+      # body phase runs first and `request_set` is not yet queued).
       - filter: headers
         request_set:
           # Calling agent identity, e.g. from an orchestrator sidecar.

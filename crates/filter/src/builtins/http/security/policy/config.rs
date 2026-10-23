@@ -252,26 +252,59 @@ pub(crate) enum ContextField {
     FrameworkGraphId,
 }
 
+impl ContextField {
+    /// The configuration key, matching the serde rename.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AgentConversationId => "agent.conversation_id",
+            Self::AgentTurn => "agent.turn",
+            Self::AgentAgentId => "agent.agent_id",
+            Self::AgentParentAgentId => "agent.parent_agent_id",
+            Self::AgentInput => "agent.input",
+            Self::FrameworkFramework => "framework.framework",
+            Self::FrameworkFrameworkVersion => "framework.framework_version",
+            Self::FrameworkNodeId => "framework.node_id",
+            Self::FrameworkGraphId => "framework.graph_id",
+        }
+    }
+}
+
 impl PolicyFilterConfig {
     /// Validate `context_headers` at config load time.
     ///
     /// The target field is already validated by `ContextField`
     /// deserialization (unknown fields and `agent.session_id` are
     /// rejected by serde). This method checks the remaining
-    /// constraint: header names must use a reserved prefix.
+    /// constraints: the header name must use a reserved prefix, and it
+    /// must parse as an HTTP header name. A value such as
+    /// `x-praxis-agent id` passes the prefix check, then
+    /// `HeaderName::from_bytes` fails at request time and the mapped
+    /// field is skipped with no startup error.
     ///
     /// Called from `PolicyFilter::new` so misconfiguration is caught at
     /// startup, not at first request.
     pub(crate) fn validate_context_headers(&self) -> Result<(), String> {
-        let mut headers: Vec<_> = self.context_headers.values().collect();
-        headers.sort();
-        for header in &headers {
+        let mut entries: Vec<_> = self.context_headers.iter().collect();
+        entries.sort_by(|left, right| {
+            left.1
+                .as_str()
+                .cmp(right.1.as_str())
+                .then_with(|| left.0.as_str().cmp(right.0.as_str()))
+        });
+        for (field, header) in entries {
             let header_lower = header.to_ascii_lowercase();
             if !praxis_core::reserved_headers::is_reserved(&header_lower) {
                 return Err(format!(
-                    "context_headers: header `{header}` does not use a reserved prefix \
+                    "context_headers: header `{header}` for `{}` does not use a reserved prefix \
                      (x-praxis-*, x-ext-agent-*, x-ext-protocol-*); only headers that \
-                     the gateway itself sets are trusted — see reserved_headers.rs"
+                     the gateway itself sets are trusted — see reserved_headers.rs",
+                    field.as_str(),
+                ));
+            }
+            if http::HeaderName::from_bytes(header_lower.as_bytes()).is_err() {
+                return Err(format!(
+                    "context_headers: header `{header}` for `{}` is not a valid HTTP header name",
+                    field.as_str(),
                 ));
             }
         }
