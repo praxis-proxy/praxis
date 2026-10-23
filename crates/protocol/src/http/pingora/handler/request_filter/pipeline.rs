@@ -24,7 +24,7 @@ use tracing::{Instrument as _, error};
 #[cfg(feature = "pingora")]
 use super::{
     super::super::convert::{request_header_from_session, send_rejection_for},
-    error_handling::handle_pre_read_io_error,
+    error_handling::{handle_pre_read_io_error, send_pre_read_rejection},
     header_mutations::apply_pre_read_mutations,
     request_utils::{create_request_span, snapshot_for_early_exit},
     stream_buffer::PreReadError,
@@ -186,7 +186,7 @@ pub(in crate::http) async fn execute(
                 // silently drop the request from praxis_errors_total.
                 ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
                 ctx.request_snapshot = Some(request);
-                send_rejection_for(session, rejection, ctx).await;
+                send_pre_read_rejection(session, rejection, ctx).await;
                 return Ok(true);
             },
             Err(PreReadError::Filter(e)) => {

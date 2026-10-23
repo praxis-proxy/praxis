@@ -495,6 +495,13 @@ StreamBuffer). When a filter also declares a per-filter
 Requests exceeding the limit receive 413 (Payload Too
 Large).
 
+When a request exceeds its StreamBuffer limit during
+pre-read, Praxis logs a warning and sends a JSON 413
+response. The Pingora backend then discards remaining
+HTTP/1 upload data for up to 30 seconds before closing
+the connection; downstream read timeouts still apply.
+Clients should stop uploading when they receive 413.
+
 ```yaml
 body_limits:
   max_request_bytes: 10485760    # 10 MiB
