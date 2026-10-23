@@ -144,6 +144,18 @@ enum GatedIdentity {
 /// See the [PPE 0.4.1 changelog] and
 /// [args migration guidance].
 ///
+/// PPE 0.5.0 tightens OAuth `delegate(...)` by default. A token-exchange
+/// response must name an access-token or JWT `issued_token_type`, and a
+/// granted scope that was neither requested nor listed in
+/// `allowed_extra_scopes` is refused. When the minted token is a JWT, its
+/// `aud` must contain the step's `audience` and its `sub` must match the
+/// caller. `strict_response_validation: false` turns these checks off. A JWT with an
+/// unsupported `crit` header is rejected, and an `env` secret provider with
+/// settings it does not use fails to load. CEL `size()` now counts code
+/// points rather than bytes, and `exists()` returns true when one element
+/// matches even if another errors, so some requests that were denied may now
+/// be allowed. See the [PPE 0.5.0 changelog].
+///
 /// The configured policy receives the full parsed inference request. Treat
 /// policy documents and custom plugins as trusted: a rule or an explicit
 /// outbound call can disclose fields it reads. Review policy authorship and
@@ -220,6 +232,7 @@ enum GatedIdentity {
 ///
 /// [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
 /// [PPE 0.4.1 changelog]: https://github.com/praxis-proxy/policy/blob/v0.4.1/CHANGELOG.md#041---2026-10-05
+/// [PPE 0.5.0 changelog]: https://github.com/praxis-proxy/policy/blob/v0.5.0/CHANGELOG.md#050---2026-10-13
 /// [args migration guidance]: https://github.com/praxis-proxy/policy/blob/v0.4.1/docs/content/apl/pdp.md#migrating-args-policies
 ///
 /// # YAML configuration
