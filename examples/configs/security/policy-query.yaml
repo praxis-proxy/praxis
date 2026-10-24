@@ -1,0 +1,42 @@
+# HTTP query-string authorization
+#
+# HTTP query-string authorization using the Praxis Policy Engine. The `policy`
+# filter loads a policy that declares only a `global` HTTP policy (no entity
+# routes), so it authorizes at the HTTP layer: it resolves JWT identity and
+# evaluates a CEL rule over `http.query`, the request-target query string the
+# path matcher excludes. This lets a policy distinguish two requests that share
+# a path and differ only by query. Denials become plain HTTP responses (with a
+# custom `denyWith` status/body/header).
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/security/policy-query.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # HTTP query-string authorization. `config_path` points at the policy
+      # document. The policy declares only a `global` HTTP policy (no entity
+      # routes), so the filter authorizes at the HTTP layer directly — no
+      # protocol classifier needed. The policy's CEL rule reads `http.query`.
+      - filter: policy
+        config_path: /etc/praxis/query-policy.yaml
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

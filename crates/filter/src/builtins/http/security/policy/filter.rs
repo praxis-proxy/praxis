@@ -1723,6 +1723,12 @@ impl PolicyFilter {
         let http = HttpExtension {
             method: Some(req.method.as_str().to_owned()),
             path: Some(req.uri.path().to_owned()),
+            // Carry the query separately from the path (which `.path()`
+            // excludes), so a policy can gate on it and distinguish requests
+            // that share a path but differ by query. `None` when the
+            // request-target had no query, so a query-specific policy fails
+            // closed rather than matching an empty string.
+            query: req.uri.query().map(str::to_owned),
             host,
             scheme: req.uri.scheme_str().map(str::to_owned),
             request_headers,
