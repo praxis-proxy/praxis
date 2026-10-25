@@ -70,15 +70,19 @@ jobs:
             ~/.cargo/bin/typos
             ~/.cargo/bin/taplo
             ~/go/bin/actionlint
-          key: lint-extra-${{ runner.os }}-v1
+          key: lint-extra-${{ runner.os }}-typos1.51.1-taplo0.10.0-actionlint1.7.12
 
       - name: Install lint-extra tools
+        env:
+          TYPOS_VERSION: "1.51.1"
+          TAPLO_VERSION: "0.10.0"
+          ACTIONLINT_VERSION: "v1.7.12"
         run: |
           echo "$HOME/go/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/go/bin:$PATH"
-          command -v typos > /dev/null || cargo install typos-cli --locked
-          command -v taplo > /dev/null || cargo install taplo-cli --locked
-          command -v actionlint > /dev/null || go install github.com/rhysd/actionlint/cmd/actionlint@latest
+          command -v typos > /dev/null || cargo install typos-cli --locked --version "$TYPOS_VERSION"
+          command -v taplo > /dev/null || cargo install taplo-cli --locked --version "$TAPLO_VERSION"
+          command -v actionlint > /dev/null || go install "github.com/rhysd/actionlint/cmd/actionlint@$ACTIONLINT_VERSION"
 
       - name: Lint extra (typos, taplo, shellcheck, actionlint)
         run: make lint-extra
