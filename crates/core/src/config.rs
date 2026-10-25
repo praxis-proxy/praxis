@@ -133,7 +133,7 @@ pub struct Config {
     #[serde(default)]
     pub runtime: RuntimeConfig,
 
-    /// Drain time for graceful shutdown.
+    /// Upper bound on the duration of a graceful shutdown.
     #[serde(default = "default_shutdown_timeout_secs")]
     pub shutdown_timeout_secs: u64,
 

@@ -771,6 +771,24 @@ therefore still gives requests at most five seconds to
 finish. Drain traffic before SIGTERM when requests need
 longer; see [Diagnostics](diagnostics.md#draining-before-shutdown).
 
+The full grace period is spent even when nothing is in
+flight. The requests cut when it ends are the
+long-running ones: streaming and SSE responses, slow
+uploads and downloads, and WebSocket or other upgraded
+connections. Clients of those see the connection close
+mid-response and should be ready to retry or
+reconnect.
+
+On Kubernetes, a larger `terminationGracePeriodSeconds`
+does not extend this window either: streams still open
+when the grace period ends are closed on every pod
+deletion, rolling update, and node drain.
+
+The experimental hyper backend lets in-flight
+connections finish for up to the full
+`shutdown_timeout_secs`; see
+[Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
+
 Once runtime shutdown completes, Praxis flushes queued
 log lines and attempts to export pending OTLP spans, then
 exits `0`. OTLP shutdown errors go to stderr and do not
