@@ -73,11 +73,14 @@ pub(in crate::http) fn declared_body_rejection(
 }
 
 /// Resolve the baseline input limit without imposing buffering on streams.
+/// Future modes use the absolute ceiling until their admission policy is defined.
 fn input_body_limit(pipeline: &FilterPipeline) -> Option<usize> {
     let mode_limit = match pipeline.body_capabilities().request_body_mode {
         BodyMode::StreamBuffer { max_bytes } => Some(max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES)),
         BodyMode::SizeLimit { max_bytes } => Some(max_bytes),
-        BodyMode::Stream | _ => None,
+        BodyMode::Stream => None,
+        // BodyMode is non-exhaustive across crates; unknown modes stay bounded.
+        _ => Some(ABSOLUTE_MAX_BODY_BYTES),
     };
     match (mode_limit, pipeline.request_body_ceiling()) {
         (Some(mode), Some(global)) => Some(mode.min(global)),

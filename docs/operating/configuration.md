@@ -511,6 +511,12 @@ last chunk can cross it. This also covers early responses
 such as 401, 403, and 429. HTTP/2 uses its native stream
 cleanup. Clients should stop uploading after a rejection.
 
+Rejected uploads retain any listener and runtime connection
+permits until cleanup finishes. Account for this grace period
+when sizing `max_connections`: stalled rejected uploads can
+occupy those slots for up to 30 seconds. A configured
+`downstream_read_timeout_ms` can end a stalled read sooner.
+
 ```yaml
 body_limits:
   max_request_bytes: 10485760    # 10 MiB
