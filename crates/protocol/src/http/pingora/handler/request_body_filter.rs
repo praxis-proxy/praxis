@@ -16,13 +16,9 @@
 use std::collections::VecDeque;
 
 use bytes::Bytes;
-#[cfg(feature = "pingora")]
-use pingora_proxy::Session;
 use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection};
 use tracing::error;
 
-#[cfg(feature = "pingora")]
-use super::super::convert::send_rejection_for;
 use super::{
     super::context::PingoraRequestCtx,
     body_util::{
@@ -102,11 +98,10 @@ fn drain_pre_read_body(ctx: &mut PingoraRequestCtx, body: &mut Option<Bytes>) ->
     false
 }
 
-/// Run body filters on a request body chunk, enforcing size limits.
+/// Run body filters and defer rejection delivery until the upstream is released.
 #[cfg(feature = "pingora")]
 pub(super) async fn execute(
     pipeline: &FilterPipeline,
-    session: &mut Session,
     body: &mut Option<Bytes>,
     end_of_stream: bool,
     ctx: &mut PingoraRequestCtx,
@@ -115,9 +110,7 @@ pub(super) async fn execute(
         return Ok(());
     };
     ctx.request_body_buffer = None;
-    if let Some(rejection) = halt.rejection {
-        send_rejection_for(session, rejection, ctx).await;
-    }
+    ctx.pending_rejection = halt.rejection;
     let etype = halt.status.map_or(
         pingora_core::ErrorType::InternalError,
         pingora_core::ErrorType::HTTPStatus,
@@ -293,6 +286,31 @@ mod tests {
 
     use super::{drain_pre_read_body, run_request_body};
     use crate::http::pingora::context::PingoraRequestCtx;
+
+    #[cfg(feature = "pingora")]
+    #[tokio::test]
+    async fn streaming_rejection_is_deferred_until_the_error_boundary()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut pipeline =
+            praxis_filter::FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins())?;
+        pipeline.apply_body_limits(Some(10), None, false)?;
+        let mut ctx = make_ctx();
+        ctx.request_body_mode = praxis_filter::BodyMode::SizeLimit { max_bytes: 10 };
+        let mut body = Some(Bytes::from_static(b"hello world"));
+
+        let error = super::execute(&pipeline, &mut body, false, &mut ctx)
+            .await
+            .err()
+            .ok_or("overflow must cross the error boundary")?;
+
+        assert_eq!(error.etype(), &pingora_core::ErrorType::HTTPStatus(413));
+        assert_eq!(
+            ctx.pending_rejection.as_ref().map(|rejection| rejection.status),
+            Some(413),
+            "the final error handler must receive the rejection"
+        );
+        Ok(())
+    }
 
     #[tokio::test]
     async fn runtime_body_limit_paths_return_the_shared_rejection()

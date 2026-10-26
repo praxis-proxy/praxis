@@ -501,15 +501,20 @@ bytes seen, and rejection phase, and return a JSON 413
 response. A declared `Content-Length` above the effective
 input limit is rejected before reading the body.
 
-For an HTTP/1 early response that closes the connection
+For a local HTTP/1 rejection that closes the connection
 with an unread upload, the Pingora backend sends the
-response, shuts down the write side, and discards remaining
-body data. Cleanup has a 30-second deadline and a 128 MiB
-discard budget; downstream read timeouts still apply.
-The budget is checked between native body reads, so the
-last chunk can cross it. This also covers early responses
+response, records request completion, shuts down the write
+side, and discards remaining body data. Streaming body
+rejections release the upstream connection before sending
+the response. Access logs and request duration metrics
+exclude the subsequent cleanup time. Cleanup has a
+30-second deadline and a 128 MiB discard budget;
+downstream read timeouts still apply. The budget is checked
+between native body reads, so the last chunk can cross it.
+This also covers early responses
 such as 401, 403, and 429. HTTP/2 uses its native stream
 cleanup. Clients should stop uploading after a rejection.
+Overload admission failures still close promptly.
 
 Rejected uploads retain any listener and runtime connection
 permits until cleanup finishes. Account for this grace period

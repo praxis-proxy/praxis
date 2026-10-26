@@ -21,6 +21,7 @@ const LINGER_BYTES: usize = 134_217_728; // 128 MiB
 ///
 /// Uses Pingora's transport shutdown for plaintext and TLS. Reusable sessions,
 /// completed uploads, upgraded connections, and HTTP/2 streams are untouched.
+/// Called after completion logging, when Pingora has released the upstream.
 /// The byte budget can be exceeded by the final native body-read chunk.
 /// This stages the close as described by [RFC 9112 Section 9.6].
 ///
@@ -77,7 +78,7 @@ mod tests {
         };
 
         let ((), received) = tokio::join!(
-            send_rejection(&mut session, praxis_filter::Rejection::status(403)),
+            send_and_cleanup(&mut session, praxis_filter::Rejection::status(403)),
             receive
         );
         let (response, received_at) = received?;
@@ -110,7 +111,7 @@ mod tests {
 
         let (uploaded, ()) = tokio::join!(
             upload,
-            send_rejection(&mut session, praxis_filter::Rejection::status(429))
+            send_and_cleanup(&mut session, praxis_filter::Rejection::status(429))
         );
         uploaded?;
 
@@ -149,7 +150,7 @@ mod tests {
         let (mut session, _client) = session_for(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n").await?;
         session.set_keepalive(Some(60));
 
-        send_rejection(
+        send_and_cleanup(
             &mut session,
             praxis_filter::Rejection::status(204).preserving_keepalive(),
         )
@@ -172,7 +173,7 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_secs(1),
-            send_rejection(&mut session, praxis_filter::Rejection::status(401)),
+            send_and_cleanup(&mut session, praxis_filter::Rejection::status(401)),
         )
         .await?;
 
@@ -186,6 +187,12 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Run response delivery and subsequent transport cleanup as distinct phases.
+    async fn send_and_cleanup(session: &mut Session, rejection: praxis_filter::Rejection) {
+        send_rejection(session, rejection).await;
+        finish_rejection(session).await;
+    }
 
     /// Parse an HTTP/1 request with a live downstream peer.
     async fn session_for(

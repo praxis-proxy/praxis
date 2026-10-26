@@ -5,14 +5,15 @@
 
 use std::{
     io::{Read as _, Write as _},
-    net::TcpStream,
-    time::Duration,
+    net::{TcpListener, TcpStream},
+    sync::mpsc,
+    time::{Duration, Instant},
 };
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    PraxisProcess, TestCertificates, free_port, http_post, http_send, parse_body, parse_status, simple_proxy_yaml,
-    start_echo_backend, start_proxy, start_tls_proxy_no_wait, wait_for_tls,
+    PraxisProcess, TestCertificates, free_port, http_get, http_post, http_send, parse_body, parse_status,
+    simple_proxy_yaml, start_echo_backend, start_proxy, start_tls_proxy_no_wait, wait_for_tls,
 };
 
 // -----------------------------------------------------------------------------
@@ -101,6 +102,87 @@ fn streaming_size_limit_rejection_drains_an_unknown_length_upload() {
 }
 
 #[test]
+#[cfg_attr(coverage, ignore = "spawns the proxy binary")]
+fn stalled_streaming_rejection_releases_upstream_before_cleanup() {
+    let (backend, closed) = upstream_close_probe();
+    let port = free_port();
+    let admin = format!("127.0.0.1:{}", free_port());
+    let addr = format!("127.0.0.1:{port}");
+    let proxy = PraxisProcess::spawn_with_env(
+        &stalled_upload_config(port, backend, &admin),
+        &addr,
+        &[("RUST_LOG", "info")],
+    );
+    let mut client = TcpStream::connect(&addr).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    client.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+    client
+        .write_all(b"POST / HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\n\r\n1000000\r\n")
+        .unwrap();
+    client.write_all(&vec![b'a'; 11_534_336]).unwrap();
+    let mut response = String::new();
+    client.read_to_string(&mut response).unwrap();
+
+    assert_eq!(
+        parse_status(&response),
+        413,
+        "the stalled upload must receive 413 and EOF"
+    );
+    let received = closed
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the upstream must close while the downstream upload is still unfinished");
+    assert!(
+        received > 0,
+        "the request must have reached the upstream before rejection"
+    );
+    let logs = wait_for_completion_log(&proxy);
+    assert!(
+        !logs.contains("Fail to proxy"),
+        "an expected 413 must not also log an ERROR:\n{logs}"
+    );
+    assert_eq!(
+        logs.matches("request body exceeds configured limit").count(),
+        1,
+        "overflow must log once"
+    );
+    let duration = logs
+        .lines()
+        .find_map(|line| line.split_once("lifecycle 413 "))
+        .and_then(|(_, suffix)| suffix.split_whitespace().next())
+        .and_then(|value| value.parse::<f64>().ok())
+        .expect("access log duration");
+    assert!(
+        duration < 5_000.0,
+        "access duration must exclude lingering cleanup: {duration} ms"
+    );
+    let (status, metrics) = http_get(&admin, "/metrics", None);
+    assert_eq!(status, 200, "the metrics endpoint must remain available during cleanup");
+    assert!(
+        (request_metric(&metrics, "count") - 1.0).abs() < f64::EPSILON,
+        "completion must be counted before cleanup"
+    );
+    assert!(
+        request_metric(&metrics, "sum") < 5.0,
+        "request latency must exclude cleanup:\n{metrics}"
+    );
+
+    let mut overload = TcpStream::connect(&addr).unwrap();
+    overload.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    overload
+        .write_all(b"POST / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 16777216\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    overload
+        .read_to_string(&mut response)
+        .expect("overload rejection must close promptly without entering upload cleanup");
+    assert_eq!(
+        parse_status(&response),
+        503,
+        "cleanup must still hold the first request's permit"
+    );
+}
+
+#[test]
 fn early_auth_and_rate_limit_rejections_drain_unread_uploads() {
     let body = "a".repeat(16_777_216);
     for status in [401, 403, 429] {
@@ -161,6 +243,65 @@ fn tls_chunked_upload_receives_complete_413_after_write_side_shutdown() {
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Observe closure of the upstream's incomplete request without sending a response.
+fn upstream_close_probe() -> (u16, mpsc::Receiver<usize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sender, receiver) = mpsc::channel();
+    drop(std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut received = Vec::new();
+        let ended = match stream.read_to_end(&mut received) {
+            Ok(_) => true,
+            Err(error) => error.kind() == std::io::ErrorKind::ConnectionReset,
+        };
+        if ended {
+            let _sent = sender.send(received.len());
+        }
+    }));
+    (port, receiver)
+}
+
+/// Configure a streamed upload with access logging and an isolated metrics endpoint.
+fn stalled_upload_config(port: u16, backend: u16, admin: &str) -> String {
+    let yaml = simple_proxy_yaml(port, backend).replacen(
+        "      - filter: router",
+        "      - filter: access_log\n        template: 'lifecycle {status} {duration_ms}'\n      - filter: router",
+        1,
+    );
+    format!("runtime:\n  threads: 2\n  max_connections: 1\nadmin:\n  metrics_address: '{admin}'\n{yaml}")
+}
+
+/// Wait for the access record while the rejected client keeps its upload open.
+fn wait_for_completion_log(proxy: &PraxisProcess) -> String {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let logs = proxy.logs();
+        if logs.contains("lifecycle 413 ") {
+            return logs;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "completion must be logged before cleanup ends:\n{logs}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Read the rejected POST's duration series from its isolated process recorder.
+fn request_metric(metrics: &str, suffix: &str) -> f64 {
+    let prefix = format!("praxis_http_request_duration_seconds_{suffix}{{");
+    metrics
+        .lines()
+        .find(|line| {
+            line.starts_with(&prefix) && line.contains("method=\"POST\"") && line.contains("status_class=\"4xx\"")
+        })
+        .and_then(|line| line.split_whitespace().last())
+        .and_then(|value| value.parse().ok())
+        .expect("rejected request duration metric")
+}
 
 /// A body much larger than the configured cap with no declared total length.
 fn chunked_upload() -> String {

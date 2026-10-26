@@ -99,8 +99,9 @@ pub(crate) fn response_header_from_pingora(upstream: &pingora_http::ResponseHead
 pub(crate) async fn send_rejection_for(
     session: &mut Session,
     rejection: Rejection,
-    ctx: &crate::http::pingora::context::PingoraRequestCtx,
+    ctx: &mut crate::http::pingora::context::PingoraRequestCtx,
 ) {
+    ctx.rejection_cleanup_pending = true;
     // Path 1: gRPC filter already set grpc-status, just frame it.
     if rejection
         .headers
@@ -108,7 +109,6 @@ pub(crate) async fn send_rejection_for(
         .any(|(name, _value)| name.eq_ignore_ascii_case("grpc-status"))
     {
         crate::http::pingora::grpc_trailers::send_grpc_rejection(session, &rejection).await;
-        super::rejection_cleanup::finish_rejection(session).await;
         return;
     }
 
@@ -117,7 +117,6 @@ pub(crate) async fn send_rejection_for(
     if let Some(mapping) = mapping.filter(|_mapping| rejection.status >= 400) {
         let message = grpc_error_message(&rejection);
         crate::http::pingora::grpc_trailers::send_trailers_only(session, mapping, rejection.status, message).await;
-        super::rejection_cleanup::finish_rejection(session).await;
         return;
     }
     // Path 3: plain HTTP rejection.
@@ -148,6 +147,7 @@ pub(in crate::http) fn grpc_error_message(rejection: &Rejection) -> &str {
 ///
 /// Disables downstream keep-alive by default so the connection closes after
 /// a short-circuit response. Complete responses may explicitly preserve it.
+/// The logging hook performs bounded upload cleanup after recording completion.
 ///
 /// ```ignore
 /// // Requires an active `pingora_proxy::Session` from a live request.
@@ -178,9 +178,7 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
         && let Err(e) = session.write_response_body(Some(body), true).await
     {
         debug!(error = %e, "failed to write rejection response body");
-        return;
     }
-    super::rejection_cleanup::finish_rejection(session).await;
 }
 
 /// Build a Pingora [`ResponseHeader`] from a [`Rejection`], falling back

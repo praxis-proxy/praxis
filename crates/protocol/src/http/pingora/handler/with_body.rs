@@ -243,7 +243,7 @@ impl ProxyHttp for PingoraHttpHandler {
 
     async fn request_body_filter(
         &self,
-        session: &mut Session,
+        _session: &mut Session,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
         ctx: &mut Self::CTX,
@@ -266,7 +266,7 @@ impl ProxyHttp for PingoraHttpHandler {
         }
         let pipeline = ctx.pipeline(&self.pipeline);
         let span = ctx.request_span.clone();
-        request_body_filter::execute(&pipeline, session, body, end_of_stream, ctx)
+        request_body_filter::execute(&pipeline, body, end_of_stream, ctx)
             .instrument(span)
             .await
     }
@@ -419,6 +419,12 @@ impl ProxyHttp for PingoraHttpHandler {
         fail_to_proxy::execute(session, e, ctx).instrument(span).await
     }
 
+    fn suppress_error_log(&self, session: &Session, ctx: &Self::CTX, error: &pingora_core::Error) -> bool {
+        ctx.rejection_cleanup_pending
+            && fail_to_proxy::expected_filter_rejection(error, ctx)
+            && session.response_written().is_some_and(fail_to_proxy::is_final_response)
+    }
+
     async fn upstream_request_filter(
         &self,
         session: &mut Session,
@@ -543,6 +549,10 @@ impl ProxyHttp for PingoraHttpHandler {
         }
         .instrument(span)
         .await;
+        // Pingora has released the upstream; record completion before lingering.
+        if std::mem::take(&mut ctx.rejection_cleanup_pending) {
+            crate::http::pingora::rejection_cleanup::finish_rejection(session).await;
+        }
     }
 }
 

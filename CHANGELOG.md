@@ -104,7 +104,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Early HTTP/1 responses with unread uploads use Pingora's write-side
   shutdown and bounded cleanup before closing, including authentication
   and rate-limit rejections. Cleanup has a 30-second deadline and a 128 MiB
-  discard budget checked between body reads.
+  discard budget checked between body reads. Streaming rejections release
+  the upstream before responding; access logs and request duration metrics
+  are recorded before downstream cleanup. Expected client-error filter
+  rejections no longer produce a duplicate Pingora error log.
 - The FIPS runtime probe selects the Pingora backend when compiling its
   listener tests with default features disabled.
 - The Hyper backend rejects reserved client trailer names before forwarding

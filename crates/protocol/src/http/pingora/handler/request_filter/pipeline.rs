@@ -114,7 +114,7 @@ pub(in crate::http) async fn execute(
         return Ok(true);
     }
 
-    if let Some(handled) = super::validation::handle_max_forwards(session).await {
+    if let Some(handled) = super::validation::handle_max_forwards(session, ctx).await {
         if handled {
             snapshot_for_early_exit(session, ctx);
         }

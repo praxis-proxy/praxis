@@ -129,11 +129,11 @@ pub(super) async fn dispatch(
         Ok(PreparedBody::TooLarge { attempted, limit }) => {
             return Ok(reject_oversized(session, ctx, limit, attempted).await);
         },
-        Err(error) => return answered_or_err(ctx, error),
+        Err(error) => return preparation_failed(ctx, error),
     };
     let plan = match AttemptPlan::from_request(client, ctx, session, body) {
         Ok(plan) => plan,
-        Err(error) => return answered_or_err(ctx, error),
+        Err(error) => return preparation_failed(ctx, error),
     };
     let raced = tokio::select! {
         biased;
@@ -238,13 +238,10 @@ fn contains_header_ascii(session: &Session, header: http::HeaderName, needle: &[
     })
 }
 
-/// The body filter already wrote the client response.
-fn answered_or_err(ctx: &mut PingoraRequestCtx, error: Box<pingora_core::Error>) -> Result<bool> {
+/// Release preparation resources and let the final error handler respond.
+fn preparation_failed(ctx: &mut PingoraRequestCtx, error: Box<pingora_core::Error>) -> Result<bool> {
     release_selected(ctx);
     end_lease(ctx);
-    if matches!(error.etype(), pingora_core::ErrorType::HTTPStatus(_)) {
-        return Ok(true);
-    }
     Err(error)
 }
 
@@ -316,7 +313,7 @@ async fn read_downstream(
             .await
             .map_err(pingora_core::Error::into_down)?;
         let end_of_stream = piece.is_none();
-        super::super::request_body_filter::execute(pipeline, session, &mut piece, end_of_stream, ctx).await?;
+        super::super::request_body_filter::execute(pipeline, &mut piece, end_of_stream, ctx).await?;
         let Some(chunk) = piece else {
             if end_of_stream {
                 return Ok(PreparedBody::Ready(buf.freeze()));
@@ -870,6 +867,26 @@ fn client_status(status: Option<u16>) -> u16 {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_rejection_reaches_the_final_error_handler() {
+        let mut ctx = PingoraRequestCtx {
+            pending_rejection: Some(praxis_filter::Rejection::status(413)),
+            ..PingoraRequestCtx::default()
+        };
+        let error = preparation_failed(
+            &mut ctx,
+            pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(413)),
+        )
+        .expect_err("a pending rejection must not be mistaken for a delivered response");
+
+        assert_eq!(error.etype(), &pingora_core::ErrorType::HTTPStatus(413));
+        assert_eq!(
+            ctx.pending_rejection.as_ref().map(|rejection| rejection.status),
+            Some(413)
+        );
+        drop(ctx);
+    }
 
     #[test]
     fn client_status_keeps_final_http_statuses() {
