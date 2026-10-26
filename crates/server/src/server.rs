@@ -48,7 +48,7 @@ use crate::{
     pipelines::resolve_pipelines_with_composition,
     startup_checks::{
         enforce_root_check, fips_blocker, warn_insecure_key_permissions, warn_insecure_log_file_permissions,
-        warn_insecure_options, warn_insecure_sink_file_permissions,
+        warn_insecure_options, warn_insecure_sink_file_permissions, warn_overload_gauges_without_exporter,
     },
 };
 
@@ -170,6 +170,7 @@ fn run_startup_security_checks(config: &Config) -> Result<(), StartupError> {
     warn_insecure_key_permissions(config);
     warn_insecure_log_file_permissions(config);
     warn_insecure_sink_file_permissions(config);
+    warn_overload_gauges_without_exporter(config);
     Ok(())
 }
 
@@ -858,7 +859,8 @@ fn spawn_housekeeping_tasks(runtime: &RuntimeConfig, client: &SubRequestClient, 
 /// The periodic loops `runtime` asks for: the descriptor sampler when
 /// `track_fds` (the descriptor monitor is initialized), the memory pressure
 /// sampler when `max_memory_bytes` is set, the circuit breaker eviction when
-/// `subrequest_circuit_breaker` is.
+/// `subrequest_circuit_breaker` is, and overload pressure gauges when
+/// `overload_gauges` is set.
 fn housekeeping_loops(runtime: &RuntimeConfig, client: &SubRequestClient, track_fds: bool) -> Vec<HousekeepingLoop> {
     let mut loops = Vec::new();
     if track_fds {
@@ -869,6 +871,9 @@ fn housekeeping_loops(runtime: &RuntimeConfig, client: &SubRequestClient, track_
     }
     if runtime.subrequest_circuit_breaker.is_some() {
         loops.push(circuit_eviction_loop(client.clone()));
+    }
+    if runtime.overload_gauges {
+        loops.push(overload_gauge_loop(runtime.max_memory_bytes));
     }
     loops
 }
@@ -885,6 +890,75 @@ fn fd_sampler_loop() -> HousekeepingLoop {
             tokio::time::sleep(praxis_core::fd::sample_interval()).await;
         }
     })
+}
+
+/// Sample overload pressure and publish it. Does not shed load.
+///
+/// Logs state transitions when a resource crosses between idle, scaling,
+/// and saturated states. Transitions are logged at `info` for scaling
+/// and `warn` for saturation so operators without Prometheus still see
+/// pressure changes.
+fn overload_gauge_loop(heap_max_bytes: Option<usize>) -> HousekeepingLoop {
+    Box::pin(async move {
+        let mut monitor = praxis_core::overload::Monitor::default();
+        let mut tracker = praxis_core::overload::TransitionTracker::default();
+        let mut interval = tokio::time::interval(praxis_core::overload::SAMPLE_INTERVAL);
+        interval.tick().await;
+        info!("overload pressure gauges enabled");
+
+        loop {
+            interval.tick().await;
+            let pressures = monitor.observe(praxis_core::overload::Inputs {
+                heap_max_bytes: heap_max_bytes.and_then(|bytes| u64::try_from(bytes).ok()),
+                connections: praxis_protocol::connections::global_usage()
+                    .and_then(|(used, limit)| Some((u64::try_from(used).ok()?, u64::try_from(limit).ok()?))),
+                file_descriptors: praxis_core::fd::usage().map(|usage| (usage.open, usage.limit)),
+            });
+            for (resource, pressure) in pressures.iter() {
+                praxis_protocol::http::metrics::set_overload_pressure(resource, pressure);
+            }
+            for transition in tracker.update(pressures) {
+                log_pressure_transition(&transition);
+            }
+        }
+    })
+}
+
+/// Emit a log line for a pressure state transition.
+fn log_pressure_transition(tr: &praxis_core::overload::Transition) {
+    use praxis_core::overload::PressureState;
+    match tr.to {
+        PressureState::Saturated => {
+            warn!(
+                resource = tr.resource,
+                pressure = %PressureDisplay(tr.pressure),
+                "overload pressure saturated"
+            );
+        },
+        PressureState::Scaling => {
+            info!(
+                resource = tr.resource,
+                pressure = %PressureDisplay(tr.pressure),
+                "overload pressure scaling"
+            );
+        },
+        PressureState::Idle => {
+            info!(
+                resource = tr.resource,
+                pressure = %PressureDisplay(tr.pressure),
+                "overload pressure cleared"
+            );
+        },
+    }
+}
+
+/// Format a pressure value to two decimal places without allocating.
+struct PressureDisplay(f64);
+
+impl std::fmt::Display for PressureDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:.2}", self.0)
+    }
 }
 
 /// Keep the memory pressure sample current, so the per-request check reads
@@ -1322,6 +1396,15 @@ filter_chains:
             housekeeping_loops(&fully_limited_runtime(), &client, true).len(),
             3,
             "descriptors, memory, and a circuit breaker each need their own loop"
+        );
+        let gauges = RuntimeConfig {
+            overload_gauges: true,
+            ..RuntimeConfig::default()
+        };
+        assert_eq!(
+            housekeeping_loops(&gauges, &client, false).len(),
+            1,
+            "overload gauges are their own loop and do not shed load"
         );
     }
 
