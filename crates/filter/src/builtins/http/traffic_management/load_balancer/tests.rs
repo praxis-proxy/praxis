@@ -1718,7 +1718,11 @@ async fn max_connections_takes_no_endpoint_slot_when_shedding() {
 
     let mut second = crate::test_utils::make_filter_context(&req);
     second.cluster = Some(Arc::from("web"));
-    drop(lb.on_request(&mut second).await.unwrap());
+    let action = lb.on_request(&mut second).await.unwrap();
+    let FilterAction::Reject(rejection) = action else {
+        panic!("the second request must be shed by the ceiling, got {action:?}");
+    };
+    assert_eq!(rejection.status, 503, "shedding should answer 503");
 
     let entry = lb.clusters.get("web").unwrap();
     let SharedStrategy::LeastConnections(lc) = entry.strategy.inner() else {

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// Copyright (c) 2024 Praxis Contributors
+// Copyright (c) 2026 Praxis Contributors
 
 //! Tests for the per-cluster `max_connections` concurrency ceiling.
 //!
@@ -7,21 +7,79 @@
 //! keep the listener uncapped so every rejection they observe can only come
 //! from the cluster's own ceiling.
 
-use std::{io::Write as _, net::TcpStream, time::Duration};
+use std::{
+    io::{Read as _, Write as _},
+    net::TcpStream,
+    sync::mpsc::{self, Receiver},
+    thread,
+    time::Duration,
+};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_header, parse_status, start_backend_with_shutdown, start_proxy,
-    start_slow_backend,
+    bind_unique_port, free_port, http_get, http_send, parse_header, parse_status, start_backend_with_shutdown,
+    start_proxy,
 };
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Open `count` connections to `addr` and write a request on each without
-/// reading the response, leaving them in flight at the upstream.
-fn hold_in_flight(addr: &str, path: &str, count: usize) -> Vec<TcpStream> {
+const ARRIVAL_TIMEOUT: Duration = Duration::from_secs(10);
+const HOLD_MARKER: &str = "hold";
+
+// fake server
+struct HoldingBackend {
+    arrivals: Receiver<()>,
+    port: u16,
+}
+
+// booting fake server
+fn start_holding_backend() -> HoldingBackend {
+    let (listener, port) = bind_unique_port();
+    let (announce, arrivals) = mpsc::channel();
+    thread::spawn(move || {
+        for incoming in listener.incoming() {
+            let Ok(mut stream) = incoming else { return };
+            let announce = announce.clone();
+            thread::spawn(move || serve_held_connection(&mut stream, &announce));
+        }
+    });
+    HoldingBackend { arrivals, port }
+}
+
+/// Answer an unmarked request, or announce and hold a marked one.
+fn serve_held_connection(stream: &mut TcpStream, announce: &mpsc::Sender<()>) {
+    let mut buffer = [0_u8; 4096];
+    let read = stream.read(&mut buffer).unwrap_or(0);
+    if read == 0 {
+        return;
+    }
+    let head = String::from_utf8_lossy(buffer.get(..read).unwrap_or_default()).into_owned();
+    let Some(request_line) = head.lines().next() else {
+        return;
+    };
+    if !request_line.contains(HOLD_MARKER) {
+        drop(stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"));
+        return;
+    }
+    if announce.send(()).is_err() {
+        return;
+    }
+    while stream.read(&mut buffer).unwrap_or(0) > 0 {}
+}
+
+/// Open `count` connections to `addr`, write a request on each, and return
+/// once every one has reached `backend`.
+///
+/// `path` must contain [`HOLD_MARKER`] so the backend holds it instead of
+/// answering. The returned sockets must outlive the assertion that follows:
+/// dropping them lets the proxy close the upstream legs and release the slots.
+fn hold_in_flight(addr: &str, path: &str, count: usize, backend: &HoldingBackend) -> Vec<TcpStream> {
+    assert!(
+        path.contains(HOLD_MARKER),
+        "hold_in_flight needs a path the backend will hold, got {path:?}"
+    );
     let mut held = Vec::with_capacity(count);
     for _ in 0..count {
         let mut stream = TcpStream::connect(addr).expect("TCP connect");
@@ -33,8 +91,12 @@ fn hold_in_flight(addr: &str, path: &str, count: usize) -> Vec<TcpStream> {
             .expect("write request");
         held.push(stream);
     }
-    // Let the proxy admit each held request before the probe that follows.
-    std::thread::sleep(Duration::from_millis(200));
+    for arrived in 0..count {
+        // expects announce.send(()) from request
+        backend.arrivals.recv_timeout(ARRIVAL_TIMEOUT).unwrap_or_else(|err| {
+            panic!("only {arrived} of {count} held requests reached the backend: {err}");
+        });
+    }
     held
 }
 
@@ -72,12 +134,12 @@ insecure_options:
 
 #[test]
 fn cluster_max_connections_rejects_excess_with_503() {
-    let slow_port = start_slow_backend("slow", Duration::from_secs(1));
+    let backend = start_holding_backend();
     let proxy_port = free_port();
-    let config = Config::from_yaml(&single_cluster_yaml(proxy_port, slow_port, 2)).unwrap();
+    let config = Config::from_yaml(&single_cluster_yaml(proxy_port, backend.port, 2)).unwrap();
     let proxy = start_proxy(&config);
 
-    let held = hold_in_flight(proxy.addr(), "/", 2);
+    let held = hold_in_flight(proxy.addr(), "/hold", 2, &backend);
 
     let raw = http_send(
         proxy.addr(),
@@ -113,7 +175,8 @@ fn cluster_max_connections_allows_after_release() {
 
 #[test]
 fn cluster_max_connections_is_per_cluster_not_per_listener() {
-    let slow_port = start_slow_backend("slow", Duration::from_secs(1));
+    let slow_backend = start_holding_backend();
+    let slow_port = slow_backend.port;
     let fast_guard = start_backend_with_shutdown("fast");
     let fast_port = fast_guard.port();
     let proxy_port = free_port();
@@ -149,7 +212,7 @@ insecure_options:
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let held = hold_in_flight(proxy.addr(), "/slow/one", 1);
+    let held = hold_in_flight(proxy.addr(), "/slow/hold", 1, &slow_backend);
 
     let raw = http_send(
         proxy.addr(),
@@ -197,20 +260,20 @@ fn cluster_max_connections_example_config_parses() {
 
 #[test]
 fn cluster_max_connections_example_functional() {
-    let slow_port = start_slow_backend("slow", Duration::from_secs(1));
+    let slow_backend = start_holding_backend();
     let fast_guard = start_backend_with_shutdown("fast");
     let proxy_port = free_port();
 
     let config = super::load_example_config(
         "traffic-management/cluster-max-connections.yaml",
         proxy_port,
-        std::collections::HashMap::from([("127.0.0.1:9000", slow_port), ("127.0.0.1:9001", fast_guard.port())]),
+        std::collections::HashMap::from([
+            ("127.0.0.1:9000", slow_backend.port),
+            ("127.0.0.1:9001", fast_guard.port()),
+        ]),
     );
     let proxy = start_proxy(&config);
-
-    // The example caps slow-model at 2; fill it, then prove the third is shed
-    // while the uncapped-in-practice fast-api cluster still answers.
-    let held = hold_in_flight(proxy.addr(), "/slow/one", 2);
+    let held = hold_in_flight(proxy.addr(), "/slow/hold", 2, &slow_backend);
 
     let raw = http_send(
         proxy.addr(),
