@@ -10,9 +10,12 @@
 # flowing: the ceilings are independent, which is what separates this from the
 # listener-level cap in operations/max-connections.yaml.
 #
-# A slot is held from endpoint selection until the response completes, so
-# retries within one request occupy the single slot that request admitted
-# rather than one slot per attempt.
+# A slot is held from endpoint selection until the response headers arrive,
+# and released before the body is streamed. A long streaming or SSE body
+# therefore stops occupying the ceiling once its headers are through, so this
+# bounds concurrent upstream round-trips rather than concurrent open bodies.
+# Retries within one request share the single slot that request admitted
+# rather than taking one slot per attempt.
 #
 # A request pinned by session affinity bypasses endpoint selection, and with it
 # this ceiling: it is neither shed nor counted. Pair max_connections with a
