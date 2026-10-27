@@ -30,6 +30,7 @@ fn build_pipeline(config: &Config) -> Result<FilterPipeline, praxis_filter::Filt
         &registry,
         &chains,
         &praxis_core::config::InsecureOptions::default(),
+        &config.clusters,
     )
 }
 

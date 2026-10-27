@@ -114,6 +114,7 @@ fn ordinary_router_in_terminal_branch_does_not_enable_binding() {
         &registry,
         &chains,
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
@@ -345,6 +346,7 @@ fn deny_branch_before_bound_dispatch_is_accepted_from_yaml() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -407,6 +409,7 @@ fn branch_trace_context_is_checked_by_where_its_branch_runs() {
             &registry,
             &HashMap::new(),
             &praxis_core::config::InsecureOptions::default(),
+            &[],
         )
         .unwrap();
 
@@ -467,6 +470,7 @@ fn binding_enabled_router_in_branch_is_rejected_from_yaml() {
         &registry,
         &chains,
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     assert!(
@@ -2102,6 +2106,7 @@ fn build_with_chains_rejects_conditions_on_a_tcp_filter() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .err()
     .expect("the production build path must reject conditions on a TCP filter too");
@@ -2121,6 +2126,7 @@ fn build_with_chains_rejects_response_conditions_on_a_tcp_filter() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .err()
     .expect("a TCP filter has no response phase, so response_conditions alone must not build");
@@ -2140,6 +2146,7 @@ fn build_with_chains_rejects_branch_chains_on_a_tcp_filter() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .err()
     .expect("a TCP filter never branches, so a config that sets branch_chains must not build");
@@ -2163,6 +2170,7 @@ fn errors_conditional_security_filter_in_branch_chain() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
@@ -2187,6 +2195,7 @@ fn errors_open_security_filter_in_branch_chain() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
@@ -2208,6 +2217,7 @@ fn errors_open_security_filter_in_nested_branch_chain() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
@@ -2232,6 +2242,7 @@ fn allow_open_security_filter_in_branch_chain_with_insecure_flag() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let errors = pipeline.ordering_errors(&entries, true, &SkipPipelineChecks::default());
@@ -2254,6 +2265,7 @@ fn skip_conditional_security_suppresses_branch_chain_error() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let skip = SkipPipelineChecks {
@@ -2280,6 +2292,7 @@ fn warns_but_does_not_error_on_security_filter_in_conditional_branch_chain() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
 
@@ -2311,6 +2324,7 @@ fn no_conditional_branch_advisory_for_unconditional_branch_chain() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let warnings = pipeline.ordering_warnings();
@@ -2363,6 +2377,7 @@ fn build_with_chains_stamps_is_security_on_branch_filter() {
         &registry,
         &chains,
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -7199,6 +7214,7 @@ async fn reenter_over_the_real_router_republishes_or_fails_closed() {
             &FilterRegistry::with_builtins(),
             &HashMap::new(),
             &praxis_core::config::InsecureOptions::default(),
+            &[],
         )
         .unwrap();
         let req = crate::test_utils::make_request(Method::GET, "/x");
@@ -7583,6 +7599,7 @@ mod bound_upstream_body_barrier {
             &registry,
             &HashMap::new(),
             &praxis_core::config::InsecureOptions::default(),
+            &[],
         )
         .unwrap();
 

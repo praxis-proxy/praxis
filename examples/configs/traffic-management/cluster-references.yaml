@@ -1,0 +1,48 @@
+# Cluster References
+#
+# An inline load-balancer cluster that shares its name with a top-level
+# declaration may omit its endpoints: validation fills them in from the
+# declaration, so the routed addresses and the health-checked addresses
+# cannot drift apart. The inline cluster below carries only its name.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/cluster-references.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+admin:
+  metrics_address: "127.0.0.1:9902"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
+  allow_private_health_checks: true  # dev only; allows loopback probes
+
+clusters:
+  - name: backend
+    endpoints:
+      - "127.0.0.1:3001"
+      - "127.0.0.1:3002"
+    health_check:
+      type: http
+      path: "/healthz"
+      expected_status: 200
+      interval_ms: 2000
+      timeout_ms: 1000
+      healthy_threshold: 1
+      unhealthy_threshold: 1
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend

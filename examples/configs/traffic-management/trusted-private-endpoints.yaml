@@ -33,9 +33,3 @@ filter_chains:
               - "backend.models.svc.cluster.local.:3000"
             trusted_private_endpoints:
               - "backend.models.svc.cluster.local"
-            health_check:
-              type: tcp
-              interval_ms: 10000
-              timeout_ms: 3000
-              healthy_threshold: 1
-              unhealthy_threshold: 2

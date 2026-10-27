@@ -180,8 +180,14 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
         .for_listener(listener)
         .unwrap_or_else(|err| panic!("{err}"));
 
-    let mut pipeline =
-        FilterPipeline::build_with_chains(&mut entries, registry, &chains, &config.insecure_options).unwrap();
+    let mut pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        registry,
+        &chains,
+        &config.insecure_options,
+        &config.clusters,
+    )
+    .unwrap();
     configure_test_pipeline(&mut pipeline, config);
     Arc::new(pipeline)
 }
