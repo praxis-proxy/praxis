@@ -308,7 +308,10 @@ pub struct Cluster {
     ///
     /// When set, rejects requests exceeding the ceiling with `503` and
     /// `Retry-After: 1`, counted under `praxis_cluster_overload_rejects_total`.
-    /// Slots are held until the response completes, including retries.
+    /// A slot is held from endpoint selection until the response headers
+    /// arrive, and released before the body streams, so a long streaming
+    /// body stops occupying one at its headers. Retries within one request
+    /// share the slot that request admitted.
     /// Session-affinity requests bypass this limit; use `max_connections`
     /// with a listener or runtime cap for a hard bound.
     /// HTTP clusters only. TCP clusters reject this field at startup; cap
