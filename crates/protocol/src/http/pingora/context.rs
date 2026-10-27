@@ -333,7 +333,7 @@ pub struct PingoraRequestCtx {
     /// configured headers and body instead of a bare status envelope.
     pub pending_rejection: Option<praxis_filter::Rejection>,
 
-    /// A local rejection needs transport cleanup after completion is recorded.
+    /// A local response needs transport cleanup after completion is recorded.
     #[cfg(feature = "pingora")]
     pub(crate) rejection_cleanup_pending: bool,
 

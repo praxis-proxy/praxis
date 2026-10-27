@@ -513,6 +513,7 @@ async fn send_terminal_to_session(
         debug!(error = %e, "failed to write terminal response header");
         return;
     }
+    ctx.rejection_cleanup_pending = true;
     if send_body
         && let Some(b) = body
         && let Err(e) = session.write_response_body(Some(b), true).await

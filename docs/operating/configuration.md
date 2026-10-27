@@ -494,14 +494,16 @@ size. These apply across all body modes (Stream,
 StreamBuffer). When a filter also declares a per-filter
 `max_bytes`, the smaller of the two limits is enforced.
 Requests exceeding the limit receive 413 (Payload Too
-Large).
+Large), subject to the gRPC mapping below.
 
 Request-body limit failures log a warning with the limit,
-bytes seen, and rejection phase, and return a JSON 413
-response. A declared `Content-Length` above the effective
-input limit is rejected before reading the body.
+bytes seen, and rejection phase. Body-phase failures return
+a JSON 413 response, or a gRPC Trailers-Only response when
+the `grpc_status` filter has armed the request. A declared
+`Content-Length` above the effective input limit is rejected
+before reading the body and returns JSON 413.
 
-For a local HTTP/1 rejection that closes the connection
+For a local HTTP/1 response that closes the connection
 with an unread upload, the Pingora backend sends the
 response, records request completion, shuts down the write
 side, and discards remaining body data. Streaming body

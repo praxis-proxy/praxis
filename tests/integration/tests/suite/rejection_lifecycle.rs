@@ -11,9 +11,11 @@ use std::{
 };
 
 use praxis_core::config::Config;
+use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext, TerminalResponse};
 use praxis_test_utils::{
     PraxisProcess, TestCertificates, free_port, http_get, http_post, http_send, parse_body, parse_status,
-    simple_proxy_yaml, start_echo_backend, start_proxy, start_tls_proxy_no_wait, wait_for_tls,
+    registry_with, simple_proxy_yaml, start_echo_backend, start_proxy, start_proxy_with_registry,
+    start_tls_proxy_no_wait, wait_for_tls,
 };
 
 // -----------------------------------------------------------------------------
@@ -183,6 +185,58 @@ fn stalled_streaming_rejection_releases_upstream_before_cleanup() {
 }
 
 #[test]
+fn successful_terminal_response_cleans_up_an_unfinished_upload() {
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let yaml = format!(
+        "runtime:\n  threads: 2\n\
+         listeners:\n  - name: web\n    address: '{addr}'\n    max_connections: 1\n    filter_chains: [main]\n\
+         filter_chains:\n  - name: main\n    filters:\n      - filter: test_terminal\n"
+    );
+    let registry = registry_with("test_terminal", || Box::new(SuccessfulTerminalFilter));
+    let proxy = start_proxy_with_registry(&Config::from_yaml(&yaml).unwrap(), &registry);
+    let mut client = TcpStream::connect(&addr).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    client.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+    client
+        .write_all(b"POST / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 8\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    client
+        .read_to_string(&mut response)
+        .expect("the complete terminal response and EOF must arrive before the upload finishes");
+    assert_eq!(
+        parse_status(&response),
+        200,
+        "the local response must retain its status"
+    );
+    assert_eq!(parse_body(&response), "ok", "the terminal body must be complete");
+    assert_eq!(
+        http_get(&addr, "/", None).0,
+        503,
+        "the unread upload must still hold its connection permit during cleanup"
+    );
+
+    client
+        .write_all(b"finished")
+        .expect("the response half-close must leave upload reads usable");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let (status, _) = http_get(&addr, "/", None);
+        if status == 200 {
+            break;
+        }
+        assert_eq!(status, 503, "only admission should reject the probe");
+        assert!(
+            Instant::now() < deadline,
+            "finishing the upload must promptly release its connection permit"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(proxy);
+}
+
+#[test]
 fn early_auth_and_rate_limit_rejections_drain_unread_uploads() {
     let body = "a".repeat(16_777_216);
     for status in [401, 403, 429] {
@@ -243,6 +297,22 @@ fn tls_chunked_upload_receives_complete_413_after_write_side_shutdown() {
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Return a real terminal response instead of the rejection used by static_response.
+struct SuccessfulTerminalFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for SuccessfulTerminalFilter {
+    fn name(&self) -> &'static str {
+        "test_terminal"
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::TerminalResponse(Box::new(
+            TerminalResponse::new(200).with_body("ok"),
+        )))
+    }
+}
 
 /// Observe closure of the upstream's incomplete request without sending a response.
 fn upstream_close_probe() -> (u16, mpsc::Receiver<usize>) {
