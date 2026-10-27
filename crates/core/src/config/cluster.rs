@@ -306,8 +306,13 @@ pub struct Cluster {
 
     /// Maximum concurrent in-flight requests to this cluster.
     ///
-    /// When set, excess requests receive 503. Prevents a single
-    /// slow upstream from consuming all available capacity.
+    /// When set, rejects requests exceeding the ceiling with `503` and
+    /// `Retry-After: 1`, counted under `praxis_cluster_overload_rejects_total`.
+    /// Slots are held until the response completes, including retries.
+    /// Session-affinity requests bypass this limit; use `max_connections`
+    /// with a listener or runtime cap for a hard bound.
+    /// HTTP clusters only. TCP clusters reject this field at startup; cap
+    /// TCP concurrency on the listener instead.
     ///
     /// ```
     /// # use praxis_core::config::Cluster;
