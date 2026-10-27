@@ -45,63 +45,112 @@ pub(super) struct SubrequestRuntimeResources<'a> {
     pub(super) time_source: &'a dyn praxis_core::time::TimeSource,
 }
 
-/// Build a [`HttpFilterContext`] for running a sub-request's pipeline,
+/// A nested [`HttpFilterContext`] that returns its cluster admission slot when dropped.
+pub(super) struct ScopedSubrequestContext<'a> {
+    /// The guarded context. Private, and never moved out of, so the [`Drop`]
+    /// impl below stays legal; reached through [`Deref`](std::ops::Deref).
+    ctx: HttpFilterContext<'a>,
+}
+
+#[cfg(test)]
+impl<'a> ScopedSubrequestContext<'a> {
+    /// Wrap an already-built context so a test can exercise the release on
+    /// drop without standing up a whole sub-request.
+    pub(super) fn for_test(ctx: HttpFilterContext<'a>) -> Self {
+        Self { ctx }
+    }
+}
+
+impl<'a> std::ops::Deref for ScopedSubrequestContext<'a> {
+    type Target = HttpFilterContext<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
+}
+
+impl std::ops::DerefMut for ScopedSubrequestContext<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.ctx
+    }
+}
+
+impl Drop for ScopedSubrequestContext<'_> {
+    fn drop(&mut self) {
+        if self.ctx.cluster_retry_state_released {
+            return;
+        }
+        let Some(state) = self.ctx.cluster_retry_state.take() else {
+            return;
+        };
+        state.leave();
+        self.ctx.cluster_retry_state_released = true;
+        if let (Some(reselector), Some(upstream)) = (&self.ctx.endpoint_reselector, &self.ctx.upstream) {
+            reselector.release(&upstream.address);
+        }
+        tracing::debug!("returned a sub-request's cluster admission slot without a response phase");
+    }
+}
+
+/// Build a [`ScopedSubrequestContext`] for running a sub-request's pipeline,
 /// inheriting server-injected resources from the containing request.
 #[expect(clippy::too_many_lines, reason = "all fields must be initialized")]
 pub(super) fn build_sub_filter_context<'a>(
     pipeline: &'a FilterPipeline,
     request: &'a crate::Request,
     runtime: SubrequestRuntimeResources<'a>,
-) -> HttpFilterContext<'a> {
-    HttpFilterContext {
-        grpc_completion: None,
-        buffered_request_body: None,
-        body_done_indices: Vec::new(),
-        branch_iterations: HashMap::new(),
-        client_addr: runtime.client_addr,
-        cluster: None,
-        current_filter_id: None,
-        downstream_tls: runtime.downstream_tls,
-        extensions: crate::extensions::RequestExtensions::default(),
-        executed_branch_filters: Vec::new(),
-        executed_filter_indices: Vec::new(),
-        extra_request_headers: Vec::new(),
-        filter_metadata: HashMap::new(),
-        filter_results: HashMap::new(),
-        filter_state: HashMap::new(),
-        health_registry: runtime.health_registry,
-        id_generator: runtime.id_generator,
-        kv_stores: runtime.kv_stores,
-        session_stores: runtime.session_stores,
-        metrics_route: None,
-        peer_identity: runtime.peer_identity.cloned(),
-        prior_pre_read_mutations: Vec::new(),
-        pre_read_mutations: Vec::new(),
-        request,
-        request_body_bytes: 0,
-        request_body_mode: pipeline.body_capabilities().request_body_mode,
-        request_headers_to_remove: Vec::new(),
-        request_headers_to_set: Vec::new(),
-        request_start: runtime.request_start,
-        response_body_bytes: 0,
-        response_body_mode: pipeline.body_capabilities().response_body_mode,
-        response_header: None,
-        response_headers_modified: false,
-        upstream_reached: false,
-        rewritten_path: None,
-        selected_endpoint_index: None,
-        attempted_endpoints: Vec::new(),
-        retry_policy: None,
-        route_retry_policy: None,
-        hedge_policy: None,
-        cluster_retry_state: None,
-        cluster_retry_state_released: false,
-        endpoint_reselector: None,
-        pinned_endpoint_address: None,
-        structured_metadata: HashMap::new(),
-        subrequest_client: runtime.subrequest_client,
-        subrequest_response_mode: SubRequestResponseMode::Buffered,
-        time_source: runtime.time_source,
-        upstream: None,
+) -> ScopedSubrequestContext<'a> {
+    ScopedSubrequestContext {
+        ctx: HttpFilterContext {
+            grpc_completion: None,
+            buffered_request_body: None,
+            body_done_indices: Vec::new(),
+            branch_iterations: HashMap::new(),
+            client_addr: runtime.client_addr,
+            cluster: None,
+            current_filter_id: None,
+            downstream_tls: runtime.downstream_tls,
+            extensions: crate::extensions::RequestExtensions::default(),
+            executed_branch_filters: Vec::new(),
+            executed_filter_indices: Vec::new(),
+            extra_request_headers: Vec::new(),
+            filter_metadata: HashMap::new(),
+            filter_results: HashMap::new(),
+            filter_state: HashMap::new(),
+            health_registry: runtime.health_registry,
+            id_generator: runtime.id_generator,
+            kv_stores: runtime.kv_stores,
+            session_stores: runtime.session_stores,
+            metrics_route: None,
+            peer_identity: runtime.peer_identity.cloned(),
+            prior_pre_read_mutations: Vec::new(),
+            pre_read_mutations: Vec::new(),
+            request,
+            request_body_bytes: 0,
+            request_body_mode: pipeline.body_capabilities().request_body_mode,
+            request_headers_to_remove: Vec::new(),
+            request_headers_to_set: Vec::new(),
+            request_start: runtime.request_start,
+            response_body_bytes: 0,
+            response_body_mode: pipeline.body_capabilities().response_body_mode,
+            response_header: None,
+            response_headers_modified: false,
+            upstream_reached: false,
+            rewritten_path: None,
+            selected_endpoint_index: None,
+            attempted_endpoints: Vec::new(),
+            retry_policy: None,
+            route_retry_policy: None,
+            hedge_policy: None,
+            cluster_retry_state: None,
+            cluster_retry_state_released: false,
+            endpoint_reselector: None,
+            pinned_endpoint_address: None,
+            structured_metadata: HashMap::new(),
+            subrequest_client: runtime.subrequest_client,
+            subrequest_response_mode: SubRequestResponseMode::Buffered,
+            time_source: runtime.time_source,
+            upstream: None,
+        },
     }
 }

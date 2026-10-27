@@ -242,6 +242,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   seeing 503s once a cluster saturates; raise or remove the value to restore
   the previous behaviour. A request pinned by session affinity bypasses
   endpoint selection and so is neither shed nor counted.
+- A sub-request running a nested pipeline (an `iterative_request_router` step
+  or a callout chain) now returns its cluster admission slot on every exit
+  path. Previously a filter ordered after the step's `load_balancer` that
+  rejected, errored or timed out ended the sub-request before its response
+  phase, leaking the slot permanently; after `max_connections` such
+  sub-requests the cluster answered 503 to everything until the config was
+  reloaded (CWE-772). The nested context now releases the slot, and the
+  endpoint's in-flight count with it, when it is dropped.
+- A terminal response produced after the load balancer ran no longer releases
+  the cluster's in-flight slot twice. The response pipeline runs against a
+  cloned context whose release flag was not carried back, so the `logging`
+  hook released a second time and took another request's slot, letting the
+  ceiling drift loose.
 
 ### Fixed
 

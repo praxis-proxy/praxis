@@ -383,6 +383,13 @@ selection, and with it this ceiling: it is neither shed nor
 counted. Pair `max_connections` with one of those caps when
 a hard bound matters.
 
+A sub-request running a nested pipeline — an
+`iterative_request_router` step, or a callout chain — takes a
+slot from the cluster its own `load_balancer` selects, and
+returns it however the step ends: a normal response, a
+rejection by a later filter, an error, the step budget
+expiring, or the client disconnecting mid-step.
+
 ### Upstream HTTP Version
 
 Praxis speaks HTTP/1.1 to upstreams by default. A cluster
