@@ -784,9 +784,12 @@ does not extend this window either: streams still open
 when the grace period ends are closed on every pod
 deletion, rolling update, and node drain.
 
-The experimental hyper backend lets in-flight
-connections finish for up to the full
-`shutdown_timeout_secs`; see
+On the experimental hyper backend, HTTP listeners let
+in-flight connections finish for up to
+`shutdown_timeout_secs` minus a 1 s reserve, so
+`shutdown_timeout_secs: 1` leaves them no drain time.
+TCP connections there close as soon as the signal
+arrives. See
 [Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
 
 Once runtime shutdown completes, Praxis flushes queued
