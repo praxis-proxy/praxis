@@ -65,21 +65,6 @@ pub fn try_acquire_global() -> (bool, Option<OwnedSemaphorePermit>) {
     }
 }
 
-#[cfg(test)]
-#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn usage_counts_a_held_permit() {
-        init_global_limit(4);
-        let (_exceeded, permit) = try_acquire_global();
-        let (in_use, max) = global_usage().expect("a cap was installed");
-        assert_eq!(max, 4, "the cap is the value passed to init");
-        assert_eq!(in_use, 1, "one held permit is one connection in use");
-        drop(permit);
-        let (in_use, _) = global_usage().expect("a cap was installed");
-        assert_eq!(in_use, 0, "dropping the permit returns the connection");
-    }
-}
+// Unit tests for `global_usage` are in the `global_connection_limit`
+// integration test. Calling `init_global_limit` in a unit test permanently
+// caps the protocol unit-test process and can break parallel Hyper tests.

@@ -326,7 +326,7 @@ fn read_cgroup_ratio() -> Option<f64> {
     let dir = cgroup_dir()?;
     let current = read_u64(dir.join("memory.current"))?;
     let max = parse_memory_max(&read_to_string(dir.join("memory.max"))?)?;
-    let inactive = parse_inactive_file(&read_to_string(dir.join("memory.stat")).unwrap_or_default());
+    let inactive = parse_inactive_file(&read_to_string(dir.join("memory.stat"))?);
     working_set_ratio(current, inactive, max)
 }
 

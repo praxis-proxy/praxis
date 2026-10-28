@@ -289,8 +289,11 @@ not refuse work.
 `heap` is anonymous resident memory (`RssAnon`) over
 `runtime.max_memory_bytes`. `cpu` is Linux PSI stall
 time (per-cgroup when available, host-wide as
-fallback), not core utilization. `connections` is open
-connections over `runtime.max_connections`.
+fallback), not core utilization. `connections` is admitted requests over
+`runtime.max_connections`. Each in-flight HTTP request
+or active TCP session holds one permit; idle HTTP/1
+keep-alive connections do not, and a single HTTP/2
+connection may hold many.
 `file_descriptors` is open descriptors over the
 process limit.
 
