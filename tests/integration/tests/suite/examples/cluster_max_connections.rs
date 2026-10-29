@@ -28,6 +28,12 @@ use praxis_test_utils::{
 const ARRIVAL_TIMEOUT: Duration = Duration::from_secs(10);
 const HOLD_MARKER: &str = "hold";
 
+/// How long the fake server waits for the rest of a request head.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Largest request head the fake server reads before giving up.
+const MAX_HEAD_BYTES: usize = 8_192; // 8 KiB
+
 // fake server
 struct HoldingBackend {
     arrivals: Receiver<()>,
@@ -51,14 +57,31 @@ fn start_holding_backend(early_head: Option<&'static [u8]>) -> HoldingBackend {
     HoldingBackend { arrivals, port }
 }
 
+/// Read a request head, through the blank line that ends it.
+fn read_request_head(stream: &mut TcpStream) -> Option<String> {
+    stream.set_read_timeout(Some(HEAD_TIMEOUT)).ok()?;
+    let mut head = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+        if head.len() >= MAX_HEAD_BYTES {
+            return None;
+        }
+        let read = stream.read(&mut buffer).unwrap_or(0);
+        if read == 0 {
+            return None;
+        }
+        head.extend_from_slice(buffer.get(..read).unwrap_or_default());
+    }
+    // Holding a connection blocks on a read that must not time out.
+    stream.set_read_timeout(None).ok()?;
+    Some(String::from_utf8_lossy(&head).into_owned())
+}
+
 /// Answer an unmarked request, or announce and hold a marked one.
 fn serve_held_connection(stream: &mut TcpStream, announce: &mpsc::Sender<()>, early_head: Option<&[u8]>) {
-    let mut buffer = [0_u8; 4096];
-    let read = stream.read(&mut buffer).unwrap_or(0);
-    if read == 0 {
+    let Some(head) = read_request_head(stream) else {
         return;
-    }
-    let head = String::from_utf8_lossy(buffer.get(..read).unwrap_or_default()).into_owned();
+    };
     let Some(request_line) = head.lines().next() else {
         return;
     };
@@ -73,6 +96,7 @@ fn serve_held_connection(stream: &mut TcpStream, announce: &mpsc::Sender<()>, ea
     if announce.send(()).is_err() {
         return;
     }
+    let mut buffer = [0_u8; 4096];
     while stream.read(&mut buffer).unwrap_or(0) > 0 {}
 }
 
