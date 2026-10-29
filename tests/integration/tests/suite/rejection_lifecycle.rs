@@ -184,6 +184,64 @@ fn stalled_streaming_rejection_releases_upstream_before_cleanup() {
     );
 }
 
+#[tokio::test]
+#[cfg_attr(coverage, ignore = "spawns the proxy binary")]
+async fn streaming_body_limit_rejection_does_not_retry_upstream() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend = listener.local_addr().unwrap().port();
+    let (accepted, mut attempts) = tokio::sync::mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        let mut connections = Vec::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            connections.push(stream);
+            if accepted.send(connections.len()).is_err() {
+                break;
+            }
+        }
+    });
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let yaml = simple_proxy_yaml(port, backend).replacen(
+        "            endpoints:",
+        "            retry_policy:\n              max_retries: 1\n              retriable_status_codes: [413]\n            endpoints:",
+        1,
+    );
+    let config = format!("runtime:\n  threads: 2\nbody_limits:\n  max_request_bytes: 1024\n{yaml}");
+    let proxy = PraxisProcess::spawn(&config, &addr);
+    let mut client = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n800\r\n{}\r\n0\r\n\r\n",
+        "a".repeat(2048)
+    );
+    client.write_all(request.as_bytes()).await.unwrap();
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(3), client.read_to_string(&mut response))
+        .await
+        .expect("a local body rejection must be delivered promptly")
+        .unwrap();
+    assert_eq!(parse_status(&response), 413, "the local rejection must be preserved");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), attempts.recv())
+            .await
+            .expect("the initial attempt must reach the upstream")
+            .expect("the upstream probe must stay alive"),
+        1,
+        "the upstream probe must observe the initial attempt"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), attempts.recv())
+            .await
+            .is_err(),
+        "a local 413 must not open a second upstream attempt even when 413 is retriable"
+    );
+    server.abort();
+    let _result = server.await;
+    drop(proxy);
+}
+
 #[test]
 fn successful_terminal_response_cleans_up_an_unfinished_upload() {
     let port = free_port();

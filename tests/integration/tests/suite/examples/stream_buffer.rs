@@ -149,6 +149,48 @@ async fn stream_buffer_http2_rejection_keeps_the_connection_usable() {
     let _result = driver.await;
 }
 
+#[cfg(feature = "pingora")]
+#[tokio::test]
+async fn stream_buffer_http2_head_rejections_are_bodyless() {
+    let (_guard, proxy) = setup(64);
+    let stream = tokio::net::TcpStream::connect(proxy.addr()).await.unwrap();
+    let (mut client, connection) = h2::client::handshake(stream).await.unwrap();
+    let driver = tokio::spawn(connection);
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for declared in [true, false] {
+            let mut request = http::Request::head("/").header("host", "localhost");
+            if declared {
+                request = request.header("content-length", "128");
+            }
+            let (response, mut upload) = client.send_request(request.body(()).unwrap(), false).unwrap();
+            upload.send_data(Bytes::from(vec![b'a'; 128]), true).unwrap();
+
+            let mut response = response.await.expect("HEAD rejection headers must remain valid HTTP/2");
+            assert_eq!(response.status(), 413, "HEAD must preserve the limit rejection status");
+            while let Some(chunk) = response.body_mut().data().await {
+                let chunk = chunk.expect("HEAD must not fail with an HTTP/2 protocol error");
+                assert!(
+                    chunk.is_empty(),
+                    "HEAD must not carry payload bytes for declared={declared}"
+                );
+            }
+        }
+        let request = http::Request::get("/").header("host", "localhost").body(()).unwrap();
+        let (response, _) = client.send_request(request, true).unwrap();
+        assert_eq!(
+            response.await.unwrap().status(),
+            200,
+            "the H2 connection must remain usable"
+        );
+    })
+    .await
+    .expect("HEAD rejections must promptly finish both streams");
+
+    driver.abort();
+    let _result = driver.await;
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
