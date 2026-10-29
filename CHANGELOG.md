@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- The `policy` filter accepts trusted metadata-only inference response context
+  from host filters, dispatches it through `cmf.llm_output` without buffering
+  response content, and exposes plugin-written custom values to downstream
+  response filters.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.

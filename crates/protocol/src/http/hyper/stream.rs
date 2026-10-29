@@ -120,12 +120,17 @@ impl Relaying {
     ///
     /// The trailer hooks come first, as on Pingora, so a filter that turns
     /// trailers into body bytes (gRPC-Web) has done so when the end of the
-    /// body reaches it. Those bytes are final: they follow whatever the
-    /// end-of-stream filters release, without passing through them.
+    /// body reaches it. Synthetic EOF dispatch in that hook marks the body
+    /// complete, so it is not run a second time below.
     async fn deliver_end(&mut self) -> Ended {
-        let (produced, trailers) = self.take_trailers();
+        let (produced, trailers) = match self.take_trailers() {
+            Ok(value) => value,
+            Err(reason) => return Ended::Filter(reason),
+        };
         let mut body = None;
-        if let Err(reason) = run_response_body(&self.flight.pipeline, &mut body, true, &mut self.flight.ctx) {
+        if !self.flight.ctx.response_delivery_complete
+            && let Err(reason) = run_response_body(&self.flight.pipeline, &mut body, true, &mut self.flight.ctx)
+        {
             return Ended::Filter(reason);
         }
         if let Some(chunk) = body
@@ -281,20 +286,20 @@ impl Relaying {
 
     /// The upstream's trailers after the upstream trailer hook, and the body
     /// bytes a trailer filter turned them into instead, if it did.
-    fn take_trailers(&mut self) -> (Option<Bytes>, Option<http::HeaderMap>) {
+    fn take_trailers(&mut self) -> Result<(Option<Bytes>, Option<http::HeaderMap>), String> {
         let Some(mut trailers) = self.session.take_trailers() else {
-            return (None, None);
+            return Ok((None, None));
         };
         strip_reserved_internal_header_map(&mut trailers);
         response_trailers::capture(&trailers, &mut self.flight.ctx);
         if !self.flight.pipeline.needs_response_trailers() {
-            return (None, Some(trailers));
+            return Ok((None, Some(trailers)));
         }
-        let produced = response_trailer_filter::execute(&self.flight.pipeline, &mut trailers, &mut self.flight.ctx);
+        let produced = response_trailer_filter::execute(&self.flight.pipeline, &mut trailers, &mut self.flight.ctx)?;
         strip_reserved_internal_header_map(&mut trailers);
         match produced {
-            Some(body) => (Some(body), None),
-            None => (None, Some(trailers)),
+            Some(body) => Ok((Some(body), None)),
+            None => Ok((None, Some(trailers))),
         }
     }
 }

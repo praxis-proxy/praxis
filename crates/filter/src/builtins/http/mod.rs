@@ -30,7 +30,9 @@ pub use security::{
     GuardrailsAction, GuardrailsFilter, IpAclFilter, PiiKind, RuleTargetKind,
 };
 #[cfg(feature = "policy-engine")]
-pub use security::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use security::{
+    PolicyFilter, PolicyPluginFactoryFn, PolicyResponseContext, PolicyResponseOutput, register_policy_plugin_factory,
+};
 #[cfg(feature = "iterative-request-router")]
 pub use traffic_management::IterativeRequestRouterFilter;
 pub use traffic_management::{

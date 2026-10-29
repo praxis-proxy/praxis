@@ -55,4 +55,6 @@ skip-tree = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# Pinned to the immutable zstd security-fix commit until the Pingora fork
+# publishes its next crates.io release.
+allow-git = ["https://github.com/praxis-proxy/pingora"]

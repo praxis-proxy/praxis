@@ -24,7 +24,7 @@ use tracing::{debug, trace};
 
 use self::frame::{Base64Stream, decode_base64, encode_trailer_frame};
 use crate::{
-    BodyAccess, BodyMode, FilterAction, FilterError, Rejection,
+    BodyAccess, BodyMode, FilterAction, FilterError, Rejection, ResponseTrailersPending,
     filter::{HttpFilter, HttpFilterContext},
     parse_filter_config,
 };
@@ -341,6 +341,7 @@ impl HttpFilter for GrpcWebFilter {
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         let on_missing = self.on_missing_trailers;
+        let trailers_pending = ctx.extensions.get::<ResponseTrailersPending>().is_some();
         let Some(state) = ctx.get_filter_state_mut::<GrpcWebState>() else {
             return Ok(FilterAction::Continue);
         };
@@ -354,7 +355,7 @@ impl HttpFilter for GrpcWebFilter {
             }
         }
 
-        if end_of_stream {
+        if end_of_stream && !trailers_pending {
             let needs_status = !state.status_delivered && on_missing == MissingTrailers::Synthesize;
             if needs_status {
                 state.status_delivered = true;

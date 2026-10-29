@@ -163,6 +163,14 @@ unicase = "2.10.0"
 url = "2.5.8"
 zeroize = "1.9.1"
 
+[patch.crates-io]
+# Unreleased security fix for the Pingora fork's header compression dependency.
+# Keep its shared HTTP and error types on the same source to avoid duplicate
+# crate identities across the registry Pingora packages.
+quixotic-plecostomus-error = { git = "https://github.com/praxis-proxy/pingora", rev = "4fde8bb89a96c54ee19134d66d91f03e81f67f0a" }
+quixotic-plecostomus-header-serde = { git = "https://github.com/praxis-proxy/pingora", rev = "4fde8bb89a96c54ee19134d66d91f03e81f67f0a" }
+quixotic-plecostomus-http = { git = "https://github.com/praxis-proxy/pingora", rev = "4fde8bb89a96c54ee19134d66d91f03e81f67f0a" }
+
 [profile.release]
 codegen-units = 1
 lto = true

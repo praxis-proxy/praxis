@@ -123,7 +123,9 @@ pub use builtins::{
     normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]
-pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use builtins::{
+    PolicyFilter, PolicyPluginFactoryFn, PolicyResponseContext, PolicyResponseOutput, register_policy_plugin_factory,
+};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{
     HttpFilterContext, PendingHeaderResult, Request, Response, StreamTermination, StreamTerminationCause,
@@ -134,7 +136,9 @@ pub use credentials::{DeferredCredential, PendingCredentials};
 pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
-pub use extensions::{AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions};
+pub use extensions::{
+    AuthenticatedIdentity, ClientResponseHeadersCommitted, RequestExtensions, ResponseTrailersPending,
+};
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
     tcp_builtin,

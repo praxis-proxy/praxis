@@ -76,7 +76,11 @@
 //!
 //! With `body_access: read_write`, `cmf.llm_output` evaluates non-streaming
 //! JSON responses. Encoded responses fail closed; SSE responses pass through.
-//! APL field mutators do not rewrite inference bodies in either direction.
+//! A host filter may also provide [`PolicyResponseContext`] after observing a
+//! response; in that case `cmf.llm_output` evaluates its trusted `custom.*`
+//! values at end of stream without buffering or exposing response content, and
+//! returns plugin-written custom values through [`PolicyResponseOutput`]. APL
+//! field mutators do not rewrite inference bodies in either direction.
 //!
 //! # The policy document
 //!
@@ -131,9 +135,10 @@
 //!   projection is tracked in [Praxis #1330]. `result:` field pipelines on prompt/resource routes are rejected at load,
 //!   including inherited pipelines.
 //!
-//! `read_only` skips all MCP entity response rules, including attribute-only
-//! `post_invocation` rules, and warns at load. A response-only route adds no
-//! request-phase route rule; identity checks and `global` policy still apply.
+//! `read_only` skips MCP entity response rules and content-based inference
+//! response rules. Metadata-only inference response rules can still run when a
+//! host filter supplies [`PolicyResponseContext`]. A response-only route adds
+//! no request-phase route rule; identity checks and `global` policy still apply.
 //!
 //! [policy #75]: https://github.com/praxis-proxy/policy/issues/75
 //! [Praxis #1330]: https://github.com/praxis-proxy/praxis/issues/1330
@@ -178,6 +183,7 @@
 mod assertions;
 mod common_message_format;
 mod config;
+mod context;
 mod dispatch;
 mod error;
 mod filter;
@@ -187,6 +193,7 @@ mod llm;
 mod response_rules;
 mod transport;
 
+pub use context::{PolicyResponseContext, PolicyResponseOutput};
 pub use filter::PolicyFilter;
 pub use host_plugins::{PolicyPluginFactoryFn, register_policy_plugin_factory};
 

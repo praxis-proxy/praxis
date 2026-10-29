@@ -39,6 +39,7 @@ use super::{
     },
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
+    context::{PolicyResponseContext, PolicyResponseOutput},
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
@@ -49,7 +50,7 @@ use super::{
         reserialize_json_rpc_response_body,
     },
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
-    response_rules::ensure_supported_entity_results,
+    response_rules::{ensure_supported_entity_results, metadata_only_policy},
     transport::PolicyHttpTransport,
 };
 use crate::{
@@ -65,6 +66,10 @@ use crate::{
 
 /// Empty request body used for parsing bodyless requests.
 static EMPTY_BODY: Bytes = Bytes::new();
+
+#[derive(Clone, Copy)]
+/// Marker retained from `on_response` until the body EOF callback.
+struct StreamedInferenceResponse;
 
 // -----------------------------------------------------------------------------
 // PolicyFilter
@@ -254,6 +259,8 @@ pub struct PolicyFilter {
     /// dispatches hook chains. Wrapped in `Arc` so offloaded hook
     /// dispatches can hold their own handle without borrowing `&self`.
     mgr: Arc<PolicyEngine>,
+    /// Policy engine view containing only post rules that can run without a response body.
+    response_context_mgr: Option<Arc<PolicyEngine>>,
     /// Derived from the loaded policy at construction: the `global` policy
     /// wired the entity-less HTTP path (`http.request`). When true and
     /// `entity_routes` is false, the filter is a pure L7 policy evaluated at
@@ -353,94 +360,20 @@ impl PolicyFilter {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
         })?;
 
-        let mgr = Arc::new(PolicyEngine::default());
-        ppe::install_builtins(&mgr);
-
         // The lazy connection pool must not bind to the temporary init runtime.
         let transport = Self::http_transport(
             subrequest_connector,
             cfg.allow_private_idp,
             &cfg.trusted_private_endpoints,
         );
-        if !mgr.set_http_transport(Arc::<PolicyHttpTransport>::clone(&transport)) {
-            // Set-once, and this manager was just constructed, so a refusal
-            // means the engine changed under us rather than a double install.
-            tracing::warn!(
-                target: "policy.filter",
-                "policy: an HTTP transport was already installed on a fresh engine"
-            );
-        }
-
-        // Host-supplied factories, for `kind:` values the engine does not
-        // bundle. After the builtins on purpose: the factory registry is
-        // last-writer-wins, so a host registering a bundled `kind` replaces it,
-        // which is how a deployment swaps an implementation without forking.
-        //
-        // Re-read on every construction, not drained. `PolicyFilter::new` runs
-        // again on each hot reload, and a registry emptied by the first read
-        // would fail the reload with "no factory registered" for a config that
-        // had been serving traffic.
-        let host_factories = super::host_plugins::host_plugin_factories();
-        if !host_factories.is_empty() {
-            tracing::info!(
-                count = super::host_plugins::host_plugin_count(),
-                "policy: registering host-supplied plugin factories"
-            );
-        }
-        for (kind, factory) in host_factories {
-            tracing::debug!(target: "policy.filter", kind = %kind, "registering host plugin factory");
-            mgr.register_factory(kind, factory);
-        }
-
-        mgr.load_config_yaml(&yaml)
-            .map_err(|e: Box<PluginError>| -> FilterError {
-                format!("policy: load_config_yaml failed for {}: {e}", cfg.config_path).into()
-            })?;
-
-        // `initialize()` is async. The praxis filter-factory signature
-        // is sync, so we drive init to completion here. We spawn a
-        // dedicated OS thread to build a single-threaded runtime and
-        // call `block_on` there — running `block_on` on the current
-        // thread would panic if any caller (notably `#[tokio::test]`)
-        // already has a runtime attached. Production startup has no
-        // caller runtime; tests do; the thread hop is correct in both.
-        //
-        // The init future is wrapped in `tokio::time::timeout` so a
-        // misbehaving plugin's `initialize()` future can't hang startup
-        // / hot-reload indefinitely. The bundled identity-jwt plugin
-        // already has its own JWKS connect/request timeouts plus
-        // soft-fail-at-boot, so this is defense-in-depth for other
-        // init paths (custom plugins, future hooks) where a future
-        // could legitimately stall.
-        let mgr_for_init = Arc::clone(&mgr);
-        let init_timeout = std::time::Duration::from_secs(cfg.init_timeout_secs);
-        let init: Result<(), String> = std::thread::spawn(move || -> Result<(), String> {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| format!("policy: failed to build init runtime: {e}"))?;
-            rt.block_on(async move {
-                match tokio::time::timeout(init_timeout, mgr_for_init.initialize()).await {
-                    Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(format!("policy: PolicyEngine::initialize failed: {e}")),
-                    Err(_) => Err(format!(
-                        "policy: PolicyEngine::initialize timed out after {}s \
-                         (init_timeout_secs); likely a JWKS / OAuth endpoint is unreachable",
-                        init_timeout.as_secs(),
-                    )),
-                }
-            })
-        })
-        .join()
-        .map_err(|panic| {
-            let msg = panic
-                .downcast_ref::<&str>()
-                .map(|s| (*s).to_owned())
-                .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<no panic message>".to_owned());
-            format!("policy: PolicyEngine::initialize panicked in init thread: {msg}")
-        })?;
-        init.map_err(|s: String| -> FilterError { s.into() })?;
+        let session_store: Arc<dyn ppe::SessionStore> = Arc::new(ppe::MemorySessionStore::new());
+        let mgr = Self::load_policy_engine(
+            &yaml,
+            &cfg.config_path,
+            Arc::clone(&transport),
+            cfg.init_timeout_secs,
+            Arc::clone(&session_store),
+        )?;
 
         // Derive the evaluation shape from the loaded policy so the filter
         // needs no operator-set mode. `has_hooks_for` reports whether a hook
@@ -501,6 +434,21 @@ impl PolicyFilter {
             })?;
         let dispatch_timeout = response_dispatch_timeout(policy_config.engine_settings.plugin_timeout);
         ensure_supported_entity_results(&yaml, &policy_config)?;
+        let response_context_mgr = if llm_post {
+            metadata_only_policy(&yaml)?
+                .map(|filtered| {
+                    Self::load_policy_engine(
+                        &filtered,
+                        &cfg.config_path,
+                        Arc::clone(&transport),
+                        cfg.init_timeout_secs,
+                        Arc::clone(&session_store),
+                    )
+                })
+                .transpose()?
+        } else {
+            None
+        };
         if entity_routes {
             ensure_dispatch_runtime()
                 .map_err(|e| -> FilterError { format!("policy: response hooks cannot run: {e}").into() })?;
@@ -540,6 +488,7 @@ impl PolicyFilter {
         Ok(Self {
             cfg,
             mgr,
+            response_context_mgr,
             http_global,
             entity_routes,
             mcp_routes,
@@ -555,6 +504,87 @@ impl PolicyFilter {
             #[cfg(test)]
             transport,
         })
+    }
+
+    /// Load and initialize one PPE view of the policy document.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear engine registration, load, and bounded initialization"
+    )]
+    fn load_policy_engine(
+        yaml: &str,
+        source: &str,
+        transport: Arc<PolicyHttpTransport>,
+        init_timeout_secs: u64,
+        session_store: Arc<dyn ppe::SessionStore>,
+    ) -> Result<Arc<PolicyEngine>, FilterError> {
+        let manager = Arc::new(PolicyEngine::default());
+        ppe::register_builtin_plugins(&manager);
+        ppe::register_apl(
+            &manager,
+            ppe::AplOptions {
+                dispatch_cache: Arc::new(ppe::DispatchCache::new()),
+                session_store,
+                pdps: Vec::new(),
+                pdp_factories: ppe::builtin_pdp_factories(),
+                session_store_factories: ppe::builtin_session_store_factories(),
+                base_capabilities: None,
+            },
+        );
+        if !manager.set_http_transport(transport) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy: an HTTP transport was already installed on a fresh engine"
+            );
+        }
+
+        let host_factories = super::host_plugins::host_plugin_factories();
+        if !host_factories.is_empty() {
+            tracing::info!(
+                count = super::host_plugins::host_plugin_count(),
+                "policy: registering host-supplied plugin factories"
+            );
+        }
+        for (kind, factory) in host_factories {
+            tracing::debug!(target: "policy.filter", kind = %kind, "registering host plugin factory");
+            manager.register_factory(kind, factory);
+        }
+        manager
+            .load_config_yaml(yaml)
+            .map_err(|error: Box<PluginError>| -> FilterError {
+                format!("policy: load_config_yaml failed for {source}: {error}").into()
+            })?;
+
+        let manager_for_init = Arc::clone(&manager);
+        let init_timeout = std::time::Duration::from_secs(init_timeout_secs);
+        let init = std::thread::spawn(move || -> Result<(), String> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| format!("policy: failed to build init runtime: {error}"))?;
+            runtime.block_on(async move {
+                match tokio::time::timeout(init_timeout, manager_for_init.initialize()).await {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(format!("policy: PolicyEngine::initialize failed: {error}")),
+                    Err(_) => Err(format!(
+                        "policy: PolicyEngine::initialize timed out after {}s \
+                         (init_timeout_secs); likely a JWKS / OAuth endpoint is unreachable",
+                        init_timeout.as_secs(),
+                    )),
+                }
+            })
+        })
+        .join()
+        .map_err(|panic| {
+            let message = panic
+                .downcast_ref::<&str>()
+                .map(|value| (*value).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<no panic message>".to_owned());
+            format!("policy: PolicyEngine::initialize panicked in init thread: {message}")
+        })?;
+        init.map_err(|message: String| -> FilterError { message.into() })?;
+        Ok(manager)
     }
 
     /// Test accessor for the transport installed on the engine.
@@ -624,8 +654,10 @@ impl PolicyFilter {
             tracing::warn!(
                 target: "policy.filter",
                 "policy declares response-phase `llm:` rules (`post_invocation`) but \
-                 `body_access` is `read_only`, which does not buffer the response: those rules \
-                 will never run. Set `body_access: read_write` to enable them.",
+                 `body_access` is `read_only`, which does not buffer the response: rules that \
+                 need response content will not run. A host may still trigger metadata-only \
+                 response policy by supplying `PolicyResponseContext`; otherwise set \
+                 `body_access: read_write`.",
             );
         }
         tracing::debug!(
@@ -1363,7 +1395,7 @@ impl PolicyFilter {
     )]
     fn dispatch_llm_response(
         &self,
-        ctx: &HttpFilterContext<'_>,
+        ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
     ) -> Result<FilterAction, FilterError> {
         let Some(model) = Self::llm_response_model(ctx) else {
@@ -1430,11 +1462,40 @@ impl PolicyFilter {
             capabilities: Vec::new(),
         }));
         extensions.completion = Some(Arc::new(parsed.completion()));
+        let response_context = ctx
+            .extensions
+            .get::<PolicyResponseContext>()
+            .map(PolicyResponseContext::custom);
+        if let Some(custom) = response_context.as_ref() {
+            extensions.custom = Some(Arc::clone(custom));
+        }
 
         let payload = MessagePayload {
             message: response_message(&parsed),
         };
-        let cmf_result = self.dispatch_response_cmf(hook_name, payload, extensions, "inference response-phase")?;
+        let cmf_result =
+            match self.dispatch_response_cmf(&self.mgr, hook_name, payload, extensions, "inference response-phase") {
+                Ok(result) => result,
+                Err(error) if response_context.is_some() => {
+                    let violation = PluginViolation::new("llm.response_context_unavailable", error.to_string());
+                    if let Some(host_custom) = response_context.clone() {
+                        ctx.extensions
+                            .insert(PolicyResponseOutput::new(host_custom, Some(violation)));
+                    }
+                    tracing::warn!(target: "policy.filter", %error, "response policy dispatch failed; continuing");
+                    return Ok(FilterAction::Continue);
+                },
+                Err(error) => return Err(error),
+            };
+        if let Some(host_custom) = response_context {
+            let custom = cmf_result
+                .modified_extensions
+                .as_ref()
+                .and_then(|modified| modified.custom.clone())
+                .unwrap_or(host_custom);
+            ctx.extensions
+                .insert(PolicyResponseOutput::new(custom, cmf_result.violation.clone()));
+        }
 
         if !cmf_result.continue_processing {
             tracing::warn!(
@@ -1460,6 +1521,89 @@ impl PolicyFilter {
                  supported on the inference path; the client receives the upstream body. \
                  Reported once per filter instance.",
             );
+        }
+        Ok(FilterAction::Continue)
+    }
+
+    /// Evaluate response policy over host-provided context without response content.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear trusted-context construction, dispatch, and output publication"
+    )]
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "response-phase dispatch shares the fallible hook signature with content evaluation"
+    )]
+    fn dispatch_llm_response_context(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let Some(context) = ctx.extensions.get::<PolicyResponseContext>() else {
+            return Ok(FilterAction::Continue);
+        };
+        let host_custom = context.custom();
+        let Some(manager) = self.response_context_mgr.as_ref() else {
+            ctx.extensions.insert(PolicyResponseOutput::new(host_custom, None));
+            return Ok(FilterAction::Continue);
+        };
+        let Some(InferenceRequest { model }) = ctx.extensions.get::<InferenceRequest>() else {
+            ctx.extensions.insert(PolicyResponseOutput::new(host_custom, None));
+            return Ok(FilterAction::Continue);
+        };
+        let model = model.clone();
+        let mut headers = Self::snapshot_headers(ctx);
+        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
+        let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
+            let violation = PluginViolation::new(
+                "llm.response_context_unavailable",
+                "request identity unavailable for metadata-only response policy",
+            );
+            ctx.extensions
+                .insert(PolicyResponseOutput::new(host_custom, Some(violation)));
+            return Ok(FilterAction::Continue);
+        };
+        let mut extensions = Self::extensions_from_identity(&headers, identity, ENTITY_LLM, &model, &self.cfg);
+        extensions.llm = Some(Arc::new(LLMExtension {
+            model_id: Some(model),
+            provider: self.cfg.llm.provider.clone(),
+            capabilities: Vec::new(),
+        }));
+        extensions.custom = Some(Arc::clone(&host_custom));
+        let payload = MessagePayload {
+            message: Message::with_content(Role::Assistant, Vec::new()),
+        };
+        let result = match self.dispatch_response_cmf(
+            manager,
+            HOOK_CMF_LLM_OUTPUT,
+            payload,
+            extensions,
+            "metadata-only inference response-phase",
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                let violation = PluginViolation::new("llm.response_context_unavailable", error.to_string());
+                ctx.extensions
+                    .insert(PolicyResponseOutput::new(host_custom, Some(violation)));
+                tracing::warn!(target: "policy.filter", %error, "metadata-only response policy dispatch failed; continuing");
+                return Ok(FilterAction::Continue);
+            },
+        };
+        let custom = result
+            .modified_extensions
+            .as_ref()
+            .and_then(|modified| modified.custom.clone())
+            .unwrap_or(host_custom);
+        let violation = ctx
+            .extensions
+            .get::<PolicyResponseOutput>()
+            .and_then(|output| output.violation().cloned())
+            .or_else(|| result.violation.clone());
+        ctx.extensions
+            .insert(PolicyResponseOutput::new(custom, violation.clone()));
+        if !result.continue_processing {
+            tracing::warn!(
+                target: "policy.filter",
+                violation = ?violation,
+                "metadata-only inference response policy denied after response content was released; host receives the denial in PolicyResponseOutput",
+            );
+            return Ok(FilterAction::Continue);
         }
         Ok(FilterAction::Continue)
     }
@@ -1667,16 +1811,18 @@ impl PolicyFilter {
     /// so the response fails under the filter's `failure_mode`.
     #[expect(
         clippy::large_stack_frames,
-        reason = "PPE response dispatch carries large async payloads"
+        clippy::too_many_arguments,
+        reason = "PPE response dispatch carries a selected engine plus its typed hook inputs"
     )]
     fn dispatch_response_cmf(
         &self,
+        manager: &Arc<PolicyEngine>,
         hook: &'static str,
         payload: MessagePayload,
         extensions: Extensions,
         phase: &str,
     ) -> Result<ppe::praxis_policy_core::executor::PipelineResult, FilterError> {
-        let mgr = Arc::clone(&self.mgr);
+        let mgr = Arc::clone(manager);
         let invoke = async move {
             let (r, _bg) = mgr.invoke_named::<CmfHook>(hook, payload, extensions, None).await;
             r
@@ -2234,6 +2380,9 @@ impl HttpFilter for PolicyFilter {
         reason = "PPE response dispatch carries large async payloads"
     )]
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() && Self::response_is_event_stream(ctx) {
+            ctx.extensions.insert(StreamedInferenceResponse);
+        }
         let Some(hook) = self.response_hook else {
             return Ok(FilterAction::Continue);
         };
@@ -2273,8 +2422,12 @@ impl HttpFilter for PolicyFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        // Release SSE immediately because it has no single completion to evaluate.
-        if matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) && self.inference_response_is_streamed(ctx) {
+        // Release SSE chunks immediately because there is no single completion to buffer.
+        // Keep the clean-EOF callback available for metadata-only response policy.
+        if !end_of_stream
+            && matches!(self.cfg.body_access, BodyAccessMode::ReadWrite)
+            && (self.inference_response_is_streamed(ctx) || ctx.extensions.get::<StreamedInferenceResponse>().is_some())
+        {
             return Ok(FilterAction::Release);
         }
         if !end_of_stream {
@@ -2285,12 +2438,23 @@ impl HttpFilter for PolicyFilter {
         if !self.entity_routes {
             return Ok(FilterAction::Continue);
         }
+        if self.llm_post
+            && ctx.extensions.get::<PolicyResponseContext>().is_some()
+            && (matches!(self.cfg.body_access, BodyAccessMode::ReadOnly)
+                || self.inference_response_is_streamed(ctx)
+                || ctx.extensions.get::<StreamedInferenceResponse>().is_some())
+        {
+            return self.dispatch_llm_response_context(ctx);
+        }
         // Response hooks require the buffering enabled by `read_write`.
         if !matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) {
             return Ok(FilterAction::Continue);
         }
 
         if self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() {
+            if ctx.extensions.get::<StreamedInferenceResponse>().is_some() {
+                return Ok(FilterAction::Release);
+            }
             return self.dispatch_llm_response(ctx, body);
         }
 
@@ -2362,7 +2526,7 @@ impl HttpFilter for PolicyFilter {
         let payload = MessagePayload {
             message: Message::with_content(Role::Assistant, content),
         };
-        let cmf_result = self.dispatch_response_cmf(hook_name, payload, extensions, "response-phase CMF")?;
+        let cmf_result = self.dispatch_response_cmf(&self.mgr, hook_name, payload, extensions, "response-phase CMF")?;
 
         // Post-phase deny — the upstream's response carries something
         // the operator wants suppressed (output PII, late policy
