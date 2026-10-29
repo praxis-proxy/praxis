@@ -895,6 +895,7 @@ lint: ## clippy, fmt check, machete, xtask lints, FIPS deps, containers
 	cargo machete
 	cargo xtask lint-deps
 	cargo xtask lint-example-tests
+	cargo xtask lint-doc-links
 	cargo xtask sync-example-readme
 	cargo xtask lint-filter-docs
 	$(MAKE) --no-print-directory fips-deps

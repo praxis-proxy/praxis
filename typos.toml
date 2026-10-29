@@ -2,4 +2,42 @@
 extend-exclude = ["Cargo.lock", "target/"]
 
 [default.extend-words]
-# Add project-specific identifiers that typos flags incorrectly.
+# Hex substrings in W3C Trace Context test vectors (e.g. 00f067aa0ba902b7).
+ba = "ba"
+BA = "BA"
+# "unparseable" is used consistently across the codebase; both spellings
+# are accepted English but switching would churn dozens of test names.
+unparseable = "unparseable"
+# Logical-AND as a verb: "ANDed", "ands_with" in function names.
+ands = "ands"
+Ded = "Ded"
+# Pingora error API: `BError::esource()`.
+esource = "esource"
+# Partial byte-string test data (e.g. b"hel", "hel\"lo").
+hel = "hel"
+# Unicode café test data: "caf\u{e9}", "/caf%C3%A9".
+caf = "caf"
+# Prefix "mis-" split across word boundaries (mis-detected, mis-gate).
+mis = "mis"
+# German test sentence ("meine Nummer ist").
+ist = "ist"
+# Tencent Kubernetes Engine.
+TKE = "TKE"
+# Quoted-value test data: r#"val"ue"#.
+ue = "ue"
+# wrk is a well-known HTTP benchmarking tool.
+wrk = "wrk"
+
+[default.extend-identifiers]
+# Intentional typos in test assertions that verify rejection messages.
+sampl_rate = "sampl_rate"
+path_prfix = "path_prfix"
+abd = "abd"
+wieght = "wieght"
+fitlers = "fitlers"
+alow_root = "alow_root"
+body_acces = "body_acces"
+recieve = "recieve"
+prfix = "prfix"
+acces = "acces"
+alow = "alow"
