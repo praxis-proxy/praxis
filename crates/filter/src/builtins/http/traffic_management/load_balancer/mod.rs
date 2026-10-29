@@ -314,6 +314,11 @@ fn cluster_overloaded() -> Rejection {
         .with_body("cluster at max_connections")
 }
 
+/// Whether `status` is the answer that ends the request.
+fn is_final_response(status: http::StatusCode) -> bool {
+    !status.is_informational() || status == http::StatusCode::SWITCHING_PROTOCOLS
+}
+
 /// Bindings for clusters that configure a strategy which consumes the ramp.
 #[cfg(feature = "slow-start")]
 fn slow_start_bindings(clusters: &[Cluster]) -> Vec<crate::load_balancing::slow_start::SlowStartBinding> {
@@ -517,6 +522,15 @@ impl HttpFilter for LoadBalancerFilter {
         if ctx.get_metadata("lb.selected").is_none() {
             return Ok(FilterAction::Continue);
         }
+        // The response phase runs once per response head the upstream sends,
+        // and a `103 Early Hints` is a head that does not end the request.
+        // Releasing on it would hand back slots the request is still using,
+        // letting the next request past `max_connections`, and leave the
+        // real response releasing slots that now belong to someone else.
+        let ends_the_request = ctx.response_header.as_ref().is_none_or(|r| is_final_response(r.status));
+        if !ends_the_request {
+            return Ok(FilterAction::Continue);
+        }
 
         tracing::trace!("releasing in-flight counter");
         if let (Some(cluster_name), Some(upstream)) = (&ctx.cluster, &ctx.upstream)
@@ -524,7 +538,9 @@ impl HttpFilter for LoadBalancerFilter {
         {
             entry.strategy.release(&upstream.address);
         }
-        if let Some(state) = &ctx.cluster_retry_state {
+        if !ctx.cluster_retry_state_released
+            && let Some(state) = &ctx.cluster_retry_state
+        {
             state.leave();
             ctx.cluster_retry_state_released = true;
         }

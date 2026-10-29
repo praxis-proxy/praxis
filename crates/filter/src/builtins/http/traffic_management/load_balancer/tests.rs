@@ -1755,6 +1755,81 @@ async fn max_connections_slot_returns_on_response() {
 }
 
 #[tokio::test]
+async fn max_connections_keeps_the_slot_until_the_final_response() {
+    let lb = LoadBalancerFilter::new(&[capped_cluster("web", &["127.0.0.1:8080"], 1)]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut hints = response_with_status(103);
+
+    let mut first = crate::test_utils::make_filter_context(&req);
+    first.cluster = Some(Arc::from("web"));
+    drop(lb.on_request(&mut first).await.unwrap());
+    first.response_header = Some(&mut hints);
+    drop(lb.on_response(&mut first).await.unwrap());
+    assert!(
+        !first.cluster_retry_state_released,
+        "a 103 must leave the in-flight request holding its slot"
+    );
+
+    let mut second = crate::test_utils::make_filter_context(&req);
+    second.cluster = Some(Arc::from("web"));
+    let action = lb.on_request(&mut second).await.unwrap();
+    let FilterAction::Reject(rejection) = action else {
+        panic!("the cap must still shed while the first request is only part-answered, got {action:?}");
+    };
+    assert_eq!(rejection.status, 503, "the shed request should answer 503");
+}
+
+#[tokio::test]
+async fn max_connections_releases_the_slot_once_per_request() {
+    let lb = LoadBalancerFilter::new(&[capped_cluster("web", &["127.0.0.1:8080"], 1)]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let state = Arc::clone(&lb.clusters.get("web").unwrap().retry_state);
+
+    let mut first = crate::test_utils::make_filter_context(&req);
+    first.cluster = Some(Arc::from("web"));
+    drop(lb.on_request(&mut first).await.unwrap());
+    drop(lb.on_response(&mut first).await.unwrap());
+
+    let mut second = crate::test_utils::make_filter_context(&req);
+    second.cluster = Some(Arc::from("web"));
+    drop(lb.on_request(&mut second).await.unwrap());
+    // A second response phase for the first request must not spend the slot
+    // the second request now holds.
+    drop(lb.on_response(&mut first).await.unwrap());
+
+    assert_eq!(
+        state.active_requests.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the repeated release must leave the second request's slot alone"
+    );
+    let mut third = crate::test_utils::make_filter_context(&req);
+    third.cluster = Some(Arc::from("web"));
+    let action = lb.on_request(&mut third).await.unwrap();
+    let FilterAction::Reject(rejection) = action else {
+        panic!("the cap must still be full, got {action:?}");
+    };
+    assert_eq!(rejection.status, 503, "the shed request should answer 503");
+}
+
+#[tokio::test]
+async fn max_connections_slot_returns_on_a_101_upgrade() {
+    let lb = LoadBalancerFilter::new(&[capped_cluster("web", &["127.0.0.1:8080"], 1)]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut switching = response_with_status(101);
+
+    let mut first = crate::test_utils::make_filter_context(&req);
+    first.cluster = Some(Arc::from("web"));
+    drop(lb.on_request(&mut first).await.unwrap());
+    first.response_header = Some(&mut switching);
+    drop(lb.on_response(&mut first).await.unwrap());
+
+    assert!(
+        first.cluster_retry_state_released,
+        "a 101 ends the exchange, so it must hand the slot back"
+    );
+}
+
+#[tokio::test]
 async fn max_connections_unset_admits_beyond_any_ceiling() {
     let lb = LoadBalancerFilter::new(&[test_cluster("web", &["127.0.0.1:8080"])]);
     let req = crate::test_utils::make_request(http::Method::GET, "/");
@@ -1796,6 +1871,14 @@ async fn max_connections_slot_returns_when_no_endpoint_is_selectable() {
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// A bare response header carrying `status`, for the response phase.
+fn response_with_status(status: u16) -> crate::context::Response {
+    crate::context::Response {
+        status: http::StatusCode::from_u16(status).unwrap(),
+        headers: http::HeaderMap::new(),
+    }
+}
 
 /// Build a [`Cluster`] with default strategy for testing.
 fn test_cluster(name: &str, endpoints: &[&str]) -> Cluster {

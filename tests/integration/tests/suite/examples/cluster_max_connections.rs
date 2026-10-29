@@ -34,22 +34,25 @@ struct HoldingBackend {
     port: u16,
 }
 
-// booting fake server
-fn start_holding_backend() -> HoldingBackend {
+/// Boot a fake server that holds marked requests open.
+///
+/// `early_head` is written on a held connection before it holds, so the proxy
+/// can be shown a response head that is not the end of the request.
+fn start_holding_backend(early_head: Option<&'static [u8]>) -> HoldingBackend {
     let (listener, port) = bind_unique_port();
     let (announce, arrivals) = mpsc::channel();
     thread::spawn(move || {
         for incoming in listener.incoming() {
             let Ok(mut stream) = incoming else { return };
             let announce = announce.clone();
-            thread::spawn(move || serve_held_connection(&mut stream, &announce));
+            thread::spawn(move || serve_held_connection(&mut stream, &announce, early_head));
         }
     });
     HoldingBackend { arrivals, port }
 }
 
 /// Answer an unmarked request, or announce and hold a marked one.
-fn serve_held_connection(stream: &mut TcpStream, announce: &mpsc::Sender<()>) {
+fn serve_held_connection(stream: &mut TcpStream, announce: &mpsc::Sender<()>, early_head: Option<&[u8]>) {
     let mut buffer = [0_u8; 4096];
     let read = stream.read(&mut buffer).unwrap_or(0);
     if read == 0 {
@@ -62,6 +65,10 @@ fn serve_held_connection(stream: &mut TcpStream, announce: &mpsc::Sender<()>) {
     if !request_line.contains(HOLD_MARKER) {
         drop(stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"));
         return;
+    }
+    if let Some(early_head) = early_head {
+        drop(stream.write_all(early_head));
+        drop(stream.flush());
     }
     if announce.send(()).is_err() {
         return;
@@ -134,7 +141,7 @@ insecure_options:
 
 #[test]
 fn cluster_max_connections_rejects_excess_with_503() {
-    let backend = start_holding_backend();
+    let backend = start_holding_backend(None);
     let proxy_port = free_port();
     let config = Config::from_yaml(&single_cluster_yaml(proxy_port, backend.port, 2)).unwrap();
     let proxy = start_proxy(&config);
@@ -160,6 +167,28 @@ fn cluster_max_connections_rejects_excess_with_503() {
 }
 
 #[test]
+fn cluster_max_connections_holds_the_slot_until_the_final_response() {
+    let backend = start_holding_backend(Some(b"HTTP/1.1 103 Early Hints\r\nLink: </a.css>; rel=preload\r\n\r\n"));
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&single_cluster_yaml(proxy_port, backend.port, 1)).unwrap();
+    let proxy = start_proxy(&config);
+
+    let held = hold_in_flight(proxy.addr(), "/hold", 1, &backend);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        503,
+        "a 103 is not the end of the held request, so its slot must stay taken"
+    );
+
+    drop(held);
+}
+
+#[test]
 fn cluster_max_connections_allows_after_release() {
     let backend_guard = start_backend_with_shutdown("ok");
     let proxy_port = free_port();
@@ -175,7 +204,7 @@ fn cluster_max_connections_allows_after_release() {
 
 #[test]
 fn cluster_max_connections_is_per_cluster_not_per_listener() {
-    let slow_backend = start_holding_backend();
+    let slow_backend = start_holding_backend(None);
     let slow_port = slow_backend.port;
     let fast_guard = start_backend_with_shutdown("fast");
     let fast_port = fast_guard.port();
@@ -260,7 +289,7 @@ fn cluster_max_connections_example_config_parses() {
 
 #[test]
 fn cluster_max_connections_example_functional() {
-    let slow_backend = start_holding_backend();
+    let slow_backend = start_holding_backend(None);
     let fast_guard = start_backend_with_shutdown("fast");
     let proxy_port = free_port();
 
