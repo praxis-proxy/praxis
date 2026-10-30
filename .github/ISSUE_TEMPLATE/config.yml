@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
+  - name: Security vulnerability
+    url: https://github.com/praxis-proxy/praxis/security/advisories/new
+    about: Report a suspected security issue privately. Do not open a public issue.
   - name: Discussions
     url: https://github.com/praxis-proxy/praxis/discussions
     about: Ask questions or start a discussion
