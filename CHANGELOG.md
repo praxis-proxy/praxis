@@ -30,8 +30,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- The policy filter registers the `env` and `file` secret providers, so a
+  policy document's `secrets:` block now loads instead of failing at
+  startup. Any other provider kind, including `vault`, is still refused.
+
+### Changed
+
+- The policy engine is updated to PPE 0.5.0, which tightens OAuth
+  `delegate(...)` by default: a token-exchange response must name an
+  access-token or JWT `issued_token_type`, unrequested scopes outside
+  `allowed_extra_scopes` are refused, and a minted JWT's `aud` and `sub`
+  must match. `strict_response_validation: false` turns these checks off.
+  JWTs with an unsupported `crit` header are rejected, an `env` secret
+  provider with unused settings fails to load, and CEL `size()` and
+  `exists()` change in ways that can allow requests that were denied. See
+  `docs/filters/http/security/policy.md`.
 
 ### Fixed
+
+- A delegated credential is sent with its own prefix rather than always
+  `Bearer `, so a Vault credential with no `scheme_prefix` goes out bare
+  and a custom prefix such as `token ` is kept.
+- A request header asserted from `secret.<name>` stays redacted in the
+  views that request-body and response policy hooks receive, rather than
+  reaching those plugins and PDPs in plaintext.
 
 - The FIPS runtime probe selects the Pingora backend when compiling its
   listener tests with default features disabled.
