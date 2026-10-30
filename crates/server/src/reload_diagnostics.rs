@@ -95,6 +95,7 @@ fn detect_listener_setting_changes_with(new: &Config, old_by_name: &ListenersByN
                 "downstream_read_timeout_ms",
                 old_l.downstream_read_timeout_ms != new_l.downstream_read_timeout_ms,
             ),
+            ("forward_proxy", old_l.forward_proxy != new_l.forward_proxy),
         ] {
             if changed {
                 warn!(

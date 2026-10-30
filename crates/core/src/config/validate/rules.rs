@@ -15,6 +15,7 @@ use super::{
     branch_chain::validate_branch_chains,
     cluster::validate_clusters,
     filter_chain::{validate_filter_chains, validate_selected_upstream_matchers},
+    forward_proxy::validate_forward_proxy_listeners,
     inline_clusters::{validate_inline_clusters, validate_tcp_listener_clusters},
     listener::{addresses_overlap, validate_listener_names, validate_listeners},
 };
@@ -119,6 +120,7 @@ impl Config {
                 )));
             }
         }
+        validate_forward_proxy_listeners(self)?;
 
         validate_body_limits(&self.body_limits, self.insecure_options.allow_unbounded_body)?;
         validate_cluster_names(&self.clusters)?;

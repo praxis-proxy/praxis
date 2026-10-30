@@ -152,6 +152,7 @@ mod tests {
             downstream_keepalive_timeout_ms: None,
             downstream_read_timeout_ms: None,
             filter_chains: vec![],
+            forward_proxy: None,
             max_connections: None,
             tcp_max_duration_secs: None,
             tcp_session_timeout_ms: None,

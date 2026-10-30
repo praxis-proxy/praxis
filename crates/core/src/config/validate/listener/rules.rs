@@ -164,6 +164,7 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
     validate_max_connections(listener)?;
 
     if listener.protocol == ProtocolKind::Tcp {
+        reject_forward_proxy_on_tcp(listener)?;
         validate_tcp_routing(listener)?;
     } else {
         reject_tcp_only_fields(listener)?;
@@ -182,6 +183,19 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
         super::timeouts::validate_tcp_max_duration(listener)?;
     }
 
+    Ok(())
+}
+
+/// Reject `forward_proxy` on a TCP listener: CONNECT handling is an
+/// HTTP-listener capability, and a TCP listener has no request phase to
+/// run the pipeline or destination rules in.
+fn reject_forward_proxy_on_tcp(listener: &Listener) -> Result<(), ProxyError> {
+    if listener.forward_proxy.is_some() {
+        return Err(ProxyError::Config(format!(
+            "listener '{name}': 'forward_proxy' only applies to protocol: http",
+            name = listener.name
+        )));
+    }
     Ok(())
 }
 
@@ -583,6 +597,7 @@ filter_chains:
                 downstream_keepalive_timeout_ms: None,
                 downstream_read_timeout_ms: None,
                 filter_chains: vec![],
+                forward_proxy: None,
                 max_connections: None,
                 name: format!("l{i}"),
                 protocol: Default::default(),

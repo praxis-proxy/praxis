@@ -13,6 +13,8 @@
 pub use praxis_tls::ListenerTls;
 use serde::Deserialize;
 
+use super::forward_proxy::ForwardProxyConfig;
+
 // -----------------------------------------------------------------------------
 // Listener
 // -----------------------------------------------------------------------------
@@ -83,6 +85,34 @@ pub struct Listener {
     /// Named filter chains to apply to this listener.
     #[serde(default)]
     pub filter_chains: Vec<String>,
+
+    /// Forward-proxy (HTTP CONNECT) settings.
+    ///
+    /// When enabled, the listener accepts `CONNECT host:port` requests,
+    /// runs the filter pipeline and destination rules on them, and
+    /// tunnels bytes to the approved destination. Only applies to
+    /// `protocol: http` listeners; rejected on TCP listeners. Changes
+    /// require a restart (the setting is captured at service creation).
+    ///
+    /// ```
+    /// use praxis_core::config::Listener;
+    ///
+    /// let listener: Listener = serde_yaml::from_str(
+    ///     r#"
+    /// name: egress
+    /// address: "127.0.0.1:32123"
+    /// forward_proxy:
+    ///   enabled: true
+    ///   allow_destinations:
+    ///     - host: api.example.com
+    ///       port: 443
+    /// "#,
+    /// )
+    /// .unwrap();
+    /// assert!(listener.forward_proxy.is_some_and(|fp| fp.enabled));
+    /// ```
+    #[serde(default)]
+    pub forward_proxy: Option<ForwardProxyConfig>,
 
     /// Maximum concurrent connections for this listener.
     ///

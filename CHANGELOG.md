@@ -19,6 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- A `forward_proxy` block on `protocol: http` listeners (config surface
+  for CONNECT-based forward proxying): destination allowlisting with
+  wildcard host patterns and optional ports, tunnel idle timeout and
+  optional max duration. Validation rejects the block on TCP listeners
+  and requires egress control (a non-empty `allow_destinations` list or
+  an `ip_acl`/`policy` filter in the listener's chains) so a listener is
+  never an open relay. The CONNECT runtime is a follow-up change; the
+  block is inert until it lands.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.

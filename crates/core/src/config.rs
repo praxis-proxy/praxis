@@ -24,6 +24,7 @@ mod cluster;
 mod condition;
 mod expanded_chains;
 mod filters;
+mod forward_proxy;
 mod hedge_policy;
 mod insecure_options;
 mod listener;
@@ -54,6 +55,7 @@ pub use condition::{
 };
 pub use expanded_chains::ExpandedFilterChains;
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
+pub use forward_proxy::{DestinationRule, ForwardProxyConfig};
 pub use hedge_policy::{HedgePolicy, MAX_HEDGE_ATTEMPTS};
 pub use insecure_options::{InsecureFlag, InsecureOptions, SkipPipelineChecks};
 pub use listener::{Listener, ListenerTls, ProtocolKind};
