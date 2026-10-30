@@ -55,6 +55,8 @@ use tracing::debug;
 /// config fast instead.
 const MAX_PIPELINE_FILTER_INSTANCES: usize = 100_000;
 
+use praxis_core::config::Cluster;
+
 use super::{
     branch::{RejoinTarget, ResolvedBranch, ResolvedBranchCondition},
     filter::PipelineFilter,
@@ -114,6 +116,11 @@ struct BuildContext<'a> {
     /// branch resolution binds at the correct outbound depth rather than
     /// inheriting the branch depth.
     outbound_depth: usize,
+
+    /// Top-level cluster declarations, threaded so outbound chains bound
+    /// from inside a branch resolve cluster references against the same
+    /// set whole-config validation uses.
+    top_level_clusters: &'a [Cluster],
 }
 
 // -----------------------------------------------------------------------------
@@ -127,12 +134,17 @@ struct BuildContext<'a> {
 /// resolves nested branches up to [`MAX_BRANCH_DEPTH`].
 ///
 /// [`ResolvedBranch`]: super::branch::ResolvedBranch
+#[expect(
+    clippy::too_many_arguments,
+    reason = "threads the shared build resources plus the cluster declarations the binding path needs"
+)]
 pub(super) fn resolve_chain_filters(
     entries: &mut [FilterEntry],
     registry: &FilterRegistry,
     chains: &HashMap<&str, &[FilterEntry]>,
     depth: usize,
     insecure: &InsecureOptions,
+    top_level_clusters: &[Cluster],
 ) -> Result<Vec<PipelineFilter>, FilterError> {
     let mut next_filter_id: usize = 0;
     let stack = ResolutionStack::new();
@@ -160,6 +172,7 @@ pub(super) fn resolve_chain_filters(
         &budget,
         &branch_budget,
         0,
+        top_level_clusters,
     )
 }
 
@@ -184,6 +197,7 @@ pub(crate) fn resolve_chain_filters_with_stack(
     budget: &Cell<usize>,
     branch_budget: &Cell<usize>,
     outbound_depth: usize,
+    top_level_clusters: &[Cluster],
 ) -> Result<Vec<PipelineFilter>, FilterError> {
     if depth > MAX_BRANCH_DEPTH {
         return Err(format!("branch nesting depth exceeds maximum ({MAX_BRANCH_DEPTH})").into());
@@ -191,8 +205,16 @@ pub(crate) fn resolve_chain_filters_with_stack(
     // Branch depth and outbound depth are tracked independently: `depth` bounds
     // branch nesting within this pipeline, while `outbound_depth` bounds how many
     // outbound bindings deep we are. The binding context carries only the latter.
-    let binding_ctx =
-        ChainBindingContext::new(registry, chains, stack, outbound_depth, insecure, budget, branch_budget);
+    let binding_ctx = ChainBindingContext::new(
+        registry,
+        chains,
+        stack,
+        outbound_depth,
+        insecure,
+        top_level_clusters,
+        budget,
+        branch_budget,
+    );
     let (mut filters, branch_configs) = build_filters(entries, next_filter_id, &binding_ctx, budget)?;
     let pipeline_filter_type_names: Vec<&str> = filters.iter().map(|pf| pf.filter.name()).collect();
     let mut bctx = BuildContext {
@@ -205,6 +227,7 @@ pub(crate) fn resolve_chain_filters_with_stack(
         budget,
         branch_budget,
         outbound_depth,
+        top_level_clusters,
     };
     let name_index = build_name_index(&filters);
     attach_branches(&mut filters, branch_configs, &mut bctx, &name_index, depth)?;
@@ -441,6 +464,7 @@ fn resolve_chain_refs(
             bctx.budget,
             bctx.branch_budget,
             bctx.outbound_depth,
+            bctx.top_level_clusters,
         )?);
     }
     Ok(filters)
@@ -532,7 +556,7 @@ mod tests {
         let insecure = InsecureOptions::default();
         let budget = Cell::new(0);
         let branch_budget = Cell::new(0);
-        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &budget, &branch_budget);
+        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &[], &budget, &branch_budget);
         let (filters, _) = build_filters(&mut entries, &mut 0, &ctx, &budget).unwrap();
         let index = build_name_index(&filters);
         assert_eq!(index.get("first"), Some(&vec![0]), "first filter at index 0");
@@ -548,7 +572,7 @@ mod tests {
         let insecure = InsecureOptions::default();
         let budget = Cell::new(0);
         let branch_budget = Cell::new(0);
-        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &budget, &branch_budget);
+        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &[], &budget, &branch_budget);
         let (filters, _) = build_filters(&mut entries, &mut 0, &ctx, &budget).unwrap();
         let index = build_name_index(&filters);
         assert_eq!(index.len(), 1, "only named filters should appear");
@@ -574,7 +598,8 @@ mod tests {
 ";
         let mut entries: Vec<FilterEntry> = serde_yaml::from_str(yaml).unwrap();
         let chains = HashMap::new();
-        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap_err();
+        let err =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap_err();
         assert!(
             err.to_string().contains("ambiguous") && err.to_string().contains("shared"),
             "a rejoin targeting a duplicated name must fail the build: {err}"
@@ -592,7 +617,8 @@ mod tests {
 ";
         let mut entries: Vec<FilterEntry> = serde_yaml::from_str(yaml).unwrap();
         let chains = HashMap::new();
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
+        let filters =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap();
         assert_eq!(
             filters.len(),
             2,
@@ -612,7 +638,7 @@ mod tests {
         let insecure = InsecureOptions::default();
         let budget = Cell::new(0);
         let branch_budget = Cell::new(0);
-        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &budget, &branch_budget);
+        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &[], &budget, &branch_budget);
         let (filters, _) = build_filters(&mut entries, &mut 0, &ctx, &budget).unwrap();
         let index = build_name_index(&filters);
         assert_eq!(
@@ -746,7 +772,7 @@ mod tests {
             ("c3", c3.as_slice()),
         ]);
         let mut top = fanout_chain("c3", 20, "b0");
-        let err = resolve_chain_filters(&mut top, &registry, &chains, 0, &InsecureOptions::default()).unwrap_err();
+        let err = resolve_chain_filters(&mut top, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap_err();
         assert!(
             err.to_string().contains("filter instances"),
             "a named-reference fan-out (~20^4 = 160k instances) exceeds the 100k ceiling and must fail the build: {err}"
@@ -768,7 +794,8 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
+        let filters =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap();
         assert_eq!(filters.len(), 1, "should have 1 main filter");
         assert_eq!(filters[0].branches.len(), 1, "should have 1 branch");
         assert_eq!(filters[0].branches[0].filters.len(), 1, "branch should have 1 filter");
@@ -799,7 +826,8 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
+        let filters =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap();
         assert_eq!(
             filters[0].branches[0].filters.len(),
             1,
@@ -827,7 +855,8 @@ mod tests {
             },
             make_entry("request_id", Some("target")),
         ];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
+        let filters =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap();
         assert!(
             matches!(filters[0].branches[0].rejoin, RejoinTarget::SkipTo(1)),
             "rejoin should be SkipTo(1)"
@@ -853,6 +882,7 @@ mod tests {
             budget: &budget,
             branch_budget: &branch_budget,
             outbound_depth: 0,
+            top_level_clusters: &[],
         };
         let refs = vec![ChainRef::Named("nonexistent".to_owned())];
         let err = resolve_chain_refs(&refs, &mut bctx, 0).unwrap_err();
@@ -873,6 +903,7 @@ mod tests {
             &chains,
             MAX_BRANCH_DEPTH + 1,
             &InsecureOptions::default(),
+            &[],
         )
         .unwrap_err();
         assert!(
@@ -902,7 +933,8 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
+        let filters =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap();
         let branch = &filters[0].branches[0];
         assert!(branch.condition.is_some(), "branch should have a condition");
         let cond = branch.condition.as_ref().unwrap();
@@ -933,7 +965,8 @@ mod tests {
             },
             make_entry("request_id", None),
         ];
-        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap_err();
+        let err =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap_err();
         assert!(
             err.to_string().contains("max_iterations"),
             "backward rejoin without max_iterations should be rejected: {err}"
@@ -960,7 +993,8 @@ mod tests {
             },
             make_entry("request_id", None),
         ];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
+        let filters =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap();
         assert!(
             matches!(filters[0].branches[0].rejoin, RejoinTarget::ReEnter(0)),
             "backward rejoin with max_iterations should be accepted"
@@ -1017,7 +1051,8 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap_err();
+        let err =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap_err();
         assert!(
             err.to_string()
                 .contains("must name the filter the branch is attached to"),
@@ -1047,7 +1082,8 @@ mod tests {
             },
             make_entry("request_id", None),
         ];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
+        let filters =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap();
         let ids = collect_ids(&filters);
         let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
         assert_eq!(
@@ -1084,7 +1120,8 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
+        let filters =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap();
         let ids = collect_ids(&filters);
         let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
         assert_eq!(ids.len(), 3, "should have top-level + branch + nested branch filters");
@@ -1122,7 +1159,8 @@ mod tests {
                 ..make_entry("request_id", None)
             },
         ];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
+        let filters =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap();
         let ids = collect_ids(&filters);
         let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
         assert_eq!(ids.len(), 4, "2 top-level + 2 branch filters");
@@ -1152,7 +1190,8 @@ mod tests {
             },
             make_entry("request_id", None),
         ];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
+        let filters =
+            resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default(), &[]).unwrap();
         let ids = collect_ids(&filters);
         let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
         assert_eq!(ids.len(), 5, "3 top-level + 2 branch filters");

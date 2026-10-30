@@ -91,6 +91,12 @@ impl FilterPipeline {
     /// same SSRF and insecure-TLS rules as top-level `clusters:`, instead of
     /// silently bypassing them.
     ///
+    /// `top_level_clusters` is the configuration's top-level `clusters:`
+    /// declarations. It supports endpoint filling for name-only inline
+    /// clusters declared in inline outbound chains, which never pass through
+    /// whole-config validation and so cannot be filled there. It may be an
+    /// empty slice when the configuration declares no top-level clusters.
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails to instantiate
@@ -102,8 +108,16 @@ impl FilterPipeline {
         registry: &FilterRegistry,
         chains: &HashMap<&str, &[FilterEntry]>,
         insecure_options: &InsecureOptions,
+        top_level_clusters: &[praxis_core::config::Cluster],
     ) -> Result<Self, FilterError> {
-        let filters = super::build_branch::resolve_chain_filters(entries, registry, chains, 0, insecure_options)?;
+        let filters = super::build_branch::resolve_chain_filters(
+            entries,
+            registry,
+            chains,
+            0,
+            insecure_options,
+            top_level_clusters,
+        )?;
         Ok(Self::from_filters(filters))
     }
 

@@ -58,7 +58,6 @@ fn done_body() -> SubResponseBody {
     SubResponseBody::new_done()
 }
 
-
 fn render_metrics() -> String {
     install_metrics_recorder().render()
 }

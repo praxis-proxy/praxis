@@ -10,11 +10,11 @@
 //! form silently bypasses every safety check (`validate_clusters` runs only
 //! over `Config::clusters`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::cluster::validate_clusters;
 use crate::{
-    config::{ChainRef, Cluster, FilterChainConfig, FilterEntry, InsecureOptions, Listener, ProtocolKind},
+    config::{ChainRef, Cluster, Endpoint, FilterChainConfig, FilterEntry, InsecureOptions, Listener, ProtocolKind},
     errors::ProxyError,
 };
 
@@ -150,6 +150,267 @@ fn collect_entry_inline_clusters(
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// Inline Cluster References
+// -----------------------------------------------------------------------------
+
+/// Resolve inline cluster references against top-level declarations.
+///
+/// An inline cluster that shares a name with a top-level cluster is a
+/// reference: it must not declare `health_check`. If it omits `endpoints`,
+/// they are filled in from the declaration. If it declares its own
+/// `endpoints` and they diverge, validation warns and keeps the inline
+/// list. An inline cluster with no top-level namesake must declare
+/// `endpoints`.
+///
+/// Runs before [`validate_inline_clusters`] so filled endpoints pass the
+/// same SSRF and TLS gating as declared ones.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] on an invariant violation or a malformed
+/// inline `clusters:` list.
+pub(super) fn resolve_inline_cluster_references(
+    chains: &mut [FilterChainConfig],
+    top_level: &[Cluster],
+) -> Result<(), ProxyError> {
+    for chain in chains {
+        for entry in &mut chain.filters {
+            resolve_entry_references(&chain.name, entry, top_level)?;
+        }
+    }
+    Ok(())
+}
+
+/// Resolve references in one chain's filter entries: the entry-level slice
+/// of `resolve_inline_cluster_references` for outbound chains bound at
+/// pipeline-build time, which never appear in `Config::filter_chains`.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] on an invariant violation or a malformed
+/// inline `clusters:` list.
+pub fn resolve_chain_entries_references(
+    chain_name: &str,
+    entries: &mut [FilterEntry],
+    top_level: &[Cluster],
+) -> Result<(), ProxyError> {
+    for entry in entries {
+        resolve_entry_references(chain_name, entry, top_level)?;
+    }
+    Ok(())
+}
+
+/// Resolve one filter entry's references, recursing into inline branch
+/// chains and `iterative_request_router` steps. Returns whether anything
+/// was filled in.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] on an invariant violation or a malformed
+/// inline `clusters:` list.
+fn resolve_entry_references(
+    chain_name: &str,
+    entry: &mut FilterEntry,
+    top_level: &[Cluster],
+) -> Result<bool, ProxyError> {
+    let mut changed = false;
+    if CLUSTER_BEARING_FILTERS.contains(&entry.filter_type.as_str()) {
+        let context = format!("chain '{chain_name}': filter '{}'", entry.filter_type);
+        let mut clusters = extract_clusters(chain_name, entry)?;
+        if fill_references(&context, &mut clusters, top_level)? {
+            write_clusters(entry, &clusters)?;
+            changed = true;
+        }
+    }
+    if let Some(branches) = entry.branch_chains.as_mut() {
+        for branch in branches {
+            for chain_ref in &mut branch.chains {
+                if let ChainRef::Inline { name, filters } = chain_ref {
+                    for nested in filters {
+                        changed |= resolve_entry_references(name, nested, top_level)?;
+                    }
+                }
+            }
+        }
+    }
+    if entry.filter_type == STEP_BEARING_FILTER {
+        changed |= resolve_step_references(chain_name, entry, top_level)?;
+    }
+    Ok(changed)
+}
+
+/// Resolve references in one entry's `iterative_request_router` steps,
+/// writing filled entries back into the step filter lists.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] on an invariant violation, a malformed
+/// step filter list, or a serialization failure writing entries back.
+fn resolve_step_references(
+    chain_name: &str,
+    entry: &mut FilterEntry,
+    top_level: &[Cluster],
+) -> Result<bool, ProxyError> {
+    let serde_yaml::Value::Mapping(mapping) = &mut entry.config else {
+        return Ok(false);
+    };
+    let Some(serde_yaml::Value::Sequence(steps)) = mapping.get_mut("steps") else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for step in steps.iter_mut() {
+        let serde_yaml::Value::Mapping(step_map) = step else {
+            continue;
+        };
+        if let Some(filters_value) = step_map.get_mut("filters") {
+            changed |= resolve_step_filters(chain_name, &entry.filter_type, filters_value, top_level)?;
+        }
+    }
+    Ok(changed)
+}
+
+/// Resolve references in one step's filter list, writing the list back
+/// when anything was filled.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] on a malformed step filter list, a
+/// reference violation, or a serialization failure writing entries back.
+fn resolve_step_filters(
+    chain_name: &str,
+    filter_type: &str,
+    filters_value: &mut serde_yaml::Value,
+    top_level: &[Cluster],
+) -> Result<bool, ProxyError> {
+    let mut filters: Vec<FilterEntry> = serde_yaml::from_value(filters_value.clone()).map_err(|err| {
+        ProxyError::Config(format!(
+            "chain '{chain_name}': filter '{filter_type}': invalid step filters: {err}"
+        ))
+    })?;
+    let mut filled = false;
+    for filter_entry in &mut filters {
+        filled |= resolve_entry_references(chain_name, filter_entry, top_level)?;
+    }
+    if filled {
+        *filters_value = serde_yaml::to_value(&filters).map_err(|err| {
+            ProxyError::Config(format!(
+                "chain '{chain_name}': filter '{filter_type}': cannot write back step filters: {err}"
+            ))
+        })?;
+    }
+    Ok(filled)
+}
+
+/// Enforce the reference invariant on one inline `clusters:` list and fill
+/// referenced endpoints. Returns whether anything was filled in.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] when a cluster declares `health_check`
+/// inline (where it never runs) or declares neither endpoints nor a
+/// matching top-level cluster.
+fn fill_references(context: &str, clusters: &mut [Cluster], top_level: &[Cluster]) -> Result<bool, ProxyError> {
+    let mut filled = false;
+    for cluster in clusters {
+        filled |= fill_cluster_reference(context, cluster, top_level)?;
+    }
+    Ok(filled)
+}
+
+/// Enforce the reference invariant on one inline cluster and fill referenced
+/// endpoints. Returns whether endpoints were filled in.
+///
+/// A cluster matching a top-level declaration by name either omits its
+/// endpoints (they are filled in from the declaration) or declares its own;
+/// a divergent copy only warns, because the inline list stays the routing
+/// truth while health checks track the top-level declaration.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] when the cluster declares `health_check`
+/// inline (where it never runs) or declares neither endpoints nor a
+/// matching top-level cluster.
+fn fill_cluster_reference(context: &str, cluster: &mut Cluster, top_level: &[Cluster]) -> Result<bool, ProxyError> {
+    if cluster.health_check.is_some() {
+        return Err(ProxyError::Config(format!(
+            "{context}: cluster '{}' declares health_check inline, where it never runs; \
+             declare it on a top-level cluster",
+            cluster.name
+        )));
+    }
+    let Some(declared) = top_level.iter().find(|declared| declared.name == cluster.name) else {
+        if cluster.endpoints.is_empty() {
+            return Err(ProxyError::Config(format!(
+                "{context}: cluster '{}' declares no endpoints and matches no top-level cluster",
+                cluster.name
+            )));
+        }
+        return Ok(false);
+    };
+    if cluster.endpoints.is_empty() {
+        cluster.endpoints = declared.endpoints.clone();
+        return Ok(true);
+    }
+    if !endpoints_match(&cluster.endpoints, &declared.endpoints) {
+        tracing::warn!(
+            "{context}: cluster '{}' inline endpoints diverge from its top-level namesake; \
+             health checks track the top-level declaration",
+            cluster.name
+        );
+    }
+    Ok(false)
+}
+
+/// Normalized endpoint identity: address, weight, priority, zone, and
+/// sorted metadata pairs.
+type EndpointKey = (String, u32, u32, Option<String>, Vec<(String, String)>);
+
+/// Compare two endpoint lists for equality as multisets.
+///
+/// Order carries no meaning, and a plain string endpoint is equivalent to
+/// an object form with default fields, so both lists are normalized to
+/// [`EndpointKey`]s before comparing.
+fn endpoints_match(inline: &[Endpoint], declared: &[Endpoint]) -> bool {
+    fn sort_key(endpoint: &Endpoint) -> EndpointKey {
+        let metadata = {
+            let mut pairs: Vec<(String, String)> = endpoint
+                .metadata()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            pairs.sort_unstable();
+            pairs
+        };
+        (
+            endpoint.address().to_owned(),
+            endpoint.weight(),
+            endpoint.priority(),
+            endpoint.zone().map(str::to_owned),
+            metadata,
+        )
+    }
+    let mut left: Vec<_> = inline.iter().map(sort_key).collect();
+    let mut right: Vec<_> = declared.iter().map(sort_key).collect();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
+}
+
+/// Write a filled `clusters:` list back into a filter entry's config.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] if the list cannot be serialized.
+fn write_clusters(entry: &mut FilterEntry, clusters: &[Cluster]) -> Result<(), ProxyError> {
+    let value = serde_yaml::to_value(clusters)
+        .map_err(|err| ProxyError::Config(format!("cannot write back inline clusters: {err}")))?;
+    if let serde_yaml::Value::Mapping(mapping) = &mut entry.config {
+        mapping.insert(serde_yaml::Value::String("clusters".to_owned()), value);
+    }
+    Ok(())
+}
+
 /// Validate that every TCP listener's `cluster` reference resolves.
 ///
 /// A TCP listener's `cluster` is consumed only by the `tcp_load_balancer`
@@ -163,7 +424,7 @@ pub(super) fn validate_tcp_listener_clusters(
 ) -> Result<(), ProxyError> {
     // Chain names are unique (validated elsewhere), so index once
     // instead of scanning the chain list per listener reference.
-    let chains_by_name: std::collections::HashMap<&str, &FilterChainConfig> =
+    let chains_by_name: HashMap<&str, &FilterChainConfig> =
         chains.iter().map(|chain| (chain.name.as_str(), chain)).collect();
 
     for listener in listeners {
@@ -195,7 +456,7 @@ pub(super) fn validate_tcp_listener_clusters(
 /// `extract_clusters` cannot surface a new error here.
 fn listener_defines_tcp_cluster(
     listener: &Listener,
-    chains_by_name: &std::collections::HashMap<&str, &FilterChainConfig>,
+    chains_by_name: &HashMap<&str, &FilterChainConfig>,
     cluster_name: &str,
 ) -> Result<bool, ProxyError> {
     for chain_name in &listener.filter_chains {
@@ -702,6 +963,282 @@ mod tests {
         assert!(
             result.unwrap_err().to_string().contains("invalid step filters"),
             "error should mention invalid step filters"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Inline Cluster References
+    // -------------------------------------------------------------------------
+
+    use super::resolve_inline_cluster_references;
+    use crate::config::{ChainRef, Cluster};
+
+    /// One chain with a `load_balancer` inline `clusters:` list.
+    fn lb_chain(clusters_yaml: &str) -> FilterChainConfig {
+        serde_yaml::from_str(&format!(
+            "name: chain\nfilters:\n  - filter: load_balancer\n    clusters:\n{clusters_yaml}"
+        ))
+        .expect("chain yaml")
+    }
+
+    fn top_level(clusters_yaml: &str) -> Vec<Cluster> {
+        serde_yaml::from_str(clusters_yaml).expect("cluster yaml")
+    }
+
+    fn resolved_clusters(chains: &[FilterChainConfig]) -> Vec<Cluster> {
+        super::extract_clusters("chain", &chains[0].filters[0]).expect("clusters")
+    }
+
+    #[test]
+    fn reference_fills_endpoints_from_declaration() {
+        let mut chains = vec![lb_chain("      - name: web\n")];
+        let declared = top_level(
+            "  - name: web\n    endpoints: [\"10.0.0.1:80\", \"10.0.0.2:80\"]\n    health_check:\n      type: tcp\n",
+        );
+        resolve_inline_cluster_references(&mut chains, &declared).expect("reference resolves");
+        let clusters = resolved_clusters(&chains);
+        assert_eq!(clusters[0].endpoints.len(), 2, "endpoints filled from declaration");
+        assert_eq!(clusters[0].endpoints[0].address(), "10.0.0.1:80");
+    }
+
+    #[test]
+    fn reference_resolved_through_config_validation() {
+        let config = Config::from_yaml(
+            "listeners:\n  - name: main\n    address: \"127.0.0.1:18080\"\n    protocol: http\n    filter_chains: [chain]\nclusters:\n  - name: web\n    endpoints: [\"192.0.2.1:80\"]\n    health_check:\n      type: tcp\nfilter_chains:\n  - name: chain\n    filters:\n      - filter: load_balancer\n        clusters:\n          - name: web\n",
+        )
+        .expect("config with a cluster reference validates");
+        let entry = &config.filter_chains[0].filters[0];
+        let clusters = super::extract_clusters("chain", entry).expect("clusters");
+        assert_eq!(clusters[0].endpoints.len(), 1, "validation fills the reference");
+    }
+
+    #[test]
+    fn inline_endpoints_matching_namesake_kept() {
+        let mut chains = vec![lb_chain("      - name: web\n        endpoints: [\"10.0.0.1:80\"]\n")];
+        let declared =
+            top_level("  - name: web\n    endpoints: [\"10.0.0.1:80\"]\n    health_check:\n      type: tcp\n");
+        resolve_inline_cluster_references(&mut chains, &declared).expect("matching duplicate resolves");
+        let clusters = resolved_clusters(&chains);
+        assert_eq!(clusters[0].endpoints.len(), 1, "matching inline endpoints kept as-is");
+    }
+
+    #[test]
+    fn divergent_inline_endpoints_warn_not_reject() {
+        let mut chains = vec![lb_chain("      - name: web\n        endpoints: [\"10.0.0.9:80\"]\n")];
+        let declared =
+            top_level("  - name: web\n    endpoints: [\"10.0.0.1:80\"]\n    health_check:\n      type: tcp\n");
+        let warnings = capture_warnings(|| {
+            resolve_inline_cluster_references(&mut chains, &declared).expect("divergent duplicate warns but resolves");
+        });
+        assert!(
+            warnings
+                .iter()
+                .any(|message| message.contains("diverge") && message.contains("'web'")),
+            "divergent inline endpoints must emit a warning naming the cluster: {warnings:?}"
+        );
+        let clusters = resolved_clusters(&chains);
+        assert_eq!(
+            clusters[0].endpoints[0].address(),
+            "10.0.0.9:80",
+            "inline endpoints stay the routing truth on divergence"
+        );
+    }
+
+    /// Run `run` and return the formatted message of every WARN event it emits.
+    fn capture_warnings(run: impl FnOnce()) -> Vec<String> {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(WarnCapture(Arc::clone(&messages)));
+        tracing::subscriber::with_default(subscriber, || {
+            // Another test in this binary may install a global subscriber
+            // concurrently, leaving callsite interest cached without this one.
+            tracing::callsite::rebuild_interest_cache();
+            run();
+        });
+        std::mem::take(&mut *messages.lock().unwrap())
+    }
+
+    /// Layer recording the formatted message of WARN events.
+    struct WarnCapture(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarnCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                event.record(&mut MessageVisitor(&mut self.0.lock().unwrap()));
+            }
+        }
+    }
+
+    /// Field visitor capturing the event's formatted `message` field.
+    struct MessageVisitor<'messages>(&'messages mut Vec<String>);
+
+    impl tracing::field::Visit for MessageVisitor<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0.push(format!("{value:?}"));
+            }
+        }
+
+        fn record_str(&mut self, _field: &tracing::field::Field, _value: &str) {}
+    }
+
+    #[test]
+    fn no_endpoints_no_namesake_rejected() {
+        let mut chains = vec![lb_chain("      - name: web\n")];
+        let err = resolve_inline_cluster_references(&mut chains, &top_level("[]")).unwrap_err();
+        assert!(
+            err.to_string().contains("declares no endpoints"),
+            "endpoint-less unreferenced cluster rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn inline_health_check_rejected() {
+        let mut chains = vec![lb_chain(
+            "      - name: web\n        endpoints: [\"10.0.0.1:80\"]\n        health_check:\n          type: tcp\n",
+        )];
+        let err = resolve_inline_cluster_references(&mut chains, &top_level("[]")).unwrap_err();
+        assert!(
+            err.to_string().contains("health_check"),
+            "inline health_check rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn unreferenced_cluster_with_endpoints_untouched() {
+        let mut chains = vec![lb_chain(
+            "      - name: web\n        endpoints: [\"10.0.0.1:80\"]\n        load_balancer_strategy: round_robin\n",
+        )];
+        resolve_inline_cluster_references(&mut chains, &top_level("[]")).expect("no namesake, no error");
+        let clusters = resolved_clusters(&chains);
+        assert_eq!(clusters[0].endpoints.len(), 1);
+        assert_eq!(
+            serde_yaml::to_string(&clusters[0].load_balancer_strategy)
+                .expect("strategy serializes")
+                .trim(),
+            "round_robin",
+            "other inline fields survive the pass"
+        );
+    }
+
+    #[test]
+    fn branch_chain_reference_resolved() {
+        let mut chain: FilterChainConfig = serde_yaml::from_str(
+            "name: chain\nfilters:\n  - filter: header_static\n    headers:\n      x-test: value\n    branch_chains:\n      - name: br\n        chains:\n          - name: inner\n            filters:\n              - filter: load_balancer\n                clusters:\n                  - name: web\n",
+        )
+        .expect("chain yaml");
+        let declared =
+            top_level("  - name: web\n    endpoints: [\"10.0.0.1:80\"]\n    health_check:\n      type: tcp\n");
+        resolve_inline_cluster_references(std::slice::from_mut(&mut chain), &declared)
+            .expect("branch reference resolves");
+        let filters = chain.filters[0].branch_chains.as_ref().unwrap()[0]
+            .chains
+            .iter()
+            .find_map(|chain_ref| match chain_ref {
+                ChainRef::Inline { filters, .. } => Some(filters),
+                ChainRef::Named(_) => None,
+            })
+            .unwrap();
+        let clusters = super::extract_clusters("inner", &filters[0]).expect("clusters");
+        assert_eq!(clusters[0].endpoints.len(), 1, "branch chain reference filled");
+    }
+
+    #[test]
+    fn step_reference_resolved() {
+        let mut chain: FilterChainConfig = serde_yaml::from_str(
+            "name: chain\nfilters:\n  - filter: iterative_request_router\n    steps:\n      - filters:\n          - filter: load_balancer\n            clusters:\n              - name: web\n",
+        )
+        .expect("chain yaml");
+        let declared =
+            top_level("  - name: web\n    endpoints: [\"10.0.0.1:80\"]\n    health_check:\n      type: tcp\n");
+        resolve_inline_cluster_references(std::slice::from_mut(&mut chain), &declared)
+            .expect("step reference resolves");
+        let steps = super::extract_step_filters("chain", &chain.filters[0]).expect("step filters");
+        let clusters = super::extract_clusters("chain", &steps[0]).expect("clusters");
+        assert_eq!(clusters[0].endpoints.len(), 1, "step reference filled");
+    }
+
+    // -------------------------------------------------------------------------
+    // Endpoint Normalization (`endpoints_match`)
+    // -------------------------------------------------------------------------
+
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    use crate::config::Endpoint;
+
+    /// Parse an endpoint list from YAML.
+    fn endpoints(yaml: &str) -> Vec<Endpoint> {
+        serde_yaml::from_str(yaml).expect("endpoint yaml")
+    }
+
+    #[test]
+    fn endpoints_match_ignores_list_order() {
+        let inline = endpoints("- \"10.0.0.2:80\"\n- \"10.0.0.1:80\"\n- \"10.0.0.3:80\"\n");
+        let declared = endpoints("- \"10.0.0.3:80\"\n- \"10.0.0.1:80\"\n- \"10.0.0.2:80\"\n");
+        assert!(
+            super::endpoints_match(&inline, &declared),
+            "reordered endpoint lists are the same multiset and must match"
+        );
+    }
+
+    #[test]
+    fn endpoints_match_string_equals_default_object() {
+        let inline = endpoints("- \"10.0.0.1:80\"\n");
+        let declared = endpoints("- address: \"10.0.0.1:80\"\n");
+        assert!(
+            super::endpoints_match(&inline, &declared),
+            "a plain string endpoint equals the object form with default fields"
+        );
+    }
+
+    #[test]
+    fn endpoints_match_duplicate_count_must_agree() {
+        let inline = endpoints("- \"10.0.0.1:80\"\n- \"10.0.0.1:80\"\n");
+        let declared = endpoints("- \"10.0.0.1:80\"\n");
+        assert!(
+            !super::endpoints_match(&inline, &declared),
+            "the same endpoint repeated a different number of times is a divergence"
+        );
+    }
+
+    #[test]
+    fn endpoints_match_weight_difference_detected() {
+        let inline = endpoints("- \"10.0.0.1:80\"\n");
+        let declared = endpoints("- address: \"10.0.0.1:80\"\n  weight: 2\n");
+        assert!(
+            !super::endpoints_match(&inline, &declared),
+            "a weight difference is a divergence"
+        );
+    }
+
+    #[test]
+    fn endpoints_match_priority_difference_detected() {
+        let inline = endpoints("- address: \"10.0.0.1:80\"\n");
+        let declared = endpoints("- address: \"10.0.0.1:80\"\n  priority: 1\n");
+        assert!(
+            !super::endpoints_match(&inline, &declared),
+            "a priority difference is a divergence"
+        );
+    }
+
+    #[test]
+    fn endpoints_match_zone_difference_detected() {
+        let inline = endpoints("- address: \"10.0.0.1:80\"\n");
+        let declared = endpoints("- address: \"10.0.0.1:80\"\n  zone: us-east-1a\n");
+        assert!(
+            !super::endpoints_match(&inline, &declared),
+            "a zone difference is a divergence"
+        );
+    }
+
+    #[test]
+    fn endpoints_match_metadata_difference_detected() {
+        let inline = endpoints("- address: \"10.0.0.1:80\"\n");
+        let declared = endpoints("- address: \"10.0.0.1:80\"\n  metadata:\n    version: canary\n");
+        assert!(
+            !super::endpoints_match(&inline, &declared),
+            "a metadata difference is a divergence"
         );
     }
 }

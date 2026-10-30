@@ -811,6 +811,14 @@ settings such as `retry_policy`, connection timeouts, `load_balancer_strategy`
 and `trusted_private_endpoints` do not configure proxied traffic. Configure
 those on the inline load-balancer cluster instead.
 
+An inline cluster that shares its name with a top-level declaration can
+omit its endpoints: validation fills them in from the declaration, so the
+routed and health-checked addresses stay together. If the inline list is
+present it stays the routing truth, and validation warns when it diverges
+from the declaration — a diverged endpoint is routed but never
+health-gated, or probed but never routed. An inline `health_check` is
+rejected: probes are configured only at top level.
+
 ## Slow Start
 
 Optional per-cluster `slow_start` names a window and an

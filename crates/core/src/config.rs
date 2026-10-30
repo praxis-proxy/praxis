@@ -70,8 +70,8 @@ pub(crate) use telemetry::OTLP_PROTOCOL_ENV_VAR;
 pub use telemetry::TelemetryConfig;
 pub use validate::{
     MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING, TERMINAL_FILTERS, count_build_branches, is_ssrf_sensitive,
-    validate_chain_entries_branch_chains, validate_chain_entries_cardinality, validate_chain_entries_conditions,
-    validate_chain_entries_inline_clusters,
+    resolve_chain_entries_references, validate_chain_entries_branch_chains, validate_chain_entries_cardinality,
+    validate_chain_entries_conditions, validate_chain_entries_inline_clusters,
 };
 
 // -----------------------------------------------------------------------------

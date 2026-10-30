@@ -36,7 +36,7 @@ use praxis_core::config::{
     ChainRef, validate_chain_entries_branch_chains, validate_chain_entries_cardinality,
     validate_chain_entries_conditions, validate_chain_entries_inline_clusters,
 };
-use praxis_core::config::{FilterEntry, InsecureOptions};
+use praxis_core::config::{Cluster, FilterEntry, InsecureOptions};
 
 #[cfg(feature = "chain-binding")]
 use crate::filter::HttpFilter;
@@ -181,6 +181,17 @@ pub struct ChainBindingContext<'a> {
     )]
     insecure: &'a InsecureOptions,
 
+    /// Top-level cluster declarations, used to resolve cluster references in
+    /// inline outbound chains, which whole-config validation never sees.
+    #[cfg_attr(
+        not(any(feature = "iterative-request-router", feature = "chain-binding")),
+        expect(
+            dead_code,
+            reason = "read only by the gated bind_chain / build_nested_step_pipeline paths"
+        )
+    )]
+    top_level_clusters: &'a [Cluster],
+
     /// Build-wide count of filter instances materialized so far, shared across
     /// branch resolution and outbound binding alike. Binding an outbound chain
     /// forwards this counter rather than resetting it, so a fan-out split across
@@ -227,6 +238,7 @@ impl<'a> ChainBindingContext<'a> {
         stack: &'a ResolutionStack,
         outbound_depth: usize,
         insecure: &'a InsecureOptions,
+        top_level_clusters: &'a [Cluster],
         budget: &'a Cell<usize>,
         branch_budget: &'a Cell<usize>,
     ) -> Self {
@@ -236,6 +248,7 @@ impl<'a> ChainBindingContext<'a> {
             stack,
             outbound_depth,
             insecure,
+            top_level_clusters,
             budget,
             branch_budget,
         }
@@ -265,7 +278,7 @@ impl<'a> ChainBindingContext<'a> {
         let stack = ResolutionStack::new();
         let budget = Cell::new(0);
         let branch_budget = Cell::new(0);
-        let ctx = ChainBindingContext::new(registry, &chains, &stack, 0, insecure, &budget, &branch_budget);
+        let ctx = ChainBindingContext::new(registry, &chains, &stack, 0, insecure, &[], &budget, &branch_budget);
         f(&ctx)
     }
 
@@ -314,6 +327,7 @@ impl<'a> ChainBindingContext<'a> {
             self.budget,
             self.branch_budget,
             self.outbound_depth,
+            self.top_level_clusters,
         )?;
         Ok(FilterPipeline::from_filters(filters))
     }
@@ -341,6 +355,13 @@ impl<'a> ChainBindingContext<'a> {
             return Err(format!("outbound chain nesting depth exceeds maximum ({MAX_OUTBOUND_CHAIN_DEPTH})").into());
         }
         let (name, mut entries) = self.resolve_ref(chain_ref)?;
+        // Inline references never appear in `Config::filter_chains`, so
+        // whole-config validation cannot resolve their cluster references;
+        // named references are top-level chains it already resolved.
+        if name.is_none() {
+            praxis_core::config::resolve_chain_entries_references("<inline>", &mut entries, self.top_level_clusters)
+                .map_err(|err| FilterError::from(err.to_string()))?;
+        }
         // Named references participate in cycle detection; the guard pops the
         // name when this resolution returns. Inline references carry no name to
         // key on and are bounded by depth alone.
@@ -364,6 +385,7 @@ impl<'a> ChainBindingContext<'a> {
             self.budget,
             self.branch_budget,
             self.outbound_depth + 1,
+            self.top_level_clusters,
         )?;
         let pipeline = FilterPipeline::from_filters(filters);
         Self::reject_non_http_filters(&pipeline, name)?;
@@ -802,7 +824,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .expect("build pipeline");
 
         assert_eq!(
@@ -821,7 +843,7 @@ mod tests {
         let outbound = entries("- filter: request_id\n- filter: headers\n- filter: compression\n");
         let chains: HashMap<&str, &[FilterEntry]> = HashMap::from([("outbound", outbound.as_slice())]);
         let mut top = entries("- filter: test_callout\n  outbound_chain: outbound\n");
-        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .expect("build pipeline");
 
         assert_eq!(
@@ -839,7 +861,7 @@ mod tests {
 
         let chains = HashMap::new();
         let mut top = entries("- filter: test_callout\n  outbound_chain: missing\n");
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -858,7 +880,7 @@ mod tests {
         let a = entries("- filter: test_callout\n  outbound_chain: a\n");
         let chains: HashMap<&str, &[FilterEntry]> = HashMap::from([("a", a.as_slice())]);
         let mut top = entries("- filter: test_callout\n  outbound_chain: a\n");
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -878,7 +900,7 @@ mod tests {
         let b = entries("- filter: test_callout\n  outbound_chain: a\n");
         let chains: HashMap<&str, &[FilterEntry]> = HashMap::from([("a", a.as_slice()), ("b", b.as_slice())]);
         let mut top = entries("- filter: test_callout\n  outbound_chain: a\n");
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -904,7 +926,7 @@ mod tests {
             .map(|(name, e)| (name.as_str(), e.as_slice()))
             .collect();
         let mut top = entries("- filter: test_callout\n  outbound_chain: c0\n");
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -937,7 +959,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -975,7 +997,7 @@ mod tests {
             },
             ..InsecureOptions::default()
         };
-        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &insecure)
+        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &insecure, &[])
             .expect("outbound chain with an opted-in private endpoint must build");
     }
 
@@ -1009,7 +1031,7 @@ mod tests {
   outbound_chain: outbound
 ",
         );
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("two ~59k outbound bindings must exceed the shared 100k budget");
 
@@ -1067,7 +1089,7 @@ mod tests {
             outbound_callout_with_branches(144)
         );
         let mut top = entries(&top_yaml);
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("two 144-branch outbound bindings must exceed the shared 256-branch ceiling");
 
@@ -1104,7 +1126,7 @@ mod tests {
         listener_branches.push_str(&outbound_callout_with_branches(144));
 
         let mut top = entries(&listener_branches);
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("listener branches plus a bound chain's branches must exceed the shared ceiling");
 
@@ -1154,7 +1176,7 @@ mod tests {
   outbound_chain: outbound
 ",
         );
-        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .expect("a shared named outbound chain's branches must be counted once, not per binding");
     }
 
@@ -1174,7 +1196,7 @@ mod tests {
             outbound_callout_with_branches(100)
         );
         let mut top = entries(&top_yaml);
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("a bound named chain (200) plus an inline chain (100) must exceed the config-wide 256 ceiling");
 
@@ -1215,7 +1237,7 @@ mod tests {
         }
 
         let mut top = entries("- filter: outbound_callout\n  outbound_chain: outbound\n");
-        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .expect("an outbound chain nested to the maximum branch depth must build");
     }
 
@@ -1242,7 +1264,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -1279,7 +1301,7 @@ mod tests {
             },
             ..InsecureOptions::default()
         };
-        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &insecure)
+        FilterPipeline::build_with_chains(&mut top, &registry, &chains, &insecure, &[])
             .expect("outbound chain must build when the ordering check is skipped");
     }
 
@@ -1316,7 +1338,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -1351,7 +1373,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -1384,7 +1406,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -1440,7 +1462,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -1491,7 +1513,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -1518,7 +1540,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -1550,7 +1572,7 @@ mod tests {
             format!("- filter: outbound_callout\n  outbound_chain:\n    name: outbound\n    filters:\n{filters_yaml}");
         let mut top = entries(&top_yaml);
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -1578,7 +1600,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -1612,7 +1634,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let err = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .err()
             .expect("build should fail");
 
@@ -1643,7 +1665,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let parent = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let parent = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .expect("build pipeline");
 
         assert!(
@@ -1677,7 +1699,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let parent = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let parent = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .expect("build pipeline");
 
         assert!(
@@ -1698,7 +1720,7 @@ mod tests {
         let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
         let insecure = InsecureOptions::default();
         let (budget, branch_budget) = (Cell::new(0), Cell::new(0));
-        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &budget, &branch_budget);
+        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &[], &budget, &branch_budget);
         let chain_ref = ChainRef::Inline {
             name: "outbound".to_owned(),
             filters: entries("- filter: request_id\n- filter: headers\n"),
@@ -1745,7 +1767,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let parent = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let parent = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .expect("build pipeline");
 
         parent.apply_insecure_options(&InsecureOptions::default());
@@ -1779,7 +1801,7 @@ mod tests {
 ",
         );
         let chains = HashMap::new();
-        let parent = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+        let parent = FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
             .expect("build pipeline");
 
         parent.apply_insecure_options(&InsecureOptions::default());
@@ -1809,7 +1831,8 @@ mod tests {
       - filter: headers
 ",
         );
-        FilterPipeline::build_with_chains(&mut v1, &registry, &chains, &InsecureOptions::default()).expect("build v1");
+        FilterPipeline::build_with_chains(&mut v1, &registry, &chains, &InsecureOptions::default(), &[])
+            .expect("build v1");
         assert_eq!(
             *sink.lock().expect("sink lock"),
             Some(2),
@@ -1827,7 +1850,8 @@ mod tests {
       - filter: compression
 ",
         );
-        FilterPipeline::build_with_chains(&mut v2, &registry, &chains, &InsecureOptions::default()).expect("build v2");
+        FilterPipeline::build_with_chains(&mut v2, &registry, &chains, &InsecureOptions::default(), &[])
+            .expect("build v2");
         assert_eq!(
             *sink.lock().expect("sink lock"),
             Some(3),

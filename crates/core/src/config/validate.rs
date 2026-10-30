@@ -17,7 +17,7 @@ mod rules;
 
 pub use cluster::is_ssrf_sensitive;
 pub use filter_chain::{TERMINAL_FILTERS, validate_chain_entries_cardinality, validate_chain_entries_conditions};
-pub use inline_clusters::validate_chain_entries_inline_clusters;
+pub use inline_clusters::{resolve_chain_entries_references, validate_chain_entries_inline_clusters};
 
 /// Maximum allowed `max_connections` value across listeners, clusters,
 /// and the global runtime setting (1 million).

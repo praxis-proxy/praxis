@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Implicit cluster references: an inline load-balancer cluster that shares
+  its name with a top-level cluster may omit its endpoints, which are
+  filled in from the declaration at validation time, keeping the routed
+  and health-checked addresses together. A divergent endpoint list now
+  warns at startup and on reload, and an inline `health_check` is
+  rejected: probes are configured only at top level.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
@@ -30,6 +36,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+
+### Changed
+
+- `FilterPipeline::build_with_chains` takes a new required
+  `top_level_clusters: &[Cluster]` argument. Rust callers pass the
+  config's top-level `clusters:` list, or `&[]` when none exists.
 
 ### Fixed
 

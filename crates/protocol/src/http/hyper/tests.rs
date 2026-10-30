@@ -1425,8 +1425,14 @@ fn pipelines(config: &Config, registry: &FilterRegistry) -> ListenerPipelines {
     let mut built = HashMap::new();
     for listener in &config.listeners {
         let mut entries = expanded.for_listener(listener).unwrap();
-        let mut pipeline =
-            FilterPipeline::build_with_chains(&mut entries, registry, &chains, &config.insecure_options).unwrap();
+        let mut pipeline = FilterPipeline::build_with_chains(
+            &mut entries,
+            registry,
+            &chains,
+            &config.insecure_options,
+            &config.clusters,
+        )
+        .unwrap();
         pipeline
             .apply_body_limits(
                 config.body_limits.max_request_bytes,

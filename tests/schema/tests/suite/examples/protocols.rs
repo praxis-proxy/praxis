@@ -360,9 +360,6 @@ filter_chains:
       - filter: tcp_load_balancer
         clusters:
           - name: db_pool
-            endpoints:
-              - "127.0.0.1:15432"
-              - "127.0.0.1:15433"
 "#,
     )
     .unwrap();
@@ -410,10 +407,6 @@ filter_chains:
       - filter: tcp_load_balancer
         clusters:
           - name: db_pool
-            endpoints:
-              - "127.0.0.1:15432"
-              - "127.0.0.1:15433"
-              - "127.0.0.1:15434"
             load_balancer_strategy:
               least_connections: ~
 "#,
@@ -456,10 +449,6 @@ filter_chains:
       - filter: tcp_load_balancer
         clusters:
           - name: cache_pool
-            endpoints:
-              - "127.0.0.1:16379"
-              - "127.0.0.1:16380"
-              - "127.0.0.1:16381"
             load_balancer_strategy:
               consistent_hash: {}
 "#,

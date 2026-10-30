@@ -15,7 +15,7 @@ use super::{
     branch_chain::validate_branch_chains,
     cluster::validate_clusters,
     filter_chain::{validate_filter_chains, validate_selected_upstream_matchers},
-    inline_clusters::{validate_inline_clusters, validate_tcp_listener_clusters},
+    inline_clusters::{resolve_inline_cluster_references, validate_inline_clusters, validate_tcp_listener_clusters},
     listener::{addresses_overlap, validate_listener_names, validate_listeners},
 };
 use crate::{
@@ -123,6 +123,7 @@ impl Config {
         validate_body_limits(&self.body_limits, self.insecure_options.allow_unbounded_body)?;
         validate_cluster_names(&self.clusters)?;
         validate_clusters(&self.clusters, &self.insecure_options)?;
+        resolve_inline_cluster_references(&mut self.filter_chains, &self.clusters)?;
         validate_inline_clusters(&self.filter_chains, &self.insecure_options)?;
         validate_tcp_listener_clusters(&self.listeners, &self.filter_chains)?;
         validate_selected_upstream_matchers(&self.filter_chains, &self.clusters)?;

@@ -6574,7 +6574,6 @@ fn an_http_route_beside_entity_routes_fails_filter_construction() {
     );
 }
 
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_global_block_does_authorize_classified_mcp_traffic() {
     let (_dir, path) = write_entity_config_with_global_authz(

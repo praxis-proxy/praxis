@@ -4903,6 +4903,7 @@ fn assert_parent_ordering_errors(case: &str, yaml: &str, expected: &[&str]) {
         &crate::FilterRegistry::with_builtins(),
         &std::collections::HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .expect(case);
 
@@ -5719,6 +5720,7 @@ fn build_top_level_with_chains(
         registry,
         &chains,
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
 }
 

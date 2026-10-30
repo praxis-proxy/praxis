@@ -68,8 +68,13 @@ filter_chains:
             entries.extend_from_slice(filters);
         }
     }
-    let result =
-        praxis_filter::FilterPipeline::build_with_chains(&mut entries, &registry, &chains, &config.insecure_options);
+    let result = praxis_filter::FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &chains,
+        &config.insecure_options,
+        &config.clusters,
+    );
     assert!(result.is_err(), "backward rejoin without max_iterations should fail");
     let err = result.err().unwrap();
     assert!(
@@ -381,8 +386,13 @@ filter_chains:
             entries.extend_from_slice(filters);
         }
     }
-    let result =
-        praxis_filter::FilterPipeline::build_with_chains(&mut entries, &registry, &chains, &config.insecure_options);
+    let result = praxis_filter::FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &chains,
+        &config.insecure_options,
+        &config.clusters,
+    );
     assert!(
         result.is_err(),
         "self-referencing rejoin without max_iterations should fail"
