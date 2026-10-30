@@ -3,10 +3,7 @@
 
 //! Weighted round-robin endpoint selection via cumulative weight thresholds.
 
-use std::sync::{
-    Arc, Mutex, PoisonError,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use praxis_core::health::ClusterHealthState;
 
@@ -15,6 +12,7 @@ use super::{
     is_excluded,
     slow_start::{self, EffectiveWeights},
 };
+use crate::weighted_cycle::{WeightedCycle, pick_weighted_matching};
 
 // -----------------------------------------------------------------------------
 // RoundRobin
@@ -26,10 +24,10 @@ pub(crate) struct RoundRobin {
     endpoints: Vec<WeightedEndpoint>,
 
     /// Sum of all endpoint weights.
-    total_weight: usize,
+    total_weight: u64,
 
-    /// Monotonically increasing counter; modulo-selected per call.
-    counter: AtomicUsize,
+    /// Monotonically increasing weighted-round-robin cursor.
+    cycle: WeightedCycle,
 
     /// Running scores for smooth weighted round robin.
     ///
@@ -41,12 +39,14 @@ pub(crate) struct RoundRobin {
 impl RoundRobin {
     /// Create a round-robin selector from a deduplicated weighted endpoint list.
     pub(crate) fn new(endpoints: Vec<WeightedEndpoint>) -> Self {
-        let total_weight: usize = endpoints.iter().map(|ep| ep.weight as usize).sum();
+        let total_weight = endpoints.iter().fold(0_u64, |total, endpoint| {
+            total.saturating_add(u64::from(endpoint.weight))
+        });
         let smooth = Mutex::new(vec![0; endpoints.len()]);
         Self {
             endpoints,
             total_weight,
-            counter: AtomicUsize::new(0),
+            cycle: WeightedCycle::new(),
             smooth,
         }
     }
@@ -73,7 +73,7 @@ impl RoundRobin {
         if let Some(weights) = slow_start::scaling_weights(weights) {
             return self.select_smooth(health, exclude, weights);
         }
-        let tick = self.counter.fetch_add(1, Ordering::Relaxed);
+        let tick = self.cycle.next();
 
         if let Some(state) = health
             && let Some(addr) = self.select_healthy(tick, state, exclude)
@@ -81,7 +81,7 @@ impl RoundRobin {
             return Some(addr);
         }
 
-        select_by_weight_excluding(&self.endpoints, tick, exclude)
+        self.pick_matching(tick, |endpoint| !is_excluded(&endpoint.address, exclude))
     }
 
     /// Nginx-style smooth weighted round robin over the scaled ramp weights.
@@ -134,52 +134,26 @@ impl RoundRobin {
     }
 
     /// Attempt weighted selection among only healthy endpoints.
-    #[expect(clippy::too_many_lines, reason = "fast/slow path split is clearer inline")]
-    fn select_healthy(&self, tick: usize, state: &ClusterHealthState, exclude: &[Arc<str>]) -> Option<Arc<str>> {
-        if exclude.is_empty() {
-            let mut healthy_weight = 0_usize;
-            for ep in &self.endpoints {
-                if state.is_address_healthy(&ep.address) {
-                    healthy_weight += ep.weight as usize;
-                }
-            }
-            if healthy_weight == 0 {
-                return None;
-            }
-            let slot = tick % healthy_weight;
-            let mut cumulative = 0_usize;
-            for ep in &self.endpoints {
-                if state.is_address_healthy(&ep.address) {
-                    cumulative += ep.weight as usize;
-                    if slot < cumulative {
-                        return Some(Arc::clone(&ep.address));
-                    }
-                }
-            }
-            return None;
-        }
+    fn select_healthy(&self, tick: u64, state: &ClusterHealthState, exclude: &[Arc<str>]) -> Option<Arc<str>> {
+        self.pick_matching(tick, |endpoint| {
+            state.is_address_healthy(&endpoint.address) && !is_excluded(&endpoint.address, exclude)
+        })
+    }
 
-        // Slow path: filter by both health and exclusion list.
-        let mut healthy_weight = 0_usize;
-        for ep in &self.endpoints {
-            if state.is_address_healthy(&ep.address) && !is_excluded(&ep.address, exclude) {
-                healthy_weight += ep.weight as usize;
-            }
-        }
-        if healthy_weight == 0 {
-            return None;
-        }
-        let slot = tick % healthy_weight;
-        let mut cumulative = 0_usize;
-        for ep in &self.endpoints {
-            if state.is_address_healthy(&ep.address) && !is_excluded(&ep.address, exclude) {
-                cumulative += ep.weight as usize;
-                if slot < cumulative {
-                    return Some(Arc::clone(&ep.address));
-                }
-            }
-        }
-        None
+    /// Pick the weight bucket containing `tick` among matching endpoints.
+    fn pick_matching<F>(&self, tick: u64, candidate: F) -> Option<Arc<str>>
+    where
+        F: Fn(&WeightedEndpoint) -> bool,
+    {
+        let index = pick_weighted_matching(
+            tick,
+            self.endpoints
+                .iter()
+                .enumerate()
+                .map(|(index, endpoint)| (index, u64::from(endpoint.weight))),
+            |index| self.endpoints.get(index).is_some_and(&candidate),
+        )?;
+        self.endpoints.get(index).map(|endpoint| Arc::clone(&endpoint.address))
     }
 }
 
@@ -189,51 +163,6 @@ fn smooth_candidate(endpoint: &WeightedEndpoint, health: Option<&ClusterHealthSt
         return false;
     }
     health.is_none_or(|state| state.is_address_healthy(&endpoint.address))
-}
-
-/// Walk `endpoints` to find the weight bucket containing `slot`.
-#[expect(clippy::expect_used, reason = "non-empty at construction")]
-fn select_by_weight(endpoints: &[WeightedEndpoint], tick: usize, total_weight: usize) -> Arc<str> {
-    let slot = tick % total_weight;
-    let mut cumulative = 0_usize;
-    for ep in endpoints {
-        cumulative += ep.weight as usize;
-        if slot < cumulative {
-            return Arc::clone(&ep.address);
-        }
-    }
-    Arc::clone(&endpoints.last().expect("non-empty").address)
-}
-
-/// Weighted round-robin selection skipping excluded endpoints.
-fn select_by_weight_excluding(endpoints: &[WeightedEndpoint], tick: usize, exclude: &[Arc<str>]) -> Option<Arc<str>> {
-    if exclude.is_empty() {
-        let total: usize = endpoints.iter().map(|ep| ep.weight as usize).sum();
-        if total == 0 {
-            return None;
-        }
-        return Some(select_by_weight(endpoints, tick, total));
-    }
-    let mut weight = 0_usize;
-    for ep in endpoints {
-        if !is_excluded(&ep.address, exclude) {
-            weight += ep.weight as usize;
-        }
-    }
-    if weight == 0 {
-        return None;
-    }
-    let slot = tick % weight;
-    let mut cumulative = 0_usize;
-    for ep in endpoints {
-        if !is_excluded(&ep.address, exclude) {
-            cumulative += ep.weight as usize;
-            if slot < cumulative {
-                return Some(Arc::clone(&ep.address));
-            }
-        }
-    }
-    None
 }
 
 // -----------------------------------------------------------------------------

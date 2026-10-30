@@ -245,6 +245,73 @@ creates more virtual nodes on the hash ring.
   and new backends by adjusting weights across
   config reloads.
 
+## Weighted Route Targets
+
+Endpoint weights split traffic inside one cluster.
+When the backends cannot share a cluster - for
+example because each has its own TLS identity -
+split the route across clusters instead:
+
+```yaml
+filters:
+  - filter: router
+    routes:
+      - path_prefix: "/"
+        weighted_clusters:
+          targets:
+            - name: stable
+              weight: 90
+            - name: canary
+              weight: 10
+            - name: dr
+              priority: 1
+```
+
+The router selects one cluster per request with
+weighted round-robin. Targets sharing a
+`priority` form a tier; the router uses the lowest
+priority number with at least one healthy cluster
+and spills to the next tier only when the active
+tier has no healthy cluster. A target is healthy
+when its cluster has at least one healthy endpoint.
+`cluster: name` is shorthand for a single target
+with weight 1 and priority 0.
+
+Target health is read from the top-level
+`clusters` registry, bound once when the pipeline
+is installed. A target whose cluster has no
+top-level `health_check` has no health state and
+stays eligible. A tier containing such a target
+can never be marked fully unhealthy, so it never
+spills to lower-priority tiers: only the last tier
+may safely omit health checks. During install the
+router warns when a primary or intermediate tier
+has an untracked target.
+
+The two kinds of weight compose multiplicatively:
+
+```text
+effective share = target_weight / tier_total
+                * endpoint_weight / cluster_total
+```
+
+So a 90/10 route split whose `stable` cluster also
+weights one endpoint 3:1 produces a 67.5% / 22.5% /
+10% split across that cluster's two endpoints and
+the canary. Endpoint selection, including health
+and slow start, is unchanged.
+
+Route-target weights are static. The selected
+cluster is sticky for the request, including
+retries, but not across router re-entry: a branch
+chain's backward `ReEnter` runs the router again,
+so for a weighted route another target is selected
+and another weighted turn is consumed. Cluster
+selection happens before endpoint selection, so it
+does not honor a downstream consistent-hash,
+ring-hash, or maglev affinity: the same request key
+can land in different clusters across requests.
+
 ## Health-Aware Routing
 
 All strategies automatically exclude unhealthy

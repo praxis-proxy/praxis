@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -42,6 +42,14 @@ pub struct EndpointHealth {
 
     /// Mutex-protected counters for atomic mutation.
     inner: Mutex<HealthInner>,
+
+    /// Cluster-level availability counter, attached when this endpoint is
+    /// placed in a [`ClusterHealthEntry`].
+    ///
+    /// A standalone endpoint has no counter. Attaching happens once, before the
+    /// entry is shared, so transitions can keep the cluster's available count
+    /// exact without the reader scanning every endpoint.
+    availability: Option<Arc<ClusterAvailability>>,
 }
 
 impl EndpointHealth {
@@ -61,6 +69,27 @@ impl EndpointHealth {
                 consecutive_successes: 0,
                 consecutive_failures: 0,
             }),
+            availability: None,
+        }
+    }
+
+    /// Attach this endpoint to a cluster availability counter.
+    ///
+    /// The caller must initialise the counter from the endpoints' current
+    /// health before sharing the entry.
+    fn attach_availability(&mut self, availability: Arc<ClusterAvailability>) {
+        self.availability = Some(availability);
+    }
+
+    /// Update the attached cluster counter after a health transition.
+    fn record_availability(&self, healthy: bool) {
+        let Some(availability) = &self.availability else {
+            return;
+        };
+        if healthy {
+            availability.record_healthy();
+        } else {
+            availability.record_unhealthy();
         }
     }
 
@@ -95,9 +124,13 @@ impl EndpointHealth {
     #[expect(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn mark_healthy(&self) {
         let mut inner = self.inner.lock().expect("health lock poisoned");
+        let transitioned = !inner.healthy;
         inner.healthy = true;
         inner.consecutive_failures = 0;
         self.healthy_cache.store(true, Ordering::Release);
+        if transitioned {
+            self.record_availability(true);
+        }
     }
 
     /// Mark the endpoint as unhealthy and reset success counter.
@@ -117,9 +150,13 @@ impl EndpointHealth {
     #[expect(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn mark_unhealthy(&self) {
         let mut inner = self.inner.lock().expect("health lock poisoned");
+        let transitioned = inner.healthy;
         inner.healthy = false;
         inner.consecutive_successes = 0;
         self.healthy_cache.store(false, Ordering::Release);
+        if transitioned {
+            self.record_availability(false);
+        }
     }
 
     /// Record a successful probe and return whether the endpoint
@@ -148,6 +185,7 @@ impl EndpointHealth {
         if transitioned {
             inner.healthy = true;
             self.healthy_cache.store(true, Ordering::Release);
+            self.record_availability(true);
         }
         transitioned
     }
@@ -178,6 +216,7 @@ impl EndpointHealth {
         if transitioned {
             inner.healthy = false;
             self.healthy_cache.store(false, Ordering::Release);
+            self.record_availability(false);
         }
         transitioned
     }
@@ -266,6 +305,46 @@ struct HealthInner {
 }
 
 // -----------------------------------------------------------------------------
+// ClusterAvailability
+// -----------------------------------------------------------------------------
+
+/// Number of healthy endpoints in a cluster, kept current by transitions.
+///
+/// Readers need only know whether any endpoint is healthy, so this turns the
+/// per-request availability check from an endpoint scan into one atomic load.
+/// Writers update it exactly once per transition, under the endpoint's health
+/// lock.
+#[derive(Debug)]
+struct ClusterAvailability {
+    /// Healthy endpoints in the cluster.
+    healthy: AtomicUsize,
+}
+
+impl ClusterAvailability {
+    /// Build a counter holding `healthy` healthy endpoints.
+    fn new(healthy: usize) -> Self {
+        Self {
+            healthy: AtomicUsize::new(healthy),
+        }
+    }
+
+    /// Whether at least one endpoint is healthy.
+    fn is_available(&self) -> bool {
+        self.healthy.load(Ordering::Relaxed) > 0
+    }
+
+    /// Record one endpoint transitioning to healthy.
+    fn record_healthy(&self) {
+        self.healthy.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record one endpoint transitioning to unhealthy.
+    fn record_unhealthy(&self) {
+        self.healthy.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+// -----------------------------------------------------------------------------
 // ClusterHealthEntry
 // -----------------------------------------------------------------------------
 
@@ -293,6 +372,9 @@ pub struct ClusterHealthEntry {
     /// Per-endpoint health states, indexed by position.
     endpoints: Vec<EndpointHealth>,
 
+    /// Healthy-endpoint count shared with every endpoint's transition path.
+    availability: Arc<ClusterAvailability>,
+
     /// Address string to endpoint index.
     index: HashMap<Arc<str>, usize>,
 
@@ -310,7 +392,7 @@ impl ClusterHealthEntry {
     ///
     /// Panics if `endpoints` and `addresses` have different lengths.
     pub fn new(
-        endpoints: Vec<EndpointHealth>,
+        mut endpoints: Vec<EndpointHealth>,
         addresses: Vec<Arc<str>>,
         passive_unhealthy_threshold: Option<u32>,
         passive_healthy_threshold: Option<u32>,
@@ -320,6 +402,11 @@ impl ClusterHealthEntry {
             addresses.len(),
             "endpoints and addresses must have the same length"
         );
+        let healthy = endpoints.iter().filter(|endpoint| endpoint.is_healthy()).count();
+        let availability = Arc::new(ClusterAvailability::new(healthy));
+        for endpoint in &mut endpoints {
+            endpoint.attach_availability(Arc::clone(&availability));
+        }
         let index = addresses
             .into_iter()
             .enumerate()
@@ -327,6 +414,7 @@ impl ClusterHealthEntry {
             .collect();
         Self {
             endpoints,
+            availability,
             index,
             passive_healthy_threshold,
             passive_unhealthy_threshold,
@@ -354,6 +442,14 @@ impl ClusterHealthEntry {
         self.endpoint_index(addr)
             .and_then(|idx| self.endpoints.get(idx))
             .is_none_or(EndpointHealth::is_healthy)
+    }
+
+    /// Whether at least one endpoint is healthy.
+    ///
+    /// Reads the incrementally maintained availability counter, so a
+    /// health-gated selector does not scan the endpoint list per request.
+    pub fn is_available(&self) -> bool {
+        self.availability.is_available()
     }
 
     /// Return `(healthy, total)` endpoint counts for this cluster.
@@ -638,6 +734,23 @@ mod tests {
             (2, 3),
             "should count two healthy out of three endpoints"
         );
+    }
+
+    #[test]
+    fn cluster_health_entry_is_available() {
+        let entry = ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new()],
+            vec![Arc::from("10.0.0.1:80"), Arc::from("10.0.0.2:80")],
+            None,
+            None,
+        );
+        assert!(entry.is_available(), "a new cluster can serve");
+        entry.endpoints()[0].mark_unhealthy();
+        assert!(entry.is_available(), "one healthy endpoint is enough");
+        entry.endpoints()[1].mark_unhealthy();
+        assert!(!entry.is_available(), "an all-unhealthy cluster cannot serve");
+        entry.endpoints()[1].mark_healthy();
+        assert!(entry.is_available(), "recovery restores availability");
     }
 
     #[test]

@@ -1117,7 +1117,7 @@ mod tests {
     use super::*;
     #[cfg(feature = "upstream-binding")]
     use crate::pipeline::test_filters::{binding_router, bound_lb, terminal_filter};
-    use crate::pipeline::test_filters::{lb_filter, noop_filter_with_conditions, selector_filter};
+    use crate::pipeline::test_filters::{lb_filter, noop_filter_with_conditions, selector_filter, wrap_http_filter};
 
     #[test]
     fn invalid_condition_header_name_rejected_at_build() {
@@ -2056,6 +2056,37 @@ mod tests {
         let mut errors = Vec::new();
         check_misaligned_clusters(&filters, &mut errors);
         assert!(errors.is_empty(), "aligned clusters should produce no errors");
+    }
+
+    #[test]
+    fn weighted_target_missing_load_balancer_is_rejected() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+routes:
+  - path_prefix: "/"
+    weighted_clusters:
+      targets:
+        - name: stable
+        - name: canary
+"#,
+        )
+        .unwrap();
+        let router = crate::RouterFilter::from_config(&yaml).unwrap();
+        let filters = vec![wrap_http_filter(router), lb_filter(&["stable"])];
+
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+
+        assert_eq!(
+            errors.len(),
+            1,
+            "the undefined weighted target must be reported: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("canary") && errors[0].contains("not defined"),
+            "the error must name the weighted target: {}",
+            errors[0]
+        );
     }
 
     /// Build an unconditional host filter carrying one unconditional

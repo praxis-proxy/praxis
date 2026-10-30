@@ -11,6 +11,12 @@ If a preceding filter (such as `path_rewrite` or `url_rewrite`) has set [`rewrit
 
 Sets `ctx.cluster` for downstream filters but does not pick an endpoint or forward the request. The `load_balancer` filter reads `ctx.cluster` to select an endpoint.
 
+A route names either one `cluster` or a `weighted_clusters` target set. Weighted targets are grouped by `priority`; the router uses the lowest-priority-number tier with at least one healthy target (a target is healthy when its cluster has at least one healthy endpoint), then selects within that tier by weighted round-robin. It spills to the next tier only when the current tier has no healthy target. Endpoint weights inside the selected cluster apply on top, so the effective share is `route_target_share * endpoint_share_within_cluster`.
+
+Target health comes from the pipeline's top-level cluster registry, bound once at pipeline install. A target whose cluster has no top-level `health_check` has no health state and stays eligible. Because such a target is always eligible, its tier can never be marked fully unhealthy: a tier that contains one never spills to lower-priority tiers. Only the last tier may safely omit health checks; the router warns at install when a primary or intermediate tier has an untracked target.
+
+The selected cluster is sticky for the request, including retries, but not across router re-entry: a branch chain's backward `ReEnter` runs the router again, so the route is matched and, for a weighted route, another target is selected, consuming another weighted turn. Cluster selection happens before endpoint selection, so it does not honor a downstream load balancer's hash-based affinity: the same request key can land in different clusters across requests.
+
 Longest prefix wins. Routes without `host` match any host. Header restrictions use AND semantics with case-sensitive matching.
 
 Header restrictions see the request as earlier filters in the pipeline left it: a header they set or added matches by its new value, and one they removed no longer matches, so a classifier can promote a fact to an `x-praxis-*` header and route on it. A routed header that earlier filters gave two different values fails the request instead of routing on a guess. `host` is always read from the request as received.
@@ -24,7 +30,12 @@ Header restrictions see the request as earlier filters in the pipeline left it: 
 | `routes` | RouterRouteConfig[] | no | Route table entries. |
 | `routes[].path` | string | no | Exact path to match. Exactly one of `path` or `path_prefix` must be set. |
 | `routes[].path_prefix` | string | no | Path prefix to match; the longest matching prefix wins. Exactly one of `path` or `path_prefix` must be set. |
-| `routes[].cluster` | string | yes | Name of the cluster to route matched requests to. |
+| `routes[].cluster` | string | no | Name of the cluster to route matched requests to. Exactly one of `cluster` or `weighted_clusters` must be set. |
+| `routes[].weighted_clusters` | WeightedClusters | no | Weighted cluster targets with optional priority tiers. Exactly one of `cluster` or `weighted_clusters` must be set. |
+| `routes[].weighted_clusters.targets` | WeightedTarget[] | yes | Cluster targets. Must not be empty. |
+| `routes[].weighted_clusters.targets[].name` | string | yes | Name of the cluster to route matched requests to. |
+| `routes[].weighted_clusters.targets[].weight` | integer | no | Relative weight within the target's priority tier. Must be in `1..=1000`. The effective share is this weight's fraction of its tier, multiplied by the selected endpoint's share within its cluster. |
+| `routes[].weighted_clusters.targets[].priority` | integer | no | Priority tier; lower numbers are preferred. Defaults to `0`. |
 | `routes[].headers` | object<string, string> | no | Request headers to match. All specified headers must be present with matching values (AND semantics, case-sensitive). Headers that earlier filters in the pipeline set, added, or removed are matched as those filters left them. |
 | `routes[].host` | string | no | Host to match. If set, the route only applies to this host. |
 | `routes[].json_aliases` | JsonAlias[] | no | Not implemented. Setting this is rejected at startup. Only present under the experimental `router-json-aliases` feature. |
@@ -60,4 +71,13 @@ filter: router
 routes:
   - path_prefix: "/"
     cluster: default
+  - path_prefix: "/checkout"
+    weighted_clusters:
+      targets:
+        - name: stable
+          weight: 90
+        - name: canary
+          weight: 10
+        - name: dr
+          priority: 1
 ```

@@ -258,7 +258,7 @@ mod tests {
         cluster.endpoints = (0..3)
             .map(|i| crate::config::Endpoint::Weighted {
                 address: format!("10.0.0.{i}:80"),
-                weight: 1_000,
+                weight: 1_000_u32.into(),
                 metadata: std::collections::HashMap::new(),
                 priority: 0,
                 zone: None,
@@ -370,7 +370,7 @@ mod tests {
         (0..count)
             .map(|i| crate::config::Endpoint::Weighted {
                 address: format!("10.0.0.1:{i}"),
-                weight,
+                weight: weight.into(),
                 metadata: std::collections::HashMap::new(),
                 priority: 0,
                 zone: None,

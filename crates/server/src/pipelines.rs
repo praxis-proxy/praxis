@@ -298,9 +298,10 @@ fn configure_pipeline(
         &config.metrics.route_templates,
     )));
 
-    if !health_registry.is_empty() {
-        pipeline.set_health_registry(Arc::clone(health_registry));
-    }
+    // Bind every filter even when the registry is empty: install-time
+    // diagnostics must see the same (empty) registry the router will, rather
+    // than being skipped because no cluster declares a health check.
+    pipeline.set_health_registry(Arc::clone(health_registry));
 
     // Always inject the process-wide KV registry (even while empty): the
     // registry is a shared Arc handle, and filters create their stores in it

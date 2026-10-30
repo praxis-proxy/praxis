@@ -44,6 +44,14 @@ impl AnyFilter {
         }
     }
 
+    /// Bind pipeline-wide cluster health state.
+    pub fn bind_health(&mut self, registry: &praxis_core::health::HealthRegistry) {
+        match self {
+            Self::Http(f) => f.bind_health(registry),
+            Self::Tcp(_) => {},
+        }
+    }
+
     /// Filesystem paths this filter reads configuration from, beyond the main
     /// Praxis config. Empty for TCP filters, which have no such surface.
     pub fn referenced_files(&self) -> Vec<std::path::PathBuf> {
@@ -69,8 +77,17 @@ impl AnyFilter {
         }
     }
 
+    /// Pass every cluster name this filter may assign to `sink`.
+    pub fn for_each_selected_cluster<'a>(&'a self, sink: &mut dyn FnMut(&'a str)) {
+        match self {
+            Self::Http(f) => f.for_each_selected_cluster(sink),
+            Self::Tcp(_) => {},
+        }
+    }
+
     /// Cluster names this filter may assign.
-    pub fn selected_clusters(&self) -> Vec<String> {
+    #[cfg(test)]
+    pub fn selected_clusters(&self) -> Vec<&str> {
         match self {
             Self::Http(f) => f.selected_clusters(),
             Self::Tcp(_) => Vec::new(),
@@ -175,7 +192,7 @@ mod tests {
         assert!(f.selects_cluster(), "Http variant should delegate selects_cluster");
         assert_eq!(
             f.selected_clusters(),
-            vec!["web".to_owned()],
+            vec!["web"],
             "Http variant should delegate selected_clusters"
         );
         assert_eq!(
@@ -299,8 +316,8 @@ mod tests {
             true
         }
 
-        fn selected_clusters(&self) -> Vec<String> {
-            vec!["web".to_owned()]
+        fn for_each_selected_cluster<'a>(&'a self, sink: &mut dyn FnMut(&'a str)) {
+            sink("web");
         }
 
         fn load_balancer_clusters(&self) -> Vec<String> {

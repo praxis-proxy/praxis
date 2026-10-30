@@ -30,9 +30,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- Route-level `weighted_clusters` targets: a route may select among several
+  clusters by static weight, with priority tiers that spill only when the
+  active tier has no healthy cluster. `cluster:` remains the shorthand for a
+  single target. Route-target weights compose multiplicatively with endpoint
+  weights; endpoint load-balancing behavior is unchanged.
+
+### Changed
+
+- **Breaking:** Rust API: `Route::cluster` is replaced by `Route::target`, a
+  `RouteTargets` set normalized from either the `cluster` shorthand or the
+  `weighted_clusters` target list. Rust consumers that build `Route` values
+  with struct literals or read `cluster` directly must move to `target`;
+  `Route::targets()` returns the canonical target slice. The YAML `cluster:`
+  key is unchanged.
+- **Breaking:** Rust API: `HttpFilter::selected_clusters` is replaced by
+  `for_each_selected_cluster`, a visitor that borrows each configured cluster
+  name. Custom filters implement the visitor; the allocating
+  `selected_clusters` wrapper is test-only.
+- **Breaking:** Rust API: `ClusterHealthEntry::has_healthy_endpoint` is
+  replaced by `is_available`, backed by an incrementally maintained healthy
+  endpoint count.
+- **Breaking:** Rust API: `WeightedClusters` and `route_label` are no longer
+  exported, and `RouteTargets::single` takes a `ClusterName` instead of
+  accepting arbitrary `Into<ClusterName>` input.
+- **Breaking:** Rust API: route-target and endpoint config weights share
+  `config::Weight`; `TargetWeight` is removed and
+  `Endpoint::Weighted::weight` is a `Weight`.
 
 ### Fixed
 
+- Routes reject an empty `cluster` or `weighted_clusters[].name` at config
+  load instead of accepting a destination that can never resolve. The
+  shorthand and the weighted form now share the same non-empty name type.
+- `weighted_clusters` failover-tier diagnostics now run even when no cluster
+  declares a health check, and cover every tier above the last, so a primary
+  or intermediate tier that can never spill no longer fails silently.
 - The FIPS runtime probe selects the Pingora backend when compiling its
   listener tests with default features disabled.
 - The Hyper backend rejects reserved client trailer names before forwarding

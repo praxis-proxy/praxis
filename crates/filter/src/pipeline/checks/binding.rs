@@ -324,13 +324,13 @@ pub(in crate::pipeline) fn check_bound_cluster_coverage(filters: &[PipelineFilte
         return;
     };
     let covered = covered_bound_clusters(filters);
-    let mut bindable: Vec<String> = filters
-        .get(router)
-        .map(|pf| pf.filter.selected_clusters())
-        .unwrap_or_default();
-    bindable.sort();
+    let mut bindable: Vec<&str> = Vec::new();
+    if let Some(pf) = filters.get(router) {
+        pf.filter.for_each_selected_cluster(&mut |name| bindable.push(name));
+    }
+    bindable.sort_unstable();
     bindable.dedup();
-    for cluster in bindable.into_iter().filter(|cluster| !covered.contains(cluster)) {
+    for cluster in bindable.into_iter().filter(|cluster| !covered.contains(*cluster)) {
         errors.push(format!(
             "cluster '{cluster}' can be bound as the logical upstream but no \
              guaranteed load_balancer can serve it on its reachable path; \
@@ -344,10 +344,13 @@ pub(in crate::pipeline) fn check_bound_cluster_coverage(filters: &[PipelineFilte
 /// [`check_bound_cluster_coverage`] owns whether each one is served, so other
 /// alignment checks treat these as accounted for rather than report them twice.
 pub(super) fn binding_router_clusters(filters: &[PipelineFilter]) -> std::collections::HashSet<String> {
-    binding_router_index(filters)
-        .and_then(|router| filters.get(router))
-        .map(|pf| pf.filter.selected_clusters().into_iter().collect())
-        .unwrap_or_default()
+    let mut out = std::collections::HashSet::new();
+    if let Some(pf) = binding_router_index(filters).and_then(|router| filters.get(router)) {
+        pf.filter.for_each_selected_cluster(&mut |name| {
+            out.insert(name.to_owned());
+        });
+    }
+    out
 }
 
 /// The binding router's clusters that every path from the router serves.
@@ -356,13 +359,15 @@ fn covered_bound_clusters(filters: &[PipelineFilter]) -> std::collections::HashS
         return std::collections::HashSet::new();
     };
     let (catalog, _) = crate::pipeline::catalog::build_catalog(crate::pipeline::collect_cluster_declarations(filters));
-    filters
-        .get(router)
-        .map(|pf| pf.filter.selected_clusters())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|cluster| ClusterScan::new(cluster, catalog.lookup(cluster), true).covers(filters, router))
-        .collect()
+    let mut covered = std::collections::HashSet::new();
+    if let Some(pf) = filters.get(router) {
+        pf.filter.for_each_selected_cluster(&mut |cluster| {
+            if ClusterScan::new(cluster, catalog.lookup(cluster), true).covers(filters, router) {
+                covered.insert(cluster.to_owned());
+            }
+        });
+    }
+    covered
 }
 
 /// Clusters the bound-source consumers in `filters` declare, at any branch

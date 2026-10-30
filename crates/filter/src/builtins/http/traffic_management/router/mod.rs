@@ -15,6 +15,7 @@ mod config;
 #[cfg(feature = "router-json-aliases")]
 mod json_alias;
 mod matching;
+mod selector;
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -33,9 +34,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use http::header::HeaderName;
-use praxis_core::config::{PathMatch, Route};
-#[cfg(feature = "upstream-binding")]
-use tracing::warn;
+use praxis_core::{
+    config::{PathMatch, Route},
+    health::HealthRegistry,
+};
 use tracing::{debug, info, trace};
 
 #[cfg(feature = "router-json-aliases")]
@@ -45,6 +47,7 @@ use self::config::{
 use self::{
     config::{RouterConfig, RouterRouteConfig},
     matching::{PendingRouteHeaders, RouteHeaderSource, route_matches_request, should_stop_early, update_best_match},
+    selector::CompiledTargets,
 };
 #[cfg(feature = "upstream-binding")]
 use crate::pipeline::catalog::ClusterApplicationCatalog;
@@ -68,6 +71,29 @@ use crate::{
 /// endpoint or forward the request. The `load_balancer` filter reads
 /// `ctx.cluster` to select an endpoint.
 ///
+/// A route names either one `cluster` or a `weighted_clusters` target set.
+/// Weighted targets are grouped by `priority`; the router uses the
+/// lowest-priority-number tier with at least one healthy target (a target is
+/// healthy when its cluster has at least one healthy endpoint), then selects
+/// within that tier by weighted round-robin. It spills to the next tier only
+/// when the current tier has no healthy target. Endpoint weights inside the
+/// selected cluster apply on top, so the effective share is
+/// `route_target_share * endpoint_share_within_cluster`.
+///
+/// Target health comes from the pipeline's top-level cluster registry, bound
+/// once at pipeline install. A target whose cluster has no top-level
+/// `health_check` has no health state and stays eligible, so a failover tier
+/// only spills when every target in the active tier is a health-checked
+/// cluster.
+///
+/// The selected cluster is sticky for the request, including retries, but not
+/// across router re-entry: a branch chain's backward `ReEnter` runs the router
+/// again, so the route is matched and, for a weighted route, another target is
+/// selected, consuming another weighted turn. Cluster selection happens before
+/// endpoint selection, so it does not honor a downstream load balancer's
+/// hash-based affinity: the same request key can land in different clusters
+/// across requests.
+///
 /// Longest prefix wins. Routes without `host` match any host. Header
 /// restrictions use AND semantics with case-sensitive matching.
 ///
@@ -85,6 +111,15 @@ use crate::{
 /// routes:
 ///   - path_prefix: "/"
 ///     cluster: default
+///   - path_prefix: "/checkout"
+///     weighted_clusters:
+///       targets:
+///         - name: stable
+///           weight: 90
+///         - name: canary
+///           weight: 10
+///         - name: dr
+///           priority: 1
 /// ```
 ///
 /// # Example
@@ -141,6 +176,9 @@ struct ResolvedRoute {
 
     /// The route's hedge policy, pre-wrapped so every request shares its budget.
     hedge_policy: Option<Arc<praxis_core::config::HedgePolicy>>,
+
+    /// Route-level cluster selection compiled once at pipeline build.
+    targets: CompiledTargets,
 }
 
 impl RouterFilter {
@@ -161,7 +199,7 @@ impl RouterFilter {
     ///         },
     ///         host: None,
     ///         headers: None,
-    ///         cluster: "default".into(),
+    ///         target: "default".into(),
     ///         retry_policy: None,
     ///         hedge_policy: None,
     ///     },
@@ -171,7 +209,7 @@ impl RouterFilter {
     ///         },
     ///         host: None,
     ///         headers: None,
-    ///         cluster: "api".into(),
+    ///         target: "api".into(),
     ///         retry_policy: None,
     ///         hedge_policy: None,
     ///     },
@@ -206,7 +244,7 @@ impl RouterFilter {
         for r in &routes {
             if r.route.retry_policy.is_some() {
                 info!(
-                    cluster = %r.route.cluster,
+                    route = %r.route.path_match.value(),
                     "route-level retry_policy overrides cluster-level policy"
                 );
             }
@@ -322,19 +360,26 @@ impl RouterFilter {
         expect(clippy::unused_self, reason = "only the binding catalog needs self")
     )]
     fn apply_matched_route(&self, ctx: &mut HttpFilterContext<'_>, resolved: &ResolvedRoute) -> FilterAction {
+        let cluster = resolved.targets.select();
+
         #[cfg(feature = "upstream-binding")]
         if let Some(catalog) = &self.binding_catalog
-            && let Err(frozen) = ctx.bind_upstream(Arc::clone(&resolved.route.cluster), catalog)
+            && let Err(frozen) = ctx.bind_upstream(Arc::clone(&cluster), catalog)
         {
-            warn!(
+            tracing::warn!(
                 frozen = %frozen.frozen,
                 attempted = %frozen.attempted,
                 "router attempted to rebind a frozen logical upstream; failing closed",
             );
             return FilterAction::Reject(Rejection::status(500));
         }
+        debug!(
+            route = %resolved.route.path_match.value(),
+            cluster = %cluster,
+            "route selected cluster"
+        );
         ctx.metrics_route = Some(resolved.metrics_label.clone());
-        ctx.cluster = Some(Arc::clone(&resolved.route.cluster));
+        ctx.cluster = Some(cluster);
         ctx.route_retry_policy = resolved.retry_policy.as_ref().map(Arc::clone);
         ctx.hedge_policy = resolved.hedge_policy.as_ref().map(Arc::clone);
         FilterAction::Continue
@@ -383,13 +428,13 @@ fn validate_json_aliases(routes: &[RouterRouteConfig]) -> Result<(), FilterError
         };
         if aliases.is_empty() {
             return Err(format!(
-                "router: json_aliases for cluster '{}' must not be empty (omit the key instead)",
-                route.cluster,
+                "router: json_aliases for route '{}' must not be empty (omit the key instead)",
+                route.path_match.value(),
             )
             .into());
         }
         for alias in aliases {
-            validate_single_alias(alias, &route.cluster)?;
+            validate_single_alias(alias, route.path_match.value())?;
         }
     }
     Ok(())
@@ -397,23 +442,23 @@ fn validate_json_aliases(routes: &[RouterRouteConfig]) -> Result<(), FilterError
 
 /// Validates a single JSON alias field, pattern, and target.
 #[cfg(feature = "router-json-aliases")]
-fn validate_single_alias(alias: &JsonAlias, cluster: &str) -> Result<(), FilterError> {
+fn validate_single_alias(alias: &JsonAlias, route_label: &str) -> Result<(), FilterError> {
     if alias.field.is_empty() {
-        return Err(format!("router: json alias field for cluster '{cluster}' must not be empty").into());
+        return Err(format!("router: json alias field for route '{route_label}' must not be empty").into());
     }
     if alias.pattern.is_empty() {
-        return Err(format!("router: json alias match pattern for cluster '{cluster}' must not be empty").into());
+        return Err(format!("router: json alias match pattern for route '{route_label}' must not be empty").into());
     }
     if alias.pattern.chars().filter(|&c| c == '*').count() > 1 {
         return Err(format!(
-            "router: json alias pattern '{}' for cluster '{cluster}' must contain at most one '*'",
+            "router: json alias pattern '{}' for route '{route_label}' must contain at most one '*'",
             alias.pattern,
         )
         .into());
     }
     if alias.target.as_ref().is_some_and(String::is_empty) {
         return Err(format!(
-            "router: json alias target for pattern '{}' in cluster '{cluster}' \
+            "router: json alias target for pattern '{}' in route '{route_label}' \
              must not be empty (omit the key to preserve the original value)",
             alias.pattern,
         )
@@ -452,11 +497,11 @@ fn reject_unimplemented_json_aliases(routes: &[RouterRouteConfig]) -> Result<(),
         return Ok(());
     };
     Err(format!(
-        "router: json_aliases (cluster '{}') is accepted by the config schema but is not applied \
+        "router: json_aliases (route '{}') is accepted by the config schema but is not applied \
          to routing decisions, so it would silently have no effect. Remove it. To route on a \
          request body field, use a classifier filter to promote the value to a header and match \
          that header with the route's `headers` field.",
-        route_config.route.cluster,
+        route_config.route.path_match.value(),
     )
     .into())
 }
@@ -522,12 +567,14 @@ fn resolve_routes(routes: Vec<RouterRouteConfig>) -> Vec<ResolvedRoute> {
             });
             let retry_policy = route.retry_policy.clone().map(Arc::new);
             let hedge_policy = route.hedge_policy.clone().map(Arc::new);
+            let targets = CompiledTargets::compile(&route.target);
             ResolvedRoute {
                 route,
                 metrics_label,
                 wildcard_suffix,
                 retry_policy,
                 hedge_policy,
+                targets,
             }
         })
         .collect()
@@ -593,11 +640,19 @@ impl HttpFilter for RouterFilter {
         true
     }
 
-    fn selected_clusters(&self) -> Vec<String> {
-        self.routes
-            .iter()
-            .map(|route| route.route.cluster.to_string())
-            .collect()
+    fn for_each_selected_cluster<'a>(&'a self, sink: &mut dyn FnMut(&'a str)) {
+        for route in &self.routes {
+            route.targets.for_each_name(sink);
+        }
+    }
+
+    fn bind_health(&mut self, registry: &HealthRegistry) {
+        for resolved in &mut self.routes {
+            resolved.targets.bind_health(registry);
+            resolved
+                .targets
+                .warn_unhealthy_priority_targets(resolved.route.path_match.value());
+        }
     }
 
     #[cfg(feature = "upstream-binding")]
@@ -634,7 +689,7 @@ impl HttpFilter for RouterFilter {
             debug!(path = %path, "no route matched");
             return Ok(FilterAction::Reject(Rejection::status(404)));
         };
-        debug!(path = %path, cluster = %resolved.route.cluster, "route matched");
+        trace!(path = %path, route = %resolved.route.path_match.value(), "route matched");
         Ok(self.apply_matched_route(ctx, resolved))
     }
 }

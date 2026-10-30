@@ -67,6 +67,7 @@ mod results;
 pub mod sse;
 mod tcp_filter;
 mod trace_context;
+pub(crate) mod weighted_cycle;
 
 /// Test-only helpers.
 #[cfg(test)]

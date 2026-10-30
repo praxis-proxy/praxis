@@ -7,6 +7,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::Weight;
+
 // -----------------------------------------------------------------------------
 // Endpoint
 // -----------------------------------------------------------------------------
@@ -40,7 +42,7 @@ pub enum Endpoint {
         /// Relative forwarding weight. Higher values receive proportionally more
         /// traffic. Defaults to 1.
         #[serde(default = "default_weight")]
-        weight: u32,
+        weight: Weight,
 
         /// Arbitrary key-value metadata for subset-based load balancing.
         #[serde(default)]
@@ -57,8 +59,8 @@ pub enum Endpoint {
 }
 
 /// Serde default for [`Endpoint::Weighted::weight`].
-fn default_weight() -> u32 {
-    1
+fn default_weight() -> Weight {
+    Weight::ONE
 }
 
 /// Raw deserialization target for [`Endpoint`].
@@ -84,7 +86,7 @@ struct WeightedEndpointRaw {
 
     /// Relative forwarding weight.
     #[serde(default = "default_weight")]
-    weight: u32,
+    weight: Weight,
 
     /// Arbitrary key-value metadata for subset-based load balancing.
     #[serde(default)]
@@ -157,8 +159,8 @@ impl Endpoint {
     /// ```
     pub fn weight(&self) -> u32 {
         match self {
-            Self::Simple(_) => 1,
-            Self::Weighted { weight, .. } => *weight,
+            Self::Simple(_) => Weight::ONE.get(),
+            Self::Weighted { weight, .. } => weight.get(),
         }
     }
 

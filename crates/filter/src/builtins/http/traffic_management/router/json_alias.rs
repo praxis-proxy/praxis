@@ -108,8 +108,6 @@ fn best_alias_in_route<'a>(
     reason = "tests"
 )]
 mod tests {
-    use std::sync::Arc;
-
     use praxis_core::config::{PathMatch, Route};
 
     use super::*;
@@ -297,7 +295,7 @@ mod tests {
                 },
                 host: None,
                 headers: None,
-                cluster: Arc::from("test"),
+                target: praxis_core::config::RouteTargets::single("test".into()),
                 retry_policy: None,
                 hedge_policy: None,
             },

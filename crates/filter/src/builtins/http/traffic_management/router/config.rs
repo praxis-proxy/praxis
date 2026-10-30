@@ -3,9 +3,7 @@
 
 //! Deserialized YAML configuration types for the router filter.
 
-use std::{collections::HashMap, sync::Arc};
-
-use praxis_core::config::{PathMatch, Route};
+use praxis_core::config::Route;
 use serde::Deserialize;
 
 // -----------------------------------------------------------------------------
@@ -68,14 +66,13 @@ pub(super) struct RouterConfig {
 /// Router-owned route config so JSON body aliasing stays out of
 /// [`praxis_core::config::Route`].
 ///
-/// Deserializes via [`RouterRouteConfigRaw`], which spells out the
-/// route fields instead of flattening [`Route`]: `#[serde(flatten)]`
-/// is incompatible with `deny_unknown_fields`, and would silently
-/// absorb typoed route keys.
+/// Deserialization delegates every route field to [`Route`] itself, so the
+/// router and the core config cannot drift. The router-specific
+/// `json_aliases` key is split off the mapping first; when the feature is
+/// disabled it is left in place and `Route` rejects it as unknown.
 ///
 /// [`praxis_core::config::Route`]: praxis_core::config::Route
-#[derive(Clone, Debug, Deserialize)]
-#[serde(try_from = "RouterRouteConfigRaw")]
+#[derive(Clone, Debug)]
 pub(super) struct RouterRouteConfig {
     /// Generic path, host, header, and cluster routing fields.
     pub route: Route,
@@ -100,74 +97,32 @@ impl From<Route> for RouterRouteConfig {
     }
 }
 
-/// Raw deserialization target for [`RouterRouteConfig`].
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RouterRouteConfigRaw {
-    /// Exact path to match. Exactly one of `path` or `path_prefix`
-    /// must be set.
-    #[serde(default)]
-    path: Option<String>,
+impl<'de> Deserialize<'de> for RouterRouteConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[cfg(feature = "router-json-aliases")]
+        let mut value = serde_yaml::Value::deserialize(deserializer)?;
+        #[cfg(not(feature = "router-json-aliases"))]
+        let value = serde_yaml::Value::deserialize(deserializer)?;
 
-    /// Path prefix to match; the longest matching prefix wins. Exactly
-    /// one of `path` or `path_prefix` must be set.
-    #[serde(default)]
-    path_prefix: Option<String>,
-
-    /// Name of the cluster to route matched requests to.
-    cluster: Arc<str>,
-
-    /// Request headers to match. All specified headers must be present
-    /// with matching values (AND semantics, case-sensitive). Headers that
-    /// earlier filters in the pipeline set, added, or removed are matched as
-    /// those filters left them.
-    #[serde(default)]
-    headers: Option<HashMap<String, String>>,
-
-    /// Host to match. If set, the route only applies to this host.
-    #[serde(default)]
-    host: Option<String>,
-
-    /// Not implemented. Setting this is rejected at startup. Only present
-    /// under the experimental `router-json-aliases` feature.
-    #[cfg(feature = "router-json-aliases")]
-    #[serde(default)]
-    json_aliases: Option<Vec<JsonAlias>>,
-
-    /// Optional per-route retry policy override.
-    #[serde(default)]
-    retry_policy: Option<praxis_core::config::RetryPolicy>,
-
-    /// Optional per-route hedged-request policy.
-    ///
-    /// When `max_attempts` is greater than 1 and the `hedged-requests` feature
-    /// is enabled, an idempotent request buffers its body, races it across
-    /// healthy endpoints in its cluster, and returns the first 2xx, 3xx, or
-    /// 4xx response, cancelling the other attempts. `max_attempts` of 1,
-    /// `CONNECT`, `Upgrade`, non-idempotent methods, and `application/grpc`
-    /// requests keep a single upstream attempt. Absent means one upstream
-    /// attempt.
-    #[serde(default)]
-    hedge_policy: Option<praxis_core::config::HedgePolicy>,
-}
-
-impl TryFrom<RouterRouteConfigRaw> for RouterRouteConfig {
-    type Error = String;
-
-    fn try_from(raw: RouterRouteConfigRaw) -> Result<Self, Self::Error> {
-        let route = Route {
-            path_match: PathMatch::from_parts(raw.path, raw.path_prefix)?,
-            cluster: raw.cluster,
-            headers: raw.headers,
-            host: raw.host,
-            retry_policy: raw.retry_policy,
-            hedge_policy: raw.hedge_policy,
+        #[cfg(feature = "router-json-aliases")]
+        let json_aliases = match &mut value {
+            serde_yaml::Value::Mapping(map) => map
+                .remove(serde_yaml::Value::String("json_aliases".to_owned()))
+                .map(serde_yaml::from_value::<Option<Vec<JsonAlias>>>)
+                .transpose()
+                .map_err(serde::de::Error::custom)?
+                .flatten(),
+            _ => None,
         };
-        route.validate_semantics()?;
+
+        let route: Route = serde_yaml::from_value(value).map_err(serde::de::Error::custom)?;
         Ok(Self {
             route,
             #[cfg(feature = "router-json-aliases")]
-            json_aliases: raw.json_aliases,
+            json_aliases,
         })
     }
 }

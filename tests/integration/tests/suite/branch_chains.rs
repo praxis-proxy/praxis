@@ -214,9 +214,93 @@ fn terminal_branch_response_headers_reach_the_client() {
     );
 }
 
+#[test]
+fn weighted_target_is_reselected_when_a_branch_reenters_the_router() {
+    let stable_guard = start_backend_with_shutdown("stable");
+    let canary_guard = start_backend_with_shutdown("canary");
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&reentrant_weighted_yaml(
+        proxy_port,
+        stable_guard.port(),
+        canary_guard.port(),
+    ))
+    .unwrap();
+    let proxy = start_proxy(&config);
+
+    for _ in 0..10 {
+        let raw = http_send(
+            proxy.addr(),
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(
+            parse_status(&raw),
+            200,
+            "the re-entering pipeline should proxy to a weighted target, got:\n{raw}"
+        );
+        assert_eq!(
+            parse_body(&raw),
+            "canary",
+            "the 1:1 route picks stable first and canary second; one branch re-entry must select \
+             again, so every request ends on canary (a single selection would alternate)"
+        );
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Proxy config whose weighted route is re-entered by a later branch chain.
+///
+/// `main` runs the named router, then a headers filter whose unconditional
+/// branch rejoins the router. Because the rejoin target sits earlier in the
+/// chain, it is a `ReEnter` and requires `max_iterations`.
+fn reentrant_weighted_yaml(proxy_port: u16, stable_port: u16, canary_port: u16) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        name: routing
+        routes:
+          - path_prefix: "/"
+            weighted_clusters:
+              targets:
+                - name: stable
+                - name: canary
+      - filter: headers
+        request_add:
+          - name: X-Reentered
+            value: "1"
+        branch_chains:
+          - name: again
+            rejoin: routing
+            max_iterations: 1
+            chains:
+              - name: again_chain
+                filters:
+                  - filter: headers
+                    request_add:
+                      - name: X-Loop
+                        value: "1"
+      - filter: load_balancer
+        clusters:
+          - name: stable
+            endpoints:
+              - "127.0.0.1:{stable_port}"
+          - name: canary
+            endpoints:
+              - "127.0.0.1:{canary_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
 
 /// Proxy config whose `main` chain runs `filters`, then routes to the backend.
 fn branch_yaml(proxy_port: u16, backend_port: u16, filters: &str) -> String {

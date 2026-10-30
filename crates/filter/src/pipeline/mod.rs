@@ -528,8 +528,20 @@ impl FilterPipeline {
     }
 
     /// Set the shared [`HealthRegistry`] for this pipeline.
+    ///
+    /// Filters are bound even when the registry is empty: install-time
+    /// diagnostics (for example a failover tier that no health check can
+    /// mark down) must see the same empty registry the router will, instead of
+    /// being skipped because no cluster declares a health check.
+    ///
+    /// The registry is stored unconditionally after install. `None` therefore
+    /// means "not installed yet", never "no health checks"; an empty registry
+    /// is the single representation of "no health checks".
     pub fn set_health_registry(&mut self, registry: HealthRegistry) {
         self.visit_nested_pipelines(&mut |pipeline| pipeline.set_health_registry(Arc::clone(&registry)));
+        for_each_pipeline_filter_mut(&mut self.filters, &mut |filter| {
+            filter.filter.bind_health(&registry);
+        });
         self.health_registry = Some(registry);
     }
 
@@ -798,21 +810,39 @@ fn bind_pipeline_slow_start(filters: &[PipelineFilter], registry: &Arc<crate::Sl
     });
 }
 
-/// Visit every filter in `filters` and, recursively, every filter nested inside
-/// their branch sub-chains.
+/// Define one pipeline-filter walker from the shared recursion template.
 ///
-/// The shared read-only walk behind the pipeline-wide scans (non-HTTP filter
-/// detection, terminal-filter detection, referenced-file discovery, insecure
-/// option application) so a filter buried in a branch is treated exactly like a
-/// top-level one rather than silently skipped.
-fn for_each_pipeline_filter(filters: &[PipelineFilter], visit: &mut dyn FnMut(&PipelineFilter)) {
-    for pf in filters {
-        visit(pf);
-        for branch in &pf.branches {
-            for_each_pipeline_filter(&branch.filters, visit);
+/// The only difference between the shared and exclusive walks is the borrow
+/// used for each filter and its branch list, so generating both from the same
+/// body keeps them from drifting.
+macro_rules! define_filter_walker {
+    ($name:ident, $filters:ty, $visit:ty, $doc:literal $(, $mutable:ident)?) => {
+        #[doc = $doc]
+        fn $name(filters: $filters, visit: $visit) {
+            for pf in filters {
+                visit(pf);
+                for branch in & $($mutable)? pf.branches {
+                    $name(& $($mutable)? branch.filters, visit);
+                }
+            }
         }
-    }
+    };
 }
+
+define_filter_walker!(
+    for_each_pipeline_filter,
+    &[PipelineFilter],
+    &mut dyn FnMut(&PipelineFilter),
+    "Visit every filter in `filters` and, recursively, every filter nested into \
+     its branch sub-chains. Shared read-only walk behind the pipeline-wide scans."
+);
+define_filter_walker!(
+    for_each_pipeline_filter_mut,
+    &mut [PipelineFilter],
+    &mut dyn FnMut(&mut PipelineFilter),
+    "Mutable variant of [`for_each_pipeline_filter`] for install-time binding.",
+    mut
+);
 
 /// Collect every filter's cluster application-metadata declarations,
 /// descending into branch sub-chains.

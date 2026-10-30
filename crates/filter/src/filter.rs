@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use praxis_core::config::InsecureOptions;
+use praxis_core::{config::InsecureOptions, health::HealthRegistry};
 
 pub(crate) use crate::context::HttpFilterContext;
 #[cfg(feature = "upstream-binding")]
@@ -81,6 +81,15 @@ pub trait HttpFilter: Send + Sync {
     #[cfg(feature = "slow-start")]
     fn bind_slow_start(&self, _registry: &Arc<crate::SlowStartRegistry>) {}
 
+    /// Bind pipeline-wide cluster health state.
+    ///
+    /// Framework-internal. Called once while the pipeline is installed, before
+    /// the first request, so a filter that routes on cluster health can resolve
+    /// handles once instead of looking them up per request. Filters without a
+    /// health-based decision keep the default no-op.
+    #[doc(hidden)]
+    fn bind_health(&mut self, _registry: &HealthRegistry) {}
+
     /// Called for each incoming request, in pipeline order.
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError>;
 
@@ -150,14 +159,24 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Pass every cluster name this filter may select at runtime to `sink`.
+    ///
+    /// Pipeline validation consumes cluster names through this sink so a
+    /// filter that owns many targets does not materialize a `Vec` only for the
+    /// caller to copy it into a set. Filters without static cluster targets
+    /// keep the default no-op.
+    fn for_each_selected_cluster<'a>(&'a self, _sink: &mut dyn FnMut(&'a str)) {}
+
     /// The cluster names this filter may select at runtime.
     ///
-    /// Return every configured cluster target so pipeline validation
-    /// can verify that downstream load balancers define matching
-    /// clusters. Filters without static cluster targets can leave the
-    /// default empty list.
-    fn selected_clusters(&self) -> Vec<String> {
-        Vec::new()
+    /// Test-only convenience wrapper around [`Self::for_each_selected_cluster`].
+    /// Production callers use the visitor so install-time validation does not
+    /// materialize a `Vec` only to copy it into a set.
+    #[cfg(test)]
+    fn selected_clusters(&self) -> Vec<&str> {
+        let mut out = Vec::new();
+        self.for_each_selected_cluster(&mut |name| out.push(name));
+        out
     }
 
     /// Emit this filter's end-of-request record from the logging phase.

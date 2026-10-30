@@ -30,7 +30,9 @@ use crate::any_filter::AnyFilter;
 pub(super) fn extract_selected_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
     let mut out = HashSet::new();
     for pf in filters {
-        out.extend(pf.filter.selected_clusters());
+        pf.filter.for_each_selected_cluster(&mut |name| {
+            out.insert(name.to_owned());
+        });
         for branch in &pf.branches {
             out.extend(extract_selected_clusters(&branch.filters));
         }
@@ -58,7 +60,13 @@ pub(super) fn extract_lb_clusters(filters: &[PipelineFilter]) -> HashSet<String>
 /// Branch-level demands are checked per branch with that branch's own
 /// availability; see `check_misaligned_clusters`.
 pub(super) fn level_selected_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
-    filters.iter().flat_map(|pf| pf.filter.selected_clusters()).collect()
+    let mut out = HashSet::new();
+    for pf in filters {
+        pf.filter.for_each_selected_cluster(&mut |name| {
+            out.insert(name.to_owned());
+        });
+    }
+    out
 }
 
 /// Cluster names provided by load balancers guaranteed to run for every
@@ -106,7 +114,9 @@ pub(super) fn bindable_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
         if let AnyFilter::Http(f) = &pf.filter
             && f.binds_upstream()
         {
-            out.extend(f.selected_clusters());
+            f.for_each_selected_cluster(&mut |name| {
+                out.insert(name.to_owned());
+            });
         }
         for branch in &pf.branches {
             out.extend(bindable_clusters(&branch.filters));

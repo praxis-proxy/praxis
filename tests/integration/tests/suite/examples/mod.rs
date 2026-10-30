@@ -131,6 +131,7 @@ mod url_rewriting;
 mod virtual_hosts;
 mod websocket;
 mod weighted_load_balancing;
+mod weighted_route_targets;
 mod zone_aware;
 
 #[cfg(feature = "tls-health-check")]

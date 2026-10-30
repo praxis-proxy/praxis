@@ -303,7 +303,7 @@ async fn weighted_endpoints_expand_proportionally() {
             Endpoint::Simple("10.0.0.1:80".into()),
             Endpoint::Weighted {
                 address: "10.0.0.2:80".into(),
-                weight: 3,
+                weight: 3_u32.into(),
                 metadata: HashMap::default(),
                 zone: None,
                 priority: 0,
@@ -605,14 +605,14 @@ fn build_cluster_entry_preserves_weights_via_distribution() {
         vec![
             Endpoint::Weighted {
                 address: "10.0.0.1:80".into(),
-                weight: 5,
+                weight: 5_u32.into(),
                 metadata: HashMap::default(),
                 zone: None,
                 priority: 0,
             },
             Endpoint::Weighted {
                 address: "10.0.0.2:80".into(),
-                weight: 3,
+                weight: 3_u32.into(),
                 metadata: HashMap::default(),
                 zone: None,
                 priority: 0,

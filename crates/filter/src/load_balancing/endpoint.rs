@@ -14,7 +14,7 @@ use praxis_core::config::Cluster;
 /// A deduplicated endpoint carrying its own weight.
 ///
 /// ```ignore
-/// let ep = WeightedEndpoint { address: "10.0.0.1:80".into(), weight: 3, ..Default::default() };
+/// let ep = WeightedEndpoint { address: "10.0.0.1:80".into(), weight: 3_u32.into(), ..Default::default() };
 /// assert_eq!(ep.address.as_ref(), "10.0.0.1:80");
 /// assert_eq!(ep.weight, 3);
 /// ```
@@ -92,7 +92,7 @@ mod tests {
                 Endpoint::from("10.0.0.1:80"),
                 Endpoint::Weighted {
                     address: "10.0.0.2:80".to_owned(),
-                    weight: 3,
+                    weight: 3_u32.into(),
                     metadata: HashMap::new(),
                     priority: 0,
                     zone: None,

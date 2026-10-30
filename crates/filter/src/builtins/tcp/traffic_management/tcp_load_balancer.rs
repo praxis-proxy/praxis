@@ -406,7 +406,7 @@ mod tests {
                 Endpoint::Simple("10.0.0.1:80".into()),
                 Endpoint::Weighted {
                     address: "10.0.0.2:80".into(),
-                    weight: 3,
+                    weight: 3_u32.into(),
                     metadata: HashMap::default(),
                     zone: None,
                     priority: 0,
