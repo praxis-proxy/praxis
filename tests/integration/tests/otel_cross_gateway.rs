@@ -105,17 +105,21 @@ impl TraceService for CapturedSpans {
 )]
 fn exported_parentage_links_edge_provider_and_backend() {
     let collector = CapturedSpans::default();
-    let collector_port = free_port();
-    let collector_addr: SocketAddr = ([127, 0, 0, 1], collector_port).into();
     let collector_runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("collector runtime");
+
+    let collector_listener = collector_runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .expect("collector listener");
+    let collector_port = collector_listener.local_addr().expect("collector address").port();
+
     let collector_service = collector.clone();
     collector_runtime.spawn(async move {
         tonic::transport::Server::builder()
             .add_service(TraceServiceServer::new(collector_service))
-            .serve(collector_addr)
+            .serve_with_incoming(tonic::transport::server::TcpIncoming::from(collector_listener))
             .await
             .expect("collector server");
     });
