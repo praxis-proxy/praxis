@@ -7055,3 +7055,93 @@ context_headers:
     );
     cfg.validate_context_headers().unwrap();
 }
+
+/// Write a pure-L7 `global` policy whose authorization admits only a request
+/// whose query string is exactly `action=read`. The CEL predicate reads
+/// `http.query`, so the fixture exercises the request-line query attribute at
+/// the `on_request` phase — the same shape as [`write_l7_global_config`], with
+/// a query predicate in place of the method one.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting utilities would obscure the shape under test"
+)]
+fn write_query_policy_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+      - cel: {{ expr: "http.query == 'action=read'" }}
+  pdp:
+    - kind: cel
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Run one pure-L7 request at `target` (a path, optionally with a query) as
+/// `alice`, returning the `on_request` action. The query gate lives in
+/// [`write_query_policy_config`].
+async fn dispatch_query_target(filter: &PolicyFilter, target: &str) -> FilterAction {
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::GET, target);
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    filter.on_request(&mut ctx).await.expect("filter ran")
+}
+
+/// A `global` policy can gate on `http.query`: the request-target query string
+/// reaches the CEL bag as `http.query`, so a rule distinguishes two requests
+/// that share a path and differ only by query. The matching query is admitted;
+/// a different query and an absent query are both denied — proving the
+/// attribute is present (a query-blind policy could not tell these apart) and
+/// that a missing query fails closed rather than matching an empty string.
+#[tokio::test(flavor = "multi_thread")]
+async fn global_rule_sees_http_query() {
+    let (_dir, path) = write_query_policy_config();
+    let filter = build_filter(path);
+
+    let allow = dispatch_query_target(&filter, "/resource?action=read").await;
+    assert!(
+        matches!(allow, FilterAction::Continue),
+        "the matching query must be admitted by the http.query predicate; got {allow:?}",
+    );
+
+    let deny_other = dispatch_query_target(&filter, "/resource?action=write").await;
+    assert!(
+        matches!(deny_other, FilterAction::Reject(_)),
+        "a different query must be denied by the http.query half of the rule \
+         (proves http.query is present at the request phase); got {deny_other:?}",
+    );
+
+    let deny_absent = dispatch_query_target(&filter, "/resource").await;
+    assert!(
+        matches!(deny_absent, FilterAction::Reject(_)),
+        "an absent query must fail closed, not match an empty string; got {deny_absent:?}",
+    );
+}

@@ -96,6 +96,8 @@ mod policy_jwks;
 mod policy_llm;
 #[cfg(feature = "policy-engine")]
 mod policy_llm_request;
+#[cfg(feature = "policy-engine")]
+mod policy_query;
 mod priority_lb;
 mod process_logging;
 mod protocol_examples;
