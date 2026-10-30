@@ -18,6 +18,25 @@ ignore = [
     # (quixotic-plecostomus-rustls) and rustls-native-certs 0.7. Drop once
     # the fork parses PEM with rustls-pki-types instead.
     "RUSTSEC-2025-0134",
+
+    # zstd 0.13.3 / zstd-safe 7.3.0: pulled transitively by the pingora fork
+    # (quixotic-plecostomus-header-serde 0.11.1). The vulnerable APIs
+    # (seekable decompression, dictionary training, try_clone, streaming
+    # legacy frames) are not exercised by Pingora's header serialization
+    # path. Drop once the fork bumps to zstd >= 0.14.3 / zstd-safe >= 8.2.0.
+    "RUSTSEC-2026-0391",  # zstd: abandoned stream data leaks
+    "RUSTSEC-2026-0395",  # zstd-safe: use-after-free with StableInBuffer
+    "RUSTSEC-2026-0396",  # zstd-safe: Seekable reads NULL seek table
+    "RUSTSEC-2026-0397",  # zstd-safe: OutBuffer::around_pos uninitialized memory
+    "RUSTSEC-2026-0398",  # zstd-safe: Seekable::decompress beyond capacity
+    "RUSTSEC-2026-0399",  # zstd-safe: use-after-free via init_using_cdict/ddict
+    "RUSTSEC-2026-0400",  # zstd-safe: use-after-free after one-shot with open stream
+    "RUSTSEC-2026-0401",  # zstd-safe: OOB read in train_from_buffer
+    "RUSTSEC-2026-0402",  # zstd-safe: heap overflow in CCtx::try_clone
+    "RUSTSEC-2026-0403",  # zstd-safe: uninitialized memory on legacy frame failure
+    "RUSTSEC-2026-0404",  # zstd-safe: double free in DCtx::try_clone
+    "RUSTSEC-2026-0405",  # zstd-safe: OOB read with out-of-range InBuffer::pos
+    "RUSTSEC-2026-0406",  # zstd-safe: use-after-free on multithreaded context
 ]
 
 [licenses]

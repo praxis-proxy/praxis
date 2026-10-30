@@ -21,6 +21,25 @@ use praxis_core::config::Config;
 const NON_FIPS_FILTERS: &[&str] = &["policy"];
 
 // -----------------------------------------------------------------------------
+// Overload gauge export
+// -----------------------------------------------------------------------------
+
+/// Warn when overload gauges are on but no admin endpoint will export them.
+///
+/// `set_overload_pressure` records nothing until a Prometheus recorder is
+/// installed, and that recorder is installed only when `admin.address` or
+/// `admin.metrics_address` is set.
+pub(crate) fn warn_overload_gauges_without_exporter(config: &Config) {
+    let exported = config.admin.address.is_some() || config.admin.metrics_address.is_some();
+    if config.runtime.overload_gauges && !exported {
+        tracing::warn!(
+            "runtime.overload_gauges is set, but no admin.address or admin.metrics_address is \
+             configured; overload pressure gauges will not be exported"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Insecure Options Warnings
 // -----------------------------------------------------------------------------
 
@@ -503,6 +522,37 @@ mod tests {
     fn insecure_warn_inactive_emits_nothing() {
         let warnings = capture_warnings(|| super::insecure_warn(false, "test_flag: inactive"));
         assert!(warnings.is_empty(), "inactive flag should produce no warnings");
+    }
+
+    #[test]
+    fn overload_gauges_without_exporter_warns() {
+        let mut config = minimal_config();
+        config.runtime.overload_gauges = true;
+        let warnings = capture_warnings(|| super::warn_overload_gauges_without_exporter(&config));
+        assert_eq!(warnings.len(), 1, "missing exporter should warn once: {warnings:?}");
+        assert!(warnings[0].contains("overload_gauges"), "warning names the flag");
+    }
+
+    #[test]
+    fn overload_gauges_with_either_admin_address_are_quiet() {
+        let mut with_address = minimal_config();
+        with_address.runtime.overload_gauges = true;
+        with_address.admin.address = Some("127.0.0.1:9090".to_owned());
+
+        let mut with_metrics = minimal_config();
+        with_metrics.runtime.overload_gauges = true;
+        with_metrics.admin.metrics_address = Some("127.0.0.1:9091".to_owned());
+
+        let off = minimal_config();
+        let cases = [
+            (&with_address, "admin.address"),
+            (&with_metrics, "admin.metrics_address"),
+            (&off, "gauges off"),
+        ];
+        for (config, label) in cases {
+            let warnings = capture_warnings(|| super::warn_overload_gauges_without_exporter(config));
+            assert!(warnings.is_empty(), "{label} should stay quiet: {warnings:?}");
+        }
     }
 
     #[test]

@@ -598,6 +598,15 @@ runtime:
   Startup logs the limit in effect and warns when it is
   below 4096, or below what `max_connections` implies.
   See [Capacity Planning](capacity-planning.md).
+- `overload_gauges`: publish `praxis_overload_pressure`
+  for cgroup memory, anonymous resident memory, CPU
+  stall time, connections, and file descriptors.
+  `bool`, defaults to `false`. This does not refuse
+  work or change timeouts. Heap pressure needs
+  `max_memory_bytes`. Connection pressure needs
+  `max_connections`. The task starts at process start,
+  so changing it needs a restart. See
+  [Observability](observability.md).
 - `shed_on_fd_pressure`: reject new requests with `503
   Service Unavailable` (and close new TCP connections)
   when open file descriptors near the process limit,

@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `runtime.overload_gauges` publishes `praxis_overload_pressure`
+  for cgroup memory, anonymous resident memory, CPU stall time,
+  connections, and file descriptors. The gauges do not shed load.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.

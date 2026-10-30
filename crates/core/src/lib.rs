@@ -52,6 +52,8 @@ pub mod logging;
 pub mod memory;
 /// Hop-by-hop and reserved-header stripping for the next HTTP hop.
 pub mod next_hop_headers;
+/// Graduated process pressure for overload gauges.
+pub mod overload;
 /// Reserved internal header prefixes for proxy-internal metadata.
 pub mod reserved_headers;
 /// Shared retry budget and per-cluster active-request tracking.

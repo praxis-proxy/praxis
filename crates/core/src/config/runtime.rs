@@ -118,6 +118,10 @@ impl SubRequestCircuitBreakerConfig {
 /// assert!(cfg.work_stealing);
 /// ```
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each runtime switch is an independent on/off flag"
+)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     /// Tokio scheduler global queue check interval, in ticks.
@@ -244,6 +248,31 @@ pub struct RuntimeConfig {
     #[serde(default = "default_shed_on_fd_pressure")]
     pub shed_on_fd_pressure: bool,
 
+    /// Publish overload pressure gauges. Off unless set.
+    ///
+    /// When true, a background task samples cgroup memory, anonymous
+    /// resident memory, CPU stall time, connections, and file descriptors,
+    /// and exports `praxis_overload_pressure`. It does not refuse work,
+    /// shrink pools, or change timeouts. Those actions are a later change.
+    /// The task starts at process start, so a reload that flips this needs
+    /// a restart.
+    ///
+    /// Heap pressure needs `max_memory_bytes` as its denominator. Connection
+    /// pressure needs `max_connections`. The other resources appear when the
+    /// kernel exposes them.
+    ///
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let cfg = RuntimeConfig::default();
+    /// assert!(!cfg.overload_gauges);
+    ///
+    /// let cfg: RuntimeConfig = serde_yaml::from_str("overload_gauges: true").unwrap();
+    /// assert!(cfg.overload_gauges);
+    /// ```
+    #[serde(default)]
+    pub overload_gauges: bool,
+
     /// Per-peer circuit breaker for the shared sub-request connector.
     ///
     /// When configured, the connector tracks consecutive failures
@@ -363,6 +392,7 @@ impl Default for RuntimeConfig {
             subrequest_circuit_breaker: None,
             subrequest_max_connections: None,
             shed_on_fd_pressure: default_shed_on_fd_pressure(),
+            overload_gauges: false,
             subrequest_pool_size: default_subrequest_pool_size(),
             threads: 0,
             work_stealing: default_work_stealing(),
