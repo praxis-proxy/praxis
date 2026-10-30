@@ -5,6 +5,14 @@
 #
 # An inline HS256 key keeps the assertion test independent of network services.
 
+# A static upstream credential read from the environment. A deployment names
+# its own variable; the test reads one Cargo sets for every test process.
+secrets:
+  providers:
+    environment: { kind: env }
+  values:
+    upstream_api_key: { provider: environment, ref: CARGO_PKG_NAME }
+
 plugins:
   - name: jwt-user
     kind: identity/jwt
@@ -50,6 +58,10 @@ global:
         - name: x-auth-context
           members:
             teams: subject.teams
+
+        # The engine renders the declared secret; no plugin or PDP reads it.
+        - name: x-api-key
+          from: secret.upstream_api_key
 
       # Withhold the caller's credential and internal hints from the upstream.
       strip:
