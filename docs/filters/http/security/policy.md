@@ -23,7 +23,7 @@ PPE 0.4.1 changes OPA and CEL `args` on `tool:` routes to native JSON. Before up
 
 PPE 0.5.0 tightens OAuth `delegate(...)` by default. A token-exchange response must name an access-token or JWT `issued_token_type`. When the step requests scopes, a granted scope that was neither requested nor listed in `allowed_extra_scopes` is refused; a step that requests none accepts the identity provider's defaults. When the minted token is a JWT, its `aud` must contain the step's `audience`, and on a token exchange its `sub` must match the caller. `strict_response_validation: false` turns these checks off. A JWT with an unsupported `crit` header is rejected, and an `env` secret provider with settings it does not use fails to load. CEL `size()` now counts code points rather than bytes, and `exists()` returns true when one element matches even if another errors, so some requests that were denied may now be allowed. See the [PPE 0.5.0 changelog].
 
-The filter registers the `env` and `file` secret providers. A `secrets:` block naming any other provider kind fails to load.
+The filter registers the `env` and `file` secret providers. A `secrets:` block naming any other provider kind fails to load. Secret values are read when the filter is built, so a rotated value takes effect on the next configuration reload or restart; changing a secret file does not trigger one.
 
 The configured policy receives the full parsed inference request. Treat policy documents and custom plugins as trusted: a rule or an explicit outbound call can disclose fields it reads. Review policy authorship and outbound endpoints before enabling structured request input.
 

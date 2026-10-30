@@ -33,6 +33,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - The policy filter registers the `env` and `file` secret providers, so a
   policy document's `secrets:` block now loads instead of failing at
   startup. Any other provider kind, including `vault`, is still refused.
+  Values are read when the filter is built, so a rotated secret takes
+  effect on the next configuration reload or restart.
 
 ### Changed
 

@@ -158,7 +158,10 @@ enum GatedIdentity {
 /// be allowed. See the [PPE 0.5.0 changelog].
 ///
 /// The filter registers the `env` and `file` secret providers. A `secrets:`
-/// block naming any other provider kind fails to load.
+/// block naming any other provider kind fails to load. Secret values are read
+/// when the filter is built, so a rotated value takes effect on the next
+/// configuration reload or restart; changing a secret file does not trigger
+/// one.
 ///
 /// The configured policy receives the full parsed inference request. Treat
 /// policy documents and custom plugins as trusted: a rule or an explicit
