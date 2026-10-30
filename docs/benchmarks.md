@@ -412,7 +412,8 @@ in `praxis-proxy/conventions`:
 - `conventions.yaml`: coding conventions enforcement
   on PRs
 - `supply-chain.yaml`: supply chain safety checks
-  (`cargo audit`, `cargo deny`) on push/PR
+  (`cargo audit`, `cargo deny`) on push to `main` and
+  on a daily schedule
 - `container.yaml`: build, run, and health-check the
   container image on push/PR
 - `microbenchmarks.yaml`: Criterion microbenchmarks

@@ -86,6 +86,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- The supply chain audit (`cargo audit` + `cargo deny check`) no longer runs on
+  pull requests. It runs on every push to `main` and on a daily schedule, and a
+  failure opens a single tracking issue that later failures comment on and a
+  passing run closes.
 - **Breaking:** the Pingora backend is now the `pingora` Cargo feature of
   `praxis-proxy`, `praxis-proxy-protocol` and `praxis-proxy-core`, on by
   default. A `--no-default-features` build (the FIPS build included) names

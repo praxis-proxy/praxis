@@ -87,7 +87,9 @@ raise the deadline for every readiness utility; `make coverage` and
 
 Security is enforced at every stage of development.
 `cargo audit` and `cargo deny check` are run as part of
-the `make audit` target. The `deny.toml` config bans
+the `make audit` target. CI runs them on every push to
+`main` and daily, and tracks failures in a single
+issue rather than gating pull requests. The `deny.toml` config bans
 wildcard version requirements, unknown registries, and
 unknown git sources. Multiple versions of the same crate
 produce a warning. All crates enforce
