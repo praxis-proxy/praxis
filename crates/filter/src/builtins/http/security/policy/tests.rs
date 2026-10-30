@@ -4230,20 +4230,26 @@ async fn response_assertions_reach_the_downstream_response() {
     );
 }
 
-const UPSTREAM_SECRET: &str = "upstream-secret-value";
+/// Variable the asserted secret is read from. Setting one is `unsafe` and
+/// races other tests, so this is one Cargo sets for every test process.
+const SECRET_ENV_VAR: &str = "CARGO_PKG_NAME";
 
-/// Write an L7 policy asserting a file-backed secret as a request header.
+fn upstream_secret() -> String {
+    std::env::var(SECRET_ENV_VAR).expect("cargo sets CARGO_PKG_NAME for test processes")
+}
+
+/// Write an L7 policy asserting a secret from a provider of `kind` as a
+/// request header.
 #[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
-fn write_secret_assertion_config() -> (TempDir, String) {
+fn write_secret_assertion_config(kind: &str, reference: &str) -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
-    std::fs::write(dir.path().join("upstream.key"), UPSTREAM_SECRET).expect("write secret");
     let cfg_path = dir.path().join("cpex.yaml");
     let yaml = format!(
         r#"secrets:
   providers:
-    local: {{ kind: file, base_dir: "{base_dir}" }}
+    local: {{ kind: {kind} }}
   values:
-    upstream_key: {{ provider: local, ref: upstream.key }}
+    upstream_key: {{ provider: local, ref: {reference} }}
 plugins:
   - name: jwt-user
     kind: identity/jwt
@@ -4272,8 +4278,7 @@ global:
       headers:
         - name: x-api-key
           from: secret.upstream_key
-"#,
-        base_dir = dir.path().display(),
+"#
     );
     std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
@@ -4284,7 +4289,8 @@ global:
 /// reached response plugins and PDPs in plaintext.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_asserted_secret_stays_redacted_on_the_response_half() {
-    let (_dir, path) = write_secret_assertion_config();
+    let secret = upstream_secret();
+    let (_dir, path) = write_secret_assertion_config("env", SECRET_ENV_VAR);
     let filter = build_filter(path.clone());
 
     let req = request_for_alice();
@@ -4296,27 +4302,40 @@ async fn an_asserted_secret_stays_redacted_on_the_response_half() {
         .iter()
         .find(|(name, _)| name.as_str() == "x-api-key")
         .map(|(_, value)| value.to_str().expect("ASCII header value"));
-    assert_eq!(sent, Some(UPSTREAM_SECRET), "the upstream receives the secret");
+    assert_eq!(sent, Some(secret.as_str()), "the upstream receives the secret");
 
     // The protocol layer copies applied headers into the request snapshot the
     // response half reads; stand in for it with a request already carrying one.
     let mut forwarded = request_for_alice();
     forwarded
         .headers
-        .insert("x-api-key", HeaderValue::from_static(UPSTREAM_SECRET));
+        .insert("x-api-key", HeaderValue::from_str(&secret).expect("header value"));
     let mut response_ctx = make_filter_context(&forwarded);
     response_ctx.extensions = std::mem::take(&mut ctx.extensions);
 
     let extensions = PolicyFilter::response_extensions(&response_ctx, HashMap::new(), 200, &filter_config(path));
     let http = extensions.http.as_deref().expect("the response half carries http");
     let view = serde_json::to_string(http).expect("serialize http extension");
-    assert!(
-        !view.contains(UPSTREAM_SECRET),
-        "response view leaks the secret: {view}"
-    );
+    assert!(!view.contains(&secret), "response view leaks the secret: {view}");
     assert!(
         view.contains("<redacted secret.upstream_key>"),
         "the header is present under its marker: {view}",
+    );
+}
+
+/// PPE's `file` provider checks `base_dir` containment by re-resolving the
+/// path after opening it, which a symlink swap can defeat, so it stays
+/// unregistered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_backed_secret_is_refused_at_load() {
+    let (_dir, path) = write_secret_assertion_config("file", "upstream.key");
+    let err = PolicyFilter::new(filter_config(path), None)
+        .err()
+        .expect("a `file` provider must not load");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("`file`") && msg.contains("not registered"),
+        "the error must name the unregistered kind; got {msg}"
     );
 }
 

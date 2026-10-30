@@ -30,11 +30,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
-- The policy filter registers the `env` and `file` secret providers, so a
-  policy document's `secrets:` block now loads instead of failing at
-  startup. Any other provider kind, including `vault`, is still refused.
-  Values are read when the filter is built, so a rotated secret takes
-  effect on the next configuration reload or restart.
+- The policy filter registers the `env` secret provider, so a policy
+  document's `secrets:` block using `env` now loads instead of failing at
+  startup. Any other provider kind, including `file` and `vault`, is still
+  refused. Values are read when the filter is built, so a changed value
+  takes effect on the next restart.
 
 ### Changed
 

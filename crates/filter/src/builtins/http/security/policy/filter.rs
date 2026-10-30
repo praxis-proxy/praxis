@@ -29,6 +29,7 @@ use ppe::praxis_policy_core::{
     hooks::Extensions,
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
+    secrets::backends::EnvSecretProviderFactory,
 };
 use praxis_core::subrequest::SubRequestConnector;
 
@@ -157,11 +158,10 @@ enum GatedIdentity {
 /// matches even if another errors, so some requests that were denied may now
 /// be allowed. See the [PPE 0.5.0 changelog].
 ///
-/// The filter registers the `env` and `file` secret providers. A `secrets:`
-/// block naming any other provider kind fails to load. Secret values are read
-/// when the filter is built, so a rotated value takes effect on the next
-/// configuration reload or restart; changing a secret file does not trigger
-/// one.
+/// The filter registers only the `env` secret provider. A `secrets:` block
+/// naming any other provider kind, including `file`, fails to load. Secret
+/// values are read when the filter is built, so a changed value takes effect
+/// on the next restart.
 ///
 /// The configured policy receives the full parsed inference request. Treat
 /// policy documents and custom plugins as trusted: a rule or an explicit
@@ -391,9 +391,14 @@ impl PolicyFilter {
             );
         }
 
-        // `env` and `file` only. A document whose `secrets:` block names any
-        // other provider kind fails at `initialize()`, naming these two.
-        if !mgr.set_secret_providers(ppe::SecretProviderRegistry::with_builtin_backends()) {
+        // `env` only. PPE's `file` provider confirms `base_dir` containment by
+        // resolving the path again after opening it, so a writer inside
+        // `base_dir` who swaps a symlink between the two can have a file
+        // outside it accepted. A document whose `secrets:` block names any
+        // other provider kind fails at `initialize()`, naming `env`.
+        let mut secret_providers = ppe::SecretProviderRegistry::new();
+        secret_providers.register(Box::new(EnvSecretProviderFactory));
+        if !mgr.set_secret_providers(secret_providers) {
             tracing::warn!(
                 target: "policy.filter",
                 "policy: secret providers were already registered on a fresh engine"
