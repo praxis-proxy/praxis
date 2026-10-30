@@ -25,10 +25,11 @@ use ppe::praxis_policy_core::{
     },
     engine::PolicyEngine,
     error::{PluginError, PluginViolation},
-    extensions::{LLMExtension, LlmRequestDocument, MetaExtension},
+    extensions::{LLMExtension, LlmRequestDocument, MetaExtension, http::SecretHeaderProvenance},
     hooks::Extensions,
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
+    secrets::backends::EnvSecretProviderFactory,
 };
 use praxis_core::subrequest::SubRequestConnector;
 
@@ -144,6 +145,24 @@ enum GatedIdentity {
 /// See the [PPE 0.4.1 changelog] and
 /// [args migration guidance].
 ///
+/// PPE 0.5.0 tightens OAuth `delegate(...)` by default. A token-exchange
+/// response must name an access-token or JWT `issued_token_type`. When the
+/// step requests scopes, a granted scope that was neither requested nor
+/// listed in `allowed_extra_scopes` is refused; a step that requests none
+/// accepts the identity provider's defaults. When the minted token is a JWT,
+/// its `aud` must contain the step's `audience`, and on a token exchange its
+/// `sub` must match the caller. `strict_response_validation: false` turns
+/// these checks off. A JWT with an unsupported `crit` header is rejected, and an `env` secret provider with
+/// settings it does not use fails to load. CEL `size()` now counts code
+/// points rather than bytes, and `exists()` returns true when one element
+/// matches even if another errors, so some requests that were denied may now
+/// be allowed. See the [PPE 0.5.0 changelog].
+///
+/// The filter registers only the `env` secret provider. A `secrets:` block
+/// naming any other provider kind, including `file`, fails to load. Secret
+/// values are read when the filter is built, so a changed value takes effect
+/// on the next restart.
+///
 /// The configured policy receives the full parsed inference request. Treat
 /// policy documents and custom plugins as trusted: a rule or an explicit
 /// outbound call can disclose fields it reads. Review policy authorship and
@@ -220,6 +239,7 @@ enum GatedIdentity {
 ///
 /// [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
 /// [PPE 0.4.1 changelog]: https://github.com/praxis-proxy/policy/blob/v0.4.1/CHANGELOG.md#041---2026-10-05
+/// [PPE 0.5.0 changelog]: https://github.com/praxis-proxy/policy/blob/v0.5.0/CHANGELOG.md#050---2026-10-13
 /// [args migration guidance]: https://github.com/praxis-proxy/policy/blob/v0.4.1/docs/content/apl/pdp.md#migrating-args-policies
 ///
 /// # YAML configuration
@@ -368,6 +388,20 @@ impl PolicyFilter {
             tracing::warn!(
                 target: "policy.filter",
                 "policy: an HTTP transport was already installed on a fresh engine"
+            );
+        }
+
+        // `env` only. PPE's `file` provider confirms `base_dir` containment by
+        // resolving the path again after opening it, so a writer inside
+        // `base_dir` who swaps a symlink between the two can have a file
+        // outside it accepted. A document whose `secrets:` block names any
+        // other provider kind fails at `initialize()`, naming `env`.
+        let mut secret_providers = ppe::SecretProviderRegistry::new();
+        secret_providers.register(Box::new(EnvSecretProviderFactory));
+        if !mgr.set_secret_providers(secret_providers) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy: secret providers were already registered on a fresh engine"
             );
         }
 
@@ -1595,7 +1629,7 @@ impl PolicyFilter {
     ///
     /// Reuses the admitted identity rather than resolving again, so a token that
     /// expired mid-exchange cannot deny an already-authorized response.
-    fn response_extensions(
+    pub(super) fn response_extensions(
         ctx: &HttpFilterContext<'_>,
         response_headers: std::collections::HashMap<String, String>,
         status: u16,
@@ -1726,6 +1760,11 @@ impl PolicyFilter {
             host,
             scheme: req.uri.scheme_str().map(str::to_owned),
             request_headers,
+            secret_headers: ctx
+                .extensions
+                .get::<AssertedSecretHeaders>()
+                .map(|asserted| asserted.0.clone())
+                .unwrap_or_default(),
             ..Default::default()
         };
         ext.http = Some(Arc::new(http));
@@ -1760,6 +1799,14 @@ fn flatten_claim(value: &serde_json::Value) -> String {
 ///
 /// Typed storage avoids serializing credentials and revalidating expired tokens.
 pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
+
+/// Engine provenance for secret assertion headers applied to the request.
+///
+/// Applied headers reach the request snapshot that later phases read, so
+/// every `HttpExtension` built from that snapshot must carry these markers.
+/// Without them, plugins and PDPs on those phases receive the credential
+/// instead of its redaction marker.
+pub(super) struct AssertedSecretHeaders(pub(super) SecretHeaderProvenance);
 
 /// Inference request state retained for response policy evaluation.
 struct InferenceRequest {
@@ -2512,8 +2559,9 @@ fn missing_protocol_metadata_rejection() -> Rejection {
 /// push them as upstream request headers. Returns the count attached
 /// (0 when no delegation ran or no extensions were returned). Each
 /// token's `outbound_header` field decides where it goes; the value
-/// is `Bearer <token>` (RFC 6750 wire format — what every audience
-/// expects). Uses `request_headers_to_set` rather than
+/// is its `outbound_prefix` followed by the token. OAuth delegates
+/// default the prefix to `Bearer ` (RFC 6750); a Vault API key without a
+/// `scheme_prefix` has none. Uses `request_headers_to_set` rather than
 /// `extra_request_headers` because authorization tokens are
 /// overwrites, not appends.
 ///
@@ -2578,12 +2626,12 @@ pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extension
             attached_outbound.remove(&outbound_lc);
             continue;
         };
-        // `tok.token` is already `Zeroizing`; keep the freshly-minted
-        // `Bearer …` plaintext in a `Zeroizing` buffer too so it is wiped
-        // as soon as the `HeaderValue` has copied its bytes, rather than
-        // lingering on the heap until the allocator reuses the page.
-        let bearer = zeroize::Zeroizing::new(format!("Bearer {}", tok.token.as_str()));
-        let Ok(value) = http::header::HeaderValue::try_from(bearer.as_str()) else {
+        // `tok.token` is already `Zeroizing`; keep the prefixed plaintext
+        // in a `Zeroizing` buffer too so it is wiped as soon as the
+        // `HeaderValue` has copied its bytes, rather than lingering on the
+        // heap until the allocator reuses the page.
+        let credential = zeroize::Zeroizing::new(format!("{}{}", tok.outbound_prefix, tok.token.as_str()));
+        let Ok(value) = http::header::HeaderValue::try_from(credential.as_str()) else {
             tracing::warn!(
                 target: "policy.filter",
                 audience = %tok.audience,

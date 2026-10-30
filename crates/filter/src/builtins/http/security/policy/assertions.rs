@@ -14,7 +14,7 @@ use ppe::praxis_policy_core::{
     hooks::Extensions,
 };
 
-use super::filter::PolicyFilter;
+use super::filter::{AssertedSecretHeaders, PolicyFilter};
 use crate::filter::HttpFilterContext;
 
 // -----------------------------------------------------------------------------
@@ -147,6 +147,8 @@ pub(super) fn apply_request_assertions(
     let Some(asserted) = extensions.and_then(|ext| ext.http.as_ref()) else {
         return (0, 0);
     };
+    ctx.extensions
+        .insert(AssertedSecretHeaders(asserted.secret_headers.clone()));
     let inbound = PolicyFilter::snapshot_headers(ctx);
     // Folding names makes policy-authored and wire casing equivalent.
     let rendered: HashMap<String, String> = asserted

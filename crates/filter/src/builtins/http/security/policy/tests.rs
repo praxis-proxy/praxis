@@ -1199,7 +1199,11 @@ routes:
 /// production default; individual tests that want to test the
 /// fail-open knob construct their own config.
 fn build_filter(config_path: String) -> PolicyFilter {
-    let cfg = PolicyFilterConfig {
+    PolicyFilter::new(filter_config(config_path), None).expect("filter should construct")
+}
+
+fn filter_config(config_path: String) -> PolicyFilterConfig {
+    PolicyFilterConfig {
         config_path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
@@ -1210,8 +1214,7 @@ fn build_filter(config_path: String) -> PolicyFilter {
         llm: super::config::LlmOptions::default(),
         context_headers: HashMap::default(),
         context_meta: ContextMetaConfig::default(),
-    };
-    PolicyFilter::new(cfg, None).expect("filter should construct")
+    }
 }
 
 /// Body filter that records the authenticated subject visible at its position
@@ -3382,6 +3385,56 @@ fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "test fixture construction")]
+fn attach_delegated_tokens_uses_each_tokens_outbound_prefix() {
+    use std::sync::Arc;
+
+    use chrono::{Duration, Utc};
+    use ppe::praxis_policy_core::extensions::{
+        container::Extensions,
+        raw_credentials::{DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken},
+    };
+
+    use super::filter::attach_delegated_tokens;
+
+    let expires = Utc::now() + Duration::hours(1);
+    let bare = RawDelegatedToken::new("api-key", "X-API-Key", "aud-bare", Vec::<String>::new(), expires)
+        .with_outbound_prefix("");
+    let custom = RawDelegatedToken::new("gh-token", "Authorization", "aud-custom", Vec::<String>::new(), expires)
+        .with_outbound_prefix("token ");
+    let key_bare = DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-bare", Vec::new()).with_subject_id("alice");
+    let key_custom =
+        DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-custom", Vec::new()).with_subject_id("alice");
+    let mut creds = RawCredentialsExtension::default();
+    creds.delegated_tokens.insert(key_bare, bare);
+    creds.delegated_tokens.insert(key_custom, custom);
+    let ext = Extensions {
+        raw_credentials: Some(Arc::new(creds)),
+        ..Extensions::default()
+    };
+
+    let req = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&req);
+    assert_eq!(attach_delegated_tokens(&mut ctx, Some(&ext)), 2);
+
+    let attached: HashMap<&str, &str> = ctx
+        .request_headers_to_set
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.to_str().expect("ASCII header value")))
+        .collect();
+    assert_eq!(
+        attached.get("x-api-key"),
+        Some(&"api-key"),
+        "an empty prefix sends the bare credential"
+    );
+    assert_eq!(
+        attached.get("authorization"),
+        Some(&"token gh-token"),
+        "a custom prefix replaces `Bearer `",
+    );
+}
+
+#[test]
 fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
     use std::sync::Arc;
 
@@ -4174,6 +4227,115 @@ async fn response_assertions_reach_the_downstream_response() {
         headers.get("content-type").and_then(|v| v.to_str().ok()),
         Some("application/json"),
         "and a header no level governs is left exactly as the upstream returned it",
+    );
+}
+
+/// Variable the asserted secret is read from. Setting one is `unsafe` and
+/// races other tests, so this is one Cargo sets for every test process.
+const SECRET_ENV_VAR: &str = "CARGO_PKG_NAME";
+
+fn upstream_secret() -> String {
+    std::env::var(SECRET_ENV_VAR).expect("cargo sets CARGO_PKG_NAME for test processes")
+}
+
+/// Write an L7 policy asserting a secret from a provider of `kind` as a
+/// request header.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+fn write_secret_assertion_config(kind: &str, reference: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"secrets:
+  providers:
+    local: {{ kind: {kind} }}
+  values:
+    upstream_key: {{ provider: local, ref: {reference} }}
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+  assertions:
+    request:
+      headers:
+        - name: x-api-key
+          from: secret.upstream_key
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Regression: the response half rebuilt `HttpExtension` from the request
+/// snapshot without the engine's secret provenance, so an asserted secret
+/// reached response plugins and PDPs in plaintext.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_asserted_secret_stays_redacted_on_the_response_half() {
+    let secret = upstream_secret();
+    let (_dir, path) = write_secret_assertion_config("env", SECRET_ENV_VAR);
+    let filter = build_filter(path.clone());
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    let action = filter.on_request(&mut ctx).await.expect("header phase ran");
+    assert!(matches!(action, FilterAction::Continue), "got {action:?}");
+    let sent = ctx
+        .request_headers_to_set
+        .iter()
+        .find(|(name, _)| name.as_str() == "x-api-key")
+        .map(|(_, value)| value.to_str().expect("ASCII header value"));
+    assert_eq!(sent, Some(secret.as_str()), "the upstream receives the secret");
+
+    // The protocol layer copies applied headers into the request snapshot the
+    // response half reads; stand in for it with a request already carrying one.
+    let mut forwarded = request_for_alice();
+    forwarded
+        .headers
+        .insert("x-api-key", HeaderValue::from_str(&secret).expect("header value"));
+    let mut response_ctx = make_filter_context(&forwarded);
+    response_ctx.extensions = std::mem::take(&mut ctx.extensions);
+
+    let extensions = PolicyFilter::response_extensions(&response_ctx, HashMap::new(), 200, &filter_config(path));
+    let http = extensions.http.as_deref().expect("the response half carries http");
+    let view = serde_json::to_string(http).expect("serialize http extension");
+    assert!(!view.contains(&secret), "response view leaks the secret: {view}");
+    assert!(
+        view.contains("<redacted secret.upstream_key>"),
+        "the header is present under its marker: {view}",
+    );
+}
+
+/// PPE's `file` provider checks `base_dir` containment by re-resolving the
+/// path after opening it, which a symlink swap can defeat, so it stays
+/// unregistered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_backed_secret_is_refused_at_load() {
+    let (_dir, path) = write_secret_assertion_config("file", "upstream.key");
+    let err = PolicyFilter::new(filter_config(path), None)
+        .err()
+        .expect("a `file` provider must not load");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("`file`") && msg.contains("not registered"),
+        "the error must name the unregistered kind; got {msg}"
     );
 }
 
