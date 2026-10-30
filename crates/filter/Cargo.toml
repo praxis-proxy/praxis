@@ -13,6 +13,8 @@ readme.workspace = true
 name = "praxis_filter"
 
 [features]
+# Adapter-neutral local HTTP lifecycle; live serving is not enabled yet.
+local-http = []
 default = ["policy-engine"]
 policy-engine = [
     "dep:ppe",

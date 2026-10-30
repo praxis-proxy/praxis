@@ -145,6 +145,9 @@ pub fn load_http_handler(
     pipeline: Arc<ArcSwap<FilterPipeline>>,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
 ) -> Result<(), praxis_core::ProxyError> {
+    #[cfg(feature = "local-http")]
+    crate::http::local::require_supported_adapter(&pipeline.load())
+        .map_err(|error| praxis_core::ProxyError::Config(error.to_string()))?;
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
     let downstream_keepalive_timeout_secs = listener
         .downstream_keepalive_timeout_ms

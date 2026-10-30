@@ -307,6 +307,11 @@ impl CorsFilter {
 
 #[async_trait]
 impl HttpFilter for CorsFilter {
+    #[cfg(feature = "local-http")]
+    fn local_http_compatibility(&self) -> crate::local_http::LocalCompatibility {
+        crate::local_http::LocalCompatibility::Policy
+    }
+
     fn name(&self) -> &'static str {
         "cors"
     }
@@ -333,6 +338,9 @@ impl HttpFilter for CorsFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        #[cfg(feature = "local-http")]
+        let local_preflight_request = is_local_preflight_request(ctx);
+
         let Some(resp) = ctx.response_header.as_mut() else {
             return Ok(FilterAction::Continue);
         };
@@ -347,6 +355,20 @@ impl HttpFilter for CorsFilter {
             }
             return Ok(FilterAction::Continue);
         };
+
+        #[cfg(feature = "local-http")]
+        record_local_cors_headers(&mut ctx.extensions);
+
+        #[cfg(feature = "local-http")]
+        if self.resolve_origin(origin).is_some()
+            && local_preflight_request
+            && resp.status == http::StatusCode::NO_CONTENT
+            && resp.headers.contains_key("access-control-allow-methods")
+        {
+            trace!("preserving generated local CORS preflight headers");
+            ctx.response_headers_modified = true;
+            return Ok(FilterAction::Continue);
+        }
 
         if strip_upstream_cors_headers(resp) {
             trace!("stripped upstream CORS response headers");
@@ -372,6 +394,24 @@ impl HttpFilter for CorsFilter {
 // -----------------------------------------------------------------------------
 // Upstream Header Stripping
 // -----------------------------------------------------------------------------
+
+/// Preserve authoritative CORS writes and removals across local replacements.
+#[cfg(feature = "local-http")]
+fn record_local_cors_headers(extensions: &mut crate::extensions::RequestExtensions) {
+    if let Some(explicit) = extensions.get_mut::<crate::local_http::headers::PolicyHeaders>() {
+        explicit
+            .touched
+            .extend(UPSTREAM_CORS_HEADERS.map(http::header::HeaderName::from_static));
+    }
+}
+
+/// Identify a local preflight request before borrowing the response slot.
+#[cfg(feature = "local-http")]
+fn is_local_preflight_request(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.extensions.get::<crate::local_http::LocalHttpActive>().is_some()
+        && ctx.request.method == http::Method::OPTIONS
+        && ctx.request.headers.contains_key("access-control-request-method")
+}
 
 /// Remove every upstream CORS response header listed in
 /// [`UPSTREAM_CORS_HEADERS`].

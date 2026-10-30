@@ -13,6 +13,10 @@
 //! [`metrics`]: crate::http::metrics
 //! [`pingora`]: crate::http::pingora
 
+/// Adapter-neutral local lifecycle and transport contract.
+#[cfg(feature = "local-http")]
+pub mod local;
+
 /// hyper-backed HTTP implementation: listeners, the proxy service and the
 /// admin glue.
 #[cfg(feature = "hyper")]

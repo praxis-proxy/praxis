@@ -463,6 +463,34 @@ fn spawn_health_check_thread(
     reason = "tests"
 )]
 mod tests {
+    #[cfg(feature = "local-http")]
+    #[test]
+    fn local_http_reload_rejection_preserves_live_generation_despite_overrides() {
+        let (live, old_config, mut registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        crate::local_http_tests::register(&mut registry);
+        let old = live.get("web").unwrap().load_full();
+        for open in [false, true] {
+            let result = reload_pipelines(
+                &crate::local_http_tests::config(open),
+                &old_config,
+                &registry,
+                &live,
+                &meta,
+                &cluster_meta,
+                &shutdown,
+                &empty_kv_stores(),
+                &empty_session_stores(),
+                &empty_slow_start_registry(),
+                &empty_subrequest_client(),
+                None,
+                &PipelineComposition::default(),
+            );
+            assert!(result.is_err());
+            assert!(Arc::ptr_eq(&old, &live.get("web").unwrap().load_full()));
+            assert!(!shutdown.lock().unwrap().is_cancelled());
+        }
+    }
+
     use std::{
         collections::HashMap,
         sync::atomic::{AtomicUsize, Ordering},

@@ -70,7 +70,15 @@ impl FilterPipeline {
             pf.name = entry.name.as_ref().map(|n| Arc::from(n.as_str()));
             filters.push(pf);
         }
-        Ok(Self::from_filters(filters))
+        let pipeline = Self::from_filters(filters);
+        #[cfg(feature = "local-http")]
+        {
+            pipeline.validate_local_http()?;
+            if pipeline.has_local_http_routes() && entries.iter().any(|entry| entry.branch_chains.is_some()) {
+                return Err("local HTTP pipelines cannot contain branch chains".into());
+            }
+        }
+        Ok(pipeline)
     }
 
     /// Build a pipeline with branch chain resolution.
@@ -104,7 +112,15 @@ impl FilterPipeline {
         insecure_options: &InsecureOptions,
     ) -> Result<Self, FilterError> {
         let filters = super::build_branch::resolve_chain_filters(entries, registry, chains, 0, insecure_options)?;
-        Ok(Self::from_filters(filters))
+        let pipeline = Self::from_filters(filters);
+        #[cfg(feature = "local-http")]
+        {
+            pipeline.validate_local_http()?;
+            if pipeline.has_local_http_routes() && entries.iter().any(|entry| entry.branch_chains.is_some()) {
+                return Err("local HTTP pipelines cannot contain branch chains".into());
+            }
+        }
+        Ok(pipeline)
     }
 
     /// Create a pipeline from an already-resolved filter list.
@@ -141,6 +157,22 @@ impl FilterPipeline {
         let id_generator = Arc::new(IdGenerator::new());
         let time_source: Arc<dyn praxis_core::time::TimeSource> = Arc::new(SystemTimeSource);
         let mut pipeline = Self {
+            #[cfg(feature = "local-http")]
+            local_http_valid: false,
+            #[cfg(feature = "local-http")]
+            local_routes: filters
+                .iter()
+                .enumerate()
+                .flat_map(|(index, filter)| match &filter.filter {
+                    AnyFilter::Http(http) => http
+                        .local_http_routes()
+                        .iter()
+                        .cloned()
+                        .map(move |route| (index, route))
+                        .collect(),
+                    AnyFilter::Tcp(_) => Vec::new(),
+                })
+                .collect(),
             body_capabilities,
             compression,
             filters,
@@ -167,6 +199,10 @@ impl FilterPipeline {
             request_body_ceiling: None,
             response_body_ceiling: None,
         };
+        #[cfg(feature = "local-http")]
+        {
+            pipeline.local_http_valid = pipeline.validate_local_http().is_ok();
+        }
         pipeline.set_id_generator(id_generator);
         pipeline.set_time_source(time_source);
         pipeline

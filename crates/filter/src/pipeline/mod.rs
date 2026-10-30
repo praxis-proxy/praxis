@@ -45,6 +45,10 @@ mod http;
 mod http_utils;
 /// Public pipeline introspection snapshots for admin surfaces.
 pub(crate) mod introspection;
+#[cfg(feature = "local-http")]
+pub(crate) mod local_http;
+#[cfg(feature = "local-http")]
+mod local_validation;
 /// Sub-request execution for iterative request routing.
 pub(crate) mod subrequest;
 mod tcp;
@@ -112,6 +116,14 @@ pub struct FilterPipeline {
 
     /// Compression configuration, if a compression filter is present.
     compression: Option<CompressionConfig>,
+
+    /// Construction-time safety result retained for programmatic-use guards.
+    #[cfg(feature = "local-http")]
+    pub(crate) local_http_valid: bool,
+
+    /// Route declarations frozen at pipeline construction.
+    #[cfg(feature = "local-http")]
+    pub(crate) local_routes: Vec<(usize, crate::local_http::LocalRoute)>,
 
     /// Ordered list of filters with their conditions and branches.
     pub(crate) filters: Vec<PipelineFilter>,

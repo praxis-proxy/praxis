@@ -1344,6 +1344,10 @@ impl AccessLogFilter {
     }
 
     fn maybe_emit(&self, ctx: &mut HttpFilterContext<'_>, status: u16, response_headers: Option<&http::HeaderMap>) {
+        #[cfg(feature = "local-http")]
+        if ctx.extensions.get::<crate::local_http::LocalHttpActive>().is_some() {
+            return;
+        }
         // Emit at most once per request: the bodyless on_response path and the
         // on_response_body end-of-stream path can both reach here, and the
         // protocol-layer fallback already relies on this marker.
@@ -1824,6 +1828,21 @@ fn build_record_from_fields(
 
 #[async_trait]
 impl HttpFilter for AccessLogFilter {
+    #[cfg(feature = "local-http")]
+    fn local_http_compatibility(&self) -> crate::local_http::LocalCompatibility {
+        crate::local_http::LocalCompatibility::Policy
+    }
+
+    #[cfg(feature = "local-http")]
+    fn complete_local_http(&self, ctx: &mut HttpFilterContext<'_>, status: u16) {
+        let active = ctx.extensions.remove::<crate::local_http::LocalHttpActive>();
+        let headers = ctx.response_header.as_ref().map(|response| response.headers.clone());
+        self.maybe_emit(ctx, status, headers.as_ref());
+        if let Some(active) = active {
+            ctx.extensions.insert(active);
+        }
+    }
+
     fn name(&self) -> &'static str {
         "access_log"
     }

@@ -88,3 +88,6 @@ pub(crate) mod test_support {
         SubRequestConnector::new(peers, None)
     }
 }
+
+#[cfg(all(test, feature = "local-http"))]
+mod local_http_tests;

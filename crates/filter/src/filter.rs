@@ -81,6 +81,35 @@ pub trait HttpFilter: Send + Sync {
     #[cfg(feature = "slow-start")]
     fn bind_slow_start(&self, _registry: &Arc<crate::SlowStartRegistry>) {}
 
+    /// Immutable local route declarations, collected at construction.
+    #[cfg(feature = "local-http")]
+    fn local_http_routes(&self) -> &[crate::local_http::LocalRoute] {
+        &[]
+    }
+
+    /// Local policy support. External filters must explicitly opt in.
+    #[cfg(feature = "local-http")]
+    fn local_http_compatibility(&self) -> crate::local_http::LocalCompatibility {
+        crate::local_http::LocalCompatibility::Unsupported
+    }
+
+    /// Construct a handler after policy approval, without external service work.
+    /// Initialization belongs in the handler's execution hook.
+    ///
+    /// # Errors
+    /// Returns an error when a handler cannot be constructed.
+    #[cfg(feature = "local-http")]
+    fn create_local_http_handler(
+        &self,
+        _route: &str,
+    ) -> Result<Box<dyn crate::local_http::LocalHttpHandler>, FilterError> {
+        Err("filter has no local HTTP handler".into())
+    }
+
+    /// Complete configured local logging, including sampling and emit conditions.
+    #[cfg(feature = "local-http")]
+    fn complete_local_http(&self, _ctx: &mut HttpFilterContext<'_>, _status: u16) {}
+
     /// Called for each incoming request, in pipeline order.
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError>;
 
