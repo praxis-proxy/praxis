@@ -1,0 +1,46 @@
+# Admin KV Store
+#
+# Serves runtime key-value stores on the admin API for an application
+# that embeds Praxis and registers the stores in code. The embedder adds
+# each store before startup with `KvStoreRegistry::register` (any
+# backend) or `KvStoreRegistry::get_or_create_memory` (in-memory), and
+# the admin listener serves:
+#
+#   GET    /api/kv/{store}        list a store's entries
+#   GET    /api/kv/{store}/{key}  read a value
+#   PUT    /api/kv/{store}/{key}  write a value (the body is the value)
+#   DELETE /api/kv/{store}/{key}  delete a key
+#
+# A store that was never registered answers 404, PUT included: a
+# misspelled name never creates a new store. The stock `praxis` binary
+# registers no stores, so run as-is, every store answers 404.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/operations/admin-kv-store.yaml
+#   curl http://localhost:9901/api/kv/routing_overrides   # 404 until registered
+
+admin:
+  address: "127.0.0.1:9901"
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
