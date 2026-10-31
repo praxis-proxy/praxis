@@ -355,6 +355,199 @@ fn render_text_template_sanitizes_field_values() {
     );
 }
 
+#[test]
+fn render_text_template_escapes_quotes_and_backslashes() {
+    let parts = vec![
+        TemplatePart::Literal("model=\"".to_owned()),
+        TemplatePart::Field(FieldToken::Metadata("llm.model".to_owned())),
+        TemplatePart::Literal("\"".to_owned()),
+    ];
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("llm.model", r#"gpt" status="200\"#);
+    let line = render_text_template(&parts, &ctx, 200, None, 0);
+    assert_eq!(
+        line, r#"model="gpt\" status=\"200\\""#,
+        "quotes and backslashes in field values must be escaped"
+    );
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "one entry per field token")]
+fn render_text_template_matches_json_projection_for_every_field() {
+    let expected = [
+        (FieldToken::Method, "method", "POST"),
+        (FieldToken::Path, "path", "/v1/chat"),
+        (FieldToken::ClientIp, "client_ip", "203.0.113.7"),
+        (FieldToken::Status, "status", "201"),
+        (FieldToken::DurationMs, "duration_ms", "56"),
+        (FieldToken::Cluster, "cluster", "-"),
+        (FieldToken::Upstream, "upstream", "-"),
+        (FieldToken::RequestId, "request_id", "req-1"),
+        (FieldToken::RequestBodyBytes, "request_body_bytes", "12"),
+        (FieldToken::ResponseBodyBytes, "response_body_bytes", "34"),
+        (FieldToken::TraceId, "trace_id", "-"),
+        (FieldToken::SpanId, "span_id", "-"),
+        (FieldToken::GrpcStatus, "grpc_status", "5"),
+        (FieldToken::GrpcStatusName, "grpc_status_name", "NOT_FOUND"),
+        (FieldToken::GrpcMessage, "grpc_message", "no%20such%20user"),
+        (
+            FieldToken::GrpcStatusDetailsBin,
+            "grpc_status_details_bin",
+            "CAUSBG9vcHM",
+        ),
+        (
+            FieldToken::RequestHeader("user-agent".to_owned()),
+            "request_header.user-agent",
+            "curl/8",
+        ),
+        (
+            FieldToken::RequestHeader("x-absent".to_owned()),
+            "request_header.x-absent",
+            "-",
+        ),
+        (
+            FieldToken::ResponseHeader("content-type".to_owned()),
+            "response_header.content-type",
+            "application/json",
+        ),
+        (
+            FieldToken::Metadata("llm.model".to_owned()),
+            "metadata.llm.model",
+            "gpt-4o",
+        ),
+        (FieldToken::Metadata("absent".to_owned()), "metadata.absent", "-"),
+    ];
+    let mut req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    req.headers.insert("user-agent", "curl/8".parse().unwrap());
+    req.headers.insert("x-request-id", "req-1".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.client_addr = Some("203.0.113.7".parse().unwrap());
+    ctx.request_body_bytes = 12;
+    ctx.response_body_bytes = 34;
+    ctx.set_metadata("llm.model", "gpt-4o");
+    let mut trailers = http::HeaderMap::new();
+    let _prev = trailers.insert("grpc-status", http::HeaderValue::from_static("5"));
+    let _prev = trailers.insert("grpc-message", http::HeaderValue::from_static("no%20such%20user"));
+    let _prev = trailers.insert("grpc-status-details-bin", http::HeaderValue::from_static("CAUSBG9vcHM"));
+    ctx.grpc_completion = praxis_core::grpc::GrpcCompletion::from_headers(&trailers);
+    let mut response_headers = http::HeaderMap::new();
+    response_headers.insert("content-type", "application/json".parse().unwrap());
+
+    let fields: Vec<FieldToken> = expected.iter().map(|(field, ..)| field.clone()).collect();
+    let record = build_record_from_fields(&fields, &ctx, 201, Some(&response_headers), 56);
+    assert_eq!(record.len(), expected.len(), "every token should project one entry");
+    for (field, key, value) in &expected {
+        assert_eq!(
+            record.get(*key).map(String::as_str),
+            Some(*value),
+            "{field:?} should project {value:?} under {key:?}"
+        );
+        let parts = [TemplatePart::Field(field.clone())];
+        let line = render_text_template(&parts, &ctx, 201, Some(&response_headers), 56);
+        assert_eq!(line, *value, "{field:?} should render {value:?} in text");
+    }
+}
+
+// -------------------------------------------------------------------------
+// Field resolution
+// -------------------------------------------------------------------------
+
+#[test]
+fn resolve_field_borrows_values_held_by_the_request() {
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/api");
+    req.headers.insert("user-agent", "curl/8".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("llm.model", "gpt-4o");
+
+    for (field, expected) in [
+        (FieldToken::Method, "GET"),
+        (FieldToken::Path, "/api"),
+        (FieldToken::RequestHeader("user-agent".to_owned()), "curl/8"),
+        (FieldToken::Metadata("llm.model".to_owned()), "gpt-4o"),
+    ] {
+        let value = resolve_field(&field, &ctx, 200, None, 0);
+        assert_eq!(value, expected, "{field:?} should resolve to its value");
+        assert!(
+            matches!(value, Cow::Borrowed(_)),
+            "{field:?} should be borrowed, not copied"
+        );
+    }
+}
+
+#[test]
+fn resolve_field_formats_scalar_values() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.client_addr = Some("203.0.113.7".parse().unwrap());
+    ctx.request_body_bytes = 12;
+
+    assert_eq!(resolve_field(&FieldToken::Status, &ctx, 503, None, 0), "503");
+    assert_eq!(resolve_field(&FieldToken::DurationMs, &ctx, 200, None, 42), "42");
+    assert_eq!(resolve_field(&FieldToken::ClientIp, &ctx, 200, None, 0), "203.0.113.7");
+    assert_eq!(resolve_field(&FieldToken::RequestBodyBytes, &ctx, 200, None, 0), "12");
+}
+
+#[test]
+fn resolve_field_dashes_missing_values() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let ctx = crate::test_utils::make_filter_context(&req);
+    let response_headers = http::HeaderMap::new();
+
+    for field in [
+        FieldToken::Cluster,
+        FieldToken::Upstream,
+        FieldToken::RequestId,
+        FieldToken::GrpcStatus,
+        FieldToken::GrpcStatusDetailsBin,
+        FieldToken::RequestHeader("x-absent".to_owned()),
+        FieldToken::Metadata("absent".to_owned()),
+    ] {
+        assert_eq!(
+            resolve_field(&field, &ctx, 200, Some(&response_headers), 0),
+            "-",
+            "{field:?} should fall back to a dash"
+        );
+    }
+    let field = FieldToken::ResponseHeader("content-type".to_owned());
+    assert_eq!(
+        resolve_field(&field, &ctx, 200, None, 0),
+        "-",
+        "a response header should be a dash when no headers were captured"
+    );
+}
+
+#[test]
+fn resolve_field_client_ip_is_empty_without_peer_address() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let ctx = crate::test_utils::make_filter_context(&req);
+    assert_eq!(
+        resolve_field(&FieldToken::ClientIp, &ctx, 200, None, 0),
+        "",
+        "an unknown peer keeps the empty client_ip of the default record"
+    );
+}
+
+#[test]
+fn field_json_key_names_prefixed_tokens() {
+    assert_eq!(
+        field_json_key(&FieldToken::GrpcStatusDetailsBin),
+        "grpc_status_details_bin"
+    );
+    assert_eq!(
+        field_json_key(&FieldToken::RequestHeader("User-Agent".to_owned())),
+        "request_header.user-agent"
+    );
+    assert_eq!(
+        field_json_key(&FieldToken::ResponseHeader("Content-Type".to_owned())),
+        "response_header.content-type"
+    );
+    assert_eq!(
+        field_json_key(&FieldToken::Metadata("LLM.Model".to_owned())),
+        "metadata.LLM.Model"
+    );
+}
+
 // -------------------------------------------------------------------------
 // Sampling and emit conditions (unchanged)
 // -------------------------------------------------------------------------

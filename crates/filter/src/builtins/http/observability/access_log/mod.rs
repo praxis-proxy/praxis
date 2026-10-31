@@ -1582,9 +1582,8 @@ fn parse_template(
 /// Render template parts into a log line string.
 ///
 /// Each [`TemplatePart::Literal`] is emitted verbatim. Each
-/// [`TemplatePart::Field`] is resolved to its value for this request/response
-/// and passed through [`push_escaped_field`]; unknown or missing values fall
-/// back to `"-"`.
+/// [`TemplatePart::Field`] is resolved with [`resolve_field`] and passed
+/// through [`push_escaped_field`]; missing values fall back to `"-"`.
 fn render_text_template(
     parts: &[TemplatePart],
     ctx: &HttpFilterContext<'_>,
@@ -1600,9 +1599,7 @@ fn render_text_template(
                 result.push_str(literal);
             },
             TemplatePart::Field(field) => {
-                let map =
-                    build_record_from_fields(std::slice::from_ref(field), ctx, status, response_headers, duration_ms);
-                let value = map.into_values().next().unwrap_or_else(|| "-".to_owned());
+                let value = resolve_field(field, ctx, status, response_headers, duration_ms);
                 push_escaped_field(&mut result, &value);
             },
         }
@@ -1723,7 +1720,9 @@ pub fn emit_access_record(ctx: &HttpFilterContext<'_>, status: u16) {
 }
 
 /// Build a record from an explicit list of field tokens.
-#[expect(clippy::too_many_lines, reason = "field projection match arms")]
+///
+/// Each token contributes one entry, keyed by [`field_json_key`] and valued by
+/// [`resolve_field`].
 fn build_record_from_fields(
     fields: &[FieldToken],
     ctx: &HttpFilterContext<'_>,
@@ -1731,95 +1730,90 @@ fn build_record_from_fields(
     response_headers: Option<&http::HeaderMap>,
     duration_ms: u64,
 ) -> BTreeMap<String, String> {
-    let path = sanitize_for_log(ctx.request.uri.path());
-    let client_ip = ctx.client_addr.map(|a| a.to_string()).unwrap_or_default();
-    let duration_ms = duration_ms.to_string();
+    fields
+        .iter()
+        .map(|token| {
+            let value = resolve_field(token, ctx, status, response_headers, duration_ms);
+            (field_json_key(token).into_owned(), value.into_owned())
+        })
+        .collect()
+}
 
-    let mut record = BTreeMap::new();
-    for token in fields {
-        match token {
-            FieldToken::Method => {
-                record.insert("method".to_owned(), ctx.request.method.to_string());
-            },
-            FieldToken::Path => {
-                record.insert("path".to_owned(), path.to_string());
-            },
-            FieldToken::ClientIp => {
-                record.insert("client_ip".to_owned(), client_ip.clone());
-            },
-            FieldToken::Status => {
-                record.insert("status".to_owned(), status.to_string());
-            },
-            FieldToken::DurationMs => {
-                record.insert("duration_ms".to_owned(), duration_ms.clone());
-            },
-            FieldToken::Cluster => {
-                record.insert("cluster".to_owned(), ctx.cluster_name().unwrap_or("-").to_owned());
-            },
-            FieldToken::Upstream => {
-                record.insert("upstream".to_owned(), ctx.upstream_addr().unwrap_or("-").to_owned());
-            },
-            FieldToken::RequestId => {
-                record.insert("request_id".to_owned(), ctx.request_id().unwrap_or("-").to_owned());
-            },
-            FieldToken::RequestBodyBytes => {
-                record.insert("request_body_bytes".to_owned(), ctx.request_body_bytes.to_string());
-            },
-            FieldToken::ResponseBodyBytes => {
-                record.insert("response_body_bytes".to_owned(), ctx.response_body_bytes.to_string());
-            },
-            FieldToken::TraceId => {
-                record.insert("trace_id".to_owned(), current_trace_id());
-            },
-            FieldToken::SpanId => {
-                record.insert("span_id".to_owned(), current_span_id());
-            },
-            FieldToken::GrpcStatus => {
-                let value = ctx
-                    .grpc_completion()
-                    .map_or_else(|| "-".to_owned(), |completion| completion.raw_code().to_string());
-                record.insert("grpc_status".to_owned(), value);
-            },
-            FieldToken::GrpcStatusName => {
-                let value = ctx
-                    .grpc_completion()
-                    .map_or_else(|| "-".to_owned(), praxis_core::grpc::GrpcCompletion::code_name);
-                record.insert("grpc_status_name".to_owned(), value);
-            },
-            FieldToken::GrpcMessage => {
-                let value = ctx
-                    .grpc_completion()
-                    .and_then(|completion| completion.message())
-                    .map_or_else(|| "-".to_owned(), |message| sanitize_for_log(message).into_owned());
-                record.insert("grpc_message".to_owned(), value);
-            },
-            FieldToken::GrpcStatusDetailsBin => {
-                let value = ctx
-                    .grpc_completion()
-                    .and_then(|completion| completion.status_details_bin())
-                    .unwrap_or("-")
-                    .to_owned();
-                record.insert("grpc_status_details_bin".to_owned(), value);
-            },
-            FieldToken::RequestHeader(name) => {
-                let value = first_header_value(&ctx.request.headers, name).unwrap_or_else(|| "-".to_owned());
-                let key = format!("request_header.{}", header_json_key(name));
-                record.insert(key, value);
-            },
-            FieldToken::ResponseHeader(name) => {
-                let value = response_headers
-                    .and_then(|headers| first_header_value(headers, name))
-                    .unwrap_or_else(|| "-".to_owned());
-                let key = format!("response_header.{}", header_json_key(name));
-                record.insert(key, value);
-            },
-            FieldToken::Metadata(key) => {
-                let value = ctx.get_metadata(key).unwrap_or("-").to_owned();
-                record.insert(format!("metadata.{key}"), value);
-            },
-        }
+/// The JSON key a field token is projected under.
+fn field_json_key(token: &FieldToken) -> Cow<'static, str> {
+    match token {
+        FieldToken::Method => Cow::Borrowed("method"),
+        FieldToken::Path => Cow::Borrowed("path"),
+        FieldToken::ClientIp => Cow::Borrowed("client_ip"),
+        FieldToken::Status => Cow::Borrowed("status"),
+        FieldToken::DurationMs => Cow::Borrowed("duration_ms"),
+        FieldToken::Cluster => Cow::Borrowed("cluster"),
+        FieldToken::Upstream => Cow::Borrowed("upstream"),
+        FieldToken::RequestId => Cow::Borrowed("request_id"),
+        FieldToken::RequestBodyBytes => Cow::Borrowed("request_body_bytes"),
+        FieldToken::ResponseBodyBytes => Cow::Borrowed("response_body_bytes"),
+        FieldToken::TraceId => Cow::Borrowed("trace_id"),
+        FieldToken::SpanId => Cow::Borrowed("span_id"),
+        FieldToken::GrpcStatus => Cow::Borrowed("grpc_status"),
+        FieldToken::GrpcStatusName => Cow::Borrowed("grpc_status_name"),
+        FieldToken::GrpcMessage => Cow::Borrowed("grpc_message"),
+        FieldToken::GrpcStatusDetailsBin => Cow::Borrowed("grpc_status_details_bin"),
+        FieldToken::RequestHeader(name) => Cow::Owned(format!("request_header.{}", header_json_key(name))),
+        FieldToken::ResponseHeader(name) => Cow::Owned(format!("response_header.{}", header_json_key(name))),
+        FieldToken::Metadata(key) => Cow::Owned(format!("metadata.{key}")),
     }
-    record
+}
+
+/// Resolve the value of a single field token for this request/response.
+///
+/// Only the requested value is computed, and values already held by the
+/// request context or headers are borrowed rather than copied. Missing values
+/// resolve to `"-"`, except `client_ip`, which is empty when the peer address
+/// is unknown.
+#[expect(clippy::too_many_lines, reason = "field resolution match arms")]
+fn resolve_field<'a>(
+    token: &FieldToken,
+    ctx: &'a HttpFilterContext<'_>,
+    status: u16,
+    response_headers: Option<&'a http::HeaderMap>,
+    duration_ms: u64,
+) -> Cow<'a, str> {
+    match token {
+        FieldToken::Method => Cow::Borrowed(ctx.request.method.as_str()),
+        FieldToken::Path => sanitize_for_log(ctx.request.uri.path()),
+        FieldToken::ClientIp => Cow::Owned(ctx.client_addr.map(|a| a.to_string()).unwrap_or_default()),
+        FieldToken::Status => Cow::Owned(status.to_string()),
+        FieldToken::DurationMs => Cow::Owned(duration_ms.to_string()),
+        FieldToken::Cluster => Cow::Borrowed(ctx.cluster_name().unwrap_or("-")),
+        FieldToken::Upstream => Cow::Borrowed(ctx.upstream_addr().unwrap_or("-")),
+        FieldToken::RequestId => Cow::Borrowed(ctx.request_id().unwrap_or("-")),
+        FieldToken::RequestBodyBytes => Cow::Owned(ctx.request_body_bytes.to_string()),
+        FieldToken::ResponseBodyBytes => Cow::Owned(ctx.response_body_bytes.to_string()),
+        FieldToken::TraceId => Cow::Owned(current_trace_id()),
+        FieldToken::SpanId => Cow::Owned(current_span_id()),
+        FieldToken::GrpcStatus => ctx.grpc_completion().map_or(Cow::Borrowed("-"), |completion| {
+            Cow::Owned(completion.raw_code().to_string())
+        }),
+        FieldToken::GrpcStatusName => ctx
+            .grpc_completion()
+            .map_or(Cow::Borrowed("-"), |completion| Cow::Owned(completion.code_name())),
+        FieldToken::GrpcMessage => ctx
+            .grpc_completion()
+            .and_then(|completion| completion.message())
+            .map_or(Cow::Borrowed("-"), sanitize_for_log),
+        FieldToken::GrpcStatusDetailsBin => Cow::Borrowed(
+            ctx.grpc_completion()
+                .and_then(|completion| completion.status_details_bin())
+                .unwrap_or("-"),
+        ),
+        FieldToken::RequestHeader(name) => Cow::Borrowed(first_header_value(&ctx.request.headers, name).unwrap_or("-")),
+        FieldToken::ResponseHeader(name) => Cow::Borrowed(
+            response_headers
+                .and_then(|headers| first_header_value(headers, name))
+                .unwrap_or("-"),
+        ),
+        FieldToken::Metadata(key) => Cow::Borrowed(ctx.get_metadata(key).unwrap_or("-")),
+    }
 }
 
 #[async_trait]
@@ -2080,12 +2074,9 @@ fn header_json_key(name: &str) -> String {
     name.to_ascii_lowercase()
 }
 
-fn first_header_value(headers: &http::HeaderMap, name: &str) -> Option<String> {
+fn first_header_value<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
     let name = HeaderName::from_bytes(name.as_bytes()).ok()?;
-    headers
-        .get(name)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned)
+    headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 /// Extract `trace_id` and `span_id` from the `OpenTelemetry` context
