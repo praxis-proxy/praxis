@@ -162,6 +162,19 @@ The pipeline's pre-computed `BodyCapabilities` set
 context. These baseline modes establish the byte
 ceiling for body buffering.
 
+After opted-in request-head filters run, a validated
+Content-Length above the effective input ceiling is
+rejected before reading any body data. Body-size failures
+share structured warning and JSON 413 construction across
+the pre-read, streaming, selected-upstream, and hedge paths.
+
+Streaming body rejections are carried in the request context
+across Pingora's error boundary. `fail_to_proxy` writes the
+response after Pingora has released the upstream session.
+The logging hook records request completion before bounded
+cleanup of the unread downstream upload, keeping the cleanup
+time out of access logs and request latency metrics.
+
 **StreamBuffer pre-read:**
 
 When `request_body_mode` is `StreamBuffer`, the

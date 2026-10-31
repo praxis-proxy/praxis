@@ -304,6 +304,11 @@ fn request_body_filter_error_rejects_request() {
         &format!("127.0.0.1:{proxy_port}"),
         "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody",
     );
+    assert_eq!(
+        parse_status(&raw),
+        500,
+        "a body-filter failure must still deliver its 500 response"
+    );
     assert!(
         !raw.contains("should-not-be-reached"),
         "an errored request body must not be forwarded: {raw:?}"

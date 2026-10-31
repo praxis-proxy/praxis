@@ -328,10 +328,14 @@ pub struct PingoraRequestCtx {
     /// `logging()` hook when errors bypass `response_filter`.
     pub response_phase_done: bool,
 
-    /// Rejection raised during the response phase, carried across the
-    /// Pingora error boundary so `fail_to_proxy` can deliver its full
+    /// Rejection raised during request-body or response processing, carried
+    /// across the Pingora error boundary so `fail_to_proxy` can deliver its full
     /// configured headers and body instead of a bare status envelope.
     pub pending_rejection: Option<praxis_filter::Rejection>,
+
+    /// A local response needs transport cleanup after completion is recorded.
+    #[cfg(feature = "pingora")]
+    pub(crate) rejection_cleanup_pending: bool,
 
     /// Whether the response was delivered to completion: a bodyless
     /// response finished its response phase, or the response body
@@ -664,6 +668,8 @@ impl Default for PingoraRequestCtx {
             response_phase_done: false,
             response_delivery_complete: false,
             pending_rejection: None,
+            #[cfg(feature = "pingora")]
+            rejection_cleanup_pending: false,
             retries: 0,
             rewritten_path: None,
             selected_endpoint_index: None,

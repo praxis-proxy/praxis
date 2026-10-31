@@ -49,6 +49,26 @@ enum RequestHeadOutcome {
 // Request-Head Phase
 // -----------------------------------------------------------------------------
 
+/// Run opted-in head filters and reject an oversized declared body before reading it.
+#[cfg(feature = "pingora")]
+pub(super) async fn prepare(
+    pipeline: &FilterPipeline,
+    session: &mut Session,
+    request: &mut Request,
+    ctx: &mut PingoraRequestCtx,
+) -> bool {
+    if pipeline.has_request_head_phase() && execute(pipeline, session, request, ctx).await {
+        return true;
+    }
+    let Some(rejection) = crate::http::body_limit::declared_body_rejection(&request.headers, pipeline) else {
+        return false;
+    };
+    ctx.stamp_error_type(metrics::ERROR_TYPE_FILTER_REJECT);
+    ctx.request_snapshot = Some(request.clone());
+    send_rejection_for(session, rejection, ctx).await;
+    true
+}
+
 /// Run the request-head phase and deliver any terminal response.
 ///
 /// Wraps [`run`] with response delivery so the request handler branches on a

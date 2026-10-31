@@ -493,7 +493,35 @@ size. These apply across all body modes (Stream,
 StreamBuffer). When a filter also declares a per-filter
 `max_bytes`, the smaller of the two limits is enforced.
 Requests exceeding the limit receive 413 (Payload Too
-Large).
+Large), subject to the gRPC mapping below.
+
+Request-body limit failures log a warning with the limit,
+bytes seen, and rejection phase. Body-phase failures return
+a JSON 413 response, or a gRPC Trailers-Only response when
+the `grpc_status` filter has armed the request. A declared
+`Content-Length` above the effective input limit is rejected
+before reading the body and returns JSON 413.
+
+For a local HTTP/1 response that closes the connection
+with an unread upload, the Pingora backend sends the
+response, records request completion, shuts down the write
+side, and discards remaining body data. Streaming body
+rejections release the upstream connection before sending
+the response. Access logs and request duration metrics
+exclude the subsequent cleanup time. Cleanup has a
+30-second deadline and a 128 MiB discard budget;
+downstream read timeouts still apply. The budget is checked
+between native body reads, so the last chunk can cross it.
+This also covers early responses
+such as 401, 403, and 429. HTTP/2 uses its native stream
+cleanup. Clients should stop uploading after a rejection.
+Overload admission failures still close promptly.
+
+Rejected uploads retain any listener and runtime connection
+permits until cleanup finishes. Account for this grace period
+when sizing `max_connections`: stalled rejected uploads can
+occupy those slots for up to 30 seconds. A configured
+`downstream_read_timeout_ms` can end a stalled read sooner.
 
 ```yaml
 body_limits:

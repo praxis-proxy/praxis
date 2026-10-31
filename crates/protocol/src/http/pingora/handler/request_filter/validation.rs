@@ -22,7 +22,10 @@ use super::stream_buffer::build_trace_response;
 /// instead of forwarding. When positive, it decrements and forwards.
 /// For non-TRACE/OPTIONS methods, or when the header is absent, returns `None`.
 #[cfg(feature = "pingora")]
-pub(super) async fn handle_max_forwards(session: &mut Session) -> Option<bool> {
+pub(super) async fn handle_max_forwards(
+    session: &mut Session,
+    ctx: &mut crate::http::pingora::context::PingoraRequestCtx,
+) -> Option<bool> {
     let method = &session.req_header().method;
     if !matches!(*method, http::Method::TRACE | http::Method::OPTIONS) {
         return None;
@@ -37,7 +40,7 @@ pub(super) async fn handle_max_forwards(session: &mut Session) -> Option<bool> {
         } else {
             Rejection::status(200)
         };
-        crate::http::pingora::convert::send_rejection(session, rejection).await;
+        crate::http::pingora::convert::send_rejection_for(session, rejection, ctx).await;
         return Some(true);
     }
 
@@ -116,21 +119,33 @@ mod tests {
     #[tokio::test]
     async fn trace_with_zero_max_forwards_is_answered_directly() {
         let (mut session, _client) = session_for("TRACE / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 0\r\n\r\n").await;
-        let handled = handle_max_forwards(&mut session).await;
+        let handled = handle_max_forwards(
+            &mut session,
+            &mut crate::http::pingora::context::PingoraRequestCtx::default(),
+        )
+        .await;
         assert_eq!(handled, Some(true), "TRACE with Max-Forwards 0 must be answered");
     }
 
     #[tokio::test]
     async fn options_with_zero_max_forwards_is_answered_directly() {
         let (mut session, _client) = session_for("OPTIONS / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 0\r\n\r\n").await;
-        let handled = handle_max_forwards(&mut session).await;
+        let handled = handle_max_forwards(
+            &mut session,
+            &mut crate::http::pingora::context::PingoraRequestCtx::default(),
+        )
+        .await;
         assert_eq!(handled, Some(true), "OPTIONS with Max-Forwards 0 must be answered");
     }
 
     #[tokio::test]
     async fn positive_max_forwards_is_decremented() {
         let (mut session, _client) = session_for("TRACE / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 3\r\n\r\n").await;
-        let handled = handle_max_forwards(&mut session).await;
+        let handled = handle_max_forwards(
+            &mut session,
+            &mut crate::http::pingora::context::PingoraRequestCtx::default(),
+        )
+        .await;
         assert_eq!(handled, None, "positive Max-Forwards must forward");
         let value = session
             .req_header()
@@ -144,7 +159,11 @@ mod tests {
     #[tokio::test]
     async fn get_requests_ignore_max_forwards() {
         let (mut session, _client) = session_for("GET / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 0\r\n\r\n").await;
-        let handled = handle_max_forwards(&mut session).await;
+        let handled = handle_max_forwards(
+            &mut session,
+            &mut crate::http::pingora::context::PingoraRequestCtx::default(),
+        )
+        .await;
         assert_eq!(handled, None, "GET must ignore Max-Forwards");
     }
 }

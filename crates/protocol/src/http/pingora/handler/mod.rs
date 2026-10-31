@@ -230,6 +230,39 @@ mod tests {
     /// Default Pingora retry body buffer limit (64 `KiB`).
     const RETRY_BODY_LIMIT: u64 = praxis_core::config::DEFAULT_RETRY_BODY_LIMIT_BYTES;
 
+    #[tokio::test]
+    async fn pending_local_rejection_stops_explicit_and_reused_connection_retries() {
+        use pingora_proxy::ProxyHttp as _;
+
+        let pipeline = FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins()).unwrap();
+        let handler = PingoraHttpHandler::new(
+            Arc::new(ArcSwap::from_pointee(pipeline)),
+            None,
+            None,
+            None,
+            "test".into(),
+        );
+        let (_client, stream) = tokio::io::duplex(1024);
+        let mut session = pingora_proxy::Session::new_h1(Box::new(stream));
+        let peer = pingora_core::upstreams::peer::HttpPeer::new("127.0.0.1:80", false, String::new());
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.pending_rejection = Some(praxis_filter::Rejection::status(413));
+        ctx.request_is_idempotent = true;
+        for retry in [
+            pingora_core::RetryType::Decided(true),
+            pingora_core::RetryType::ReusedOnly,
+        ] {
+            let mut error = pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(413));
+            error.retry = retry;
+            let error = handler.error_while_proxy(&peer, &mut session, error, &mut ctx, true);
+            assert!(
+                !error.retry(),
+                "a pending local rejection must override every retry path"
+            );
+            assert_eq!(ctx.retries, 0, "a local rejection must not consume retry budget");
+        }
+    }
+
     #[test]
     fn first_failure_idempotent_sets_retry() {
         let mut ctx = PingoraRequestCtx::default();
