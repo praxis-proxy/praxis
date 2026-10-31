@@ -98,6 +98,7 @@ pub(in crate::http) async fn prepare_terminal_response(
         executed_branch_filters,
         executed_indices,
         body_done,
+        retry_state_released,
     ) = {
         let mut fctx = ctx
             .filter_context_for(pipeline, Some(&mut resp))
@@ -116,10 +117,12 @@ pub(in crate::http) async fn prepare_terminal_response(
             fctx.executed_branch_filters,
             fctx.executed_filter_indices,
             fctx.body_done_indices,
+            fctx.cluster_retry_state_released,
         )
     };
     ctx.cluster = cluster;
     ctx.upstream = upstream;
+    ctx.cluster_retry_state_released = retry_state_released;
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
@@ -165,6 +168,7 @@ pub(in crate::http) fn run_parent_terminal_body_filters(
         executed_branch_filters,
         executed_indices,
         body_done,
+        retry_state_released,
     ) = {
         let Some(mut fctx) = ctx.filter_context_for(pipeline, None) else {
             warn!("request snapshot not set for terminal response body; sending as-is");
@@ -184,11 +188,13 @@ pub(in crate::http) fn run_parent_terminal_body_filters(
             fctx.executed_branch_filters,
             fctx.executed_filter_indices,
             fctx.body_done_indices,
+            fctx.cluster_retry_state_released,
         )
     };
     ctx.response_body_bytes = response_body_bytes;
     ctx.cluster = cluster;
     ctx.upstream = upstream;
+    ctx.cluster_retry_state_released = retry_state_released;
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;

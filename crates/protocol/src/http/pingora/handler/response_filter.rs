@@ -63,7 +63,8 @@ pub(super) async fn execute(
     // map on every response for listeners with no filters.
     let name_fingerprint_before = (!pipeline.is_empty()).then(|| header_name_fingerprint(&resp.headers));
     ctx.connection_upgraded = is_upgrade_response;
-    if super::fail_to_proxy::is_final_response(upstream_response) {
+    let is_final = super::fail_to_proxy::is_final_response(upstream_response);
+    if is_final {
         ctx.upstream_response_status = Some(upstream_response.status.as_u16());
         praxis_core::subrequest::record_http_client_status(
             &ctx.upstream_client_span,
@@ -85,7 +86,9 @@ pub(super) async fn execute(
         return Err(err);
     }
 
-    ctx.response_phase_done = true;
+    if is_final {
+        ctx.response_phase_done = true;
+    }
 
     let (result, filter_flagged_modification) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
     let rewritten_is_bodyless = ctx

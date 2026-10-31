@@ -186,6 +186,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
 | [cluster-application-metadata.yaml](configs/traffic-management/cluster-application-metadata.yaml) | Tags an upstream cluster with opaque application metadata that consuming filters interpret |
 | [cluster-base-path.yaml](configs/traffic-management/cluster-base-path.yaml) | Prepends a path to the upstream request for the cluster the load balancer selected, so one gateway can front several upstreams that each serve the same API under their own prefix |
+| [cluster-max-connections.yaml](configs/traffic-management/cluster-max-connections.yaml) | Caps the concurrent in-flight requests the load balancer will send to one cluster, so a single slow upstream cannot consume all available capacity |
 | [endpoint-selector.yaml](configs/traffic-management/endpoint-selector.yaml) | Selects an upstream endpoint from a trusted mutation source (e.g. external processing) |
 | [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detects gRPC requests from the content-type header and promotes the variant to filter metadata and results |
 | [grpc-timeout.yaml](configs/traffic-management/grpc-timeout.yaml) | Honours the `grpc-timeout` request header as a real deadline |

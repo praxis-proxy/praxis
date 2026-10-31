@@ -4539,3 +4539,143 @@ impl crate::HttpFilter for BranchCalloutFilter {
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// Cluster Admission Slot Release
+// -----------------------------------------------------------------------------
+
+// Rejects during the request phase, standing in for any filter ordered after a
+// `load_balancer` that ends a sub-request before its response phase.
+struct RejectAfterAdmissionFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for RejectAfterAdmissionFilter {
+    fn name(&self) -> &'static str {
+        "test_reject_after_admission"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Reject(crate::Rejection::status(418)))
+    }
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn rejected_subrequest_returns_its_cluster_admission_slot() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::SubRequestClient;
+
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_reject_after_admission",
+            crate::FilterFactory::Http(Arc::new(move |_| Ok(Box::new(RejectAfterAdmissionFilter)))),
+        )
+        .unwrap();
+
+    // The endpoint is never dialed: the rejection short-circuits the step
+    // before the transport runs.
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: router
+  routes:
+    - path_prefix: "/"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints: ["127.0.0.1:1"]
+      max_connections: 1
+- filter: test_reject_after_admission
+"#,
+    )
+    .unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let client = SubRequestClient::new(crate::test_support::connector(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+
+    // Each iteration is admitted, rejected before the response phase, and must
+    // hand its slot back. Without that, iteration 2 onwards sees 503 forever —
+    // a permanent denial of service against the cluster the ceiling was meant
+    // to protect (CWE-772).
+    for attempt in 0..3_u8 {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let response = match executor
+            .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+            .await
+            .expect("the step should produce its rejection, not an error")
+        {
+            crate::CalloutResponse::Buffered(response) => response,
+            crate::CalloutResponse::Streaming { .. } => panic!("a rejection must be buffered"),
+        };
+        assert_eq!(
+            response.status, 418,
+            "attempt {attempt} must reach the rejecting filter; 503 means the previous attempt leaked its slot"
+        );
+    }
+}
+
+#[test]
+fn dropping_a_scoped_context_releases_an_unfinished_admission() {
+    use std::sync::Arc;
+
+    use praxis_core::retry::ClusterRetryState;
+
+    let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(1)));
+    assert!(state.try_enter(), "the first request should be admitted");
+
+    let request = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.cluster_retry_state = Some(Arc::clone(&state));
+    drop(super::context::ScopedSubrequestContext::for_test(ctx));
+
+    assert_eq!(
+        state.active_requests.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "dropping without a response phase must return the slot"
+    );
+    assert!(state.try_enter(), "the returned slot must be reusable");
+}
+
+#[test]
+fn dropping_a_scoped_context_does_not_double_release() {
+    use std::sync::Arc;
+
+    use praxis_core::retry::ClusterRetryState;
+
+    let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(2)));
+    assert!(state.try_enter(), "first request admitted");
+    // The response phase already handed this request's slot back.
+    state.leave();
+    // A second request is still in flight and must keep its slot.
+    assert!(state.try_enter(), "second request admitted");
+
+    let request = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.cluster_retry_state = Some(Arc::clone(&state));
+    ctx.cluster_retry_state_released = true;
+    drop(super::context::ScopedSubrequestContext::for_test(ctx));
+
+    assert_eq!(
+        state.active_requests.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "a context whose response phase already released must not steal the other request's slot"
+    );
+}

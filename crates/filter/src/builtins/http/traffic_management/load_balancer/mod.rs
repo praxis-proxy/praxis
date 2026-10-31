@@ -39,7 +39,7 @@ pub use self::reselector::EndpointReselector;
 use crate::pipeline::catalog::{ClusterApplicationMetadata, ClusterMetadataDeclaration};
 use crate::{
     FilterError,
-    actions::FilterAction,
+    actions::{FilterAction, Rejection},
     filter::{HttpFilter, HttpFilterContext},
 };
 
@@ -304,6 +304,21 @@ impl LoadBalancerFilter {
     }
 }
 
+/// The 503 a cluster at its `max_connections` ceiling answers with.
+///
+/// Mirrors the listener-level connection cap: `503` with `Retry-After: 1`,
+/// so a client backs off the same way whichever ceiling shed it.
+fn cluster_overloaded() -> Rejection {
+    Rejection::status(503)
+        .with_header("Retry-After", "1")
+        .with_body("cluster at max_connections")
+}
+
+/// Whether `status` is the answer that ends the request.
+fn is_final_response(status: http::StatusCode) -> bool {
+    !status.is_informational() || status == http::StatusCode::SWITCHING_PROTOCOLS
+}
+
 /// Bindings for clusters that configure a strategy which consumes the ramp.
 #[cfg(feature = "slow-start")]
 fn slow_start_bindings(clusters: &[Cluster]) -> Vec<crate::load_balancing::slow_start::SlowStartBinding> {
@@ -404,12 +419,14 @@ impl HttpFilter for LoadBalancerFilter {
                 debug!(cluster = %cluster_name, upstream = %pinned_addr, "using pinned endpoint from session affinity");
                 ctx.selected_endpoint_index = pinned_index;
                 // Known limitation: a pinned request is served directly without
-                // a retry policy, retry budget, or endpoint reselector, so it is
-                // not retried or failed over on a transient connect failure, and
-                // its load is not tracked by counter-based strategies (strategy
-                // .select is bypassed to honor affinity). Health-check-detected
-                // outages are handled upstream by the session-affinity filter,
-                // which does not pin to a down endpoint.
+                // a retry policy, retry budget, endpoint reselector, or
+                // `max_connections` admission, so it is not retried or failed
+                // over on a transient connect failure, its load is not tracked
+                // by counter-based strategies (strategy.select is bypassed to
+                // honor affinity), and it neither consumes nor is shed by the
+                // cluster's concurrency ceiling. Health-check-detected outages
+                // are handled upstream by the session-affinity filter, which
+                // does not pin to a down endpoint.
                 ctx.upstream = Some(entry.build_upstream(pinned_addr, ctx));
                 ctx.publish_selected_application(
                     entry.application_protocol.clone(),
@@ -422,6 +439,20 @@ impl HttpFilter for LoadBalancerFilter {
                 pinned = %pinned_addr,
                 "pinned endpoint no longer in cluster; selecting a new endpoint"
             );
+        }
+
+        // Admission against the cluster's `max_connections` ceiling. Claimed
+        // before selection so a shed request takes no strategy counter, and
+        // released by the same `on_response` path that releases the retry
+        // slot, since both ride one counter.
+        if !entry.retry_state.try_enter() {
+            debug!(
+                cluster = %cluster_name,
+                max_connections = entry.retry_state.max_concurrent.unwrap_or_default(),
+                "cluster at max_connections, shedding request"
+            );
+            crate::metrics::record_cluster_overload_reject(SharedString::from(Arc::clone(cluster)));
+            return Ok(FilterAction::Reject(cluster_overloaded()));
         }
 
         if let Some(h) = health {
@@ -437,21 +468,26 @@ impl HttpFilter for LoadBalancerFilter {
 
         let weights = self.slow_start_weights(cluster_name, health);
         let scaling = crate::load_balancing::slow_start::scaling_weights(weights.as_ref()).is_some();
-        let addr = if scaling {
+        let selected = if scaling {
             entry.strategy.select_weighted(ctx, health, &[], weights.as_ref())
         } else {
             entry.strategy.select(ctx, health, &[])
-        }
-        .ok_or_else(|| -> FilterError {
-            format!("load_balancer filter: cluster '{cluster_name}' has no available endpoints").into()
-        })?;
+        };
+        let Some(addr) = selected else {
+            // Hand the admitted slot back: a cluster with no selectable
+            // endpoint must not spend its own ceiling on requests it never
+            // sends, which would wedge it closed once `max_connections`
+            // failures accumulated.
+            entry.retry_state.leave();
+            return Err(format!("load_balancer filter: cluster '{cluster_name}' has no available endpoints").into());
+        };
         debug!(cluster = %cluster_name, upstream = %addr, "upstream selected");
 
         ctx.selected_endpoint_index = health.and_then(|h| h.endpoint_index(&addr)).or(Some(usize::MAX));
         ctx.set_metadata("lb.selected", "true");
 
-        // Track active request for retry budget.
-        entry.retry_state.enter();
+        // The active-request slot was claimed at admission; publish the state
+        // so the release paths can hand it back.
         ctx.cluster_retry_state = Some(Arc::clone(&entry.retry_state));
 
         let policy = match &ctx.route_retry_policy {
@@ -486,6 +522,15 @@ impl HttpFilter for LoadBalancerFilter {
         if ctx.get_metadata("lb.selected").is_none() {
             return Ok(FilterAction::Continue);
         }
+        // The response phase runs once per response head the upstream sends,
+        // and a `103 Early Hints` is a head that does not end the request.
+        // Releasing on it would hand back slots the request is still using,
+        // letting the next request past `max_connections`, and leave the
+        // real response releasing slots that now belong to someone else.
+        let ends_the_request = ctx.response_header.as_ref().is_none_or(|r| is_final_response(r.status));
+        if !ends_the_request {
+            return Ok(FilterAction::Continue);
+        }
 
         tracing::trace!("releasing in-flight counter");
         if let (Some(cluster_name), Some(upstream)) = (&ctx.cluster, &ctx.upstream)
@@ -493,7 +538,9 @@ impl HttpFilter for LoadBalancerFilter {
         {
             entry.strategy.release(&upstream.address);
         }
-        if let Some(state) = &ctx.cluster_retry_state {
+        if !ctx.cluster_retry_state_released
+            && let Some(state) = &ctx.cluster_retry_state
+        {
             state.leave();
             ctx.cluster_retry_state_released = true;
         }

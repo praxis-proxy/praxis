@@ -219,16 +219,52 @@ pub struct ClusterRetryState {
     pub active_requests: AtomicU64,
     /// Token-bucket retry budget (unlimited when no budget config).
     pub budget: RetryBudget,
+    /// Ceiling on [`active_requests`](Self::active_requests), or `None` when
+    /// uncapped.
+    pub max_concurrent: Option<u64>,
 }
 
 impl ClusterRetryState {
-    /// Create state from an optional budget config.
+    /// Create state from an optional budget config, uncapped.
     #[must_use]
     pub fn new(budget_config: Option<&RetryBudgetConfig>) -> Self {
         let budget = budget_config.map_or_else(RetryBudget::unlimited, RetryBudget::new);
         Self {
             active_requests: AtomicU64::new(0),
             budget,
+            max_concurrent: None,
+        }
+    }
+
+    /// Cap concurrent requests at `max`, or leave uncapped for `None`.
+    #[must_use]
+    pub fn with_max_concurrent(mut self, max: Option<u32>) -> Self {
+        self.max_concurrent = max.map(u64::from);
+        self
+    }
+
+    /// Claim one in-flight slot, or report that the cluster is at its cap.
+    /// An uncapped cluster always admits.
+    pub fn try_enter(&self) -> bool {
+        let Some(max) = self.max_concurrent else {
+            self.enter();
+            return true;
+        };
+        let mut current = self.active_requests.load(Ordering::Relaxed);
+
+        loop {
+            if current >= max {
+                return false;
+            }
+            match self.active_requests.compare_exchange_weak(
+                current,
+                current.saturating_add(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
         }
     }
 
@@ -402,6 +438,84 @@ mod tests {
             state.active_requests.load(Ordering::Relaxed),
             0,
             "leave at zero is a no-op"
+        );
+    }
+
+    #[test]
+    fn try_enter_is_unbounded_without_a_cap() {
+        let state = ClusterRetryState::new(None);
+        for _ in 0..1_000 {
+            assert!(state.try_enter(), "an uncapped cluster must admit every request");
+        }
+        assert_eq!(
+            state.active_requests.load(Ordering::Relaxed),
+            1_000,
+            "every admitted request must be counted"
+        );
+    }
+
+    #[test]
+    fn try_enter_refuses_past_the_cap() {
+        let state = ClusterRetryState::new(None).with_max_concurrent(Some(2));
+        assert!(state.try_enter(), "first request fits");
+        assert!(state.try_enter(), "second request fills the cap");
+        assert!(!state.try_enter(), "third request must be refused");
+        assert_eq!(
+            state.active_requests.load(Ordering::Relaxed),
+            2,
+            "a refused request must not increment the counter"
+        );
+    }
+
+    #[test]
+    fn try_enter_reuses_a_released_slot() {
+        let state = ClusterRetryState::new(None).with_max_concurrent(Some(1));
+        assert!(state.try_enter(), "first request fits");
+        assert!(!state.try_enter(), "cap is full");
+        state.leave();
+        assert!(state.try_enter(), "a released slot must be reusable");
+    }
+
+    #[test]
+    fn with_max_concurrent_none_leaves_the_cluster_uncapped() {
+        let state = ClusterRetryState::new(None).with_max_concurrent(None);
+        assert_eq!(state.max_concurrent, None, "no cap should be recorded");
+        for _ in 0..100 {
+            assert!(state.try_enter(), "an explicitly uncapped cluster admits everything");
+        }
+    }
+
+    #[test]
+    fn capped_state_still_serves_the_retry_budget() {
+        let cfg = RetryBudgetConfig {
+            percent: BudgetPercent::try_from(20.0).unwrap(),
+            min_retries_per_second: 3,
+        };
+        let state = ClusterRetryState::new(Some(&cfg)).with_max_concurrent(Some(10));
+        assert!(state.try_enter(), "admission should succeed under the cap");
+        assert!(
+            state.try_admit_retry(),
+            "a cap must not disturb the retry budget sharing the counter"
+        );
+    }
+
+    #[test]
+    fn concurrent_try_enter_never_exceeds_the_cap() {
+        use std::{sync::Arc, thread};
+
+        let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(8)));
+        let threads: Vec<_> = std::iter::repeat_with(|| {
+            let state = Arc::clone(&state);
+            thread::spawn(move || usize::from(state.try_enter()))
+        })
+        .take(16)
+        .collect();
+        let admitted: usize = threads.into_iter().map(|t| t.join().unwrap()).sum();
+        assert_eq!(admitted, 8, "exactly the cap many racing requests may be admitted");
+        assert_eq!(
+            state.active_requests.load(Ordering::Relaxed),
+            8,
+            "the counter must agree with the number admitted"
         );
     }
 
