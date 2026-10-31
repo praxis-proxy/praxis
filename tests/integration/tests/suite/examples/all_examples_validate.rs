@@ -52,6 +52,13 @@ fn every_example_resolves_its_pipelines() {
         if path.file_name().is_some_and(|name| name == "slow-start.yaml") {
             continue;
         }
+        #[cfg(not(feature = "forward-proxy"))]
+        if path
+            .file_name()
+            .is_some_and(|name| name == "forward-proxy.yaml" || name == "forward-proxy-ip-acl.yaml")
+        {
+            continue;
+        }
         match resolve(&path) {
             Ok(()) => validated += 1,
             Err(error) if environmental(&error) => {},

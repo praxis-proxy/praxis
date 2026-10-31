@@ -65,7 +65,8 @@ mod rejection_cleanup;
 ///
 /// Registers HTTP listeners from the configuration, binding them to Pingora
 /// HTTP proxy services with filter pipelines. Delegates to
-/// [`handler::load_http_handler`] for each listener. Implements [`Protocol`].
+/// [`handler::load_http_handler_with_options`] for each listener. Implements
+/// [`Protocol`].
 ///
 /// [`Protocol`]: crate::Protocol
 #[cfg(feature = "pingora")]
@@ -89,13 +90,21 @@ impl Protocol for PingoraHttp {
             return Ok(Vec::new());
         }
 
+        let options = handler::HttpHandlerOptions::default()
+            .with_allow_private_upstreams(config.insecure_options.allow_private_upstreams);
         let mut cert_watcher_shutdowns = Vec::new();
         for listener in &http_listeners {
             let pipeline = pipelines.get(&listener.name).map(Arc::clone).ok_or_else(|| {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
 
-            handler::load_http_handler(server.server_mut(), listener, pipeline, &mut cert_watcher_shutdowns)?;
+            handler::load_http_handler_with_options(
+                server.server_mut(),
+                listener,
+                pipeline,
+                &mut cert_watcher_shutdowns,
+                &options,
+            )?;
         }
 
         Ok(cert_watcher_shutdowns)
