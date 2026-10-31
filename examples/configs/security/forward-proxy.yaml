@@ -1,0 +1,46 @@
+# Forward Proxy (Egress Allowlist)
+#
+# HTTP listener that doubles as an egress gateway for clients configured
+# with HTTPS_PROXY: CONNECT tunnels reach only the destinations in
+# allow_destinations. The filter pipeline runs on each CONNECT before the
+# destination check; tunneled bytes are end-to-end TLS and opaque to
+# body-inspecting filters. Any other host or port is answered with 403,
+# and IP-literal destinations never match a host pattern.
+#
+#   Client -- CONNECT api.example.com:443 --> Praxis :8080 --> api.example.com:443
+#
+# Requires the experimental `forward-proxy` cargo feature.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features forward-proxy -- \
+#     -c examples/configs/security/forward-proxy.yaml
+#
+# Exercise:
+#   HTTPS_PROXY=http://127.0.0.1:8080 curl https://api.example.com/
+#   HTTPS_PROXY=http://127.0.0.1:8080 curl https://other.example.org/ # 403
+
+listeners:
+  - name: egress
+    address: "127.0.0.1:8080"
+    filter_chains: [egress]
+    forward_proxy:
+      enabled: true
+      # Close a tunnel after 2 minutes without traffic in either direction.
+      idle_timeout_ms: 120000 # 2 minutes
+      # Tunnels do not observe graceful shutdown; cap their lifetime.
+      max_duration_secs: 3600 # 1 hour
+      allow_destinations:
+        # Exact host, one port.
+        - host: api.example.com
+          port: 443
+        # Exact host, any port.
+        - host: docs.example.com
+        # Any subdomain of internal.example.com (not the apex), HTTPS only.
+        - host: "*.internal.example.com"
+          port: 443
+
+filter_chains:
+  - name: egress
+    filters:
+      - filter: request_id
+      - filter: access_log

@@ -31,5 +31,8 @@ pub use pingora::health::PingoraHealthService;
 #[cfg(feature = "admin-api")]
 pub use pingora::kv;
 #[cfg(feature = "pingora")]
-pub use pingora::{PingoraHttp, handler::load_http_handler};
+pub use pingora::{
+    PingoraHttp,
+    handler::{HttpHandlerOptions, load_http_handler, load_http_handler_with_options},
+};
 pub use pingora::{health, metrics};

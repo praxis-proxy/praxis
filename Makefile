@@ -791,9 +791,10 @@ HYPER_CARGO_ARGS        := -p praxis-proxy --no-default-features --features $(HY
 # $(call hyper-suite-features,pkg1 pkg2 ...): compatible features of those suite
 # crates, from the same `cargo xtask features` listing the standard targets
 # use (see "Feature lists" below), excluding Pingora-only features.
-# TLS health probes select Pingora's transport and cannot join a hyper build.
+# TLS health probes and the forward-proxy runtime select Pingora's transport
+# and cannot join a hyper build.
 hyper-suite-features = $(shell $(XTASK_FIPS) features --except pingora --except tls-health-check \
-	$(POLICY_FIPS_EXCEPT) $(foreach pkg,$(1),-p $(pkg)))
+	--except forward-proxy $(POLICY_FIPS_EXCEPT) $(foreach pkg,$(1),-p $(pkg)))
 HYPER_BIN               := PRAXIS_BIN=$(abspath $(HYPER_TARGET_DIR))/debug/praxis
 # The parity record: tests that do not pass on hyper yet, one per line with
 # its bucket in a comment, skipped by name so the suites stay untouched. A

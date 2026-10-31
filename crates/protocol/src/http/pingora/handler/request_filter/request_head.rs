@@ -51,7 +51,7 @@ enum RequestHeadOutcome {
 
 /// Run opted-in head filters and reject an oversized declared body before reading it.
 #[cfg(feature = "pingora")]
-pub(super) async fn prepare(
+pub(in crate::http) async fn prepare(
     pipeline: &FilterPipeline,
     session: &mut Session,
     request: &mut Request,
