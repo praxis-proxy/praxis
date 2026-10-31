@@ -1,8 +1,14 @@
 blank_issues_enabled: true
 contact_links:
-  - name: Discussions
+  - name: Ask a Question (Discussions)
     url: https://github.com/praxis-proxy/praxis/discussions
-    about: Ask questions or start a discussion
-  - name: Enhancements
+    about: Usage questions, configuration help, and general discussion
+  - name: Ask a Question (Slack)
+    url: https://cloud-native.slack.com/archives/C0BK0RSP5RC
+    about: Chat with the community on the #praxis CNCF Slack channel
+  - name: Report a Security Vulnerability
+    url: https://github.com/praxis-proxy/praxis/security/advisories/new
+    about: Report security issues privately — do not open a public issue
+  - name: Propose an Enhancement
     url: https://github.com/praxis-proxy/enhancements
     about: Centralized enhancement proposals repository

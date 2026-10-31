@@ -6,6 +6,20 @@ do not follow the conventions will be rejected.
 
 [development conventions]: docs/conventions.md
 
+## Getting Help
+
+Before opening an issue, check if [SUPPORT.md](SUPPORT.md)
+points you to a better channel:
+
+- **Questions** → [Discussions] or [#praxis on CNCF Slack]
+- **Bugs** → [Bug Report template]
+- **Security vulnerabilities** → [Private reporting] (never a public issue)
+
+[Discussions]: https://github.com/praxis-proxy/praxis/discussions
+[#praxis on CNCF Slack]: https://cloud-native.slack.com/archives/C0BK0RSP5RC
+[Bug Report template]: https://github.com/praxis-proxy/praxis/issues/new?template=bug-report.yml
+[Private reporting]: https://github.com/praxis-proxy/praxis/security/advisories/new
+
 ## Getting Started
 
 1. Fork the repository and clone your fork

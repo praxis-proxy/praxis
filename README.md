@@ -63,6 +63,10 @@ Feel free to join our [discussion forums] to ask questions or share ideas.
 
 Or please join us in our Slack channel on [CNCF Slack]: [#praxis] channel
 
+See [SUPPORT.md](SUPPORT.md) for the full list of channels: where to
+ask questions, propose enhancements, report bugs, and report security
+vulnerabilities.
+
 [discussion forums]:https://github.com/praxis-proxy/praxis/discussions
 
 ## License
