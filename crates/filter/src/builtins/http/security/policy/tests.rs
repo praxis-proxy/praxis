@@ -1140,6 +1140,128 @@ async fn context_headers_pending_mutation_flows_into_apl() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// entity-less response fallback — stamp_operator_context
+// ---------------------------------------------------------------------------
+
+/// Identity-only policy (authentication plus a response half, no request
+/// authorization and no entity route). `identity_gate` admits the caller
+/// without stashing `ResolvedIdentity`, so `on_response` takes the
+/// entity-less fallback. The post rules read `meta.tags`,
+/// `meta.properties.region`, and `agent.agent_id`. Dropping
+/// `stamp_operator_context` from that fallback makes the allow case deny
+/// with `tags_missing`.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+fn write_entity_less_response_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    post_invocation:
+      - "!(meta.tags contains 'regulated'): deny('operator tags missing on the response half', 'tags_missing')"
+      - "!(meta.properties.region == 'us-east-1'): deny('operator region missing on the response half', 'region_missing')"
+      - "!(agent.agent_id == 'planner-v2'): deny('mapped header missing on the response half', 'agent_id_missing')"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+fn regulated_context() -> ContextMetaConfig {
+    ContextMetaConfig {
+        tags: vec!["regulated".to_owned()],
+        properties: HashMap::from([("region".to_owned(), "us-east-1".to_owned())]),
+        ..Default::default()
+    }
+}
+
+fn agent_id_header() -> HashMap<ContextField, String> {
+    HashMap::from([(ContextField::AgentAgentId, "x-ext-agent-id".to_owned())])
+}
+
+/// Admit through the identity gate, then run the response half.
+///
+/// Asserts `ResolvedIdentity` was not stashed, so a pass cannot be explained
+/// by `extensions_from_identity` on the request-phase identity.
+async fn respond_without_stashed_identity(filter: &PolicyFilter) -> FilterAction {
+    let mut req = request_for_alice();
+    req.headers
+        .insert("x-ext-agent-id", HeaderValue::from_static("planner-v2"));
+    let mut ctx = make_filter_context(&req);
+    let admitted = filter.on_request(&mut ctx).await.expect("request phase ran");
+    assert!(
+        matches!(admitted, FilterAction::Continue),
+        "the identity gate must admit alice; got {admitted:?}",
+    );
+    assert!(
+        ctx.extensions.get::<super::filter::ResolvedIdentity>().is_none(),
+        "the identity gate must not stash ResolvedIdentity",
+    );
+    let mut response = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut response);
+    filter.on_response(&mut ctx).await.expect("response phase ran")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_less_response_keeps_operator_context() {
+    let (_dir, path) = write_entity_less_response_config();
+    let filter = build_filter_with_context(path, agent_id_header(), regulated_context());
+    assert_eq!(
+        filter.derived_shape(),
+        (false, false),
+        "a post-only global policy is identity-only; the response half must use the entity-less fallback",
+    );
+
+    let action = respond_without_stashed_identity(&filter).await;
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "stamped tags, region, and agent.agent_id must satisfy the response rules; got {action:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_less_response_denies_without_regulated_tag() {
+    let (_dir, path) = write_entity_less_response_config();
+    let filter = build_filter_with_context(
+        path,
+        agent_id_header(),
+        ContextMetaConfig {
+            properties: HashMap::from([("region".to_owned(), "us-east-1".to_owned())]),
+            ..Default::default()
+        },
+    );
+
+    let action = respond_without_stashed_identity(&filter).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("without the regulated tag the response rule must deny; got {action:?}");
+    };
+    assert!(
+        has_header(&rejection, "x-policy-violation", "tags_missing"),
+        "the deny must report tags_missing; got {:?}",
+        rejection.headers,
+    );
+}
+
 /// Write a policy document selecting the Valkey-backed session store via a
 /// flat `global.session_store` block. The `valkey` factory connects
 /// lazily (the pool dials on first request), so this config loads
@@ -4750,6 +4872,122 @@ async fn require_route_false_admits_a_model_no_route_selects() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// context_meta.scope → scoped llm: route selection
+// ---------------------------------------------------------------------------
+
+/// Write a policy where `llm: scoped-model` declares `meta.scope: staging`.
+/// Without a catch-all, an unlisted model or a scope mismatch produces
+/// `llm.no_route`.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+fn write_scoped_llm_route_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+routes:
+  - llm: scoped-model
+    meta:
+      scope: staging
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Build a filter with custom `context_meta` and `LlmOptions`.
+fn build_filter_with_meta_and_llm(
+    config_path: String,
+    context_meta: ContextMetaConfig,
+    llm: super::config::LlmOptions,
+) -> PolicyFilter {
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            body_access: BodyAccessMode::ReadOnly,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm,
+            context_headers: HashMap::default(),
+            context_meta,
+        },
+        None,
+    )
+    .expect("filter should construct")
+}
+
+/// When `context_meta.scope` equals the route's `meta.scope`, the
+/// scoped `llm:` route is selected and the model is admitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn scoped_llm_route_admitted_when_scope_matches() {
+    let (_dir, path) = write_scoped_llm_route_config();
+    let filter = build_filter_with_meta_and_llm(
+        path,
+        ContextMetaConfig {
+            scope: Some("staging".to_owned()),
+            ..Default::default()
+        },
+        super::config::LlmOptions::default(),
+    );
+
+    let action = dispatch_inference_as(&filter, "alice", r#"{"model":"scoped-model","messages":[]}"#).await;
+    assert!(
+        !matches!(action, FilterAction::Reject(_)),
+        "scoped-model with scope=staging must be admitted; got {action:?}",
+    );
+}
+
+/// When `context_meta.scope` does not match the route's `meta.scope`,
+/// `llm_route_selects` returns false and the model is denied with
+/// `llm.no_route`.
+#[tokio::test(flavor = "multi_thread")]
+async fn scoped_llm_route_denied_when_scope_mismatches() {
+    let (_dir, path) = write_scoped_llm_route_config();
+    let filter = build_filter_with_meta_and_llm(
+        path,
+        ContextMetaConfig {
+            scope: Some("production".to_owned()),
+            ..Default::default()
+        },
+        super::config::LlmOptions::default(),
+    );
+
+    let action = dispatch_inference_as(&filter, "alice", r#"{"model":"scoped-model","messages":[]}"#).await;
+    let FilterAction::Reject(rejection) = action else {
+        panic!("scope mismatch (production vs staging) must deny scoped-model; got {action:?}");
+    };
+    assert!(
+        has_header(&rejection, "X-Policy-Violation", "llm.no_route"),
+        "the deny must report llm.no_route; got {:?}",
+        rejection.headers,
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_catch_all_route_satisfies_the_route_requirement() {
     let (_dir, path) = write_llm_route_config();
@@ -6818,6 +7056,40 @@ fn policy_filter_new_rejects_non_reserved_context_header() {
     assert!(
         err.contains("reserved prefix"),
         "error should mention reserved prefix: {err}",
+    );
+}
+
+/// Builds through `PolicyFilter::new` so a header that passes the reserved
+/// prefix check but is not a legal HTTP name (`x-praxis-agent id`) is
+/// rejected at startup. Otherwise `HeaderName::from_bytes` fails later and
+/// the mapped field is skipped with no error.
+#[test]
+fn policy_filter_new_rejects_invalid_context_header_name() {
+    let mut context_headers = HashMap::new();
+    context_headers.insert(ContextField::AgentAgentId, "x-praxis-agent id".to_owned());
+    let cfg = PolicyFilterConfig {
+        config_path: "/nonexistent/policy.yaml".to_owned(),
+        allow_private_idp: false,
+        trusted_private_endpoints: vec![],
+        body_access: BodyAccessMode::ReadOnly,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
+        context_headers,
+        context_meta: ContextMetaConfig::default(),
+    };
+    let err = match PolicyFilter::new(cfg, None) {
+        Ok(_) => panic!("an invalid context header name must be rejected at construction"),
+        Err(e) => e.to_string(),
+    };
+    assert!(
+        err.contains("not a valid HTTP header name"),
+        "error should name the parse failure: {err}",
+    );
+    assert!(
+        err.contains("agent.agent_id") && err.contains("x-praxis-agent id"),
+        "error should name the field and the header: {err}",
     );
 }
 

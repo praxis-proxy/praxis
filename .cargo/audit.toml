@@ -8,4 +8,21 @@ ignore = [
     # (quixotic-plecostomus-rustls) and rustls-native-certs 0.7. Drop once
     # the fork parses PEM with rustls-pki-types instead.
     "RUSTSEC-2025-0134",
+
+    # zstd 0.13.3 / zstd-safe 7.3.0: pulled in by the pingora fork
+    # (quixotic-plecostomus-header-serde). zstd is patched in 0.14.3,
+    # zstd-safe in 8.2.0. Drop once the fork bumps past those versions.
+    "RUSTSEC-2026-0391",
+    "RUSTSEC-2026-0395",
+    "RUSTSEC-2026-0396",
+    "RUSTSEC-2026-0397",
+    "RUSTSEC-2026-0398",
+    "RUSTSEC-2026-0399",
+    "RUSTSEC-2026-0400",
+    "RUSTSEC-2026-0401",
+    "RUSTSEC-2026-0402",
+    "RUSTSEC-2026-0403",
+    "RUSTSEC-2026-0404",
+    "RUSTSEC-2026-0405",
+    "RUSTSEC-2026-0406",
 ]
