@@ -279,7 +279,14 @@ impl ProxyHttp for PingoraHttpHandler {
         {
             return connect::handle(forward_proxy, &pipeline, session, ctx).await;
         }
-        request_filter::execute(&pipeline, session, ctx).await
+        let handled = request_filter::execute(&pipeline, session, ctx).await?;
+        #[cfg(feature = "forward-proxy")]
+        if !handled && let Some(forward_proxy) = &self.forward_proxy {
+            // Forward-proxy egress for absolute-form plain requests; every
+            // other shape continues through the reverse-proxy path.
+            return connect::forward_egress(forward_proxy, session, ctx).await;
+        }
+        Ok(handled)
     }
 
     async fn request_body_filter(
