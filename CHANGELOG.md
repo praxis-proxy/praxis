@@ -29,6 +29,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   preceding ordered body-filter mutations, including stripped headers
   introduced during earlier pre-read passes.
 
+### Added
+
+- The HTTP CONNECT runtime for the experimental `forward_proxy` listener
+  block (the `forward-proxy` cargo feature, off by default), which turns
+  the block from inert config into an egress gateway: `CONNECT host:port`
+  requests pass the same inbound admission as other requests (reserved
+  `x-praxis-*` headers are refused with 400), run the filter pipeline
+  (`ip_acl`, `policy`, conditions), then the destination rules and the
+  private-IP guard decide the dial, and the tunnel relays raw bytes with the
+  configured idle timeout and optional max duration, both enforced even
+  while a peer has stopped reading. A target without a port is answered
+  with 400, and a filter's 2xx answer to a CONNECT with 502, since a 2xx
+  would claim a tunnel that was never opened. HTTP/2 CONNECT is answered
+  with 501. Tunneled payloads are opaque to body-inspecting filters.
+
 ## [0.8.0] - 2026-11-06
 
 ### Added
