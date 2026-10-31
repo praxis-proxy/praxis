@@ -180,10 +180,15 @@ impl ShutdownSignalWatch for FutureShutdown {
 ///
 /// A graceful shutdown runs in two phases: Pingora first sleeps for
 /// the grace period while listeners stop accepting and in-flight
-/// requests finish, then bounds the runtime drain by the graceful
-/// shutdown timeout. The grace period
-/// is capped at [`SHUTDOWN_GRACE_CAP_SECS`] and the drain gets the
-/// remainder, so the two phases sum to `shutdown_timeout_secs`.
+/// requests finish, then shuts the runtimes down with the graceful
+/// shutdown timeout. The grace period is capped at
+/// [`SHUTDOWN_GRACE_CAP_SECS`] and the timeout gets the remainder, so
+/// the two phases sum to `shutdown_timeout_secs`.
+///
+/// Runtime shutdown drops async tasks at their next yield and only
+/// waits on blocking threads, so requests still in flight when the
+/// grace period ends are cut; the timeout bounds the exit, not a
+/// request drain.
 fn build_server_conf(shutdown_timeout_secs: u64, threads: usize, runtime: &RuntimeOptions) -> ServerConf {
     let grace = shutdown_timeout_secs.min(SHUTDOWN_GRACE_CAP_SECS);
     let drain = shutdown_timeout_secs.saturating_sub(grace);

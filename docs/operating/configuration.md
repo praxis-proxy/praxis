@@ -17,7 +17,7 @@ admin:                 # Optional. Admin health endpoint.
 body_limits:           # Optional. Global body size ceilings.
 metrics:               # Optional. Prometheus metric collection toggles.
 runtime:               # Optional. Thread pool and logging tuning.
-shutdown_timeout_secs: # Optional. Graceful drain time (default: 30).
+shutdown_timeout_secs: # Optional. Graceful shutdown bound (default: 30).
 insecure_options:      # Optional. Dev/test overrides. See developing/getting-started.md.
 ```
 
@@ -733,20 +733,49 @@ module docs for the trait definition.
 
 ## Graceful Shutdown
 
-The `shutdown_timeout_secs` field controls how long the
-server drains in-flight connections before forcing
-shutdown:
+The `shutdown_timeout_secs` field bounds how long a
+graceful shutdown can take:
 
 ```yaml
 shutdown_timeout_secs: 60    # default: 30
 ```
 
-On SIGTERM listeners stop accepting new connections. The
-first up-to-5 s is a grace period in which in-flight
-requests keep running; the remainder bounds the runtime
-drain; the total never exceeds `shutdown_timeout_secs`.
+On SIGTERM listeners stop accepting new connections and
+Praxis waits out a grace period of 5 s (or
+`shutdown_timeout_secs`, if lower) while in-flight
+requests keep running. The full grace period is spent
+even when nothing is in flight.
 
-Once the drain completes, Praxis flushes queued log lines
+When the grace period ends the runtimes shut down, and
+any request still in flight is cut, whatever
+`shutdown_timeout_secs` says. The remainder of
+`shutdown_timeout_secs` only bounds how long Praxis
+waits for blocking work before exiting, so a 60 s
+setting still gives in-flight requests at most 5 s.
+Raising it can only lengthen the exit, not the drain.
+
+The requests that get cut are the long-running ones:
+streaming and SSE responses, slow uploads and
+downloads, and WebSocket or other upgraded
+connections. Clients of those see the connection close
+mid-response and should be ready to retry or
+reconnect.
+
+On Kubernetes, a larger `terminationGracePeriodSeconds`
+does not extend this window either: streams still open
+when the grace period ends are closed on every pod
+deletion, rolling update, and node drain.
+
+This describes the default Pingora backend. On the
+experimental hyper backend, HTTP listeners let
+in-flight connections finish for up to
+`shutdown_timeout_secs` minus a 1 s reserve, so
+`shutdown_timeout_secs: 1` leaves them no drain time.
+TCP connections there close as soon as the signal
+arrives. See
+[Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
+
+Once shutdown completes, Praxis flushes queued log lines
 and exports pending OTLP spans, then exits `0`. A startup
 failure after logging is initialized (a listener that
 cannot be registered, a filter that cannot be built) is
