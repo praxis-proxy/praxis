@@ -10,7 +10,11 @@
 //! private-IP guard decide the dial, and the tunnel relays raw bytes with
 //! idle and duration limits.
 //!
-//! Non-CONNECT requests keep using the reverse-proxy pipeline.
+//! Non-CONNECT requests keep using the reverse-proxy pipeline, with one
+//! forward-proxy addition: an HTTP/1 absolute-form request
+//! (`GET http://host/path`, what `HTTP_PROXY` clients send for `http://`
+//! URLs) is gated by the same destination rules and then forwarded to
+//! its origin. Origin-form requests are reverse-proxied as before.
 
 mod tunnel;
 
@@ -20,10 +24,14 @@ use std::{
 };
 
 use pingora_proxy::Session;
-use praxis_core::{ProxyError, config::ForwardProxyConfig, connectivity::peer::resolve_client_host};
+use praxis_core::{
+    ProxyError,
+    config::ForwardProxyConfig,
+    connectivity::{ConnectionOptions, Upstream, is_private_upstream_ip, peer::resolve_client_host},
+};
 use praxis_filter::{FilterAction, FilterPipeline, Rejection, Request};
-use praxis_tls::SniMatcher;
-use tracing::{Instrument as _, info, warn};
+use praxis_tls::{CachedClusterTls, ClusterTls, SniMatcher};
+use tracing::{Instrument as _, debug, info, warn};
 use tunnel::{TunnelStats, pump};
 
 use super::{
@@ -52,6 +60,12 @@ use crate::{
 /// answer opens no tunnel; the client would treat the response body as
 /// destination bytes. A filter that approves the CONNECT continues instead.
 const CONNECT_SUCCESS_REFUSED: u16 = 502;
+
+/// Default port for `http` absolute-form destinations.
+const HTTP_PORT: u16 = 80;
+
+/// Default port for `https` absolute-form destinations.
+const HTTPS_PORT: u16 = 443;
 
 // -----------------------------------------------------------------------------
 // ForwardProxyRuntime
@@ -110,6 +124,21 @@ impl ForwardProxyRuntime {
                 .matcher
                 .lookup(host)
                 .is_some_and(|ports| ports.is_empty() || ports.contains(&port))
+    }
+
+    /// Whether `host` is an IP literal in a private or reserved range that
+    /// the private-address guard refuses.
+    ///
+    /// The HTTP upstream resolver checks only names it resolves and trusts
+    /// literals, which in reverse-proxy mode come from validated config.
+    /// Forward-proxy destinations come from the client, so a literal is
+    /// checked here, with the same ranges (IPv4-mapped and NAT64 forms
+    /// included) the CONNECT dialer applies.
+    fn private_literal_refused(&self, host: &str) -> bool {
+        !self.allow_private_upstreams
+            && host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| is_private_upstream_ip(&ip))
     }
 }
 
@@ -668,6 +697,253 @@ fn record_tunnel_close(ctx: &mut PingoraRequestCtx, stats: &TunnelStats, started
 }
 
 // -----------------------------------------------------------------------------
+// Absolute-Form Forwarding
+// -----------------------------------------------------------------------------
+
+/// A parsed absolute-form request destination.
+struct ForwardDestination {
+    /// Host and port to dial and match against the destination rules.
+    destination: ConnectDestination,
+
+    /// Whether the scheme was `https` (TLS origination with SNI).
+    tls: bool,
+
+    /// `Host` header value for the upstream leg: the authority without
+    /// any userinfo.
+    host_header: http::HeaderValue,
+}
+
+/// Parse an absolute-form request target into a forward destination.
+///
+/// The target is read verbatim from the wire (`raw_path()`): the fork's
+/// HTTP/1 reader keeps scheme and authority off the `Uri`, exposing only
+/// the path there. `None` when the target is not absolute-form or its
+/// scheme is neither `http` nor `https`. The port defaults to the
+/// scheme's (80/443).
+fn forward_destination(target: &str) -> Option<ForwardDestination> {
+    let uri = http::Uri::try_from(target).ok()?;
+    let authority = uri.authority()?;
+    let tls = match uri.scheme_str()? {
+        "http" => false,
+        "https" => true,
+        _ => return None,
+    };
+    let default_port = if tls { HTTPS_PORT } else { HTTP_PORT };
+    // `Authority::host` keeps an IPv6 literal's brackets; store it bare, as
+    // CONNECT does, so it parses as an IP and `dial_address` brackets it once.
+    // Brackets hold only an IPv6 literal.
+    let wire_host = authority.host();
+    let host = match wire_host.strip_prefix('[') {
+        Some(bracketed) => {
+            let literal = bracketed.strip_suffix(']')?;
+            literal.parse::<std::net::Ipv6Addr>().ok()?;
+            literal
+        },
+        None => wire_host,
+    };
+    let destination = destination(host, authority.port_u16().unwrap_or(default_port))?;
+    // Filters judge this request by its `Host`, which the fork holds equal
+    // to the target's authority byte for byte. Only a host already in the
+    // canonical form the destination rules check is accepted, so no
+    // spelling (`EXAMPLE.com`, `example.com.`) can satisfy a filter and
+    // reach a destination the filter would refuse.
+    if destination.host != host {
+        return None;
+    }
+    let host_header = match authority.port() {
+        Some(port) => format!("{}:{port}", authority.host()),
+        None => authority.host().to_owned(),
+    };
+    Some(ForwardDestination {
+        destination,
+        tls,
+        host_header: http::HeaderValue::try_from(host_header).ok()?,
+    })
+}
+
+/// The address the HTTP upstream resolver dials: [`dial_address`] with a
+/// host name made absolute (see [`absolute_name`]). IP literals are left as
+/// they are; they are not resolved and would not parse with a dot.
+fn resolve_address(destination: &ConnectDestination) -> String {
+    if destination.host.parse::<std::net::IpAddr>().is_ok() {
+        return dial_address(destination);
+    }
+    format!("{}:{}", absolute_name(&destination.host), destination.port)
+}
+
+/// Build the upstream for a forward destination.
+///
+/// HTTPS destinations originate TLS with SNI from the destination host
+/// and verification against the system roots: no custom CA, no client
+/// certificate. The dialed authority becomes the upstream `Host`.
+///
+/// # Errors
+///
+/// Returns the TLS material error when the HTTPS TLS settings cannot be
+/// built.
+fn build_destination_upstream(parsed: &ForwardDestination) -> Result<Upstream, praxis_tls::TlsError> {
+    let tls = parsed
+        .tls
+        .then(|| {
+            CachedClusterTls::try_from_config(&ClusterTls {
+                sni: Some(parsed.destination.host.clone()),
+                ..ClusterTls::default()
+            })
+        })
+        .transpose()?;
+    Ok(Upstream {
+        // Absolute, so the resolver dials exactly the host the rules approved.
+        address: Arc::from(resolve_address(&parsed.destination)),
+        authority: Some(parsed.host_header.clone()),
+        base_path: None,
+        connection: Arc::new(ConnectionOptions::default()),
+        tls,
+    })
+}
+
+/// Gate and forward an absolute-form request (`GET http://host/path`) on a
+/// forward-proxy listener.
+///
+/// Runs after the reverse-proxy request pipeline approved the request, so
+/// filters (`ip_acl`, `policy`, conditions) saw it first. The destination
+/// rules then decide the egress: a host or port that is not allowlisted is
+/// answered with 403. A pipeline-selected upstream (`router`,
+/// `load_balancer`) keeps control; otherwise the URI's destination becomes
+/// the upstream and the request is rewritten to origin-form for the
+/// upstream leg. Requests that are not HTTP/1 absolute-form — including
+/// everything on HTTP/2 listeners — keep reverse-proxy behavior when the
+/// pipeline selected an upstream, and are answered with 400 when it did not:
+/// such a request names no destination for the forward proxy and has no
+/// reverse-proxy route either.
+///
+/// Returns `Ok(true)` when the request was answered with a rejection.
+pub(super) async fn forward_egress(
+    forward_proxy: &ForwardProxyRuntime,
+    session: &mut Session,
+    ctx: &mut PingoraRequestCtx,
+) -> pingora_core::Result<bool> {
+    let Some(parsed) = absolute_form_destination(session) else {
+        return reject_unrouted(session, ctx).await;
+    };
+    if let Some(answered) = gate_and_select(forward_proxy, &parsed, session, ctx).await? {
+        return Ok(answered);
+    }
+    rewrite_origin_form(session);
+    Ok(false)
+}
+
+/// The forward destination of an HTTP/1 absolute-form request, if this is
+/// one.
+fn absolute_form_destination(session: &Session) -> Option<ForwardDestination> {
+    if session.as_downstream().is_http2() {
+        return None;
+    }
+    std::str::from_utf8(session.req_header().raw_path())
+        .ok()
+        .and_then(forward_destination)
+}
+
+/// Answer a request that is not a forward request with 400 when the
+/// pipeline selected no upstream for it.
+///
+/// A `router`/`load_balancer` on the listener keeps serving origin-form
+/// requests, so one port can reverse-proxy and forward-proxy at once. Without
+/// one, the request would otherwise fail later with a 500 for want of an
+/// upstream, which reads as a proxy fault rather than a client error.
+///
+/// Returns `Ok(true)` when the request was answered.
+async fn reject_unrouted(session: &mut Session, ctx: &mut PingoraRequestCtx) -> pingora_core::Result<bool> {
+    if ctx.upstream.is_some() {
+        return Ok(false);
+    }
+    debug!("request on a forward-proxy listener is not absolute-form and selected no upstream");
+    ctx.stamp_error_type(ERROR_TYPE_FILTER_REJECT);
+    send_rejection_for(session, Rejection::status(400), ctx).await;
+    Ok(true)
+}
+
+/// Why a forward destination is refused, if it is: the response status and
+/// the error type to stamp, after logging the reason.
+///
+/// A destination outside `allow_destinations` is 403. A private or reserved
+/// IP literal is 502, the same answer the CONNECT dialer and the resolver
+/// give for a private address.
+fn refuse_destination(
+    forward_proxy: &ForwardProxyRuntime,
+    destination: &ConnectDestination,
+) -> Option<(u16, &'static str)> {
+    let address = dial_address(destination);
+    if !forward_proxy.destination_allowed(&destination.host, destination.port) {
+        warn!(destination = %address, "forward request destination denied by allow_destinations");
+        return Some((403, ERROR_TYPE_FILTER_REJECT));
+    }
+    if forward_proxy.private_literal_refused(&destination.host) {
+        warn!(
+            destination = %address,
+            "forward request destination is a private/reserved IP address; \
+             set insecure_options.allow_private_upstreams to allow"
+        );
+        return Some((502, ERROR_TYPE_UPSTREAM_UNAVAILABLE));
+    }
+    None
+}
+
+/// Gate the destination rules and pre-select the destination upstream.
+///
+/// `Ok(Some(true))` when the request was answered with a rejection and
+/// the caller should stop; `Ok(None)` to forward.
+async fn gate_and_select(
+    forward_proxy: &ForwardProxyRuntime,
+    parsed: &ForwardDestination,
+    session: &mut Session,
+    ctx: &mut PingoraRequestCtx,
+) -> pingora_core::Result<Option<bool>> {
+    if let Some((status, error_type)) = refuse_destination(forward_proxy, &parsed.destination) {
+        ctx.stamp_error_type(error_type);
+        send_rejection_for(session, Rejection::status(status), ctx).await;
+        return Ok(Some(true));
+    }
+    if ctx.upstream.is_none() {
+        match build_destination_upstream(parsed) {
+            Ok(upstream) => ctx.upstream = Some(upstream),
+            Err(error) => {
+                warn!(
+                    destination = %dial_address(&parsed.destination),
+                    error = %error,
+                    "forward destination TLS setup failed"
+                );
+                ctx.stamp_error_type(ERROR_TYPE_INTERNAL);
+                send_rejection_for(session, Rejection::status(500), ctx).await;
+                return Ok(Some(true));
+            },
+        }
+    }
+    Ok(None)
+}
+
+/// Rewrite an absolute-form request to origin-form for the upstream leg.
+///
+/// Origin servers must accept absolute-form request targets, but every
+/// reverse-proxied request already arrives in origin-form; forwarding the
+/// same shape keeps the upstream leg conventional. A target that cannot
+/// be rebuilt (an empty path, say) is forwarded as received.
+fn rewrite_origin_form(session: &mut Session) {
+    let header = session.req_header_mut();
+    let mut parts = http::uri::Parts::default();
+    parts.path_and_query = Some(
+        header
+            .uri
+            .path_and_query()
+            .cloned()
+            .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/")),
+    );
+    if let Ok(origin) = http::Uri::from_parts(parts) {
+        debug!(path = %origin.path(), "rewriting absolute-form target to origin-form");
+        header.set_uri(origin);
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -862,6 +1138,40 @@ allow_destinations:
     fn runtime_without_rules_allows_all_destinations() {
         let forward_proxy = runtime("enabled: true\n");
         assert!(forward_proxy.destination_allowed("anything.example.com", 8080));
+    }
+
+    #[test]
+    fn private_literal_destinations_are_refused_by_default() {
+        let forward_proxy = runtime("enabled: true\n");
+        for host in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "169.254.169.254",
+            "192.168.1.1",
+            "::1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::a00:1",
+        ] {
+            assert!(
+                forward_proxy.private_literal_refused(host),
+                "{host} is private or reserved and must be refused"
+            );
+        }
+        assert!(
+            !forward_proxy.private_literal_refused("93.184.215.14"),
+            "a public literal is not refused"
+        );
+        assert!(
+            !forward_proxy.private_literal_refused("localhost"),
+            "names are checked when they resolve, not here"
+        );
+    }
+
+    #[test]
+    fn private_literal_destinations_pass_with_allow_private_upstreams() {
+        let config: ForwardProxyConfig = serde_yaml::from_str("enabled: true\n").unwrap();
+        let forward_proxy = ForwardProxyRuntime::try_from_config(&config, true).unwrap();
+        assert!(!forward_proxy.private_literal_refused("127.0.0.1"));
     }
 
     #[test]
@@ -1426,5 +1736,135 @@ allow_destinations:
             .nth(1)
             .and_then(|code| code.parse().ok())
             .expect("the response must start with a status line")
+    }
+
+    /// Parse an absolute-form target, unwrapping the result for assertions.
+    fn forwarded(target: &str) -> ForwardDestination {
+        forward_destination(target).unwrap()
+    }
+
+    #[test]
+    fn forward_destination_http_defaults_to_port_80() {
+        let parsed = forwarded("http://example.com/status/418");
+        assert_eq!(parsed.destination.host, "example.com");
+        assert_eq!(parsed.destination.port, 80);
+        assert!(!parsed.tls);
+        assert_eq!(parsed.host_header.to_str().unwrap(), "example.com");
+    }
+
+    #[test]
+    fn forward_destination_https_defaults_to_port_443() {
+        let parsed = forwarded("https://example.com/");
+        assert_eq!(parsed.destination.port, 443);
+        assert!(parsed.tls);
+    }
+
+    #[test]
+    fn forward_destination_keeps_explicit_port_in_host_header() {
+        let parsed = forwarded("https://api.example.com:8443/x?y=1");
+        assert_eq!(parsed.destination.port, 8443);
+        assert_eq!(parsed.host_header.to_str().unwrap(), "api.example.com:8443");
+    }
+
+    #[test]
+    fn forward_destination_strips_userinfo_from_host_header() {
+        let parsed = forwarded("http://user:secret@example.com:8080/");
+        assert_eq!(parsed.host_header.to_str().unwrap(), "example.com:8080");
+        assert_eq!(parsed.destination.host, "example.com");
+    }
+
+    #[test]
+    fn forward_destination_rejects_origin_form() {
+        assert!(forward_destination("/status/418").is_none());
+    }
+
+    #[test]
+    fn forward_destination_rejects_non_http_schemes() {
+        assert!(forward_destination("ftp://example.com/file").is_none());
+    }
+
+    #[test]
+    fn forward_destination_rejects_hosts_filters_and_the_gate_would_read_apart() {
+        // Filters see `Host`, held equal to this authority; the gate checks
+        // the canonical host. Every spelling where the two differ is refused.
+        for target in [
+            "http://[blocked.example]/",
+            "http://[1.2.3.4]/",
+            "http://blocked.example./",
+            "http://BLOCKED.example/",
+            "http://blocked..example/",
+            "http://10.1/",
+            "http://[2001:DB8::1]/",
+            "http://[2001:db8:0:0:0:0:0:1]/",
+            "http://[::ffff:93.184.216.34]/",
+        ] {
+            assert!(forward_destination(target).is_none(), "{target} must be refused");
+        }
+        assert_eq!(forwarded("http://[::1]:8080/").destination.host, "::1");
+        assert_eq!(forwarded("http://[2001:db8::1]/").destination.host, "2001:db8::1");
+        assert_eq!(forwarded("http://93.184.216.34/").destination.host, "93.184.216.34");
+    }
+
+    #[test]
+    fn destination_upstream_plain_http_dials_with_authority() {
+        let parsed = forwarded("http://api.example.com:8080/");
+        let upstream = build_destination_upstream(&parsed).unwrap();
+        // Dialed as an absolute name, so search domains are never appended;
+        // the Host header keeps the name the client sent.
+        assert_eq!(&*upstream.address, "api.example.com.:8080");
+        assert!(upstream.tls.is_none(), "plain http must not originate TLS");
+        assert_eq!(
+            upstream
+                .authority
+                .as_ref()
+                .and_then(|value| value.to_str().ok())
+                .unwrap(),
+            "api.example.com:8080"
+        );
+    }
+
+    #[test]
+    fn destination_upstream_https_originate_tls_with_sni() {
+        let parsed = forwarded("https://api.example.com/");
+        let upstream = build_destination_upstream(&parsed).unwrap();
+        assert_eq!(&*upstream.address, "api.example.com.:443");
+        let tls = upstream.tls.as_ref().unwrap();
+        assert_eq!(tls.sni(), Some("api.example.com"), "SNI is never fully qualified");
+    }
+
+    #[test]
+    fn forward_destination_stores_ipv6_host_bare() {
+        let parsed = forwarded("http://[fd00::1]:8080/");
+        assert_eq!(parsed.destination.host, "fd00::1");
+        assert_eq!(
+            parsed.host_header.to_str().unwrap(),
+            "[fd00::1]:8080",
+            "the Host header keeps the brackets HTTP requires"
+        );
+    }
+
+    #[test]
+    fn private_ipv6_literal_destinations_are_refused() {
+        // With the brackets kept, `[::1]` did not parse as an IP and slipped
+        // past the private-address check.
+        let forward_proxy = runtime("enabled: true\n");
+        for target in ["http://[::1]/", "http://[fd00::1]:8080/", "https://[64:ff9b::a00:1]/"] {
+            let parsed = forwarded(target);
+            assert!(
+                forward_proxy.private_literal_refused(&parsed.destination.host),
+                "{target} must be refused"
+            );
+        }
+        // An IPv4-mapped spelling is not canonical, so it is refused at parse
+        // and never reaches the dial.
+        assert!(forward_destination("https://[::ffff:10.0.0.1]/").is_none());
+    }
+
+    #[test]
+    fn destination_upstream_dials_ip_literals_as_given() {
+        let upstream = build_destination_upstream(&forwarded("http://10.0.0.1:8080/")).unwrap();
+        assert_eq!(&*upstream.address, "10.0.0.1:8080");
+        let upstream = build_destination_upstream(&forwarded("http://[::1]:8080/")).unwrap();
+        assert_eq!(&*upstream.address, "[::1]:8080");
     }
 }

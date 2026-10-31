@@ -59,7 +59,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   thread per request. A target without a port is answered with 400, and a
   filter's 2xx answer to a CONNECT with 502, since a 2xx would claim a
   tunnel that was never opened. HTTP/2 CONNECT is answered with 501.
-  Tunneled payloads are opaque to body-inspecting filters. Example configs:
+  Absolute-form plain requests (`GET http://host/path`, what `HTTP_PROXY`
+  clients send for `http://` URLs) run the same pipeline, pass the same
+  destination rules, and are forwarded to their origin (TLS-originated with
+  SNI for `https`), with private and reserved IP-literal destinations
+  refused unless `insecure_options.allow_private_upstreams` is set.
+  Origin-form requests keep using the reverse-proxy pipeline when it selects
+  an upstream, and are answered with 400 when it does not. Tunneled payloads
+  are opaque to body-inspecting filters. Example configs:
   `security/forward-proxy.yaml`
   (destination allowlist) and `security/forward-proxy-ip-acl.yaml` (client
   ACL).
