@@ -728,6 +728,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the regression test asserts body, trailers, and callback ordering"
+    )]
     async fn synthetic_eof_runs_before_response_trailers() {
         let (_upstream, connector, session) =
             answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
