@@ -781,6 +781,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn response_trailer_error_preserves_client_trailers() {
+        let (_upstream, connector, session) =
+            answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
+                .await;
+        let pipeline = scripted_pipeline(Script {
+            response_trailers: Some(Arc::new(|_trailers| Err("trailer filter failed".into()))),
+            ..Script::default()
+        });
+        let (relaying, body) = relaying(connector, pipeline, session, Start::Fresh, true).await;
+
+        let relayed = tokio::spawn(relaying.run());
+        let collected = tokio::time::timeout(Duration::from_secs(5), body.collect())
+            .await
+            .expect("the relay finishes")
+            .expect("a trailer filter error is soft");
+        relayed.await.unwrap();
+
+        assert_eq!(
+            collected
+                .trailers()
+                .and_then(|trailers| trailers.get("x-checksum"))
+                .unwrap(),
+            "9",
+            "the original trailers are forwarded after a trailer filter error"
+        );
+        assert_eq!(collected.to_bytes(), "ok", "the body remains available");
+    }
+
+    #[tokio::test]
+    async fn synthetic_eof_error_aborts_client_stream() {
+        let (_upstream, connector, session) =
+            answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
+                .await;
+        let pipeline = scripted_pipeline(Script {
+            response_body: Some((
+                BodyMode::Stream,
+                Arc::new(|_body, end_of_stream| {
+                    if end_of_stream {
+                        return Err("synthetic EOF failed".into());
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            response_trailers: Some(Arc::new(|_trailers| Ok(None))),
+            ..Script::default()
+        });
+        let (relaying, body) = relaying(connector, pipeline, session, Start::Fresh, true).await;
+
+        let relayed = tokio::spawn(relaying.run());
+        let collected = tokio::time::timeout(Duration::from_secs(5), body.collect())
+            .await
+            .expect("the relay finishes");
+        relayed.await.unwrap();
+
+        assert!(collected.is_err(), "synthetic EOF failures abort the client stream");
+    }
+
+    #[tokio::test]
     async fn failing_body_filter_aborts_the_client_body() {
         let (_upstream, connector, session) = answered(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").await;
         let pipeline = scripted_pipeline(Script {
