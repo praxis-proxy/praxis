@@ -65,7 +65,6 @@ pub(in crate::http) fn execute(
     }
 }
 
-#[cfg(feature = "pingora")]
 /// Deliver the missing final response-body callback before trailers.
 pub(super) fn dispatch_synthetic_eof(
     pipeline: &FilterPipeline,
@@ -73,22 +72,9 @@ pub(super) fn dispatch_synthetic_eof(
 ) -> Result<Option<Bytes>, String> {
     if !ctx.response_delivery_complete && pipeline.body_capabilities().needs_response_body {
         let mut body = None;
-        super::response_body_filter::execute(pipeline, &mut body, true, ctx).map_err(|error| error.to_string())?;
+        super::response_body_filter::run_response_body(pipeline, &mut body, true, ctx)?;
         return Ok(body);
     }
-    Ok(None)
-}
-
-#[cfg(not(feature = "pingora"))]
-/// No body adapter exists on backend-neutral builds.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "keep the backend-neutral helper signature aligned with Pingora"
-)]
-pub(super) fn dispatch_synthetic_eof(
-    _pipeline: &FilterPipeline,
-    _ctx: &mut PingoraRequestCtx,
-) -> Result<Option<Bytes>, String> {
     Ok(None)
 }
 

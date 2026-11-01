@@ -728,6 +728,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn synthetic_eof_runs_before_response_trailers() {
+        let (_upstream, connector, session) =
+            answered(b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\nx-checksum: 9\r\n\r\n")
+                .await;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let body_events = Arc::clone(&events);
+        let trailer_events = Arc::clone(&events);
+        let pipeline = scripted_pipeline(Script {
+            response_body: Some((
+                BodyMode::Stream,
+                Arc::new(move |_body, end_of_stream| {
+                    if end_of_stream {
+                        body_events.lock().unwrap().push("eof");
+                    }
+                    Ok(FilterAction::Continue)
+                }),
+            )),
+            response_trailers: Some(Arc::new(move |_trailers| {
+                trailer_events.lock().unwrap().push("trailers");
+                Ok(None)
+            })),
+            ..Script::default()
+        });
+        let (relaying, body) = relaying(connector, pipeline, session, Start::Fresh, true).await;
+
+        let relayed = tokio::spawn(relaying.run());
+        let collected = tokio::time::timeout(Duration::from_secs(5), body.collect())
+            .await
+            .expect("the relay finishes")
+            .unwrap();
+        relayed.await.unwrap();
+
+        assert_eq!(
+            collected
+                .trailers()
+                .and_then(|trailers| trailers.get("x-checksum"))
+                .unwrap(),
+            "9",
+            "the trailer hook leaves upstream trailers intact"
+        );
+        assert_eq!(collected.to_bytes(), "ok", "the body remains unchanged");
+        assert_eq!(
+            *events.lock().unwrap(),
+            ["eof", "trailers"],
+            "response policy output is published before trailer callbacks"
+        );
+    }
+
+    #[tokio::test]
     async fn failing_body_filter_aborts_the_client_body() {
         let (_upstream, connector, session) = answered(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok").await;
         let pipeline = scripted_pipeline(Script {
