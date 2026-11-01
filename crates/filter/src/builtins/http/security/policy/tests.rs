@@ -3562,6 +3562,163 @@ async fn response_phase_without_request_identity_fails_closed() {
 }
 
 // -----------------------------------------------------------------------------
+// publish_candidate_constraint
+// -----------------------------------------------------------------------------
+
+/// Add an APL restriction to an existing authenticated fixture. Keeping the
+/// identity setup from the fixture makes the test exercise the same dispatch
+/// path that serves authenticated proxy traffic.
+fn add_candidate_constraint(path: &str) {
+    let yaml = std::fs::read_to_string(path).expect("read policy fixture");
+    let step = yaml
+        .lines()
+        .find(|line| line.contains("- \"require(authenticated)\""))
+        .expect("the fixture must contain an authenticated authorization step")
+        .to_owned();
+    let indentation = step.trim_end_matches("- \"require(authenticated)\"");
+    let restriction = format!("{step}\n{indentation}- restrict: {{ allow_regions: [eu] }}");
+    let yaml = yaml.replacen(&step, &restriction, 1);
+    std::fs::write(path, yaml).expect("write policy fixture");
+}
+
+/// Assert the region restriction that the policy fixtures emit after PPE
+/// authorizes the request.
+fn assert_published_candidate_regions(ctx: &crate::HttpFilterContext<'_>, expected: &[&str]) {
+    let expected: Vec<String> = expected.iter().map(|region| (*region).to_owned()).collect();
+    assert_eq!(
+        ctx.policy_candidate_constraint()
+            .and_then(|constraint| constraint.allow_regions.as_deref()),
+        Some(expected.as_slice()),
+        "the request context must expose PPE's candidate restriction"
+    );
+}
+
+/// The generic HTTP authorization dispatch must carry PPE's `restrict`
+/// extension into the request context for a later candidate publisher.
+#[tokio::test(flavor = "multi_thread")]
+async fn http_authz_dispatch_publishes_candidate_constraint() {
+    let (_dir, path) = write_l7_global_config();
+    add_candidate_constraint(&path);
+    let filter = build_filter(path);
+
+    let mut req = request_for_alice();
+    req.method = Method::GET;
+    let mut ctx = make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.expect("filter ran");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "expected Continue; got {action:?}"
+    );
+    assert_published_candidate_regions(&ctx, &["eu"]);
+}
+
+/// The JSON-RPC CMF dispatch must carry PPE's `restrict` extension into the
+/// request context after it authorizes a tool call.
+#[tokio::test(flavor = "multi_thread")]
+async fn json_rpc_dispatch_publishes_candidate_constraint() {
+    let (_dir, path) = write_tool_route_config();
+    add_candidate_constraint(&path);
+    let filter = build_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.filter_metadata
+        .insert("mcp.method", "tools/call")
+        .expect("entry must fit in the filter's metadata");
+    ctx.filter_metadata
+        .insert("mcp.name", "echo")
+        .expect("entry must fit in the filter's metadata");
+    let mut body = Some(bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
+    ));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("filter ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "expected BodyDone; got {action:?}"
+    );
+    assert_published_candidate_regions(&ctx, &["eu"]);
+}
+
+/// The LLM CMF dispatch must carry PPE's `restrict` extension into the
+/// request context after it authorizes an inference request.
+#[tokio::test(flavor = "multi_thread")]
+async fn llm_dispatch_publishes_candidate_constraint() {
+    let (_dir, path) = write_llm_route_config();
+    add_candidate_constraint(&path);
+    let filter = build_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    let mut body = Some(bytes::Bytes::from_static(br#"{"model":"allowed-model","messages":[]}"#));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("filter ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "expected BodyDone; got {action:?}"
+    );
+    assert_published_candidate_regions(&ctx, &["eu"]);
+}
+
+#[test]
+fn publish_candidate_constraint_exposes_a_non_empty_policy_restriction() {
+    use std::sync::Arc;
+
+    use ppe::praxis_policy_core::extensions::{CandidateConstraintExtension, container::Extensions};
+
+    use super::filter::publish_candidate_constraint;
+
+    let extensions = Extensions {
+        candidate_constraint: Some(Arc::new(CandidateConstraintExtension {
+            allow_regions: Some(vec!["eu".to_owned()]),
+            ..CandidateConstraintExtension::default()
+        })),
+        ..Extensions::default()
+    };
+    let request = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&request);
+
+    publish_candidate_constraint(&mut ctx, Some(&extensions));
+    assert_published_candidate_regions(&ctx, &["eu"]);
+}
+
+#[test]
+fn publish_candidate_constraint_ignores_absent_and_empty_policy_restrictions() {
+    use std::sync::Arc;
+
+    use ppe::praxis_policy_core::extensions::{CandidateConstraintExtension, container::Extensions};
+
+    use super::filter::publish_candidate_constraint;
+
+    let request = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&request);
+
+    publish_candidate_constraint(&mut ctx, None);
+    assert!(
+        ctx.policy_candidate_constraint().is_none(),
+        "absent output must not publish a constraint"
+    );
+
+    let extensions = Extensions {
+        candidate_constraint: Some(Arc::new(CandidateConstraintExtension::default())),
+        ..Extensions::default()
+    };
+    publish_candidate_constraint(&mut ctx, Some(&extensions));
+
+    assert!(
+        ctx.policy_candidate_constraint().is_none(),
+        "empty output must not publish a constraint"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // attach_delegated_tokens — outbound header collision handling
 // -----------------------------------------------------------------------------
 

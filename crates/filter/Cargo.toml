@@ -78,6 +78,11 @@ cloud-events-filter = [
 # experimental. Without it those config forms are rejected at load time and
 # the router never touches request extensions.
 upstream-binding = ["praxis-core/upstream-binding"]
+# Praxis applies PPE candidate constraints to the load balancer's declared
+# logical clusters and publishes the eligible names. A future AI routing filter
+# can select one of those names before a normal load balancer selects an endpoint.
+# Off by default while the configuration surface is experimental.
+candidate-constraints = ["policy-engine", "praxis-core/candidate-constraints"]
 # The `iterative_request_router` filter (framework-level multi-sub-request
 # loop). Off by default; experimental. Carries no extra dependencies. Its
 # steps dispatch from the logical binding, so it pulls in `upstream-binding`.

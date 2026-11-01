@@ -92,6 +92,14 @@ impl AnyFilter {
         }
     }
 
+    /// Whether this filter publishes policy-eligible logical cluster names.
+    pub fn publishes_policy_candidates(&self) -> bool {
+        match self {
+            Self::Http(f) => f.publishes_policy_candidates(),
+            Self::Tcp(_) => false,
+        }
+    }
+
     /// Forward a deferred access-record claim to the selected HTTP filter.
     ///
     /// The pipeline selects only the first top-level `access_log` instance

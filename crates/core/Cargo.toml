@@ -46,6 +46,10 @@ hyper = [
 # Config support for logical upstream binding (`bound_upstream` conditions).
 # Off by default; experimental. The filter crate's `upstream-binding` turns it on.
 upstream-binding = []
+# Policy-driven logical-candidate filtering. Off by default while its routing
+# surface is experimental. The filter crate enables this for configurations
+# that publish PPE-filtered candidate names before AI routing chooses a cluster.
+candidate-constraints = []
 # Per-cluster `slow_start`. Off by default; experimental. With the feature on,
 # weighted strategies apply the ramp. Hash strategies do not. Without this
 # feature the field is an unknown key.

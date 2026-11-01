@@ -1,0 +1,53 @@
+# Cluster Candidate Labels
+#
+# Declares labels on logical HTTP clusters for policy-aware candidate
+# filtering. The experimental `candidate-constraints` feature is required.
+# The first load_balancer publishes the policy-eligible logical cluster names.
+# A later AI routing filter must choose one of those names; the final
+# load_balancer then selects an endpoint within that chosen cluster. This
+# standalone example has no policy restriction, so its ordinary router safely
+# selects the only declared candidate.
+#
+# Labels
+# describe the whole cluster, not individual endpoints;
+# use separate clusters when endpoints differ by model, region, site, or
+# cost tier.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features candidate-constraints -- -c examples/configs/traffic-management/cluster-candidate-labels.yaml
+#   curl -s http://localhost:8080/v1/chat/completions
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: load_balancer
+        cluster_source: policy_candidates
+        clusters:
+          - name: eu_model
+            http:
+              labels:
+                model: gpt-4.1
+                region: eu
+                site: fra
+                cost_tier: standard
+                data_class: restricted
+            endpoints:
+              - "127.0.0.1:3001"
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: eu_model
+      - filter: load_balancer
+        clusters:
+          - name: eu_model
+            endpoints:
+              - "127.0.0.1:3001"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

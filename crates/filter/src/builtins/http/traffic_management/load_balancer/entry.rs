@@ -3,6 +3,8 @@
 
 //! Resolved cluster entry: strategy, connection options, and TLS config.
 
+#[cfg(feature = "candidate-constraints")]
+use std::collections::BTreeMap;
 use std::sync::{Arc, atomic::Ordering};
 
 use arc_swap::ArcSwap;
@@ -70,6 +72,13 @@ pub(super) struct ClusterEntry {
 
     /// Opaque application provider tagged on the cluster, if any.
     pub(super) application_provider: Option<Arc<str>>,
+
+    /// Operator-defined labels of this logical cluster.
+    ///
+    /// Retained with the resolved entry so policy-candidate filtering can
+    /// evaluate this logical cluster before endpoint load balancing.
+    #[cfg(feature = "candidate-constraints")]
+    pub(super) labels: BTreeMap<String, String>,
 
     /// Normalized upstream base path tagged on the cluster, if any.
     pub(super) base_path: Option<Arc<str>>,
@@ -269,12 +278,7 @@ fn sni_candidate(host: &str) -> Option<&str> {
 pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, FilterError> {
     let endpoints = build_weighted_endpoints(cluster);
     let total_weight: u32 = endpoints.iter().map(|ep| ep.weight).sum();
-    debug!(
-        cluster = %cluster.name,
-        endpoints = endpoints.len(),
-        total_weight,
-        "cluster registered"
-    );
+    log_cluster_registration(cluster, endpoints.len(), total_weight);
 
     let tls = build_cached_tls(cluster)?;
     let authority = AuthorityResolver::build(cluster)?;
@@ -291,6 +295,8 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
         tls,
         application_protocol: cluster.http.application_protocol.clone(),
         application_provider: cluster.http.application_provider.clone(),
+        #[cfg(feature = "candidate-constraints")]
+        labels: cluster.http.labels.clone(),
         base_path: cluster.http.normalized_base_path().map(Arc::from),
         retry_policy,
         retry_state,
@@ -298,6 +304,11 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
         panic_mode_logged: std::sync::atomic::AtomicBool::new(false),
         default_reselector: std::sync::OnceLock::new(),
     })
+}
+
+/// Log the endpoint count and total weight of a registered cluster.
+fn log_cluster_registration(cluster: &Cluster, endpoints: usize, total_weight: u32) {
+    debug!(cluster = %cluster.name, endpoints, total_weight, "cluster registered");
 }
 
 /// Pre-cache TLS material for a cluster, failing closed on unreadable material.

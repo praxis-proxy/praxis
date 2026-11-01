@@ -13,6 +13,8 @@ use std::{
 };
 
 use http::{HeaderMap, Method, StatusCode, Uri, header::HeaderName};
+#[cfg(feature = "policy-engine")]
+use ppe::praxis_policy_core::extensions::CandidateConstraintExtension;
 use praxis_core::{
     connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
 };
@@ -20,6 +22,10 @@ use praxis_tls::TlsPeerIdentity;
 
 #[cfg(feature = "bound-upstream-request-body")]
 use crate::extensions::BoundRequestBodyRewrite;
+#[cfg(feature = "policy-engine")]
+use crate::extensions::PolicyCandidateConstraint;
+#[cfg(feature = "candidate-constraints")]
+use crate::extensions::PolicyEligibleCandidates;
 use crate::{
     FilterError, IterationState,
     body::BodyMode,
@@ -739,6 +745,40 @@ impl HttpFilterContext<'_> {
         self.extensions
             .get::<SelectedClusterApplication>()
             .and_then(SelectedClusterApplication::provider)
+    }
+
+    /// Candidate constraint emitted by the trusted `policy` filter.
+    ///
+    /// A present value is a restriction on the candidates an AI routing filter
+    /// may consider. It is not a routing decision: the consuming selector must
+    /// apply the policy engine's matcher and honor its `on_empty` behavior
+    /// before choosing a cluster. `None` means the policy emitted no
+    /// restriction for this request.
+    #[cfg(feature = "policy-engine")]
+    pub fn policy_candidate_constraint(&self) -> Option<&CandidateConstraintExtension> {
+        self.extensions
+            .get::<PolicyCandidateConstraint>()
+            .map(PolicyCandidateConstraint::as_ref)
+    }
+
+    /// Logical clusters that remain eligible after policy filtering.
+    ///
+    /// None means no policy-candidate publisher ran in this pipeline. Some
+    /// always contains at least one cluster: an empty match result is handled
+    /// by PPE's `on_empty` behavior before this value is published. An AI
+    /// routing filter should choose only from this list, then leave endpoint
+    /// selection to a later load balancer.
+    #[cfg(feature = "candidate-constraints")]
+    pub fn policy_eligible_clusters(&self) -> Option<&[Arc<str>]> {
+        self.extensions
+            .get::<PolicyEligibleCandidates>()
+            .map(PolicyEligibleCandidates::clusters)
+    }
+
+    /// Publish the policy-filtered logical cluster names for a later AI router.
+    #[cfg(feature = "candidate-constraints")]
+    pub(crate) fn publish_policy_eligible_clusters(&mut self, clusters: Vec<Arc<str>>) {
+        self.extensions.insert(PolicyEligibleCandidates::new(clusters));
     }
 
     /// Publish the selected cluster's opaque application metadata into the

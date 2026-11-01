@@ -3,6 +3,8 @@
 
 //! Tests for the load balancer filter.
 
+#[cfg(feature = "candidate-constraints")]
+use std::collections::BTreeMap;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use praxis_core::{
@@ -26,6 +28,23 @@ fn new_creates_clusters() {
     let clusters = vec![test_cluster("web", &["127.0.0.1:8080"])];
     let lb = LoadBalancerFilter::new(&clusters);
     assert!(lb.clusters.contains_key("web"), "cluster 'web' should be registered");
+}
+
+#[test]
+#[cfg(feature = "candidate-constraints")]
+fn build_cluster_entry_retains_logical_cluster_labels() {
+    let mut cluster = test_cluster("eu-model", &["127.0.0.1:8080"]);
+    cluster.http.labels = BTreeMap::from([
+        ("model".to_owned(), "gpt-4.1".to_owned()),
+        ("region".to_owned(), "eu".to_owned()),
+    ]);
+
+    let entry = build_cluster_entry(&cluster).expect("a labelled cluster should resolve");
+
+    assert_eq!(
+        entry.labels, cluster.http.labels,
+        "the resolved entry must retain the logical cluster labels"
+    );
 }
 
 #[test]
@@ -1568,6 +1587,9 @@ fn declared_cluster_metadata_is_sorted_and_keeps_untagged_clusters() {
         ],
         "every cluster is declared, with untagged ones carrying no metadata"
     );
+
+    let (_catalog, conflicts) = crate::pipeline::catalog::build_catalog(declared);
+    assert!(conflicts.is_empty(), "distinct cluster declarations cannot conflict");
 }
 
 #[cfg(feature = "upstream-binding")]
@@ -1660,6 +1682,141 @@ async fn bound_source_panic_mode_metric_uses_the_bound_cluster() {
         rendered.contains("praxis_lb_panic_mode_total{cluster=\"bound-panic\"}"),
         "panic mode under the bound source must label the counter with the bound cluster:\n{rendered}"
     );
+}
+
+#[cfg(feature = "candidate-constraints")]
+#[tokio::test]
+async fn policy_candidates_publish_the_only_matching_logical_cluster() {
+    let lb = policy_candidate_load_balancer(&[
+        labelled_cluster("us", "127.0.0.1:8080", [("region", "us")]),
+        labelled_cluster("eu", "127.0.0.1:8081", [("region", "eu")]),
+    ]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    insert_constraint(
+        &mut ctx,
+        Some(vec!["eu".to_owned()]),
+        ppe::praxis_policy_core::extensions::OnEmpty::Deny,
+    );
+
+    let action = lb
+        .on_request(&mut ctx)
+        .await
+        .expect("candidate filtering should not fail");
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "one eligible candidate should be published"
+    );
+    let eligible: Vec<&str> = ctx
+        .policy_eligible_clusters()
+        .expect("candidate publisher must expose the reduced list")
+        .iter()
+        .map(AsRef::as_ref)
+        .collect();
+    assert_eq!(
+        eligible,
+        ["eu"],
+        "only the EU logical cluster may be presented to the AI router"
+    );
+    assert!(ctx.cluster.is_none(), "candidate filtering must not choose a cluster");
+    assert!(
+        ctx.upstream.is_none(),
+        "candidate filtering must not contact an upstream"
+    );
+}
+
+#[cfg(feature = "candidate-constraints")]
+#[tokio::test]
+async fn policy_candidates_denies_when_no_logical_cluster_matches() {
+    let lb = policy_candidate_load_balancer(&[labelled_cluster("us", "127.0.0.1:8080", [("region", "us")])]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    insert_constraint(
+        &mut ctx,
+        Some(vec!["eu".to_owned()]),
+        ppe::praxis_policy_core::extensions::OnEmpty::Deny,
+    );
+
+    let action = lb
+        .on_request(&mut ctx)
+        .await
+        .expect("empty candidate set is a defined rejection");
+
+    assert!(matches!(action, FilterAction::Reject(rejection) if rejection.status == 403));
+    assert!(
+        ctx.cluster.is_none(),
+        "a denied request must not select an ineligible cluster"
+    );
+    assert!(ctx.upstream.is_none(), "a denied request must not contact an upstream");
+}
+
+#[cfg(feature = "candidate-constraints")]
+#[tokio::test]
+async fn policy_candidates_fallback_publishes_the_unconstrained_set() {
+    let lb = policy_candidate_load_balancer(&[labelled_cluster("us", "127.0.0.1:8080", [("region", "us")])]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    insert_constraint(
+        &mut ctx,
+        Some(vec!["eu".to_owned()]),
+        ppe::praxis_policy_core::extensions::OnEmpty::Fallback,
+    );
+
+    let action = lb
+        .on_request(&mut ctx)
+        .await
+        .expect("fallback should restore candidates");
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "fallback should publish the unconstrained candidates"
+    );
+    let eligible: Vec<&str> = ctx
+        .policy_eligible_clusters()
+        .expect("fallback must publish the original candidate set")
+        .iter()
+        .map(AsRef::as_ref)
+        .collect();
+    assert_eq!(eligible, ["us"], "the original candidate set must be restored");
+}
+
+#[cfg(feature = "candidate-constraints")]
+#[tokio::test]
+async fn policy_candidates_use_the_host_cost_tier_order() {
+    let clusters = [
+        labelled_cluster("premium", "127.0.0.1:8080", [("cost_tier", "premium")]),
+        labelled_cluster("standard", "127.0.0.1:8081", [("cost_tier", "standard")]),
+    ];
+    let lb = LoadBalancerFilter::try_new_with_source_and_cost_tiers(
+        &clusters,
+        super::ClusterSource::PolicyCandidates,
+        &["standard".to_owned(), "premium".to_owned()],
+    )
+    .expect("valid tier order should build");
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let constraint = ppe::praxis_policy_core::extensions::CandidateConstraintExtension {
+        max_cost_tiers: vec!["standard".to_owned()],
+        ..Default::default()
+    };
+    let published = crate::extensions::PolicyCandidateConstraint::new(Arc::new(constraint))
+        .expect("a tier ceiling is a non-empty restriction");
+    ctx.extensions.insert(published);
+
+    let action = lb
+        .on_request(&mut ctx)
+        .await
+        .expect("ranked candidate filtering should not fail");
+
+    assert!(matches!(action, FilterAction::Continue));
+    let eligible: Vec<&str> = ctx
+        .policy_eligible_clusters()
+        .expect("ranked filtering must publish the eligible candidates")
+        .iter()
+        .map(AsRef::as_ref)
+        .collect();
+    assert_eq!(eligible, ["standard"], "premium exceeds the configured ceiling");
 }
 
 // -----------------------------------------------------------------------------
@@ -2153,6 +2310,42 @@ fn capped_cluster(name: &str, endpoints: &[&str], max_connections: u32) -> Clust
         max_connections: Some(max_connections),
         ..test_cluster(name, endpoints)
     }
+}
+
+#[cfg(feature = "candidate-constraints")]
+fn labelled_cluster(
+    name: &str,
+    endpoint: &str,
+    labels: impl IntoIterator<Item = (&'static str, &'static str)>,
+) -> Cluster {
+    let mut cluster = test_cluster(name, &[endpoint]);
+    cluster.http.labels = labels
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    cluster
+}
+
+#[cfg(feature = "candidate-constraints")]
+fn policy_candidate_load_balancer(clusters: &[Cluster]) -> LoadBalancerFilter {
+    LoadBalancerFilter::try_new_with_source_and_cost_tiers(clusters, super::ClusterSource::PolicyCandidates, &[])
+        .expect("valid candidate clusters should build")
+}
+
+#[cfg(feature = "candidate-constraints")]
+fn insert_constraint(
+    ctx: &mut crate::filter::HttpFilterContext<'_>,
+    allow_regions: Option<Vec<String>>,
+    on_empty: ppe::praxis_policy_core::extensions::OnEmpty,
+) {
+    let constraint = ppe::praxis_policy_core::extensions::CandidateConstraintExtension {
+        allow_regions,
+        on_empty,
+        ..Default::default()
+    };
+    let published = crate::extensions::PolicyCandidateConstraint::new(Arc::new(constraint))
+        .expect("a region allow-list is a non-empty restriction");
+    ctx.extensions.insert(published);
 }
 
 /// Build a [`Cluster`] tagged with application protocol and/or provider.

@@ -164,7 +164,7 @@ check-features: ## check each optional feature on its own
 	done
 	# Policy needs exactly one shared crypto backend, so each granular
 	# selection is checked with the ordinary one.
-	@for f in policy-engine policy-api-key policy-jwt policy-oauth policy-delegator-vault \
+	@for f in policy-engine candidate-constraints policy-api-key policy-jwt policy-oauth policy-delegator-vault \
 	          policy-elicitation-ciba policy-cedar policy-cel policy-opa policy-valkey \
 	          policy-secrets-vault policy-experimental-ratelimit; do \
 		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f,policy-crypto-default --all-targets =="; \

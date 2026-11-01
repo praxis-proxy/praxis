@@ -66,6 +66,7 @@ use super::{
 use crate::{
     AuthenticatedIdentity, FilterAction, FilterError, FilterMetadata, Rejection,
     body::{BodyAccess, BodyMode},
+    extensions::PolicyCandidateConstraint,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -1823,6 +1824,7 @@ impl PolicyFilter {
             Ok(attached) => attached,
             Err(rejection) => return Ok(FilterAction::Reject(rejection)),
         };
+        publish_candidate_constraint(ctx, cmf_result.modified_extensions.as_ref());
         if attached > 0 {
             tracing::debug!(
                 target: "policy.filter",
@@ -2306,6 +2308,7 @@ impl PolicyFilter {
         if let Some(rejection) = self.apply_http_grants(ctx, result.modified_extensions.as_ref()) {
             return Ok(FilterAction::Reject(rejection));
         }
+        publish_candidate_constraint(ctx, result.modified_extensions.as_ref());
         // Reuse the admitted identity so mid-exchange token expiry cannot cause a late deny.
         Self::store_identity(ctx, identity);
         tracing::trace!(target: "policy.filter", "http authz allow");
@@ -3123,6 +3126,7 @@ impl HttpFilter for PolicyFilter {
             Ok(attached) => attached,
             Err(rejection) => return Ok(FilterAction::Reject(rejection)),
         };
+        publish_candidate_constraint(ctx, cmf_result.modified_extensions.as_ref());
         if attached > 0 {
             tracing::debug!(
                 target: "policy.filter",
@@ -3469,6 +3473,27 @@ fn missing_protocol_metadata_rejection() -> Rejection {
               `require_protocol_metadata: false` to disable this guard \
               for non-classified traffic.",
         ))
+}
+
+// -----------------------------------------------------------------------------
+// publish_candidate_constraint
+// -----------------------------------------------------------------------------
+
+/// Preserve the policy engine's non-empty candidate restriction for a later
+/// candidate publisher in this request's filter pipeline.
+///
+/// The policy-driven load-balancer source consumes this value later in the
+/// same pipeline, before AI routing selects a cluster and endpoint balancing
+/// selects its concrete destination.
+pub(super) fn publish_candidate_constraint(ctx: &mut HttpFilterContext<'_>, extensions: Option<&Extensions>) {
+    let Some(constraint) = extensions
+        .and_then(|extensions| extensions.candidate_constraint.clone())
+        .and_then(PolicyCandidateConstraint::new)
+    else {
+        return;
+    };
+
+    ctx.extensions.insert(constraint);
 }
 
 // -----------------------------------------------------------------------------

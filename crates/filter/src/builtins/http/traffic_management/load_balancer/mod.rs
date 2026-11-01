@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-//! Load-balancer filter: select an upstream endpoint from the routed cluster.
+//! Load-balancer filter: publish policy-eligible clusters or select an endpoint.
 
 mod authority;
 mod entry;
@@ -62,7 +62,7 @@ use crate::{
 ///
 /// ```yaml
 /// filter: load_balancer
-/// # cluster_source: router      # the default; or bound_upstream (see below)
+/// # cluster_source: router      # the default; or policy_candidates
 /// clusters:
 ///   - name: backend
 ///     endpoints: ["10.0.0.1:80"]
@@ -91,6 +91,17 @@ pub struct LoadBalancerFilter {
     /// Where the target cluster name comes from for each request.
     cluster_source: ClusterSource,
 
+    /// Candidate clusters in declaration order for policy-driven filtering.
+    ///
+    /// Keeping this separate from `clusters` avoids making a `HashMap`'s
+    /// randomized iteration order part of routing behaviour.
+    #[cfg(feature = "candidate-constraints")]
+    candidate_clusters: Vec<Arc<str>>,
+
+    /// Host-owned ordering for the PPE `cost_tier` label.
+    #[cfg(feature = "candidate-constraints")]
+    cost_tier_ranks: HashMap<Arc<str>, u32>,
+
     /// Slow-start bindings held for the lifetime of this pipeline.
     ///
     /// Filled at construction and attached when the pipeline is installed.
@@ -117,6 +128,12 @@ enum ClusterSource {
     /// balancer; a conflicting exchange-local cluster fails closed. Selection
     /// is skipped entirely when an upstream is already present.
     BoundUpstream,
+
+    /// Publish the declared logical clusters that remain eligible after PPE
+    /// constrains them. A later AI routing filter chooses one of the published
+    /// names; this source never selects a cluster or an endpoint.
+    #[cfg(feature = "candidate-constraints")]
+    PolicyCandidates,
 }
 
 /// Deserialization wrapper for the load balancer's YAML config.
@@ -129,13 +146,20 @@ struct LoadBalancerConfig {
 
     /// Where the target cluster name comes from. `router` (the default) uses
     /// the cluster a preceding `router` selected. `bound_upstream` (needs the
-    /// `upstream-binding` build feature) uses the request's logical binding,
-    /// which lets a direct dispatch branch or an `iterative_request_router`
-    /// step pick an endpoint with no router of its own; the bound cluster must
-    /// be one of the clusters declared here, which startup validation checks.
-    /// When an upstream was already selected, the filter does nothing.
+    /// `upstream-binding` build feature) uses the request's logical binding.
+    /// `policy_candidates` (needs `candidate-constraints`) applies the PPE
+    /// constraint from a preceding policy filter to every declared cluster and
+    /// publishes the eligible names for a later AI routing filter. It does not
+    /// select a logical cluster or an endpoint.
     #[serde(default)]
     cluster_source: ClusterSource,
+
+    /// Host-owned order for `cost_tier` labels, from cheapest to most
+    /// expensive. PPE supplies tier ceilings but deliberately does not define
+    /// their vocabulary or ordering.
+    #[cfg(feature = "candidate-constraints")]
+    #[serde(default)]
+    cost_tier_order: Vec<String>,
 }
 
 impl LoadBalancerFilter {
@@ -175,6 +199,36 @@ impl LoadBalancerFilter {
     /// invalid, including an endpoint that `{ from: endpoint }` cannot
     /// turn into one.
     fn try_new_with_source(clusters: &[Cluster], cluster_source: ClusterSource) -> Result<Self, FilterError> {
+        #[cfg(feature = "candidate-constraints")]
+        return Self::try_new_with_source_and_cost_tiers(clusters, cluster_source, &[]);
+        #[cfg(not(feature = "candidate-constraints"))]
+        Self::try_new_without_cost_tiers(clusters, cluster_source)
+    }
+
+    /// Build the load balancer with a configured host cost-tier order.
+    #[cfg(feature = "candidate-constraints")]
+    fn try_new_with_source_and_cost_tiers(
+        clusters: &[Cluster],
+        cluster_source: ClusterSource,
+        cost_tier_order: &[String],
+    ) -> Result<Self, FilterError> {
+        let map = clusters
+            .iter()
+            .map(|c| Ok((Arc::clone(&c.name), build_cluster_entry(c)?)))
+            .collect::<Result<_, FilterError>>()?;
+        Ok(Self {
+            clusters: map,
+            cluster_source,
+            candidate_clusters: clusters.iter().map(|cluster| Arc::clone(&cluster.name)).collect(),
+            cost_tier_ranks: build_cost_tier_ranks(cost_tier_order)?,
+            #[cfg(feature = "slow-start")]
+            ramps: slow_start_bindings(clusters),
+        })
+    }
+
+    /// Build the load balancer in configurations without candidate filtering.
+    #[cfg(not(feature = "candidate-constraints"))]
+    fn try_new_without_cost_tiers(clusters: &[Cluster], cluster_source: ClusterSource) -> Result<Self, FilterError> {
         let map = clusters
             .iter()
             .map(|c| Ok((Arc::clone(&c.name), build_cluster_entry(c)?)))
@@ -205,7 +259,15 @@ impl LoadBalancerFilter {
                 "load_balancer: cluster_source 'bound_upstream' needs the upstream-binding build feature".into(),
             );
         }
-        Ok(Box::new(Self::try_new_with_source(&cfg.clusters, cfg.cluster_source)?))
+        #[cfg(feature = "candidate-constraints")]
+        if cfg.cluster_source != ClusterSource::PolicyCandidates && !cfg.cost_tier_order.is_empty() {
+            return Err("load_balancer: cost_tier_order is only valid with cluster_source 'policy_candidates'".into());
+        }
+        #[cfg(feature = "candidate-constraints")]
+        let filter = Self::try_new_with_source_and_cost_tiers(&cfg.clusters, cfg.cluster_source, &cfg.cost_tier_order)?;
+        #[cfg(not(feature = "candidate-constraints"))]
+        let filter = Self::try_new_with_source(&cfg.clusters, cfg.cluster_source)?;
+        Ok(Box::new(filter))
     }
 
     /// Resolve the target cluster for this request from the configured
@@ -227,7 +289,61 @@ impl LoadBalancerFilter {
         match self.cluster_source {
             ClusterSource::Router => self.resolve_from_router(ctx),
             ClusterSource::BoundUpstream => self.resolve_from_bound_upstream(ctx),
+            #[cfg(feature = "candidate-constraints")]
+            ClusterSource::PolicyCandidates => {
+                Err("load_balancer: policy_candidates publishes names and cannot select an endpoint".into())
+            },
         }
+    }
+
+    /// Apply a PPE restriction to every logical candidate and publish the
+    /// resulting names for a later AI routing filter.
+    ///
+    /// Returns `false` only for PPE's explicit fail-closed `on_empty: deny`.
+    #[cfg(feature = "candidate-constraints")]
+    fn publish_policy_candidates(&self, ctx: &mut HttpFilterContext<'_>) -> Result<bool, FilterError> {
+        if let Some(cluster) = ctx.cluster.as_deref() {
+            return Err(format!(
+                "load_balancer: cluster_source 'policy_candidates' must run before a cluster is selected; found '{cluster}'"
+            )
+            .into());
+        }
+
+        let constraint = ctx.policy_candidate_constraint();
+        let eligible = constraint.map_or_else(
+            || self.candidate_clusters.clone(),
+            |constraint| self.matching_policy_candidates(constraint),
+        );
+
+        let candidates = if eligible.is_empty() {
+            match constraint.map(|constraint| constraint.on_empty) {
+                Some(ppe::praxis_policy_core::extensions::OnEmpty::Deny) => return Ok(false),
+                Some(ppe::praxis_policy_core::extensions::OnEmpty::Fallback) | None => self.candidate_clusters.clone(),
+            }
+        } else {
+            eligible
+        };
+
+        ctx.publish_policy_eligible_clusters(candidates);
+        Ok(true)
+    }
+
+    /// Return the configured logical clusters that PPE accepts for this
+    /// request's typed restriction.
+    #[cfg(feature = "candidate-constraints")]
+    fn matching_policy_candidates(
+        &self,
+        constraint: &ppe::praxis_policy_core::extensions::CandidateConstraintExtension,
+    ) -> Vec<Arc<str>> {
+        self.candidate_clusters
+            .iter()
+            .filter(|name| {
+                self.clusters.get(name.as_ref()).is_some_and(|entry| {
+                    constraint.accepts(&entry.labels, |tier| self.cost_tier_ranks.get(tier).copied())
+                })
+            })
+            .cloned()
+            .collect()
     }
 
     /// Resolve the cluster a preceding `router` set in [`HttpFilterContext`].
@@ -387,6 +503,24 @@ fn slow_start_bindings(clusters: &[Cluster]) -> Vec<crate::load_balancing::slow_
         .collect()
 }
 
+/// Turn the operator's cheapest-to-most-expensive cost-tier list into PPE's
+/// rank callback representation.
+#[cfg(feature = "candidate-constraints")]
+fn build_cost_tier_ranks(cost_tier_order: &[String]) -> Result<HashMap<Arc<str>, u32>, FilterError> {
+    let mut ranks = HashMap::with_capacity(cost_tier_order.len());
+    for (index, tier) in cost_tier_order.iter().enumerate() {
+        if tier.is_empty() {
+            return Err("load_balancer: cost_tier_order entries must not be empty".into());
+        }
+        let rank = u32::try_from(index)
+            .map_err(|_error| -> FilterError { "load_balancer: cost_tier_order has too many entries".into() })?;
+        if ranks.insert(Arc::from(tier.as_str()), rank).is_some() {
+            return Err(format!("load_balancer: cost_tier_order repeats tier '{tier}'").into());
+        }
+    }
+    Ok(ranks)
+}
+
 #[async_trait]
 #[expect(
     clippy::too_many_lines,
@@ -414,6 +548,11 @@ impl HttpFilter for LoadBalancerFilter {
 
     fn load_balancer_clusters(&self) -> Vec<String> {
         self.clusters.keys().map(ToString::to_string).collect()
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    fn publishes_policy_candidates(&self) -> bool {
+        self.cluster_source == ClusterSource::PolicyCandidates
     }
 
     #[cfg(feature = "upstream-binding")]
@@ -448,6 +587,19 @@ impl HttpFilter for LoadBalancerFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        #[cfg(feature = "candidate-constraints")]
+        if self.cluster_source == ClusterSource::PolicyCandidates {
+            if ctx.upstream.is_some() {
+                return Err(
+                    "load_balancer: cluster_source 'policy_candidates' must run before upstream selection".into(),
+                );
+            }
+            if !self.publish_policy_candidates(ctx)? {
+                return Ok(FilterAction::Reject(crate::actions::Rejection::status(403)));
+            }
+            return Ok(FilterAction::Continue);
+        }
+
         if ctx.upstream.is_some() {
             return Ok(self.preset_upstream(ctx));
         }

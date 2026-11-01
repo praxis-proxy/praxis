@@ -33,6 +33,18 @@ pub(in crate::pipeline) fn lb_filter(clusters: &[&str]) -> PipelineFilter {
     })
 }
 
+/// A policy-candidate publisher stand-in: it filters and publishes names but
+/// deliberately does not choose an endpoint.
+#[cfg(feature = "candidate-constraints")]
+pub(in crate::pipeline) fn policy_candidate_publisher(clusters: &[&str]) -> PipelineFilter {
+    capability_filter(CapabilityFilter {
+        load_balancer_clusters: owned(clusters),
+        name: "load_balancer",
+        publishes_policy_candidates: true,
+        ..CapabilityFilter::default()
+    })
+}
+
 pub(in crate::pipeline) fn noop_filter(name: &'static str) -> PipelineFilter {
     capability_filter(CapabilityFilter {
         name,
@@ -195,6 +207,8 @@ struct CapabilityFilter {
     selects_cluster: bool,
     selected_clusters: Vec<String>,
     load_balancer_clusters: Vec<String>,
+    #[cfg(feature = "candidate-constraints")]
+    publishes_policy_candidates: bool,
     #[cfg(feature = "upstream-binding")]
     binds_upstream: bool,
     #[cfg(feature = "upstream-binding")]
@@ -229,6 +243,11 @@ impl HttpFilter for CapabilityFilter {
 
     fn load_balancer_clusters(&self) -> Vec<String> {
         self.load_balancer_clusters.clone()
+    }
+
+    #[cfg(feature = "candidate-constraints")]
+    fn publishes_policy_candidates(&self) -> bool {
+        self.publishes_policy_candidates
     }
 
     #[cfg(feature = "upstream-binding")]

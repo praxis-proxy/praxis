@@ -279,7 +279,10 @@ pub(in crate::pipeline) fn check_irr_coexistence(filters: &[PipelineFilter], nam
     if !names.contains(&"iterative_request_router") {
         return;
     }
-    if names.contains(&"load_balancer") {
+    if filters
+        .iter()
+        .any(|filter| filter.filter.name() == "load_balancer" && !filter.filter.publishes_policy_candidates())
+    {
         errors.push(
             "iterative_request_router and a top-level load_balancer in the \
              same chain: the IRR owns endpoint selection within its step \
@@ -541,7 +544,7 @@ impl<'a> ClusterScan<'a> {
         let served = |serves: bool| Some(if serves { Ending::Selected } else { Ending::Failed });
         if pf.filter.consumes_bound_upstream() {
             served(declares(pf.filter.bound_upstream_clusters()))
-        } else if pf.filter.name() == "load_balancer" {
+        } else if pf.filter.name() == "load_balancer" && !pf.filter.publishes_policy_candidates() {
             self.ordinary_lb_serves
                 .then(|| served(declares(pf.filter.load_balancer_clusters())))
                 .flatten()

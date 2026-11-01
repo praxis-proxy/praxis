@@ -706,6 +706,10 @@ filter_chains:
             if entry.file_name().is_some_and(|n| n == "slow-start.yaml") {
                 continue;
             }
+            #[cfg(not(feature = "candidate-constraints"))]
+            if entry.file_name().is_some_and(|n| n == "cluster-candidate-labels.yaml") {
+                continue;
+            }
             #[cfg(not(feature = "forward-proxy"))]
             if entry
                 .file_name()
