@@ -45,6 +45,8 @@ jobs:
           api-key: ${{ secrets.FOSSA_API_KEY }}
           pinned-cli-version: v3.20.5
           project: https://github.com/praxis-proxy/praxis
+          # The CNCF API key requires its exact, case-sensitive team name.
+          team: Praxis
           branch: ${{ github.head_ref || github.ref_name }}
         env:
           # Metadata was fetched with --locked; analysis must not re-resolve it.
