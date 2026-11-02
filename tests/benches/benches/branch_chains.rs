@@ -220,7 +220,7 @@ fn branch(name: &str, on_result: Option<BranchCondition>, header: &str) -> Branc
 /// Build a pipeline with its branch chains resolved.
 fn build_with_chains(entries: &mut [FilterEntry]) -> FilterPipeline {
     let registry = FilterRegistry::with_builtins();
-    FilterPipeline::build_with_chains(entries, &registry, &HashMap::new(), &InsecureOptions::default()).unwrap()
+    FilterPipeline::build_with_chains(entries, &registry, &HashMap::new(), &InsecureOptions::default(), &[]).unwrap()
 }
 
 /// Build a POST request with an optional `content-type`.

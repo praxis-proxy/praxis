@@ -55,9 +55,6 @@ filter_chains:
       - filter: load_balancer
         clusters:
           - name: grpc-backend
-            endpoints:
-              - "127.0.0.1:50051"
-              - "127.0.0.1:50052"
             http:
               version: h2
 

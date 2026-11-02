@@ -28,6 +28,7 @@ mod circuit_breaker;
 #[cfg(feature = "cloud-events-filter")]
 mod cloud_events;
 mod cluster_base_path;
+mod cluster_references;
 mod conditional_filters;
 mod credential_injection;
 mod credential_injection_env_vars;

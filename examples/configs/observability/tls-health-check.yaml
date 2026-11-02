@@ -55,13 +55,11 @@ filter_chains:
       - filter: load_balancer
         clusters:
           - name: handshake
-            endpoints: ["127.0.0.1:8443"]
             tls:
               sni: localhost
               ca:
                 ca_path: /etc/praxis/upstream-ca.pem
           - name: https
-            endpoints: ["127.0.0.1:8444"]
             tls:
               sni: localhost
               ca:
