@@ -674,11 +674,14 @@ flooding output from every module.
 
 ## Key-Value Stores
 
-In-memory key-value stores for runtime-updatable
-mappings. A store is created in code through
-`KvStoreRegistry::get_or_create`; the admin API reads
-and updates entries in stores that already exist but
-does not create them. No built-in filter or
+Key-value stores for runtime-updatable mappings. A
+store is created in code:
+`KvStoreRegistry::get_or_create_memory` creates an
+in-memory store, and `KvStoreRegistry::register` adds a
+caller-supplied `KvBackend` under a new name, for
+example one that stores data outside the process. The
+admin API reads and updates entries in stores that
+already exist but does not create them. No built-in filter or
 configuration section creates a store yet, so in a
 standard deployment the registry is empty and the
 admin key-value endpoints answer 404 for every store
@@ -716,8 +719,11 @@ threads. Unknown store names return 404.
 ### Runtime Cache Semantics
 
 Key-value stores are **runtime caches, not durable
-storage**. Data lives in memory, survives config
-reloads, and is lost on process exit.
+storage**. Every store survives config reloads. With
+`InMemoryKvBackend`, entries live in process memory and
+are lost on process exit; a backend added with
+`KvStoreRegistry::register` keeps them wherever it
+stores them.
 
 The store is designed for operational overrides (routing
 tables, feature flags, config knobs) that can be
