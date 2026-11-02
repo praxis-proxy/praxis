@@ -47,30 +47,30 @@ definitions and processes.
 
 ## Reviewers
 
-| Name                      | Repos          | GitHub            | Affiliation |
-| ------------------------- | -------------- | ----------------- | ----------- |
-| Alexander Cristurean      | AI             | [@crstrn13]       | Red Hat     |
-| Asaad Balum               | AI             | [@asaadbalum]     | Red Hat     |
-| Brent Salisbury           | Core, AI, Grid | [@nerdalert]      | Red Hat     |
-| Christina Xu              | AI             | [@christinaexyou] | Red Hat     |
-| Craig Brookes             | Policy         | [@maleck13]       | Red Hat     |
-| Daniel Grimm              | Core           | [@dgn]            | Red Hat     |
-| David Martin              | Policy         | [@david-martin]   | Red Hat     |
-| Didier Di Cesare          | AI             | [@didierofrivia]  | Red Hat     |
-| Doug Edgar                | AI             | [@rhdedgar]       | Red Hat     |
-| Fred Araujo               | Core           | [@araujof]        | IBM         |
-| Guilherme Cassolato       | Policy         | [@guicassolato]   | Red Hat     |
-| Hen Schwartz              | AI             | [@henschwartz]    | Red Hat     |
-| Jamie Land                | AI             | [@jland-redhat]   | Red Hat     |
-| Jordi Gil                 | Grid           | [@jordigilh]      | Red Hat     |
-| Ladislav Smola            | AI             | [@Ladas]          | Red Hat     |
-| Liav Weiss                | AI             | [@liavweiss]      | Red Hat     |
-| Marina Koushnir           | AI             | [@mkoushni]       | Red Hat     |
-| Pierangelo Di Pilato      | AI             | [@pierDipi]       | Red Hat     |
-| Ricardo Pchevuzinske Katz | Core, AI       | [@rikatz]         | Red Hat     |
-| Senan Zedan               | AI, Policy     | [@szedan-rh]      | Red Hat     |
-| Teryl Taylor              | Policy         | [@terylt]         | IBM         |
-| Yehudit Kerido            | Policy         | [@yehuditkerido]  | Red Hat     |
+| Name                      | Repos            | GitHub            | Affiliation |
+| ------------------------- | --------------   | ----------------- | ----------- |
+| Alexander Cristurean      | AI               | [@crstrn13]       | Red Hat     |
+| Asaad Balum               | AI               | [@asaadbalum]     | Red Hat     |
+| Brent Salisbury           | Core, AI, Grid   | [@nerdalert]      | Red Hat     |
+| Christina Xu              | AI               | [@christinaexyou] | Red Hat     |
+| Craig Brookes             | Policy           | [@maleck13]       | Red Hat     |
+| Daniel Grimm              | Core             | [@dgn]            | Red Hat     |
+| David Martin              | Policy           | [@david-martin]   | Red Hat     |
+| Didier Di Cesare          | AI               | [@didierofrivia]  | Red Hat     |
+| Doug Edgar                | AI               | [@rhdedgar]       | Red Hat     |
+| Fred Araujo               | Core             | [@araujof]        | IBM         |
+| Guilherme Cassolato       | Policy           | [@guicassolato]   | Red Hat     |
+| Hen Schwartz              | AI               | [@henschwartz]    | Red Hat     |
+| Jamie Land                | AI, Enhancements | [@jland-redhat]   | Red Hat     |
+| Jordi Gil                 | Grid             | [@jordigilh]      | Red Hat     |
+| Ladislav Smola            | AI               | [@Ladas]          | Red Hat     |
+| Liav Weiss                | AI               | [@liavweiss]      | Red Hat     |
+| Marina Koushnir           | AI               | [@mkoushni]       | Red Hat     |
+| Pierangelo Di Pilato      | AI               | [@pierDipi]       | Red Hat     |
+| Ricardo Pchevuzinske Katz | Core, AI         | [@rikatz]         | Red Hat     |
+| Senan Zedan               | AI, Policy       | [@szedan-rh]      | Red Hat     |
+| Teryl Taylor              | Policy           | [@terylt]         | IBM         |
+| Yehudit Kerido            | Policy           | [@yehuditkerido]  | Red Hat     |
 
 [@crstrn13]: https://github.com/crstrn13
 [@asaadbalum]: https://github.com/asaadbalum
