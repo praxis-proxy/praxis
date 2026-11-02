@@ -2,7 +2,7 @@
 #
 # Forward proxy with no destination allowlist: any destination is
 # reachable, and egress control rests on the ip_acl filter gating which
-# clients may open tunnels. Validation refuses an enabled forward_proxy
+# clients may use the proxy. Validation refuses an enabled forward_proxy
 # that has neither allow_destinations nor an ip_acl/policy filter, so the
 # listener is never an open relay. Private and reserved destination
 # addresses stay unreachable unless insecure_options.allow_private_upstreams
@@ -19,6 +19,7 @@
 #
 # Exercise:
 #   HTTPS_PROXY=http://127.0.0.1:8080 curl https://www.example.com/
+#   curl http://127.0.0.1:8080/  # 400: not a proxy request, and no route
 
 listeners:
   - name: egress
@@ -30,7 +31,7 @@ listeners:
 filter_chains:
   - name: egress
     filters:
-      # Only these client networks may open tunnels.
+      # Only these client networks may open tunnels or forward requests.
       - filter: ip_acl
         allow:
           - "127.0.0.0/8"

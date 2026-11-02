@@ -4,8 +4,9 @@
 //! Functional tests for the forward-proxy example configurations.
 //!
 //! Each test starts the example's listener against loopback backends and
-//! drives it the way an `HTTPS_PROXY` client does: a real `CONNECT` tunnel
-//! carrying bytes both ways.
+//! drives it the way an `HTTP_PROXY`/`HTTPS_PROXY` client does: a real
+//! `CONNECT` tunnel carrying bytes both ways, and absolute-form plain
+//! requests (`GET http://host/path`).
 //!
 //! The examples allowlist public hostnames; the tests swap those for
 //! `localhost` on the backends' ports, and turn on
@@ -22,8 +23,8 @@ use std::{
 use praxis_core::config::Config;
 use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection};
 use praxis_test_utils::{
-    ProxyGuard, example_config_path, free_port, patch_yaml, registry_with, start_proxy, start_proxy_with_registry,
-    start_tcp_echo_backend,
+    BackendGuard, ProxyGuard, example_config_path, free_port, patch_yaml, registry_with, start_proxy,
+    start_proxy_with_registry, start_tcp_echo_backend, start_uri_echo_backend,
 };
 
 // -----------------------------------------------------------------------------
@@ -138,9 +139,169 @@ fn allowlist_example_keeps_the_upload_after_the_destination_half_closes() {
     });
 }
 
+#[test]
+fn allowlist_example_forwards_absolute_form_to_allowed_origin() {
+    let echo_port = start_tcp_echo_backend();
+    let (proxy, http_backend) = start_allowlist_example_with_origin(echo_port, "");
+    let origin = format!("localhost:{}", http_backend.port());
+
+    let (status, body) = send_request(
+        proxy.addr(),
+        &format!("GET http://{origin}/search?q=praxis HTTP/1.1\r\nHost: {origin}\r\nConnection: close\r\n\r\n"),
+    );
+
+    assert_eq!(status, 200, "allowlisted absolute-form request should be forwarded");
+    assert_eq!(
+        body, "/search?q=praxis",
+        "the origin should receive the origin-form path and query"
+    );
+}
+
+#[test]
+fn allowlist_example_rejects_absolute_form_outside_the_allowlist() {
+    let echo_port = start_tcp_echo_backend();
+    let proxy = start_allowlist_example(echo_port);
+
+    let (status, _) = send_request(
+        proxy.addr(),
+        "GET http://other.example.org/ HTTP/1.1\r\nHost: other.example.org\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(status, 403, "absolute-form request to an unlisted host must be denied");
+}
+
+#[test]
+fn allowlist_example_refuses_absolute_form_hosts_in_another_spelling() {
+    // Filters judge the request by `Host`, equal to the target authority;
+    // the gate checks the canonical host. A spelling where the two differ
+    // is refused before any filter or dial, never forwarded.
+    let echo_port = start_tcp_echo_backend();
+    let (proxy, http_backend) = start_allowlist_example_with_origin(echo_port, "");
+    let port = http_backend.port();
+    for authority in [
+        format!("[localhost]:{port}"),
+        format!("LOCALHOST:{port}"),
+        format!("localhost.:{port}"),
+        format!("[::FFFF:7F00:1]:{port}"),
+        format!("[0:0:0:0:0:0:0:1]:{port}"),
+    ] {
+        let (status, body) = send_request(
+            proxy.addr(),
+            &format!("GET http://{authority}/ HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
+        );
+        assert_eq!(status, 400, "{authority} must not be forwarded, got body: {body:?}");
+    }
+}
+
+#[test]
+fn allowlist_example_host_conditions_hold_for_absolute_form() {
+    // A condition on `Host` sees the canonical authority: the fork holds
+    // `Host` equal to it, and any other spelling is refused before the
+    // pipeline. No spelling forwards past the condition.
+    let echo_port = start_tcp_echo_backend();
+    let http_backend = start_uri_echo_backend();
+    let port = http_backend.port();
+    let gate = format!(
+        "      - filter: static_response\n        status: 451\n        conditions:\n          - when:\n              \
+         headers:\n                host: \"localhost:{port}\"\n"
+    );
+    let yaml = allowlist_example_yaml(echo_port, &gate).replacen(
+        "- host: docs.example.com",
+        &format!("- host: localhost\n          port: {port}"),
+        1,
+    );
+    let proxy = start_example(&yaml);
+    for (authority, expected) in [
+        (format!("localhost:{port}"), 451),
+        (format!("LOCALHOST:{port}"), 400),
+        (format!("localhost.:{port}"), 400),
+        (format!("Localhost.:{port}"), 400),
+    ] {
+        let (status, body) = send_request(
+            proxy.addr(),
+            &format!("GET http://{authority}/ HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"),
+        );
+        assert_eq!(
+            status, expected,
+            "{authority} must not reach the origin, got body: {body:?}"
+        );
+    }
+}
+
+#[test]
+fn allowlist_example_rejects_origin_form_requests_with_400() {
+    let echo_port = start_tcp_echo_backend();
+    let proxy = start_allowlist_example(echo_port);
+
+    let (status, _) = send_request(
+        proxy.addr(),
+        "GET /index.html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(
+        status, 400,
+        "an origin-form request names no destination and the example routes none"
+    );
+}
+
+#[test]
+fn allowlist_example_with_router_keeps_reverse_proxying_origin_form() {
+    let echo_port = start_tcp_echo_backend();
+    let reverse_backend = start_uri_echo_backend();
+    let (proxy, http_backend) = start_allowlist_example_with_origin(echo_port, &reverse_route(reverse_backend.port()));
+
+    let (status, body) = send_request(
+        proxy.addr(),
+        "GET /app/page HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        status, 200,
+        "a routed origin-form request must be reverse-proxied, not refused"
+    );
+    assert_eq!(body, "/app/page", "the reverse-proxy backend should serve it");
+
+    let origin = format!("localhost:{}", http_backend.port());
+    let (status, body) = send_request(
+        proxy.addr(),
+        &format!("GET http://{origin}/fwd HTTP/1.1\r\nHost: {origin}\r\nConnection: close\r\n\r\n"),
+    );
+    assert_eq!(
+        status, 200,
+        "absolute-form requests are still forwarded on the same port"
+    );
+    assert_eq!(body, "/fwd", "the forward origin should serve it");
+}
+
 // -----------------------------------------------------------------------------
 // Tests: security/forward-proxy-ip-acl.yaml (client ACL, no allowlist)
 // -----------------------------------------------------------------------------
+
+#[test]
+fn ip_acl_example_rejects_origin_form_requests_with_400() {
+    let proxy = start_ip_acl_example("127.0.0.0/8", true);
+
+    let (status, _) = send_request(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(
+        status, 400,
+        "an admitted client's origin-form request is a client error"
+    );
+}
+
+#[test]
+fn ip_acl_example_denies_unlisted_clients_before_the_400() {
+    let proxy = start_ip_acl_example("10.0.0.0/8", true);
+
+    let (status, _) = send_request(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(status, 403, "the ACL decides first; a denied client never sees the 400");
+}
 
 #[test]
 fn ip_acl_example_tunnels_for_allowed_clients() {
@@ -204,6 +365,17 @@ fn ip_acl_example_refuses_private_literal_destinations_by_default() {
             "CONNECT to a private IP literal ({target}) must not be dialed"
         );
     }
+
+    let http_backend = start_uri_echo_backend();
+    let origin = format!("127.0.0.1:{}", http_backend.port());
+    let (status, body) = send_request(
+        proxy.addr(),
+        &format!("GET http://{origin}/ HTTP/1.1\r\nHost: {origin}\r\nConnection: close\r\n\r\n"),
+    );
+    assert_eq!(
+        status, 502,
+        "absolute-form request to a private IP literal must not be forwarded, got body: {body:?}"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -417,6 +589,22 @@ fn start_allowlist_example_with_registry(
     start_proxy_with_registry(&config, registry)
 }
 
+/// [`start_allowlist_example_with`] with the `docs.example.com` rule also
+/// pointed at a loopback HTTP origin, returned alongside the proxy.
+fn start_allowlist_example_with_origin(echo_port: u16, extra_filters: &str) -> (ProxyGuard, BackendGuard) {
+    let http_backend = start_uri_echo_backend();
+    let yaml = allowlist_example_yaml(echo_port, extra_filters).replacen(
+        "- host: docs.example.com",
+        &format!("- host: localhost\n          port: {}", http_backend.port()),
+        1,
+    );
+    assert!(
+        !yaml.contains("- host: docs.example.com"),
+        "the docs.example.com rule should be patched to the HTTP origin"
+    );
+    (start_example(&yaml), http_backend)
+}
+
 /// `security/forward-proxy.yaml` patched for loopback destinations, with
 /// `extra_filters` appended to its chain.
 fn allowlist_example_yaml(echo_port: u16, extra_filters: &str) -> String {
@@ -465,13 +653,24 @@ fn read_example(filename: &str, proxy_port: u16) -> String {
     patch_yaml(&yaml, proxy_port, &HashMap::new())
 }
 
-/// Append the insecure option loopback test destinations need.
+/// A `router` and `load_balancer` sending every origin-form request to the
+/// loopback backend on `port`, as chain list items.
+fn reverse_route(port: u16) -> String {
+    format!(
+        "      - filter: router\n        routes:\n          - path_prefix: \"/\"\n            cluster: app\n      \
+         - filter: load_balancer\n        clusters:\n          - name: app\n            endpoints:\n              - \
+         \"127.0.0.1:{port}\"\n"
+    )
+}
+
+/// Append the insecure options loopback test backends need: dialing
+/// `localhost` destinations, and loopback endpoints for added routes.
 fn with_private_upstreams(yaml: &str) -> String {
     assert!(
         !yaml.contains("insecure_options:"),
         "example should not set insecure_options"
     );
-    format!("{yaml}\ninsecure_options:\n  allow_private_upstreams: true\n")
+    format!("{yaml}\ninsecure_options:\n  allow_private_upstreams: true\n  allow_private_endpoints: true\n")
 }
 
 /// Parse and start a patched example.
@@ -504,6 +703,17 @@ fn connect_tunnel(proxy: &str, target: &str) -> Tunnel {
         head,
         stream,
     }
+}
+
+/// Send a raw request and return its status and body.
+fn send_request(proxy: &str, request: &str) -> (u16, String) {
+    let mut stream = TcpStream::connect(proxy).expect("connect to proxy");
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = String::new();
+    drop(stream.read_to_string(&mut response));
+    let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+    (parse_status(head), body.to_owned())
 }
 
 /// Read up to and including the blank line ending a response head, one byte
