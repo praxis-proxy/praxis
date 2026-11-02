@@ -7,7 +7,7 @@
 # A missing or unknown key is rejected with HTTP 401.
 #
 # Usage:
-#   cargo run -p praxis-proxy -- -c examples/configs/security/policy-api-key.yaml
+#   cargo run -p praxis-proxy --no-default-features --features pingora,policy-api-key -- -c examples/configs/security/policy-api-key.yaml
 
 listeners:
   - name: default

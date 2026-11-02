@@ -10,11 +10,11 @@
 # rules that read the parsed request body, such as its `tools`, as
 # `llm.request`. It also demonstrates a prompt rule over Responses tool history.
 #
-# Requires building with the `policy-engine` feature, which is off
-# by default:
+# The standard build includes the Policy builtins. For a build with defaults
+# disabled, select the builtins referenced by the operator-supplied policy.
 #
 # Usage:
-#   cargo run -p praxis-proxy --features policy-engine -- -c examples/configs/security/policy-llm.yaml
+#   cargo run -p praxis-proxy --features policy-builtins -- -c examples/configs/security/policy-llm.yaml
 #
 listeners:
   - name: default

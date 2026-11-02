@@ -13,12 +13,24 @@ readme.workspace = true
 name = "praxis_filter"
 
 [features]
-default = ["policy-engine"]
+default = ["policy-builtins"]
 policy-engine = [
     "dep:ppe",
     "dep:unicase",
     "tokio/rt-multi-thread",
 ]
+policy-builtins = ["policy-engine", "ppe/builtins", "ppe/crypto-rustcrypto"]
+policy-jwt = ["policy-engine", "ppe/jwt"]
+policy-api-key = ["policy-engine", "ppe/api-key", "ppe/crypto-rustcrypto"]
+policy-api-key-fips = ["policy-engine", "ppe/api-key", "ppe/fips"]
+policy-oauth = ["policy-engine", "ppe/oauth"]
+policy-delegator-vault = ["policy-engine", "ppe/delegator-vault"]
+policy-elicitation-ciba = ["policy-engine", "ppe/elicitation-ciba"]
+policy-cedar = ["policy-engine", "ppe/cedar"]
+policy-cel = ["policy-engine", "ppe/cel"]
+policy-opa = ["policy-engine", "ppe/opa"]
+policy-valkey = ["policy-engine", "ppe/valkey"]
+policy-secrets-vault = ["policy-engine", "ppe/secrets-vault"]
 basic-auth-filter = [
     "dep:openssl",
     "dep:subtle",

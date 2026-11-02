@@ -22,7 +22,7 @@ const MANIFEST: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.
 /// `policy` filter that gives up on initializing after two seconds, well
 /// inside the five the JWKS fetch itself waits. `{policy}` stands for the path
 /// of the policy document.
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 const CONFIG: &str = r#"
 runtime:
   subrequest_max_connections: 1
@@ -51,7 +51,7 @@ filter_chains:
 /// constructed, from a loopback port nothing listens on. The fetch fails at
 /// once unless it has to wait for admission, and a failed fetch at boot is
 /// recoverable, so the filter still builds.
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 const POLICY: &str = r#"
 plugins:
   - name: jwt-user
@@ -87,7 +87,7 @@ global:
     clippy::tests_outside_test_module,
     reason = "integration tests are in tests/ directory, not in src"
 )]
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 #[test]
 fn resolved_policy_filters_call_out_through_the_runtime_connector() {
     // Calls resolve_pipelines directly, so it misses main()'s provider install.
@@ -117,14 +117,14 @@ fn resolved_policy_filters_call_out_through_the_runtime_connector() {
     reason = "integration tests are in tests/ directory, not in src"
 )]
 #[test]
-fn the_default_feature_set_includes_the_policy_engine() {
+fn the_default_feature_set_includes_the_policy_builtins() {
     let declaration = default_feature_declaration().expect("[features] must declare a `default` array");
 
     assert!(
-        declaration.contains("\"policy-engine\""),
-        "`policy-engine` must stay in this crate's default features: the binary's own feature set \
+        declaration.contains("\"policy-builtins\""),
+        "`policy-builtins` must stay in this crate's default features: the binary's own feature set \
          is what decides whether the `policy` filter is nameable in config, and no cfg-based test \
-         can catch its removal — tests/integration turns praxis-filter/policy-engine on through \
+         can catch its removal — tests/integration turns the policy filter on through \
          its own default, so every suite would stay green while the shipped binary lost the \
          filter. Got: {declaration}"
     );
@@ -150,7 +150,7 @@ fn default_feature_declaration() -> Option<&'static str> {
 
 /// Parse [`CONFIG`] with its `policy` filter pointed at [`POLICY`], written
 /// into `dir`.
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 #[expect(clippy::expect_used, reason = "test utility")]
 fn runtime_config(dir: &tempfile::TempDir) -> praxis_core::config::Config {
     let policy = dir.path().join("policy.yaml");
@@ -160,7 +160,7 @@ fn runtime_config(dir: &tempfile::TempDir) -> praxis_core::config::Config {
 }
 
 /// Take the one admission permit `client`'s connector hands out.
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 #[expect(clippy::expect_used, reason = "test utility")]
 fn hold_the_only_admission_permit(
     client: &praxis_core::subrequest::SubRequestClient,
@@ -174,7 +174,7 @@ fn hold_the_only_admission_permit(
 
 /// Resolve `config`'s pipelines over `client` the way server startup does,
 /// keeping only the error text.
-#[cfg(feature = "policy-engine")]
+#[cfg(feature = "policy-builtins")]
 fn resolve(
     config: &praxis_core::config::Config,
     client: &praxis_core::subrequest::SubRequestClient,

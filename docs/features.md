@@ -156,7 +156,7 @@ deployment guidance.
 - **Credential injection**: per-cluster API key injection
   into upstream request headers with environment variable
   or inline values; client credential stripping
-- **Policy engine** (`policy`, feature `policy-engine`,
+- **Policy engine** (`policy`, feature `policy-builtins`,
   on by default): independently validated user, agent,
   and workload identity; APL authorization with
   pluggable decision points (Cedar, CEL, OPA) including
@@ -164,7 +164,11 @@ deployment guidance.
   token per upstream; field redaction and session taint
   across tool calls; out-of-band approval; an audit
   event per decision; and inference authorization on the
-  model in the request body
+  model in the request body. Narrow builds can select
+  `policy-engine` without builtins or choose individual
+  `policy-*` builtins such as `policy-api-key`. The FIPS build selects
+  `policy-api-key-fips`; required-FIPS startup checks Policy's whole-graph
+  capability report and the OpenSSL FIPS provider.
 
 ## Observability
 

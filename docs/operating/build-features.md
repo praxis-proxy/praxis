@@ -11,7 +11,8 @@ Most features are on by default. Build the standard binary with:
 cargo build -p praxis-proxy --release
 ```
 
-which includes hot-reload, the admin surface, and the `policy` filter.
+which includes hot-reload, the admin surface, and the `policy` filter with all
+supported builtins.
 
 Build the leanest possible binary (every optional subsystem off) with:
 
@@ -37,13 +38,38 @@ A `--no-default-features` build always names its network backend (`pingora`
 today); see [Network backends](#network-backends).
 
 For that exact invocation the guarantee holds: every Praxis crate depends on
-`praxis-proxy-filter` without dependency defaults, so dropping the server's
-`policy-engine` feature leaves the filter's `policy-engine` off and the policy
-engine's dependency tree out of the build. `make release-fips` is this build
-with the feature list kept in one place; see [FIPS 140-3](fips.md) for what
-that build is for and how to deploy it.
+`praxis-proxy-filter` without dependency defaults, so omitting policy features
+leaves the policy engine's dependency tree out of the build. `make release-fips`
+uses its own feature list, which includes Policy's API-key-only FIPS profile;
+see [FIPS 140-3](fips.md) for its dependency and deployment requirements.
 
-### Disabling the policy engine as a library consumer
+### Selecting policy features
+
+The standard build uses `policy-builtins`, the complete supported Policy
+builtin set. With `--no-default-features`, select `policy-engine` to embed the
+engine without bundled plugins, or select an individual builtin such as
+`policy-api-key`:
+
+```console
+cargo build -p praxis-proxy --no-default-features \
+    --features pingora,config-reload,admin-api,policy-api-key
+```
+
+An engine-only policy configuration can use inline policy rules and host
+plugins; any omitted `kind:` fails configuration loading. `policy-api-key`
+uses the ordinary RustCrypto hash backend. For required FIPS mode, select the
+API-key-only `policy-api-key-fips` profile:
+
+```console
+cargo build -p praxis-proxy --no-default-features \
+    --features pingora,config-reload,admin-api,policy-api-key-fips
+```
+
+Startup accepts this profile only when Policy's whole-graph capability report
+is safe, OpenSSL can fetch the FIPS SHA-256 digest, and no host policy plugins
+have been registered.
+
+### Selecting policy features as a library consumer
 
 The same holds when Praxis crates are embedded. Each crate that reaches the
 filter (`praxis-proxy`, `praxis-proxy-protocol`) depends on it without
@@ -52,15 +78,16 @@ filter's. So:
 
 - Depending on `praxis-proxy` (the server as a library) with
   `default-features = false` and naming the features you want gives a
-  policy-free build; leaving defaults on gives the policy engine.
+  policy-free build; leaving defaults on gives the complete builtin set.
 - Depending on `praxis-proxy-protocol` or `praxis-proxy-filter` directly gives
-  no policy engine unless you enable `policy-engine` on them (the filter's own
-  default is on, so set `default-features = false` on that edge to keep it
-  off). `praxis-proxy-core` and `praxis-proxy-tls` never pull it.
+  no policy engine unless you enable `policy-engine`, `policy-builtins`, or an
+  individual `policy-*` feature on that edge. Set
+  `default-features = false` on a filter dependency when you want to choose
+  features explicitly. `praxis-proxy-core` and `praxis-proxy-tls` never pull it.
 
 Cargo unions features across the whole dependency graph, so one crate anywhere
 in your graph that depends on `praxis-proxy-filter` with its defaults turns
-`policy-engine` back on for everyone, and the `policy` filter then becomes
+`policy-builtins` back on for everyone, and the `policy` filter then becomes
 nameable in config in a build believed to be policy-free. Verify with
 `cargo tree -e normal -i praxis-policy`: no output means the policy engine
 really is out of the build.
@@ -83,7 +110,7 @@ therefore starts from `--no-default-features` and names it:
 
 ```console
 cargo build -p praxis-proxy --release --no-default-features \
-    --features hyper,config-reload,admin-api,policy-engine
+    --features hyper,config-reload,admin-api,policy-builtins
 ```
 
 `make build-hyper` is the same build without `--release`, into
@@ -106,7 +133,11 @@ on that edge too. Adding a backend is described in
 | `config-reload` | on | Config-file and TLS-certificate hot-reload (filesystem watching). | Off for a static-config deployment: drops both watchers and the `notify`, `arc-swap`, and `tokio` dependencies they pull into the TLS crate. |
 | `admin-api` | on | The admin HTTP services: management API (`/api/*`) on `admin.address`, and `/healthy`, `/ready`, `/metrics` on `admin.metrics_address`. | Off when the proxy exposes no monitoring or management surface. The data path and background health checks are unaffected; only the HTTP endpoints go away. |
 | `otel` | off | OpenTelemetry / OTLP span export for traces. | On for distributed tracing. Pulls in a heavy `opentelemetry` + `tonic` dependency graph. |
-| `policy-engine` | on | The `policy` filter (Praxis Policy Engine: OPA-style route policy, JWT identity, token exchange). | Off for a deployment that does no policy-based authorization: it is the heaviest optional dependency, so dropping it is the largest single saving in build time and binary size. |
+| `policy-builtins` | on | The policy engine and complete supported builtin set, preserving the standard build. | Keep for the standard policy capabilities; use a narrower feature when only selected plugin kinds are needed. |
+| `policy-engine` | via `policy-builtins` | The policy engine without bundled plugins. | Select alone for engine-only policies and host-registered plugins; omitted plugin kinds fail configuration loading. |
+| `policy-api-key` | off | The policy engine with API-key identity using the standard RustCrypto backend. | Select for API-key authentication in ordinary builds. |
+| `policy-api-key-fips` | off | The policy engine with API-key identity using Policy's OpenSSL FIPS backend. | Select for API-key authentication in required-FIPS builds; other crypto builtins remain excluded. |
+| Other `policy-*` features | off | One additional Policy builtin each, such as JWT, Cedar, CEL, OPA, OAuth or Valkey. | Combine only the builtins referenced by the policy documents. |
 | `basic-auth-filter` | off (experimental) | The `basic_auth` filter. | Dev and testing only. Slated for removal in favor of the policy engine ([praxis-proxy/policy]); prefer that for authentication. |
 | `cloud-events-filter` | off (experimental) | The `cloud_events` filter (serialize requests into CloudEvents and ship them to an HTTP receiver). | On for event export; delivery is best-effort. Adds `chrono` and `url`. |
 | `upstream-binding` | off (experimental) | Logical upstream binding: the `router` publishes the matched cluster as a request-wide binding that `bound_upstream` conditions and `cluster_source: bound_upstream` load balancers read. | On when a pipeline gates filters on the bound cluster's application metadata or dispatches from the binding. Implied by the two features below. Off, those config forms are rejected at load time and the router never touches request extensions. |
