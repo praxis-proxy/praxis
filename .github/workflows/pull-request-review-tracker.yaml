@@ -38,7 +38,7 @@ permissions: {}
 
 jobs:
   track:
-    uses: praxis-proxy/conventions/.github/workflows/pr-review-tracker.yaml@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
+    uses: praxis-proxy/conventions/.github/workflows/pr-review-tracker.yaml@169157db08ef3fdf1b72641efb65e44e2baac23d # unreleased, after v0.5.0
     with:
       dry-run: ${{ inputs.dry-run }}
       apply-project: ${{ inputs.apply-project }}
