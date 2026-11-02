@@ -83,6 +83,7 @@ mod ip_acl;
 mod iterative_request_router;
 mod json_body_field;
 mod json_rpc;
+mod kv_admin;
 mod path_rewrite;
 mod payload_processing;
 mod per_listener_pipeline;

@@ -17,6 +17,7 @@ use praxis_core::{
     backend::Runtime,
     config::{Config, ExpandedFilterChains, Listener, ProtocolKind},
     health::{HealthRegistry, build_health_registry},
+    kv::KvStoreRegistry,
 };
 use praxis_filter::{FilterFactory, FilterPipeline, FilterRegistry, HttpFilter};
 use praxis_protocol::{
@@ -386,19 +387,19 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
 /// and spawn background health check probes.
 fn build_full_server(config: &Config) -> Runtime {
     let registry = praxis::build_full_registry();
-    build_full_server_with_registry(config, &registry)
+    build_full_server_with_registry(config, &registry, KvStoreRegistry::new())
 }
 
 /// Build a backend [`Runtime`] with a caller-supplied filter
-/// registry, HTTP and TCP protocols, and background health probes.
+/// registry and KV store registry, HTTP and TCP protocols, and
+/// background health probes.
 #[expect(clippy::too_many_lines, reason = "test utility wiring")]
-fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -> Runtime {
+fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry, kv_stores: KvStoreRegistry) -> Runtime {
     // Every full-proxy start builds a `SubRequestConnector`, which constructs a
     // rustls `ClientConfig`. Hooking the certificate fixtures is not enough: a test
     // that starts a proxy without TLS reaches rustls with no provider installed.
     crate::net::tls::ensure_crypto_provider();
     let health_registry = build_health_registry(&config.clusters);
-    let kv_stores = praxis_core::kv::KvStoreRegistry::new();
     let ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
     let subrequest_connector = praxis_core::subrequest::SubRequestConnector::with_options(
         praxis_core::subrequest::SubRequestConnectorOptions {
@@ -536,7 +537,23 @@ pub fn start_full_proxy(config: &Config) -> ProxyGuard {
 /// Panics if `config.listeners` is empty or pipeline resolution
 /// fails.
 pub fn start_full_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> ProxyGuard {
-    let runtime = build_full_server_with_registry(config, registry);
+    let runtime = build_full_server_with_registry(config, registry, KvStoreRegistry::new());
+    start_full_proxy_runtime(config, runtime)
+}
+
+/// Start a full proxy server whose pipelines and admin KV API share
+/// `kv_stores`, as an embedder that registers its own stores would.
+///
+/// The registry is shared, not copied: stores the test registers
+/// before or after startup are the ones the running proxy serves.
+///
+/// # Panics
+///
+/// Panics if `config.listeners` is empty or pipeline resolution
+/// fails.
+pub fn start_full_proxy_with_kv_stores(config: &Config, kv_stores: &KvStoreRegistry) -> ProxyGuard {
+    let registry = praxis::build_full_registry();
+    let runtime = build_full_server_with_registry(config, &registry, kv_stores.clone());
     start_full_proxy_runtime(config, runtime)
 }
 
