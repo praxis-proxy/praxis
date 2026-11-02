@@ -917,7 +917,7 @@ fn overload_gauge_loop(heap_max_bytes: Option<usize>) -> HousekeepingLoop {
             for (resource, pressure) in pressures.iter() {
                 praxis_protocol::http::metrics::set_overload_pressure(resource, pressure);
             }
-            for transition in tracker.update(pressures) {
+            for transition in tracker.update(pressures, monitor.raw_saturated()) {
                 log_pressure_transition(&transition);
             }
         }

@@ -73,6 +73,8 @@ mod max_body_guard;
 mod max_connections;
 mod multi_listener;
 mod operations;
+#[cfg(unix)]
+mod overload_gauges;
 mod p2c;
 mod path_based_routing;
 mod path_rewriting;

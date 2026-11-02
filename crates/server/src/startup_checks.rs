@@ -24,17 +24,17 @@ const NON_FIPS_FILTERS: &[&str] = &["policy"];
 // Overload gauge export
 // -----------------------------------------------------------------------------
 
-/// Warn when overload gauges are on but no admin endpoint will export them.
+/// Warn when overload gauges are on but nothing will scrape them.
 ///
-/// `set_overload_pressure` records nothing until a Prometheus recorder is
-/// installed, and that recorder is installed only when `admin.address` or
-/// `admin.metrics_address` is set.
+/// The Prometheus recorder is also installed for `admin.address` alone, but
+/// that listener answers `/metrics` with 404, and `/api/stats` does not
+/// include these gauges. Only `admin.metrics_address` serves `/metrics`.
 pub(crate) fn warn_overload_gauges_without_exporter(config: &Config) {
-    let exported = config.admin.address.is_some() || config.admin.metrics_address.is_some();
-    if config.runtime.overload_gauges && !exported {
+    if config.runtime.overload_gauges && config.admin.metrics_address.is_none() {
         tracing::warn!(
-            "runtime.overload_gauges is set, but no admin.address or admin.metrics_address is \
-             configured; overload pressure gauges will not be exported"
+            "runtime.overload_gauges is set, but admin.metrics_address is not configured; \
+             /metrics is not served and /api/stats omits these gauges, so the samples cannot \
+             be scraped"
         );
     }
 }
@@ -534,22 +534,31 @@ mod tests {
     }
 
     #[test]
-    fn overload_gauges_with_either_admin_address_are_quiet() {
-        let mut with_address = minimal_config();
-        with_address.runtime.overload_gauges = true;
-        with_address.admin.address = Some("127.0.0.1:9090".to_owned());
+    fn overload_gauges_with_only_admin_address_warns() {
+        let mut admin_only = minimal_config();
+        admin_only.runtime.overload_gauges = true;
+        admin_only.admin.address = Some("127.0.0.1:9090".to_owned());
 
+        let warnings = capture_warnings(|| super::warn_overload_gauges_without_exporter(&admin_only));
+        assert_eq!(
+            warnings.len(),
+            1,
+            "admin.address does not scrape overload gauges: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("metrics_address"),
+            "warning tells the operator the samples cannot be scraped: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn overload_gauges_with_metrics_address_are_quiet() {
         let mut with_metrics = minimal_config();
         with_metrics.runtime.overload_gauges = true;
         with_metrics.admin.metrics_address = Some("127.0.0.1:9091".to_owned());
 
         let off = minimal_config();
-        let cases = [
-            (&with_address, "admin.address"),
-            (&with_metrics, "admin.metrics_address"),
-            (&off, "gauges off"),
-        ];
-        for (config, label) in cases {
+        for (config, label) in [(&with_metrics, "admin.metrics_address"), (&off, "gauges off")] {
             let warnings = capture_warnings(|| super::warn_overload_gauges_without_exporter(config));
             assert!(warnings.is_empty(), "{label} should stay quiet: {warnings:?}");
         }

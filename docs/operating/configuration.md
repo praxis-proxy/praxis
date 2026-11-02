@@ -104,7 +104,8 @@ rather than silently adopted as the baseline.
 - Startup-only `runtime` settings (`threads`,
   `work_stealing`, `global_queue_interval`,
   `max_connections`, `max_memory_bytes`,
-  `max_open_files`, `shed_on_fd_pressure`,
+  `max_open_files`, `overload_gauges`,
+  `shed_on_fd_pressure`,
   `subrequest_pool_size`,
   `subrequest_max_connections`,
   `subrequest_circuit_breaker`, `upstream_ca_file`,
@@ -602,11 +603,16 @@ runtime:
   for cgroup memory, anonymous resident memory, CPU
   stall time, connections, and file descriptors.
   `bool`, defaults to `false`. This does not refuse
-  work or change timeouts. Heap pressure needs
-  `max_memory_bytes`. Connection pressure needs
-  `max_connections`. The task starts at process start,
-  so changing it needs a restart. See
-  [Observability](observability.md).
+  work or change timeouts. Scraped at `/metrics` on
+  `admin.metrics_address`; `admin.address` does not
+  serve these gauges. Cgroup pressure uses the
+  highest working-set ratio of this process's cgroup
+  and its ancestors, so a parent slice limit still
+  counts when `memory.max` is `max` on the service
+  cgroup. Heap pressure needs `max_memory_bytes`.
+  Connection pressure needs `max_connections`. The
+  task starts at process start, so changing it needs
+  a restart. See [Observability](observability.md).
 - `shed_on_fd_pressure`: reject new requests with `503
   Service Unavailable` (and close new TCP connections)
   when open file descriptors near the process limit,
