@@ -6,6 +6,13 @@ name: Mutation Testing
 #
 # The full workspace has over 11,000 mutants. At about 20 seconds per mutant,
 # a serial run takes over 60 hours, beyond the shared workflow's two-hour limit.
+#
+# Pass/fail policy (issue #1390):
+#   - Each shard calls cargo mutants directly (not make) to preserve exit codes.
+#   - Exit 0/2/3 (all caught / survived / timeout) → shard passes, results uploaded.
+#   - Exit 4 (tool error) → shard fails immediately.
+#   - A summary job aggregates all 32 shards, computes the kill ratio, and
+#     fails only when it drops below the baseline in .github/mutants-baseline.json.
 
 on:
   schedule:
@@ -62,7 +69,27 @@ jobs:
       - name: Run mutation testing
         env:
           MUTANTS_SHARD: ${{ matrix.shard }}
-        run: make mutants MUTANTS_ARGS="--shard ${MUTANTS_SHARD}/32 --sharding round-robin --jobs 2"
+        run: |
+          set +e
+          cargo mutants \
+            --package praxis-proxy \
+            --package praxis-proxy-core \
+            --package praxis-proxy-filter \
+            --package praxis-proxy-protocol \
+            --package praxis-proxy-tls \
+            --shard "${MUTANTS_SHARD}/32" \
+            --sharding round-robin \
+            --jobs 2
+          exit_code=$?
+          set -e
+
+          case $exit_code in
+            0) echo "All mutants caught in this shard." ;;
+            2) echo "::warning::Some mutants survived in shard ${MUTANTS_SHARD}." ;;
+            3) echo "::warning::Some mutants timed out in shard ${MUTANTS_SHARD}." ;;
+            4) echo "::error::Baseline build or test failed (exit code 4)"; exit 1 ;;
+            *) echo "::error::Unexpected exit code $exit_code"; exit 1 ;;
+          esac
 
       - name: Upload mutation results
         if: always()
@@ -70,4 +97,121 @@ jobs:
         with:
           name: mutants-shard-${{ matrix.shard }}
           path: mutants.out/
+          if-no-files-found: error
           retention-days: 7
+
+  summary:
+    needs: [mutants]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download all shard results
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mutants-shard-*
+          path: all-results/
+
+      - name: Aggregate results and check ratchet
+        run: |
+          expected=32
+          found=$(ls -d all-results/mutants-shard-*/ 2>/dev/null | wc -l)
+          if [ "$found" -lt "$expected" ]; then
+            echo "::error::Only ${found}/${expected} shard results found."
+            exit 1
+          fi
+
+          caught=0
+          missed=0
+          timeout=0
+          unviable=0
+
+          for dir in all-results/mutants-shard-*/; do
+            if [ -f "${dir}caught.txt" ]; then
+              n=$(grep -c '.' "${dir}caught.txt" 2>/dev/null || true)
+              caught=$((caught + n))
+            fi
+            if [ -f "${dir}missed.txt" ]; then
+              n=$(grep -c '.' "${dir}missed.txt" 2>/dev/null || true)
+              missed=$((missed + n))
+            fi
+            if [ -f "${dir}timeout.txt" ]; then
+              n=$(grep -c '.' "${dir}timeout.txt" 2>/dev/null || true)
+              timeout=$((timeout + n))
+            fi
+            if [ -f "${dir}unviable.txt" ]; then
+              n=$(grep -c '.' "${dir}unviable.txt" 2>/dev/null || true)
+              unviable=$((unviable + n))
+            fi
+          done
+
+          tested=$((caught + missed))
+          total=$((tested + timeout + unviable))
+
+          if [ "$tested" -eq 0 ]; then
+            echo "::error::No mutants were tested — something is wrong."
+            exit 1
+          fi
+
+          kill_pct=$((caught * 100 / tested))
+
+          baseline=$(python3 -c "
+          import json, sys
+          b = json.load(open('.github/mutants-baseline.json'))
+          v = b['min_kill_ratio']
+          if not isinstance(v, int) or isinstance(v, bool):
+              print(f'::error::min_kill_ratio must be an integer, got {v!r}', file=sys.stderr)
+              sys.exit(1)
+          print(v)
+          ")
+          max_timeout=$(python3 -c "
+          import json, sys
+          b = json.load(open('.github/mutants-baseline.json'))
+          v = b['max_timeout']
+          if not isinstance(v, int) or isinstance(v, bool):
+              print(f'::error::max_timeout must be an integer, got {v!r}', file=sys.stderr)
+              sys.exit(1)
+          print(v)
+          ")
+
+          echo "## Mutation Testing Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Count |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|--------|------:|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Caught (killed) | $caught |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Survived (missed) | $missed |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Timed out | $timeout |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Unviable | $unviable |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Total** | **$total** |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Kill ratio: ${kill_pct}%** (baseline: ${baseline}%)" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Timeouts: ${timeout}** (max: ${max_timeout})" >> "$GITHUB_STEP_SUMMARY"
+
+          failed=0
+
+          if [ "$kill_pct" -lt "$baseline" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> **❌ Kill ratio ${kill_pct}% dropped below the ${baseline}% baseline.**" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Kill ratio ${kill_pct}% is below baseline ${baseline}%"
+            failed=1
+          fi
+
+          if [ "$timeout" -gt "$max_timeout" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "> **❌ Timeout count ${timeout} exceeds the ${max_timeout} cap.**" >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Timeout count ${timeout} exceeds cap ${max_timeout}"
+            failed=1
+          fi
+
+          if [ "$failed" -eq 1 ]; then
+            exit 1
+          fi
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> **✅ PASSED** — kill ratio and timeout count within limits." >> "$GITHUB_STEP_SUMMARY"

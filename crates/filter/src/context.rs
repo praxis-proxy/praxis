@@ -2132,7 +2132,7 @@ content-length: 0
     #[test]
     fn kv_stores_returns_registry_when_set() {
         let registry = KvStoreRegistry::new();
-        let store = registry.get_or_create("routing");
+        let store = registry.get_or_create_memory("routing");
         store.set("model", Arc::from("model-gamma-1"));
 
         let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2150,7 +2150,7 @@ content-length: 0
     #[test]
     fn kv_stores_write_from_context_is_visible() {
         let registry = KvStoreRegistry::new();
-        let store = registry.get_or_create("flags");
+        let store = registry.get_or_create_memory("flags");
 
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -2270,7 +2270,7 @@ content-length: 0
         use praxis_core::kv::MatchType;
 
         let registry = KvStoreRegistry::new();
-        let store = registry.get_or_create("routes");
+        let store = registry.get_or_create_memory("routes");
         store.set("route.api.v1", Arc::from("api_cluster"));
         store.set("route.web.main", Arc::from("web_cluster"));
 

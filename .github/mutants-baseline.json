@@ -1,0 +1,5 @@
+{
+  "min_kill_ratio": 0,
+  "max_timeout": 200,
+  "_comment": "min_kill_ratio: kill-ratio floor (%). max_timeout: absolute cap on timeout mutants. Set to 0 / 200 for the first run. Update both after reviewing the first summary."
+}

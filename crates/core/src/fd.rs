@@ -925,13 +925,16 @@ mod tests {
 
     /// Held by the tests that need an exact descriptor count, so they never
     /// overlap: each opens and closes descriptors while the other counts.
+    #[cfg(target_os = "linux")]
     static EXACT_COUNTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// How long an exact count keeps retrying for a moment when no other test
     /// in this binary opens or closes a descriptor.
+    #[cfg(target_os = "linux")]
     const QUIET_RETRY_BUDGET: Duration = Duration::from_secs(5);
 
     /// Take [`EXACT_COUNTING`] for as long as the guard lives.
+    #[cfg(target_os = "linux")]
     fn exclusive_descriptor_counting() -> std::sync::MutexGuard<'static, ()> {
         EXACT_COUNTING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -941,6 +944,7 @@ mod tests {
     /// Other tests in this binary open and close descriptors in bursts that
     /// can outlast thousands of attempts, so the budget is time rather than a
     /// count: back-to-back retries would all land inside one burst.
+    #[cfg(target_os = "linux")]
     fn retry_until_quiet<F: FnMut() -> bool>(mut attempt: F) -> bool {
         let started = Instant::now();
         loop {
