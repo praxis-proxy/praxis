@@ -470,7 +470,7 @@ async fn kv_store_lookup_valid_credentials() {
     let f = BasicAuthFilter::from_config(&yaml).unwrap();
 
     let registry = KvStoreRegistry::new();
-    let store = registry.get_or_create("auth_users");
+    let store = registry.get_or_create_memory("auth_users");
     store.set("admin", Arc::from("fakecreds"));
 
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");

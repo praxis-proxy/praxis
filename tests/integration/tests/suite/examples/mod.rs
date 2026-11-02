@@ -14,6 +14,7 @@ mod access_log_syslog;
 mod access_log_template;
 mod access_logging;
 mod admin_interface;
+mod admin_kv_store;
 mod all_examples_validate;
 mod api_key_filter;
 mod authority_from_endpoint;

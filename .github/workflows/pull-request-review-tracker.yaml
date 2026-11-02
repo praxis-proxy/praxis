@@ -1,0 +1,48 @@
+name: Pull Request Review Tracker
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+#
+# Reports which pull request assignees still owe an initial review, keeps two
+# fields on organization project #13 in step, and reminds anyone who is
+# overdue. Shared from praxis-proxy/conventions (pr-review-tracker.yaml).
+#
+# Defaults are inert: dry run is on and both opt-ins are off, so a run reads
+# only and writes its findings to the job summary. A write needs dry-run set
+# to false AND the matching opt-in set to true.
+#
+# There is deliberately no schedule yet. Add one once the reported people and
+# waits have been checked here; see the conventions docs for the cron, which
+# has to pass the opt-ins explicitly because a scheduled run gets no inputs.
+#
+# The called job only uses the praxis-bot token, so it gets no permissions.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Report proposed changes without writing anything
+        type: boolean
+        default: true
+      apply-project:
+        description: Write the two project fields; needs dry-run off
+        type: boolean
+        default: false
+      apply-reminders:
+        description: Post reminder comments; needs dry-run off
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  track:
+    uses: praxis-proxy/conventions/.github/workflows/pr-review-tracker.yaml@2a0d28ddd3690ed73347ddbe59d08dac02f604ce # v0.5.0
+    with:
+      dry-run: ${{ inputs.dry-run }}
+      apply-project: ${{ inputs.apply-project }}
+      apply-reminders: ${{ inputs.apply-reminders }}
+    secrets:
+      PRAXIS_BOT_APP_ID: ${{ secrets.PRAXIS_BOT_APP_ID }}
+      PRAXIS_BOT_APP_PRIVATE_KEY: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
