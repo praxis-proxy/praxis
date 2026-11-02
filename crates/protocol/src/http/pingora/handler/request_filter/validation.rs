@@ -6,10 +6,14 @@
 //! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 //! [RFC 9110 Section 7.6.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.2
 
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
+#[cfg(feature = "pingora")]
 use praxis_filter::Rejection;
+#[cfg(feature = "pingora")]
 use tracing::debug;
 
+#[cfg(feature = "pingora")]
 use super::stream_buffer::build_trace_response;
 
 /// Handle `Max-Forwards` on TRACE and OPTIONS requests per [RFC 9110 Section 7.6.2].
@@ -17,6 +21,7 @@ use super::stream_buffer::build_trace_response;
 /// When `Max-Forwards` is present and zero, the proxy responds directly
 /// instead of forwarding. When positive, it decrements and forwards.
 /// For non-TRACE/OPTIONS methods, or when the header is absent, returns `None`.
+#[cfg(feature = "pingora")]
 pub(super) async fn handle_max_forwards(session: &mut Session) -> Option<bool> {
     let method = &session.req_header().method;
     if !matches!(*method, http::Method::TRACE | http::Method::OPTIONS) {
@@ -44,10 +49,15 @@ pub(super) async fn handle_max_forwards(session: &mut Session) -> Option<bool> {
 }
 
 /// Parse `Max-Forwards` from a Pingora session.
+#[cfg(feature = "pingora")]
 fn parse_max_forwards(session: &Session) -> Option<u32> {
-    session
-        .req_header()
-        .headers
+    parse_max_forwards_header(&session.req_header().headers)
+}
+
+/// Parse `Max-Forwards` from request headers; the backend-neutral core of
+/// `parse_max_forwards`.
+pub(in crate::http) fn parse_max_forwards_header(headers: &http::HeaderMap) -> Option<u32> {
+    headers
         .get("max-forwards")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<u32>().ok())
@@ -58,6 +68,7 @@ fn parse_max_forwards(session: &Session) -> Option<u32> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {

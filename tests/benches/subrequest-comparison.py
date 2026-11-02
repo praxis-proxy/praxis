@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Praxis Contributors
-"""Build identical subrequest workloads against three revisions on one CI runner.
+"""Validate a candidate or compare identical workloads across three revisions.
 
-Only peer construction is adapted for the pre-seam public API. All workloads,
-compiler settings, and dependencies are otherwise identical. Backend processes
+Comparisons adapt only peer construction for the pre-seam public API. Workloads,
+compiler settings, and dependencies must otherwise be identical. Backend processes
 are outside the client's heap profiler. Timing uses separate, uninstrumented
 release binaries; two attempts measure concurrent subrequests, not the hedge
 scheduler. Measurements include the common harness validation overhead.
@@ -29,6 +29,7 @@ COMPLETION_HARNESS_PATHS = {
     ".github/workflows/subrequest-benchmarks.yaml",
     "tests/benches/subrequest-comparison.py",
     "tests/benches/subrequest-benchmark.md",
+    "tests/benches/test_subrequest_comparison.py",
 }
 
 
@@ -198,10 +199,12 @@ def measure_completion(binaries, revisions, destination):
             summary_file.write(text)
 
 
-def summarize(records, destination):
+def summarize(records, destination, comparison):
     """Present descriptive timing and allocation data without a noisy speed gate."""
-    rows = ["# Subrequest performance comparison", "",
-            "Same runner, compiler, dependencies, and workload across all three revisions.",
+    title = "Subrequest performance comparison" if comparison else "Subrequest workload validation"
+    scope = ("Same runner, compiler, dependencies, and workload across all three revisions."
+             if comparison else "Candidate workload validation only; no cross-revision performance comparison.")
+    rows = [f"# {title}", "", scope,
             "Timing is amortized wall time per completed subrequest, not tail latency.",
             "DHAT runs measure client allocations separately; their timing is not compared.",
             "Two attempts are concurrent executor calls, not the full hedge scheduler.", "",
@@ -226,13 +229,22 @@ def summarize(records, destination):
 def main():
     """Build once per revision/mode, then execute the fixed case matrix."""
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("base", "before", "candidate", "output"):
+    for name in ("candidate", "output"):
         parser.add_argument(f"--{name}", required=True)
+    for name in ("base", "before"):
+        parser.add_argument(f"--{name}", help="Comparison commit; requires both --base and --before")
     parser.add_argument("--completion-parent", help="Enable the pinned parent/guard timing investigation")
     args = parser.parse_args()
+    if bool(args.base) != bool(args.before):
+        parser.error("--base and --before must be supplied together")
+    if args.base == "" or args.before == "":
+        parser.error("comparison references must not be empty")
+    if args.completion_parent and not args.base:
+        parser.error("--completion-parent requires --base and --before")
+    comparison = bool(args.base)
     repository = Path(output(["git", "rev-parse", "--show-toplevel"], Path.cwd()))
     revisions = {label: output(["git", "rev-parse", "--verify", "--end-of-options", f"{getattr(args, label)}^{{commit}}"], repository)
-                 for label in ("base", "before", "candidate")}
+                 for label in ("base", "before", "candidate") if getattr(args, label)}
     harness_sha = output(["git", "rev-parse", "HEAD"], repository)
     if harness_sha != revisions["candidate"]:
         raise RuntimeError("checkout must be the exact candidate commit")
@@ -250,6 +262,7 @@ def main():
     destination = Path(args.output).resolve()
     destination.mkdir(parents=True, exist_ok=True)
     metadata = {"harness_sha": harness_sha, "completion_parent": parent if args.completion_parent else None,
+                "mode": "comparison" if comparison else "candidate-validation",
                 "completion_runtime_equivalent": COMPLETION_CANDIDATE if args.completion_parent else None,
                 "revisions": revisions, "platform": platform.platform(),
                 "rustc": output(["rustc", "-Vv"], repository),
@@ -264,7 +277,7 @@ def main():
             prepare_tree(repository, tree, revision)
             for mode in ("timing", "allocations"):
                 binaries[label, mode] = build(tree, label, mode, destination, environment)
-        summarize(measure(binaries, revisions, destination), destination)
+        summarize(measure(binaries, revisions, destination), destination, comparison)
         if args.completion_parent:
             parent_tree = Path(scratch) / "parent"
             prepare_tree(repository, parent_tree, parent)

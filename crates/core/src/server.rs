@@ -5,6 +5,9 @@
 
 /// The runtime contract every network backend implements.
 mod contract;
+/// The hyper backend's runtime: a tokio runtime, listeners and shutdown.
+#[cfg(feature = "hyper")]
+pub mod hyper;
 /// Pingora-specific server factory and runtime.
 #[cfg(feature = "pingora")]
 pub mod pingora;
@@ -14,6 +17,8 @@ mod runtime;
 mod unavailable;
 
 pub use contract::{ServerRuntime, ShutdownFuture};
+#[cfg(feature = "hyper")]
+pub use hyper::HyperRuntime;
 #[cfg(feature = "pingora")]
 pub use pingora::{PingoraServerRuntime, build_http_server};
 pub use runtime::{RuntimeOptions, resolve_thread_count};

@@ -3,13 +3,13 @@
 
 //! TCP protocol service construction and registration.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use pingora_core::services::listening::Service;
 use praxis_core::{ProxyError, config::Config};
 use praxis_filter::{FilterPipeline, FilterRegistry};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 
 use super::{
     groups::{self, TcpGroupKey},
@@ -70,62 +70,10 @@ fn build_tcp_service(
     fallback_pipeline: &Arc<ArcSwap<FilterPipeline>>,
     config: &Config,
 ) -> Service<proxy::PingoraTcpProxy> {
-    let (upstream_opt, cluster_opt, timeout_ms, max_dur_secs) = group_key;
-    let pipeline = listeners
-        .first()
-        .and_then(|l| pipelines.get(&l.name))
-        .map_or_else(|| Arc::clone(fallback_pipeline), Arc::clone);
-    let session_timeout = timeout_ms.map(Duration::from_millis);
-    let max_duration = max_dur_secs.map(Duration::from_secs);
-    let connection_semaphore = listeners
-        .first()
-        .and_then(|l| l.max_connections)
-        .map(|max| Arc::new(Semaphore::new(max as usize)));
-    let (listener_names, default_listener_name) = build_listener_labels(listeners);
-    let app = proxy::PingoraTcpProxy::new(
-        upstream_opt.clone(),
-        cluster_opt.clone().map(Arc::from),
-        pipeline,
-        session_timeout,
-        max_duration,
-        connection_semaphore,
-        config.insecure_options.allow_private_upstreams,
-        listener_names,
-        default_listener_name,
-    );
-    Service::new(tcp_service_name(upstream_opt.as_deref(), cluster_opt.as_deref()), app)
-}
-
-/// Derive the Pingora service name for a TCP listener group.
-fn tcp_service_name(upstream: Option<&str>, cluster: Option<&str>) -> String {
-    match (upstream, cluster) {
-        (Some(addr), _) => format!("tcp-proxy:{addr}"),
-        (_, Some(cluster)) => format!("tcp-proxy:cluster:{cluster}"),
-        _ => "tcp-proxy:filter-routed".to_owned(),
-    }
-}
-
-/// Build the per-address metric label map and the default listener label.
-fn build_listener_labels(
-    listeners: &[&praxis_core::config::Listener],
-) -> (
-    std::collections::HashMap<String, ::metrics::SharedString>,
-    ::metrics::SharedString,
-) {
-    // `from_shared` keeps labels as refcounted `Arc<str>`s: they are cloned
-    // per connection, and owned `String` labels would deep-copy on every clone.
-    let by_address = listeners
-        .iter()
-        .map(|l| {
-            (
-                l.address.clone(),
-                ::metrics::SharedString::from_shared(Arc::from(l.name.as_str())),
-            )
-        })
-        .collect();
-    let default = listeners.first().map_or_else(
-        || ::metrics::SharedString::const_str("unknown"),
-        |l| ::metrics::SharedString::from_shared(Arc::from(l.name.as_str())),
-    );
-    (by_address, default)
+    let (upstream_opt, cluster_opt, ..) = group_key;
+    let app = proxy::build_group_proxy(group_key, listeners, pipelines, fallback_pipeline, config);
+    Service::new(
+        proxy::tcp_service_name(upstream_opt.as_deref(), cluster_opt.as_deref()),
+        app,
+    )
 }

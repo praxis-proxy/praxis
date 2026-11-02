@@ -31,15 +31,15 @@ use praxis_core::{
 use crate::{ListenerPipelines, Protocol};
 
 /// Per-request context for filter pipeline results.
-#[cfg(feature = "pingora")]
+#[cfg(any(feature = "pingora", feature = "hyper"))]
 pub mod context;
-#[cfg(feature = "pingora")]
+#[cfg(any(feature = "pingora", feature = "hyper"))]
 pub(crate) mod convert;
 /// Trailers-Only responses for proxy-generated gRPC errors.
 #[cfg(feature = "pingora")]
 pub(crate) mod grpc_trailers;
 /// HTTP proxy handler and Pingora integration.
-#[cfg(feature = "pingora")]
+#[cfg(any(feature = "pingora", feature = "hyper"))]
 pub mod handler;
 /// Health check infrastructure: admin endpoints, probes, and background runner.
 pub mod health;

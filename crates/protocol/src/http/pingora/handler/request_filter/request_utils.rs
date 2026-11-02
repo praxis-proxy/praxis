@@ -6,14 +6,15 @@
 //! Provides helpers for OpenTelemetry span creation, request snapshot
 //! population, and route template matching.
 
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
+#[cfg(feature = "pingora")]
 use praxis_core::connectivity::normalize_mapped_ipv4;
 use praxis_filter::FilterPipeline;
 
-use super::super::{
-    super::{context::PingoraRequestCtx, convert::request_header_from_session},
-    span_util::http_version_label,
-};
+#[cfg(feature = "pingora")]
+use super::super::super::convert::request_header_from_session;
+use super::super::{super::context::PingoraRequestCtx, span_util::http_version_label};
 
 /// Populate the request snapshot and client address for a pre-pipeline exit.
 ///
@@ -22,6 +23,7 @@ use super::super::{
 /// validation, header normalization, reserved-header and Max-Forwards
 /// handling) would otherwise leave it unset and the record silently
 /// skipped: precisely the requests operators most want logged.
+#[cfg(feature = "pingora")]
 pub(super) fn snapshot_for_early_exit(session: &mut Session, ctx: &mut PingoraRequestCtx) {
     if ctx.request_snapshot.is_none() {
         ctx.request_snapshot = Some(request_header_from_session(session));
@@ -71,24 +73,31 @@ pub(super) fn templated_route(
 /// [OTel span name]: https://opentelemetry.io/docs/specs/semconv/http/http-spans/
 /// [`Empty`]: tracing::field::Empty
 /// [`record_response_span_attributes`]: super::super::span_util::record_response_span_attributes
+#[cfg(feature = "pingora")]
+pub(super) fn create_request_span(session: &Session, ctx: &PingoraRequestCtx) -> tracing::Span {
+    let header = session.req_header();
+    create_request_span_for(header.method.as_str(), header.uri.path(), &header.headers, ctx)
+}
+
+/// Build the root tracing span from the request's method, path and headers;
+/// the backend-neutral core of `create_request_span`.
 #[expect(
     clippy::too_many_lines,
     reason = "OTel semantic convention attributes require many span fields"
 )]
-pub(super) fn create_request_span(session: &Session, ctx: &PingoraRequestCtx) -> tracing::Span {
-    let method = session.req_header().method.as_str();
-    let path = session.req_header().uri.path();
+pub(in crate::http) fn create_request_span_for(
+    method: &str,
+    path: &str,
+    headers: &http::HeaderMap,
+    ctx: &PingoraRequestCtx,
+) -> tracing::Span {
     let path = if path.is_empty() { "/" } else { path };
     let protocol_version = http_version_label(ctx.client_http_version.unwrap_or(http::Version::HTTP_11));
-    let host = session.req_header().headers.get("host").and_then(|v| v.to_str().ok());
+    let host = headers.get("host").and_then(|v| v.to_str().ok());
     let server_address = host.map(|h| h.split(':').next().unwrap_or(h));
     let server_port = host.and_then(|h| h.split_once(':').and_then(|(_, p)| p.parse::<u16>().ok()));
     let url_scheme = if ctx.downstream_tls { "https" } else { "http" };
-    let user_agent = session
-        .req_header()
-        .headers
-        .get("user-agent")
-        .and_then(|v| v.to_str().ok());
+    let user_agent = headers.get("user-agent").and_then(|v| v.to_str().ok());
 
     let span = tracing::info_span!(
         "http_request",
@@ -116,7 +125,7 @@ pub(super) fn create_request_span(session: &Session, ctx: &PingoraRequestCtx) ->
     }
 
     #[cfg(feature = "otel")]
-    if let Some(parent) = praxis_core::trace_context::extract_remote_context(&session.req_header().headers) {
+    if let Some(parent) = praxis_core::trace_context::extract_remote_context(headers) {
         use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
         // Set the W3C parent before this span enters the filter pipeline.

@@ -29,6 +29,10 @@ use crate::http::pingora::context::PingoraRequestCtx;
 /// limit (enforced separately via `SizeLimit`) remains the backstop for
 /// oversized payloads.
 pub(super) fn clamp_body_mode_to_ceiling(mode: BodyMode, baseline: BodyMode) -> BodyMode {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "BodyMode is non_exhaustive; every other mode imposes no ceiling"
+    )]
     let ceiling = match baseline {
         BodyMode::StreamBuffer { max_bytes: Some(v) } | BodyMode::SizeLimit { max_bytes: v } => Some(v),
         _ => None,

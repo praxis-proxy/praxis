@@ -37,15 +37,33 @@ jobs:
     timeout-minutes: 240
     permissions:
       contents: read
+    env:
+      CARGO_NET_RETRY: "5"
+      CARGO_HTTP_MULTIPLEXING: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
         with:
           cache-suffix: bench
+
+      - name: Fetch dependencies
+        # Cargo does not retry every curl error, including HTTP/2 framing errors.
+        # Retry fetching separately so compiler and benchmark failures remain visible.
+        run: |
+          for delay in 0 10 20; do
+            sleep "$delay"
+            if cargo fetch --locked; then
+              exit 0
+            else
+              status=$?
+            fi
+            echo "Dependency fetch failed (exit $status)."
+          done
+          exit "$status"
 
       - name: Install benchmark tools
         run: |
@@ -87,7 +105,7 @@ jobs:
         env:
           THRESHOLD: ${{ env.THRESHOLD }}
         run: |
-          cargo xtask benchmark \
+          cargo run --locked --offline -p xtask -- benchmark \
             --proxy envoy \
             --threshold "$THRESHOLD" \
             --runs 5 \
@@ -103,7 +121,7 @@ jobs:
         env:
           THRESHOLD: ${{ env.THRESHOLD }}
         run: |
-          cargo xtask benchmark compare \
+          cargo run --locked --offline -p xtask -- benchmark compare \
             baseline.yaml benchmark-results.yaml \
             --threshold "$THRESHOLD" | tee compare-output.txt
 

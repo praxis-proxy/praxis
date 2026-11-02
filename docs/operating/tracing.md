@@ -82,7 +82,7 @@ exported span IDs to inspect.
 This command runs two local Praxis proxies through an OTLP test receiver:
 
 ```console
-cargo test --all-features -p praxis-tests-integration --test otel_cross_gateway -- --nocapture
+cargo test -p praxis-tests-integration --features otel,cloud-events-filter --test otel_cross_gateway -- --nocapture
 ```
 
 The test parses the exported IDs and checks the chain

@@ -9,12 +9,20 @@
     clippy::iter_over_hash_type,
     clippy::min_ident_chars,
     clippy::mod_module_files,
-    clippy::partial_pub_fields,
-    clippy::pub_underscore_fields,
     clippy::shadow_unrelated,
     clippy::single_char_lifetime_names,
-    clippy::wildcard_enum_match_arm,
     reason = "TODO(conventions-sync): fix violations and remove"
+)]
+// Only the Pingora adapter violates these three; a build without it
+// would leave the expectations unfulfilled.
+#![cfg_attr(
+    feature = "pingora",
+    expect(
+        clippy::partial_pub_fields,
+        clippy::pub_underscore_fields,
+        clippy::wildcard_enum_match_arm,
+        reason = "TODO(conventions-sync): fix violations and remove"
+    )
 )]
 
 //! Protocol adapters for Praxis.
@@ -72,17 +80,31 @@ pub mod tls_setup;
 /// bootstrap and the test harness need from a backend: `Http` and `Tcp`
 /// implement [`Protocol`] and bind listeners onto the runtime, and
 /// [`admin`] registers the management, health and metrics listeners. Under
-/// the `pingora` feature they resolve to the Pingora adapters. A build with
-/// no backend feature has none of them, so nothing can bind a listener; see
+/// the `pingora` feature they resolve to the Pingora adapters, under `hyper`
+/// to the hyper ones; the two features are mutually exclusive, as
+/// [`praxis_core::backend`] documents. A build with no backend feature has
+/// none of them, so nothing can bind a listener; see
 /// `docs/developing/adding-backends.md` for what a new backend supplies.
 ///
 /// [`admin`]: crate::backend::admin
 /// [`praxis_core::backend`]: praxis_core::backend
 /// [`Protocol`]: crate::Protocol
 pub mod backend {
+    #[cfg(all(feature = "pingora", feature = "hyper"))]
+    compile_error!(
+        "the `pingora` and `hyper` network backends are mutually exclusive: build the hyper backend with \
+         `--no-default-features --features hyper`"
+    );
+
+    /// The HTTP protocol adapter.
+    #[cfg(feature = "hyper")]
+    pub use crate::http::hyper::HyperHttp as Http;
     /// The HTTP protocol adapter.
     #[cfg(feature = "pingora")]
     pub use crate::http::pingora::PingoraHttp as Http;
+    /// The raw TCP/L4 protocol adapter.
+    #[cfg(feature = "hyper")]
+    pub use crate::tcp::HyperTcp as Tcp;
     /// The raw TCP/L4 protocol adapter.
     #[cfg(feature = "pingora")]
     pub use crate::tcp::PingoraTcp as Tcp;
@@ -96,6 +118,10 @@ pub mod backend {
     /// [`AdminRequest`]: crate::http::health::AdminRequest
     #[cfg(feature = "admin-api")]
     pub mod admin {
+        #[cfg(feature = "hyper")]
+        pub use crate::http::hyper::admin::{
+            add_admin_api, add_health_endpoint, add_health_endpoint_with_pipelines, add_prometheus_upkeep,
+        };
         pub use crate::http::pingora::health::{
             AdminEndpointOptions, PrometheusAdminRecorder, StatsAdminState, install_prometheus_admin_recorder,
         };

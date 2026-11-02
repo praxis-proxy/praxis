@@ -19,7 +19,7 @@ use crate::http::pingora::context::PingoraRequestCtx;
 /// block of a Trailers-Only response — a gRPC error is frequently a
 /// single HEADERS frame carrying `grpc-status` with no trailers at all.
 /// A map without `grpc-status` leaves the context untouched.
-pub(super) fn capture(headers: &http::HeaderMap, ctx: &mut PingoraRequestCtx) {
+pub(in crate::http) fn capture(headers: &http::HeaderMap, ctx: &mut PingoraRequestCtx) {
     let Some(completion) = GrpcCompletion::from_headers(headers) else {
         return;
     };

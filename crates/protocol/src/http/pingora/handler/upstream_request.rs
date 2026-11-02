@@ -7,15 +7,16 @@
 //! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 
 use http::Uri;
+#[cfg(feature = "pingora")]
 use pingora_http::RequestHeader;
+#[cfg(feature = "pingora")]
 use praxis_core::next_hop_headers::{StripHopByHopOptions, UpgradePreserve, strip_hop_by_hop_target};
+#[cfg(feature = "pingora")]
 use tracing::debug;
 
-use super::{
-    super::context::PingoraRequestCtx,
-    hop_by_hop::{REQUEST_HOP_BY_HOP, RequestHop},
-    path_traversal::has_dot_dot_traversal,
-};
+#[cfg(feature = "pingora")]
+use super::hop_by_hop::{REQUEST_HOP_BY_HOP, RequestHop};
+use super::{super::context::PingoraRequestCtx, path_traversal::has_dot_dot_traversal};
 
 // -----------------------------------------------------------------------------
 // Hop-by-hop Header Stripping
@@ -31,6 +32,7 @@ use super::{
 /// as `h2c` are always stripped to prevent smuggling attacks.
 ///
 /// [RFC 6455]: https://datatracker.ietf.org/doc/html/rfc6455
+#[cfg(feature = "pingora")]
 pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
     strip_hop_by_hop_target(
         &mut RequestHop(req),
@@ -58,6 +60,7 @@ pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
 ///
 /// [RFC 9113 Section 8.2.2]: https://datatracker.ietf.org/doc/html/rfc9113#section-8.2.2
 /// [RFC 9110 Section 10.1.4]: https://datatracker.ietf.org/doc/html/rfc9110#section-10.1.4
+#[cfg(feature = "pingora")]
 pub(crate) fn restore_te_trailers(req: &mut RequestHeader, downstream: &http::HeaderMap) {
     if req.version != http::Version::HTTP_2 {
         return;
@@ -92,6 +95,7 @@ pub(crate) fn restore_te_trailers(req: &mut RequestHeader, downstream: &http::He
 ///
 /// Returns a Pingora error if the rewritten path is malformed,
 /// contains traversal, or includes a scheme/authority.
+#[cfg(feature = "pingora")]
 pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
     let Some(new_path) = ctx.rewritten_path.as_deref() else {
         return Ok(());
@@ -116,33 +120,35 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &PingoraRequest
 
 /// Parse a filter-produced path, refusing anything that is not an origin form
 /// this proxy may forward.
+#[cfg(feature = "pingora")]
 fn validated_rewritten_uri(new_path: &str) -> pingora_core::Result<Uri> {
+    rewritten_origin_form(new_path)
+        .map_err(|reason| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, reason))
+}
+
+/// Parse a filter-produced path, refusing anything that is not an origin
+/// form this proxy may forward; the backend-neutral core of
+/// `validated_rewritten_uri`.
+///
+/// # Errors
+///
+/// Returns why the path is refused: it does not start with a single `/`,
+/// does not parse, carries a scheme or authority, or has a `..` segment.
+pub(in crate::http) fn rewritten_origin_form(new_path: &str) -> Result<Uri, String> {
     if !new_path.starts_with('/') || new_path.starts_with("//") {
-        return Err(pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            format!("rewritten path must start with / but not //: {new_path}"),
-        ));
+        return Err(format!("rewritten path must start with / but not //: {new_path}"));
     }
 
-    let uri = new_path.parse::<Uri>().map_err(|e| {
-        pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            format!("invalid rewritten path: {new_path}: {e}"),
-        )
-    })?;
+    let uri = new_path
+        .parse::<Uri>()
+        .map_err(|e| format!("invalid rewritten path: {new_path}: {e}"))?;
 
     if uri.scheme().is_some() || uri.authority().is_some() {
-        return Err(pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            format!("rewritten path contains scheme or authority: {new_path}"),
-        ));
+        return Err(format!("rewritten path contains scheme or authority: {new_path}"));
     }
 
     if has_dot_dot_traversal(uri.path()) {
-        return Err(pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            format!("rewritten path contains '..' traversal: {new_path}"),
-        ));
+        return Err(format!("rewritten path contains '..' traversal: {new_path}"));
     }
 
     Ok(uri)
@@ -176,6 +182,7 @@ fn validated_rewritten_uri(new_path: &str) -> pingora_core::Result<Uri> {
 /// Every error here is sourced `Downstream`. This runs after the upstream peer
 /// is resolved, so an error sourced anywhere else is counted by passive health
 /// against the endpoint rather than against the request that caused it.
+#[cfg(feature = "pingora")]
 pub(crate) fn apply_base_path(req: &mut RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
     let Some(base) = ctx.upstream_for_retry.as_ref().and_then(|u| u.base_path.as_deref()) else {
         return Ok(());
@@ -217,6 +224,7 @@ pub(crate) fn apply_base_path(req: &mut RequestHeader, ctx: &PingoraRequestCtx) 
 }
 
 /// Rebuild `uri` with `base` prepended to its path, keeping scheme and authority.
+#[cfg(feature = "pingora")]
 fn prefixed_uri(uri: &Uri, base: &str) -> pingora_core::Result<Uri> {
     let path_and_query = uri.path_and_query().map_or("/", http::uri::PathAndQuery::as_str);
     let mut parts = uri.clone().into_parts();
@@ -241,6 +249,7 @@ fn prefixed_uri(uri: &Uri, base: &str) -> pingora_core::Result<Uri> {
 }
 
 /// What prefixing a raw request target produced.
+#[cfg(feature = "pingora")]
 enum PrefixedTarget {
     /// The prefixed target.
     Target(Vec<u8>),
@@ -255,6 +264,7 @@ enum PrefixedTarget {
 /// Absolute-form is split with Pingora's own classifier rather than a second
 /// one: a parser with its own idea of where the authority ends would prefix
 /// bytes the proxy layer never validated as a path.
+#[cfg(feature = "pingora")]
 fn prefixed_raw_target(raw: &[u8], base: &str, method: &http::Method) -> PrefixedTarget {
     // Neither names a resource a path prefix can describe.
     if raw == b"*" || raw.is_empty() || method == http::Method::CONNECT {
@@ -303,6 +313,7 @@ fn prefixed_raw_target(raw: &[u8], base: &str, method: &http::Method) -> Prefixe
 ///
 /// A request with no gRPC deadline installed is untouched, so pipelines
 /// without the `grpc_timeout` filter pay one type lookup.
+#[cfg(feature = "pingora")]
 pub(crate) fn apply_grpc_deadline_header(req: &mut RequestHeader, ctx: &PingoraRequestCtx) {
     let Some(deadline) = ctx.extensions.get::<praxis_core::grpc::GrpcDeadline>() else {
         return;
@@ -348,6 +359,7 @@ pub(crate) fn apply_grpc_deadline_header(req: &mut RequestHeader, ctx: &PingoraR
 ///
 /// Returns a Pingora error if the URI cannot be rebuilt with the
 /// new authority (should not happen with a pre-validated value).
+#[cfg(feature = "pingora")]
 pub(crate) fn apply_authority_override(req: &mut RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
     let Some(authority) = ctx.upstream_for_retry.as_ref().and_then(|u| u.authority.as_ref()) else {
         return Ok(());
@@ -372,6 +384,7 @@ pub(crate) fn apply_authority_override(req: &mut RequestHeader, ctx: &PingoraReq
 /// Rebuilds the URI preserving scheme, path, and query while
 /// substituting the authority. This prevents absolute-form
 /// requests from retaining an outdated authority in the URI.
+#[cfg(feature = "pingora")]
 fn normalize_uri_authority(req: &mut RequestHeader, authority: &http::header::HeaderValue) -> pingora_core::Result<()> {
     let uri = &req.uri;
     if uri.authority().is_none() && uri.scheme().is_none() {
@@ -419,6 +432,7 @@ fn normalize_uri_authority(req: &mut RequestHeader, authority: &http::header::He
 /// pre-read `mutated_request_body_len`.
 ///
 /// [RFC 9112 Section 6.2]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.2
+#[cfg(feature = "pingora")]
 pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &PingoraRequestCtx) {
     let Some(new_len) = ctx.adapted_request_body_len.or(ctx.mutated_request_body_len) else {
         return;
@@ -436,7 +450,7 @@ pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &Pingor
 /// The first attempt forwards the post-filter body from `pre_read_body`
 /// (or `adapted_request_body` when the selected-upstream phase ran), which
 /// drains as it is written. A retry replays from Pingora's fixed retry buffer
-/// (the ORIGINAL bytes) while [`apply_mutated_content_length`] re-stamps the
+/// (the ORIGINAL bytes) while `apply_mutated_content_length` re-stamps the
 /// authoritative length; without re-seeding, the replayed body would not match
 /// its `Content-Length` (a request-smuggling gadget). Restore the retained copy
 /// so each replay matches the stamped length.
@@ -462,6 +476,7 @@ pub(crate) fn reseed_retry_body(ctx: &mut PingoraRequestCtx) {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,

@@ -18,7 +18,7 @@ jobs:
       checks: read
       issues: read
       pull-requests: write
-    uses: praxis-proxy/conventions/.github/workflows/pr-housekeeping.yaml@c5837c3fdd35066b05d337594fabe9d641d08df2 # v0.3.0
+    uses: praxis-proxy/conventions/.github/workflows/pr-housekeeping.yaml@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
     secrets:
       PRAXIS_BOT_APP_ID: ${{ secrets.PRAXIS_BOT_APP_ID }}
       PRAXIS_BOT_APP_PRIVATE_KEY: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}

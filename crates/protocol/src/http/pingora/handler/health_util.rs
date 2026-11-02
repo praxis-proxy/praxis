@@ -16,6 +16,17 @@ use praxis_filter::FilterPipeline;
 use super::metrics;
 use crate::http::pingora::context::PingoraRequestCtx;
 
+/// Where the error that ended a request came from, as passive health and
+/// the circuit breaker see it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::http) enum ErrorOrigin {
+    /// The downstream client; says nothing about the endpoint.
+    Downstream,
+
+    /// The upstream, the proxy itself, or an unknown source.
+    Other,
+}
+
 /// Record a passive health observation for the selected upstream endpoint.
 ///
 /// Called from the `logging` hook on every completed request. Determines
@@ -24,9 +35,21 @@ use crate::http::pingora::context::PingoraRequestCtx;
 ///
 /// No-op when no upstream was selected, no health registry is available,
 /// or passive checking is not configured for the cluster.
+#[cfg(feature = "pingora")]
 pub(super) fn record_passive_health(
     pipeline: &FilterPipeline,
     error: Option<&pingora_core::Error>,
+    ctx: &PingoraRequestCtx,
+) {
+    record_passive_health_outcome(pipeline, error_origin(error), ctx);
+}
+
+/// Record a passive health observation from the origin of the error that
+/// ended the request, if any; the backend-neutral core of
+/// `record_passive_health`.
+pub(in crate::http) fn record_passive_health_outcome(
+    pipeline: &FilterPipeline,
+    error: Option<ErrorOrigin>,
     ctx: &PingoraRequestCtx,
 ) {
     let cluster_name = ctx.cluster.as_ref().or(ctx.metrics_cluster.as_ref());
@@ -64,8 +87,8 @@ pub(super) fn record_passive_health(
     // as failures (Internal/Unset are kept because a real endpoint failure
     // is not always tagged Upstream, and missing one is worse here than an
     // occasional false positive).
-    let is_downstream_error = error.is_some_and(|e| matches!(e.esource(), pingora_core::ErrorSource::Downstream));
-    if ended_by_client(error, ctx.upstream_response_status) {
+    let is_downstream_error = error == Some(ErrorOrigin::Downstream);
+    if ended_by_client_origin(error, ctx.upstream_response_status) {
         return;
     }
     let is_failure =
@@ -76,7 +99,7 @@ pub(super) fn record_passive_health(
 /// The logging hook only sees the winner. A copy that failed, or a connect
 /// that never produced a status, still has to move this endpoint's passive
 /// health.
-#[cfg(feature = "hedged-requests")]
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
 pub(super) fn record_hedge_attempt(
     health: &praxis_core::health::ClusterHealthEntry,
     cluster_name: &Arc<str>,
@@ -90,8 +113,28 @@ pub(super) fn record_hedge_attempt(
 /// a downstream-sourced error with no upstream response status. Such a
 /// request says nothing about the endpoint, so neither passive health nor the
 /// circuit breaker may count it.
+#[cfg(feature = "pingora")]
 pub(super) fn ended_by_client(error: Option<&pingora_core::Error>, upstream_status: Option<u16>) -> bool {
-    upstream_status.is_none() && error.is_some_and(|e| matches!(e.esource(), pingora_core::ErrorSource::Downstream))
+    ended_by_client_origin(error_origin(error), upstream_status)
+}
+
+/// Whether the request ended on the client side before the upstream
+/// answered, from the origin of the error that ended it; the
+/// backend-neutral core of `ended_by_client`.
+pub(in crate::http) fn ended_by_client_origin(error: Option<ErrorOrigin>, upstream_status: Option<u16>) -> bool {
+    upstream_status.is_none() && error == Some(ErrorOrigin::Downstream)
+}
+
+/// The origin of a Pingora error, as passive health classifies it.
+#[cfg(feature = "pingora")]
+fn error_origin(error: Option<&pingora_core::Error>) -> Option<ErrorOrigin> {
+    error.map(|e| {
+        if matches!(e.esource(), pingora_core::ErrorSource::Downstream) {
+            ErrorOrigin::Downstream
+        } else {
+            ErrorOrigin::Other
+        }
+    })
 }
 
 /// Apply passive health threshold for a single endpoint observation.
@@ -152,6 +195,7 @@ fn emit_passive_health_transition(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 mod tests {
     use pingora_core::{Error, ErrorType};
 

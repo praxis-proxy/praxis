@@ -12,10 +12,10 @@
 //! [`BodyMode`]: praxis_filter::BodyMode
 //! [`HttpFilter::on_response_body`]: praxis_filter::HttpFilter::on_response_body
 
+#[cfg(feature = "pingora")]
 use std::time::Duration;
 
 use bytes::Bytes;
-use pingora_core::Result;
 use praxis_filter::{BodyMode, FilterAction, FilterPipeline};
 use tracing::{debug, error};
 
@@ -34,22 +34,41 @@ use super::{
 /// Run body filters on a response body chunk (synchronous, like [`HttpFilter::on_response_body`]).
 ///
 /// [`HttpFilter::on_response_body`]: praxis_filter::HttpFilter::on_response_body
-#[expect(clippy::too_many_lines, reason = "body filter dispatch")]
+#[cfg(feature = "pingora")]
 pub(super) fn execute(
     pipeline: &FilterPipeline,
     body: &mut Option<Bytes>,
     end_of_stream: bool,
     ctx: &mut PingoraRequestCtx,
-) -> Result<Option<Duration>> {
+) -> pingora_core::Result<Option<Duration>> {
+    run_response_body(pipeline, body, end_of_stream, ctx)
+        .map(|()| None)
+        .map_err(|reason| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, reason))
+}
+
+/// Run body filters on a response body chunk; the backend-neutral core of
+/// `execute`.
+///
+/// # Errors
+///
+/// Returns why the response must be aborted: a body over its limit, a
+/// filter rejection or failure, or a missing request snapshot.
+#[expect(clippy::too_many_lines, reason = "body filter dispatch")]
+pub(in crate::http) fn run_response_body(
+    pipeline: &FilterPipeline,
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    ctx: &mut PingoraRequestCtx,
+) -> Result<(), String> {
     if ctx.connection_upgraded {
-        return Ok(None);
+        return Ok(());
     }
 
     let caps = pipeline.body_capabilities();
 
     if !caps.needs_response_body {
         mark_delivered_at_eos(ctx, end_of_stream);
-        return Ok(None);
+        return Ok(());
     }
 
     let is_stream_buffer = matches!(ctx.response_body_mode, BodyMode::StreamBuffer { .. });
@@ -62,30 +81,21 @@ pub(super) fn execute(
     if !matches!(ctx.response_body_mode, BodyMode::SizeLimit { .. })
         && exceeds_body_ceiling(pipeline.response_body_ceiling(), ctx.response_body_bytes, body.as_ref())
     {
-        return Err(pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            "response body exceeds global body limit",
-        ));
+        return Err("response body exceeds global body limit".to_owned());
     }
 
     match ctx.response_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
             if check_body_size_limit(body.as_ref(), &mut ctx.response_body_bytes, max_bytes) {
-                return Err(pingora_core::Error::explain(
-                    pingora_core::ErrorType::InternalError,
-                    "response body exceeds maximum size",
-                ));
+                return Err("response body exceeds maximum size".to_owned());
             }
             mark_delivered_at_eos(ctx, end_of_stream);
-            return Ok(None);
+            return Ok(());
         },
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.response_body_released => {
             if accumulate_stream_buffer(body, &mut ctx.response_body_buffer, end_of_stream, max_bytes) {
-                return Err(pingora_core::Error::explain(
-                    pingora_core::ErrorType::InternalError,
-                    "response body exceeds stream_buffer size limit",
-                ));
+                return Err("response body exceeds stream_buffer size limit".to_owned());
             }
             if end_of_stream {
                 // The mid-stream chunks were already counted incrementally,
@@ -101,12 +111,9 @@ pub(super) fn execute(
     }
 
     let (result, response_body_bytes, output) = {
-        let (mut fctx, response_header) = ctx.response_body_context_for(pipeline).ok_or_else(|| {
-            pingora_core::Error::explain(
-                pingora_core::ErrorType::InternalError,
-                "request snapshot not set when response body hooks are active",
-            )
-        })?;
+        let (mut fctx, response_header) = ctx
+            .response_body_context_for(pipeline)
+            .ok_or_else(|| "request snapshot not set when response body hooks are active".to_owned())?;
         let r =
             pipeline.execute_http_response_body_with_response_header(&mut fctx, body, end_of_stream, response_header);
         (r, fctx.response_body_bytes, BodyFilterOutput::take_from(&mut fctx))
@@ -123,7 +130,7 @@ pub(super) fn execute(
         ) => {
             suppress_stream_buffer_chunk(body, is_stream_buffer, ctx.response_body_released, end_of_stream);
             mark_delivered_at_eos(ctx, end_of_stream);
-            Ok(None)
+            Ok(())
         },
         Ok(FilterAction::Release) => {
             release_stream_buffer(
@@ -134,27 +141,21 @@ pub(super) fn execute(
                 end_of_stream,
             );
             mark_delivered_at_eos(ctx, end_of_stream);
-            Ok(None)
+            Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
             debug!(
                 status = rejection.status,
                 "response body filter rejected response; aborting connection"
             );
-            Err(pingora_core::Error::explain(
-                pingora_core::ErrorType::InternalError,
-                format!(
-                    "response body filter rejected response with status {}",
-                    rejection.status
-                ),
+            Err(format!(
+                "response body filter rejected response with status {}",
+                rejection.status
             ))
         },
         Err(e) => {
             error!(error = %e, "filter pipeline error during response body");
-            Err(pingora_core::Error::explain(
-                pingora_core::ErrorType::InternalError,
-                format!("response body filter error: {e}"),
-            ))
+            Err(format!("response body filter error: {e}"))
         },
     }
 }
@@ -179,6 +180,7 @@ fn mark_delivered_at_eos(ctx: &mut PingoraRequestCtx, end_of_stream: bool) {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
@@ -615,7 +617,7 @@ mod tests {
             "release_probe"
         }
 
-        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> std::result::Result<FilterAction, FilterError> {
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
             Ok(FilterAction::Continue)
         }
 
@@ -632,7 +634,7 @@ mod tests {
             ctx: &mut HttpFilterContext<'_>,
             _body: &mut Option<Bytes>,
             end_of_stream: bool,
-        ) -> std::result::Result<FilterAction, FilterError> {
+        ) -> Result<FilterAction, FilterError> {
             let mode = if ctx.response_body_mode == BodyMode::Stream {
                 "stream"
             } else {

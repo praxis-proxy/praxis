@@ -7,6 +7,7 @@
 //! on the root request span and upstream exchange span. Extracted from
 //! `mod.rs` to keep the handler module focused on lifecycle hooks.
 
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
 
 use crate::http::pingora::context::PingoraRequestCtx;
@@ -33,6 +34,7 @@ pub(super) fn http_version_label(version: http::Version) -> &'static str {
 /// `otel.name` upgrade to `{method} {route}` (when a route matched),
 /// `upstream.address`, and `upstream.cluster` on the root request span,
 /// and response attributes on the upstream exchange span.
+#[cfg(feature = "pingora")]
 pub(super) fn record_response_span_attributes(session: &Session, ctx: &PingoraRequestCtx) {
     if ctx.request_span.is_disabled() {
         return;
@@ -47,10 +49,24 @@ pub(super) fn record_response_span_attributes(session: &Session, ctx: &PingoraRe
 ///
 /// Split from [`record_response_span_attributes`] so the recording logic is
 /// unit-testable without constructing a live Pingora session.
+#[cfg(feature = "pingora")]
 pub(super) fn record_response_span_fields(
     status: Option<http::StatusCode>,
     method: &str,
     response: Option<&pingora_http::ResponseHeader>,
+    ctx: &PingoraRequestCtx,
+) {
+    record_response_span_status(status, method, response.map(|resp| resp.status.as_u16()), ctx);
+}
+
+/// Record the response-phase fields from the written status, the request
+/// method, and the written status the exchange span falls back to when the
+/// upstream's own status was not captured; the backend-neutral core of
+/// `record_response_span_fields`.
+pub(in crate::http) fn record_response_span_status(
+    status: Option<http::StatusCode>,
+    method: &str,
+    written_status: Option<u16>,
     ctx: &PingoraRequestCtx,
 ) {
     if let Some(status) = status {
@@ -80,20 +96,17 @@ pub(super) fn record_response_span_fields(
         ctx.request_span.record("upstream.cluster", cluster.as_ref());
     }
 
-    record_upstream_exchange_span(ctx, response);
+    record_upstream_exchange_span(ctx, written_status);
 }
 
 /// Record the upstream-exchange child span's response fields.
-fn record_upstream_exchange_span(ctx: &PingoraRequestCtx, response: Option<&pingora_http::ResponseHeader>) {
+fn record_upstream_exchange_span(ctx: &PingoraRequestCtx, written_status: Option<u16>) {
     if ctx.upstream_exchange_span.is_disabled() {
         return;
     }
     // Prefer the upstream's own status (captured before any response-phase
     // rewrite); fall back to the written response when it was not captured.
-    if let Some(status) = ctx
-        .upstream_response_status
-        .or_else(|| response.map(|resp| resp.status.as_u16()))
-    {
+    if let Some(status) = ctx.upstream_response_status.or(written_status) {
         ctx.upstream_exchange_span.record("http.response.status_code", status);
     }
     ctx.upstream_exchange_span

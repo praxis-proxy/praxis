@@ -16,18 +16,56 @@
 use std::collections::VecDeque;
 
 use bytes::Bytes;
-use pingora_core::Result;
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
 use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection};
 use tracing::error;
 
+#[cfg(feature = "pingora")]
+use super::super::convert::send_rejection_for;
 use super::{
-    super::{context::PingoraRequestCtx, convert::send_rejection_for},
+    super::context::PingoraRequestCtx,
     body_util::{
         BodyFilterOutput, accumulate_stream_buffer, check_body_size_limit, exceeds_body_ceiling, release_stream_buffer,
         suppress_stream_buffer_chunk,
     },
 };
+
+// -----------------------------------------------------------------------------
+// RequestBodyHalt
+// -----------------------------------------------------------------------------
+
+/// Why the request body phase stopped a request.
+pub(in crate::http) struct RequestBodyHalt {
+    /// What stopped the request, for the error the backend raises.
+    pub(in crate::http) reason: String,
+
+    /// The response the client gets; `None` when none is sent.
+    pub(in crate::http) rejection: Option<Rejection>,
+
+    /// The HTTP status the halt carries; `None` for an internal error.
+    pub(in crate::http) status: Option<u16>,
+}
+
+impl RequestBodyHalt {
+    /// An internal failure answered with `rejection`, if any.
+    fn internal<R: Into<String>>(reason: R, rejection: Option<Rejection>) -> Self {
+        Self {
+            reason: reason.into(),
+            rejection,
+            status: None,
+        }
+    }
+
+    /// A refusal answered with `rejection`, carrying its status.
+    fn refused<R: Into<String>>(reason: R, rejection: Rejection) -> Self {
+        Self {
+            reason: reason.into(),
+            status: Some(rejection.status),
+            rejection: Some(rejection),
+        }
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Request Body Filters
@@ -64,14 +102,42 @@ fn drain_pre_read_body(ctx: &mut PingoraRequestCtx, body: &mut Option<Bytes>) ->
 }
 
 /// Run body filters on a request body chunk, enforcing size limits.
-#[expect(clippy::large_stack_frames, clippy::too_many_lines, reason = "body filter dispatch")]
+#[cfg(feature = "pingora")]
 pub(super) async fn execute(
     pipeline: &FilterPipeline,
     session: &mut Session,
     body: &mut Option<Bytes>,
     end_of_stream: bool,
     ctx: &mut PingoraRequestCtx,
-) -> Result<()> {
+) -> pingora_core::Result<()> {
+    let Err(halt) = run_request_body(pipeline, body, end_of_stream, ctx).await else {
+        return Ok(());
+    };
+    if let Some(rejection) = halt.rejection {
+        send_rejection_for(session, rejection, ctx).await;
+    }
+    let etype = halt.status.map_or(
+        pingora_core::ErrorType::InternalError,
+        pingora_core::ErrorType::HTTPStatus,
+    );
+    Err(pingora_core::Error::explain(etype, halt.reason))
+}
+
+/// Run body filters on a request body chunk, enforcing size limits; the
+/// backend-neutral core of `execute`.
+///
+/// # Errors
+///
+/// Returns [`RequestBodyHalt`] when the body is over a limit, a filter
+/// rejects or fails, or no request snapshot exists; the backend sends its
+/// rejection, if any, and fails the request.
+#[expect(clippy::too_many_lines, reason = "body filter dispatch")]
+pub(in crate::http) async fn run_request_body(
+    pipeline: &FilterPipeline,
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    ctx: &mut PingoraRequestCtx,
+) -> Result<(), RequestBodyHalt> {
     if ctx.connection_upgraded {
         return Ok(());
     }
@@ -98,10 +164,9 @@ pub(super) async fn execute(
         && exceeds_body_ceiling(pipeline.request_body_ceiling(), ctx.request_body_bytes, body.as_ref())
     {
         ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-        send_rejection_for(session, Rejection::status(413), ctx).await;
-        return Err(pingora_core::Error::explain(
-            pingora_core::ErrorType::HTTPStatus(413),
+        return Err(RequestBodyHalt::refused(
             "request body exceeds global body limit",
+            Rejection::status(413),
         ));
     }
 
@@ -109,10 +174,9 @@ pub(super) async fn execute(
         BodyMode::SizeLimit { max_bytes } => {
             if check_body_size_limit(body.as_ref(), &mut ctx.request_body_bytes, max_bytes) {
                 ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-                send_rejection_for(session, Rejection::status(413), ctx).await;
-                return Err(pingora_core::Error::explain(
-                    pingora_core::ErrorType::HTTPStatus(413),
+                return Err(RequestBodyHalt::refused(
                     "request body exceeds maximum size",
+                    Rejection::status(413),
                 ));
             }
             return Ok(());
@@ -121,10 +185,9 @@ pub(super) async fn execute(
         BodyMode::StreamBuffer { max_bytes } if !ctx.request_body_released => {
             if accumulate_stream_buffer(body, &mut ctx.request_body_buffer, end_of_stream, max_bytes) {
                 ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-                send_rejection_for(session, Rejection::status(413), ctx).await;
-                return Err(pingora_core::Error::explain(
-                    pingora_core::ErrorType::HTTPStatus(413),
+                return Err(RequestBodyHalt::refused(
                     "request body exceeds stream_buffer size limit",
+                    Rejection::status(413),
                 ));
             }
             if end_of_stream {
@@ -141,10 +204,7 @@ pub(super) async fn execute(
 
     let (result, request_body_bytes, rewritten_path, output) = {
         let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
-            pingora_core::Error::explain(
-                pingora_core::ErrorType::InternalError,
-                "request snapshot not set when request body hooks are active",
-            )
+            RequestBodyHalt::internal("request snapshot not set when request body hooks are active", None)
         })?;
         let r = pipeline.execute_http_request_body(&mut fctx, body, end_of_stream).await;
         (
@@ -183,21 +243,18 @@ pub(super) async fn execute(
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
-            let status = rejection.status;
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-            send_rejection_for(session, rejection, ctx).await;
-            Err(pingora_core::Error::explain(
-                pingora_core::ErrorType::HTTPStatus(status),
+            Err(RequestBodyHalt::refused(
                 "request body rejected by filter pipeline",
+                rejection,
             ))
         },
         Err(e) => {
             error!(error = %e, "filter pipeline error during request body");
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_INTERNAL);
-            send_rejection_for(session, Rejection::status(500), ctx).await;
-            Err(pingora_core::Error::explain(
-                pingora_core::ErrorType::InternalError,
+            Err(RequestBodyHalt::internal(
                 format!("request body filter error: {e}"),
+                Some(Rejection::status(500)),
             ))
         },
     }

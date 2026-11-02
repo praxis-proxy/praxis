@@ -31,6 +31,7 @@ mod benchmark;
 mod debug;
 #[cfg(feature = "dev")]
 mod echo;
+mod features;
 #[cfg(feature = "dev")]
 mod filter_docs;
 mod fips;
@@ -73,6 +74,10 @@ enum Command {
     /// Run proxy benchmarks and generate reports.
     #[cfg(feature = "dev")]
     Benchmark(Box<benchmark::Args>),
+
+    /// List the workspace's features, qualified by package, for
+    /// cargo invocations that cannot use `--all-features`.
+    Features(features::Args),
 
     /// FIPS build tooling: the compliance report and Red Hat
     /// base image verification.
@@ -117,6 +122,7 @@ fn main() {
         Command::Debug(args) => debug::run(&args),
         #[cfg(feature = "dev")]
         Command::Benchmark(args) => benchmark::run(*args),
+        Command::Features(args) => features::run(&args),
         Command::Fips(args) => fips::run(args),
         Command::LintDeps(args) => lint_deps::run(args),
         Command::LintExampleTests(args) => lint_example_tests::run(args),

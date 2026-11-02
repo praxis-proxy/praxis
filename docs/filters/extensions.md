@@ -516,17 +516,20 @@ coupling filters to each other.
 
 ### Access KV stores for runtime mappings
 
-Use `ctx.kv_stores` with `get_or_create` to access
-runtime-updatable key-value data without restarting
-the proxy. Stores are created on demand:
+Use `ctx.kv_stores` to access runtime-updatable key-value
+data without restarting the proxy. Read a store the
+embedder configured with `get`, which returns `None` for
+a missing name instead of silently creating one. Use
+`get_or_create_memory` only when the filter deliberately
+owns an in-memory store:
 
 ```rust
 async fn on_request(
     &self,
     ctx: &mut HttpFilterContext<'_>,
 ) -> Result<FilterAction, FilterError> {
-    if let Some(registry) = ctx.kv_stores {
-        let store = registry.get_or_create("routing_overrides");
+    // `get` returns `None` when the store is not configured.
+    if let Some(store) = ctx.kv_stores.and_then(|registry| registry.get("routing_overrides")) {
         if let Some(cluster) = store.get("preferred_cluster") {
             ctx.cluster = Some(Arc::from(cluster.as_ref()));
         }

@@ -26,7 +26,7 @@ use super::super::context::PingoraRequestCtx;
 
 /// Classification of an upstream failure outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum RetryOutcome {
+pub(in crate::http) enum RetryOutcome {
     /// TCP/TLS connect failure.
     ConnectFailure,
     /// Connection reset by peer.
@@ -82,6 +82,7 @@ pub(super) fn is_retriable(policy: &RetryPolicy, outcome: RetryOutcome) -> bool 
 }
 
 /// Classify a Pingora error into a [`RetryOutcome`].
+#[cfg(feature = "pingora")]
 #[must_use]
 pub(super) fn classify_error(e: &pingora_core::Error) -> RetryOutcome {
     use pingora_core::ErrorType;
@@ -114,6 +115,7 @@ pub(super) fn classify_error(e: &pingora_core::Error) -> RetryOutcome {
 ///
 /// [`h2::Error`]: h2::Error
 /// [RFC 9113 Section 8.7]: https://datatracker.ietf.org/doc/html/rfc9113#section-8.7
+#[cfg(feature = "pingora")]
 fn classify_h2_error(e: &pingora_core::Error) -> RetryOutcome {
     let Some(h2_error) = e.root_cause().downcast_ref::<h2::Error>() else {
         return RetryOutcome::Other;
@@ -409,6 +411,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pingora")]
     fn h2_error_with_reason(reason: h2::Reason) -> pingora_core::BError {
         pingora_core::Error::because(
             pingora_core::ErrorType::H2Error,
@@ -417,6 +420,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "pingora")]
     #[test]
     fn h2_refused_stream_is_refused_stream() {
         assert_eq!(
@@ -426,6 +430,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pingora")]
     #[test]
     fn h2_internal_error_is_not_refused_stream() {
         assert_eq!(
@@ -435,6 +440,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pingora")]
     #[test]
     fn h2_error_without_cause_is_other() {
         assert_eq!(

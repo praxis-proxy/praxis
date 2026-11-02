@@ -10,6 +10,7 @@
 //! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 //! [RFC 9112]: https://datatracker.ietf.org/doc/html/rfc9112
 
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
 use praxis_filter::Rejection;
 use tracing::{debug, warn};
@@ -25,7 +26,7 @@ const OBS_FOLD_REJECT_HEADERS: &[http::header::HeaderName] = &[http::header::HOS
 /// Mutable request surface used for admission (Pingora session or plain [`HeaderMap`]).
 ///
 /// [`HeaderMap`]: http::HeaderMap
-trait AdmissionRequest {
+pub(in crate::http) trait AdmissionRequest {
     /// Downstream HTTP version.
     fn version(&self) -> http::Version;
 
@@ -40,11 +41,13 @@ trait AdmissionRequest {
 }
 
 /// Admission over a Pingora [`Session`] (production path).
+#[cfg(feature = "pingora")]
 struct SessionAdmission<'a> {
     /// Downstream session whose request header is admitted.
     session: &'a mut Session,
 }
 
+#[cfg(feature = "pingora")]
 impl AdmissionRequest for SessionAdmission<'_> {
     fn version(&self) -> http::Version {
         self.session.req_header().version
@@ -65,6 +68,7 @@ impl AdmissionRequest for SessionAdmission<'_> {
 }
 
 /// Run admission on a Pingora session before the request-phase pipeline.
+#[cfg(feature = "pingora")]
 pub(in crate::http) fn admit_inbound_session(session: &mut Session) -> Option<Rejection> {
     admit_inbound(&mut SessionAdmission { session })
 }
@@ -73,7 +77,7 @@ pub(in crate::http) fn admit_inbound_session(session: &mut Session) -> Option<Re
 ///
 /// `None` means the request may enter the filter pipeline (headers may have
 /// been mutated in place).
-fn admit_inbound(request: &mut impl AdmissionRequest) -> Option<Rejection> {
+pub(in crate::http) fn admit_inbound(request: &mut impl AdmissionRequest) -> Option<Rejection> {
     reject_unsupported_transfer_coding(request.headers())
         .or_else(|| validate_host_header(request))
         .or_else(|| reject_dot_dot_path(request.path()))
@@ -421,6 +425,7 @@ mod tests {
         headers
     }
 
+    #[cfg(feature = "pingora")]
     async fn session_for(raw: &str) -> Session {
         use tokio::io::AsyncWriteExt as _;
 
@@ -432,6 +437,7 @@ mod tests {
         session
     }
 
+    #[cfg(feature = "pingora")]
     fn admit_session(session: &mut Session) -> Option<Rejection> {
         admit_inbound_session(session)
     }
@@ -935,6 +941,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     async fn conflicting_third_host_value_rejected() {
         let mut session = session_for("GET / HTTP/1.1\r\nHost: one.example\r\n\r\n").await;
@@ -948,6 +955,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     async fn session_unsupported_transfer_coding_before_host() {
         let mut session = session_for("GET / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n").await;
@@ -959,6 +967,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     async fn session_host_canonicalized_before_conflicting_content_length() {
         let mut session = session_for("GET / HTTP/1.1\r\nHost: example.com\r\nContent-Length: 5\r\n\r\n").await;
@@ -978,6 +987,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "pingora")]
     #[tokio::test]
     async fn session_reserved_headers_checked_last() {
         let mut session =

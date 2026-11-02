@@ -35,6 +35,9 @@ pub mod runner;
 mod service;
 #[cfg(feature = "admin-api")]
 mod stats_admin;
+/// TLS transport adapter for active probes.
+#[cfg(feature = "tls-health-check")]
+mod tls;
 
 #[cfg(feature = "admin-api")]
 pub use admin_request::{AdminRequest, BodyReadError};
@@ -53,5 +56,7 @@ pub use service::{
     AdminEndpointOptions, PingoraAdminService, PingoraHealthService, PrometheusAdminRecorder,
     install_prometheus_admin_recorder,
 };
+#[cfg(all(feature = "admin-api", feature = "hyper"))]
+pub(crate) use service::{PROMETHEUS_UPKEEP_INTERVAL, run_prometheus_upkeep};
 #[cfg(feature = "admin-api")]
 pub use stats_admin::{ProcessVersionInfo, StatsAdminState};

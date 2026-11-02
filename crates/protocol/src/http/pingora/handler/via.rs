@@ -10,6 +10,7 @@
 //! [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
 
 use http::Version;
+#[cfg(feature = "pingora")]
 use tracing::debug;
 
 // -----------------------------------------------------------------------------
@@ -75,8 +76,8 @@ fn combined_via(headers: &http::HeaderMap, entry: &str) -> Option<String> {
 }
 
 /// Append this proxy's Via entry to an `http` header map.
-#[cfg(feature = "hedged-requests")]
-pub(super) fn append_map_via(headers: &mut http::HeaderMap, version: Version) {
+#[cfg(any(feature = "hedged-requests", feature = "hyper"))]
+pub(in crate::http) fn append_map_via(headers: &mut http::HeaderMap, version: Version) {
     let entry = via_value(version);
     if let Some(combined) = combined_via(headers, entry)
         && let Ok(value) = http::HeaderValue::from_str(&combined)
@@ -93,6 +94,7 @@ pub(super) fn append_map_via(headers: &mut http::HeaderMap, version: Version) {
 /// proxy's entry is appended comma-separated (RFC 9110 treats multiple
 /// `Via` field-lines as one list). If any existing line is non-UTF-8,
 /// the header is replaced outright to avoid a malformed value.
+#[cfg(feature = "pingora")]
 pub(crate) fn append_request_via(req: &mut pingora_http::RequestHeader, upstream_version: Version) {
     let entry = via_value(upstream_version);
     if let Some(combined) = combined_via(&req.headers, entry) {
@@ -117,6 +119,7 @@ pub(crate) fn append_request_via(req: &mut pingora_http::RequestHeader, upstream
 /// the header is replaced outright to avoid a malformed value.
 ///
 /// [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
+#[cfg(feature = "pingora")]
 pub(crate) fn append_response_via(resp: &mut pingora_http::ResponseHeader, upstream_version: Version) {
     let entry = via_value(upstream_version);
     if let Some(combined) = combined_via(&resp.headers, entry) {
@@ -133,6 +136,7 @@ pub(crate) fn append_response_via(resp: &mut pingora_http::ResponseHeader, upstr
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,

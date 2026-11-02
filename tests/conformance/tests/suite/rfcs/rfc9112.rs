@@ -13,8 +13,9 @@ use std::{
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    Backend, free_port, http_get, http_send, parse_body, parse_header as parse_response_header, parse_status,
-    simple_proxy_yaml, start_backend, start_header_echo_backend, start_proxy,
+    Backend, free_port, http_get, http_send, http_send_on_connection, parse_body,
+    parse_header as parse_response_header, parse_status, simple_proxy_yaml, start_backend, start_header_echo_backend,
+    start_proxy,
 };
 
 use super::test_utils::{
@@ -23,7 +24,8 @@ use super::test_utils::{
 
 /// [RFC 9112 Sections 6.3 and 9.3]: after a response filter removes a stale
 /// Content-Length, the HTTP/1.1 response needs self-defined framing to remain
-/// eligible for persistent connections.
+/// eligible for persistent connections. Two requests on one connection prove
+/// the first response ends at its chunked framing rather than at a close.
 ///
 /// [RFC 9112 Sections 6.3 and 9.3]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.3
 #[test]
@@ -57,25 +59,33 @@ insecure_options:
     .expect("test configuration must parse");
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-    );
-    assert_eq!(parse_status(&raw), 200, "filtered response should succeed: {raw}");
-    assert_eq!(
-        parse_response_header(&raw, "transfer-encoding").as_deref(),
-        Some("chunked"),
-        "filtered HTTP/1.1 response must be explicitly framed: {raw}"
-    );
-    assert!(
-        parse_response_header(&raw, "content-length").is_none(),
-        "stale length must stay removed: {raw}"
-    );
-    assert_eq!(
-        parse_body(&raw),
-        "original",
-        "chunked body must decode to the upstream payload"
-    );
+    let mut stream = TcpStream::connect(proxy.addr()).expect("connect to proxy");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set client read timeout");
+
+    for turn in 1..=2 {
+        let raw = http_send_on_connection(&mut stream, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert_eq!(
+            parse_status(&raw),
+            200,
+            "filtered response {turn} should succeed on the same connection: {raw}"
+        );
+        assert_eq!(
+            parse_response_header(&raw, "transfer-encoding").as_deref(),
+            Some("chunked"),
+            "filtered HTTP/1.1 response {turn} must be explicitly framed: {raw}"
+        );
+        assert!(
+            parse_response_header(&raw, "content-length").is_none(),
+            "stale length must stay removed from response {turn}: {raw}"
+        );
+        assert_eq!(
+            parse_body(&raw),
+            "original",
+            "chunked body of response {turn} must decode to the upstream payload"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------

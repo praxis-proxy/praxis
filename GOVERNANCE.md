@@ -1,7 +1,6 @@
 # Governance
 
-Praxis is a CNCF Sandbox project governed by this
-document.
+Praxis is a CNCF Sandbox project governed by this document.
 
 ## Principles
 
@@ -13,22 +12,185 @@ document.
 - **Merit-based.** Influence is earned through
   sustained, high-quality contributions.
 
+## Decision Making
+
+Substantial decisions must happen publicly within
+GitHub, generally brokered by maintainers or leads.
+
+Generally lazy-consensus applies. Silence is *not*
+consent in this project.
+
+If a vote is tied, contested, lacking engagement,
+or otherwise doesn't have clear results the Project
+Leads make the call.
+
+## Roles
+
+Current roles are: `Contributors`; `Reviewers`; `Maintainers`;
+`Community Managers` and `Project Leads`.
+
+In the following sections the function and responsibilities
+of these roles are defined, as well as the criteria for becoming
+one.
+
+See [MAINTAINERS.md](MAINTAINERS.md) for the current list of
+the specific individuals assigned to these roles, and note
+that their assignment is done via [GitHub Teams].
+
+[GitHub Teams]: https://github.com/orgs/praxis-proxy/teams
+
+### Contributor Ladder
+
+Individuals seeking a specific role in the Praxis project
+can follow our ladder process:
+
+1. `Contributor`
+2. `Reviewer`
+3. `Maintainer`
+
+These are based on merit and participation. See below
+for more criteria for these roles.
+
+There are two special tracks:
+
+* `Community Manager`
+* `Project Lead`
+
+These are also based on merit and participation, but are
+effectively _alternate tracks_ to the normal ladder. These
+are handled in a bespoke (but public) manner by the Project
+Leads.
+
+### Contributors
+
+Anyone who contributes code, documentation, issue
+reports, design feedback, project socialization, etc.
+No formal membership required.
+
+### Reviewers
+
+Reviewers are shepherds of the code across one or many repositories.
+They support the overall quality and alignment of the code.
+
+#### Responsibilities
+
+**Code Review**. Reviewers provide initial review of pull requests,
+and hand-off to maintainers for final approvals. Reviewers are
+auto-assigned to pull requests.
+
+#### Criteria
+
+Be highly active in reviews and show deep understanding of the technology
+and subject matter in one or more areas.
+
+### Maintainers
+
+Maintainers are shepherds of one or more repositories within the overall
+project. They are lead engineers driving individual components forward
+according to the overall project direction, keeping the software stable,
+serving the community, and assuring that bugs and security issues are
+found and resolved.
+
+#### Responsibilities
+
+**Issue management**. Maintainers are responsible for actively triaging
+GitHub Issues, accepting incoming issues and assigning them a milestone
+and date (or declining them with clearly documented reasoning).
+
+**Pull request review**. Maintainers are responsible for providing deep
+technical review and the final approval for GitHub Pull Requests. They
+hold the ultimate responsibility for code that makes it into the project.
+Maintainers are auto-assigned to pull requests.
+
+**Milestones**. Maintainers are responsible for setting milestones, with
+estimated release dates. Project boards should consist of multiple
+milestones, with milestone views when applicable.
+
+**Roadmap**. Maintainers are responsible for forming, driving and
+tending to substantial efforts in the form of GitHub Project Boards.
+Issues that are not bugs must be assigned to a project board if
+possible, or documented with the reasoning for being standalone.
+
+**Decision Makers**. Maintainers drive the day-to-day of individual
+sub-projects within Praxis and make decisions about capabilities of the
+software, and issue resolutions. Maintainers are responsible for
+keeping their sub-projects aligned with overall project direction.
+
+#### Criteria
+
+Show a deep expertise in the codebase in the form of both contributions
+and pull request reviews. Participate in project management for one
+or more repositories actively (e.g. issue triage, board management).
+
+### Community Managers
+
+**Our community managers are liaisons for the project**.
+They work across the entire the project, the wider CNCF community,
+and the industry as a whole to socialize and communicate on behalf
+of the project and it's community. This includes representation of
+the project such as artwork, blog posts and social media. They are
+organizers of conferences, booths, etc.
+
+### Project Leads
+
+Directors of the project, and shepherds of the community. Project
+Leads operate across the entire scope of the project.
+
+#### Responsibilities
+
+**Project Leads are arbiters**. They can act as the final decision
+makers and ultimate authority across the project when needed.
+
+**Project Leads are strategists**. They set long-term
+technical direction and guide major efforts and support overall
+project coherence. They define and enforce project scope.
+
+**Project Leads maintain the contributor ladder**. They support
+the community with opportunities in the project and are appointers
+of individuals to official roles.
+
+#### Criteria
+
+Individuals in this group are generally those that have extensive
+contributions across all of the project and have had an unmistakable
+impact on the project as a whole. These people will have been
+consistently engaged with the project over long periods of time.
+
+Given the unique nature of this role, appointment is always bespoke.
+However as per our project principles the process must be performed
+publicly and decisions documented.
+
+### Emeritus
+
+Anyone may step down from any role at any time by
+notifying the Project Leads. They will be moved to emeritus.
+
+Inactivity for 3 or more months (no commits, reviews, or
+issue activity), will trigger a notification to leads and
+maintainers. If inactivity continues, and the individual
+can't be reached, they may be moved to emeritus by the
+leads at their discretion.
+
+Emeritus members are recognized for their contributions but
+generally don't hold any official position or responsibilities.
+
 ## Project vs. Product
 
 Praxis is an open source project, not a product.
 
-No single company owns, controls, or speaks for
+No single organization owns, controls, or speaks for
 Praxis. The project is governed by this document,
 and its maintainers act on behalf of Praxis and
-its community, not on behalf of any employer.
+its community.
 
-Companies, including those that employ our
+Organizations, including companies that employ our
 contributors and maintainers, are welcome and
 encouraged to build commercial products and
 services on top of Praxis, to offer it as a
-hosted or supported service, and to contribute
-the improvements they need back upstream. Those
-commercial offerings are separate and distinct
+hosted or supported service. We ask that you please
+contribute improvements back upstream.
+
+All commercial offerings are separate and distinct
 from the Praxis project itself:
 
 - **The project is vendor-neutral.** Roadmap,
@@ -57,106 +219,6 @@ from the Praxis project itself:
 Adopting Praxis means adopting a community-owned
 project. Any product or service a vendor offers
 around it belongs to that vendor, not to Praxis.
-
-## Roles
-
-See [MAINTAINERS.md](MAINTAINERS.md) for the
-current list of reviewers.
-
-### Contributors
-
-Anyone who contributes code, documentation, issue
-reports, or design feedback. No formal membership
-required.
-
-#### Project Leads
-
-Project Leads oversee all aspects of the project
-and all repositories. They serve as the final
-decision-makers when consensus cannot be reached.
-
-### Reviewers
-
-Reviewers have write access to one or more
-repositories and are responsible for the direction
-and quality of the project within their area.
-
-Praxis defines four reviewer scopes:
-
-- **Project Leads** oversee all aspects of the
-  project and all repositories.
-- **Core Reviewers** oversee the core proxy
-  framework and server builds.
-- **Praxis Policy Engine (PPE) Reviewers** oversee
-  the policy engine and related integrations.
-- **AI Gateway Reviewers** oversee the AI
-  capabilities and AI server builds.
-
-All reviewers share equal authority within their
-scope.
-
-### Emeritus
-
-Those who step down or become inactive are
-moved to Emeritus status. Emeritus members are
-recognized for their contributions but generally
-don't hold any specific position or responsibilities.
-
-## Becoming a Reviewer
-
-To be nominated as a review:
-
-1. Sustained contributions over at least 6 months
-2. Demonstrated understanding of the codebase, the
-   underlying technologies and the project goals
-3. Demonstrates **being a good net-citizen**: is patient
-   and respectful to everyone else. Guides productive
-   conversation and seeks progress and resolutions.
-   Demonstrates a will to **put the good of the project
-   and the community above theirs or their organizations
-   needs**.
-4. Nomination by an existing reviewer
-5. Approval by the Project Lead
-
-Nominations are made via a GitHub issue. The
-nominee should have a track record of quality
-contributions, constructive code reviews, and
-alignment with the project's direction.
-
-## Stepping Down and Inactivity
-
-Reviewers may step down at any time by notifying
-the Project Lead. They will be moved to Emeritus.
-
-If a reviewer is inactive for 3 or more months
-(no commits, reviews, or issue activity), a
-conversation will be initiated. If inactivity
-continues, they will be moved to Emeritus with
-potential to return later.
-
-## Decision Making
-
-Decisions are made by lazy consensus among
-reviewers. Silence is *not* consent.
-
-When consensus cannot be reached:
-
-- **Normal decisions** (feature direction, release
-  timing, dependency changes): simple majority vote
-  among reviewers in the relevant scope.
-- **Cross-scope decisions** (changes affecting
-  multiple areas): simple majority of all
-  reviewers.
-- **Governance changes** (amendments to this
-  document, role changes, reviewer removal):
-  two-thirds supermajority of all reviewers.
-
-If a vote is tied, contested, or there's a lack of
-engagement (e.g. silence) the Project Lead makes the
-call.
-
-Votes are cast via GitHub discussion comments and remain
-open for at least one week.
 
 ## Code of Conduct
 

@@ -18,7 +18,7 @@
 //! backend adds its feature to that `not(...)` list.
 
 #![cfg_attr(
-    not(feature = "pingora"),
+    not(any(feature = "pingora", feature = "hyper")),
     expect(dead_code, reason = "the recording surface is only driven by a backend's data path")
 )]
 

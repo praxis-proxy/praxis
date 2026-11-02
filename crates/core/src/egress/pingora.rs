@@ -125,7 +125,9 @@ impl Connector for PingoraConnector {
     async fn release(&self, session: PingoraSession, keepalive: bool) {
         let PingoraSession { mut inner, peer, .. } = session;
         if keepalive {
-            self.inner.release_http_session(inner, &peer, None).await;
+            self.inner
+                .release_http_session(inner, &peer, peer.options.idle_timeout)
+                .await;
             return;
         }
 
@@ -134,7 +136,9 @@ impl Connector for PingoraConnector {
         // the connection alive for the others. An H1 connection stays shut,
         // because unread bytes would corrupt the next response on it.
         if matches!(inner, HttpSession::H2(_)) {
-            self.inner.release_http_session(inner, &peer, None).await;
+            self.inner
+                .release_http_session(inner, &peer, peer.options.idle_timeout)
+                .await;
         }
     }
 }
@@ -409,6 +413,86 @@ mod tests {
         assert!(session.response_done(), "the original head still frames the response");
         Box::pin(connector.release(session, false)).await;
         backend.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn release_evicts_pooled_connection_after_idle_timeout() {
+        assert!(
+            !reused_after_idle(Some(Duration::from_millis(50))).await,
+            "a connection idle past idle_timeout must not be reused"
+        );
+    }
+
+    #[tokio::test]
+    async fn release_without_idle_timeout_keeps_pooled_connection() {
+        assert!(
+            reused_after_idle(None).await,
+            "without idle_timeout the pooled connection is reused"
+        );
+    }
+
+    /// Run one keep-alive exchange, release it, wait past `idle_timeout`, then
+    /// report whether the next connect reused the pooled connection.
+    #[expect(clippy::too_many_lines, reason = "two exchanges with an idle gap")]
+    async fn reused_after_idle(idle_timeout: Option<Duration>) -> bool {
+        praxis_tls::provider::install();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut peer = PeerSpec::plain(listener.local_addr().unwrap());
+        peer.connection = Arc::new(ConnectionOptions {
+            idle_timeout,
+            ..ConnectionOptions::default()
+        });
+        let backend = tokio::spawn(keepalive_backend(listener));
+        let connector = PingoraConnector::new(4);
+
+        let mut session = Box::pin(connector.connect(&peer, Duration::from_secs(5)))
+            .await
+            .unwrap();
+        session
+            .send_request_head(RequestHead {
+                method: http::Method::GET,
+                target: "/".to_owned(),
+                headers: http::HeaderMap::new(),
+            })
+            .await
+            .unwrap();
+        session.finish_request().await.unwrap();
+        session.read_response_head().await.unwrap();
+        assert!(session.response_done(), "empty body completes the response");
+        Box::pin(connector.release(session, true)).await;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let next = Box::pin(connector.connect(&peer, Duration::from_secs(5)))
+            .await
+            .unwrap();
+        let reused = next.reused();
+        Box::pin(connector.release(next, false)).await;
+        backend.abort();
+        reused
+    }
+
+    /// Answer every request with an empty 200, keeping connections open.
+    async fn keepalive_backend(listener: tokio::net::TcpListener) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = Vec::with_capacity(4096);
+                loop {
+                    while !buf.ends_with(b"\r\n\r\n") {
+                        if socket.read_buf(&mut buf).await.unwrap_or(0) == 0 {
+                            return;
+                        }
+                    }
+                    buf.clear();
+                    socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                        .await
+                        .unwrap();
+                }
+            });
+        }
     }
 
     #[test]

@@ -12,23 +12,25 @@
 /// Request body handling for the selected-upstream phase.
 mod body_handling;
 /// Pre-read error classification and client disconnect handling.
+#[cfg(feature = "pingora")]
 mod error_handling;
 /// Header mutation application for pre-read and request-phase filters.
-mod header_mutations;
+pub(in crate::http) mod header_mutations;
 /// Hedged upstream attempts for a route that configured `hedge_policy`.
-#[cfg(feature = "hedged-requests")]
+#[cfg(all(feature = "pingora", feature = "hedged-requests"))]
 mod hedge;
 /// Request-phase entry point and pipeline runner.
-mod pipeline;
+pub(in crate::http) mod pipeline;
 /// Request-head phase execution, before `StreamBuffer` pre-read.
-mod request_head;
+pub(in crate::http) mod request_head;
 /// Request utilities: span creation, snapshotting, and validation.
-mod request_utils;
+pub(in crate::http) mod request_utils;
 /// StreamBuffer pre-read logic and TRACE response construction.
-mod stream_buffer;
+pub(in crate::http) mod stream_buffer;
 /// Terminal response delivery (buffered and streaming).
-mod terminal_responses;
+pub(in crate::http) mod terminal_responses;
 /// Max-Forwards handling for TRACE and OPTIONS.
-mod validation;
+pub(in crate::http) mod validation;
 
+#[cfg(feature = "pingora")]
 pub(in crate::http) use pipeline::execute;

@@ -70,6 +70,8 @@ pub mod trace_state;
 
 pub use errors::ProxyError;
 pub use logging::TracingGuard;
+#[cfg(feature = "hyper")]
+pub use server::HyperRuntime;
 #[cfg(feature = "pingora")]
 pub use server::PingoraServerRuntime;
 pub use server::{RuntimeOptions, ServerRuntime};
@@ -80,14 +82,19 @@ pub use server::{RuntimeOptions, ServerRuntime};
 
 /// The network backend this build runs on.
 ///
-/// Exactly one backend is selected at build time with a Cargo feature, and
-/// these names resolve to its types: `Runtime` implements [`ServerRuntime`]
-/// and `Connector` implements [`egress::Connector`]. Under the `pingora`
-/// feature both are the Pingora implementations. Without a backend feature
-/// the library still compiles: `Connector` refuses every connection and
-/// `Runtime` has nothing to serve, and the `praxis-proxy` binary refuses to
-/// build. Adding a backend means adding its feature here; see
+/// A backend is selected at build time with a Cargo feature, and these
+/// names resolve to its types: `Runtime` implements [`ServerRuntime`] and
+/// `Connector` implements [`egress::Connector`]. Under the `pingora` feature
+/// both are the Pingora implementations; under `hyper` they are the hyper
+/// ones. The two are mutually exclusive: enabling both is a compile error,
+/// so a hyper build starts from `--no-default-features`. [`NAME`] names the
+/// backend compiled in. Without a backend feature the library still
+/// compiles: `Connector` refuses every connection and `Runtime` has nothing
+/// to serve, and the `praxis-proxy` binary refuses to build. Adding a
+/// backend means adding its feature here; see
 /// `docs/developing/adding-backends.md`.
+///
+/// [`NAME`]: crate::backend::NAME
 ///
 /// ```
 /// use praxis_core::{backend, egress::Connector as _};
@@ -100,16 +107,38 @@ pub use server::{RuntimeOptions, ServerRuntime};
 /// [`ServerRuntime`]: crate::server::ServerRuntime
 /// [`egress::Connector`]: crate::egress::Connector
 pub mod backend {
+    #[cfg(all(feature = "pingora", feature = "hyper"))]
+    compile_error!(
+        "the `pingora` and `hyper` network backends are mutually exclusive: build the hyper backend with \
+         `--no-default-features --features hyper`"
+    );
+
     /// With no backend compiled in, every connection is refused.
-    #[cfg(not(feature = "pingora"))]
+    #[cfg(not(any(feature = "pingora", feature = "hyper")))]
     pub use crate::egress::Unavailable as Connector;
+    /// The egress connector shared by every outbound exchange.
+    #[cfg(feature = "hyper")]
+    pub use crate::egress::hyper::HyperConnector as Connector;
     /// The egress connector shared by every outbound exchange.
     #[cfg(feature = "pingora")]
     pub use crate::egress::pingora::PingoraConnector as Connector;
     /// With no backend compiled in, there is nothing to serve.
-    #[cfg(not(feature = "pingora"))]
+    #[cfg(not(any(feature = "pingora", feature = "hyper")))]
     pub use crate::server::UnavailableRuntime as Runtime;
+    /// The server runtime: owns the async runtime, listeners and shutdown.
+    #[cfg(feature = "hyper")]
+    pub use crate::server::hyper::HyperRuntime as Runtime;
     /// The server runtime: owns the async runtime, listeners and shutdown.
     #[cfg(feature = "pingora")]
     pub use crate::server::pingora::PingoraServerRuntime as Runtime;
+
+    /// The selected backend's name, for startup logs and diagnostics.
+    #[cfg(not(any(feature = "pingora", feature = "hyper")))]
+    pub const NAME: &str = "none";
+    /// The selected backend's name, for startup logs and diagnostics.
+    #[cfg(feature = "hyper")]
+    pub const NAME: &str = "hyper";
+    /// The selected backend's name, for startup logs and diagnostics.
+    #[cfg(feature = "pingora")]
+    pub const NAME: &str = "pingora";
 }

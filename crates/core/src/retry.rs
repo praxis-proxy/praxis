@@ -286,8 +286,10 @@ impl ClusterRetryState {
 /// have been processed; a truncated buffer is excluded because a partial
 /// body cannot be resent intact.
 ///
-/// Every network backend applies this same rule to its own reuse signal and
-/// replay buffer, so the retry semantics do not drift between backends.
+/// Callers must first have an explicit transport guarantee such as
+/// `ReusedOnly` that the request was not processed. Connection reuse plus a
+/// generic closed/reset error is insufficient; without that guarantee,
+/// apply the configured retry policy.
 ///
 /// ```
 /// use praxis_core::retry::reused_only_replay_safe;

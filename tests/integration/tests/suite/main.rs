@@ -76,11 +76,14 @@ mod guardrails;
 mod health_check;
 mod hot_reload;
 mod http_active_requests;
+#[cfg(feature = "hyper")]
+mod hyper_backend;
 mod ip_acl;
 #[cfg(feature = "iterative-request-router")]
 mod iterative_request_router;
 mod json_body_field;
 mod json_rpc;
+mod kv_admin;
 mod path_rewrite;
 mod payload_processing;
 mod per_listener_pipeline;
@@ -120,3 +123,6 @@ mod url_target_tls;
 mod via;
 mod websocket;
 mod wildcard_routing;
+
+#[cfg(feature = "tls-health-check")]
+mod tls_health_check;

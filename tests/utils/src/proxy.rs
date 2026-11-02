@@ -17,6 +17,7 @@ use praxis_core::{
     backend::Runtime,
     config::{Config, ExpandedFilterChains, Listener, ProtocolKind},
     health::{HealthRegistry, build_health_registry},
+    kv::KvStoreRegistry,
 };
 use praxis_filter::{FilterFactory, FilterPipeline, FilterRegistry, HttpFilter};
 use praxis_protocol::{
@@ -74,14 +75,17 @@ const TEST_WORKER_THREADS: usize = 2;
 ///
 /// The fallback below builds the standard binary, so a run against another
 /// feature set has to say which binary it means: `make test-integration-fips`
-/// points this at the FIPS build.
+/// points this at the FIPS build and `make test-integration-hyper` at the
+/// hyper build.
 pub const PRAXIS_BIN_ENV: &str = "PRAXIS_BIN";
 
 /// Path to the `praxis` binary for subprocess integration tests.
 ///
 /// Uses [`PRAXIS_BIN_ENV`] when set, then `CARGO_BIN_EXE_praxis`; otherwise
 /// resolves under `CARGO_TARGET_DIR` (including llvm-cov's alternate target
-/// dir) and builds the binary if it is not already present.
+/// dir), in its `hyper` subdirectory when this harness tests the hyper
+/// backend, and builds the binary for that backend if it is not already
+/// present.
 ///
 /// # Panics
 ///
@@ -105,7 +109,9 @@ pub fn praxis_bin() -> PathBuf {
     }
 
     let status = std::process::Command::new(env!("CARGO"))
-        .args(["build", "-p", "praxis-proxy", "--bin", "praxis", "-q"])
+        .args(["build", "-p", "praxis-proxy", "--bin", "praxis", "-q", "--target-dir"])
+        .arg(build_target_dir())
+        .args(backend_build_args())
         .status()
         .expect("spawn cargo build for praxis binary");
     assert!(status.success(), "cargo build -p praxis-proxy --bin praxis failed");
@@ -119,15 +125,41 @@ pub fn praxis_bin() -> PathBuf {
 fn resolve_praxis_bin_path() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_praxis").map_or_else(
         || {
-            let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
-                || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
-                PathBuf::from,
-            );
             let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
-            target.join(profile).join("praxis")
+            build_target_dir().join(profile).join("praxis")
         },
         PathBuf::from,
     )
+}
+
+/// The target directory the fallback build uses: cargo's, with a `hyper`
+/// subdirectory when this harness tests the hyper backend, so neither
+/// backend's binary stands in for the other's.
+fn build_target_dir() -> PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+        PathBuf::from,
+    );
+    if cfg!(feature = "hyper") {
+        target.join("hyper")
+    } else {
+        target
+    }
+}
+
+/// The feature arguments selecting the backend this harness tests: the
+/// binary's defaults, or under `hyper` that backend with the binary's other
+/// default features, as `make build-hyper` builds it.
+fn backend_build_args() -> &'static [&'static str] {
+    if cfg!(feature = "hyper") {
+        &[
+            "--no-default-features",
+            "--features",
+            "hyper,config-reload,admin-api,policy-engine",
+        ]
+    } else {
+        &[]
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -149,8 +181,14 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
         .for_listener(listener)
         .unwrap_or_else(|err| panic!("{err}"));
 
-    let mut pipeline =
-        FilterPipeline::build_with_chains(&mut entries, registry, &chains, &config.insecure_options).unwrap();
+    let mut pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        registry,
+        &chains,
+        &config.insecure_options,
+        &config.clusters,
+    )
+    .unwrap();
     configure_test_pipeline(&mut pipeline, config);
     Arc::new(pipeline)
 }
@@ -355,19 +393,19 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
 /// and spawn background health check probes.
 fn build_full_server(config: &Config) -> Runtime {
     let registry = praxis::build_full_registry();
-    build_full_server_with_registry(config, &registry)
+    build_full_server_with_registry(config, &registry, KvStoreRegistry::new())
 }
 
 /// Build a backend [`Runtime`] with a caller-supplied filter
-/// registry, HTTP and TCP protocols, and background health probes.
+/// registry and KV store registry, HTTP and TCP protocols, and
+/// background health probes.
 #[expect(clippy::too_many_lines, reason = "test utility wiring")]
-fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -> Runtime {
+fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry, kv_stores: KvStoreRegistry) -> Runtime {
     // Every full-proxy start builds a `SubRequestConnector`, which constructs a
     // rustls `ClientConfig`. Hooking the certificate fixtures is not enough: a test
     // that starts a proxy without TLS reaches rustls with no provider installed.
     crate::net::tls::ensure_crypto_provider();
     let health_registry = build_health_registry(&config.clusters);
-    let kv_stores = praxis_core::kv::KvStoreRegistry::new();
     let ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
     let subrequest_connector = praxis_core::subrequest::SubRequestConnector::with_options(
         praxis_core::subrequest::SubRequestConnectorOptions {
@@ -505,7 +543,23 @@ pub fn start_full_proxy(config: &Config) -> ProxyGuard {
 /// Panics if `config.listeners` is empty or pipeline resolution
 /// fails.
 pub fn start_full_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> ProxyGuard {
-    let runtime = build_full_server_with_registry(config, registry);
+    let runtime = build_full_server_with_registry(config, registry, KvStoreRegistry::new());
+    start_full_proxy_runtime(config, runtime)
+}
+
+/// Start a full proxy server whose pipelines and admin KV API share
+/// `kv_stores`, as an embedder that registers its own stores would.
+///
+/// The registry is shared, not copied: stores the test registers
+/// before or after startup are the ones the running proxy serves.
+///
+/// # Panics
+///
+/// Panics if `config.listeners` is empty or pipeline resolution
+/// fails.
+pub fn start_full_proxy_with_kv_stores(config: &Config, kv_stores: &KvStoreRegistry) -> ProxyGuard {
+    let registry = praxis::build_full_registry();
+    let runtime = build_full_server_with_registry(config, &registry, kv_stores.clone());
     start_full_proxy_runtime(config, runtime)
 }
 

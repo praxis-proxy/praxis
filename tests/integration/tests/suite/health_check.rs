@@ -2,9 +2,12 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Integration tests for active health checks.
+//!
+//! The tests gated on `pingora` build a Pingora server directly.
 
+#[cfg(feature = "pingora")]
+use std::collections::HashMap;
 use std::{
-    collections::HashMap,
     io::{Read as _, Write as _},
     net::TcpStream,
     sync::{
@@ -14,13 +17,13 @@ use std::{
     time::Duration,
 };
 
-use praxis_core::{
-    config::Config,
-    health::{EndpointHealth, HealthRegistry},
-};
+use praxis_core::config::Config;
+#[cfg(feature = "pingora")]
+use praxis_core::health::{EndpointHealth, HealthRegistry};
+#[cfg(feature = "pingora")]
+use praxis_test_utils::ensure_crypto_provider;
 use praxis_test_utils::{
-    ensure_crypto_provider, free_port, http_get, start_backend_with_shutdown, start_full_proxy, start_proxy,
-    wait_for_http,
+    free_port, http_get, start_backend_with_shutdown, start_full_proxy, start_proxy, wait_for_http,
 };
 
 // -----------------------------------------------------------------------------
@@ -309,6 +312,7 @@ filter_chains:
     );
 }
 
+#[cfg(feature = "pingora")]
 #[test]
 fn ready_endpoint_reports_cluster_health() {
     ensure_crypto_provider();
@@ -405,6 +409,7 @@ insecure_options:
     assert_eq!(status, 200, "/metrics should install its recorder");
 }
 
+#[cfg(feature = "pingora")]
 #[test]
 fn ready_endpoint_returns_503_when_all_unhealthy() {
     let admin_port = free_port();

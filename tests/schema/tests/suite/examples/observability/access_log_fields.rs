@@ -46,6 +46,7 @@ fn access_log_fields_example_builds_pipeline() {
         &registry,
         &chains,
         &praxis_core::config::InsecureOptions::default(),
+        &config.clusters,
     )
     .expect("pipeline should build");
 }

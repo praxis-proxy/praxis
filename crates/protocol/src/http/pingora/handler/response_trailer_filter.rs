@@ -14,7 +14,7 @@ use crate::http::pingora::context::PingoraRequestCtx;
 /// Returning `Some(bytes)` tells Pingora to drop the trailers and send
 /// those bytes as the response body's final chunk instead — the
 /// conversion a browser needs, since it cannot read HTTP trailers.
-pub(super) fn execute(
+pub(in crate::http) fn execute(
     pipeline: &FilterPipeline,
     trailers: &mut http::HeaderMap,
     ctx: &mut PingoraRequestCtx,

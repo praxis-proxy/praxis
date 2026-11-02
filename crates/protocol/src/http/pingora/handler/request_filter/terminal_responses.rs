@@ -9,23 +9,25 @@
 //! response size limit enforcement.
 
 use bytes::Bytes;
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
-use praxis_filter::{
-    BodyMode, ClientResponseHeadersCommitted, FilterAction, FilterPipeline, Rejection, StreamingTerminalResponse,
-    TerminalResponse,
-};
-use tracing::{debug, error, warn};
+use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection};
+#[cfg(feature = "pingora")]
+use praxis_filter::{ClientResponseHeadersCommitted, StreamingTerminalResponse, TerminalResponse};
+#[cfg(feature = "pingora")]
+use tracing::debug;
+use tracing::{error, warn};
 
+#[cfg(feature = "pingora")]
+use super::super::super::convert::{send_rejection, send_rejection_for};
 use super::super::{
-    super::{
-        context::PingoraRequestCtx,
-        convert::{send_rejection, send_rejection_for},
-    },
+    super::context::PingoraRequestCtx,
     body_util::clamp_body_mode_to_ceiling,
     hop_by_hop::{RESPONSE_HOP_BY_HOP, strip_hop_by_hop_header_map, strip_reserved_internal_header_map},
 };
 
 /// Run response filters on a buffered terminal response and send it downstream.
+#[cfg(feature = "pingora")]
 pub(super) async fn run_terminal_response(
     pipeline: &FilterPipeline,
     session: &mut Session,
@@ -65,7 +67,7 @@ pub(super) async fn run_terminal_response(
 /// Run response-header filters and persist their request-scoped state.
 #[expect(clippy::too_many_lines, reason = "writeback destructuring")]
 #[expect(clippy::expect_used, reason = "request_snapshot checked via let-else guard above")]
-async fn prepare_terminal_response(
+pub(in crate::http) async fn prepare_terminal_response(
     pipeline: &FilterPipeline,
     ctx: &mut PingoraRequestCtx,
     status: u16,
@@ -143,7 +145,7 @@ async fn prepare_terminal_response(
 
 /// Run one parent response-body filter invocation and persist its state.
 #[expect(clippy::too_many_lines, reason = "writeback destructuring")]
-fn run_parent_terminal_body_filters(
+pub(in crate::http) fn run_parent_terminal_body_filters(
     pipeline: &FilterPipeline,
     ctx: &mut PingoraRequestCtx,
     resp: &praxis_filter::Response,
@@ -218,6 +220,7 @@ fn run_parent_terminal_body_filters(
 }
 
 /// Deliver an opaque terminal stream directly to the downstream session.
+#[cfg(feature = "pingora")]
 #[expect(clippy::too_many_lines, reason = "stream lifecycle state machine")]
 #[expect(
     clippy::cognitive_complexity,
@@ -350,6 +353,7 @@ pub(super) async fn run_streaming_terminal_response(
 }
 
 /// Suppress a bodyless streaming terminal response (HEAD, 204, 304).
+#[cfg(feature = "pingora")]
 async fn suppress_streaming_terminal_response(
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
@@ -382,7 +386,7 @@ async fn suppress_streaming_terminal_response(
 }
 
 /// Remove transport framing and hop-by-hop headers before commitment.
-fn prepare_streaming_headers(
+pub(in crate::http) fn prepare_streaming_headers(
     resp: &mut praxis_filter::Response,
     is_head: bool,
     is_not_modified: bool,
@@ -403,6 +407,7 @@ fn prepare_streaming_headers(
 }
 
 /// Build a header for a streamed response without synthesizing body length.
+#[cfg(feature = "pingora")]
 fn build_streaming_terminal_header(resp: &praxis_filter::Response) -> Option<pingora_http::ResponseHeader> {
     let code = resp.status.as_u16();
     if !(200..=599).contains(&code) {
@@ -426,7 +431,11 @@ fn build_streaming_terminal_header(resp: &praxis_filter::Response) -> Option<pin
 }
 
 /// Enforce an incremental response size limit after raw bytes are counted.
-fn streaming_size_limit_exceeded(ctx: &PingoraRequestCtx, pipeline: &FilterPipeline) -> bool {
+pub(in crate::http) fn streaming_size_limit_exceeded(ctx: &PingoraRequestCtx, pipeline: &FilterPipeline) -> bool {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "BodyMode is non_exhaustive; every other mode has no incremental limit"
+    )]
     let max_bytes = match ctx.response_body_mode {
         BodyMode::SizeLimit { max_bytes } => Some(max_bytes),
         BodyMode::Stream => pipeline.response_body_ceiling(),
@@ -447,6 +456,7 @@ fn streaming_size_limit_exceeded(ctx: &PingoraRequestCtx, pipeline: &FilterPipel
 }
 
 /// Build a Pingora response header from filter-modified state.
+#[cfg(feature = "pingora")]
 fn build_terminal_header(
     resp: &praxis_filter::Response,
     body: Option<&Bytes>,
@@ -480,6 +490,7 @@ fn build_terminal_header(
 }
 
 /// Write a terminal response (headers + optional body) to the Pingora session.
+#[cfg(feature = "pingora")]
 async fn send_terminal_to_session(session: &mut Session, resp: &praxis_filter::Response, body: Option<Bytes>) {
     let is_head = session.req_header().method == http::Method::HEAD;
     let status = resp.status;
@@ -506,6 +517,7 @@ async fn send_terminal_to_session(session: &mut Session, resp: &praxis_filter::R
 }
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,

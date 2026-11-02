@@ -11,26 +11,30 @@
 use std::{borrow::Cow, sync::Arc};
 
 use bytes::Bytes;
-use pingora_core::Result;
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
+#[cfg(feature = "pingora")]
 use praxis_core::connectivity::normalize_mapped_ipv4;
-use praxis_filter::{BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request};
+#[cfg(feature = "pingora")]
+use praxis_filter::BodyMode;
+use praxis_filter::{FilterAction, FilterError, FilterPipeline, Rejection, Request};
+#[cfg(feature = "pingora")]
 use tracing::{Instrument as _, error};
 
+#[cfg(feature = "pingora")]
 use super::{
-    super::{
-        super::{
-            context::PingoraRequestCtx,
-            convert::{request_header_from_session, send_rejection_for},
-        },
-        body_util::clamp_body_mode_to_ceiling,
-    },
-    body_handling::{selected_upstream_body_limit, store_adapted_request_body, store_canonical_request_body},
+    super::super::convert::{request_header_from_session, send_rejection_for},
     error_handling::handle_pre_read_io_error,
-    header_mutations::{apply_pending_header_mutations, apply_pre_read_mutations},
-    request_utils::{create_request_span, snapshot_for_early_exit, templated_route},
+    header_mutations::apply_pre_read_mutations,
+    request_utils::{create_request_span, snapshot_for_early_exit},
     stream_buffer::PreReadError,
     terminal_responses::{run_streaming_terminal_response, run_terminal_response},
+};
+use super::{
+    super::{super::context::PingoraRequestCtx, body_util::clamp_body_mode_to_ceiling},
+    body_handling::{selected_upstream_body_limit, store_adapted_request_body, store_canonical_request_body},
+    header_mutations::apply_pending_header_mutations,
+    request_utils::templated_route,
 };
 
 // -----------------------------------------------------------------------------
@@ -38,18 +42,28 @@ use super::{
 // -----------------------------------------------------------------------------
 
 /// Results from running the request-phase filter pipeline.
-struct PipelineResult {
+///
+/// The header lists were already applied to the request snapshot; the
+/// Pingora handler applies them to its session's forwarded head as well.
+#[cfg_attr(
+    not(feature = "pingora"),
+    expect(
+        dead_code,
+        reason = "the hyper backend forwards the snapshot the lists were applied to"
+    )
+)]
+pub(in crate::http) struct PipelineResult {
     /// Final filter action.
-    action: FilterAction,
+    pub(in crate::http) action: FilterAction,
 
     /// Extra headers to add to the upstream request.
-    extra_headers: Vec<(Cow<'static, str>, String)>,
+    pub(in crate::http) extra_headers: Vec<(Cow<'static, str>, String)>,
 
     /// Headers to remove from the upstream request.
-    headers_to_remove: Vec<http::header::HeaderName>,
+    pub(in crate::http) headers_to_remove: Vec<http::header::HeaderName>,
 
     /// Headers to set (overwrite) on the upstream request.
-    headers_to_set: Vec<(http::header::HeaderName, http::header::HeaderValue)>,
+    pub(in crate::http) headers_to_set: Vec<(http::header::HeaderName, http::header::HeaderValue)>,
 }
 
 // -----------------------------------------------------------------------------
@@ -79,6 +93,7 @@ struct CanonicalRequestBody(Bytes);
 ///
 /// Host header validation runs first (before the pipeline) to reject
 /// ambiguous requests early.
+#[cfg(feature = "pingora")]
 #[expect(clippy::too_many_lines, reason = "orchestration function")]
 #[expect(
     clippy::large_stack_frames,
@@ -88,7 +103,7 @@ pub(in crate::http) async fn execute(
     pipeline: &FilterPipeline,
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
-) -> Result<bool> {
+) -> pingora_core::Result<bool> {
     // Stale upstream-contact state from a prior keep-alive request is cleared in
     // early_request_filter (the first per-request hook), before any rejection
     // path, so it cannot leak into this request's passive-health attribution.
@@ -263,11 +278,11 @@ pub(in crate::http) async fn execute(
 ///
 /// Returns the final action and any extra headers promoted by filters.
 #[expect(clippy::too_many_lines, reason = "writeback destructuring")]
-async fn run_pipeline(
+pub(in crate::http) async fn run_pipeline(
     pipeline: &FilterPipeline,
     mut request: Request,
     ctx: &mut PingoraRequestCtx,
-) -> std::result::Result<PipelineResult, FilterError> {
+) -> Result<PipelineResult, FilterError> {
     let baseline_request_body_mode = ctx.request_body_mode;
     let baseline_response_body_mode = ctx.response_body_mode;
     let (
@@ -519,6 +534,10 @@ mod tests {
 
     use http::{HeaderMap, Method, Uri};
     use praxis_core::config::FailureMode;
+    #[cfg(not(feature = "pingora"))]
+    use praxis_core::connectivity::normalize_mapped_ipv4;
+    #[cfg(not(feature = "pingora"))]
+    use praxis_filter::BodyMode;
     use praxis_filter::{FilterRegistry, TrustedHeaderMutation};
 
     use super::*;
@@ -937,7 +956,7 @@ mod tests {
         async fn on_request(
             &self,
             _ctx: &mut praxis_filter::HttpFilterContext<'_>,
-        ) -> std::result::Result<FilterAction, FilterError> {
+        ) -> Result<FilterAction, FilterError> {
             Ok(FilterAction::Continue)
         }
 
@@ -953,7 +972,7 @@ mod tests {
             &self,
             _ctx: &mut praxis_filter::HttpFilterContext<'_>,
             body: &mut Option<Bytes>,
-        ) -> std::result::Result<praxis_filter::SelectedUpstreamBodyOutcome, FilterError> {
+        ) -> Result<praxis_filter::SelectedUpstreamBodyOutcome, FilterError> {
             if let Some(b) = body {
                 let upper: Vec<u8> = b.iter().map(u8::to_ascii_uppercase).collect();
                 *b = Bytes::from(upper);
@@ -973,7 +992,7 @@ mod tests {
         async fn on_request(
             &self,
             _ctx: &mut praxis_filter::HttpFilterContext<'_>,
-        ) -> std::result::Result<FilterAction, FilterError> {
+        ) -> Result<FilterAction, FilterError> {
             Ok(FilterAction::Continue)
         }
 
@@ -989,7 +1008,7 @@ mod tests {
             &self,
             _ctx: &mut praxis_filter::HttpFilterContext<'_>,
             _body: &mut Option<Bytes>,
-        ) -> std::result::Result<praxis_filter::SelectedUpstreamBodyOutcome, FilterError> {
+        ) -> Result<praxis_filter::SelectedUpstreamBodyOutcome, FilterError> {
             Ok(praxis_filter::SelectedUpstreamBodyOutcome::Reject(Rejection::status(
                 413,
             )))
@@ -1007,7 +1026,7 @@ mod tests {
         async fn on_request(
             &self,
             _ctx: &mut praxis_filter::HttpFilterContext<'_>,
-        ) -> std::result::Result<FilterAction, FilterError> {
+        ) -> Result<FilterAction, FilterError> {
             Ok(FilterAction::Continue)
         }
 
@@ -1023,7 +1042,7 @@ mod tests {
             &self,
             _ctx: &mut praxis_filter::HttpFilterContext<'_>,
             _body: &mut Option<Bytes>,
-        ) -> std::result::Result<praxis_filter::SelectedUpstreamBodyOutcome, FilterError> {
+        ) -> Result<praxis_filter::SelectedUpstreamBodyOutcome, FilterError> {
             Err(FilterError::from("selected-upstream body hook failed"))
         }
     }

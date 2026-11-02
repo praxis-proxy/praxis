@@ -13,71 +13,83 @@
 //! Each submodule implements one Pingora hook. The pipeline is held
 //! behind `Arc<ArcSwap<FilterPipeline>>` for lock-free hot reload.
 
+#[cfg(feature = "pingora")]
 use std::{sync::Arc, time::Duration};
 
+#[cfg(feature = "pingora")]
 use arc_swap::ArcSwap;
+#[cfg(feature = "pingora")]
 use pingora_core::{Result, server::Server, services::listening::Service};
+#[cfg(feature = "pingora")]
 use pingora_proxy::http_proxy;
+#[cfg(feature = "pingora")]
 use praxis_filter::FilterPipeline;
+#[cfg(feature = "pingora")]
 use tokio::sync::Semaphore;
+#[cfg(feature = "pingora")]
 use tracing::debug;
 
 use super::metrics;
 
 /// Safe per-request compression configuration.
+#[cfg(feature = "pingora")]
 mod compression;
 /// Upstream connection established hook.
-mod connected_to_upstream;
+pub(in crate::http) mod connected_to_upstream;
 /// Structured error responses for fatal proxy errors.
-mod fail_to_proxy;
+pub(in crate::http) mod fail_to_proxy;
 /// Shared hop-by-hop header stripping logic.
-mod hop_by_hop;
+pub(in crate::http) mod hop_by_hop;
 /// Pre-pipeline inbound request admission.
-mod inbound_admission;
+pub(in crate::http) mod inbound_admission;
 /// Path dot-dot traversal detection.
 mod path_traversal;
 /// Request body filter hook.
-mod request_body_filter;
+pub(in crate::http) mod request_body_filter;
 /// Request filter hook.
-mod request_filter;
+pub(in crate::http) mod request_filter;
 /// Response body filter hook.
-mod response_body_filter;
+pub(in crate::http) mod response_body_filter;
 /// Response filter hook.
-mod response_filter;
+pub(in crate::http) mod response_filter;
 /// Response trailer hook: filter-driven trailer rewriting.
-mod response_trailer_filter;
+pub(in crate::http) mod response_trailer_filter;
 /// Response trailer hook: gRPC completion capture.
-mod response_trailers;
+pub(in crate::http) mod response_trailers;
 /// Policy-aware retry decision engine.
-mod retry;
+pub(in crate::http) mod retry;
 /// Upstream peer selection hook.
-mod upstream_peer;
+pub(in crate::http) mod upstream_peer;
 /// Upstream request transformation hook.
-mod upstream_request;
+pub(in crate::http) mod upstream_request;
 /// Upstream response hop-by-hop stripping hook.
+#[cfg(feature = "pingora")]
 mod upstream_response;
 /// Via header injection hook.
-mod via;
+pub(in crate::http) mod via;
 /// HTTP handler with body filter hooks.
+#[cfg(feature = "pingora")]
 mod with_body;
 
 /// Body mode clamping and stream buffer utilities.
 mod body_util;
 /// Passive health checking utilities.
-mod health_util;
+pub(in crate::http) mod health_util;
 /// Fallback access log emission and response filter cleanup.
-mod logging_util;
+pub(in crate::http) mod logging_util;
 /// Request metrics emission utilities.
-mod metrics_util;
+pub(in crate::http) mod metrics_util;
 /// Retry decision logic and state management.
-mod retry_util;
+pub(in crate::http) mod retry_util;
 /// Pingora HTTP/2 server option builders.
+#[cfg(feature = "pingora")]
 mod server_options;
 /// Span attribute recording for request tracing.
-mod span_util;
+pub(in crate::http) mod span_util;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use upstream_peer::{UpstreamRetryGateRelease, arm_upstream_retry_gate, lock_upstream_retry_gate_tests};
+#[cfg(feature = "pingora")]
 pub use with_body::PingoraHttpHandler;
 
 // -----------------------------------------------------------------------------
@@ -126,6 +138,7 @@ pub use with_body::PingoraHttpHandler;
 /// Returns [`ProxyError`] if the listener fails to bind.
 ///
 /// [`ProxyError`]: praxis_core::ProxyError
+#[cfg(feature = "pingora")]
 pub fn load_http_handler(
     server: &mut Server,
     listener: &praxis_core::config::Listener,
@@ -158,6 +171,7 @@ pub fn load_http_handler(
 }
 
 /// Create a Pingora HTTP proxy service, bind the listener, and add it to the server.
+#[cfg(feature = "pingora")]
 fn wire_service<H>(
     server: &mut Server,
     listener: &praxis_core::config::Listener,
@@ -185,6 +199,7 @@ where
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,

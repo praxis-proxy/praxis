@@ -310,6 +310,7 @@ fn host_cargo_test(addr: &str, work: &Path, libtest: &[&str]) -> Command {
     command
         .current_dir(workspace_root())
         .args(["test", "--target-dir", "target/fips", "--no-default-features"])
+        .args(["--features", "pingora"])
         .args(["-p", "praxis-tests-integration", "--test", "suite", "--"])
         .args(libtest)
         .env("PRAXIS_FIPS_HOST", "1")
@@ -340,6 +341,7 @@ fn toolchain_cargo_test(toolchain_image: &str, addr: &str, work: &Path, libtest:
         .args(["--env", &format!("PRAXIS_FIPS_PROBE_CA={PROBE_MOUNT}/ca.pem")])
         .args(["--env", "CARGO_TERM_COLOR=always", toolchain_image])
         .args(["cargo", "test", "--target-dir", "/target", "--no-default-features"])
+        .args(["--features", "pingora"])
         .args([
             "-p",
             "praxis-tests-integration",

@@ -6,15 +6,19 @@
 //! A network backend supplies a [`Connector`] that turns a [`PeerSpec`]
 //! into a live [`Session`]. The sub-request client, the filters that dial
 //! callouts, and the policy engine's transport speak only these types, so
-//! swapping the backend never touches them. The Pingora implementation
-//! lives in the `pingora` submodule behind the feature of the same name;
-//! [`Unavailable`] stands in when no backend is compiled in.
+//! swapping the backend never touches them. The Pingora and hyper
+//! implementations live in the `pingora` and `hyper` submodules behind the
+//! features of the same names; [`Unavailable`] stands in when no backend is
+//! compiled in.
 //!
 //! [`Connector`]: crate::egress::Connector
 //! [`PeerSpec`]: crate::egress::PeerSpec
 //! [`Session`]: crate::egress::Session
 //! [`Unavailable`]: crate::egress::Unavailable
 
+/// The hyper backend's connector, sessions and connection pool.
+#[cfg(feature = "hyper")]
+pub mod hyper;
 /// Where to connect: the backend-neutral description of one peer.
 mod peer;
 /// The Pingora backend's connector and session.

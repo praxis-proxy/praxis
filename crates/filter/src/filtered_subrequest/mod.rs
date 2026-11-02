@@ -679,10 +679,14 @@ impl FilteredSubrequestExecutor {
         clippy::too_many_lines,
         reason = "one sub-request owns the complete filter and transport lifecycle"
     )]
-    #[expect(clippy::large_futures, reason = "step execution spans filter and transport futures")]
     #[expect(
+        clippy::allow_attributes,
+        reason = "the future's size depends on the network backend compiled in"
+    )]
+    #[allow(
+        clippy::large_futures,
         clippy::large_stack_frames,
-        reason = "step execution reconstructs a full filter context"
+        reason = "step execution spans filter and transport futures"
     )]
     pub(crate) async fn execute(
         &self,

@@ -7,6 +7,12 @@ license.workspace = true
 readme.workspace = true
 publish = false
 
+[features]
+# The network backend of the proxy under test; see tests/integration/Cargo.toml.
+default = ["pingora"]
+pingora = ["praxis-test-utils/pingora"]
+hyper = ["praxis-test-utils/hyper"]
+
 [lints]
 workspace = true
 

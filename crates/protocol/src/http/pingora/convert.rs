@@ -11,9 +11,14 @@
 //! error mapping, dispatching based on whether the pipeline armed gRPC mode for
 //! a given request.
 
+#[cfg(feature = "pingora")]
 use pingora_proxy::Session;
+#[cfg(feature = "pingora")]
 use praxis_core::next_hop_headers::is_forbidden_client_response_header;
-use praxis_filter::{Rejection, Request, Response};
+use praxis_filter::Rejection;
+#[cfg(feature = "pingora")]
+use praxis_filter::{Request, Response};
+#[cfg(feature = "pingora")]
 use tracing::debug;
 
 // -----------------------------------------------------------------------------
@@ -33,6 +38,7 @@ use tracing::debug;
 ///
 /// [`Request`]: praxis_filter::Request
 // Hot path: called per-request, cross-crate boundary.
+#[cfg(feature = "pingora")]
 #[inline]
 pub(crate) fn request_header_from_session(session: &mut Session) -> Request {
     let req = session.req_header_mut();
@@ -63,6 +69,7 @@ pub(crate) fn request_header_from_session(session: &mut Session) -> Request {
 /// [`Response`]: praxis_filter::Response
 /// [`HeaderMap`]: http::HeaderMap
 // Hot path: called per-request, cross-crate boundary.
+#[cfg(feature = "pingora")]
 #[inline]
 pub(crate) fn response_header_from_pingora(upstream: &pingora_http::ResponseHeader) -> Response {
     Response {
@@ -88,6 +95,7 @@ pub(crate) fn response_header_from_pingora(upstream: &pingora_http::ResponseHead
 /// Only error statuses become gRPC statuses: a successful short-circuit
 /// (a CORS preflight `204`, a `static_response` `200`) is a real HTTP
 /// response the client asked for, not a proxy error.
+#[cfg(feature = "pingora")]
 pub(crate) async fn send_rejection_for(
     session: &mut Session,
     rejection: Rejection,
@@ -120,7 +128,7 @@ pub(crate) async fn send_rejection_for(
 /// rule that fired (for example "rate limit exceeded"), giving clients a more
 /// specific diagnostic than the HTTP status's canonical reason phrase.
 /// Falls back through: body text → status reason phrase → "proxy error".
-fn grpc_error_message(rejection: &Rejection) -> &str {
+pub(in crate::http) fn grpc_error_message(rejection: &Rejection) -> &str {
     rejection
         .body
         .as_deref()
@@ -148,6 +156,7 @@ fn grpc_error_message(rejection: &Rejection) -> &str {
 /// ```
 ///
 /// [`Rejection`]: praxis_filter::Rejection
+#[cfg(feature = "pingora")]
 pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) {
     debug!(status = rejection.status, "sending rejection response");
     if !rejection.preserve_keepalive {
@@ -182,6 +191,7 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
 /// [RFC 9110 Section 15.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-15.2
 /// [`ResponseHeader`]: pingora_http::ResponseHeader
 /// [`Rejection`]: praxis_filter::Rejection
+#[cfg(feature = "pingora")]
 fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader {
     let header_count = Some(
         rejection
@@ -219,6 +229,7 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
 /// `content-length` and keep-alive state Praxis applies itself.
 ///
 /// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
+#[cfg(feature = "pingora")]
 fn append_rejection_headers(header: &mut pingora_http::ResponseHeader, rejection: &Rejection) {
     for (name, value) in &rejection.headers {
         if is_forbidden_client_response_header(name) {
@@ -243,6 +254,7 @@ fn append_rejection_headers(header: &mut pingora_http::ResponseHeader, rejection
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg(feature = "pingora")]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,

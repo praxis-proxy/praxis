@@ -24,11 +24,20 @@
 //!
 //! [`FilterPipeline`]: praxis_filter::FilterPipeline
 
-// A proxy with no network backend has nothing to bind a listener with. Each
-// backend is a Cargo feature; `pingora` is on by default, and a
-// `--no-default-features` build names the one it wants.
-#[cfg(not(feature = "pingora"))]
-compile_error!("praxis-proxy needs a network backend: enable the `pingora` feature (on by default)");
+// A proxy with no network backend has nothing to bind a listener with, and
+// one with two has no way to choose. Each backend is a Cargo feature;
+// `pingora` is on by default, and a `--no-default-features` build names the
+// one it wants.
+#[cfg(not(any(feature = "pingora", feature = "hyper")))]
+compile_error!(
+    "praxis-proxy needs a network backend: enable the `pingora` feature (on by default) or build with \
+     `--no-default-features --features hyper`"
+);
+#[cfg(all(feature = "pingora", feature = "hyper"))]
+compile_error!(
+    "the `pingora` and `hyper` network backends are mutually exclusive: build the hyper backend with \
+     `--no-default-features --features hyper`"
+);
 
 mod composition;
 mod fd_limit;
