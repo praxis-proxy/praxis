@@ -672,6 +672,13 @@ filter_chains:
             if entry.file_name().is_some_and(|n| n == "slow-start.yaml") {
                 continue;
             }
+            #[cfg(not(feature = "forward-proxy"))]
+            if entry
+                .file_name()
+                .is_some_and(|n| n == "forward-proxy.yaml" || n == "forward-proxy-ip-acl.yaml")
+            {
+                continue;
+            }
             Config::from_file(&entry).unwrap_or_else(|err| panic!("{}: {err}", entry.display()));
             count += 1;
         }
