@@ -115,26 +115,42 @@ floor only ratchets up, never down.
 #### Mutation Testing
 
 Coverage proves code executed; mutation testing
-(`make mutants`, weekly in CI) proves the assertions
-would notice if the code were wrong. cargo-mutants
-rewrites function bodies (return defaults, flip
-operators) and fails if the test suite still passes.
-Treat a surviving mutant as a missing assertion, not
-noise: either strengthen the tests or delete the
-unneeded code.
+(weekly in CI) proves the assertions would notice if
+the code were wrong. cargo-mutants rewrites function
+bodies (return defaults, flip operators) and fails if
+the test suite still passes. Treat a surviving mutant
+as a missing assertion, not noise: either strengthen
+the tests or delete the unneeded code.
 
-The weekly workflow runs every workspace mutant across
-32 round-robin shards, with two workers per runner and at
-most eight runners active. Each shard checks the unmutated
-baseline first and uploads `mutants.out/`, including on
-failure. Incremental compilation is enabled because each
-case rebuilds a small source change. Run one shard locally:
+The weekly workflow tests only production packages
+(`praxis-proxy`, `praxis-proxy-core`,
+`praxis-proxy-filter`, `praxis-proxy-protocol`,
+`praxis-proxy-tls`), not the full workspace. Test
+crates, `xtask`, and benchmarks are excluded to reduce
+noise. Results are split across 32 round-robin shards,
+with two workers per runner and at most eight runners
+active. A summary job aggregates all shards and fails
+when the kill ratio drops below the baseline in
+`.github/mutants-baseline.json`, the timeout count
+exceeds `max_timeout`, or no mutants were tested. Each
+shard uploads
+`mutants.out/`, including on failure. Incremental
+compilation is enabled because each case rebuilds a
+small source change. Run one shard locally:
 
 ```console
-make mutants MUTANTS_ARGS="--shard 0/32 --sharding round-robin --jobs 2"
+cargo mutants \
+  --package praxis-proxy \
+  --package praxis-proxy-core \
+  --package praxis-proxy-filter \
+  --package praxis-proxy-protocol \
+  --package praxis-proxy-tls \
+  --shard 0/32 --sharding round-robin --jobs 2
 ```
 
-Plain `make mutants` still runs the full workspace.
+`make mutants` still runs the full workspace (all
+packages, no shard filtering) and is useful for local
+exploration, but CI uses the scoped command above.
 
 #### Property-Based Testing
 
