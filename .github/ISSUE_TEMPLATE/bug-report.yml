@@ -12,19 +12,37 @@ body:
   - type: textarea
     id: reproduce
     attributes:
-      label: Steps to Reproduce
-      description: Minimal steps to trigger the bug
+      label: Minimal Reproduction
+      description: Smallest steps that trigger the bug
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: Minimal config that reproduces the bug. Scrub secrets before pasting.
+      render: yaml
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
       label: Expected Behavior
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output. Scrub secrets, tokens, and private data before pasting.
+      render: shell
+    validations:
+      required: true
   - type: input
     id: version
     attributes:
       label: Praxis Version
       placeholder: "v0.4.0"
+    validations:
+      required: true
   - type: dropdown
     id: area
     attributes:

@@ -319,6 +319,18 @@ mod tests {
     }
 
     #[test]
+    fn handle_set_misspelled_store_does_not_create_it() {
+        let registry = make_registry_with("routing_overrides", &[]);
+        let resp = handle_set(&registry, "routing_overides", "k", "v");
+        assert_eq!(resp.status().as_u16(), 404, "unknown store must stay 404");
+        assert!(
+            registry.get("routing_overides").is_none(),
+            "PUT must not create the store"
+        );
+        assert_eq!(registry.len(), 1, "registry must be unchanged");
+    }
+
+    #[test]
     fn handle_delete_existing_key() {
         let registry = make_registry_with("test", &[("temp", "val")]);
         let resp = handle_delete(&registry, "test", "temp");
@@ -487,7 +499,7 @@ mod tests {
     /// Build a registry with a single store pre-populated with pairs.
     fn make_registry_with(name: &str, pairs: &[(&str, &str)]) -> KvStoreRegistry {
         let registry = KvStoreRegistry::new();
-        let store = registry.get_or_create(name);
+        let store = registry.get_or_create_memory(name);
         for (k, v) in pairs {
             store.set(k, Arc::from(*v));
         }

@@ -82,6 +82,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | File | Description |
 | ------ | ------------- |
 | [admin-interface.yaml](configs/operations/admin-interface.yaml) | Exposes separate admin API and health/metrics listeners |
+| [admin-kv-store.yaml](configs/operations/admin-kv-store.yaml) | Serves runtime key-value stores on the admin API for an application that embeds Praxis and registers the stores in code |
 | [container-default.yaml](configs/operations/container-default.yaml) | Default config for containerized deployments |
 | [file-descriptor-limits.yaml](configs/operations/file-descriptor-limits.yaml) | Size and protect the proxy's open file descriptor budget: pin the process limit, shed requests with 503 before descriptors run out, and close idle keep-alive clients and pooled upstream connections so they cannot pin descriptors |
 | [hot-reload.yaml](configs/operations/hot-reload.yaml) | Filter pipelines are swapped atomically at runtime when the config file changes |
