@@ -19,6 +19,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Implicit cluster references: an inline load-balancer cluster that shares
+  its name with a top-level cluster may omit its endpoints, which are
+  filled in from the declaration at validation time, keeping the routed
+  and health-checked addresses together. A divergent endpoint list now
+  warns at startup and on reload, and an inline `health_check` is
+  rejected: probes are configured only at top level. Filling is capped at
+  16 MiB of copied endpoint data in validation and again in each pipeline
+  build, so many references to one large declaration cannot expand a small
+  config into an out-of-memory reload.
+- A [support diagnostics reference](docs/operating/diagnostics.md) covering
+  config checks, live state, logging, reloads and draining before shutdown.
+- `SUPPORT.md` with guidance on where to ask questions, report bugs,
+  report security vulnerabilities, and propose enhancements.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
@@ -47,6 +60,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   provider with unused settings fails to load, and CEL `size()` and
   `exists()` change in ways that can allow requests that were denied. See
   `docs/filters/http/security/policy.md`.
+- `KvStoreRegistry::register` adds a caller-supplied `KvBackend` under a
+  name, rejecting duplicates with `KvRegistryError::AlreadyRegistered`.
+- `KvStoreRegistry::get_or_create_memory` deliberately creates an
+  in-memory store.
+
+### Removed
+
+- `KvStoreRegistry::get_or_create`, which silently created an in-memory
+  store for any unknown name. Use `get` to look up a configured store, or
+  `get_or_create_memory` to choose memory explicitly.
+
+### Changed
+
+- `FilterPipeline::build_with_chains` takes a new required
+  `top_level_clusters: &[Cluster]` argument. Rust callers pass the
+  config's top-level `clusters:` list, or `&[]` when none exists.
 
 ### Fixed
 

@@ -4487,6 +4487,7 @@ fn build_branching_pipeline(registry: &crate::FilterRegistry, yaml: &str) -> cra
         registry,
         &std::collections::HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap()
 }

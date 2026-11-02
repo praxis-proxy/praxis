@@ -673,7 +673,7 @@ mod tests {
     /// Start an admin listener whose `test` KV store holds `color=blue`.
     fn kv_admin() -> (String, KvStoreRegistry, Running) {
         let registry = KvStoreRegistry::new();
-        registry.get_or_create("test").set("color", Arc::from("blue"));
+        registry.get_or_create_memory("test").set("color", Arc::from("blue"));
         let addr = free_addr();
         let options = AdminEndpointOptions {
             kv_registry: Some(registry.clone()),
