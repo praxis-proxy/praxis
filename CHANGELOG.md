@@ -33,7 +33,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `per_connection` shares one budget across a downstream connection, and
   `per_ip` shares one budget across connections from the same source through
   that filter instance. A full per-IP table closes a new connection instead
-  of pacing it.
+  of pacing it. IRR steps and bound outbound chains wait for the same
+  reservations before a request body is sent or response bytes are released.
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
   filled in from the declaration at validation time, keeping the routed

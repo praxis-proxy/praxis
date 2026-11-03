@@ -4540,3 +4540,265 @@ impl crate::HttpFilter for BranchCalloutFilter {
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// Bandwidth pacing
+// -----------------------------------------------------------------------------
+
+/// Upload and download size that each take 250 ms at [`PACED_BYTE_RATE`].
+const PACED_BYTES: usize = 1_000;
+
+/// Byte rate that turns [`PACED_BYTES`] into a quarter-second reservation.
+const PACED_BYTE_RATE: u64 = 4_000;
+
+/// Both directions of a 1 KB body. One missing direction finishes well under this.
+const BOTH_DIRECTIONS: std::time::Duration = std::time::Duration::from_millis(350);
+
+// Read a request until its Content-Length body has arrived.
+fn request_complete(buf: &[u8]) -> bool {
+    let Some(split) = buf.windows(4).position(|marker| marker == b"\r\n\r\n") else {
+        return false;
+    };
+    let header_end = split.saturating_add(4);
+    let Some(headers) = buf.get(..header_end) else {
+        return false;
+    };
+    let headers = String::from_utf8_lossy(headers);
+    let length = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())?
+    });
+    length.is_none_or(|length| buf.len() >= header_end.saturating_add(length))
+}
+
+// Accept one request, record it, and answer with `response`.
+async fn spawn_recording_backend(
+    response: Vec<u8>,
+    captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut buf = Vec::new();
+        let mut tmp = [0_u8; 1024];
+        while !request_complete(&buf) && buf.len() < 65_536 {
+            let read = socket.read(&mut tmp).await.unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            if let Some(chunk) = tmp.get(..read) {
+                buf.extend_from_slice(chunk);
+            }
+        }
+        if let Ok(mut slot) = captured.lock() {
+            slot.extend_from_slice(&buf);
+        }
+        socket.write_all(&response).await.unwrap();
+    });
+    (addr, handle)
+}
+
+fn http_ok(body: &[u8]) -> Vec<u8> {
+    let mut response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(body);
+    response
+}
+
+fn paced_chain(addr: std::net::SocketAddr, rate: u64, streaming: bool) -> String {
+    let selector = if streaming {
+        "- filter: test_streaming_selector\n"
+    } else {
+        ""
+    };
+    format!(
+        "
+{selector}- filter: bandwidth_limit
+  mode: per_connection
+  upload_bytes_per_sec: {rate}
+  download_bytes_per_sec: {rate}
+  burst_bytes: 0
+- filter: router
+  routes:
+    - path_prefix: \"/\"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints:
+        - \"{addr}\"
+"
+    )
+}
+
+fn contains_slice(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn subrequest_pace_waits_for_both_directions() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let upload = vec![b'u'; PACED_BYTES];
+    let download = vec![b'd'; PACED_BYTES];
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (addr, backend) = spawn_recording_backend(http_ok(&download), Arc::clone(&captured)).await;
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&paced_chain(addr, PACED_BYTE_RATE, false)).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = buffered_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::POST,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::from(upload.clone()),
+    };
+    let started = Instant::now();
+    let response = match executor
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            started + Duration::from_secs(5),
+        )
+        .await
+        .expect("a paced buffered callout must complete")
+    {
+        crate::CalloutResponse::Buffered(response) => response,
+        crate::CalloutResponse::Streaming { .. } => panic!("the chain is buffered"),
+    };
+    let elapsed = started.elapsed();
+    backend.abort();
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body.as_ref(),
+        download.as_slice(),
+        "the download must be delivered"
+    );
+    assert!(
+        contains_slice(&captured.lock().unwrap(), &upload),
+        "the upload must be sent after its reservation"
+    );
+    assert!(
+        elapsed >= BOTH_DIRECTIONS,
+        "upload and download reservations must both be waited, elapsed {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn subrequest_pace_streaming_waits_for_both_directions() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let upload = vec![b'u'; PACED_BYTES];
+    let download = vec![b'd'; PACED_BYTES];
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (addr, backend) = spawn_recording_backend(http_ok(&download), Arc::clone(&captured)).await;
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&paced_chain(addr, PACED_BYTE_RATE, true)).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = streaming_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::POST,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::from(upload.clone()),
+    };
+    let started = Instant::now();
+    let mut body = match executor
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            started + Duration::from_secs(5),
+        )
+        .await
+        .expect("a paced streaming callout must open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+    let payload = drain(&mut body).await.expect("the paced download must drain");
+    let elapsed = started.elapsed();
+    backend.abort();
+
+    assert_eq!(payload, download, "the download must be delivered");
+    assert!(
+        contains_slice(&captured.lock().unwrap(), &upload),
+        "the upload must be sent after its reservation"
+    );
+    assert!(
+        elapsed >= BOTH_DIRECTIONS,
+        "upload and download reservations must both be waited, elapsed {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn subrequest_pace_refunds_when_the_deadline_cannot_cover() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    // The reviewer's case: 8 KB at 1 KB/s is an eight-second reservation.
+    let upload = vec![b'u'; 8192];
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (addr, backend) = spawn_recording_backend(http_ok(b"ok"), Arc::clone(&captured)).await;
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&paced_chain(addr, 1_024, false)).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let executor = buffered_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::POST,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::from(upload.clone()),
+    };
+    let started = Instant::now();
+    let Err(error) = executor
+        .run(
+            &pipeline,
+            &request,
+            crate::RequestExtensions::default(),
+            started + Duration::from_millis(200),
+        )
+        .await
+    else {
+        panic!("a reservation longer than the step deadline must not be sent");
+    };
+    backend.abort();
+
+    assert!(
+        error
+            .to_string()
+            .contains("bandwidth reservation exceeds the step deadline"),
+        "the deadline miss must be reported, got {error}"
+    );
+    assert!(
+        !contains_slice(&captured.lock().unwrap(), &upload),
+        "the 8 KB upload must not be sent before its reservation"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the executor must not sleep out a reservation the deadline cannot cover"
+    );
+}
