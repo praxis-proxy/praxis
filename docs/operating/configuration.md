@@ -788,7 +788,7 @@ On the experimental hyper backend, HTTP listeners let
 in-flight connections finish for up to
 `shutdown_timeout_secs` minus a 1 s reserve, so
 `shutdown_timeout_secs: 1` leaves them no drain time.
-TCP connections there close as soon as the signal
+Active TCP forwarding stops as soon as the signal
 arrives. See
 [Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
 
