@@ -49,12 +49,10 @@ pub(super) async fn handle(
     connection: Arc<ConnectionFacts>,
     request: Request<Incoming>,
 ) -> Result<Response<ProxyBody>, ResponseAbort> {
-    let mut flight = Flight::new(
-        &listener.pipeline,
-        request.method().clone(),
-        request.version(),
-        listener.lifecycle.clone(),
-    );
+    let version = request.version();
+    let mut flight = Flight::for_request(&listener, &request);
+    #[cfg(feature = "test-support")]
+    flight.ctx.extensions.insert(Arc::clone(&listener.overload));
     if let Some(refusal) = admission::admit(&listener, &mut flight.ctx) {
         flight.error = Some(ErrorOrigin::Other);
         return Ok(flight.reply(refusal).await);
@@ -63,7 +61,19 @@ pub(super) async fn handle(
     let (parts, body) = request.into_parts();
     let mut body = DownstreamBody::new(body, listener.read_timeout);
     let phase = Box::pin(request::run(&mut flight, &connection, parts, &mut body)).await;
-    Box::pin(answer(&listener, flight, body, phase)).await
+    Box::pin(answer(&listener, flight, body, phase))
+        .await
+        .map(|mut response| {
+            if version != Version::HTTP_2
+                && listener.overload.should_disable_keepalive()
+                && response.status() != http::StatusCode::SWITCHING_PROTOCOLS
+            {
+                response
+                    .headers_mut()
+                    .insert(http::header::CONNECTION, HeaderValue::from_static("close"));
+            }
+            response
+        })
 }
 
 /// Answer the request the way its request phase decided.
@@ -121,10 +131,31 @@ pub(super) struct Flight {
 }
 
 impl Flight {
+    /// Share the listener controller while creating one request's state.
+    fn for_request(listener: &ListenerShared, request: &Request<Incoming>) -> Self {
+        Self::new(
+            &listener.pipeline,
+            request.method().clone(),
+            request.version(),
+            listener.lifecycle.clone(),
+            Arc::clone(&listener.overload),
+        )
+    }
+
     /// Start a request's state, pinning the current pipeline for its whole
     /// run.
-    fn new(pipeline: &ArcSwap<FilterPipeline>, method: Method, version: Version, lifecycle: LifecycleHandle) -> Self {
-        let mut ctx = Box::<PingoraRequestCtx>::default();
+    fn new(
+        pipeline: &ArcSwap<FilterPipeline>,
+        method: Method,
+        version: Version,
+        lifecycle: LifecycleHandle,
+        overload: Arc<praxis_core::overload::Signal>,
+    ) -> Self {
+        let mut ctx = Box::new(PingoraRequestCtx {
+            overload: Some(overload),
+            lifecycle: Some(lifecycle.clone()),
+            ..PingoraRequestCtx::default()
+        });
         let pipeline = ctx.pin_pipeline(pipeline);
         Self {
             completed: false,
@@ -157,6 +188,7 @@ impl Flight {
             Method::GET,
             Version::HTTP_11,
             LifecycleHandle::new(),
+            Arc::default(),
         )
     }
 
@@ -328,6 +360,7 @@ mod tests {
             Method::GET,
             Version::HTTP_11,
             lifecycle,
+            Arc::default(),
         );
         let mut reply = LocalReply::status(200);
         reply.keepalive = true;
@@ -418,7 +451,7 @@ mod tests {
     fn pinned_pipeline_outlives_a_reload() {
         let original = Arc::new(empty_pipeline());
         let swap = ArcSwap::new(Arc::clone(&original));
-        let flight = Flight::new(&swap, Method::GET, Version::HTTP_11, LifecycleHandle::new());
+        let flight = Flight::new(&swap, Method::GET, Version::HTTP_11, LifecycleHandle::new(), Arc::default());
 
         swap.store(Arc::new(empty_pipeline()));
 

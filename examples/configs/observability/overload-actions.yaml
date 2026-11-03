@@ -1,0 +1,50 @@
+# Overload Protective Actions
+#
+# Purges unused allocator pages under memory pressure, closes HTTP/1
+# keep-alives, scales transport deadlines and idle pools, and refuses new
+# work at sustained saturation while admitted streams complete.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features overload-actions -- -c examples/configs/observability/overload-actions.yaml
+#
+# Exercise:
+#   curl -s http://localhost:9902/metrics | grep praxis_overload
+#   curl -i http://localhost:9902/ready
+#
+admin:
+  metrics_address: "127.0.0.1:9902"
+
+runtime:
+  overload_gauges: true
+  overload_actions: true
+  overload_thresholds:
+    connections: { scaling: 0.70, saturation: 0.95 }
+  # Connection pressure needs a cap. In-flight HTTP requests and active TCP
+  # sessions hold permits; idle keep-alives do not.
+  max_connections: 1000
+  # Heap pressure is anonymous resident memory over this cap.
+  max_memory_bytes: 1073741824
+
+insecure_options:
+  allow_private_endpoints: true
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - routing
+
+filter_chains:
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            connection_timeout_ms: 5000
+            idle_timeout_ms: 30000
+            endpoints:
+              - "127.0.0.1:3000"

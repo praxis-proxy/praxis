@@ -85,6 +85,11 @@ release was 2024-10-09, which is low risk for a small, feature-complete
 primitive. If it goes dormant, vendor its narrow surface: it is a thin wrapper
 over `zeroize`, already a direct dependency.
 
+`tikv-jemalloc-sys` is the TiKV allocator's existing FFI dependency.
+The optional `overload-actions` feature uses it directly to purge unused
+pages from the binary's jemalloc arenas. It adds no cryptography and is
+not enabled in the default build.
+
 **`syslog`** backs the `access_log` filter's RFC 3164 sink. It is optional,
 pulled in only by the off-by-default experimental `access-log-syslog` feature.
 It is the de-facto Rust syslog client, maintained by Geoffroy Couprie (author

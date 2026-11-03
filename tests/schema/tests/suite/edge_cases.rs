@@ -202,9 +202,63 @@ fn accept_runtime_config_defaults() {
     assert_eq!(config.runtime.threads, 0, "default runtime threads should be 0");
     assert!(config.runtime.work_stealing, "work_stealing should default to true");
     assert!(
+        !config.runtime.overload_actions,
+        "overload actions must default to false"
+    );
+    assert!(
         config.runtime.log_overrides.is_empty(),
         "log_overrides should default to empty"
     );
+}
+
+#[test]
+fn accept_runtime_overload_actions_enabled() {
+    let yaml = format!(
+        "runtime:\n  overload_actions: true\n{}",
+        test_utils::minimal_valid_yaml()
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    assert!(
+        config.runtime.overload_actions,
+        "explicit overload actions must survive deserialization"
+    );
+}
+
+#[test]
+fn runtime_overload_thresholds_preserve_custom_values_and_other_defaults() {
+    let yaml = format!(
+        "runtime:\n  overload_thresholds:\n    connections: {{ scaling: 0.2, saturation: 0.4 }}\n{}",
+        test_utils::minimal_valid_yaml()
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let bands = config.runtime.overload_thresholds;
+    assert_eq!(
+        bands.connections,
+        serde_yaml::from_str("{scaling: 0.2, saturation: 0.4}").unwrap()
+    );
+    assert_eq!(bands.cpu, praxis_core::overload::Bands::default().cpu);
+}
+
+#[test]
+fn invalid_overload_thresholds_name_the_resource_key() {
+    for resource in ["cgroup_memory", "heap", "cpu", "connections", "file_descriptors"] {
+        for values in [
+            "{scaling: 0.9, saturation: 0.8}",
+            "{scaling: .nan, saturation: 0.9}",
+            "{scaling: 0.2, saturation: 1.1}",
+        ] {
+            let yaml = format!(
+                "runtime:\n  overload_thresholds:\n    {resource}: {values}\n{}",
+                test_utils::minimal_valid_yaml()
+            );
+            let error = Config::from_yaml(&yaml).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("runtime.overload_thresholds.{resource}")),
+                "{error}"
+            );
+            assert!(error.contains("0 <= scaling < saturation <= 1"), "{error}");
+        }
+    }
 }
 
 #[test]
