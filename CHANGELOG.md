@@ -126,6 +126,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `praxis_core::retry::ClusterRetryState` gains `try_enter`,
   `with_max_concurrent` and a `max_concurrent` field, exposing the per-cluster
   admission counter the ceiling is built on.
+- `praxis_core::retry::AdmissionLease` owns one request's claim on that
+  counter: `claim` takes a slot or reports the cluster full, `release` returns
+  it idempotently, and dropping the lease returns it too. It replaces the
+  `cluster_retry_state` and `cluster_retry_state_released` fields on
+  `HttpFilterContext` and `PingoraRequestCtx` with a single
+  `cluster_admission` field holding the lease. Rust consumers that read or
+  wrote either field must move to the lease.
 - `tcp_load_balancer` rejects a cluster that sets `max_connections` at startup
   rather than ignoring it: a TCP connection has no status code to shed with.
   Cap TCP concurrency on the listener instead.
@@ -255,6 +262,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   cloned context whose release flag was not carried back, so the `logging`
   hook released a second time and took another request's slot, letting the
   ceiling drift loose.
+- An upstream `103 Early Hints`, or any other non-final `1xx`, no longer
+  releases the cluster's in-flight slot. The response pipeline runs once per
+  response head the upstream sends, so an interim head handed the slot back
+  while the request was still being served and the final head released it a
+  second time, taking another request's slot. One `103`-emitting backend was
+  enough to let `max_connections` be exceeded.
+- A request whose client goes away mid-pipeline no longer leaks its cluster
+  in-flight slot. Each phase ran against a cloned context whose state reached
+  the request only at the end of the phase, so a phase cancelled before that
+  point stranded the slot with nothing left holding it, and a cancelled
+  response phase lost the release flag and released a second time, taking
+  another request's slot. After `max_connections` cancellations a cluster
+  answered 503 to everything until the config was reloaded (CWE-772). The
+  slot is now an `AdmissionLease` shared by every phase, which returns it
+  exactly once whether the request finishes or is dropped.
 
 ### Fixed
 

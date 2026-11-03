@@ -514,11 +514,13 @@ pub struct HttpFilterContext<'a> {
     /// shares one hedge budget.
     pub hedge_policy: Option<Arc<praxis_core::config::HedgePolicy>>,
 
-    /// Shared cluster retry state (budget + active-request counter).
-    pub cluster_retry_state: Option<Arc<praxis_core::retry::ClusterRetryState>>,
-
-    /// Whether `cluster_retry_state.leave()` has already been called.
-    pub cluster_retry_state_released: bool,
+    /// This request's claim on the cluster's in-flight count, taken by the
+    /// load balancer and carrying the cluster's retry budget with it.
+    ///
+    /// Every holder shares one lease, so releasing it is idempotent and a
+    /// phase that is cancelled before its state is copied back still
+    /// returns the slot when the lease goes away.
+    pub cluster_admission: Option<Arc<praxis_core::retry::AdmissionLease>>,
 
     /// Reselector for alternate-host retries after connect/response failure.
     pub endpoint_reselector: Option<Arc<crate::EndpointReselector>>,

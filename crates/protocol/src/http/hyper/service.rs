@@ -245,7 +245,7 @@ mod tests {
     use bytes::Bytes;
     use http::StatusCode;
     use hyper::body::Body as _;
-    use praxis_core::retry::ClusterRetryState;
+    use praxis_core::retry::{AdmissionLease, ClusterRetryState};
     use tokio::sync::Semaphore;
 
     use super::*;
@@ -344,30 +344,33 @@ mod tests {
 
     #[tokio::test]
     async fn completed_flight_is_not_completed_again_when_dropped() {
-        let (mut flight, lease) = leased_flight();
+        let (mut flight, state) = leased_flight();
         flight.complete().await;
-        lease.enter();
+        // A later request takes the slot the completed one gave back.
+        let _next = AdmissionLease::claim(&state).expect("an uncapped cluster admits");
 
         drop(flight);
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         assert_eq!(
-            lease.active_requests.load(Ordering::Relaxed),
+            state.active_requests.load(Ordering::Relaxed),
             1,
             "a completed request is not completed a second time"
         );
     }
 
     #[test]
-    fn flight_dropped_outside_a_runtime_is_left_alone() {
-        let (flight, lease) = leased_flight();
+    fn flight_dropped_outside_a_runtime_still_returns_its_slot() {
+        let (flight, state) = leased_flight();
 
+        // Nothing is spawned: there is no runtime to spawn on, and reaching
+        // for one anyway would panic this drop.
         drop(flight);
 
         assert_eq!(
-            lease.active_requests.load(Ordering::Relaxed),
-            1,
-            "with no runtime to complete it on, nothing is spawned"
+            state.active_requests.load(Ordering::Relaxed),
+            0,
+            "the admission lease hands its slot back even where completion cannot run"
         );
     }
 
@@ -461,13 +464,12 @@ mod tests {
         })
     }
 
-    /// A request's state holding a cluster retry lease, which completion
-    /// releases, and the lease.
+    /// A request's state holding a cluster admission lease, which
+    /// completion releases, and the cluster counter behind it.
     fn leased_flight() -> (Flight, Arc<ClusterRetryState>) {
-        let lease = Arc::new(ClusterRetryState::new(None));
-        lease.enter();
+        let state = Arc::new(ClusterRetryState::new(None));
         let mut flight = Flight::for_tests(empty_pipeline());
-        flight.ctx.cluster_retry_state = Some(Arc::clone(&lease));
-        (flight, lease)
+        flight.ctx.cluster_admission = AdmissionLease::claim(&state);
+        (flight, state)
     }
 }

@@ -1766,7 +1766,10 @@ async fn max_connections_keeps_the_slot_until_the_final_response() {
     first.response_header = Some(&mut hints);
     drop(lb.on_response(&mut first).await.unwrap());
     assert!(
-        !first.cluster_retry_state_released,
+        first
+            .cluster_admission
+            .as_ref()
+            .is_some_and(|lease| !lease.is_released()),
         "a 103 must leave the in-flight request holding its slot"
     );
 
@@ -1793,8 +1796,6 @@ async fn max_connections_releases_the_slot_once_per_request() {
     let mut second = crate::test_utils::make_filter_context(&req);
     second.cluster = Some(Arc::from("web"));
     drop(lb.on_request(&mut second).await.unwrap());
-    // A second response phase for the first request must not spend the slot
-    // the second request now holds.
     drop(lb.on_response(&mut first).await.unwrap());
 
     assert_eq!(
@@ -1824,7 +1825,10 @@ async fn max_connections_slot_returns_on_a_101_upgrade() {
     drop(lb.on_response(&mut first).await.unwrap());
 
     assert!(
-        first.cluster_retry_state_released,
+        first
+            .cluster_admission
+            .as_ref()
+            .is_some_and(|lease| lease.is_released()),
         "a 101 ends the exchange, so it must hand the slot back"
     );
 }

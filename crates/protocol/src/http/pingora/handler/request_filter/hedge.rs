@@ -764,14 +764,11 @@ fn release_selected(ctx: &PingoraRequestCtx) {
     }
 }
 
-/// Return the cluster retry lease and stop the load balancer from releasing it again.
+/// Return the cluster admission slot now, before the response phase would.
 fn end_lease(ctx: &mut PingoraRequestCtx) {
     ctx.filter_metadata.remove("lb.selected");
-    if let Some(state) = &ctx.cluster_retry_state
-        && !ctx.cluster_retry_state_released
-    {
-        state.leave();
-        ctx.cluster_retry_state_released = true;
+    if let Some(lease) = &ctx.cluster_admission {
+        lease.release();
     }
 }
 
