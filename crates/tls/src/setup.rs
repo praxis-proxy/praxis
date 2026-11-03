@@ -39,7 +39,7 @@ use crate::{
 /// has no ticketer and rustls would not check one for FIPS.
 pub(crate) const SESSION_CACHE_ENTRIES: usize = 4_096;
 
-/// The session cache every listener config uses.
+/// The session cache used when client authentication cannot change on reload.
 fn session_storage() -> Arc<dyn StoresServerSessions + Send + Sync> {
     ServerSessionMemoryCache::new(SESSION_CACHE_ENTRIES)
 }
@@ -167,6 +167,10 @@ pub struct ReloadableServerConfig {
 /// uses these handles to atomically update TLS state on
 /// filesystem changes.
 ///
+/// Client-authenticated listeners disable session resumption: rustls does
+/// not bind a cached session to the verifier that authenticated its handshake.
+/// Each new connection must therefore authenticate against the current trust.
+///
 /// # Errors
 ///
 /// Returns [`TlsError`] if the initial certificate cannot be
@@ -204,8 +208,12 @@ pub fn build_reloadable_server_config(
 
     let config = builder.with_cert_resolver(Arc::new(resolver));
     let mut config = finish_server_config(config, advertise_http_alpn, tls.cipher_suites.is_some())?;
-    if let Some(handle) = &verifier_handle {
-        config.session_storage = Arc::new(crate::reload::VerifierBoundSessions(Arc::clone(handle)));
+    if verifier_handle.is_some() {
+        // A handshake authenticated before reload can finish afterward. Cache
+        // invalidation alone lets it insert stale authentication into the new
+        // cache. The builder also leaves stateless ticket production disabled.
+        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+        config.send_tls13_tickets = 0;
     }
 
     Ok(ReloadableServerConfig {
@@ -894,33 +902,45 @@ mod tests {
 
     #[test]
     #[cfg(feature = "config-reload")]
-    fn build_reloadable_server_config_mtls_binds_session_cache() -> Result<(), Box<dyn std::error::Error>> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "check every resumption mechanism for each client-auth mode"
+    )]
+    fn build_reloadable_server_config_mtls_disables_resumption() -> Result<(), Box<dyn std::error::Error>> {
         ensure_crypto_provider();
         let certs = gen_test_certs();
-        let tls = ListenerTls {
-            certificates: vec![CertKeyPair {
-                cert_path: certs.cert_path.to_str().ok_or("cert path is not UTF-8")?.to_owned(),
-                default: false,
-                key_path: certs.key_path.to_str().ok_or("key path is not UTF-8")?.to_owned(),
-                server_names: Vec::new(),
-            }],
-            cipher_suites: None,
-            client_ca: Some(CaConfig {
-                ca_path: certs.ca_cert_path.to_str().ok_or("CA path is not UTF-8")?.to_owned(),
-                crl_paths: Vec::new(),
-            }),
-            client_cert_mode: ClientCertMode::Require,
-            trusted_spiffe_ids: Vec::new(),
-            hot_reload: None,
-            min_version: None,
-        };
-
-        let result = build_reloadable_server_config(&tls, true)?;
-        assert!(result.verifier_handle.is_some(), "mTLS should expose a verifier handle");
-        assert!(
-            result.config.session_storage.can_cache(),
-            "verifier-bound session storage should cache sessions"
-        );
+        let mut tls = ListenerTls::new_validated(
+            certs.cert_path.to_str().ok_or("cert path is not UTF-8")?,
+            certs.key_path.to_str().ok_or("key path is not UTF-8")?,
+        )?;
+        tls.client_ca = Some(CaConfig {
+            ca_path: certs.ca_cert_path.to_str().ok_or("CA path is not UTF-8")?.to_owned(),
+            crl_paths: Vec::new(),
+        });
+        let modes = [
+            ClientCertMode::Request,
+            ClientCertMode::Require,
+            #[cfg(feature = "spiffe")]
+            ClientCertMode::RequireNamed,
+        ];
+        for mode in modes {
+            tls.client_cert_mode = mode;
+            let result = build_reloadable_server_config(&tls, true)?;
+            assert!(result.verifier_handle.is_some(), "mTLS should expose a verifier handle");
+            assert!(
+                !result.config.session_storage.can_cache(),
+                "reloadable mTLS must not cache sessions"
+            );
+            assert!(
+                !result.config.ticketer.enabled(),
+                "stateless tickets must also be disabled"
+            );
+            assert_eq!(result.config.send_tls13_tickets, 0, "no unsolicited TLS 1.3 tickets");
+            assert_eq!(
+                result.config.max_tls13_tickets, 0,
+                "no client-requested TLS 1.3 tickets"
+            );
+        }
         Ok(())
     }
 

@@ -17,6 +17,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- Disable TLS session resumption on listeners with client authentication
+  and TLS hot-reload. A handshake authenticated before a CA/CRL reload
+  could finish afterward and cache stale authentication, allowing new
+  connections to bypass the updated trust. New connections now perform
+  full certificate verification; static mTLS and non-mTLS listeners
+  retain resumption.
+
 ### Added
 
 - Implicit cluster references: an inline load-balancer cluster that shares
