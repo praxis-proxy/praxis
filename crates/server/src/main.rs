@@ -91,6 +91,12 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Register the jemalloc heap purge callback before the server starts.
+    // The overload manager calls this when pressure rises, to return unused
+    // pages to the OS.
+    #[cfg(all(unix, feature = "overload-actions"))]
+    praxis_core::overload::set_heap_purge(praxis::allocator::jemalloc_purge);
+
     let (config, config_file) = load_serving_config(explicit.as_deref());
     let tracing_guard = praxis::init_tracing(&config).unwrap_or_else(|error| praxis::fatal(&error));
     let log_level = Some(tracing_guard.log_level_state());
@@ -130,6 +136,21 @@ fn load_serving_config(explicit: Option<&str>) -> (Config, Option<ConfigFile>) {
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
+    #[cfg(all(unix, feature = "overload-actions"))]
+    #[test]
+    fn process_allocations_are_visible_to_the_purge_allocator() {
+        let before = praxis::allocator::allocated_bytes().unwrap();
+        let allocation = vec![7_u8; 16_777_216];
+        std::hint::black_box(&allocation);
+        let during = praxis::allocator::allocated_bytes().unwrap();
+        assert!(
+            during >= before.saturating_add(8_388_608), // 8 MiB: allow unrelated parallel tests to release memory.
+            "binary allocations must use the same jemalloc as mallctl: before={before}, during={during}"
+        );
+        assert!(praxis::allocator::jemalloc_purge());
+        assert_eq!(allocation.first(), Some(&7));
+    }
+
     use clap::Parser as _;
 
     use super::Cli;

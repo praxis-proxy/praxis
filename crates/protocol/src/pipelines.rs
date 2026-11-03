@@ -49,6 +49,8 @@ use praxis_filter::FilterPipeline;
 ///
 /// [`ArcSwap`]: arc_swap::ArcSwap
 pub struct ListenerPipelines {
+    /// Protective action state shared only by this server's adapters and sampler.
+    overload: Arc<praxis_core::overload::Signal>,
     /// Maps listener names to their swappable filter pipelines.
     pipelines: HashMap<String, Arc<ArcSwap<FilterPipeline>>>,
     /// The protocol each listener's pipelines are resolved for.
@@ -61,6 +63,11 @@ pub struct ListenerPipelines {
 }
 
 impl ListenerPipelines {
+    /// The server-scoped controller, stable across filter pipeline reloads.
+    pub fn overload(&self) -> Arc<praxis_core::overload::Signal> {
+        Arc::clone(&self.overload)
+    }
+
     /// Create from a map of listener name to pipeline.
     ///
     /// Called by the server during startup after building filter pipelines
@@ -100,6 +107,7 @@ impl ListenerPipelines {
             .map(|(name, p)| (name, Arc::new(ArcSwap::from(p))))
             .collect();
         Self {
+            overload: Arc::default(),
             pipelines: swappable,
             protocols,
         }

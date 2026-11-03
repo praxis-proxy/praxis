@@ -115,10 +115,16 @@ fn wait_for_upstream_retry_gate(retries: u32) {
 /// alternate host (after applying any pending backoff).
 #[cfg(feature = "pingora")]
 pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> pingora_core::Result<Box<HttpPeer>> {
+    let signal = ctx.overload.clone().filter(|signal| signal.is_enabled());
     let target = prepare_attempt(ctx)
         .await
         .map_err(|message| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, message))?;
-    build_peer(target.upstream, target.allow_private).await
+    let Some(signal) = signal else {
+        return build_peer(target.upstream, target.allow_private).await;
+    };
+    let mut upstream = target.upstream.clone();
+    crate::overload::scale_connection(&mut upstream.connection, &signal);
+    build_peer(&upstream, target.allow_private).await
 }
 
 /// What one upstream attempt dials.

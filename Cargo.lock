@@ -3424,6 +3424,7 @@ dependencies = [
  "praxis-proxy-tls",
  "serde",
  "tempfile",
+ "tikv-jemalloc-sys",
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
@@ -3599,6 +3600,7 @@ version = "0.8.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "cargo_metadata",
  "futures",
  "h2",
  "http",

@@ -149,6 +149,18 @@ pub fn load_http_handler(
     pipeline: Arc<ArcSwap<FilterPipeline>>,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
 ) -> Result<(), praxis_core::ProxyError> {
+    load_http_handler_with_overload(server, listener, pipeline, cert_watcher_shutdowns, Arc::default())
+}
+
+/// Register a listener with its owning server's overload controller.
+#[cfg(feature = "pingora")]
+pub(super) fn load_http_handler_with_overload(
+    server: &mut Server,
+    listener: &praxis_core::config::Listener,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+    overload: Arc<praxis_core::overload::Signal>,
+) -> Result<(), praxis_core::ProxyError> {
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
     let downstream_keepalive_timeout_secs = listener
         .downstream_keepalive_timeout_ms
@@ -160,7 +172,7 @@ pub fn load_http_handler(
     // Always use the body-capable handler: a reload may add body
     // filters, and compression init is one-shot in Pingora.
     debug!(listener = %listener.name, "loading HTTP handler with body filters");
-    let handler = PingoraHttpHandler::new(
+    let mut handler = PingoraHttpHandler::new(
         pipeline,
         downstream_read_timeout,
         downstream_keepalive_timeout_secs,
@@ -170,7 +182,8 @@ pub fn load_http_handler(
         // would deep-copy on every clone.
         ::metrics::SharedString::from_shared(Arc::from(listener.name.as_str())),
     );
-    wire_service(server, listener, handler, cert_watcher_shutdowns)?;
+    handler.overload = Arc::clone(&overload);
+    wire_service(server, listener, handler, cert_watcher_shutdowns, overload)?;
     Ok(())
 }
 
@@ -181,6 +194,7 @@ fn wire_service<H>(
     listener: &praxis_core::config::Listener,
     handler: H,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+    overload: Arc<praxis_core::overload::Signal>,
 ) -> Result<(), praxis_core::ProxyError>
 where
     H: pingora_proxy::ProxyHttp + Send + Sync + 'static,
@@ -190,7 +204,9 @@ where
     let mut proxy = http_proxy(&server.configuration, handler);
     proxy.server_options = Some(server_options::h2c_server_options());
     proxy.h2_options = Some(server_options::h2_server_options());
-    let mut service = Service::new(service_name, proxy);
+    let app = crate::overload::http_app(proxy, listener, Arc::clone(&overload));
+    let mut service = Service::new(service_name, app);
+    service.set_connection_filter(Arc::new(crate::overload::AdmissionFilter(overload)));
     if let Some(tx) = super::listener::add_listener(&mut service, listener)? {
         cert_watcher_shutdowns.push(tx);
     }

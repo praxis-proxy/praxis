@@ -324,6 +324,10 @@ async fn handle_connection(
     tls: Option<TlsAcceptor>,
     shutdown: ShutdownWatch,
 ) {
+    if proxy.overload.is_saturated() {
+        crate::http::metrics::record_overload_reject("pre_tls_pressure");
+        return;
+    }
     // Pingora disables Nagle on every accepted socket; a proxy forwards
     // bytes as they arrive.
     if let Err(err) = stream.set_nodelay(true) {

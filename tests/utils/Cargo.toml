@@ -28,6 +28,7 @@ policy-jwt = ["policy-engine", "praxis/policy-jwt"]
 policy-jwt-openssl-fips = ["policy-engine", "praxis/policy-jwt-openssl-fips"]
 policy-jwt-fips = ["policy-jwt-openssl-fips", "policy-crypto-fips"]
 policy-experimental-ratelimit = ["policy-engine", "praxis/policy-experimental-ratelimit"]
+overload-actions = ["praxis/overload-actions"]
 
 [lints]
 workspace = true
@@ -47,6 +48,7 @@ praxis-filter = { workspace = true }
 # that depends on the harness, so the full test surface is always built.
 praxis-protocol = { workspace = true, features = ["admin-api", "config-reload"] }
 praxis-tls = { workspace = true }
+cargo_metadata = { workspace = true }
 h2 = { workspace = true }
 http = { workspace = true }
 # Well-formed EC key shares for the raw TLS probes (tls_probe.rs).

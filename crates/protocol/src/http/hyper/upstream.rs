@@ -9,6 +9,8 @@
 //! `error_while_proxy` hooks: the retry policy for connect and exchange
 //! failures, and no retry once the replay copy of the body is truncated.
 
+#[cfg(test)]
+use std::sync::Arc;
 use std::time::Duration;
 
 use http::{Response, Version};
@@ -154,6 +156,7 @@ async fn select_peer(listener: &ListenerShared, flight: &mut Flight) -> Result<P
     let mut peer = PeerSpec::from_upstream(target.upstream, target.allow_private)
         .await
         .map_err(|err| Failure::peer(&err))?;
+    crate::overload::scale_connection(&mut peer.connection, &listener.overload);
     peer.trust_anchors.clone_from(&listener.trust_anchors);
     open_attempt_at(&peer.address.ip().to_string(), peer.address.port(), &mut flight.ctx);
     Ok(peer)
@@ -312,7 +315,6 @@ fn connect_budget(options: &ConnectionOptions) -> Duration {
     reason = "tests"
 )]
 mod tests {
-    use std::sync::Arc;
 
     use http::StatusCode;
     use praxis_core::{
@@ -650,8 +652,10 @@ mod tests {
     /// to a cluster of two endpoints nothing listens on, whose policy retries
     /// connect failures on another endpoint; its upload, and the client side.
     async fn routed_to_two_endpoints() -> (Flight, Upload, Client) {
-        let first = refusing_peer().await.address;
-        let second = refusing_peer().await.address;
+        let first_socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first = first_socket.local_addr().unwrap();
+        let second = second_socket.local_addr().unwrap();
         let yaml = format!(
             "- filter: router\n  routes:\n    - path_prefix: \"/\"\n      cluster: backend\n- filter: load_balancer\n  clusters:\n    - name: backend\n      endpoints: [\"{first}\", \"{second}\"]\n      retry_policy:\n        max_retries: 2\n        retriable_conditions: [connect_failure]\n"
         );
@@ -670,6 +674,7 @@ mod tests {
 
         assert!(matches!(phase, RequestPhase::Proxy), "the request is routed upstream");
         let upload = Upload::new(body, &flight.ctx);
+        drop((first_socket, second_socket));
         (flight, upload, client)
     }
 

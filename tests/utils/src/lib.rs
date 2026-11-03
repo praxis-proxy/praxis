@@ -48,6 +48,6 @@ pub use process_metrics::{ProcessSample, sample_process};
 pub use proxy::{
     PRAXIS_BIN_ENV, ProxyGuard, ReloadableProxyGuard, build_pipeline, custom_filter_yaml, praxis_bin, registry_with,
     simple_proxy_yaml, start_full_proxy, start_full_proxy_with_kv_stores, start_full_proxy_with_registry, start_proxy,
-    start_proxy_with_registry, start_reloadable_proxy, start_tls_proxy, start_tls_proxy_no_wait,
-    start_tls_proxy_no_wait_with_registry,
+    start_proxy_with_overload, start_proxy_with_registry, start_reloadable_proxy, start_tls_proxy,
+    start_tls_proxy_no_wait, start_tls_proxy_no_wait_with_registry,
 };

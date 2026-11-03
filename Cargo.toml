@@ -68,7 +68,7 @@ opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-provider-agnostic", "tls-roots", "trace"] }
 opentelemetry-proto = { version = "0.33.1", default-features = false, features = ["gen-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
-pingora-core = { version = "0.11.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
+pingora-core = { version = "0.11.0", package = "quixotic-plecostomus-core", features = ["rustls", "connection_filter"] }
 pingora-http = { version = "0.11.0", package = "quixotic-plecostomus-http" }
 pingora-proxy = { version = "0.11.0", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
 percent-encoding = "2.3.2"
@@ -151,6 +151,7 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["logg
 tokio-tungstenite = "0.30.0"
 thiserror = "2.0.21"
 tikv-jemallocator = "0.7.0"
+tikv-jemalloc-sys = "0.7.0"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 # Pingora 0.11 creates zero-capacity BufStreams, which Tokio 1.54 rejects.

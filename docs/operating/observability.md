@@ -261,12 +261,16 @@ in.
 
 Requests (HTTP) and connections (TCP) rejected by
 overload protection before any filter runs. HTTP
-rejections answer `503` with `Retry-After`; TCP
-rejections close the connection.
+rejections after parsing answer `503` with `Retry-After`; TCP
+rejections and pre-TLS socket rejections close the connection.
 
 | Label | Values |
 | -------- | ---------------------------------------- |
-| `reason` | `memory`, `file_descriptors`, `global_connections`, `listener_connections` |
+| `reason` | `memory`, `file_descriptors`, `global_connections`, `listener_connections`, `pressure`, `pre_tls_pressure` |
+
+`pressure` counts new HTTP requests and TCP sessions refused during sustained
+resource saturation. `pre_tls_pressure` counts data sockets refused before
+TLS or HTTP parsing; these refusals cannot return an HTTP response.
 
 `file_descriptors` counts requests shed because open
 descriptors neared the process limit (see
@@ -279,15 +283,17 @@ Smoothed pressure from 0 to 1 for one resource.
 Published only when `runtime.overload_gauges` is true,
 and scraped from `/metrics` on `admin.metrics_address`.
 `admin.address` answers `/metrics` with 404, and
-`/api/stats` omits these gauges. A resource with no
+`/api/stats` omits these gauges. For a fresh controller slot, a resource with no
 sample is absent: no cgroup limit, no PSI file, no
 `runtime.max_memory_bytes` for heap, no connection
 cap, or no descriptor usage (including non-Linux).
-The gauge does not refuse work.
+The gauge does not refuse work. Each series also carries a `server` slot,
+so embedded servers with different threshold bands keep distinct values.
 
 | Label | Values |
 | ---------- | -------------------------------------------------------- |
 | `resource` | `cgroup_memory`, `heap`, `cpu`, `connections`, `file_descriptors` |
+| `server` | Process-local reusable controller slot |
 
 `cgroup_memory` is the highest working-set ratio of this
 process's cgroup and its ancestors, up to the cgroup
@@ -356,6 +362,90 @@ label schemes. The mapping between them is:
 
 `listener_connections` rejects are per-listener and have
 no matching pressure gauge.
+
+#### `praxis_overload_action` (gauge)
+
+Published when the binary is built with `--features overload-actions`
+and both `runtime.overload_gauges` and `runtime.overload_actions` are
+true. Each series includes a `server` identity, stable for that server's
+lifetime and across reloads. Concurrent embedded servers publish independent
+action series; stopping one resets only its pressure and action series.
+Slots are reused after the controller’s final owner is dropped. Retained
+zero-valued series are therefore bounded by the peak number of concurrent
+controllers in the process (at most five pressure and six action series per
+slot), rather than the total number of server restarts. A slot identifies
+a live controller, not a persistent server across restarts. Cleared resource
+series may remain at zero when the next owner leaves that resource unconfigured.
+The `action` label
+identifies the applied policy:
+
+- `purge_heap`: 1 when unused jemalloc pages were successfully purged
+  since the previous sampling cycle; 0 when no purge completed, the
+  allocator callback is unavailable, or the purge failed. Purges are
+  requested only under memory pressure on a blocking worker. Only one
+  purge can run at a time; samplers do not wait for it.
+- `disable_keepalive`: 1 after peak effective pressure exceeds 0.5.
+  HTTP/1 connections close after completing their response. Keep-alive
+  is restored when pressure falls to 0.4 or below. HTTP/2 is unchanged.
+- `scale_timeouts` and `scale_idle_timeout`: 1 while quantized effective
+  pressure shortens connect/header waits and idle pool retention.
+  The factor is `1 - 0.9 * pressure`, rounded to 1% pressure steps.
+  Body, stream, and total session deadlines stay unchanged.
+- `refuse_before_tls`: 1 at sustained saturation. HTTP/TCP data listeners
+  close new sockets before TLS; management listeners remain available.
+  New HTTP requests on existing connections receive 503 with Retry-After.
+- `fail_readiness`: 1 after three consecutive raw saturated samples
+  for an effective resource. `/ready` then returns HTTP 503 with
+  `{"status":"overloaded"}`. Three consecutive raw samples below
+  saturation clear that resource's state. Any remaining saturated
+  resource keeps readiness failed. `/healthy` stays successful.
+
+Action pressure uses cgroup memory when a finite cgroup sample is
+available, falling back to heap pressure otherwise. Both gauges remain
+available independently. CPU, connection, and descriptor pressures
+also contribute to peak pressure and readiness. Only cgroup-local CPU
+readings drive actions; host-wide fallback CPU readings remain visible
+in gauges. A missing sample cannot count toward a saturation or recovery
+run. Ten consecutive missing samples stop that reading from driving
+actions and log a warning, while the gauge retains its last value.
+Fresh readings start a new saturation run.
+
+Pressure gauges keep the 30% moving average described above. Readiness
+uses debounced raw samples so it does not wait roughly a minute for an
+average starting at zero to approach 1. Pressure and action changes are
+logged. Existing hard admission limits remain in force.
+
+Connections returned to upstream pools use the shortened idle timeout.
+An unset idle timeout becomes 60 seconds when actions are enabled; previously
+idle entries keep their scheduled expiry. No active upstream connection or
+response body is interrupted to reclaim idle capacity.
+
+Correlate pressure with `praxis_http_active_requests{listener}` and
+`praxis_tcp_active_connections{listener}` for in-flight work,
+`praxis_body_buffer_bytes` for accumulated/frozen body payload bytes still
+owned by the pipeline (including shared Bytes clones), and
+`praxis_filter_active{filter}` for hooks running or awaiting external work.
+The existing opt-in `praxis_filter_duration_seconds` histogram shows which
+filter consumes time. These are attribution signals, not a per-filter heap
+profiler: private filter allocations and transport buffers are outside the
+body-buffer gauge. Labels use registered filter types and configured
+listeners, never request paths or arbitrary client values.
+
+Action signals belong to one server instance and survive pipeline reloads;
+stopping one embedded server does not reset another's controller. Exported
+resource gauges describe process-wide resources.
+
+Library embedders must register their allocator callback with
+`praxis_core::overload::set_heap_purge` before starting a server.
+Without a callback, heap purging is unavailable and its gauge stays 0.
+The shipped binary registers jemalloc on Unix.
+The callback is available as `praxis::allocator::jemalloc_purge` in Unix
+builds with the `overload-actions` feature; register it only when the
+embedding process uses jemalloc. Startup returns an error if the required
+housekeeping runtime cannot be created. Shutdown joins that runtime and
+clears both the request-path signal and all action gauges.
+
+See [the functional example](../../examples/configs/observability/overload-actions.yaml).
 
 #### `praxis_process_open_fds` / `praxis_process_max_fds` (gauges)
 

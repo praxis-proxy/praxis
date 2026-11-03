@@ -105,7 +105,7 @@ rather than silently adopted as the baseline.
   `work_stealing`, `global_queue_interval`,
   `max_connections`, `max_memory_bytes`,
   `max_open_files`, `overload_gauges`,
-  `shed_on_fd_pressure`,
+  `overload_actions`, `overload_thresholds`, `shed_on_fd_pressure`,
   `subrequest_pool_size`,
   `subrequest_max_connections`,
   `subrequest_circuit_breaker`, `upstream_ca_file`,
@@ -671,6 +671,29 @@ runtime:
   Connection pressure needs `max_connections`. The
   task starts at process start, so changing it needs
   a restart. See [Observability](observability.md).
+- `overload_actions`: **experimental.** Requires a binary built with
+  `--features overload-actions` and `overload_gauges: true`.
+  Purges unused jemalloc pages under memory pressure, disables HTTP/1
+  keep-alive above 50% pressure (restoring it at 40%), and fails
+  `/ready` after three consecutive raw saturated samples. Three clear
+  samples restore readiness for that resource. Cgroup memory takes
+  precedence over heap for actions. Saturation refuses new connections
+  before TLS and new HTTP requests with 503; admitted streams complete.
+  Connect, idle, and downstream HTTP/1 header timeouts scale from 100%
+  to 10% of their configured values as effective pressure rises. Body
+  reads/writes and stream/session deadlines are preserved. Returned idle
+  upstream connections expire sooner; an unset upstream idle timeout has
+  a 60-second baseline when actions are enabled. Previously idle entries
+  keep their current expiry. `bool`, defaults to `false`. Changes
+  require a restart. See [Observability](observability.md).
+- `overload_thresholds`: optional per-resource bands under `runtime`.
+  Each pair requires finite `0 <= scaling < saturation <= 1`.
+  Resources are `cgroup_memory` and `heap` (default 0.80/0.95),
+  `cpu` (0.10/0.50), and `connections` and `file_descriptors`
+  (0.70/0.95). For example:
+  `connections: { scaling: 0.60, saturation: 0.85 }`.
+  Omitted resources retain their defaults. Bands require a restart and
+  apply to gauges even when actions are off.
 - `shed_on_fd_pressure`: reject new requests with `503
   Service Unavailable` (and close new TCP connections)
   when open file descriptors near the process limit,
@@ -855,6 +878,12 @@ in-flight connections finish for up to
 Active TCP forwarding stops as soon as the signal
 arrives. See
 [Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
+
+The overload housekeeping runtime stops its periodic loops on shutdown
+and clears its server's action state. An already running jemalloc purge
+is joined after the network runtime's shutdown budget; allocator work
+cannot be interrupted safely, so this final join can extend process exit
+past `shutdown_timeout_secs`.
 
 Once runtime shutdown completes, Praxis flushes queued
 log lines and attempts to export pending OTLP spans, then

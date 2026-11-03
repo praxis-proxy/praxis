@@ -139,6 +139,11 @@ already a direct dependency.
 (dtolnay, dev tooling), `criterion` / `plotters`
 (benchmarks), `tempfile`.
 
+`tikv-jemalloc-sys` is the TiKV allocator's existing FFI dependency.
+The optional `overload-actions` feature uses it directly to purge unused
+pages from the binary's jemalloc arenas. It adds no cryptography and is
+not enabled in the default build.
+
 `syslog` backs the `access_log` filter's RFC 3164
 sink and is optional, pulled in only by the
 off-by-default experimental `access-log-syslog`

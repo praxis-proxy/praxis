@@ -25,6 +25,7 @@
 )]
 #![allow(let_underscore_drop, reason = "development tooling")]
 
+mod artifact_path;
 #[cfg(feature = "dev")]
 mod benchmark;
 #[cfg(feature = "dev")]
@@ -61,6 +62,9 @@ struct Cli {
 /// Available xtask subcommands.
 #[derive(Subcommand)]
 enum Command {
+    /// Print the praxis executable from Cargo JSON messages on standard input.
+    ArtifactPath,
+
     /// Start a quick HTTP test server returning a static
     /// response to every request.
     #[cfg(feature = "dev")]
@@ -116,6 +120,7 @@ enum Command {
 fn main() {
     let cli = Cli::parse();
     match cli.command {
+        Command::ArtifactPath => artifact_path::run(),
         #[cfg(feature = "dev")]
         Command::Echo(args) => echo::run(args),
         #[cfg(feature = "dev")]

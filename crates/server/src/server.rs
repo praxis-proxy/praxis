@@ -171,6 +171,10 @@ fn run_startup_security_checks(config: &Config) -> Result<(), StartupError> {
     warn_insecure_log_file_permissions(config);
     warn_insecure_sink_file_permissions(config);
     warn_overload_gauges_without_exporter(config);
+    crate::startup_checks::warn_overload_memory_limit(
+        config.runtime.max_memory_bytes,
+        praxis_core::overload::finite_cgroup_memory_limit(),
+    );
     Ok(())
 }
 
@@ -323,9 +327,8 @@ pub fn try_run_server_with_composition(
 
     let health_registry = build_health_registry(&config.clusters);
     let (state, registry) = build_server_state(&config, composition, &health_registry, log_level)?;
-
-    info!(backend = praxis_core::backend::NAME, "initializing server");
-    let mut server = Runtime::from_config(&config);
+    let _health_cleanup = HealthStartupGuard(Some(Arc::clone(&state.health_shutdown)));
+    let (mut server, _housekeeping) = prepare_serving_runtime(&config, &state)?;
     let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines)?;
     #[cfg(feature = "admin-api")]
     register_admin_endpoints(
@@ -562,8 +565,7 @@ fn build_server_state(
         Arc::clone(health_registry),
         &health_shutdown,
         subrequest_client.upstream_ca(),
-    );
-    spawn_housekeeping_tasks(&config.runtime, &subrequest_client, praxis_core::fd::usage().is_some());
+    )?;
 
     let state = ServerState {
         pipelines: Arc::new(pipelines),
@@ -777,20 +779,30 @@ type HousekeepingLoop = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// reactor is registered on the calling thread and a bare
 /// `tokio::spawn` would panic; the health checks and the housekeeping
 /// loops get their own thread and runtime instead.
-fn spawn_on_dedicated_runtime<F>(runtime_name: &'static str, fut: F)
+fn spawn_on_dedicated_runtime<F>(runtime_name: &'static str, fut: F) -> std::io::Result<std::thread::JoinHandle<()>>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    std::thread::spawn(move || {
-        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-            Ok(rt) => rt,
-            Err(err) => {
-                tracing::error!(runtime = runtime_name, error = %err, "failed to start background runtime");
-                return;
-            },
-        };
-        rt.block_on(fut);
-    });
+    spawn_with_runtime(
+        runtime_name,
+        tokio::runtime::Builder::new_current_thread().enable_all().build(),
+        fut,
+    )
+}
+
+/// Start background work only when runtime construction and thread spawn succeed.
+fn spawn_with_runtime<F>(
+    name: &'static str,
+    runtime: std::io::Result<tokio::runtime::Runtime>,
+    fut: F,
+) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let runtime = runtime?;
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || runtime.block_on(fut))
 }
 
 /// Spawn background health check tasks on a dedicated tokio runtime.
@@ -811,9 +823,9 @@ fn spawn_health_check_tasks(
     registry: HealthRegistry,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     upstream_ca: Option<Arc<praxis_tls::CachedCaCerts>>,
-) {
+) -> Result<(), StartupError> {
     if registry.is_empty() {
-        return;
+        return Ok(());
     }
 
     let shutdown = health_shutdown.lock().expect("health shutdown lock").clone();
@@ -826,7 +838,7 @@ fn spawn_health_check_tasks(
         .cloned()
         .collect();
 
-    spawn_on_dedicated_runtime("health check runtime", async move {
+    let _thread = spawn_on_dedicated_runtime("health check runtime", async move {
         praxis_protocol::http::health::runner::spawn_health_checks_with_ca(
             &clusters,
             &registry,
@@ -834,7 +846,8 @@ fn spawn_health_check_tasks(
             upstream_ca.as_deref(),
         );
         shutdown.cancelled().await;
-    });
+    })?;
+    Ok(())
 }
 
 /// Run the periodic loops `runtime` asks for on one shared dedicated runtime.
@@ -842,18 +855,84 @@ fn spawn_health_check_tasks(
 /// Descriptor tracking, memory limits, and the sub-request circuit breaker
 /// are startup-only, so their loops run for the life of the process and share
 /// one thread; nothing is spawned when none of them is active.
-fn spawn_housekeeping_tasks(runtime: &RuntimeConfig, client: &SubRequestClient, track_fds: bool) {
-    let loops = housekeeping_loops(runtime, client, track_fds);
+fn spawn_housekeeping_tasks(
+    runtime: &RuntimeConfig,
+    client: &SubRequestClient,
+    track_fds: bool,
+    signal: Arc<praxis_core::overload::Signal>,
+) -> Result<Option<HousekeepingTasks>, StartupError> {
+    if runtime.overload_gauges && runtime.overload_actions && cfg!(feature = "overload-actions") {
+        signal.update(praxis_core::overload::EngagedActions::default(), 0.0);
+    }
+    let loops = housekeeping_loops(runtime, client, track_fds, Arc::clone(&signal));
     if loops.is_empty() {
-        return;
+        return Ok(None);
     }
 
-    spawn_on_dedicated_runtime("housekeeping runtime", async move {
+    let shutdown = CancellationToken::new();
+    let cancelled = shutdown.clone();
+    let gauges_enabled = runtime.overload_gauges;
+    let thread = spawn_on_dedicated_runtime("housekeeping runtime", async move {
+        let mut tasks = tokio::task::JoinSet::new();
         for task in loops {
-            tokio::spawn(task);
+            tasks.spawn(task);
         }
-        std::future::pending::<()>().await;
-    });
+        cancelled.cancelled().await;
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        reset_overload_actions(&signal, gauges_enabled);
+    })?;
+    Ok(Some(HousekeepingTasks {
+        shutdown,
+        thread: Some(thread),
+    }))
+}
+
+/// Prepare the network runtime and samplers owned by the serving entry point.
+fn prepare_serving_runtime(
+    config: &Config,
+    state: &ServerState,
+) -> Result<(Runtime, Option<HousekeepingTasks>), StartupError> {
+    let housekeeping = spawn_housekeeping_tasks(
+        &config.runtime,
+        &state.subrequest_client,
+        praxis_core::fd::usage().is_some(),
+        state.pipelines.overload(),
+    )?;
+    info!(backend = praxis_core::backend::NAME, "initializing server");
+    Ok((Runtime::from_config(config), housekeeping))
+}
+
+/// Cancels already-started health probes if a later startup stage fails.
+struct HealthStartupGuard(Option<Arc<Mutex<CancellationToken>>>);
+
+impl Drop for HealthStartupGuard {
+    fn drop(&mut self) {
+        if let Some(token) = self.0.take() {
+            token.lock().unwrap_or_else(std::sync::PoisonError::into_inner).cancel();
+        }
+    }
+}
+
+/// Owns the housekeeping runtime until startup fails or the server stops.
+/// A running allocator purge is joined after the network shutdown budget;
+/// allocator work cannot safely be interrupted. Periodic loops are aborted first.
+struct HousekeepingTasks {
+    /// Cancels every periodic loop before joining its runtime thread.
+    shutdown: CancellationToken,
+    /// The runtime thread, joined exactly once on drop.
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for HousekeepingTasks {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            tracing::error!("housekeeping runtime panicked");
+        }
+    }
 }
 
 /// The periodic loops `runtime` asks for: the descriptor sampler when
@@ -861,7 +940,12 @@ fn spawn_housekeeping_tasks(runtime: &RuntimeConfig, client: &SubRequestClient, 
 /// sampler when `max_memory_bytes` is set, the circuit breaker eviction when
 /// `subrequest_circuit_breaker` is, and overload pressure gauges when
 /// `overload_gauges` is set.
-fn housekeeping_loops(runtime: &RuntimeConfig, client: &SubRequestClient, track_fds: bool) -> Vec<HousekeepingLoop> {
+fn housekeeping_loops(
+    runtime: &RuntimeConfig,
+    client: &SubRequestClient,
+    track_fds: bool,
+    signal: Arc<praxis_core::overload::Signal>,
+) -> Vec<HousekeepingLoop> {
     let mut loops = Vec::new();
     if track_fds {
         loops.push(fd_sampler_loop());
@@ -873,7 +957,8 @@ fn housekeeping_loops(runtime: &RuntimeConfig, client: &SubRequestClient, track_
         loops.push(circuit_eviction_loop(client.clone()));
     }
     if runtime.overload_gauges {
-        loops.push(overload_gauge_loop(runtime.max_memory_bytes));
+        let actions_enabled = runtime.overload_actions && cfg!(feature = "overload-actions");
+        loops.push(overload_gauge_loop(runtime, actions_enabled, signal));
     }
     loops
 }
@@ -892,36 +977,153 @@ fn fd_sampler_loop() -> HousekeepingLoop {
     })
 }
 
-/// Sample overload pressure and publish it. Does not shed load.
-///
-/// Logs state transitions when a resource crosses between idle, scaling,
-/// and saturated states. Transitions are logged at `info` for scaling
-/// and `warn` for saturation so operators without Prometheus still see
-/// pressure changes.
-fn overload_gauge_loop(heap_max_bytes: Option<usize>) -> HousekeepingLoop {
+/// Sample and publish pressure, log transitions, and optionally apply actions.
+fn overload_gauge_loop(
+    runtime: &RuntimeConfig,
+    actions_enabled: bool,
+    signal: Arc<praxis_core::overload::Signal>,
+) -> HousekeepingLoop {
+    let bands = runtime.overload_thresholds;
+    let heap_max_bytes = runtime.max_memory_bytes;
     Box::pin(async move {
-        let mut monitor = praxis_core::overload::Monitor::default();
+        let mut monitor = praxis_core::overload::Monitor::with_bands(bands);
         let mut tracker = praxis_core::overload::TransitionTracker::default();
+        let mut prev_actions = praxis_core::overload::EngagedActions::default();
+        let mut purge = None;
         let mut interval = tokio::time::interval(praxis_core::overload::SAMPLE_INTERVAL);
         interval.tick().await;
-        info!("overload pressure gauges enabled");
+        log_overload_mode(actions_enabled);
 
         loop {
             interval.tick().await;
-            let pressures = monitor.observe(praxis_core::overload::Inputs {
-                heap_max_bytes: heap_max_bytes.and_then(|bytes| u64::try_from(bytes).ok()),
-                connections: praxis_protocol::connections::global_usage()
-                    .and_then(|(used, limit)| Some((u64::try_from(used).ok()?, u64::try_from(limit).ok()?))),
-                file_descriptors: praxis_core::fd::usage().map(|usage| (usage.open, usage.limit)),
-            });
-            for (resource, pressure) in pressures.iter() {
-                praxis_protocol::http::metrics::set_overload_pressure(resource, pressure);
-            }
-            for transition in tracker.update(pressures, monitor.raw_saturated()) {
-                log_pressure_transition(&transition);
-            }
+            prev_actions = sample_overload(
+                &mut monitor,
+                &mut tracker,
+                prev_actions,
+                heap_max_bytes,
+                (signal.as_ref(), actions_enabled.then_some(&mut purge)),
+            )
+            .await;
         }
     })
+}
+
+/// One overload sample: publish pressure, log transitions, and apply actions.
+async fn sample_overload(
+    monitor: &mut praxis_core::overload::Monitor,
+    tracker: &mut praxis_core::overload::TransitionTracker,
+    prev_actions: praxis_core::overload::EngagedActions,
+    heap_max_bytes: Option<usize>,
+    control: (
+        &praxis_core::overload::Signal,
+        Option<&mut Option<tokio::task::JoinHandle<bool>>>,
+    ),
+) -> praxis_core::overload::EngagedActions {
+    let (signal, purge) = control;
+    let pressures = monitor.observe(overload_inputs(heap_max_bytes));
+    let action_pressures = monitor.action_pressures(pressures);
+    tracker.track_cpu_source(action_pressures.cpu.is_some());
+    for (resource, pressure) in pressures.iter() {
+        praxis_protocol::http::metrics::set_overload_pressure(resource, pressure, signal.id());
+    }
+    for transition in tracker.update(pressures, monitor.raw_saturated()) {
+        log_pressure_transition(&transition);
+    }
+    let Some(purge) = purge else {
+        return prev_actions;
+    };
+    apply_overload_actions(action_pressures, tracker, prev_actions, purge, signal).await
+}
+
+/// Counts the sampler already has. Kernel files are read inside `observe`.
+fn overload_inputs(heap_max_bytes: Option<usize>) -> praxis_core::overload::Inputs {
+    praxis_core::overload::Inputs {
+        heap_max_bytes: heap_max_bytes.and_then(|bytes| u64::try_from(bytes).ok()),
+        connections: praxis_protocol::connections::global_usage()
+            .and_then(|(used, limit)| Some((u64::try_from(used).ok()?, u64::try_from(limit).ok()?))),
+        file_descriptors: praxis_core::fd::usage().map(|usage| (usage.open, usage.limit)),
+    }
+}
+
+/// Update the request-path signal, publish action gauges, and purge the heap.
+async fn apply_overload_actions(
+    pressures: praxis_core::overload::Pressures,
+    tracker: &praxis_core::overload::TransitionTracker,
+    prev_actions: praxis_core::overload::EngagedActions,
+    purge: &mut Option<tokio::task::JoinHandle<bool>>,
+    signal: &praxis_core::overload::Signal,
+) -> praxis_core::overload::EngagedActions {
+    let mut actions = praxis_core::overload::EngagedActions::from_pressures(pressures, tracker, prev_actions);
+    actions.purge_heap = poll_heap_purge(actions.purge_heap, purge).await;
+    publish_overload_actions(actions, signal, tracker.action_pressures(pressures).peak());
+    log_action_changes(prev_actions, actions);
+    actions
+}
+
+/// Publish one consistent action state to request handlers and Prometheus.
+fn publish_overload_actions(
+    actions: praxis_core::overload::EngagedActions,
+    signal: &praxis_core::overload::Signal,
+    pressure: f64,
+) {
+    signal.update(actions, pressure);
+    for action in ["scale_timeouts", "scale_idle_timeout"] {
+        praxis_protocol::http::metrics::set_overload_action(action, signal.is_scaling(), signal.id());
+    }
+    praxis_protocol::http::metrics::set_overload_action("refuse_before_tls", actions.fail_readiness, signal.id());
+    for (action, engaged) in actions.iter() {
+        praxis_protocol::http::metrics::set_overload_action(action, engaged, signal.id());
+    }
+}
+
+/// Clear the owning controller's gauges before its metric slot can be reused.
+fn reset_overload_actions(signal: &praxis_core::overload::Signal, gauges_enabled: bool) {
+    if gauges_enabled {
+        for resource in ["cgroup_memory", "heap", "cpu", "connections", "file_descriptors"] {
+            praxis_protocol::http::metrics::set_overload_pressure(resource, 0.0, signal.id());
+        }
+    }
+    if signal.is_enabled() {
+        publish_overload_actions(praxis_core::overload::EngagedActions::default(), signal, 0.0);
+    }
+    signal.clear();
+}
+
+/// Collect completed purge work without blocking samplers or queuing purges.
+async fn poll_heap_purge(requested: bool, task: &mut Option<tokio::task::JoinHandle<bool>>) -> bool {
+    let mut succeeded = false;
+    if task.as_ref().is_some_and(tokio::task::JoinHandle::is_finished)
+        && let Some(completed) = task.take()
+    {
+        succeeded = completed.await.unwrap_or(false);
+    }
+    if requested && task.is_none() && praxis_core::overload::heap_purge_available() {
+        *task = Some(tokio::task::spawn_blocking(praxis_core::overload::run_heap_purge));
+    }
+    succeeded
+}
+
+/// Startup line so operators can see whether actions are on.
+fn log_overload_mode(actions_enabled: bool) {
+    if actions_enabled {
+        info!("overload pressure gauges and actions enabled");
+    } else {
+        info!("overload pressure gauges enabled");
+    }
+}
+
+/// Log when an action engages or disengages.
+fn log_action_changes(prev: praxis_core::overload::EngagedActions, next: praxis_core::overload::EngagedActions) {
+    for ((action, was_engaged), (_, is_engaged)) in prev.iter().zip(next.iter()) {
+        if was_engaged == is_engaged {
+            continue;
+        }
+        if is_engaged {
+            warn!(action, "overload action engaged");
+        } else {
+            info!(action, "overload action disengaged");
+        }
+    }
 }
 
 /// Emit a log line for a pressure state transition.
@@ -1308,11 +1510,28 @@ mod tests {
     #[test]
     fn dedicated_runtime_runs_the_future() {
         let (tx, rx) = std::sync::mpsc::channel::<u8>();
-        spawn_on_dedicated_runtime("test runtime", async move {
+        let thread = spawn_on_dedicated_runtime("test runtime", async move {
             tx.send(7).expect("send completion marker");
-        });
+        })
+        .expect("create dedicated runtime");
         let received = rx.recv_timeout(Duration::from_secs(5));
         assert_eq!(received.ok(), Some(7), "the future must run on the dedicated runtime");
+        thread.join().expect("runtime thread exits");
+    }
+
+    #[test]
+    fn runtime_build_failure_returns_before_background_work_starts() {
+        let (sent, received) = std::sync::mpsc::channel();
+        let failure = std::io::Error::other("injected runtime construction failure");
+        let result = spawn_with_runtime("failing runtime", Err(failure), async move {
+            sent.send(()).expect("background marker");
+        });
+        let error = result.expect_err("runtime failure must propagate to startup");
+        assert!(error.to_string().contains("injected runtime construction failure"));
+        assert!(matches!(
+            received.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        ));
     }
 
     #[test]
@@ -1331,7 +1550,7 @@ filter_chains:
         let config = Config::from_yaml(yaml).expect("test config should parse");
         let registry: HealthRegistry = Arc::new(std::collections::HashMap::new());
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        spawn_health_check_tasks(&config, registry, &health_shutdown, None);
+        spawn_health_check_tasks(&config, registry, &health_shutdown, None).expect("start health checks");
     }
 
     #[test]
@@ -1371,7 +1590,7 @@ filter_chains:
         let registry = build_health_registry(&config.clusters);
         assert!(!registry.is_empty(), "health-checked clusters must register");
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        spawn_health_check_tasks(&config, registry, &health_shutdown, None);
+        spawn_health_check_tasks(&config, registry, &health_shutdown, None).expect("start health checks");
         health_shutdown.lock().expect("health shutdown lock").cancel();
     }
 
@@ -1379,21 +1598,21 @@ filter_chains:
     fn housekeeping_loops_follow_the_runtime_config() {
         let client = SubRequestClient::new(crate::test_support::connector(1));
         assert!(
-            housekeeping_loops(&RuntimeConfig::default(), &client, false).is_empty(),
+            housekeeping_loops(&RuntimeConfig::default(), &client, false, Arc::default()).is_empty(),
             "no limit configured and no descriptor tracking means no housekeeping loop"
         );
         assert_eq!(
-            housekeeping_loops(&RuntimeConfig::default(), &client, true).len(),
+            housekeeping_loops(&RuntimeConfig::default(), &client, true, Arc::default()).len(),
             1,
             "descriptor tracking alone needs only its sampler"
         );
         assert_eq!(
-            housekeeping_loops(&memory_limited_runtime(), &client, false).len(),
+            housekeeping_loops(&memory_limited_runtime(), &client, false, Arc::default()).len(),
             1,
             "a memory limit alone needs only the sampler"
         );
         assert_eq!(
-            housekeeping_loops(&fully_limited_runtime(), &client, true).len(),
+            housekeeping_loops(&fully_limited_runtime(), &client, true, Arc::default()).len(),
             3,
             "descriptors, memory, and a circuit breaker each need their own loop"
         );
@@ -1402,7 +1621,7 @@ filter_chains:
             ..RuntimeConfig::default()
         };
         assert_eq!(
-            housekeeping_loops(&gauges, &client, false).len(),
+            housekeeping_loops(&gauges, &client, false, Arc::default()).len(),
             1,
             "overload gauges are their own loop and do not shed load"
         );
@@ -1411,8 +1630,269 @@ filter_chains:
     #[test]
     fn housekeeping_tasks_spawn_without_panicking() {
         let client = SubRequestClient::new(crate::test_support::connector(1));
-        spawn_housekeeping_tasks(&RuntimeConfig::default(), &client, false);
-        spawn_housekeeping_tasks(&fully_limited_runtime(), &client, true);
+        drop(spawn_housekeeping_tasks(&RuntimeConfig::default(), &client, false, Arc::default()).expect("no tasks"));
+        drop(
+            spawn_housekeeping_tasks(&fully_limited_runtime(), &client, true, Arc::default())
+                .expect("start housekeeping"),
+        );
+    }
+
+    #[test]
+    fn stopping_housekeeping_clears_the_signal_and_action_gauges() {
+        praxis_protocol::http::metrics::install_prometheus_recorder();
+        let client = SubRequestClient::new(crate::test_support::connector(1));
+        let signal = Arc::new(praxis_core::overload::Signal::default());
+        let other = praxis_core::overload::Signal::default();
+        other.update(
+            praxis_core::overload::EngagedActions {
+                fail_readiness: true,
+                ..Default::default()
+            },
+            1.0,
+        );
+        let task = spawn_housekeeping_tasks(&fully_limited_runtime(), &client, true, Arc::clone(&signal))
+            .expect("housekeeping");
+        publish_overload_actions(
+            praxis_core::overload::EngagedActions {
+                disable_keepalive: true,
+                fail_readiness: true,
+                purge_heap: true,
+            },
+            &signal,
+            1.0,
+        );
+        drop(task);
+        assert!(other.is_saturated(), "stopping one server must not reset another");
+        assert!(!signal.is_saturated());
+        assert!(!signal.should_disable_keepalive());
+        let scrape = praxis_protocol::http::metrics::render_prometheus().expect("render action gauges");
+        for (action, _) in praxis_core::overload::EngagedActions::default().iter() {
+            assert!(
+                scrape.contains(&format!(
+                    "praxis_overload_action{{action=\"{action}\",server=\"{}\"}} 0",
+                    signal.id()
+                )),
+                "{scrape}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "overload-actions")]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "synchronous lifecycle test waits on a separate runtime thread"
+    )]
+    fn stopping_actions_sampler_stops_publications() {
+        let signal = Arc::new(praxis_core::overload::Signal::default());
+        let runtime = RuntimeConfig {
+            overload_gauges: true,
+            overload_actions: true,
+            ..Default::default()
+        };
+        let client = SubRequestClient::new(crate::test_support::connector(1));
+        let task = spawn_housekeeping_tasks(&runtime, &client, false, Arc::clone(&signal)).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let baseline = signal.publications();
+        while signal.publications() == baseline {
+            assert!(std::time::Instant::now() < deadline, "real sampler must publish");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(task);
+        let stopped = signal.publications();
+        std::thread::sleep(praxis_core::overload::SAMPLE_INTERVAL + Duration::from_millis(100));
+        assert_eq!(signal.publications(), stopped, "no sampler survives owner drop");
+    }
+
+    #[tokio::test]
+    async fn host_cpu_is_excluded_through_the_sampler_caller() {
+        let signal = praxis_core::overload::Signal::default();
+        let mut monitor = praxis_core::overload::Monitor::default();
+        monitor.set_cpu_sample_for_test(Some((1.0, false)));
+        let mut tracker = praxis_core::overload::TransitionTracker::default();
+        let mut actions = praxis_core::overload::EngagedActions::default();
+        let mut purge = None;
+        for _ in 0..3 {
+            actions = sample_overload(&mut monitor, &mut tracker, actions, None, (&signal, Some(&mut purge))).await;
+        }
+        assert!(
+            !signal.is_saturated(),
+            "host CPU is observable but cannot refuse process work"
+        );
+        assert!(!signal.should_disable_keepalive());
+        monitor.set_cpu_sample_for_test(Some((1.0, true)));
+        for _ in 0..3 {
+            actions = sample_overload(&mut monitor, &mut tracker, actions, None, (&signal, Some(&mut purge))).await;
+        }
+        assert!(signal.is_saturated(), "the same local CPU sample must drive actions");
+    }
+
+    #[tokio::test]
+    async fn different_server_bands_keep_distinct_pressure_gauges() {
+        praxis_protocol::http::metrics::install_prometheus_recorder();
+        let first = praxis_core::overload::Signal::default();
+        let sibling = praxis_core::overload::Signal::default();
+        let mut first_monitor = praxis_core::overload::Monitor::default();
+        let bands = serde_yaml::from_str("cpu: {scaling: 0.7, saturation: 0.95}").unwrap();
+        let mut sibling_monitor = praxis_core::overload::Monitor::with_bands(bands);
+        for (monitor, signal) in [(&mut first_monitor, &first), (&mut sibling_monitor, &sibling)] {
+            monitor.set_cpu_sample_for_test(Some((0.3, true)));
+            sample_overload(
+                monitor,
+                &mut praxis_core::overload::TransitionTracker::default(),
+                praxis_core::overload::EngagedActions::default(),
+                None,
+                (signal, None),
+            )
+            .await;
+        }
+        let scrape = praxis_protocol::http::metrics::render_prometheus().unwrap();
+        let pressure = |metric_text: &str, signal: &praxis_core::overload::Signal| {
+            let prefix = format!(
+                "praxis_overload_pressure{{resource=\"cpu\",server=\"{}\"}} ",
+                signal.id()
+            );
+            metric_text
+                .lines()
+                .find_map(|line| line.strip_prefix(&prefix))
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+        };
+        assert!(pressure(&scrape, &first) > 0.0);
+        assert!(pressure(&scrape, &sibling).abs() < f64::EPSILON);
+        reset_overload_actions(&first, true);
+        let after_stop = praxis_protocol::http::metrics::render_prometheus().unwrap();
+        assert!(
+            pressure(&after_stop, &first).abs() < f64::EPSILON,
+            "shutdown must clear the pressure gauge"
+        );
+        assert!(
+            pressure(&after_stop, &sibling).abs() < f64::EPSILON,
+            "shutdown must preserve the sibling's pressure gauge"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_allocator_does_not_spawn_empty_purge_work() {
+        if !praxis_core::overload::heap_purge_available() {
+            let mut task = None;
+            assert!(!poll_heap_purge(true, &mut task).await);
+            assert!(task.is_none());
+        }
+    }
+
+    #[test]
+    fn late_startup_failure_cancels_health_probes() {
+        let token = Arc::new(Mutex::new(CancellationToken::new()));
+        let watch = token.lock().unwrap().clone();
+        drop(HealthStartupGuard(Some(token)));
+        assert!(watch.is_cancelled());
+    }
+
+    #[test]
+    fn stopping_one_server_preserves_its_siblings_action_gauges() {
+        praxis_protocol::http::metrics::install_prometheus_recorder();
+        let first = praxis_core::overload::Signal::default();
+        let sibling = praxis_core::overload::Signal::default();
+        let engaged = praxis_core::overload::EngagedActions {
+            fail_readiness: true,
+            disable_keepalive: true,
+            ..Default::default()
+        };
+        publish_overload_actions(engaged, &first, 1.0);
+        publish_overload_actions(engaged, &sibling, 1.0);
+        reset_overload_actions(&first, true);
+        let scrape = praxis_protocol::http::metrics::render_prometheus().unwrap();
+        assert!(!first.is_saturated());
+        assert!(sibling.is_saturated());
+        for action in [
+            "fail_readiness",
+            "disable_keepalive",
+            "refuse_before_tls",
+            "scale_timeouts",
+            "scale_idle_timeout",
+        ] {
+            assert!(
+                scrape.contains(&format!(
+                    "praxis_overload_action{{action=\"{action}\",server=\"{}\"}} 0",
+                    first.id()
+                )),
+                "{scrape}"
+            );
+            assert!(
+                scrape.contains(&format!(
+                    "praxis_overload_action{{action=\"{action}\",server=\"{}\"}} 1",
+                    sibling.id()
+                )),
+                "{scrape}"
+            );
+        }
+        reset_overload_actions(&sibling, true);
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_purge_does_not_block_sampling_or_queue_another() {
+        let (release, wait) = std::sync::mpsc::channel();
+        let mut task = Some(tokio::task::spawn_blocking(move || {
+            wait.recv().expect("release blocking purge");
+            true
+        }));
+        let original = task.as_ref().expect("purge task").id();
+        assert!(!poll_heap_purge(true, &mut task).await);
+        assert_eq!(task.as_ref().expect("same in-flight purge").id(), original);
+        release.send(()).expect("complete purge");
+        while !task.as_ref().expect("purge task").is_finished() {
+            tokio::task::yield_now().await;
+        }
+        assert!(poll_heap_purge(false, &mut task).await);
+        assert!(task.is_none(), "completed purge must be reaped");
+    }
+
+    #[test]
+    fn dropping_housekeeping_waits_for_an_in_flight_blocking_purge() {
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let owner = blocked_purge_owner(started, blocked);
+        ready.recv_timeout(Duration::from_secs(5)).expect("purge started");
+        let (dropped, finished) = std::sync::mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            drop(owner);
+            dropped.send(()).expect("owner dropped");
+        });
+        assert!(
+            matches!(
+                finished.recv_timeout(Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "owner must keep waiting while the allocator callback is running"
+        );
+        release.send(()).expect("release purge");
+        finished
+            .recv_timeout(Duration::from_secs(5))
+            .expect("shutdown finishes after purge");
+        dropper.join().expect("owner dropper exits");
+    }
+
+    /// A real housekeeping owner with blocking allocator work controlled by channels.
+    fn blocked_purge_owner(
+        started: std::sync::mpsc::Sender<()>,
+        blocked: std::sync::mpsc::Receiver<()>,
+    ) -> HousekeepingTasks {
+        let shutdown = CancellationToken::new();
+        let cancelled = shutdown.clone();
+        let thread = spawn_on_dedicated_runtime("blocked-purge housekeeping", async move {
+            let _purge = tokio::task::spawn_blocking(move || {
+                started.send(()).expect("purge started");
+                blocked.recv().expect("release purge");
+            });
+            cancelled.cancelled().await;
+        })
+        .expect("housekeeping runtime");
+        HousekeepingTasks {
+            shutdown,
+            thread: Some(thread),
+        }
     }
 
     #[cfg(feature = "config-reload")]
