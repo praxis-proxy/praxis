@@ -88,8 +88,9 @@ mod pipeline;
 mod policy;
 #[cfg(any(
     feature = "policy-builtins",
-    feature = "policy-api-key",
-    feature = "policy-api-key-fips"
+    feature = "policy-api-key-fips",
+    all(feature = "policy-api-key", feature = "policy-crypto-default"),
+    all(feature = "policy-api-key", feature = "policy-crypto-fips")
 ))]
 mod policy_api_key;
 #[cfg(feature = "policy-builtins")]

@@ -15,21 +15,21 @@ fn an_unsafe_policy_report_blocks_fips() {
     }
 }
 
-/// The API-key-only FIPS selection reports the approved Policy backend.
-#[cfg(feature = "policy-api-key-fips")]
+/// The FIPS crypto selection reports the approved Policy backend.
+#[cfg(feature = "policy-crypto-fips")]
 #[test]
-fn api_key_fips_feature_selects_a_safe_policy_profile() {
+fn fips_backend_feature_selects_a_safe_api_key_profile() {
     let report = ppe::crypto_capability_report();
     assert!(
         report.fips_profile_is_safe(),
-        "API-key FIPS features must select a safe Policy graph: {report:?}"
+        "Policy FIPS features must select a safe API-key graph: {report:?}"
     );
 }
 
 /// Check OpenSSL availability in addition to the compile-time FIPS report.
-#[cfg(feature = "policy-api-key-fips")]
+#[cfg(feature = "policy-crypto-fips")]
 #[test]
-fn api_key_fips_profile_reports_provider_unavailability() {
+fn fips_backend_reports_provider_unavailability() {
     let expected_blocker = super::host_plugins::host_plugin_count() > 0 || ppe::validate_api_key_crypto().is_err();
     assert_eq!(
         super::fips_crypto_blocker().is_some(),

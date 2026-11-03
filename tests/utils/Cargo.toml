@@ -19,7 +19,9 @@ tls-health-check = ["praxis/tls-health-check"]
 policy-engine = ["praxis/policy-engine"]
 policy-builtins = ["policy-engine", "praxis/policy-builtins"]
 policy-api-key = ["policy-engine", "praxis/policy-api-key"]
-policy-api-key-fips = ["policy-engine", "praxis/policy-api-key-fips"]
+policy-crypto-default = ["policy-engine", "praxis/policy-crypto-default"]
+policy-crypto-fips = ["policy-engine", "praxis/policy-crypto-fips"]
+policy-api-key-fips = ["policy-api-key", "policy-crypto-fips"]
 
 [lints]
 workspace = true

@@ -97,13 +97,16 @@ hedged-requests = ["praxis-protocol/hedged-requests", "experimental"]
 access-log-syslog = ["praxis-filter/access-log-syslog", "experimental"]
 # The `policy` filter (Praxis Policy Engine). `policy-engine` selects the
 # engine without bundled plugins; `policy-builtins` preserves the standard
-# builtin set. `policy-api-key` selects API-key identity with the standard
-# hash backend; `policy-api-key-fips` selects its OpenSSL FIPS backend.
+# builtin set. Select an individual plugin and a crypto backend independently;
+# API-key identity requires either `policy-crypto-default` or
+# `policy-crypto-fips`. `policy-api-key-fips` is a convenience alias.
 policy-engine = ["praxis-filter/policy-engine", "praxis-protocol/policy-engine"]
 policy-builtins = ["policy-engine", "praxis-filter/policy-builtins", "praxis-protocol/policy-builtins"]
 policy-jwt = ["policy-engine", "praxis-filter/policy-jwt", "praxis-protocol/policy-jwt"]
 policy-api-key = ["policy-engine", "praxis-filter/policy-api-key", "praxis-protocol/policy-api-key"]
-policy-api-key-fips = ["policy-engine", "praxis-filter/policy-api-key-fips", "praxis-protocol/policy-api-key-fips"]
+policy-crypto-default = ["policy-engine", "praxis-filter/policy-crypto-default", "praxis-protocol/policy-crypto-default"]
+policy-crypto-fips = ["policy-engine", "praxis-filter/policy-crypto-fips", "praxis-protocol/policy-crypto-fips"]
+policy-api-key-fips = ["policy-api-key", "policy-crypto-fips"]
 policy-oauth = ["policy-engine", "praxis-filter/policy-oauth", "praxis-protocol/policy-oauth"]
 policy-delegator-vault = ["policy-engine", "praxis-filter/policy-delegator-vault", "praxis-protocol/policy-delegator-vault"]
 policy-elicitation-ciba = ["policy-engine", "praxis-filter/policy-elicitation-ciba", "praxis-protocol/policy-elicitation-ciba"]

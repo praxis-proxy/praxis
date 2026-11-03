@@ -155,7 +155,7 @@ check: ## cargo check of the default and lean feature sets
 # enabled) is caught on every PR rather than only in the all-on or all-off
 # build.
 check-features: ## check each optional feature on its own
-	@for f in policy-engine policy-builtins policy-jwt policy-api-key policy-api-key-fips policy-oauth \
+	@for f in policy-engine policy-builtins policy-jwt policy-api-key-fips policy-crypto-default policy-oauth \
 	          policy-delegator-vault policy-elicitation-ciba policy-cedar policy-cel \
 	          policy-opa policy-valkey policy-secrets-vault config-reload admin-api otel basic-auth-filter \
 	          cloud-events-filter upstream-binding iterative-request-router \
@@ -164,6 +164,9 @@ check-features: ## check each optional feature on its own
 		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f --all-targets =="; \
 		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f" --all-targets || exit 1; \
 	done
+	# API-key plugin selection requires exactly one backend.
+	cargo check -p praxis-proxy --no-default-features --features pingora,policy-api-key,policy-crypto-default --all-targets
+	cargo check -p praxis-proxy --no-default-features --features pingora,policy-api-key,policy-crypto-fips --all-targets
 	# The other backend, on its own: the loop above always names pingora, and
 	# the two backends refuse to build together.
 	cargo check -p praxis-proxy --no-default-features --features hyper --all-targets
@@ -288,10 +291,11 @@ container-run: | require-container-engine ## run the container image (host netwo
 # FIPS
 # -------------------------------------------------------------------
 #
-# The standard build enables everything by default. The FIPS build keeps the
-# API-key-only Policy profile and omits other bundled crypto implementations:
+# The standard build enables everything by default. The FIPS build selects
+# the API-key plugin and its FIPS crypto backend, omitting other crypto plugins:
 #
-#   policy-api-key-fips   API-key identity with Policy's OpenSSL FIPS backend
+#   policy-api-key        API-key identity plugin
+#   policy-crypto-fips    Policy's OpenSSL FIPS backend
 #
 # Everything else in the default set stays on (config-reload, admin-api).
 # FIPS_FEATURES is the single place this is defined; Containerfile.fips
@@ -328,7 +332,7 @@ container-run: | require-container-engine ## run the container image (host netwo
 #
 # See docs/developing/fips.md and docs/developing/getting-started.md.
 
-FIPS_FEATURES           := pingora,config-reload,admin-api,policy-api-key-fips
+FIPS_FEATURES           := pingora,config-reload,admin-api,policy-api-key,policy-crypto-fips
 # The same list qualified for a multi-package cargo invocation.
 _COMMA                  := ,
 FIPS_FEATURES_QUALIFIED := $(subst $(_COMMA),$(_COMMA)praxis-proxy/,praxis-proxy/$(FIPS_FEATURES))
@@ -414,7 +418,7 @@ require-go:
 require-oc:
 	@command -v oc >/dev/null || { echo "oc (the OpenShift CLI) is required: check-payload refuses to scan without it on PATH"; exit 1; }
 
-##@ FIPS (API-key-only policy; see FIPS_FEATURES)
+##@ FIPS (Policy API-key plugin + FIPS crypto; see FIPS_FEATURES)
 # The debug build is the edit-compile loop; only the release build carries
 # the manifest.
 build-fips: ## FIPS build, debug profile, into target/fips
@@ -452,7 +456,7 @@ test-fips: ## unit tests resolved as the FIPS build
 		-p praxis-proxy-core -p praxis-proxy-tls \
 		--features $(FIPS_FEATURES_QUALIFIED) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
 	cargo test --target-dir $(FIPS_TARGET_DIR) -p praxis-proxy-filter \
-		--no-default-features --features policy-api-key-fips,ppe/jwt \
+		--no-default-features --features policy-api-key,policy-crypto-fips,ppe/jwt \
 		--lib an_unsafe_policy_report_blocks_fips
 
 .PHONY: test-integration-fips test-conformance-fips test-fips-host fips-toolchain fips-host-facts
@@ -754,13 +758,13 @@ test-conformance-hyper: build-hyper $(H2SPEC) ## RFC conformance suite on hyper 
 # Feature lists
 # -------------------------------------------------------------------
 #
-# The network backends are mutually exclusive, so --all-features no longer
-# compiles the workspace. `cargo xtask features` lists every feature of the
-# selected packages except the backend named here, from cargo metadata, so a
-# feature added to any manifest is picked up without editing this file. The
-# variables expand when a recipe runs, not when make parses this file.
+# The network backends and Policy crypto backends are mutually exclusive, so
+# --all-features does not compile the workspace. `cargo xtask features` lists
+# every feature except those selectors and the separately tested FIPS backend,
+# from cargo metadata, so other new features are picked up automatically.
+# The variables expand when a recipe runs, not when make parses the file.
 
-XTASK_FEATURES   = $(XTASK_FIPS) features --except hyper
+XTASK_FEATURES   = $(XTASK_FIPS) features --except hyper --except policy-crypto-fips --except policy-api-key-fips
 ALL_FEATURES     = $(shell $(XTASK_FEATURES))
 UNIT_FEATURES    = $(shell $(XTASK_FEATURES) --exclude praxis-tests-schema --exclude praxis-tests-security \
 	--exclude praxis-tests-resilience --exclude praxis-tests-integration --exclude praxis-tests-conformance \

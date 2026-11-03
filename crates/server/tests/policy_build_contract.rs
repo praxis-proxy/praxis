@@ -130,6 +130,34 @@ fn the_default_feature_set_includes_the_policy_builtins() {
     );
 }
 
+#[expect(
+    clippy::expect_used,
+    clippy::tests_outside_test_module,
+    reason = "integration tests are in tests/ directory, not in src"
+)]
+#[test]
+fn policy_plugin_and_crypto_features_are_forwarded_independently() {
+    let api_key = feature_declaration("policy-api-key").expect("API-key plugin feature");
+    assert!(api_key.contains("praxis-filter/policy-api-key"));
+    assert!(
+        !api_key.contains("policy-crypto-"),
+        "plugin selection must not choose a crypto backend: {api_key}"
+    );
+
+    let rustcrypto = feature_declaration("policy-crypto-default")
+        .expect("RustCrypto backend feature");
+    assert!(rustcrypto.contains("praxis-filter/policy-crypto-default"));
+    assert!(rustcrypto.contains("praxis-protocol/policy-crypto-default"));
+
+    let fips = feature_declaration("policy-crypto-fips").expect("FIPS backend feature");
+    assert!(fips.contains("praxis-filter/policy-crypto-fips"));
+    assert!(fips.contains("praxis-protocol/policy-crypto-fips"));
+
+    let alias = feature_declaration("policy-api-key-fips").expect("FIPS convenience alias");
+    assert!(alias.contains("policy-api-key"));
+    assert!(alias.contains("policy-crypto-fips"));
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -139,13 +167,20 @@ fn the_default_feature_set_includes_the_policy_builtins() {
 /// A line scan rather than a TOML parse: the workspace carries no TOML parser,
 /// and adding one for a single-line assertion is not worth the dependency.
 fn default_feature_declaration() -> Option<&'static str> {
+    feature_declaration("default")
+}
+
+/// Find a feature's right-hand side in this crate's `[features]` table.
+fn feature_declaration(name: &str) -> Option<&'static str> {
     MANIFEST
         .lines()
         .skip_while(|line| line.trim() != "[features]")
         .skip(1)
         .take_while(|line| !line.trim_start().starts_with('['))
-        .find_map(|line| line.trim().strip_prefix("default"))
-        .and_then(|rest| rest.trim_start().strip_prefix('='))
+        .find_map(|line| {
+            let rest = line.trim().strip_prefix(name)?.trim_start();
+            rest.strip_prefix('=').map(str::trim)
+        })
 }
 
 /// Parse [`CONFIG`] with its `policy` filter pointed at [`POLICY`], written

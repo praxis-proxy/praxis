@@ -105,7 +105,8 @@ enum GatedIdentity {
 ///
 /// Registered under the YAML filter name `policy`. The standard build selects
 /// `policy-builtins`; `policy-engine` enables the engine without bundled
-/// plugins, and individual `policy-*` features select one builtin.
+/// plugins. Individual `policy-*` features select plugins, and a separate
+/// `policy-crypto-*` feature selects the Policy crypto backend.
 ///
 /// A single request can carry multiple identity sources — user JWT in
 /// `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in

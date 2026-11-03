@@ -17,13 +17,13 @@ is in [FIPS Tooling](../developing/fips.md).
 
 The standard build (`make release`, `make container`) uses the default
 features, including the complete policy builtin set. The FIPS build selects
-Policy's API-key-only profile:
+Policy's API-key plugin with its FIPS crypto backend:
 
 | | Standard | FIPS |
 |---|---|---|
 | Make targets | `release`, `container` | `release-fips`, `container-fips` |
-| Cargo features | defaults | `pingora,config-reload,admin-api,policy-api-key-fips` |
-| `policy` filter (policy engine) | yes, with all supported builtins | API-key identity only; other crypto builtins are excluded |
+| Cargo features | defaults | `pingora,config-reload,admin-api,policy-api-key,policy-crypto-fips` |
+| `policy` filter (policy engine) | yes, with all supported builtins | API-key identity; other crypto builtins are excluded |
 | Base image | Alpine, praxis built with upstream Rust | `ubi9/ubi-minimal`, praxis built with Red Hat's `rust-toolset` on `ubi9/ubi`, both pinned by digest and signature-verified |
 | OpenSSL | Alpine's, dynamically linked | UBI's, dynamically linked (`openssl-libs` and `openssl-fips-provider-so`), the validated module on a FIPS host |
 | Published tags | `<version>`, `<major>.<minor>`, `latest`, `sha-<hash>`, `nightly` (see [image tags](../release.md#image-tags)) | the same with a `-fips` suffix (`0.7.0-fips`, `latest-fips`) |
@@ -98,8 +98,8 @@ turns it on. It is a check, not a switch. With it on, praxis refuses to start:
 - unless all three signals above are present, and names each one that is missing;
 - when a listener's TLS configuration is not FIPS-approved by rustls;
 - when the registered `policy` filter's capability report is outside the
-  supported API-key-only FIPS profile, its OpenSSL FIPS digest is unavailable,
-  or host-registered policy plugins have no FIPS capability evidence.
+  supported API-key plus FIPS-backend selection, its OpenSSL FIPS digest is
+  unavailable, or host-registered policy plugins have no FIPS capability evidence.
 
 Upstream connections always require Extended Master Secret and use the same
 provider, so they are FIPS whenever the listeners are. Without the variable,
@@ -255,7 +255,7 @@ kept out of it:
 | ahash, crc32fast, blake2, digest | hash maps, gzip checksums, Pingora cache keys | not security functions |
 | x509-parser (parsing only, no `verify` feature) | peer certificate fields in the Pingora fork; praxis's own SPIFFE use is outside the FIPS feature set | parse only |
 | subtle, zeroize | constant-time comparison, wiping | helpers |
-| policy engine (`policy` filter) | API-key uses Policy's OpenSSL FIPS backend; other crypto builtins are omitted and reported | API-key-only profile is supported; host plugins are refused |
+| policy engine (`policy` filter) | API-key uses Policy's OpenSSL FIPS backend; other crypto builtins are omitted and reported | API-key plus FIPS-backend selection is supported; host plugins are refused |
 | `basic_auth` filter (feature `basic-auth-filter`) | password hashing through OpenSSL's SHA-256 (EVP) | not in the FIPS build (the feature is off by default); ready to join it |
 | sha1, rcgen, ring | test utilities and fixtures | development only, absent from the shipped binary and its manifest |
 

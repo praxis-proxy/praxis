@@ -209,8 +209,8 @@ linked. On a stable toolchain cargo-auditable derives the list from
 - It unifies features across every workspace member, dev-dependencies
   included. rcgen in the tls and protocol crates pulls `ring`; the filter's
   `jsonwebtoken` development dependency can add `aws-lc-rs` to test builds.
-  The FIPS dependency selection enables Policy's API-key-only profile; the
-  capability report rejects any other bundled crypto builtin.
+  The FIPS dependency selection enables Policy's API-key plugin and FIPS crypto
+  backend; the capability report rejects any other bundled crypto builtin.
 - It activates weak features (`dep?/feature`) the real build never turns on.
   rustls always enables rustls-webpki's `alloc`, whose `ring?/alloc` entry
   puts `ring` in the resolve of a binary that never compiled it. No rustls

@@ -37,8 +37,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   connections, and file descriptors. The gauges do not shed load.
 - Granular Policy Engine Cargo features: select the engine without bundled
   plugins, the complete builtin set, or individual builtins such as API-key
-  authentication. The API-key-only FIPS feature selects Policy's OpenSSL
-  backend, and required-FIPS startup checks the compiled capability report.
+  authentication, with crypto backend selection forwarded independently.
+  Required-FIPS startup checks Policy's compiled capability report and the
+  OpenSSL FIPS provider.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.

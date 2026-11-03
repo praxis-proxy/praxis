@@ -77,7 +77,7 @@ rand = "0.10.3"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 # Policy owns its builtin selection: this workspace dependency stays engine-only
 # until a Praxis feature explicitly forwards a builtin selection.
-ppe = { git = "https://github.com/evacchi/policy", rev = "4fb8375ae0dd8936f60d88fc8b1e1b9c17df2644", package = "praxis-policy", default-features = false }
+ppe = { git = "https://github.com/evacchi/policy", rev = "13996eade509c43dcefae1f7db349fa1bbc5f39c", package = "praxis-policy", default-features = false }
 parking_lot = "0.12.5"
 portable-atomic = "1.15.0"
 proptest = "1.12.0"

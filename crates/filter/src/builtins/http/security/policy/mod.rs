@@ -203,7 +203,7 @@ pub fn fips_crypto_blocker() -> Option<String> {
         ));
     }
 
-    #[cfg(feature = "policy-api-key-fips")]
+    #[cfg(feature = "policy-crypto-fips")]
     if let Err(error) = ppe::validate_api_key_crypto() {
         return Some(format!("Policy API-key FIPS crypto is unavailable: {error}"));
     }
@@ -228,8 +228,9 @@ mod tests;
     test,
     any(
         feature = "policy-builtins",
-        feature = "policy-api-key",
-        feature = "policy-api-key-fips"
+        feature = "policy-api-key-fips",
+        all(feature = "policy-api-key", feature = "policy-crypto-default"),
+        all(feature = "policy-api-key", feature = "policy-crypto-fips")
     )
 ))]
 #[expect(

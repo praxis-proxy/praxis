@@ -159,17 +159,17 @@ fn backend_build_args() -> &'static [&'static str] {
                 "--features",
                 "hyper,config-reload,admin-api,policy-builtins",
             ]
-        } else if cfg!(feature = "policy-api-key-fips") {
+        } else if cfg!(all(feature = "policy-api-key", feature = "policy-crypto-fips")) {
             &[
                 "--no-default-features",
                 "--features",
-                "hyper,config-reload,admin-api,policy-api-key-fips",
+                "hyper,config-reload,admin-api,policy-api-key,policy-crypto-fips",
             ]
-        } else if cfg!(feature = "policy-api-key") {
+        } else if cfg!(all(feature = "policy-api-key", feature = "policy-crypto-default")) {
             &[
                 "--no-default-features",
                 "--features",
-                "hyper,config-reload,admin-api,policy-api-key",
+                "hyper,config-reload,admin-api,policy-api-key,policy-crypto-default",
             ]
         } else if cfg!(feature = "policy-engine") {
             &[

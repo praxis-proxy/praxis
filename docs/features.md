@@ -166,9 +166,9 @@ deployment guidance.
   event per decision; and inference authorization on the
   model in the request body. Narrow builds can select
   `policy-engine` without builtins or choose individual
-  `policy-*` builtins such as `policy-api-key`. The FIPS build selects
-  `policy-api-key-fips`; required-FIPS startup checks Policy's whole-graph
-  capability report and the OpenSSL FIPS provider.
+  `policy-*` builtins such as `policy-api-key` and select the backend separately
+  with `policy-crypto-default` or `policy-crypto-fips`. Required-FIPS startup
+  checks Policy's whole-graph capability report and the OpenSSL FIPS provider.
 
 ## Observability
 
