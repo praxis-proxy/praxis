@@ -107,7 +107,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `forward_proxy` block, removes a listener that has one, or changes
   `insecure_options.allow_private_upstreams` while a bound listener has
   an enabled block, is rejected. The CONNECT runtime is a follow-up
- change; the block is inert until it lands.
+  change; the block is inert until it lands.
+- Experimental `runtime.overload_actions` (requires
+  `runtime.overload_gauges` and the `overload-actions` Cargo feature)
+  purges unused jemalloc pages under memory pressure, disables HTTP/1
+  keep-alive above 50% pressure with recovery at 40%, and fails
+  `/ready` after sustained saturation. It now includes validated per-resource
+  bands, server-scoped transport admission, connect/header timeout scaling,
+  idle pool aging, and buffer/filter attribution, with
+  `praxis_overload_action` exposing the applied policy.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.

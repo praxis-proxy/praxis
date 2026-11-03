@@ -72,8 +72,10 @@ fn build_tcp_service(
 ) -> Service<proxy::PingoraTcpProxy> {
     let (upstream_opt, cluster_opt, ..) = group_key;
     let app = proxy::build_group_proxy(group_key, listeners, pipelines, fallback_pipeline, config);
-    Service::new(
+    let mut service = Service::new(
         proxy::tcp_service_name(upstream_opt.as_deref(), cluster_opt.as_deref()),
         app,
-    )
+    );
+    service.set_connection_filter(Arc::new(crate::overload::AdmissionFilter(pipelines.overload())));
+    service
 }

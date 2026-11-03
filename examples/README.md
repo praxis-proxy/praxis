@@ -65,6 +65,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [http-active-requests.yaml](configs/observability/http-active-requests.yaml) | Prometheus gauge for HTTP requests currently in flight per listener |
 | [logging.yaml](configs/observability/logging.yaml) | request_id — ensures every request has a correlation ID |
 | [metric-label-sets.yaml](configs/observability/metric-label-sets.yaml) | Selectively disables individual label dimensions on Prometheus metrics to bound total time-series cardinality |
+| [overload-actions.yaml](configs/observability/overload-actions.yaml) | Purges unused allocator pages under memory pressure, closes HTTP/1 keep-alives, scales transport deadlines and idle pools, and refuses new work at sustained saturation while admitted streams complete |
 | [overload-gauges.yaml](configs/observability/overload-gauges.yaml) | Publishes smoothed `praxis_overload_pressure` gauges for cgroup memory, anonymous resident memory, CPU stall time, connections, and file descriptors |
 | [process-logging.yaml](configs/observability/process-logging.yaml) | Non-blocking process logs written to a file |
 | [route-templates.yaml](configs/observability/route-templates.yaml) | Collapses dynamic path segments in the Prometheus route label into stable templates, so high-variety URLs share one series instead of widening cardinality |

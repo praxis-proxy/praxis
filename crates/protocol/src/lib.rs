@@ -54,6 +54,8 @@
 mod cert_watcher_shutdowns;
 pub use cert_watcher_shutdowns::CertWatcherShutdowns;
 
+/// Transport admission and timeout policy for server-scoped overload actions.
+mod overload;
 mod pipelines;
 pub use pipelines::ListenerPipelines;
 
