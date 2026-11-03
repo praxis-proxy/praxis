@@ -30,8 +30,9 @@ pub use port::{
 };
 pub use postgres::{PostgresGuard, start_postgres};
 pub use tls::{
-    ClientCert, TestCertificates, ensure_crypto_provider, https_get, parse_cert_chain_and_key, start_mtls_backend,
-    start_tcp_echo_backend, start_tcp_tagged_backend, start_tls_backend, start_tls_backend_from_pem,
-    tls_connection_rejected, tls_send_recv, wait_for_https, wait_for_tls,
+    ClientCert, TestCertificates, ensure_crypto_provider, https_client_config, https_get, parse_cert_chain_and_key,
+    start_mtls_backend, start_tcp_echo_backend, start_tcp_tagged_backend, start_tls_backend,
+    start_tls_backend_from_pem, tls_connection_rejected, tls_send_recv, tls_serial, wait_for_https, wait_for_tls,
+    write_test_certificate,
 };
 pub use wait::{wait_for_http, wait_for_http2, wait_for_tcp};

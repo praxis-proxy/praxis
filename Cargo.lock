@@ -6022,6 +6022,7 @@ dependencies = [
  "praxis-proxy",
  "praxis-proxy-benchmarks",
  "praxis-proxy-core",
+ "praxis-test-utils",
  "quote",
  "regex",
  "serde",

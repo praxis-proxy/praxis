@@ -28,6 +28,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- A KIND rollout acceptance suite (`make test-rollout`) that continuously drives
+  HTTP/1.1 keepalive and HTTP/2 traffic through a Kubernetes Service during pod
+  loss, rollouts, reloads, certificate rotation, node drain, and upstream
+  failure. Kubernetes assets and CI ownership live in the operator repository.
+
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
   filled in from the declaration at validation time, keeping the routed

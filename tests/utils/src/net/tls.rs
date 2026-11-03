@@ -15,7 +15,7 @@ use std::{
 };
 
 use rcgen::{CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType};
-use rustls::ClientConfig;
+use rustls::{ClientConfig, pki_types::pem::PemObject as _};
 use tempfile::TempDir;
 
 use crate::net::wait::{DEFAULT_HTTP_TIMEOUT, poll_until_ready, ready_timeout};
@@ -924,6 +924,97 @@ pub fn start_tcp_tagged_backend(tag: &str) -> u16 {
     });
 
     port
+}
+
+/// Reads the serial number of the certificate served over TLS.
+///
+/// # Errors
+///
+/// Returns an error when the TLS connection, certificate extraction, or
+/// certificate parsing fails.
+pub fn tls_serial(endpoint: &str) -> Result<String, String> {
+    let output = std::process::Command::new("openssl")
+        .args(["s_client", "-connect", endpoint, "-servername", "localhost"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|error| format!("connect over TLS: {error}"))?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let start = text
+        .find("-----BEGIN CERTIFICATE-----")
+        .ok_or_else(|| "no certificate in TLS output".to_owned())?;
+    let Some(certificate) = text.get(start..) else {
+        return Err("certificate PEM ends before its start".to_owned());
+    };
+    let parsed =
+        openssl::x509::X509::from_pem(certificate.as_bytes()).map_err(|error| format!("parse certificate: {error}"))?;
+    parsed
+        .serial_number()
+        .to_bn()
+        .map_err(|error| format!("read certificate serial: {error}"))
+        .map(|serial| serial.to_string())
+}
+
+/// Writes a self-signed localhost certificate and key with the given prefix.
+///
+/// # Errors
+///
+/// Returns an error when `openssl` cannot generate the certificate.
+pub fn write_test_certificate(temp_dir: &TempDir, prefix: &str) -> Result<(), String> {
+    let certificate = temp_dir.path().join(format!("{prefix}.crt"));
+    let key = temp_dir.path().join(format!("{prefix}.key"));
+    let status = std::process::Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            key.to_string_lossy().as_ref(),
+            "-out",
+            certificate.to_string_lossy().as_ref(),
+            "-days",
+            "1",
+            "-subj",
+            "/CN=localhost",
+            "-addext",
+            "subjectAltName=DNS:localhost",
+        ])
+        .status()
+        .map_err(|error| format!("generate {prefix} certificate: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("generate {prefix} certificate: openssl failed"))
+    }
+}
+
+/// Builds an HTTPS client configuration trusting the supplied certificates.
+///
+/// The rollout suite rotates between self-signed certificates, so its client
+/// must trust both the original and replacement certificate.
+///
+/// # Errors
+///
+/// Returns an error when a certificate cannot be parsed or added to the root
+/// store.
+pub fn https_client_config(certificates: &[PathBuf]) -> Result<Arc<ClientConfig>, String> {
+    ensure_crypto_provider();
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in certificates {
+        let pem = std::fs::read(certificate).map_err(|error| format!("read certificate: {error}"))?;
+        for der in rustls::pki_types::CertificateDer::pem_slice_iter(&pem) {
+            let der = der.map_err(|error| format!("parse certificate PEM: {error}"))?;
+            roots
+                .add(der)
+                .map_err(|error| format!("add certificate root: {error}"))?;
+        }
+    }
+    let mut config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    Ok(Arc::new(config))
 }
 
 /// Tagged handler: read one chunk, respond with `tag:data`.

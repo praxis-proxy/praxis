@@ -41,6 +41,8 @@ mod paths;
 #[cfg(feature = "dev")]
 mod port;
 mod publish;
+#[cfg(feature = "dev")]
+mod rollout;
 mod sync_example_readme;
 
 use clap::{Parser, Subcommand};
@@ -74,6 +76,10 @@ enum Command {
     /// Run proxy benchmarks and generate reports.
     #[cfg(feature = "dev")]
     Benchmark(Box<benchmark::Args>),
+
+    /// Run the Kubernetes rollout acceptance suite in KIND.
+    #[cfg(feature = "dev")]
+    Rollout(Box<rollout::Args>),
 
     /// List the workspace's features, qualified by package, for
     /// cargo invocations that cannot use `--all-features`.
@@ -122,6 +128,13 @@ fn main() {
         Command::Debug(args) => debug::run(&args),
         #[cfg(feature = "dev")]
         Command::Benchmark(args) => benchmark::run(*args),
+        #[cfg(feature = "dev")]
+        Command::Rollout(args) => {
+            if let Err(error) = rollout::run(&args) {
+                eprintln!("rollout failed: {error}");
+                std::process::exit(1);
+            }
+        },
         Command::Features(args) => features::run(&args),
         Command::Fips(args) => fips::run(args),
         Command::LintDeps(args) => lint_deps::run(args),

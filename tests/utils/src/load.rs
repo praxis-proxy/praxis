@@ -10,7 +10,11 @@ use std::{
     collections::BTreeMap,
     io::{BufRead as _, BufReader, Read as _, Write as _},
     net::TcpStream,
-    sync::{Arc, Barrier},
+    panic::AssertUnwindSafe,
+    sync::{
+        Arc, Barrier,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -103,6 +107,340 @@ pub fn concurrent_gets(
         report.absorb(handle.join().expect("load client thread"));
     }
     report
+}
+
+// -----------------------------------------------------------------------------
+// Continuous load
+// -----------------------------------------------------------------------------
+
+/// Continuous HTTP/1.1 and HTTP/2 load driver.
+pub struct ContinuousLoadDriver {
+    /// Signal that tells workers to stop.
+    stop: Arc<AtomicBool>,
+    /// Worker join handles.
+    handles: Vec<std::thread::JoinHandle<()>>,
+    /// Counters shared with workers.
+    report: Arc<ContinuousLoadReport>,
+}
+
+/// Mutable request counters shared by continuous load workers.
+#[derive(Default)]
+pub struct ContinuousLoadReport {
+    /// Successful HTTP/1.1 responses.
+    pub http1: AtomicU64,
+    /// Successful HTTP/2 responses.
+    pub http2: AtomicU64,
+    /// Successful HTTPS responses.
+    pub https: AtomicU64,
+    /// Failed requests.
+    pub failures: AtomicU64,
+    /// First failure message.
+    pub first_failure: std::sync::Mutex<Option<String>>,
+}
+
+/// Immutable result returned when continuous load stops.
+#[derive(Debug)]
+pub struct ContinuousLoadSnapshot {
+    /// Successful HTTP/1.1 responses.
+    pub http1: u64,
+    /// Successful HTTP/2 responses.
+    pub http2: u64,
+    /// Successful HTTPS responses.
+    pub https: u64,
+    /// Failed requests.
+    pub failures: u64,
+    /// First failure message.
+    pub first_failure: Option<String>,
+}
+
+impl ContinuousLoadSnapshot {
+    /// Total requests attempted.
+    pub fn total(&self) -> u64 {
+        self.http1 + self.http2 + self.https + self.failures
+    }
+}
+
+impl ContinuousLoadDriver {
+    /// Starts two keep-alive HTTP/1.1 workers and one HTTP/2 worker.
+    ///
+    /// Every failed exchange is counted, including connection-close races.
+    pub fn start(endpoint: &str) -> Self {
+        Self::start_workers(endpoint, None)
+    }
+
+    /// Starts HTTP/1.1, HTTP/2, and HTTPS keep-alive load workers.
+    pub fn start_with_https(
+        http_endpoint: &str,
+        https_endpoint: &str,
+        client_config: Arc<rustls::ClientConfig>,
+    ) -> Self {
+        Self::start_workers(http_endpoint, Some((https_endpoint.to_owned(), client_config)))
+    }
+
+    /// Spawns the selected continuous-load workers.
+    fn start_workers(endpoint: &str, https: Option<(String, Arc<rustls::ClientConfig>)>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let report = Arc::new(ContinuousLoadReport::default());
+        let mut handles = std::iter::repeat_with(|| spawn_worker(&stop, &report, endpoint, http1_worker))
+            .take(2)
+            .chain(std::iter::once(spawn_worker(&stop, &report, endpoint, http2_worker)))
+            .collect::<Vec<_>>();
+        if let Some((https_endpoint, client_config)) = https {
+            let stop = Arc::clone(&stop);
+            let report = Arc::clone(&report);
+            handles.push(std::thread::spawn(move || {
+                https_worker(&stop, &report, &https_endpoint, &client_config);
+            }));
+        }
+        Self { stop, handles, report }
+    }
+
+    /// Stops workers and returns their final counters.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the report mutex is poisoned.
+    pub fn stop(mut self) -> ContinuousLoadSnapshot {
+        self.join_workers();
+        self.snapshot()
+    }
+
+    /// Returns the current counters without stopping the workers.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the report mutex is poisoned.
+    pub fn snapshot(&self) -> ContinuousLoadSnapshot {
+        ContinuousLoadSnapshot {
+            http1: self.report.http1.load(Ordering::SeqCst),
+            http2: self.report.http2.load(Ordering::SeqCst),
+            https: self.report.https.load(Ordering::SeqCst),
+            failures: self.report.failures.load(Ordering::SeqCst),
+            first_failure: self.report.first_failure.lock().expect("load report").clone(),
+        }
+    }
+
+    /// Stops and joins every worker, counting unexpected worker panics.
+    fn join_workers(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        for handle in self.handles.drain(..) {
+            if handle.join().is_err() {
+                self.report.failure("load worker panicked".to_owned());
+            }
+        }
+    }
+}
+
+impl Drop for ContinuousLoadDriver {
+    fn drop(&mut self) {
+        self.join_workers();
+    }
+}
+
+/// Spawns a continuous worker with its owned copies of shared state.
+fn spawn_worker(
+    stop: &Arc<AtomicBool>,
+    report: &Arc<ContinuousLoadReport>,
+    endpoint: &str,
+    worker: fn(&AtomicBool, &ContinuousLoadReport, &str),
+) -> std::thread::JoinHandle<()> {
+    let stop = Arc::clone(stop);
+    let report = Arc::clone(report);
+    let endpoint = endpoint.to_owned();
+    std::thread::spawn(move || worker(&stop, &report, &endpoint))
+}
+
+/// Runs persistent HTTP/1.1 keepalive requests until stopped.
+fn http1_worker(stop: &AtomicBool, report: &ContinuousLoadReport, endpoint: &str) {
+    let mut stream = None;
+    while !stop.load(Ordering::Relaxed) {
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| http1_request(endpoint, &mut stream)));
+        match result {
+            Ok(Ok(response)) if healthy_response(&response) => {
+                report.http1.fetch_add(1, Ordering::Relaxed);
+            },
+            Ok(Ok(response)) => {
+                report.failure(format!("HTTP/1.1 returned {response}"));
+                stream = None;
+            },
+            Ok(Err(error)) => {
+                report.failure(format!("HTTP/1.1 transport: {error}"));
+                stream = None;
+            },
+            Err(_) => {
+                report.failure("HTTP/1.1 client panicked".to_owned());
+                stream = None;
+            },
+        }
+    }
+}
+
+/// Sends one persistent HTTP/1.1 request, reconnecting when `stream` is unset.
+fn http1_request(endpoint: &str, stream: &mut Option<TcpStream>) -> Result<String, String> {
+    if stream.is_none() {
+        let address = endpoint.parse().map_err(|error| format!("invalid endpoint: {error}"))?;
+        *stream = Some(TcpStream::connect_timeout(&address, IO_TIMEOUT).map_err(|error| error.to_string())?);
+    }
+    let stream = stream.as_mut().expect("connected stream");
+    stream
+        .set_read_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(IO_TIMEOUT))
+        .map_err(|error| error.to_string())?;
+    Ok(crate::net::http_send_on_connection(
+        stream,
+        "GET /healthy HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+    ))
+}
+
+/// Checks status and the complete fixed-length health response body.
+fn healthy_response(response: &str) -> bool {
+    response.split_once("\r\n\r\n").is_some_and(|(headers, body)| {
+        headers
+            .lines()
+            .next()
+            .is_some_and(|status| status.starts_with("HTTP/1.1 200 "))
+            && body.trim() == "ok"
+            && headers.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            }) == Some(body.len())
+    })
+}
+
+/// Runs prior-knowledge HTTP/2 requests until stopped.
+fn http2_worker(stop: &AtomicBool, report: &ContinuousLoadReport, endpoint: &str) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("HTTP/2 load runtime");
+    while !stop.load(Ordering::Relaxed) {
+        let result = runtime.block_on(async { tokio::time::timeout(IO_TIMEOUT, http2_request(endpoint)).await });
+        match result {
+            Ok(Ok(())) => {
+                report.http2.fetch_add(1, Ordering::Relaxed);
+            },
+            Ok(Err(error)) => report.failure(format!("HTTP/2 transport: {error}")),
+            Err(error) => report.failure(format!("HTTP/2 timeout: {error}")),
+        }
+    }
+}
+
+/// Runs HTTPS health requests until stopped.
+fn https_worker(
+    stop: &AtomicBool,
+    report: &ContinuousLoadReport,
+    endpoint: &str,
+    client_config: &Arc<rustls::ClientConfig>,
+) {
+    while !stop.load(Ordering::Relaxed) {
+        let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            crate::net::https_get(endpoint, "/healthy", client_config)
+        }));
+        match result {
+            Ok((status, body)) if status == 200 && body.trim() == "ok" => {
+                report.https.fetch_add(1, Ordering::Relaxed);
+            },
+            Ok((status, body)) => {
+                report.failure(format!("HTTPS returned {status} {body}"));
+            },
+            Err(_) => report.failure("HTTPS client panicked".to_owned()),
+        }
+    }
+}
+
+/// Makes one HTTP/2 exchange, polling the connection alongside the request.
+async fn http2_request(endpoint: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let stream = tokio::net::TcpStream::connect(endpoint).await?;
+    let (mut client, connection) = h2::client::handshake(stream).await?;
+    let exchange = async move {
+        let request = http::Request::get("/healthy").header("host", "localhost").body(())?;
+        let (response, _) = client.send_request(request, true)?;
+        let response = response.await?;
+        let status = response.status();
+        let mut stream = response.into_body();
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.data().await {
+            let chunk = chunk?;
+            body.extend_from_slice(&chunk);
+            stream.flow_control().release_capacity(chunk.len())?;
+        }
+        if status != http::StatusCode::OK || body != b"ok" {
+            return Err(format!("unexpected health response: {status} {body:?}").into());
+        }
+        Ok(())
+    };
+    tokio::pin!(connection, exchange);
+    tokio::select! {
+        result = &mut exchange => result,
+        result = &mut connection => {
+            result?;
+            exchange.await
+        },
+    }
+}
+
+impl ContinuousLoadReport {
+    /// Records a failed request and retains the first failure message.
+    fn failure(&self, message: String) {
+        self.failures.fetch_add(1, Ordering::Relaxed);
+        let mut first = self.first_failure.lock().expect("load report");
+        if first.is_none() {
+            *first = Some(message);
+        }
+    }
+}
+
+#[cfg(test)]
+mod continuous_tests {
+    use super::*;
+
+    #[test]
+    fn health_response_requires_complete_success_body() {
+        assert!(healthy_response("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"));
+        for response in [
+            "",
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no",
+            "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nok",
+            "HTTP/1.1 500 Error\r\n\r\nok",
+        ] {
+            assert!(!healthy_response(response), "accepted {response:?}");
+        }
+    }
+
+    #[test]
+    fn total_includes_failed_requests() {
+        let snapshot = ContinuousLoadSnapshot {
+            http1: 2,
+            http2: 3,
+            https: 4,
+            failures: 1,
+            first_failure: None,
+        };
+        assert_eq!(snapshot.total(), 10);
+    }
+
+    #[test]
+    fn connection_closure_is_counted_without_retry() {
+        for worker in [http1_worker, http2_worker] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listen");
+            let endpoint = listener.local_addr().expect("address").to_string();
+            let stop = Arc::new(AtomicBool::new(false));
+            let server_stop = Arc::clone(&stop);
+            let server = std::thread::spawn(move || {
+                let (stream, _) = listener.accept().expect("accept");
+                server_stop.store(true, Ordering::SeqCst);
+                drop(stream);
+            });
+            let report = ContinuousLoadReport::default();
+            worker(&stop, &report, &endpoint);
+            server.join().expect("server");
+            assert_eq!(report.failures.load(Ordering::SeqCst), 1);
+        }
+    }
 }
 
 /// Open `count` connections to `addr` and send one `GET path` on each

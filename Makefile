@@ -32,6 +32,7 @@ RUST_TARGETS := all build release check \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
+	test-rollout \
 	bench build-benches check-features \
 	lint fmt doc audit coverage coverage-check \
 	build-fips release-fips check-fips lint-fips test-fips fips-deps fips-report \
@@ -56,6 +57,7 @@ endif
 
 # Meta-lint tools checked by lint-extra.
 LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
+ROLLOUT_MANIFEST_DIR ?= ../operator/deploy/rollout-test
 
 .PHONY: all build build-dev release check check-features clean \
 	test test-unit \
@@ -77,6 +79,7 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	fips-check fips-check-ubi fips-deps fips-report fips-signature-store fips-verify-image \
 	fips-scan fips-scanner fips-smoke \
 	run-echo run-debug \
+	test-rollout \
 	tools clean-tools \
 	check-prereqs \
 	check-prereqs-cmake \
@@ -794,6 +797,9 @@ test-integration: test-integration-hyper
 test-conformance: test-conformance-hyper
 test-security-suite: test-security-hyper
 test-resilience: test-resilience-hyper
+test-rollout:
+	@echo "test-rollout requires the Pingora backend; run it without BACKEND=hyper" >&2
+	@exit 2
 else
 # Everything outside tests/, one pass, every feature on, then the filter and
 # core crates in their lean configs: the full feature set compiles out the
@@ -832,6 +838,10 @@ test-integration: ## schema, security, resilience and integration suites
 
 test-conformance: $(H2SPEC) ## RFC conformance suite (fetches h2spec)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-conformance $(_NOCAPTURE)
+
+test-rollout: | require-container-engine ## Kubernetes rollout suite in KIND
+	CONTAINER_ENGINE=$(notdir $(CONTAINER_ENGINE)) cargo xtask rollout \
+		--manifest-dir $(ROLLOUT_MANIFEST_DIR)
 
 test-security-suite: ## security suite
 	$(call require-features,$(call package-features,praxis-tests-security))
