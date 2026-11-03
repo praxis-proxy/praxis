@@ -155,14 +155,19 @@ check: ## cargo check of the default and lean feature sets
 # enabled) is caught on every PR rather than only in the all-on or all-off
 # build.
 check-features: ## check each optional feature on its own
-	@for f in policy-engine policy-builtins policy-jwt policy-api-key-fips policy-crypto-default policy-oauth \
-	          policy-delegator-vault policy-elicitation-ciba policy-cedar policy-cel \
-	          policy-opa policy-valkey policy-secrets-vault config-reload admin-api otel basic-auth-filter \
+	@for f in policy-builtins policy-api-key-fips policy-crypto-default config-reload admin-api otel basic-auth-filter \
 	          cloud-events-filter upstream-binding iterative-request-router \
 	          router-json-aliases slow-start bound-upstream-request-body chain-binding spiffe \
 	          access-log-syslog hedged-requests tls-health-check; do \
 		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f --all-targets =="; \
 		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f" --all-targets || exit 1; \
+	done
+	# Policy requires a crypto backend even when no policy plugin is selected.
+	# Compile each backend-neutral plugin selection with the default backend.
+	@for f in policy-engine policy-jwt policy-oauth policy-delegator-vault policy-elicitation-ciba \
+	          policy-cedar policy-cel policy-opa policy-valkey policy-secrets-vault; do \
+		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f,policy-crypto-default --all-targets =="; \
+		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f,policy-crypto-default" --all-targets || exit 1; \
 	done
 	# API-key plugin selection requires exactly one backend.
 	cargo check -p praxis-proxy --no-default-features --features pingora,policy-api-key,policy-crypto-default --all-targets
