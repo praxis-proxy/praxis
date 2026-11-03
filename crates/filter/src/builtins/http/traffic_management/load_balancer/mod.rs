@@ -30,6 +30,7 @@ use metrics::SharedString;
 use praxis_core::{
     config::Cluster,
     health::{ClusterHealthState, HealthRegistry},
+    retry::AdmissionLease,
 };
 use tracing::{debug, warn};
 
@@ -442,10 +443,10 @@ impl HttpFilter for LoadBalancerFilter {
         }
 
         // Admission against the cluster's `max_connections` ceiling. Claimed
-        // before selection so a shed request takes no strategy counter, and
-        // released by the same `on_response` path that releases the retry
-        // slot, since both ride one counter.
-        if !entry.retry_state.try_enter() {
+        // before selection so a shed request takes no strategy counter. The
+        // lease owns the slot from here: every early return below drops it,
+        // which hands the slot straight back.
+        let Some(lease) = AdmissionLease::claim(&entry.retry_state) else {
             debug!(
                 cluster = %cluster_name,
                 max_connections = entry.retry_state.max_concurrent.unwrap_or_default(),
@@ -453,7 +454,7 @@ impl HttpFilter for LoadBalancerFilter {
             );
             crate::metrics::record_cluster_overload_reject(SharedString::from(Arc::clone(cluster)));
             return Ok(FilterAction::Reject(cluster_overloaded()));
-        }
+        };
 
         if let Some(h) = health {
             if h.endpoints().iter().all(|ep| !ep.is_healthy()) {
@@ -474,11 +475,11 @@ impl HttpFilter for LoadBalancerFilter {
             entry.strategy.select(ctx, health, &[])
         };
         let Some(addr) = selected else {
-            // Hand the admitted slot back: a cluster with no selectable
-            // endpoint must not spend its own ceiling on requests it never
-            // sends, which would wedge it closed once `max_connections`
-            // failures accumulated.
-            entry.retry_state.leave();
+            // Dropping the lease hands the slot back: a cluster with no
+            // selectable endpoint must not spend its own ceiling on requests
+            // it never sends, which would wedge it closed once
+            // `max_connections` failures accumulated.
+            drop(lease);
             return Err(format!("load_balancer filter: cluster '{cluster_name}' has no available endpoints").into());
         };
         debug!(cluster = %cluster_name, upstream = %addr, "upstream selected");
@@ -486,9 +487,9 @@ impl HttpFilter for LoadBalancerFilter {
         ctx.selected_endpoint_index = health.and_then(|h| h.endpoint_index(&addr)).or(Some(usize::MAX));
         ctx.set_metadata("lb.selected", "true");
 
-        // The active-request slot was claimed at admission; publish the state
-        // so the release paths can hand it back.
-        ctx.cluster_retry_state = Some(Arc::clone(&entry.retry_state));
+        // Hand the lease to the request: from here the release paths, and the
+        // lease's own drop, are what give the slot back.
+        ctx.cluster_admission = Some(lease);
 
         let policy = match &ctx.route_retry_policy {
             Some(route_override) => entry.merged_retry_policy(route_override),
@@ -538,11 +539,8 @@ impl HttpFilter for LoadBalancerFilter {
         {
             entry.strategy.release(&upstream.address);
         }
-        if !ctx.cluster_retry_state_released
-            && let Some(state) = &ctx.cluster_retry_state
-        {
-            state.leave();
-            ctx.cluster_retry_state_released = true;
+        if let Some(lease) = &ctx.cluster_admission {
+            lease.release();
         }
 
         Ok(FilterAction::Continue)

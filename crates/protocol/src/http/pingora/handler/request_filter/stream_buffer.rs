@@ -289,8 +289,7 @@ impl PreReadPass {
         ctx.retry_policy = filter_ctx.retry_policy;
         ctx.route_retry_policy = filter_ctx.route_retry_policy;
         ctx.hedge_policy = filter_ctx.hedge_policy;
-        ctx.cluster_retry_state = filter_ctx.cluster_retry_state;
-        ctx.cluster_retry_state_released = filter_ctx.cluster_retry_state_released;
+        ctx.cluster_admission = filter_ctx.cluster_admission;
         ctx.endpoint_reselector = filter_ctx.endpoint_reselector;
         ctx.extensions = filter_ctx.extensions;
         ctx.filter_metadata = filter_ctx.filter_metadata;

@@ -200,7 +200,6 @@ pub(in crate::http) async fn run_response_filters(
         headers_modified,
         response_body_mode,
         cluster,
-        cluster_retry_state_released,
         extensions,
         filter_metadata,
         filter_state,
@@ -216,7 +215,6 @@ pub(in crate::http) async fn run_response_filters(
             fctx.response_headers_modified,
             fctx.response_body_mode,
             fctx.cluster,
-            fctx.cluster_retry_state_released,
             fctx.extensions,
             fctx.filter_metadata,
             fctx.filter_state,
@@ -227,7 +225,6 @@ pub(in crate::http) async fn run_response_filters(
         )
     };
     ctx.cluster = cluster;
-    ctx.cluster_retry_state_released = cluster_retry_state_released;
     ctx.response_body_mode = clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;

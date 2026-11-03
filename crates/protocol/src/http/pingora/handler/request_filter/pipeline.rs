@@ -301,8 +301,7 @@ pub(in crate::http) async fn run_pipeline(
         retry_policy,
         route_retry_policy,
         hedge_policy,
-        cluster_retry_state,
-        cluster_retry_state_released,
+        cluster_admission,
         endpoint_reselector,
         extensions,
         filter_metadata,
@@ -411,8 +410,7 @@ pub(in crate::http) async fn run_pipeline(
             filter_ctx.retry_policy,
             filter_ctx.route_retry_policy,
             filter_ctx.hedge_policy,
-            filter_ctx.cluster_retry_state,
-            filter_ctx.cluster_retry_state_released,
+            filter_ctx.cluster_admission,
             filter_ctx.endpoint_reselector,
             filter_ctx.extensions,
             filter_ctx.filter_metadata,
@@ -469,8 +467,7 @@ pub(in crate::http) async fn run_pipeline(
     ctx.cluster = cluster;
     ctx.upstream = upstream;
     ctx.selected_endpoint_index = selected_endpoint_index;
-    ctx.cluster_retry_state = cluster_retry_state;
-    ctx.cluster_retry_state_released = cluster_retry_state_released;
+    ctx.cluster_admission = cluster_admission;
     ctx.endpoint_reselector = endpoint_reselector;
 
     match action {
@@ -530,17 +527,21 @@ pub(in crate::http) async fn run_pipeline(
     reason = "tests"
 )]
 mod tests {
-    use std::{collections::VecDeque, net::IpAddr};
+    use std::{collections::VecDeque, net::IpAddr, sync::atomic::Ordering as AtomicOrdering, time::Duration};
 
     use http::{HeaderMap, Method, Uri};
-    use praxis_core::config::FailureMode;
     #[cfg(not(feature = "pingora"))]
     use praxis_core::connectivity::normalize_mapped_ipv4;
+    use praxis_core::{
+        config::FailureMode,
+        retry::{AdmissionLease, ClusterRetryState},
+    };
     #[cfg(not(feature = "pingora"))]
     use praxis_filter::BodyMode;
     use praxis_filter::{FilterRegistry, TrustedHeaderMutation};
 
     use super::*;
+    use crate::http::pingora::handler::{response_filter::run_response_filters, retry_util::release_retry_state};
 
     #[tokio::test]
     async fn empty_pipeline_continues() {
@@ -1170,5 +1171,181 @@ mod tests {
             ctx.adapted_request_body.is_none(),
             "phase is gated on a selected upstream"
         );
+    }
+    // -------------------------------------------------------------------------
+    // Cancelled Phases and the Admission Lease
+    // -------------------------------------------------------------------------
+
+    /// A filter whose request hook never finishes, standing in for one
+    /// awaiting a slow dependency when the client goes away.
+    struct StallingRequestFilter;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for StallingRequestFilter {
+        fn name(&self) -> &'static str {
+            "stalling_request"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            std::future::pending::<()>().await;
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// A filter whose response hook never finishes.
+    struct StallingResponseFilter;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for StallingResponseFilter {
+        fn name(&self) -> &'static str {
+            "stalling_response"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            std::future::pending::<()>().await;
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// A `load_balancer` capped at one connection, paired with a stalling
+    /// filter.
+    ///
+    /// `stall_first` puts the stall ahead of the load balancer, which is what
+    /// makes it run *after* the load balancer on the way out, since the
+    /// response phase unwinds in reverse.
+    fn capped_lb_with_stall(
+        stall: &'static str,
+        make: fn() -> Box<dyn praxis_filter::HttpFilter>,
+        stall_first: bool,
+    ) -> FilterPipeline {
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(stall, praxis_filter::FilterFactory::Http(Arc::new(move |_| Ok(make()))))
+            .unwrap();
+        let entry = |filter_type: String, config: serde_yaml::Value| praxis_filter::FilterEntry {
+            branch_chains: None,
+            filter_type,
+            config,
+            conditions: vec![],
+            name: None,
+            response_conditions: vec![],
+            failure_mode: FailureMode::default(),
+        };
+        let lb = entry(
+            "load_balancer".into(),
+            serde_yaml::from_str(
+                "clusters:\n  - name: web\n    endpoints: [\"127.0.0.1:8080\"]\n    max_connections: 1\n",
+            )
+            .unwrap(),
+        );
+        let stalling = entry(stall.into(), serde_yaml::from_str("{}").unwrap());
+        let mut entries = if stall_first {
+            vec![stalling, lb]
+        } else {
+            vec![lb, stalling]
+        };
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    /// A context routed to the capped cluster.
+    fn ctx_for_web() -> PingoraRequestCtx {
+        let mut ctx = make_ctx();
+        ctx.cluster = Some(Arc::from("web"));
+        ctx
+    }
+
+    /// A context as the response phase finds it: request answered by the
+    /// upstream the load balancer picked, holding `lease`.
+    fn answered_ctx(lease: Arc<AdmissionLease>) -> PingoraRequestCtx {
+        let mut ctx = ctx_for_web();
+        ctx.request_snapshot = Some(make_request());
+        ctx.upstream = Some(make_test_upstream());
+        ctx.cluster_admission = Some(lease);
+        let _old = ctx.filter_metadata.insert("lb.selected".to_owned(), "true".to_owned());
+        ctx
+    }
+
+    /// Covers the cluster admission slot only. The per-endpoint in-flight
+    /// count `strategy.select` takes in the same `on_request` is not owned by
+    /// the lease, and a cancelled phase still strands it; that is a separate
+    /// pre-existing leak, reachable with `least_connections` and no
+    /// `max_connections` set at all.
+    #[tokio::test]
+    async fn a_cancelled_request_phase_returns_the_admission_slot() {
+        let pipeline = capped_lb_with_stall("stalling_request", || Box::new(StallingRequestFilter), false);
+
+        // The client goes away while the filter after the load balancer is
+        // still awaiting, so the phase never reaches its writeback.
+        let mut abandoned = ctx_for_web();
+        let ran = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_pipeline(&pipeline, make_request(), &mut abandoned),
+        )
+        .await;
+        assert!(ran.is_err(), "the stalling filter keeps the request phase pending");
+        release_retry_state(&mut abandoned);
+
+        // The cap is one, so the next request proves whether the slot came back.
+        let mut next = ctx_for_web();
+        let ran = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_pipeline(&pipeline, make_request(), &mut next),
+        )
+        .await;
+        assert!(
+            ran.is_err(),
+            "the abandoned request's slot must come back, letting the next request through to the stall"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_response_phase_keeps_another_requests_slot() {
+        let pipeline = capped_lb_with_stall("stalling_response", || Box::new(StallingResponseFilter), true);
+        let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(2)));
+        let lease = AdmissionLease::claim(&state).expect("the first request is admitted");
+        let other = AdmissionLease::claim(&state).expect("a second request is admitted");
+
+        // The first request's response phase releases its slot and is then
+        // cancelled before its state is written back.
+        let mut ctx = answered_ctx(lease);
+        let mut response = praxis_filter::Response {
+            status: http::StatusCode::OK,
+            headers: HeaderMap::new(),
+        };
+        let ran = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_response_filters(&pipeline, &mut ctx, &mut response),
+        )
+        .await;
+        assert!(ran.is_err(), "the stalling filter keeps the response phase pending");
+        assert_eq!(
+            state.active_requests.load(AtomicOrdering::Relaxed),
+            1,
+            "the load balancer released the first request's slot"
+        );
+
+        // Completion runs anyway, and must not take the slot the other
+        // request is still holding.
+        release_retry_state(&mut ctx);
+
+        assert_eq!(
+            state.active_requests.load(AtomicOrdering::Relaxed),
+            1,
+            "the second request must keep its slot"
+        );
+        assert!(!other.is_released(), "and its lease is untouched");
     }
 }

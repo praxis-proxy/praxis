@@ -39,8 +39,8 @@
 
 use std::{
     sync::{
-        OnceLock,
-        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Instant,
 };
@@ -308,6 +308,87 @@ impl ClusterRetryState {
 }
 
 // -----------------------------------------------------------------------------
+// AdmissionLease
+// -----------------------------------------------------------------------------
+
+/// One request's claim on a cluster's in-flight count.
+///
+/// The claim is an object rather than a counter increment plus a "did I
+/// already give it back" flag kept beside it, because the flag and the
+/// counter can be copied between contexts and then fall out of step. A
+/// request's phases run on temporary filter contexts whose state is copied
+/// back only when the phase finishes; a cancelled phase (a client that
+/// resets mid-filter) never reaches that copy. A lease survives that: every
+/// holder shares one `Arc`, so the released flag cannot go stale, and the
+/// last holder to go away returns the slot even if nobody asked it to.
+///
+/// Releasing twice is a no-op, so a release path that runs after a phase
+/// already released cannot take a slot belonging to another request.
+pub struct AdmissionLease {
+    /// The cluster counter this lease is counted in.
+    state: Arc<ClusterRetryState>,
+    /// Whether the slot has gone back, so it goes back exactly once.
+    released: AtomicBool,
+}
+
+impl AdmissionLease {
+    /// Claim a slot on `state`, or `None` when the cluster is at its cap.
+    #[must_use]
+    pub fn claim(state: &Arc<ClusterRetryState>) -> Option<Arc<Self>> {
+        state.try_enter().then(|| {
+            Arc::new(Self {
+                state: Arc::clone(state),
+                released: AtomicBool::new(false),
+            })
+        })
+    }
+
+    /// The cluster state this lease counts against, for the retry budget.
+    #[must_use]
+    pub fn state(&self) -> &ClusterRetryState {
+        &self.state
+    }
+
+    /// Hand the slot back, reporting whether this call is the one that did
+    /// it. Safe to call any number of times, from any holder; only the first
+    /// call reaches the counter.
+    ///
+    /// The returned flag is how a caller gates work that must happen once
+    /// alongside the release, without the check-then-release race an
+    /// [`is_released`](Self::is_released) test would leave open.
+    pub fn release(&self) -> bool {
+        let first = !self.released.swap(true, Ordering::AcqRel);
+        if first {
+            self.state.leave();
+        }
+        first
+    }
+
+    /// Whether the slot has already gone back.
+    #[must_use]
+    pub fn is_released(&self) -> bool {
+        self.released.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for AdmissionLease {
+    /// The safety net: a lease dropped without an explicit release — a
+    /// cancelled request phase, say — still returns its slot.
+    fn drop(&mut self) {
+        let _returned = self.release();
+    }
+}
+
+impl std::fmt::Debug for AdmissionLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AdmissionLease")
+            .field("released", &self.is_released())
+            .field("cluster_active", &self.state.active_requests.load(Ordering::Relaxed))
+            .finish()
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Replay Safety
 // -----------------------------------------------------------------------------
 
@@ -517,6 +598,76 @@ mod tests {
             8,
             "the counter must agree with the number admitted"
         );
+    }
+
+    #[test]
+    fn a_lease_takes_a_slot_and_gives_it_back_once() {
+        let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(1)));
+        let lease = AdmissionLease::claim(&state).expect("the first claim fits");
+        assert_eq!(state.active_requests.load(Ordering::Relaxed), 1, "the slot is taken");
+
+        assert!(lease.release(), "the first release is the one that returns the slot");
+        assert!(!lease.release(), "a later release reports that it did nothing");
+        assert!(!lease.release(), "and so does the one after that");
+
+        assert_eq!(
+            state.active_requests.load(Ordering::Relaxed),
+            0,
+            "repeated releases must return one slot, not three"
+        );
+        assert!(lease.is_released(), "the lease knows it is spent");
+    }
+
+    #[test]
+    fn a_lease_refused_at_the_cap_takes_nothing() {
+        let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(1)));
+        let _held = AdmissionLease::claim(&state).expect("the first claim fits");
+
+        assert!(
+            AdmissionLease::claim(&state).is_none(),
+            "a cluster at its cap must refuse the claim"
+        );
+        assert_eq!(
+            state.active_requests.load(Ordering::Relaxed),
+            1,
+            "a refused claim must not count"
+        );
+    }
+
+    #[test]
+    fn a_dropped_lease_returns_its_slot() {
+        let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(1)));
+        drop(AdmissionLease::claim(&state).expect("the claim fits"));
+
+        assert_eq!(
+            state.active_requests.load(Ordering::Relaxed),
+            0,
+            "a lease nobody released still gives its slot back when dropped"
+        );
+        assert!(
+            AdmissionLease::claim(&state).is_some(),
+            "and the cluster can admit again"
+        );
+    }
+
+    #[test]
+    fn a_shared_lease_releases_once_however_many_hold_it() {
+        let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(2)));
+        let held = AdmissionLease::claim(&state).expect("the first claim fits");
+        let other = AdmissionLease::claim(&state).expect("the second claim fits");
+        let copy = Arc::clone(&held);
+
+        // One holder releases and goes away; the other still holds the Arc.
+        copy.release();
+        drop(copy);
+        drop(held);
+
+        assert_eq!(
+            state.active_requests.load(Ordering::Relaxed),
+            1,
+            "the other request's slot must survive both the release and the drop"
+        );
+        drop(other);
     }
 
     #[test]

@@ -77,14 +77,12 @@ impl std::ops::DerefMut for ScopedSubrequestContext<'_> {
 
 impl Drop for ScopedSubrequestContext<'_> {
     fn drop(&mut self) {
-        if self.ctx.cluster_retry_state_released {
-            return;
-        }
-        let Some(state) = self.ctx.cluster_retry_state.take() else {
+        let Some(lease) = self.ctx.cluster_admission.take() else {
             return;
         };
-        state.leave();
-        self.ctx.cluster_retry_state_released = true;
+        if !lease.release() {
+            return;
+        }
         if let (Some(reselector), Some(upstream)) = (&self.ctx.endpoint_reselector, &self.ctx.upstream) {
             reselector.release(&upstream.address);
         }
@@ -142,8 +140,7 @@ pub(super) fn build_sub_filter_context<'a>(
             retry_policy: None,
             route_retry_policy: None,
             hedge_policy: None,
-            cluster_retry_state: None,
-            cluster_retry_state_released: false,
+            cluster_admission: None,
             endpoint_reselector: None,
             pinned_endpoint_address: None,
             structured_metadata: HashMap::new(),

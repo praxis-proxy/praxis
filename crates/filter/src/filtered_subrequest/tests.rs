@@ -4636,14 +4636,14 @@ async fn rejected_subrequest_returns_its_cluster_admission_slot() {
 fn dropping_a_scoped_context_releases_an_unfinished_admission() {
     use std::sync::Arc;
 
-    use praxis_core::retry::ClusterRetryState;
+    use praxis_core::retry::{AdmissionLease, ClusterRetryState};
 
     let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(1)));
-    assert!(state.try_enter(), "the first request should be admitted");
+    let lease = AdmissionLease::claim(&state).expect("the first request should be admitted");
 
     let request = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&request);
-    ctx.cluster_retry_state = Some(Arc::clone(&state));
+    ctx.cluster_admission = Some(lease);
     drop(super::context::ScopedSubrequestContext::for_test(ctx));
 
     assert_eq!(
@@ -4658,19 +4658,18 @@ fn dropping_a_scoped_context_releases_an_unfinished_admission() {
 fn dropping_a_scoped_context_does_not_double_release() {
     use std::sync::Arc;
 
-    use praxis_core::retry::ClusterRetryState;
+    use praxis_core::retry::{AdmissionLease, ClusterRetryState};
 
     let state = Arc::new(ClusterRetryState::new(None).with_max_concurrent(Some(2)));
-    assert!(state.try_enter(), "first request admitted");
+    let lease = AdmissionLease::claim(&state).expect("first request admitted");
     // The response phase already handed this request's slot back.
-    state.leave();
+    lease.release();
     // A second request is still in flight and must keep its slot.
-    assert!(state.try_enter(), "second request admitted");
+    let _second = AdmissionLease::claim(&state).expect("second request admitted");
 
     let request = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&request);
-    ctx.cluster_retry_state = Some(Arc::clone(&state));
-    ctx.cluster_retry_state_released = true;
+    ctx.cluster_admission = Some(lease);
     drop(super::context::ScopedSubrequestContext::for_test(ctx));
 
     assert_eq!(
