@@ -195,6 +195,8 @@ impl<'de> Deserialize<'de> for MaxEntries {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StorageConfig {
+    /// Bindings live in this process only; they are not shared with other
+    /// replicas and do not survive a restart.
     Local,
 }
 
