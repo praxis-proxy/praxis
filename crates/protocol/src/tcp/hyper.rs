@@ -352,6 +352,10 @@ async fn handle_connection(
     tls: Option<TlsAcceptor>,
     shutdown: ShutdownWatch,
 ) {
+    if proxy.overload.is_saturated() {
+        crate::http::metrics::record_overload_reject("pre_tls_pressure");
+        return;
+    }
     let AcceptedTcp {
         stream,
         peer,

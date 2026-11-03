@@ -175,6 +175,10 @@ fn run_startup_security_checks(config: &Config) -> Result<(), StartupError> {
     warn_insecure_log_file_permissions(config);
     warn_insecure_sink_file_permissions(config);
     warn_overload_gauges_without_exporter(config);
+    crate::startup_checks::warn_overload_memory_limit(
+        config.runtime.max_memory_bytes,
+        praxis_core::overload::finite_cgroup_memory_limit(),
+    );
     Ok(())
 }
 
@@ -697,6 +701,7 @@ fn build_server_state(
     // First installed generation. A reload publishes its own only after the
     // last fallible step, immediately before the pipeline swap.
     slow_start_generation.commit();
+    let pipelines = Arc::new(pipelines);
 
     let listener_meta = praxis_protocol::http::health::new_listener_meta_store(
         praxis_protocol::http::health::listener_meta_from_config(config),
@@ -717,12 +722,12 @@ fn build_server_state(
     }
     let tasks = ServerBackgroundTasks {
         health: Arc::clone(&health_lifecycle),
-        housekeeping: spawn_housekeeping_tasks(&config.runtime, &subrequest_client, praxis_core::fd::usage().is_some()),
+        housekeeping: spawn_housekeeping_tasks(&config.runtime, &subrequest_client, praxis_core::fd::usage().is_some(), pipelines.overload()),
         watcher: None,
     };
 
     let state = ServerState {
-        pipelines: Arc::new(pipelines),
+        pipelines,
         listener_meta,
         cluster_meta,
         kv_stores,
@@ -1138,19 +1143,28 @@ fn spawn_housekeeping_tasks(
     runtime: &RuntimeConfig,
     client: &SubRequestClient,
     track_fds: bool,
+    signal: Arc<praxis_core::overload::Signal>,
 ) -> Option<(CancellationToken, std::thread::JoinHandle<()>)> {
-    let loops = housekeeping_loops(runtime, client, track_fds);
+    if runtime.overload_gauges && runtime.overload_actions && cfg!(feature = "overload-actions") {
+        signal.update(praxis_core::overload::EngagedActions::default(), 0.0);
+    }
+    let loops = housekeeping_loops(runtime, client, track_fds, Arc::clone(&signal));
     if loops.is_empty() {
         return None;
     }
 
     let shutdown = CancellationToken::new();
     let token = shutdown.clone();
+    let gauges_enabled = runtime.overload_gauges;
     let handle = spawn_on_dedicated_runtime("housekeeping runtime", async move {
+        let mut tasks = tokio::task::JoinSet::new();
         for task in loops {
-            tokio::spawn(task);
+            tasks.spawn(task);
         }
         token.cancelled().await;
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+        reset_overload_actions(&signal, gauges_enabled);
     });
     Some((shutdown, handle))
 }
@@ -1160,7 +1174,12 @@ fn spawn_housekeeping_tasks(
 /// sampler when `max_memory_bytes` is set, the circuit breaker eviction when
 /// `subrequest_circuit_breaker` is, and overload pressure gauges when
 /// `overload_gauges` is set.
-fn housekeeping_loops(runtime: &RuntimeConfig, client: &SubRequestClient, track_fds: bool) -> Vec<HousekeepingLoop> {
+fn housekeeping_loops(
+    runtime: &RuntimeConfig,
+    client: &SubRequestClient,
+    track_fds: bool,
+    signal: Arc<praxis_core::overload::Signal>,
+) -> Vec<HousekeepingLoop> {
     let mut loops = Vec::new();
     if track_fds {
         loops.push(fd_sampler_loop());
@@ -1172,7 +1191,8 @@ fn housekeeping_loops(runtime: &RuntimeConfig, client: &SubRequestClient, track_
         loops.push(circuit_eviction_loop(client.clone()));
     }
     if runtime.overload_gauges {
-        loops.push(overload_gauge_loop(runtime.max_memory_bytes));
+        let actions_enabled = runtime.overload_actions && cfg!(feature = "overload-actions");
+        loops.push(overload_gauge_loop(runtime, actions_enabled, signal));
     }
     loops
 }
@@ -1191,36 +1211,153 @@ fn fd_sampler_loop() -> HousekeepingLoop {
     })
 }
 
-/// Sample overload pressure and publish it. Does not shed load.
-///
-/// Logs state transitions when a resource crosses between idle, scaling,
-/// and saturated states. Transitions are logged at `info` for scaling
-/// and `warn` for saturation so operators without Prometheus still see
-/// pressure changes.
-fn overload_gauge_loop(heap_max_bytes: Option<usize>) -> HousekeepingLoop {
+/// Sample and publish pressure, log transitions, and optionally apply actions.
+fn overload_gauge_loop(
+    runtime: &RuntimeConfig,
+    actions_enabled: bool,
+    signal: Arc<praxis_core::overload::Signal>,
+) -> HousekeepingLoop {
+    let bands = runtime.overload_thresholds;
+    let heap_max_bytes = runtime.max_memory_bytes;
     Box::pin(async move {
-        let mut monitor = praxis_core::overload::Monitor::default();
+        let mut monitor = praxis_core::overload::Monitor::with_bands(bands);
         let mut tracker = praxis_core::overload::TransitionTracker::default();
+        let mut prev_actions = praxis_core::overload::EngagedActions::default();
+        let mut purge = None;
         let mut interval = tokio::time::interval(praxis_core::overload::SAMPLE_INTERVAL);
         interval.tick().await;
-        info!("overload pressure gauges enabled");
+        log_overload_mode(actions_enabled);
 
         loop {
             interval.tick().await;
-            let pressures = monitor.observe(praxis_core::overload::Inputs {
-                heap_max_bytes: heap_max_bytes.and_then(|bytes| u64::try_from(bytes).ok()),
-                connections: praxis_protocol::connections::global_usage()
-                    .and_then(|(used, limit)| Some((u64::try_from(used).ok()?, u64::try_from(limit).ok()?))),
-                file_descriptors: praxis_core::fd::usage().map(|usage| (usage.open, usage.limit)),
-            });
-            for (resource, pressure) in pressures.iter() {
-                praxis_protocol::http::metrics::set_overload_pressure(resource, pressure);
-            }
-            for transition in tracker.update(pressures, monitor.raw_saturated()) {
-                log_pressure_transition(&transition);
-            }
+            prev_actions = sample_overload(
+                &mut monitor,
+                &mut tracker,
+                prev_actions,
+                heap_max_bytes,
+                (signal.as_ref(), actions_enabled.then_some(&mut purge)),
+            )
+            .await;
         }
     })
+}
+
+/// One overload sample: publish pressure, log transitions, and apply actions.
+async fn sample_overload(
+    monitor: &mut praxis_core::overload::Monitor,
+    tracker: &mut praxis_core::overload::TransitionTracker,
+    prev_actions: praxis_core::overload::EngagedActions,
+    heap_max_bytes: Option<usize>,
+    control: (
+        &praxis_core::overload::Signal,
+        Option<&mut Option<tokio::task::JoinHandle<bool>>>,
+    ),
+) -> praxis_core::overload::EngagedActions {
+    let (signal, purge) = control;
+    let pressures = monitor.observe(overload_inputs(heap_max_bytes));
+    let action_pressures = monitor.action_pressures(pressures);
+    tracker.track_cpu_source(action_pressures.cpu.is_some());
+    for (resource, pressure) in pressures.iter() {
+        praxis_protocol::http::metrics::set_overload_pressure(resource, pressure, signal.id());
+    }
+    for transition in tracker.update(pressures, monitor.raw_saturated()) {
+        log_pressure_transition(&transition);
+    }
+    let Some(purge) = purge else {
+        return prev_actions;
+    };
+    apply_overload_actions(action_pressures, tracker, prev_actions, purge, signal).await
+}
+
+/// Counts the sampler already has. Kernel files are read inside `observe`.
+fn overload_inputs(heap_max_bytes: Option<usize>) -> praxis_core::overload::Inputs {
+    praxis_core::overload::Inputs {
+        heap_max_bytes: heap_max_bytes.and_then(|bytes| u64::try_from(bytes).ok()),
+        connections: praxis_protocol::connections::global_usage()
+            .and_then(|(used, limit)| Some((u64::try_from(used).ok()?, u64::try_from(limit).ok()?))),
+        file_descriptors: praxis_core::fd::usage().map(|usage| (usage.open, usage.limit)),
+    }
+}
+
+/// Update the request-path signal, publish action gauges, and purge the heap.
+async fn apply_overload_actions(
+    pressures: praxis_core::overload::Pressures,
+    tracker: &praxis_core::overload::TransitionTracker,
+    prev_actions: praxis_core::overload::EngagedActions,
+    purge: &mut Option<tokio::task::JoinHandle<bool>>,
+    signal: &praxis_core::overload::Signal,
+) -> praxis_core::overload::EngagedActions {
+    let mut actions = praxis_core::overload::EngagedActions::from_pressures(pressures, tracker, prev_actions);
+    actions.purge_heap = poll_heap_purge(actions.purge_heap, purge).await;
+    publish_overload_actions(actions, signal, tracker.action_pressures(pressures).peak());
+    log_action_changes(prev_actions, actions);
+    actions
+}
+
+/// Publish one consistent action state to request handlers and Prometheus.
+fn publish_overload_actions(
+    actions: praxis_core::overload::EngagedActions,
+    signal: &praxis_core::overload::Signal,
+    pressure: f64,
+) {
+    signal.update(actions, pressure);
+    for action in ["scale_timeouts", "scale_idle_timeout"] {
+        praxis_protocol::http::metrics::set_overload_action(action, signal.is_scaling(), signal.id());
+    }
+    praxis_protocol::http::metrics::set_overload_action("refuse_before_tls", actions.fail_readiness, signal.id());
+    for (action, engaged) in actions.iter() {
+        praxis_protocol::http::metrics::set_overload_action(action, engaged, signal.id());
+    }
+}
+
+/// Clear the owning controller's gauges before its metric slot can be reused.
+fn reset_overload_actions(signal: &praxis_core::overload::Signal, gauges_enabled: bool) {
+    if gauges_enabled {
+        for resource in ["cgroup_memory", "heap", "cpu", "connections", "file_descriptors"] {
+            praxis_protocol::http::metrics::set_overload_pressure(resource, 0.0, signal.id());
+        }
+    }
+    if signal.is_enabled() {
+        publish_overload_actions(praxis_core::overload::EngagedActions::default(), signal, 0.0);
+    }
+    signal.clear();
+}
+
+/// Collect completed purge work without blocking samplers or queuing purges.
+async fn poll_heap_purge(requested: bool, task: &mut Option<tokio::task::JoinHandle<bool>>) -> bool {
+    let mut succeeded = false;
+    if task.as_ref().is_some_and(tokio::task::JoinHandle::is_finished)
+        && let Some(completed) = task.take()
+    {
+        succeeded = completed.await.unwrap_or(false);
+    }
+    if requested && task.is_none() && praxis_core::overload::heap_purge_available() {
+        *task = Some(tokio::task::spawn_blocking(praxis_core::overload::run_heap_purge));
+    }
+    succeeded
+}
+
+/// Startup line so operators can see whether actions are on.
+fn log_overload_mode(actions_enabled: bool) {
+    if actions_enabled {
+        info!("overload pressure gauges and actions enabled");
+    } else {
+        info!("overload pressure gauges enabled");
+    }
+}
+
+/// Log when an action engages or disengages.
+fn log_action_changes(prev: praxis_core::overload::EngagedActions, next: praxis_core::overload::EngagedActions) {
+    for ((action, was_engaged), (_, is_engaged)) in prev.iter().zip(next.iter()) {
+        if was_engaged == is_engaged {
+            continue;
+        }
+        if is_engaged {
+            warn!(action, "overload action engaged");
+        } else {
+            info!(action, "overload action disengaged");
+        }
+    }
 }
 
 /// Emit a log line for a pressure state transition.
@@ -1654,7 +1791,8 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<u8>();
         let handle = spawn_on_dedicated_runtime("test runtime", async move {
             tx.send(7).expect("send completion marker");
-        });
+        })
+        .expect("create dedicated runtime");
         let received = rx.recv_timeout(Duration::from_secs(5));
         assert_eq!(received.ok(), Some(7), "the future must run on the dedicated runtime");
         handle.join().expect("test runtime must exit");
@@ -1727,21 +1865,21 @@ filter_chains:
     fn housekeeping_loops_follow_the_runtime_config() {
         let client = SubRequestClient::new(crate::test_support::connector(1));
         assert!(
-            housekeeping_loops(&RuntimeConfig::default(), &client, false).is_empty(),
+            housekeeping_loops(&RuntimeConfig::default(), &client, false, Arc::default()).is_empty(),
             "no limit configured and no descriptor tracking means no housekeeping loop"
         );
         assert_eq!(
-            housekeeping_loops(&RuntimeConfig::default(), &client, true).len(),
+            housekeeping_loops(&RuntimeConfig::default(), &client, true, Arc::default()).len(),
             1,
             "descriptor tracking alone needs only its sampler"
         );
         assert_eq!(
-            housekeeping_loops(&memory_limited_runtime(), &client, false).len(),
+            housekeeping_loops(&memory_limited_runtime(), &client, false, Arc::default()).len(),
             1,
             "a memory limit alone needs only the sampler"
         );
         assert_eq!(
-            housekeeping_loops(&fully_limited_runtime(), &client, true).len(),
+            housekeeping_loops(&fully_limited_runtime(), &client, true, Arc::default()).len(),
             3,
             "descriptors, memory, and a circuit breaker each need their own loop"
         );
@@ -1750,7 +1888,7 @@ filter_chains:
             ..RuntimeConfig::default()
         };
         assert_eq!(
-            housekeeping_loops(&gauges, &client, false).len(),
+            housekeeping_loops(&gauges, &client, false, Arc::default()).len(),
             1,
             "overload gauges are their own loop and do not shed load"
         );
@@ -1760,10 +1898,10 @@ filter_chains:
     fn housekeeping_tasks_spawn_without_panicking() {
         let client = SubRequestClient::new(crate::test_support::connector(1));
         assert!(
-            spawn_housekeeping_tasks(&RuntimeConfig::default(), &client, false).is_none(),
+            spawn_housekeeping_tasks(&RuntimeConfig::default(), &client, false, Arc::default()).is_none(),
             "default runtime needs no housekeeping thread"
         );
-        let (shutdown, handle) = spawn_housekeeping_tasks(&fully_limited_runtime(), &client, true)
+        let (shutdown, handle) = spawn_housekeeping_tasks(&fully_limited_runtime(), &client, true, Arc::default())
             .expect("limited runtime needs housekeeping");
         shutdown.cancel();
         handle.join().expect("housekeeping runtime must exit on cancellation");

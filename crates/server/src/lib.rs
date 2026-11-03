@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2024 Praxis Contributors
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 //! Server bootstrap for the Praxis proxy.
 //!
@@ -39,6 +39,9 @@ compile_error!(
      `--no-default-features --features hyper`"
 );
 
+/// Jemalloc integration for the opt-in overload manager.
+#[cfg(all(unix, feature = "overload-actions"))]
+pub mod allocator;
 mod composition;
 mod fd_limit;
 pub(crate) mod pipelines;

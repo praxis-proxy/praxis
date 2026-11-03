@@ -229,6 +229,13 @@ impl PingoraHealthService {
             Some(praxis_core::server::LifecyclePhase::Draining) => (503, r#"{"status":"draining"}"#.to_owned()),
             Some(praxis_core::server::LifecyclePhase::Stopped) => (503, r#"{"status":"stopped"}"#.to_owned()),
             Some(praxis_core::server::LifecyclePhase::Serving) | None => {
+                if self
+                    .pipelines
+                    .as_ref()
+                    .is_some_and(|state| state.pipelines.overload().is_saturated())
+                {
+                    return (503, r#"{"status":"overloaded"}"#.to_owned());
+                }
                 compute_ready_response(registry.as_ref(), self.verbose, self.readiness)
             },
         }
@@ -689,6 +696,29 @@ mod tests {
 
         shutdown_tx.send(true).unwrap();
         task.await.unwrap();
+    }
+
+    #[test]
+    fn readiness_uses_only_its_own_server_controller() {
+        let first = Arc::new(crate::ListenerPipelines::new(HashMap::new()));
+        let signal = first.overload();
+        let second = Arc::new(crate::ListenerPipelines::new(HashMap::new()));
+        let one =
+            PingoraHealthService::new(None, false).with_live_pipelines(first, new_listener_meta_store(HashMap::new()));
+        let two =
+            PingoraHealthService::new(None, false).with_live_pipelines(second, new_listener_meta_store(HashMap::new()));
+        signal.update(
+            praxis_core::overload::EngagedActions {
+                fail_readiness: true,
+                ..Default::default()
+            },
+            1.0,
+        );
+        assert_eq!(one.ready_response().0, 503);
+        assert_eq!(two.ready_response().0, 200);
+        assert_eq!(PingoraHealthService::new(None, false).ready_response().0, 200);
+        signal.clear();
+        assert_eq!(one.ready_response().0, 200);
     }
 
     #[test]

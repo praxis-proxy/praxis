@@ -23,6 +23,17 @@ pub(crate) fn warn_overload_gauges_without_exporter(config: &Config) {
              be scraped"
         );
     }
+    if config.runtime.overload_actions && !config.runtime.overload_gauges {
+        tracing::warn!(
+            "runtime.overload_actions is set without runtime.overload_gauges; \
+             actions require gauges to be enabled and will have no effect"
+        );
+    }
+    if config.runtime.overload_actions && !cfg!(feature = "overload-actions") {
+        tracing::warn!(
+            "runtime.overload_actions requires a build with --features overload-actions; actions are disabled"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -517,6 +528,19 @@ pub(crate) fn warn_policy_filter_without_feature(registry: &praxis_filter::Filte
 // Tests
 // -----------------------------------------------------------------------------
 
+/// Warn when the configured RSS backstop sits above the kernel-enforced memory cap.
+pub(crate) fn warn_overload_memory_limit(cap: Option<usize>, limit: Option<u64>) {
+    if let (Some(cap), Some(limit)) = (cap, limit)
+        && u64::try_from(cap).is_ok_and(|cap| cap > limit)
+    {
+        tracing::warn!(
+            max_memory_bytes = cap,
+            cgroup_memory_limit = limit,
+            "configured RSS cap exceeds finite cgroup limit; cgroup pressure takes precedence for overload actions"
+        );
+    }
+}
+
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
@@ -550,6 +574,21 @@ mod tests {
     fn insecure_warn_inactive_emits_nothing() {
         let warnings = capture_warnings(|| super::insecure_warn(false, "test_flag: inactive"));
         assert!(warnings.is_empty(), "inactive flag should produce no warnings");
+    }
+
+    #[test]
+    fn rss_cap_above_a_finite_cgroup_limit_warns() {
+        let warnings = capture_warnings(|| super::warn_overload_memory_limit(Some(2048), Some(1024)));
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("RSS cap exceeds finite cgroup limit"));
+        for (cap, limit) in [
+            (Some(1024), Some(2048)),
+            (Some(1024), Some(1024)),
+            (None, Some(1024)),
+            (Some(2048), None),
+        ] {
+            assert!(capture_warnings(|| super::warn_overload_memory_limit(cap, limit)).is_empty());
+        }
     }
 
     #[test]
@@ -590,6 +629,29 @@ mod tests {
             let warnings = capture_warnings(|| super::warn_overload_gauges_without_exporter(config));
             assert!(warnings.is_empty(), "{label} should stay quiet: {warnings:?}");
         }
+    }
+
+    #[test]
+    fn overload_actions_without_gauges_warns() {
+        let mut config = minimal_config();
+        config.runtime.overload_actions = true;
+        let warnings = capture_warnings(|| super::warn_overload_gauges_without_exporter(&config));
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("without runtime.overload_gauges")),
+            "actions without gauges should warn: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn overload_actions_requires_the_build_feature() {
+        let mut config = minimal_config();
+        config.runtime.overload_actions = true;
+        config.runtime.overload_gauges = true;
+        config.admin.metrics_address = Some("127.0.0.1:9091".to_owned());
+        let warnings = capture_warnings(|| super::warn_overload_gauges_without_exporter(&config));
+        assert_eq!(warnings.is_empty(), cfg!(feature = "overload-actions"), "{warnings:?}");
     }
 
     #[test]

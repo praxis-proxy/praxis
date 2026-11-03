@@ -97,12 +97,12 @@ impl Protocol for PingoraHttp {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
 
-            handler::load_http_handler_with_lifecycle(
+            handler::load_http_handler_with_overload(
                 server.server_mut(),
                 listener,
                 pipeline,
                 cert_watcher_shutdowns.senders_mut(),
-                lifecycle.clone(),
+                (lifecycle.clone(), pipelines.overload()),
             )?;
         }
 

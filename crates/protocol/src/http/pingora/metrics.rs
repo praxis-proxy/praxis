@@ -61,6 +61,9 @@ const OVERLOAD_REJECTS_TOTAL: &str = "praxis_overload_rejects_total";
 /// Gauge for smoothed overload pressure, from 0 to 1, per resource.
 const OVERLOAD_PRESSURE: &str = "praxis_overload_pressure";
 
+/// Gauge for engaged overload actions. 1 when an action is engaged, 0 when not.
+const OVERLOAD_ACTION: &str = "praxis_overload_action";
+
 /// Gauge for file descriptors the process holds open.
 const PROCESS_OPEN_FDS: &str = "praxis_process_open_fds";
 
@@ -784,11 +787,19 @@ pub(crate) fn record_overload_reject(reason: &'static str) {
 }
 
 /// Publish one resource's smoothed overload pressure, from 0 to 1.
-pub fn set_overload_pressure(resource: &'static str, pressure: f64) {
+pub fn set_overload_pressure(resource: &'static str, pressure: f64, server: u64) {
     if !is_recorder_installed() {
         return;
     }
-    gauge!(OVERLOAD_PRESSURE, "resource" => resource).set(pressure);
+    gauge!(OVERLOAD_PRESSURE, "resource" => resource, "server" => server.to_string()).set(pressure);
+}
+
+/// Publish whether a protective overload action is currently engaged.
+pub fn set_overload_action(action: &'static str, engaged: bool, server: u64) {
+    if !is_recorder_installed() {
+        return;
+    }
+    gauge!(OVERLOAD_ACTION, "action" => action, "server" => server.to_string()).set(if engaged { 1.0 } else { 0.0 });
 }
 
 /// Publish a file descriptor usage sample as the
@@ -1075,9 +1086,10 @@ mod tests {
     }
 
     #[test]
-    fn record_utilities_noop_without_recorder() {
+    fn record_utilities_do_not_panic() {
         record_overload_reject(OVERLOAD_REASON_MEMORY);
-        set_overload_pressure("cpu", 0.0);
+        set_overload_pressure("cpu", 0.0, 0);
+        set_overload_action("fail_readiness", false, 0);
         record_upstream_connect_failure(cluster_none());
         record_error(ERROR_TYPE_INTERNAL);
         record_upstream_request(cluster_none(), SharedString::const_str("10.0.0.1:80"), "2xx");
@@ -1131,11 +1143,27 @@ mod tests {
     #[test]
     fn overload_pressure_gauge_appears_in_scrape() {
         install_prometheus_recorder();
-        set_overload_pressure("connections", 0.5);
+        set_overload_pressure("connections", 0.5, 0);
         let body = render_prometheus().expect("recorder should render");
         assert!(
-            body.contains("praxis_overload_pressure{resource=\"connections\"} 0.5"),
+            body.contains("praxis_overload_pressure{resource=\"connections\",server=\"0\"} 0.5"),
             "expected the pressure gauge in the scrape:\n{body}"
+        );
+    }
+
+    #[test]
+    fn overload_action_gauge_appears_in_scrape() {
+        install_prometheus_recorder();
+        set_overload_action("purge_heap", true, 0);
+        set_overload_action("disable_keepalive", false, 0);
+        let body = render_prometheus().expect("recorder should render");
+        assert!(
+            body.contains("praxis_overload_action{action=\"purge_heap\",server=\"0\"} 1"),
+            "expected engaged action gauge in the scrape:\n{body}"
+        );
+        assert!(
+            body.contains("praxis_overload_action{action=\"disable_keepalive\",server=\"0\"} 0"),
+            "expected disengaged action gauge in the scrape:\n{body}"
         );
     }
 

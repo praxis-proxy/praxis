@@ -22,6 +22,8 @@ use tracing::{error, warn};
 use super::super::super::convert::send_rejection_for;
 #[cfg(feature = "pingora")]
 use super::super::with_body::add_drain_connection_close;
+#[cfg(feature = "pingora")]
+use super::super::with_body::close_keepalive_under_overload;
 use super::super::{
     super::context::PingoraRequestCtx,
     body_util::clamp_body_mode_to_ceiling,
@@ -282,6 +284,7 @@ pub(super) async fn run_streaming_terminal_response(
         return;
     };
     add_terminal_drain_connection_close(session, &mut header, ctx);
+    close_keepalive_under_overload(session, ctx.overload.as_deref());
     if let Err(e) = session.write_response_header(Box::new(header), false).await {
         debug!(error = %e, "failed to write streaming terminal response header");
         streaming_body.swap_extensions(&mut ctx.extensions);
@@ -381,6 +384,7 @@ async fn suppress_streaming_terminal_response(
         return;
     };
     add_terminal_drain_connection_close(session, &mut header, ctx);
+    close_keepalive_under_overload(session, ctx.overload.as_deref());
     if let Err(e) = session.write_response_header(Box::new(header), true).await {
         debug!(error = %e, "failed to write suppressed streaming terminal response");
         session.as_downstream_mut().shutdown().await;
@@ -517,6 +521,7 @@ async fn send_terminal_to_session(
     body: Option<Bytes>,
     ctx: &mut PingoraRequestCtx,
 ) {
+    close_keepalive_under_overload(session, ctx.overload.as_deref());
     let is_head = session.req_header().method == http::Method::HEAD;
     let status = resp.status;
     let body_prohibited = status == http::StatusCode::NO_CONTENT || status == http::StatusCode::NOT_MODIFIED;
