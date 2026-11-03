@@ -105,6 +105,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   reading the body. Local body-limit rejections are not retried upstream,
   even when 413 is configured as retriable. HEAD rejection responses retain
   representation headers without sending payload bytes, including over HTTP/2.
+  Streaming rejections also cancel HTTP/2 upstream streams promptly instead of
+  waiting for an upstream response or allowing it to replace the rejection.
 - Early HTTP/1 responses with unread uploads use Pingora's write-side
   shutdown and bounded cleanup before closing, including authentication
   and rate-limit rejections and successful terminal responses. Cleanup has

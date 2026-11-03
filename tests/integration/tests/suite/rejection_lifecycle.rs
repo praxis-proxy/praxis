@@ -294,6 +294,96 @@ fn successful_terminal_response_cleans_up_an_unfinished_upload() {
     drop(proxy);
 }
 
+#[tokio::test]
+#[cfg_attr(coverage, ignore = "spawns the proxy binary")]
+async fn streaming_rejection_cancels_a_silent_h2_upstream() {
+    assert_h2_streaming_rejection(false).await;
+}
+
+#[tokio::test]
+#[cfg_attr(coverage, ignore = "spawns the proxy binary")]
+async fn streaming_rejection_wins_over_a_late_h2_upstream_response() {
+    assert_h2_streaming_rejection(true).await;
+}
+
+/// Exercise a body halt after the H2 upstream has received part of the upload.
+async fn assert_h2_streaming_rejection(late_response: bool) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let backend = listener.local_addr().unwrap().port();
+    let (started, receiving) = tokio::sync::oneshot::channel();
+    let (uploaded, overflow_sent) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut connection = h2::server::handshake(socket).await.unwrap();
+        let (request, mut respond) = connection.accept().await.unwrap().unwrap();
+        let handle = async move {
+            let mut body = request.into_body();
+            let chunk = body.data().await.unwrap().unwrap();
+            body.flow_control().release_capacity(chunk.len()).unwrap();
+            started.send(()).unwrap();
+            if late_response {
+                overflow_sent.await.unwrap();
+                tokio::select! {
+                    reset = std::future::poll_fn(|cx| respond.poll_reset(cx)) => return reset,
+                    () = tokio::time::sleep(Duration::from_millis(200)) => {},
+                }
+                respond.send_response(http::Response::new(()), true).unwrap();
+            }
+            std::future::poll_fn(|cx| respond.poll_reset(cx)).await
+        };
+        tokio::select! {
+            reset = handle => reset,
+            () = async { while connection.accept().await.is_some() {} } => {
+                panic!("the upstream connection closed before its request stream was cancelled");
+            },
+        }
+    });
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+    let yaml = simple_proxy_yaml(port, backend).replacen(
+        "            endpoints:",
+        "            http:\n              version: h2\n            endpoints:",
+        1,
+    );
+    let config = format!("runtime:\n  threads: 2\nbody_limits:\n  max_request_bytes: 1024\n{yaml}");
+    let proxy = PraxisProcess::spawn(&config, &addr);
+    let mut client = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let request = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n200\r\n{}\r\n",
+        "a".repeat(512)
+    );
+    client.write_all(request.as_bytes()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), receiving)
+        .await
+        .expect("the first chunk must reach the H2 upstream")
+        .unwrap();
+    let overflow = format!("400\r\n{}\r\n0\r\n\r\n", "a".repeat(1024));
+    client.write_all(overflow.as_bytes()).await.unwrap();
+    let _sent = uploaded.send(());
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(3), client.read_to_string(&mut response))
+        .await
+        .expect("the local rejection must arrive without waiting for the H2 upstream")
+        .unwrap();
+    assert_eq!(parse_status(&response), 413, "the local rejection must win: {response}");
+    assert!(
+        parse_body(&response).contains("request body too large"),
+        "the local rejection body must be preserved: {response}"
+    );
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("the H2 upstream stream must be cancelled promptly")
+            .unwrap()
+            .unwrap(),
+        h2::Reason::CANCEL,
+        "the rejected upload must release its upstream stream"
+    );
+    drop(proxy);
+}
+
 #[test]
 fn early_auth_and_rate_limit_rejections_drain_unread_uploads() {
     let body = "a".repeat(16_777_216);

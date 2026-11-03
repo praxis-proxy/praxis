@@ -115,7 +115,9 @@ pub(super) async fn execute(
         pingora_core::ErrorType::InternalError,
         pingora_core::ErrorType::HTTPStatus,
     );
-    Err(pingora_core::Error::explain(etype, halt.reason))
+    // Pingora's H2 body loop propagates downstream errors; other sources
+    // are treated as upstream write failures and swallowed.
+    Err(pingora_core::Error::explain(etype, halt.reason).into_down())
 }
 
 /// Run body filters on a request body chunk, enforcing size limits; the
@@ -304,6 +306,11 @@ mod tests {
             .ok_or("overflow must cross the error boundary")?;
 
         assert_eq!(error.etype(), &pingora_core::ErrorType::HTTPStatus(413));
+        assert_eq!(
+            error.esource(),
+            &pingora_core::ErrorSource::Downstream,
+            "the local halt must escape Pingora's H2 request-body loop"
+        );
         assert_eq!(
             ctx.pending_rejection.as_ref().map(|rejection| rejection.status),
             Some(413),

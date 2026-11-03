@@ -274,7 +274,9 @@ Async (Pingora allows `.await` here).
   if StreamBuffer is still accumulating (not EOS).
 - `Release` - flushes the accumulated buffer and
   marks `request_body_released = true`.
-- `Reject` - sends rejection to client, returns error.
+- `Reject` - saves the rejection for `fail_to_proxy` and returns a
+  downstream-source error so Pingora stops both HTTP/1 and HTTP/2 upstream
+  attempts. The final error handler sends the rejection after upstream release.
 
 Source: `request_body_filter.rs`
 
