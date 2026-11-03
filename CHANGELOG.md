@@ -101,8 +101,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Request-body limit rejections log structured warnings and return JSON 413
   responses across buffering and streaming paths. Body-phase rejections
   for requests armed by `grpc_status` return gRPC Trailers-Only responses
-  instead. Oversized declared Content-Length values are rejected before
-  reading the body. Local body-limit rejections are not retried upstream,
+  instead. Oversized declared Content-Length values, including validated
+  matching comma-separated lengths, are rejected before reading the body
+  or sending 100 Continue. Local body-limit rejections are not retried upstream,
   even when 413 is configured as retriable. HEAD rejection responses retain
   representation headers without sending payload bytes, including over HTTP/2.
   Streaming rejections also cancel HTTP/2 upstream streams promptly instead of

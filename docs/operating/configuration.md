@@ -501,7 +501,8 @@ bytes seen, and rejection phase. Body-phase failures return
 a JSON 413 response, or a gRPC Trailers-Only response when
 the `grpc_status` filter has armed the request. A declared
 `Content-Length` above the effective input limit is rejected
-before reading the body and returns JSON 413.
+before reading the body or sending 100 Continue and returns JSON 413.
+This includes matching comma-separated lengths accepted by the HTTP parser.
 
 For a local HTTP/1 response that closes the connection
 with an unread upload, the Pingora backend sends the

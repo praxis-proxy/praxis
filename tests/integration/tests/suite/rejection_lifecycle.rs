@@ -28,27 +28,30 @@ fn oversized_expect_continue_is_rejected_before_upload_and_logged() {
     let port = free_port();
     let addr = format!("127.0.0.1:{port}");
     let mut proxy = PraxisProcess::spawn(&inspection_config(port, ""), &addr);
-    let response = http_send(
-        &addr,
-        concat!(
-            "POST / HTTP/1.1\r\nHost: localhost\r\n",
-            "Content-Length: 16777216\r\nExpect: 100-continue\r\n\r\n"
-        ),
-    );
+    for length in [
+        "16777216",
+        "16777216, 16777216",
+        "\t16777216 ,\t16777216, 16777216\t",
+        "16777216, 16777216\r\nContent-Length: 16777216, 16777216",
+    ] {
+        let request =
+            format!("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {length}\r\nExpect: 100-continue\r\n\r\n");
+        let response = http_send(&addr, &request);
 
-    assert_eq!(
-        parse_status(&response),
-        413,
-        "a final rejection must arrive without sending the body"
-    );
-    assert!(
-        !response.contains("100 Continue"),
-        "an oversized declared body must not be invited"
-    );
-    assert!(
-        parse_body(&response).contains("request body too large"),
-        "the response must explain the rejection"
-    );
+        assert_eq!(
+            parse_status(&response),
+            413,
+            "a final rejection must arrive without sending the body: {length:?}"
+        );
+        assert!(
+            !response.contains("100 Continue"),
+            "an oversized declared body must not be invited: {length:?}"
+        );
+        assert!(
+            parse_body(&response).contains("request body too large"),
+            "the response must explain the rejection: {length:?}"
+        );
+    }
     let _status = proxy.terminate();
     assert_warning(&proxy.logs(), "DeclaredLength");
     assert!(

@@ -53,6 +53,8 @@ pub(in crate::http) fn body_limit_rejection(limit: usize, attempted: u64, phase:
 ///
 /// Chunked requests are checked as they arrive. An unbounded streaming
 /// pipeline has no declared-length admission ceiling.
+/// Backends validate that duplicate lengths agree, so the first
+/// comma-separated value is the effective length.
 pub(in crate::http) fn declared_body_rejection(
     headers: &http::HeaderMap,
     pipeline: &FilterPipeline,
@@ -65,6 +67,8 @@ pub(in crate::http) fn declared_body_rejection(
         .get(http::header::CONTENT_LENGTH)?
         .to_str()
         .ok()?
+        .split(',')
+        .next()?
         .trim()
         .parse::<u64>()
         .ok()?;
@@ -97,12 +101,18 @@ mod tests {
         let pipeline = pipeline(Some(10))?;
         let mut headers = http::HeaderMap::new();
         for size in [9_u64, 10, 11] {
-            headers.insert(http::header::CONTENT_LENGTH, size.into());
-            assert_eq!(
-                declared_body_rejection(&headers, &pipeline).map(|rejection| rejection.status),
-                (size > 10).then_some(413),
-                "only lengths above the limit must be rejected"
-            );
+            for value in [
+                size.to_string(),
+                format!("{size}, {size}"),
+                format!("\t{size} ,\t{size}, {size}\t"),
+            ] {
+                headers.insert(http::header::CONTENT_LENGTH, value.parse()?);
+                assert_eq!(
+                    declared_body_rejection(&headers, &pipeline).map(|rejection| rejection.status),
+                    (size > 10).then_some(413),
+                    "only lengths above the limit must be rejected: {value:?}"
+                );
+            }
         }
         Ok(())
     }
