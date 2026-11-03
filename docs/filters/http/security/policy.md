@@ -9,7 +9,7 @@ Requires Cargo feature: `policy-engine`.
 
 ## Configuration Notes
 
-Registered under the YAML filter name `policy`. The standard build selects `policy-builtins`; `policy-engine` enables the engine without bundled plugins, and individual `policy-*` features select one builtin.
+Registered under the YAML filter name `policy`. The standard build selects `policy-builtins`; `policy-engine` enables the engine without bundled plugins. Individual `policy-*` features select plugins, and a separate `policy-crypto-*` feature selects the Policy crypto backend.
 
 A single request can carry multiple identity sources — user JWT in `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in `X-Workload-Token`, etc. Each registered identity plugin reads its own configured header and contributes to a typed `Extensions` context.
 

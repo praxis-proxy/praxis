@@ -144,8 +144,7 @@ fn policy_plugin_and_crypto_features_are_forwarded_independently() {
         "plugin selection must not choose a crypto backend: {api_key}"
     );
 
-    let rustcrypto = feature_declaration("policy-crypto-default")
-        .expect("RustCrypto backend feature");
+    let rustcrypto = feature_declaration("policy-crypto-default").expect("RustCrypto backend feature");
     assert!(rustcrypto.contains("praxis-filter/policy-crypto-default"));
     assert!(rustcrypto.contains("praxis-protocol/policy-crypto-default"));
 

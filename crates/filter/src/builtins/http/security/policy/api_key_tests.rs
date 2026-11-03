@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::tests_outside_test_module,
+    reason = "API-key test functions live in this cfg(test) module"
+)]
+
 //! API-key enforcement tests, available without the JWT builtin.
 
 use std::collections::HashMap;

@@ -25,10 +25,7 @@ use ppe::praxis_policy_core::{
     },
     engine::PolicyEngine,
     error::{PluginError, PluginViolation},
-    extensions::{
-        Credential, LLMExtension, LlmRequestDocument, MetaExtension,
-        http::SecretHeaderProvenance,
-    },
+    extensions::{Credential, LLMExtension, LlmRequestDocument, MetaExtension, http::SecretHeaderProvenance},
     hooks::Extensions,
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
@@ -1730,10 +1727,6 @@ impl PolicyFilter {
     ///
     /// Returns [`FilterError`] when the hook times out or yields no result,
     /// so the response fails under the filter's `failure_mode`.
-    #[expect(
-        clippy::large_stack_frames,
-        reason = "PPE response dispatch carries large async payloads"
-    )]
     fn dispatch_response_cmf(
         &self,
         hook: &'static str,
@@ -1743,7 +1736,7 @@ impl PolicyFilter {
     ) -> Result<ppe::praxis_policy_core::executor::PipelineResult, FilterError> {
         let mgr = Arc::clone(&self.mgr);
         let invoke = async move {
-            let (r, _bg) = mgr.invoke_named::<CmfHook>(hook, payload, extensions, None).await;
+            let (r, _bg) = Box::pin(mgr.invoke_named::<CmfHook>(hook, payload, extensions, None)).await;
             r
         };
         block_on_bounded(invoke, self.response_dispatch_timeout)

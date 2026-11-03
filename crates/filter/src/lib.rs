@@ -126,6 +126,10 @@ pub use builtins::{
 pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, fips_crypto_blocker, register_policy_plugin_factory};
 #[cfg(not(feature = "policy-engine"))]
 /// Report missing capability evidence for a policy filter registered by another factory.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keep the FIPS blocker contract consistent when policy support is disabled"
+)]
 pub fn fips_crypto_blocker() -> Option<String> {
     Some("policy filter capability evidence is unavailable in this build".to_owned())
 }

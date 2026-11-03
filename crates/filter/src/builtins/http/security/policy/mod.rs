@@ -215,13 +215,6 @@ pub fn fips_crypto_blocker() -> Option<String> {
 mod crypto_capabilities;
 
 #[cfg(all(test, feature = "policy-builtins"))]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    reason = "tests"
-)]
 mod tests;
 
 #[cfg(all(
@@ -233,11 +226,4 @@ mod tests;
         all(feature = "policy-api-key", feature = "policy-crypto-fips")
     )
 ))]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    reason = "tests"
-)]
 mod api_key_tests;

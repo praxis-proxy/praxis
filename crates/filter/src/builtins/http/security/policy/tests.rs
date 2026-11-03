@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::tests_outside_test_module,
+    reason = "policy test functions live in this cfg(test) module"
+)]
+
 //! Tests for the `policy` security filter.
 //!
 //! Uses HMAC (HS256) JWTs throughout for setup simplicity — the
