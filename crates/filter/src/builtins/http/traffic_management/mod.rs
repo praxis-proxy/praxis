@@ -3,6 +3,7 @@
 
 //! HTTP traffic management filters: routing, load balancing, timeout enforcement, redirects and static responses.
 
+mod bandwidth_limit;
 mod circuit_breaker;
 mod endpoint_selector;
 mod grpc_detection;
@@ -19,6 +20,7 @@ pub(crate) mod sticky_sessions;
 mod timeout;
 pub(crate) mod token_bucket;
 
+pub use bandwidth_limit::{BandwidthLimitFilter, BandwidthMode};
 pub use circuit_breaker::CircuitBreakerFilter;
 pub use endpoint_selector::EndpointSelectorFilter;
 pub use grpc_detection::GrpcDetectionFilter;

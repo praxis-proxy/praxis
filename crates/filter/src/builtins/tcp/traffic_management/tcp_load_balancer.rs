@@ -458,6 +458,7 @@ mod tests {
                 connect_time: Instant::now(),
                 bytes_in: 0,
                 bytes_out: 0,
+                bandwidth: None,
             };
             lb.on_connect(&mut ctx).await.unwrap();
             let addr = ctx.upstream_addr.unwrap().into_owned();
@@ -485,6 +486,7 @@ mod tests {
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
+            bandwidth: None,
         };
         let err = lb.on_connect(&mut ctx).await.unwrap_err();
         assert!(
@@ -564,6 +566,7 @@ clusters:
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
+            bandwidth: None,
         };
         lb.on_disconnect(&mut ctx).await.unwrap();
     }
@@ -609,6 +612,7 @@ clusters:
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
+            bandwidth: None,
         }
     }
 
@@ -625,6 +629,7 @@ clusters:
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
+            bandwidth: None,
         }
     }
 }

@@ -43,6 +43,7 @@
 
 mod actions;
 mod any_filter;
+mod bandwidth;
 mod binding;
 pub mod body;
 pub mod builtins;
@@ -108,6 +109,11 @@ pub use actions::{
     TerminalResponse,
 };
 pub use any_filter::AnyFilter;
+pub use bandwidth::{
+    ConnectionAlive, DownstreamConnectionId, PaceReservation, TcpBandwidthPacer, cancel_bandwidth,
+    cancel_download_pace, cancel_upload_pace, commit_download_pace, commit_upload_pace, connection_close_reason,
+    download_pace_delay, settle_bandwidth, settle_download_write, upload_pace_delay,
+};
 pub use binding::ChainBindingContext;
 #[cfg(feature = "chain-binding")]
 pub use binding::ChainBindingHttpFactory;
@@ -115,12 +121,12 @@ pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, Bod
 #[cfg(feature = "basic-auth-filter")]
 pub use builtins::BasicAuthFilter;
 pub use builtins::{
-    CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointReselector,
-    EndpointSelectorFilter, GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode,
-    RedirectStatus, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry, StickySessionsFilter,
-    access_record_already_emitted, bodyless_response, emit_access_record, encode_trailer_frame, has_dot_dot_traversal,
-    http::payload_processing::compression_config::CompressionConfig, mark_access_record_emitted,
-    normalize_rewritten_path, shutdown_access_log_sinks,
+    BandwidthLimitFilter, BandwidthMode, CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter,
+    DisallowedOriginMode, EndpointReselector, EndpointSelectorFilter, GuardrailsAction, GuardrailsFilter,
+    LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind, SessionStore,
+    SessionStoreRegistry, StickySessionsFilter, access_record_already_emitted, bodyless_response, emit_access_record,
+    encode_trailer_frame, has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig,
+    mark_access_record_emitted, normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]
 pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};

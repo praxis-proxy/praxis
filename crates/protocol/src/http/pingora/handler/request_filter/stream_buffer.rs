@@ -315,10 +315,15 @@ impl PreReadPass {
                 }
             },
             Ok(FilterAction::Reject(rejection)) => {
+                praxis_filter::cancel_bandwidth(&mut ctx.extensions);
                 return Err(PreReadStop::Rejected(rejection));
             },
-            Err(e) => return Err(PreReadStop::Filter(e)),
+            Err(e) => {
+                praxis_filter::cancel_bandwidth(&mut ctx.extensions);
+                return Err(PreReadStop::Filter(e));
+            },
         }
+        super::super::bandwidth::pace_upload(&mut ctx.extensions).await;
 
         if end_of_stream {
             self.eos_body = body;

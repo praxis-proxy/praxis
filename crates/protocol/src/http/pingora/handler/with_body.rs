@@ -539,6 +539,7 @@ impl ProxyHttp for PingoraHttpHandler {
             release_retry_state(ctx);
             ctx.ended_by_client = ended_by_client(e, ctx.upstream_response_status);
             logging_cleanup(&pipeline, ctx).await;
+            praxis_filter::settle_bandwidth(&mut ctx.extensions, e.is_none());
             maybe_emit_fallback_access_log(&pipeline, written_status, ctx);
         }
         .instrument(span)

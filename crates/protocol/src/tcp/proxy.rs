@@ -17,7 +17,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Context, Poll},
     time::Duration,
@@ -32,10 +32,10 @@ use praxis_core::{
     config::{Config, Listener},
     connectivity::is_private_upstream_ip,
 };
-use praxis_filter::{FilterAction, FilterPipeline, TcpFilterContext};
+use praxis_filter::{FilterAction, FilterPipeline, TcpBandwidthPacer, TcpFilterContext};
 use praxis_tls::sni;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt as _, AsyncWrite, ReadBuf},
+    io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf},
     net::TcpStream,
     sync::{Semaphore, watch},
 };
@@ -53,6 +53,9 @@ const PEEK_INITIAL: usize = 1_024; // 1 KiB
 
 /// Maximum peek buffer size before giving up on SNI extraction.
 const PEEK_MAX: usize = 16_384; // 16 KiB
+
+/// Bytes read in one paced copy.
+const PACED_CHUNK: usize = 16_384;
 
 /// Timeout for upstream TCP connect (including DNS resolution).
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -172,11 +175,11 @@ impl PingoraTcpProxy {
             })
     }
 
-    /// Run bidirectional forwarding, returning the close reason.
+    /// Run bidirectional forwarding, returning how the session ended.
     ///
-    /// The reason lets the `connection_close` log distinguish a force-close
-    /// from a genuine completion. The copy is optionally wrapped in a
-    /// max-duration timeout.
+    /// The peeked prefix is written inside the same future as the copy, so
+    /// shutdown, the session timeout, and the max duration bound its pace
+    /// wait. A failed prefix write stays separate from a later copy error.
     #[expect(clippy::too_many_arguments, reason = "per-connection forwarding state")]
     async fn forward<S>(
         &self,
@@ -185,7 +188,9 @@ impl PingoraTcpProxy {
         shutdown_rx: &mut watch::Receiver<bool>,
         upstream_addr: &str,
         counters: &ByteCounters,
-    ) -> TcpCloseReason
+        pacer: Option<&TcpBandwidthPacer>,
+        peeked: Vec<u8>,
+    ) -> SessionEnd
     where
         S: AsyncRead + AsyncWrite + Unpin + Send,
     {
@@ -193,30 +198,36 @@ impl PingoraTcpProxy {
             inner: session,
             counters,
         };
-        let copy_fut = async {
-            let copy_future = tokio::io::copy_bidirectional(&mut counted, upstream);
-            match self.session_timeout {
-                Some(timeout) => forward_with_timeout(copy_future, shutdown_rx, timeout, upstream_addr).await,
-                // Config validation applies a default session timeout to every
-                // TCP listener, so this arm is reachable only for a proxy
-                // constructed programmatically without one.
-                None => forward_no_timeout(copy_future, shutdown_rx, upstream_addr).await,
-            }
-        };
+        let prefix_written = AtomicBool::new(false);
+        let work = paced_session(&mut counted, upstream, pacer, peeked, &prefix_written);
+        let bound = self.bound_forward(work, shutdown_rx, upstream_addr).await;
+        session_end(bound, prefix_written.load(Ordering::Relaxed), upstream_addr)
+    }
 
-        if let Some(max_dur) = self.max_duration {
-            if let Ok(r) = tokio::time::timeout(max_dur, copy_fut).await {
-                r
-            } else {
+    /// Apply the session deadline, shutdown, and max duration to `work`.
+    async fn bound_forward<F, T>(
+        &self,
+        work: F,
+        shutdown_rx: &mut watch::Receiver<bool>,
+        upstream_addr: &str,
+    ) -> Bound<T>
+    where
+        F: Future<Output = T>,
+    {
+        let driven = drive_session(work, shutdown_rx, self.session_timeout, upstream_addr);
+        let Some(limit) = self.max_duration else {
+            return Bound::Drive(driven.await);
+        };
+        match tokio::time::timeout(limit, driven).await {
+            Ok(outcome) => Bound::Drive(outcome),
+            Err(_elapsed) => {
                 warn!(
                     upstream = %upstream_addr,
-                    max_duration_secs = max_dur.as_secs(),
+                    max_duration_secs = limit.as_secs(),
                     "TCP session exceeded maximum duration"
                 );
-                TcpCloseReason::MaxDuration
-            }
-        } else {
-            copy_fut.await
+                Bound::MaxDuration
+            },
         }
     }
 
@@ -229,7 +240,7 @@ impl PingoraTcpProxy {
         local_addr: &str,
         sni: Option<&str>,
         connect_time: std::time::Instant,
-    ) -> Option<String> {
+    ) -> Option<(String, Option<Arc<TcpBandwidthPacer>>)> {
         let upstream_cow = self.upstream_addr.as_deref().map(Cow::Borrowed);
         let health_registry = pipeline.health_registry().cloned();
 
@@ -244,6 +255,7 @@ impl PingoraTcpProxy {
             connect_time,
             bytes_in: 0,
             bytes_out: 0,
+            bandwidth: None,
         };
 
         let result = resolve_connect_result(pipeline, &mut ctx, remote_addr).await;
@@ -255,7 +267,8 @@ impl PingoraTcpProxy {
             );
             log_early_close(connect_time, "filter_rejection");
         }
-        result
+        let pacer = ctx.bandwidth.take();
+        result.map(|addr| (addr, pacer))
     }
 
     /// Run TCP disconnect filters for logging.
@@ -283,6 +296,7 @@ impl PingoraTcpProxy {
             connect_time,
             bytes_in,
             bytes_out,
+            bandwidth: None,
         };
         let _result = pipeline.execute_tcp_disconnect(&mut ctx).await;
     }
@@ -383,7 +397,7 @@ impl PingoraTcpProxy {
             // stays on the same instance across a hot reload.
             let pipeline = self.pipeline.load_full();
 
-            let Some(upstream_addr) = self
+            let Some((upstream_addr, pacer)) = self
                 .run_connect_filters(
                     &pipeline,
                     remote_addr,
@@ -434,50 +448,57 @@ impl PingoraTcpProxy {
                     return;
                 };
 
-            if !peeked_bytes.is_empty()
-                && let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut upstream, &peeked_bytes).await
-            {
-                warn!(
-                    upstream = %upstream_addr,
-                    error = %e,
-                    phase = "peeked_write",
-                    "connection_error"
-                );
-                self.run_disconnect_filters(
-                    &pipeline,
-                    remote_addr,
-                    local_addr,
-                    &upstream_addr,
-                    sni_hostname.as_deref(),
-                    connect_time,
-                    0,
-                    0,
-                )
-                .await;
-                super::metrics::record_tcp_connection_duration(
-                    self.listener_label_for(local_addr),
-                    "peeked_write_error",
-                    connect_time.elapsed().as_secs_f64(),
-                );
-                log_early_close(connect_time, "peeked_write_error");
-                return;
-            }
-
-            // The peeked hello has been forwarded; a long-lived session
-            // must not pin up to 16 KiB of dead peek buffer for its
-            // whole lifetime.
-            drop(peeked_bytes);
-
             let mut shutdown_rx: watch::Receiver<bool> = shutdown.clone();
             let counters = ByteCounters::default();
-            let close_reason = self
-                .forward(&mut session, &mut upstream, &mut shutdown_rx, &upstream_addr, &counters)
+            let ended = self
+                .forward(
+                    &mut session,
+                    &mut upstream,
+                    &mut shutdown_rx,
+                    &upstream_addr,
+                    &counters,
+                    pacer.as_deref(),
+                    peeked_bytes,
+                )
                 .await;
+            let (close_reason, prefix_written) = match ended {
+                SessionEnd::PrefixFailed(error) => {
+                    warn!(
+                        upstream = %upstream_addr,
+                        error = %error,
+                        phase = "peeked_write",
+                        "connection_error"
+                    );
+                    self.run_disconnect_filters(
+                        &pipeline,
+                        remote_addr,
+                        local_addr,
+                        &upstream_addr,
+                        sni_hostname.as_deref(),
+                        connect_time,
+                        0,
+                        0,
+                    )
+                    .await;
+                    super::metrics::record_tcp_connection_duration(
+                        self.listener_label_for(local_addr),
+                        "peeked_write_error",
+                        connect_time.elapsed().as_secs_f64(),
+                    );
+                    log_early_close(connect_time, "peeked_write_error");
+                    return;
+                },
+                SessionEnd::Closed { reason, prefix_written } => (reason, prefix_written),
+            };
             let (copied_in, bytes_out) = counters.totals();
-            // The peeked ClientHello bytes were read from the client and
-            // written to the upstream before copy_bidirectional started, so
-            // they are client->upstream ingress and belong in bytes_in.
-            let bytes_in = copied_in.saturating_add(peeked_len);
+            // Peeked bytes count as client ingress once their write has
+            // finished. A shutdown or timeout during the pace wait did not
+            // send them.
+            let bytes_in = if prefix_written {
+                copied_in.saturating_add(peeked_len)
+            } else {
+                copied_in
+            };
 
             self.run_disconnect_filters(
                 &pipeline,
@@ -626,7 +647,7 @@ async fn resolve_connect_result(
             }
         },
         Ok(FilterAction::Reject(r)) => {
-            warn!(remote = %remote_addr, status = r.status, "TCP connection rejected by filter");
+            log_tcp_rejection(remote_addr, &r);
             release_selected_endpoint(pipeline, ctx).await;
             None
         },
@@ -636,6 +657,15 @@ async fn resolve_connect_result(
             None
         },
     }
+}
+
+/// Log a connect-filter rejection, including its close cause when it has one.
+fn log_tcp_rejection(remote_addr: &str, rejection: &praxis_filter::Rejection) {
+    if let Some(reason) = praxis_filter::connection_close_reason(rejection) {
+        warn!(remote = %remote_addr, %reason, "closing TCP connection");
+        return;
+    }
+    warn!(remote = %remote_addr, status = rejection.status, "TCP connection rejected by filter");
 }
 
 /// Run disconnect filters when the connect phase selected an endpoint but
@@ -816,6 +846,51 @@ fn extract_addrs(session: &Stream) -> (String, String) {
     (remote, local)
 }
 
+/// How [`PingoraTcpProxy::forward`](PingoraTcpProxy::forward) finished.
+enum SessionEnd {
+    /// The session reached a normal close reason.
+    Closed {
+        /// Why forwarding stopped.
+        reason: TcpCloseReason,
+
+        /// Whether the peeked prefix was written before forwarding stopped.
+        prefix_written: bool,
+    },
+
+    /// The peeked prefix could not be written. This is not a copy error.
+    PrefixFailed(io::Error),
+}
+
+/// A copy future's own failure, distinct from a deadline or shutdown.
+enum CopyFault {
+    /// The peeked prefix write failed.
+    Prefix(io::Error),
+
+    /// The bidirectional copy failed.
+    Forward(io::Error),
+}
+
+/// The deadline and shutdown outcome of one forwarding future.
+enum Drive<T> {
+    /// The future finished.
+    Ready(T),
+
+    /// The server shut down while it was running.
+    Shutdown,
+
+    /// The session deadline elapsed.
+    SessionTimeout,
+}
+
+/// [`Drive`] after the optional max-duration bound.
+enum Bound<T> {
+    /// Shutdown, the session deadline, or the future's own result.
+    Drive(Drive<T>),
+
+    /// The max duration elapsed.
+    MaxDuration,
+}
+
 /// Why a forwarded TCP connection closed, for the `connection_close` log.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TcpCloseReason {
@@ -845,46 +920,257 @@ impl TcpCloseReason {
 }
 
 /// Forward under a hard session deadline, returning the close reason on shutdown or timeout.
+#[cfg(test)]
 async fn forward_with_timeout<F: Future<Output = io::Result<(u64, u64)>>>(
     copy_future: F,
     shutdown_rx: &mut watch::Receiver<bool>,
     timeout: Duration,
     upstream_addr: &str,
 ) -> TcpCloseReason {
-    tokio::select! {
-        biased;
-        _ = shutdown_rx.changed() => TcpCloseReason::Shutdown,
-        r = tokio::time::timeout(timeout, copy_future) => match r {
-            Ok(Ok(_)) => TcpCloseReason::Completed,
-            Ok(Err(e)) => {
-                warn!(upstream = %upstream_addr, error = %e, phase = "forward", "connection_error");
-                TcpCloseReason::Error
-            },
-            Err(_) => {
-                let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
-                warn!(upstream = %upstream_addr, timeout_ms, "TCP session timed out");
-                TcpCloseReason::SessionTimeout
-            },
-        },
-    }
+    close_reason(
+        drive_session(copy_future, shutdown_rx, Some(timeout), upstream_addr).await,
+        upstream_addr,
+    )
 }
 
 /// Forward without timeout, returning the close reason on shutdown.
+#[cfg(test)]
 async fn forward_no_timeout<F: Future<Output = io::Result<(u64, u64)>>>(
     copy_future: F,
     shutdown_rx: &mut watch::Receiver<bool>,
     upstream_addr: &str,
 ) -> TcpCloseReason {
+    close_reason(
+        drive_session(copy_future, shutdown_rx, None, upstream_addr).await,
+        upstream_addr,
+    )
+}
+
+/// Bound `work` by server shutdown and an optional session deadline.
+async fn drive_session<F, T>(
+    work: F,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    session_timeout: Option<Duration>,
+    upstream_addr: &str,
+) -> Drive<T>
+where
+    F: Future<Output = T>,
+{
+    let timed = async {
+        let Some(timeout) = session_timeout else {
+            return Drive::Ready(work.await);
+        };
+        match tokio::time::timeout(timeout, work).await {
+            Ok(value) => Drive::Ready(value),
+            Err(_elapsed) => {
+                let timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX);
+                warn!(upstream = %upstream_addr, timeout_ms, "TCP session timed out");
+                Drive::SessionTimeout
+            },
+        }
+    };
     tokio::select! {
         biased;
-        _ = shutdown_rx.changed() => TcpCloseReason::Shutdown,
-        r = copy_future => match r {
-            Ok(_) => TcpCloseReason::Completed,
-            Err(e) => {
-                warn!(upstream = %upstream_addr, error = %e, phase = "forward", "connection_error");
-                TcpCloseReason::Error
-            },
+        _ = shutdown_rx.changed() => Drive::Shutdown,
+        outcome = timed => outcome,
+    }
+}
+
+/// Map a plain copy's drive result to the close reason tests and logs use.
+#[cfg(test)]
+fn close_reason(driven: Drive<io::Result<(u64, u64)>>, upstream_addr: &str) -> TcpCloseReason {
+    match driven {
+        Drive::Ready(Ok(_)) => TcpCloseReason::Completed,
+        Drive::Ready(Err(error)) => forward_io_error(upstream_addr, &error),
+        Drive::Shutdown => TcpCloseReason::Shutdown,
+        Drive::SessionTimeout => TcpCloseReason::SessionTimeout,
+    }
+}
+
+/// Log a bidirectional copy failure and classify it.
+fn forward_io_error(upstream_addr: &str, error: &io::Error) -> TcpCloseReason {
+    warn!(
+        upstream = %upstream_addr,
+        error = %error,
+        phase = "forward",
+        "connection_error"
+    );
+    TcpCloseReason::Error
+}
+
+/// Turn one bounded forwarding attempt into the session result.
+fn session_end(bound: Bound<Result<(u64, u64), CopyFault>>, prefix_written: bool, upstream_addr: &str) -> SessionEnd {
+    match bound {
+        Bound::MaxDuration => SessionEnd::Closed {
+            reason: TcpCloseReason::MaxDuration,
+            prefix_written,
         },
+        Bound::Drive(Drive::Shutdown) => SessionEnd::Closed {
+            reason: TcpCloseReason::Shutdown,
+            prefix_written,
+        },
+        Bound::Drive(Drive::SessionTimeout) => SessionEnd::Closed {
+            reason: TcpCloseReason::SessionTimeout,
+            prefix_written,
+        },
+        Bound::Drive(Drive::Ready(Ok(_counts))) => SessionEnd::Closed {
+            reason: TcpCloseReason::Completed,
+            prefix_written,
+        },
+        Bound::Drive(Drive::Ready(Err(CopyFault::Prefix(error)))) => SessionEnd::PrefixFailed(error),
+        Bound::Drive(Drive::Ready(Err(CopyFault::Forward(error)))) => SessionEnd::Closed {
+            reason: forward_io_error(upstream_addr, &error),
+            prefix_written,
+        },
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Paced Copy
+// -----------------------------------------------------------------------------
+
+/// Which side of a TCP connection a copy is charging.
+#[derive(Clone, Copy)]
+enum CopyDirection {
+    /// Client to upstream.
+    Upload,
+
+    /// Upstream to client.
+    Download,
+}
+
+/// Bidirectional copy that reserves each chunk before writing it.
+async fn copy_bidirectional_paced<A, B>(
+    client: &mut A,
+    upstream: &mut B,
+    pacer: &TcpBandwidthPacer,
+) -> io::Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let (client_read, client_write) = tokio::io::split(client);
+    let (upstream_read, upstream_write) = tokio::io::split(upstream);
+    let upload = copy_paced(client_read, upstream_write, pacer, CopyDirection::Upload);
+    let download = copy_paced(upstream_read, client_write, pacer, CopyDirection::Download);
+    tokio::try_join!(upload, download)
+}
+
+/// Copy one direction until EOF, then half-close the writer.
+async fn copy_paced<R, W>(
+    mut reader: R,
+    mut writer: W,
+    pacer: &TcpBandwidthPacer,
+    direction: CopyDirection,
+) -> io::Result<u64>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut buf = vec![0_u8; PACED_CHUNK];
+    let mut total = 0_u64;
+    loop {
+        let read = reader.read(&mut buf).await?;
+        if read == 0 {
+            half_close(&mut writer).await;
+            return Ok(total);
+        }
+        total = total.saturating_add(write_paced(&mut writer, &buf, read, pacer, direction).await?);
+    }
+}
+
+/// Write the peeked prefix, drop it, then copy both directions.
+///
+/// The prefix buffer does not stay alive for the rest of the session.
+/// `prefix_written` becomes true only after that write finishes, so a
+/// cancelled pace wait is not reported as sent bytes.
+async fn paced_session<A, B>(
+    client: &mut A,
+    upstream: &mut B,
+    pacer: Option<&TcpBandwidthPacer>,
+    peeked: Vec<u8>,
+    prefix_written: &AtomicBool,
+) -> Result<(u64, u64), CopyFault>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    let written = write_client_prefix(upstream, &peeked, pacer).await;
+    drop(peeked);
+    written.map_err(CopyFault::Prefix)?;
+    prefix_written.store(true, Ordering::Relaxed);
+    copy_rest(client, upstream, pacer).await.map_err(CopyFault::Forward)
+}
+
+/// Copy both directions, pacing when `pacer` is installed.
+async fn copy_rest<A, B>(client: &mut A, upstream: &mut B, pacer: Option<&TcpBandwidthPacer>) -> io::Result<(u64, u64)>
+where
+    A: AsyncRead + AsyncWrite + Unpin,
+    B: AsyncRead + AsyncWrite + Unpin,
+{
+    if let Some(pacer) = pacer {
+        return copy_bidirectional_paced(client, upstream, pacer).await;
+    }
+    tokio::io::copy_bidirectional(client, upstream).await
+}
+
+/// Write bytes already read from the client, pacing them when a pacer is installed.
+async fn write_client_prefix<W>(upstream: &mut W, peeked: &[u8], pacer: Option<&TcpBandwidthPacer>) -> io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    if peeked.is_empty() {
+        return Ok(());
+    }
+    if let Some(pacer) = pacer {
+        write_paced(upstream, peeked, peeked.len(), pacer, CopyDirection::Upload).await?;
+        return Ok(());
+    }
+    upstream.write_all(peeked).await
+}
+
+/// Reserve, wait, write, flush, then commit.
+///
+/// The flush happens before the commit. A TLS writer can accept bytes in
+/// `write_all` and still hold them. A failed flush drops the reservation.
+async fn write_paced<W>(
+    writer: &mut W,
+    buf: &[u8],
+    read: usize,
+    pacer: &TcpBandwidthPacer,
+    direction: CopyDirection,
+) -> io::Result<u64>
+where
+    W: AsyncWrite + Unpin,
+{
+    let Some(chunk) = buf.get(..read) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "read exceeded the pace buffer",
+        ));
+    };
+    let bytes = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+    let reservation = match direction {
+        CopyDirection::Upload => pacer.reserve_upload(bytes),
+        CopyDirection::Download => pacer.reserve_download(bytes),
+    };
+    let delay = reservation.delay();
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    writer.write_all(chunk).await?;
+    writer.flush().await?;
+    reservation.commit();
+    Ok(bytes)
+}
+
+/// Shut down one direction and leave the other copy running.
+async fn half_close<W>(writer: &mut W)
+where
+    W: AsyncWrite + Unpin,
+{
+    if let Err(error) = writer.shutdown().await {
+        debug!(%error, "tcp half-close shutdown failed");
     }
 }
 
@@ -1301,6 +1587,7 @@ mod tests {
             connect_time: std::time::Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
+            bandwidth: None,
         }
     }
 
@@ -1962,5 +2249,137 @@ mod tests {
         fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
             self.0.insert(field.name().to_owned(), value.to_string());
         }
+    }
+
+    #[tokio::test]
+    async fn paced_copy_keeps_download_open_after_upload_eof() {
+        let (mut client, mut client_peer) = tokio::io::duplex(64 * 1024);
+        let (mut upstream, mut upstream_peer) = tokio::io::duplex(64 * 1024);
+        let pacer = TcpBandwidthPacer::new(Some(1_000_000), Some(1_000_000), 1_000_000);
+        let copy = tokio::spawn(async move {
+            copy_bidirectional_paced(&mut client, &mut upstream, &pacer)
+                .await
+                .unwrap()
+        });
+
+        client_peer.write_all(b"ping").await.unwrap();
+        client_peer.shutdown().await.unwrap();
+        let mut upload = [0_u8; 4];
+        upstream_peer.read_exact(&mut upload).await.unwrap();
+        assert_eq!(&upload, b"ping", "upload bytes should reach upstream");
+
+        upstream_peer.write_all(b"pong").await.unwrap();
+        upstream_peer.shutdown().await.unwrap();
+        let mut download = [0_u8; 4];
+        client_peer.read_exact(&mut download).await.unwrap();
+        assert_eq!(&download, b"pong", "download should continue after upload EOF");
+
+        let (uploaded, downloaded) = copy.await.unwrap();
+        assert_eq!(uploaded, 4, "upload byte count");
+        assert_eq!(downloaded, 4, "download byte count");
+    }
+
+    #[tokio::test]
+    async fn paced_copy_delays_a_limited_upload() {
+        let (mut client, mut client_peer) = tokio::io::duplex(64 * 1024);
+        let (mut upstream, mut upstream_peer) = tokio::io::duplex(64 * 1024);
+        let pacer = TcpBandwidthPacer::new(Some(4_000), None, 0);
+        let started = std::time::Instant::now();
+        let copy = tokio::spawn(async move {
+            copy_bidirectional_paced(&mut client, &mut upstream, &pacer)
+                .await
+                .unwrap()
+        });
+
+        let payload = vec![7_u8; 4_000];
+        client_peer.write_all(&payload).await.unwrap();
+        client_peer.shutdown().await.unwrap();
+        let mut got = vec![0_u8; 4_000];
+        upstream_peer.read_exact(&mut got).await.unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(700),
+            "4000 bytes at 4000 bytes per second should take about a second"
+        );
+        upstream_peer.shutdown().await.unwrap();
+        let _counts = copy.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn peeked_prefix_is_paced() {
+        let (mut upstream, mut upstream_peer) = tokio::io::duplex(64 * 1024);
+        let pacer = TcpBandwidthPacer::new(Some(4_000), None, 0);
+        let payload = vec![9_u8; 2_000];
+        let started = std::time::Instant::now();
+        write_client_prefix(&mut upstream, &payload, Some(&pacer))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(300),
+            "the peeked prefix is charged before it is written, elapsed {:?}",
+            started.elapsed()
+        );
+        let mut got = vec![0_u8; 2_000];
+        upstream_peer.read_exact(&mut got).await.unwrap();
+        assert_eq!(got, payload, "the peeked prefix is written upstream");
+    }
+
+    #[tokio::test]
+    async fn paced_prefix_wait_ends_on_shutdown() {
+        let (tx, mut shutdown) = watch::channel(false);
+        let (mut upstream, _peer) = tokio::io::duplex(64);
+        let pacer = TcpBandwidthPacer::new(Some(1), None, 0);
+        let payload = vec![1_u8; 4_000];
+        let drive = drive_session(
+            async {
+                write_client_prefix(&mut upstream, &payload, Some(&pacer))
+                    .await
+                    .map(|()| (0_u64, 0_u64))
+            },
+            &mut shutdown,
+            None,
+            "10.0.0.1:1",
+        );
+        let signal = async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            tx.send(true).expect("signal shutdown");
+        };
+        let (outcome, ()) = tokio::join!(drive, signal);
+        assert!(matches!(outcome, Drive::Shutdown), "shutdown stops the prefix wait");
+        assert!(
+            pacer.reserve_upload(1).delay() < Duration::from_secs(2),
+            "the unsent prefix reservation is refunded"
+        );
+    }
+
+    #[tokio::test]
+    async fn paced_prefix_wait_ends_on_session_timeout() {
+        let (_tx, mut shutdown) = watch::channel(false);
+        let (mut upstream, _peer) = tokio::io::duplex(64);
+        let pacer = TcpBandwidthPacer::new(Some(1), None, 0);
+        let payload = vec![1_u8; 4_000];
+        let started = std::time::Instant::now();
+        let outcome = drive_session(
+            async {
+                write_client_prefix(&mut upstream, &payload, Some(&pacer))
+                    .await
+                    .map(|()| (0_u64, 0_u64))
+            },
+            &mut shutdown,
+            Some(Duration::from_millis(50)),
+            "10.0.0.1:1",
+        )
+        .await;
+        assert!(
+            matches!(outcome, Drive::SessionTimeout),
+            "the session deadline stops the prefix wait"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the wait did not run for the whole byte budget"
+        );
+        assert!(
+            pacer.reserve_upload(1).delay() < Duration::from_secs(2),
+            "the unsent prefix reservation is refunded"
+        );
     }
 }

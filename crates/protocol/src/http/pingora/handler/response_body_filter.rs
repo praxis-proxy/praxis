@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use praxis_filter::{BodyMode, FilterAction, FilterPipeline};
+use praxis_filter::{BodyMode, FilterAction, FilterPipeline, cancel_download_pace, commit_download_pace};
 use tracing::{debug, error};
 
 use super::{
@@ -42,7 +42,7 @@ pub(super) fn execute(
     ctx: &mut PingoraRequestCtx,
 ) -> pingora_core::Result<Option<Duration>> {
     run_response_body(pipeline, body, end_of_stream, ctx)
-        .map(|()| None)
+        .map(|()| praxis_filter::download_pace_delay(&ctx.extensions))
         .map_err(|reason| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, reason))
 }
 
@@ -61,8 +61,10 @@ pub(in crate::http) fn run_response_body(
     ctx: &mut PingoraRequestCtx,
 ) -> Result<(), String> {
     if ctx.connection_upgraded {
+        commit_download_pace(&mut ctx.extensions);
         return Ok(());
     }
+    commit_download_pace(&mut ctx.extensions);
 
     let caps = pipeline.body_capabilities();
 
@@ -144,6 +146,11 @@ pub(in crate::http) fn run_response_body(
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
+            cancel_download_pace(&mut ctx.extensions);
+            if let Some(reason) = praxis_filter::connection_close_reason(&rejection) {
+                tracing::warn!(%reason, "closing connection");
+                return Err(reason.to_owned());
+            }
             debug!(
                 status = rejection.status,
                 "response body filter rejected response; aborting connection"
@@ -154,6 +161,7 @@ pub(in crate::http) fn run_response_body(
             ))
         },
         Err(e) => {
+            cancel_download_pace(&mut ctx.extensions);
             error!(error = %e, "filter pipeline error during response body");
             Err(format!("response body filter error: {e}"))
         },

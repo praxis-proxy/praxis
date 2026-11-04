@@ -34,34 +34,50 @@ pub(super) async fn run_terminal_response(
     ctx: &mut PingoraRequestCtx,
     terminal: TerminalResponse,
 ) {
-    let prepared = Box::pin(prepare_terminal_response(
+    let mut resp = match Box::pin(prepare_terminal_response(
         pipeline,
         ctx,
         terminal.status,
         terminal.headers,
     ))
-    .await;
-    let mut resp = match prepared {
+    .await
+    {
         Ok(resp) => resp,
-        Err(rejection) => {
-            Box::pin(send_rejection_for(session, rejection, ctx)).await;
-            return;
-        },
+        Err(rejection) => return send_rejection_for(session, rejection, ctx).await,
     };
     let mut body = terminal.body;
+    if !keep_terminal_body(pipeline, session, ctx, &resp, &mut body).await {
+        return;
+    }
+    strip_hop_by_hop_header_map(&mut resp.headers, RESPONSE_HOP_BY_HOP);
+    strip_reserved_internal_header_map(&mut resp.headers);
+    send_terminal_to_session(session, ctx, &resp, body).await;
+}
+
+/// Run the body filters unless the response carries no body.
+///
+/// `false` when a filter rejected it and that rejection was already sent.
+#[cfg(feature = "pingora")]
+async fn keep_terminal_body(
+    pipeline: &FilterPipeline,
+    session: &mut Session,
+    ctx: &mut PingoraRequestCtx,
+    resp: &praxis_filter::Response,
+    body: &mut Option<Bytes>,
+) -> bool {
     let is_bodyless = ctx
         .request_snapshot
         .as_ref()
         .is_some_and(|request| praxis_filter::bodyless_response(resp.status, &request.method));
     if is_bodyless {
         ctx.response_delivery_complete = true;
-    } else if let Err(rejection) = run_parent_terminal_body_filters(pipeline, ctx, &resp, &mut body, true) {
-        send_rejection_for(session, rejection, ctx).await;
-        return;
+        return true;
     }
-    strip_hop_by_hop_header_map(&mut resp.headers, RESPONSE_HOP_BY_HOP);
-    strip_reserved_internal_header_map(&mut resp.headers);
-    send_terminal_to_session(session, &resp, body).await;
+    if let Err(rejection) = run_parent_terminal_body_filters(pipeline, ctx, resp, body, true) {
+        send_rejection_for(session, rejection, ctx).await;
+        return false;
+    }
+    true
 }
 
 /// Run response-header filters and persist their request-scoped state.
@@ -152,6 +168,7 @@ pub(in crate::http) fn run_parent_terminal_body_filters(
     body: &mut Option<Bytes>,
     end_of_stream: bool,
 ) -> Result<(), Rejection> {
+    praxis_filter::commit_download_pace(&mut ctx.extensions);
     let (
         result,
         response_body_bytes,
@@ -200,6 +217,7 @@ pub(in crate::http) fn run_parent_terminal_body_filters(
 
     match result {
         Ok(FilterAction::Reject(rejection)) => {
+            praxis_filter::cancel_download_pace(&mut ctx.extensions);
             warn!(
                 status = rejection.status,
                 "response body filter rejected terminal response"
@@ -207,6 +225,7 @@ pub(in crate::http) fn run_parent_terminal_body_filters(
             Err(rejection)
         },
         Err(e) => {
+            praxis_filter::cancel_download_pace(&mut ctx.extensions);
             error!(error = %e, "response body filter error on terminal response");
             Err(Rejection::status(500))
         },
@@ -317,6 +336,7 @@ pub(super) async fn run_streaming_terminal_response(
                     session.as_downstream_mut().shutdown().await;
                     return;
                 }
+                super::super::bandwidth::pace_download(&ctx.extensions).await;
                 streaming_body.swap_extensions(&mut ctx.extensions);
                 if let Err(e) = session.write_response_body(body, false).await {
                     debug!(error = %e, "failed to write streaming terminal response body");
@@ -335,6 +355,7 @@ pub(super) async fn run_streaming_terminal_response(
                     session.as_downstream_mut().shutdown().await;
                     return;
                 }
+                super::super::bandwidth::pace_download(&ctx.extensions).await;
                 if let Err(e) = session.write_response_body(completion_body, true).await {
                     debug!(error = %e, "failed to finish streaming terminal response");
                     session.as_downstream_mut().shutdown().await;
@@ -490,30 +511,53 @@ fn build_terminal_header(
 }
 
 /// Write a terminal response (headers + optional body) to the Pingora session.
+///
+/// The status line goes out before the bandwidth wait, so a slow byte rate
+/// cannot hold the headers after the response is already prepared.
 #[cfg(feature = "pingora")]
-async fn send_terminal_to_session(session: &mut Session, resp: &praxis_filter::Response, body: Option<Bytes>) {
+async fn send_terminal_to_session(
+    session: &mut Session,
+    ctx: &mut PingoraRequestCtx,
+    resp: &praxis_filter::Response,
+    body: Option<Bytes>,
+) {
     let is_head = session.req_header().method == http::Method::HEAD;
     let status = resp.status;
     let body_prohibited = status == http::StatusCode::NO_CONTENT || status == http::StatusCode::NOT_MODIFIED;
 
     let Some(header) = build_terminal_header(resp, body.as_ref(), body_prohibited, is_head) else {
+        praxis_filter::cancel_download_pace(&mut ctx.extensions);
         send_rejection(session, Rejection::status(500)).await;
         return;
     };
     let send_body = !is_head && !body_prohibited;
-    if let Err(e) = session
+    if let Err(error) = session
         .write_response_header(Box::new(header), !send_body || body.is_none())
         .await
     {
-        debug!(error = %e, "failed to write terminal response header");
+        debug!(error = %error, "failed to write terminal response header");
+        praxis_filter::cancel_download_pace(&mut ctx.extensions);
         return;
     }
-    if send_body
-        && let Some(b) = body
-        && let Err(e) = session.write_response_body(Some(b), true).await
-    {
-        debug!(error = %e, "failed to write terminal response body");
+    super::super::bandwidth::pace_download(&ctx.extensions).await;
+    let wrote = write_terminal_body(session, send_body, body).await;
+    praxis_filter::settle_download_write(&mut ctx.extensions, wrote);
+}
+
+/// Write the buffered terminal body. `false` when that write fails.
+#[cfg(feature = "pingora")]
+async fn write_terminal_body(session: &mut Session, send_body: bool, body: Option<Bytes>) -> bool {
+    if !send_body {
+        return true;
     }
+    let Some(chunk) = body else {
+        return true;
+    };
+    if let Err(error) = session.write_response_body(Some(chunk), true).await {
+        debug!(error = %error, "failed to write terminal response body");
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]

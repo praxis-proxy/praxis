@@ -413,6 +413,7 @@ mod tests {
             headers: Vec::new(),
             header_map: None,
             preserve_keepalive: false,
+            close_reason: None,
             status: 99,
         };
         let header = build_rejection_header(&rejection);

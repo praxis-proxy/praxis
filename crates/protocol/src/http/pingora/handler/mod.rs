@@ -71,6 +71,8 @@ pub(in crate::http) mod via;
 #[cfg(feature = "pingora")]
 mod with_body;
 
+/// Protocol waits for bandwidth reservations.
+mod bandwidth;
 /// Body mode clamping and stream buffer utilities.
 mod body_util;
 /// Passive health checking utilities.

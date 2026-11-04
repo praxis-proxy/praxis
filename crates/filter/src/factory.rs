@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use praxis_core::config::ProtocolKind;
 use serde::de::DeserializeOwned;
 
 use crate::{
@@ -127,14 +128,44 @@ pub enum FilterFactory {
 
     /// Factory for TCP-level filters.
     Tcp(TcpFilterFactory),
+
+    /// Factory that builds the HTTP or TCP form of one filter.
+    Dual {
+        /// HTTP filter factory.
+        http: HttpFilterFactory,
+
+        /// TCP filter factory.
+        tcp: TcpFilterFactory,
+    },
 }
 
 impl FilterFactory {
     /// Create a filter from YAML config.
+    ///
+    /// A [`FilterFactory::Dual`] factory builds the HTTP filter.
+    /// TCP-only factories are unchanged.
     pub(crate) fn create(&self, config: &serde_yaml::Value) -> Result<AnyFilter, FilterError> {
-        match self {
-            Self::Http(f) => Ok(AnyFilter::Http(f(config)?)),
-            Self::Tcp(f) => Ok(AnyFilter::Tcp(f(config)?)),
+        self.create_for(config, ProtocolKind::Http)
+    }
+
+    /// Create the filter variant for `protocol`.
+    ///
+    /// HTTP-only and TCP-only factories ignore `protocol` and return
+    /// their own variant. A dual factory follows `protocol`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] when the selected factory fails.
+    pub(crate) fn create_for(
+        &self,
+        config: &serde_yaml::Value,
+        protocol: ProtocolKind,
+    ) -> Result<AnyFilter, FilterError> {
+        match (self, protocol) {
+            (Self::Http(factory), _) => Ok(AnyFilter::Http(factory(config)?)),
+            (Self::Tcp(factory), _) => Ok(AnyFilter::Tcp(factory(config)?)),
+            (Self::Dual { http, .. }, ProtocolKind::Http) => Ok(AnyFilter::Http(http(config)?)),
+            (Self::Dual { tcp, .. }, ProtocolKind::Tcp) => Ok(AnyFilter::Tcp(tcp(config)?)),
         }
     }
 }

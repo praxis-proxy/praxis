@@ -18,7 +18,9 @@ use std::collections::VecDeque;
 use bytes::Bytes;
 #[cfg(feature = "pingora")]
 use pingora_proxy::Session;
-use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection};
+#[cfg(feature = "pingora")]
+use praxis_filter::connection_close_reason;
+use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection, cancel_bandwidth};
 use tracing::error;
 
 #[cfg(feature = "pingora")]
@@ -113,6 +115,9 @@ pub(super) async fn execute(
     let Err(halt) = run_request_body(pipeline, body, end_of_stream, ctx).await else {
         return Ok(());
     };
+    if let Some(reason) = halt.rejection.as_ref().and_then(connection_close_reason) {
+        return Err(super::bandwidth::close_error(reason));
+    }
     if let Some(rejection) = halt.rejection {
         send_rejection_for(session, rejection, ctx).await;
     }
@@ -230,6 +235,7 @@ pub(in crate::http) async fn run_request_body(
             | FilterAction::StreamingTerminalResponse(_),
         ) => {
             suppress_stream_buffer_chunk(body, is_stream_buffer, ctx.request_body_released, end_of_stream);
+            super::bandwidth::pace_upload(&mut ctx.extensions).await;
             Ok(())
         },
         Ok(FilterAction::Release) => {
@@ -240,9 +246,11 @@ pub(in crate::http) async fn run_request_body(
                 &mut ctx.request_body_buffer,
                 end_of_stream,
             );
+            super::bandwidth::pace_upload(&mut ctx.extensions).await;
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
+            cancel_bandwidth(&mut ctx.extensions);
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
             Err(RequestBodyHalt::refused(
                 "request body rejected by filter pipeline",
@@ -250,6 +258,7 @@ pub(in crate::http) async fn run_request_body(
             ))
         },
         Err(e) => {
+            cancel_bandwidth(&mut ctx.extensions);
             error!(error = %e, "filter pipeline error during request body");
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_INTERNAL);
             Err(RequestBodyHalt::internal(

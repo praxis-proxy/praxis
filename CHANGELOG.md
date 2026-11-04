@@ -28,6 +28,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `bandwidth_limit` paces HTTP request and response bodies, and TCP
+  payloads, to a configured byte rate. An omitted direction is unlimited.
+  `per_connection` shares one budget across a downstream connection, and
+  `per_ip` shares one budget across connections from the same source through
+  that filter instance. A full per-IP table closes a new connection instead
+  of pacing it.
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
   filled in from the declaration at validation time, keeping the routed
@@ -88,6 +94,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `FilterPipeline::build_with_chains` takes a new required
   `top_level_clusters: &[Cluster]` argument. Rust callers pass the
   config's top-level `clusters:` list, or `&[]` when none exists.
+
+### Changed
+
+- **Breaking (`praxis-filter`):** `FilterFactory` gains a `Dual` variant and
+  is not `#[non_exhaustive]`. Crates that match `FilterFactory` exhaustively
+  must handle `Dual { http, tcp }`.
+- **Breaking (`praxis-filter`):** `TcpFilterContext` gains a public
+  `bandwidth` field. External struct literals of `TcpFilterContext` must set
+  it.
+- **Breaking (`praxis-filter`):** `Rejection` gains the public `close_reason`
+  field. External `Rejection` struct literals must set it. These breaks
+  cannot ship in a `0.7.x` patch. Cargo treats `0.7.x` releases as
+  compatible with each other, so the release that includes them must be
+  `0.8.0`.
 
 ### Fixed
 
