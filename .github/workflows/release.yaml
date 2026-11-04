@@ -245,6 +245,13 @@ jobs:
   # Phase 1 (tag push): verify crates package cleanly (publish dry run)
   # ----------------------------------------------------------------------------
 
+  rollout:
+    if: github.event_name == 'push'
+    needs: [validate]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/rollout.yaml
+
   publish-dry-run:
     if: github.event_name == 'push'
     needs: [validate]
@@ -274,7 +281,7 @@ jobs:
   # ----------------------------------------------------------------------------
 
   container:
-    needs: [validate, test, lint, audit, coverage, publish-dry-run]
+    needs: [validate, test, lint, audit, coverage, publish-dry-run, rollout]
     outputs:
       # The pushed -fips image, for the FIPS runner to prove before the draft.
       fips-digest: ${{ steps.push-fips.outputs.digest }}
@@ -283,6 +290,7 @@ jobs:
       && !cancelled()
       && needs.validate.result == 'success'
       && needs.publish-dry-run.result == 'success'
+      && needs.rollout.result == 'success'
       && (needs.test.result == 'success' || needs.test.result == 'skipped')
       && (needs.lint.result == 'success' || needs.lint.result == 'skipped')
       && (needs.audit.result == 'success' || needs.audit.result == 'skipped')

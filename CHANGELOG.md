@@ -42,6 +42,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- `cargo xtask rollout` and `make test-rollout` exercise Kubernetes pod
+  loss, rollouts, config reloads, TLS rotation, node drain, and upstream
+  failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
+
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
   filled in from the declaration at validation time, keeping the routed

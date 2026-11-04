@@ -72,7 +72,15 @@ make check
 ```console
 make test
 make test-integration
+make test-rollout # requires Docker/Podman, KIND, kubectl, and ../operator
 ```
+
+The rollout target uses the operator-owned `deploy/rollout-test` reference
+base from the adjacent `../operator` checkout. Pass harness options with
+`ROLLOUT_ARGS`, for example `make test-rollout ROLLOUT_ARGS=--keep-cluster`.
+Runtime config-hash convergence remains dependent on config identity issue
+[#1296](https://github.com/praxis-proxy/praxis/issues/1296); the current
+harness verifies hot-reload behavior on each replica.
 
 Integration tests wait for the proxy to start accepting connections
 before issuing requests. On slow or heavily loaded runners (notably

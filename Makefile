@@ -772,7 +772,7 @@ test-conformance-hyper: build-hyper $(H2SPEC) ## RFC conformance suite on hyper 
 XTASK_FEATURES   = $(XTASK_FIPS) features --except hyper
 ALL_FEATURES     = $(shell $(XTASK_FEATURES))
 UNIT_FEATURES    = $(shell $(XTASK_FEATURES) --exclude praxis-tests-schema --exclude praxis-tests-security \
-	--exclude praxis-tests-resilience --exclude praxis-tests-integration --exclude praxis-tests-conformance \
+	--exclude praxis-tests-resilience --exclude praxis-tests-rollout --exclude praxis-tests-integration --exclude praxis-tests-conformance \
 	--exclude praxis-test-utils --exclude praxis-tests-benches)
 # $(call package-features,pkg1 pkg2 ...): the features of those packages only,
 # which is what a `-p` invocation may name.
@@ -821,6 +821,7 @@ test-unit: ## everything outside tests/, all features, plus lean runs
 		--exclude praxis-tests-schema \
 		--exclude praxis-tests-security \
 		--exclude praxis-tests-resilience \
+		--exclude praxis-tests-rollout \
 		--exclude praxis-tests-integration \
 		--exclude praxis-tests-conformance \
 		--exclude praxis-test-utils \
@@ -852,6 +853,7 @@ test-integration: build-test-proxy ## schema, security, resilience and integrati
 		-p praxis-tests-schema \
 		-p praxis-tests-security \
 		-p praxis-tests-resilience \
+		-p praxis-tests-rollout \
 		-p praxis-tests-integration \
 		$(_NOCAPTURE)
 
@@ -1056,3 +1058,7 @@ help: ## list targets
 	@awk 'BEGIN { FS = ":[^#]*## " } \
 		/^##@ / { printf "\n%s:\n", substr($$0, 5); next } \
 		/^[a-zA-Z0-9_-]+:[^=]*## / { printf "  %-24s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
+
+.PHONY: test-rollout
+test-rollout: ## KIND rollout acceptance (requires Docker, KIND, kubectl and ../operator)
+	CONTAINER_ENGINE="$(CONTAINER_ENGINE)" cargo xtask rollout $(ROLLOUT_ARGS)
