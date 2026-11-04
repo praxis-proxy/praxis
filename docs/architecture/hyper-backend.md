@@ -160,9 +160,12 @@ listener accepts, so a signal that lands during startup is honoured.
 HTTP, TCP and management listeners are required services: an unexpected exit
 stops the other services within the fast shutdown bound and fails the runtime.
 A failed socket in a TCP listener group stops the whole group.
-`SIGTERM` and `SIGHUP` start a graceful shutdown: listeners stop accepting,
-in-flight connections finish through hyper's graceful shutdown, bounded by
-`shutdown_timeout_secs`; `SIGINT` stops quickly. The harness path
+`SIGTERM` starts a readiness-first graceful shutdown: listeners stop
+accepting, `/ready` becomes unavailable, and the optional
+`shutdown_drain_delay_secs` handoff delay runs before in-flight connections
+finish through hyper's graceful shutdown, bounded by `shutdown_timeout_secs`.
+`SIGHUP` is ignored because configuration reload owns that signal; `SIGINT`
+stops quickly. The harness path
 (`run_with_shutdown`) stops quickly too, like Pingora's.
 
 ## What is not at parity

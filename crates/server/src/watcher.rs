@@ -94,6 +94,9 @@ pub(crate) struct WatcherParams {
     /// Cluster metadata for admin `/api/stats`, swapped on reload.
     pub(crate) cluster_meta: praxis_protocol::http::health::ClusterMetaStore,
 
+    /// Published exact-byte identity of the active configuration.
+    pub(crate) config_identity: praxis_protocol::http::health::ConfigIdentityStore,
+
     /// Filter registry for building new pipelines.
     pub(crate) registry: Arc<FilterRegistry>,
 
@@ -213,6 +216,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: WatcherParams) {
         &params.pipelines,
         &params.listener_meta,
         &params.cluster_meta,
+        &params.config_identity,
         &params.health_shutdown,
         &params.kv_stores,
         &params.session_stores,
@@ -263,6 +267,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: WatcherParams) {
             &params.pipelines,
             &params.listener_meta,
             &params.cluster_meta,
+            &params.config_identity,
             &params.health_shutdown,
             &params.kv_stores,
             &params.session_stores,
@@ -318,6 +323,7 @@ fn handle_reload(
     pipelines: &ListenerPipelines,
     listener_meta: &praxis_protocol::http::health::ListenerMetaStore,
     cluster_meta: &praxis_protocol::http::health::ClusterMetaStore,
+    config_identity: &praxis_protocol::http::health::ConfigIdentityStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
@@ -367,6 +373,14 @@ fn handle_reload(
         },
     };
 
+    let documents: Vec<Vec<u8>> = referenced_files
+        .iter()
+        .filter_map(|path| std::fs::read(path).ok())
+        .collect();
+    let document_slices: Vec<&[u8]> = documents.iter().map(Vec::as_slice).collect();
+    let candidate_identity =
+        praxis_core::config::identity::ConfigIdentity::from_bytes(content.as_bytes(), &document_slices);
+
     match reload_pipelines(
         &new_config,
         current_config,
@@ -383,6 +397,12 @@ fn handle_reload(
         composition,
     ) {
         Ok(()) => {
+            let previous_identity = config_identity.load_full();
+            praxis_protocol::http::pingora::metrics::publish_config_identity(
+                previous_identity.as_deref(),
+                &candidate_identity,
+            );
+            config_identity.store(Some(Arc::new(candidate_identity)));
             *current_config = new_config;
             *content_hash = new_hash;
             praxis_protocol::http::metrics::record_config_reload_success();
@@ -991,6 +1011,11 @@ mod tests {
 
         let original_hash = composite_hash(VALID_YAML, &[]);
         let mut hash = original_hash;
+        let identity_store = praxis_protocol::http::health::new_config_identity_store();
+        identity_store.store(Some(Arc::new(praxis_core::config::ConfigIdentity::from_bytes(
+            VALID_YAML.as_bytes(),
+            &[],
+        ))));
 
         std::fs::write(&config_path, "this: is: not: valid: praxis: config\n").unwrap();
         let ok = handle_reload(
@@ -1002,6 +1027,7 @@ mod tests {
             &pipelines,
             &listener_meta,
             &cluster_meta,
+            &identity_store,
             &health_shutdown,
             &kv_stores,
             &session_stores,
@@ -1016,6 +1042,10 @@ mod tests {
             hash, original_hash,
             "a failed reload must leave the hash untouched, or the retry is skipped forever",
         );
+        assert!(
+            identity_store.load_full().is_some(),
+            "failed reload must preserve identity"
+        );
 
         std::fs::write(&config_path, VALID_YAML).unwrap();
         let recovered = handle_reload(
@@ -1027,6 +1057,7 @@ mod tests {
             &pipelines,
             &listener_meta,
             &cluster_meta,
+            &identity_store,
             &health_shutdown,
             &kv_stores,
             &session_stores,
@@ -1036,6 +1067,10 @@ mod tests {
             &PipelineComposition::default(),
         );
         assert!(recovered, "a subsequent valid config must reload");
+        assert!(
+            identity_store.load_full().is_some(),
+            "successful reload must publish identity"
+        );
     }
 
     #[test]
@@ -1084,6 +1119,7 @@ mod tests {
             &pipelines,
             &listener_meta,
             &cluster_meta,
+            &praxis_protocol::http::health::new_config_identity_store(),
             &health_shutdown,
             &kv_stores,
             &session_stores,
@@ -1179,6 +1215,7 @@ mod tests {
             cluster_meta: praxis_protocol::http::health::new_cluster_meta_store(
                 praxis_protocol::http::health::cluster_meta_from_config(&config),
             ),
+            config_identity: praxis_protocol::http::health::new_config_identity_store(),
             registry,
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
@@ -1234,6 +1271,7 @@ mod tests {
             cluster_meta: praxis_protocol::http::health::new_cluster_meta_store(
                 praxis_protocol::http::health::cluster_meta_from_config(&config),
             ),
+            config_identity: praxis_protocol::http::health::new_config_identity_store(),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
@@ -1297,6 +1335,7 @@ mod tests {
             cluster_meta: praxis_protocol::http::health::new_cluster_meta_store(
                 praxis_protocol::http::health::cluster_meta_from_config(&config),
             ),
+            config_identity: praxis_protocol::http::health::new_config_identity_store(),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
@@ -1390,6 +1429,7 @@ mod tests {
             cluster_meta: praxis_protocol::http::health::new_cluster_meta_store(
                 praxis_protocol::http::health::cluster_meta_from_config(&config),
             ),
+            config_identity: praxis_protocol::http::health::new_config_identity_store(),
             registry,
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
@@ -1465,6 +1505,7 @@ mod tests {
             cluster_meta: praxis_protocol::http::health::new_cluster_meta_store(
                 praxis_protocol::http::health::cluster_meta_from_config(&config),
             ),
+            config_identity: praxis_protocol::http::health::new_config_identity_store(),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
@@ -1542,6 +1583,7 @@ mod tests {
             cluster_meta: praxis_protocol::http::health::new_cluster_meta_store(
                 praxis_protocol::http::health::cluster_meta_from_config(&config),
             ),
+            config_identity: praxis_protocol::http::health::new_config_identity_store(),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
@@ -1618,6 +1660,7 @@ mod tests {
             cluster_meta: praxis_protocol::http::health::new_cluster_meta_store(
                 praxis_protocol::http::health::cluster_meta_from_config(&config),
             ),
+            config_identity: praxis_protocol::http::health::new_config_identity_store(),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
@@ -1787,6 +1830,7 @@ mod tests {
             cluster_meta: praxis_protocol::http::health::new_cluster_meta_store(
                 praxis_protocol::http::health::cluster_meta_from_config(&config),
             ),
+            config_identity: praxis_protocol::http::health::new_config_identity_store(),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(crate::test_support::connector(8)),
@@ -1879,6 +1923,7 @@ mod tests {
             &pipelines,
             &listener_meta,
             &cluster_meta,
+            &praxis_protocol::http::health::new_config_identity_store(),
             &Arc::new(Mutex::new(CancellationToken::new())),
             &kv_stores,
             &session_stores,

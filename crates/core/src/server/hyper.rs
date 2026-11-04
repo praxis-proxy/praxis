@@ -24,7 +24,7 @@ use tokio::{
 };
 use tracing::{error, info, warn};
 
-use super::{RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
+use super::{LifecycleHandle, RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
 use crate::config::Config;
 
 // -----------------------------------------------------------------------------
@@ -93,11 +93,17 @@ pub struct HyperRuntime {
     /// How long a graceful shutdown waits for services to finish.
     shutdown_timeout: Duration,
 
+    /// How long readiness-first handoff waits before stopping listeners.
+    shutdown_drain_delay: Duration,
+
     /// Worker threads the tokio runtime runs.
     threads: usize,
 
     /// Trust anchors loaded from `runtime.upstream_ca_file`.
     trust_anchors: Option<Arc<CachedCaCerts>>,
+
+    /// Shared lifecycle state for management services and handlers.
+    lifecycle: LifecycleHandle,
 }
 
 impl fmt::Debug for HyperRuntime {
@@ -138,8 +144,10 @@ impl HyperRuntime {
             options,
             services: Vec::new(),
             shutdown_timeout: Duration::from_secs(config.shutdown_timeout_secs),
+            shutdown_drain_delay: Duration::from_secs(config.shutdown_drain_delay_secs),
             threads,
             trust_anchors,
+            lifecycle: LifecycleHandle::new(),
         }
     }
 
@@ -237,6 +245,8 @@ impl HyperRuntime {
         };
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let graceful = self.shutdown_timeout;
+        let lifecycle = self.lifecycle.clone();
+        let run_lifecycle = lifecycle.clone();
         info!(
             services = self.services.len(),
             threads = self.threads,
@@ -246,11 +256,13 @@ impl HyperRuntime {
         let (mode, aborted) = runtime.block_on(async move {
             let stop = make_stop();
             let mut services = ServiceSet::start(self.services, &shutdown_rx);
+            _ = run_lifecycle.mark_serving();
             let mode = services.serve_until(stop).await;
             (mode, services.stop(&shutdown_tx, mode.bound(graceful)).await)
         });
 
         runtime.shutdown_timeout(RUNTIME_DROP_TIMEOUT);
+        lifecycle.mark_stopped();
         info!(aborted, "server stopped");
         assert_ne!(mode, ShutdownMode::Failed, "required service exited before shutdown");
     }
@@ -272,6 +284,12 @@ impl HyperRuntime {
     pub fn trust_anchors(&self) -> Option<Arc<CachedCaCerts>> {
         self.trust_anchors.as_ref().map(Arc::clone)
     }
+
+    /// Return the lifecycle handle shared with registered protocol services.
+    #[must_use]
+    pub fn lifecycle(&self) -> LifecycleHandle {
+        self.lifecycle.clone()
+    }
 }
 
 impl ServerRuntime for HyperRuntime {
@@ -279,17 +297,24 @@ impl ServerRuntime for HyperRuntime {
         Self::new(config)
     }
 
-    /// `SIGTERM` and `SIGHUP` stop gracefully, giving services up to
-    /// `shutdown_timeout_secs`; `SIGINT` stops fast, giving them a second.
+    /// `SIGTERM` begins the readiness-first handoff and then stops gracefully,
+    /// giving services up to `shutdown_timeout_secs`; `SIGHUP` is ignored and
+    /// `SIGINT` stops fast, giving them a second.
     /// The handlers are installed before any listener accepts, so a signal
     /// that lands during startup is honoured.
     fn run_until_shutdown(self) {
-        self.run(|| signal_stop(SignalListeners::install()));
+        let delay = self.shutdown_drain_delay;
+        let lifecycle = self.lifecycle.clone();
+        self.run(move || signal_stop(SignalListeners::install(), delay, lifecycle));
     }
 
     /// Stops fast once `shutdown` resolves, giving services a second.
     fn run_with_shutdown(self, shutdown: ShutdownFuture) {
         self.run(move || future_stop(shutdown));
+    }
+
+    fn lifecycle(&self) -> LifecycleHandle {
+        self.lifecycle()
     }
 }
 
@@ -519,14 +544,6 @@ impl StopSignal {
             Self::Terminate => SignalKind::terminate(),
         }
     }
-
-    /// How the runtime stops on this signal.
-    fn mode(self) -> ShutdownMode {
-        match self {
-            Self::Hangup | Self::Terminate => ShutdownMode::Graceful,
-            Self::Interrupt => ShutdownMode::Fast,
-        }
-    }
 }
 
 // -----------------------------------------------------------------------------
@@ -560,7 +577,7 @@ impl SignalListeners {
     }
 
     /// Wait for `SIGHUP`, `SIGINT` or `SIGTERM`, whichever arrives first.
-    async fn wait(mut self) -> StopSignal {
+    async fn wait(&mut self) -> StopSignal {
         tokio::select! {
             () = next_signal(self.hangup.as_mut()) => StopSignal::Hangup,
             () = next_signal(self.interrupt.as_mut()) => StopSignal::Interrupt,
@@ -630,11 +647,46 @@ fn build_tokio(threads: usize, options: &RuntimeOptions) -> io::Result<TokioRunt
 }
 
 /// Wait for a stop signal and return the shutdown mode it asks for.
-async fn signal_stop(listeners: SignalListeners) -> ShutdownMode {
-    let received = listeners.wait().await;
-    let mode = received.mode();
-    info!(signal = received.name(), mode = mode.name(), "shutdown signal received");
-    mode
+async fn signal_stop(mut listeners: SignalListeners, delay: Duration, lifecycle: LifecycleHandle) -> ShutdownMode {
+    loop {
+        let received = listeners.wait().await;
+        match received {
+            StopSignal::Hangup => {
+                warn!("SIGHUP received during shutdown wait; ignoring because file watching owns reload");
+            },
+            StopSignal::Interrupt => {
+                info!(
+                    signal = received.name(),
+                    mode = ShutdownMode::Fast.name(),
+                    "shutdown signal received"
+                );
+                return ShutdownMode::Fast;
+            },
+            StopSignal::Terminate => {
+                let _ = lifecycle.begin_drain();
+                info!(signal = received.name(), "shutdown drain delay started");
+                let mode = wait_for_drain_delay(&mut listeners, delay).await;
+                info!(signal = received.name(), mode = mode.name(), "shutdown signal received");
+                return mode;
+            },
+        }
+    }
+}
+
+/// Wait for readiness-first handoff while retaining the fast-stop signal.
+async fn wait_for_drain_delay(listeners: &mut SignalListeners, delay: Duration) -> ShutdownMode {
+    let sleep = tokio::time::sleep(delay);
+    tokio::pin!(sleep);
+    loop {
+        tokio::select! {
+            () = &mut sleep => return ShutdownMode::Graceful,
+            received = listeners.wait() => match received {
+                StopSignal::Interrupt => return ShutdownMode::Fast,
+                StopSignal::Hangup => warn!("SIGHUP received during shutdown drain delay; ignoring"),
+                StopSignal::Terminate => warn!("repeated SIGTERM received during shutdown drain delay; continuing"),
+            },
+        }
+    }
 }
 
 /// Install a listener for `stop`; `None`, logged, when that fails.
@@ -887,13 +939,6 @@ mod tests {
     #[test]
     fn sigterm_and_sighup_stop_gracefully_and_sigint_stops_fast() {
         assert_eq!(
-            StopSignal::Terminate.mode(),
-            ShutdownMode::Graceful,
-            "SIGTERM is graceful"
-        );
-        assert_eq!(StopSignal::Hangup.mode(), ShutdownMode::Graceful, "SIGHUP is graceful");
-        assert_eq!(StopSignal::Interrupt.mode(), ShutdownMode::Fast, "SIGINT is fast");
-        assert_eq!(
             StopSignal::Terminate.kind(),
             SignalKind::terminate(),
             "Terminate listens for SIGTERM"
@@ -927,7 +972,9 @@ mod tests {
 
     #[test]
     fn new_reads_threads_and_shutdown_timeout() {
-        let runtime = HyperRuntime::new(&config_with("shutdown_timeout_secs: 7\nruntime:\n  threads: 3\n"));
+        let runtime = HyperRuntime::new(&config_with(
+            "shutdown_timeout_secs: 7\nshutdown_drain_delay_secs: 2\nruntime:\n  threads: 3\n",
+        ));
 
         assert_eq!(runtime.options().threads, 3, "options should carry runtime.threads");
         assert_eq!(runtime.threads, 3, "the worker count should follow runtime.threads");
@@ -936,6 +983,7 @@ mod tests {
             Duration::from_secs(7),
             "shutdown_timeout should follow shutdown_timeout_secs"
         );
+        assert_eq!(runtime.shutdown_drain_delay, Duration::from_secs(2));
     }
 
     #[test]
