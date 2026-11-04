@@ -473,6 +473,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
         }],
         metrics: MetricsConfig::default(),
         runtime: RuntimeConfig::default(),
+        shutdown_drain_delay_secs: 0,
         shutdown_timeout_secs: 5,
         telemetry: TelemetryConfig::default(),
     }

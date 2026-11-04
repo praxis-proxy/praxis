@@ -6,7 +6,7 @@
 use std::{collections::VecDeque, net::IpAddr, sync::Arc, time::Instant};
 
 use bytes::Bytes;
-use praxis_core::connectivity::Upstream;
+use praxis_core::{connectivity::Upstream, server::LifecycleHandle};
 use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, TrustedHeaderMutation};
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Span;
@@ -36,6 +36,9 @@ use tracing::Span;
     )
 )]
 pub struct PingoraRequestCtx {
+    /// Process lifecycle used by direct response writers during drain.
+    pub lifecycle: Option<LifecycleHandle>,
+
     /// Connection permit from the per-listener semaphore.
     ///
     /// Held for the request's lifetime; released on drop,
@@ -619,6 +622,7 @@ impl Default for PingoraRequestCtx {
             cached_executed_branch_filters: Vec::new(),
             cached_executed_filter_indices: Vec::new(),
             client_addr: None,
+            lifecycle: None,
             client_http_version: None,
             cluster: None,
             connection_upgraded: false,

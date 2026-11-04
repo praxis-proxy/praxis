@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 
 use metrics::{Label, SharedString, counter, gauge, histogram};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
-use praxis_core::config::{MetricLabel, MetricLabelsConfig};
+use praxis_core::config::{ConfigIdentity, MetricLabel, MetricLabelsConfig};
 
 // -----------------------------------------------------------------------------
 // Metric Names
@@ -93,6 +93,12 @@ const CONFIG_RELOAD_TOTAL: &str = "praxis_config_reload_total";
 
 /// Gauge for unix timestamp of last successful config reload.
 const CONFIG_RELOAD_LAST_SUCCESS_TIMESTAMP: &str = "praxis_config_reload_last_success_timestamp";
+
+/// Gauge identifying the active exact-byte config source.
+const CONFIG_INFO: &str = "praxis_config_info";
+
+/// Gauge identifying the running build.
+const BUILD_INFO: &str = "praxis_build_info";
 
 /// Counter for proxy errors not already counted by a dedicated metric.
 const ERRORS_TOTAL: &str = "praxis_errors_total";
@@ -984,6 +990,26 @@ pub fn record_config_reload_failure() {
         return;
     }
     counter!(CONFIG_RELOAD_TOTAL, "result" => RELOAD_RESULT_FAILURE).increment(1);
+}
+
+/// Publish the active configuration identity, retiring the previous label set.
+pub fn publish_config_identity(previous: Option<&ConfigIdentity>, current: &ConfigIdentity) {
+    if !is_recorder_installed() {
+        return;
+    }
+    if let Some(previous) = previous {
+        gauge!(CONFIG_INFO, "hash" => previous.hash.clone(), "documents_hash" => previous.documents_hash.clone())
+            .set(0.0);
+    }
+    gauge!(CONFIG_INFO, "hash" => current.hash.clone(), "documents_hash" => current.documents_hash.clone()).set(1.0);
+}
+
+/// Publish the process build identity with a stable label for absent git data.
+pub fn publish_build_info(version: &str, git_sha: Option<&str>) {
+    if !is_recorder_installed() {
+        return;
+    }
+    gauge!(BUILD_INFO, "version" => version.to_owned(), "git_sha" => git_sha.unwrap_or("unknown").to_owned()).set(1.0);
 }
 
 // -----------------------------------------------------------------------------

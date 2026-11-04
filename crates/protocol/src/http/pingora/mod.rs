@@ -87,12 +87,19 @@ impl Protocol for PingoraHttp {
         }
 
         let mut cert_watcher_shutdowns = Vec::new();
+        let lifecycle = server.lifecycle();
         for listener in &http_listeners {
             let pipeline = pipelines.get(&listener.name).map(Arc::clone).ok_or_else(|| {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
 
-            handler::load_http_handler(server.server_mut(), listener, pipeline, &mut cert_watcher_shutdowns)?;
+            handler::load_http_handler_with_lifecycle(
+                server.server_mut(),
+                listener,
+                pipeline,
+                &mut cert_watcher_shutdowns,
+                lifecycle.clone(),
+            )?;
         }
 
         Ok(cert_watcher_shutdowns)
@@ -137,6 +144,7 @@ mod tests {
             listeners,
             metrics: MetricsConfig::default(),
             runtime: RuntimeConfig::default(),
+            shutdown_drain_delay_secs: 0,
             shutdown_timeout_secs: 30,
             telemetry: TelemetryConfig::default(),
         }

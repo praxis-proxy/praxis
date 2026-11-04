@@ -68,6 +68,7 @@ http-body-util = { workspace = true, optional = true }
 hyper = { workspace = true, features = ["client", "http1", "http2"], optional = true }
 hyper-util = { workspace = true, features = ["http1", "http2", "tokio"], optional = true }
 metrics = { workspace = true }
+openssl = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }

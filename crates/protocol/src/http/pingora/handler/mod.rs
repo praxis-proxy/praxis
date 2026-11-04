@@ -23,6 +23,8 @@ use pingora_core::{Result, server::Server, services::listening::Service};
 #[cfg(feature = "pingora")]
 use pingora_proxy::http_proxy;
 #[cfg(feature = "pingora")]
+use praxis_core::server::LifecycleHandle;
+#[cfg(feature = "pingora")]
 use praxis_filter::FilterPipeline;
 #[cfg(feature = "pingora")]
 use tokio::sync::Semaphore;
@@ -145,6 +147,24 @@ pub fn load_http_handler(
     pipeline: Arc<ArcSwap<FilterPipeline>>,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
 ) -> Result<(), praxis_core::ProxyError> {
+    load_http_handler_with_lifecycle(
+        server,
+        listener,
+        pipeline,
+        cert_watcher_shutdowns,
+        LifecycleHandle::new(),
+    )
+}
+
+/// Load an HTTP handler with the process lifecycle shared by readiness and responses.
+#[cfg(feature = "pingora")]
+pub fn load_http_handler_with_lifecycle(
+    server: &mut Server,
+    listener: &praxis_core::config::Listener,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+    lifecycle: LifecycleHandle,
+) -> Result<(), praxis_core::ProxyError> {
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
     let downstream_keepalive_timeout_secs = listener
         .downstream_keepalive_timeout_ms
@@ -165,6 +185,7 @@ pub fn load_http_handler(
         // handler clones it per connection, and an owned `String` label
         // would deep-copy on every clone.
         ::metrics::SharedString::from_shared(Arc::from(listener.name.as_str())),
+        lifecycle,
     );
     wire_service(server, listener, handler, cert_watcher_shutdowns)?;
     Ok(())

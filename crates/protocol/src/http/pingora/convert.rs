@@ -101,6 +101,13 @@ pub(crate) async fn send_rejection_for(
     rejection: Rejection,
     ctx: &crate::http::pingora::context::PingoraRequestCtx,
 ) {
+    if ctx
+        .lifecycle
+        .as_ref()
+        .is_some_and(|lifecycle| lifecycle.phase() == praxis_core::server::LifecyclePhase::Draining)
+    {
+        session.set_keepalive(None);
+    }
     // Path 1: gRPC filter already set grpc-status, just frame it.
     if rejection
         .headers

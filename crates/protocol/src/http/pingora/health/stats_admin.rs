@@ -5,8 +5,12 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
+use arc_swap::ArcSwapOption;
 use http::Response;
-use praxis_core::{config::ProtocolKind, health::HealthRegistry};
+use praxis_core::{
+    config::{ConfigIdentity, ProtocolKind},
+    health::HealthRegistry,
+};
 use serde::Serialize;
 
 use super::{
@@ -44,6 +48,16 @@ pub struct StatsAdminState {
     pub listener_meta: ListenerMetaStore,
     /// Hot-swappable cluster endpoint metadata.
     pub cluster_meta: ClusterMetaStore,
+    /// Published source identity, if the process loaded a config file.
+    pub config_identity: Option<ConfigIdentityStore>,
+}
+
+/// Hot-swappable identity of the active configuration source.
+pub type ConfigIdentityStore = Arc<ArcSwapOption<ConfigIdentity>>;
+
+/// Create an empty configuration identity store.
+pub fn new_config_identity_store() -> ConfigIdentityStore {
+    Arc::new(ArcSwapOption::empty())
 }
 
 // -----------------------------------------------------------------------------
@@ -57,6 +71,9 @@ struct StatsResponse {
     uptime_secs: u64,
     /// Build/runtime version identity.
     version: ProcessVersionInfo,
+    /// Exact source identity of the active configuration, when file-backed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<ConfigIdentity>,
     /// Open file descriptors against the process limit, where tracked.
     #[serde(skip_serializing_if = "Option::is_none")]
     file_descriptors: Option<FileDescriptorStatsView>,
@@ -198,6 +215,10 @@ fn build_stats_response(
     serde_json::to_vec(&StatsResponse {
         uptime_secs: state.started_at.elapsed().as_secs(),
         version: state.version.clone(),
+        config: state
+            .config_identity
+            .as_ref()
+            .and_then(|store| store.load_full().map(|identity| (*identity).clone())),
         file_descriptors: praxis_core::fd::usage().map(|usage| FileDescriptorStatsView {
             open: usage.open,
             limit: usage.limit,
@@ -398,6 +419,7 @@ filter_chains:
             },
             listener_meta: new_listener_meta_store(listener_meta_from_config(&config)),
             cluster_meta: new_cluster_meta_store(cluster_meta_from_config(&config)),
+            config_identity: None,
         }
     }
 
@@ -414,6 +436,24 @@ filter_chains:
         );
         assert_eq!(json["listeners"][0]["name"], "web", "listener row expected");
         assert_eq!(json["clusters"][0]["name"], "backend", "cluster row expected");
+        assert!(json.get("config").is_none(), "embedded state has no source identity");
+    }
+
+    #[test]
+    fn stats_includes_published_config_identity() {
+        let mut state = sample_state();
+        let store = new_config_identity_store();
+        store.store(Some(Arc::new(ConfigIdentity::from_bytes(b"listeners: []", &[]))));
+        state.config_identity = Some(store);
+
+        let response = stats_response(None, &state, "GET");
+        let json: serde_json::Value = serde_json::from_slice(response.body()).expect("valid JSON");
+        assert_eq!(
+            json["config"]["hash"],
+            "e0bcff089ff2470e0f025c12a8261d3c2254ad396912b1b77ff58ec75546356a"
+        );
+        assert_eq!(json["config"]["documents_hash"], "");
+        assert!(json["config"]["loaded_at"].is_string());
     }
 
     #[test]
@@ -958,6 +998,7 @@ filter_chains:
             },
             listener_meta: new_listener_meta_store(listener_meta_from_config(&config)),
             cluster_meta: new_cluster_meta_store(cluster_meta_from_config(&config)),
+            config_identity: None,
         };
 
         let resp = stats_response(None, &state, "GET");
@@ -1005,6 +1046,7 @@ filter_chains:
             },
             listener_meta: new_listener_meta_store(listener_meta_from_config(&config)),
             cluster_meta: new_cluster_meta_store(cluster_meta_from_config(&config)),
+            config_identity: None,
         };
 
         let resp = stats_response(None, &state, "GET");

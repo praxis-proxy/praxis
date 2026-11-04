@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: praxis-ingress
+  labels:
+    app.kubernetes.io/name: praxis
+    app.kubernetes.io/component: proxy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: praxis
+      app.kubernetes.io/component: proxy
+  policyTypes:
+    - Ingress
+  ingress:
+    # The data Service is intentionally reachable from any namespace. Apply a
+    # deployment-specific source restriction in an overlay when required.
+    - ports:
+        - protocol: TCP
+          port: 8080
+    # Metrics are private to the monitoring namespace and its Prometheus pods.
+    # Clusters whose CNI enforces policies for node-originated kubelet probes
+    # must add their node CIDRs in an overlay before enabling this policy.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+      ports:
+        - protocol: TCP
+          port: 9902
+

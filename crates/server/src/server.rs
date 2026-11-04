@@ -475,6 +475,9 @@ struct ServerState {
     /// Hot-swappable cluster metadata for admin `/api/stats`.
     cluster_meta: praxis_protocol::http::health::ClusterMetaStore,
 
+    /// Hot-swappable exact-byte identity for the active config source.
+    config_identity: praxis_protocol::http::health::ConfigIdentityStore,
+
     /// KV store registry.
     kv_stores: praxis_core::kv::KvStoreRegistry,
 
@@ -555,6 +558,7 @@ fn build_server_state(
     let cluster_meta = praxis_protocol::http::health::new_cluster_meta_store(
         praxis_protocol::http::health::cluster_meta_from_config(config),
     );
+    let config_identity = praxis_protocol::http::health::new_config_identity_store();
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
     spawn_health_check_tasks(
@@ -569,6 +573,7 @@ fn build_server_state(
         pipelines: Arc::new(pipelines),
         listener_meta,
         cluster_meta,
+        config_identity,
         kv_stores,
         session_stores,
         slow_start_registry,
@@ -662,6 +667,14 @@ fn watcher_params(
     // An edit to one between its filter loading it and this read is therefore
     // missed until the next change to any watched file triggers a reload.
     let initial_content_hash = crate::watcher::composite_hash(&content, &referenced_files);
+    let documents: Vec<Vec<u8>> = referenced_files
+        .iter()
+        .filter_map(|path| std::fs::read(path).ok())
+        .collect();
+    let document_slices: Vec<&[u8]> = documents.iter().map(Vec::as_slice).collect();
+    let identity = praxis_core::config::ConfigIdentity::from_bytes(content.as_bytes(), &document_slices);
+    praxis_protocol::http::pingora::metrics::publish_config_identity(None, &identity);
+    state.config_identity.store(Some(Arc::new(identity)));
     Some(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
@@ -670,6 +683,7 @@ fn watcher_params(
         kv_stores: state.kv_stores,
         listener_meta: state.listener_meta,
         cluster_meta: state.cluster_meta,
+        config_identity: state.config_identity,
         session_stores: state.session_stores,
         slow_start_registry: state.slow_start_registry,
         pipelines: state.pipelines,
@@ -717,6 +731,7 @@ fn register_admin_endpoints(
                     version: crate::version::process_version_info(),
                     listener_meta: Arc::clone(&state.listener_meta),
                     cluster_meta: Arc::clone(&state.cluster_meta),
+                    config_identity: Some(Arc::clone(&state.config_identity)),
                 }),
                 verbose: config.admin.verbose,
             },
@@ -724,16 +739,21 @@ fn register_admin_endpoints(
     }
 
     if let Some(prometheus_recorder) = prometheus_recorder {
+        let version = crate::version::process_version_info();
+        praxis_protocol::http::pingora::metrics::publish_build_info(&version.semver, version.git_sha.as_deref());
         admin::add_prometheus_upkeep(server, prometheus_recorder);
     }
 
     if let Some(metrics_addr) = &config.admin.metrics_address {
-        admin::add_health_endpoint_with_pipelines(
+        let lifecycle = server.lifecycle();
+        admin::add_health_endpoint_with_pipelines_and_policy(
             server,
             metrics_addr,
             Some(health_registry),
             config.admin.verbose,
             Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
+            config.admin.readiness,
+            Some(lifecycle),
         );
     }
 }

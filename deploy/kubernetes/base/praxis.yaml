@@ -1,0 +1,35 @@
+admin:
+  address: "127.0.0.1:9901"
+  metrics_address: "0.0.0.0:9902"
+  readiness: serving
+
+listeners:
+  - name: default
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - default-response
+
+filter_chains:
+  - name: default-response
+    filters:
+      - filter: static_response
+        status: 200
+        headers:
+          - name: Content-Type
+            value: application/json
+        body: '{"status": "ok", "server": "praxis"}'
+        conditions:
+          - when:
+              path: "/"
+
+      - filter: static_response
+        status: 404
+        headers:
+          - name: Content-Type
+            value: application/json
+        body: '{"error": "not found"}'
+
+# Keep the application handoff shorter than the pod grace budget. The
+# application marks itself unready before waiting this delay on SIGTERM.
+shutdown_drain_delay_secs: 5
+shutdown_timeout_secs: 30

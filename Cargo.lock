@@ -3360,6 +3360,7 @@ dependencies = [
  "loom",
  "metrics",
  "metrics-exporter-prometheus",
+ "openssl",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

@@ -29,6 +29,7 @@ use praxis_core::{
         Connector as _, PeerSpec, RequestHead, Session as _,
         hyper::{HyperConnector, HyperSession},
     },
+    server::LifecycleHandle,
 };
 use praxis_filter::{
     BodyAccess, BodyMode, FilterAction, FilterEntry, FilterError, FilterFactory, FilterPipeline, FilterRegistry,
@@ -478,7 +479,13 @@ impl Drop for Upstream {
 pub(super) fn listener_shared() -> ListenerShared {
     let listener: Listener = serde_yaml::from_str("name: test\naddress: \"127.0.0.1:0\"\n").unwrap();
     let pipeline = Arc::new(ArcSwap::from_pointee(empty_pipeline()));
-    ListenerShared::new(&listener, pipeline, HyperConnector::new(4), None)
+    ListenerShared::new(
+        &listener,
+        pipeline,
+        HyperConnector::new(4),
+        None,
+        LifecycleHandle::new(),
+    )
 }
 
 /// A session to `upstream` with the request head of `method` to `/` sent.

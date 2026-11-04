@@ -128,6 +128,7 @@ impl Config {
         validate_tcp_listener_clusters(&self.listeners, &self.filter_chains)?;
         validate_selected_upstream_matchers(&self.filter_chains, &self.clusters)?;
         self.validate_runtime()?;
+        validate_shutdown_drain_delay(self.shutdown_drain_delay_secs)?;
         validate_shutdown_timeout(self.shutdown_timeout_secs)?;
         validate_telemetry(&self.telemetry)?;
 
@@ -535,6 +536,16 @@ fn validate_logging(logging: &crate::config::LoggingConfig) -> Result<(), ProxyE
         && let Some(path) = logging.file_path.as_deref()
     {
         warn_if_symlink(path);
+    }
+    Ok(())
+}
+
+/// Reject a drain delay above the one-hour safety ceiling.
+fn validate_shutdown_drain_delay(secs: u64) -> Result<(), ProxyError> {
+    if secs > MAX_SHUTDOWN_TIMEOUT_SECS {
+        return Err(ProxyError::Config(format!(
+            "shutdown_drain_delay_secs ({secs}) exceeds maximum ({MAX_SHUTDOWN_TIMEOUT_SECS}s / 1 hour)"
+        )));
     }
     Ok(())
 }
@@ -1816,6 +1827,44 @@ listeners:
     address: "0.0.0.0:8080"
     filter_chains: [main]
 shutdown_timeout_secs: 3600
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_shutdown_drain_delay_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+shutdown_drain_delay_secs: 7200
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("shutdown_drain_delay_secs") && err.to_string().contains("exceeds maximum"),
+            "should reject drain delay > 1 hour: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_shutdown_drain_delay_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+shutdown_drain_delay_secs: 3600
 filter_chains:
   - name: main
     filters:
