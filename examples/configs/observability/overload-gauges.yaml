@@ -1,0 +1,45 @@
+# Overload Pressure Gauges
+#
+# Publishes smoothed `praxis_overload_pressure` gauges for cgroup memory,
+# anonymous resident memory, CPU stall time, connections, and file
+# descriptors. The gauges never refuse work, but the `max_connections` and
+# `max_memory_bytes` caps in this config do: requests over a cap receive HTTP 503.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/observability/overload-gauges.yaml
+#
+# Exercise:
+#   curl -s http://localhost:9902/metrics | grep praxis_overload_pressure
+
+admin:
+  metrics_address: "127.0.0.1:9902"
+
+runtime:
+  overload_gauges: true
+  # Connection pressure needs a cap. In-flight HTTP requests and active TCP
+  # sessions hold permits; idle keep-alives do not.
+  max_connections: 1000
+  # Heap pressure is anonymous resident memory over this cap.
+  max_memory_bytes: 1073741824
+
+insecure_options:
+  allow_private_endpoints: true
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - routing
+
+filter_chains:
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

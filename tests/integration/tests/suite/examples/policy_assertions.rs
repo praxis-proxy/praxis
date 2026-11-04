@@ -116,6 +116,40 @@ fn assertions_reach_the_upstream_request() {
 }
 
 #[test]
+fn a_secret_assertion_reaches_the_upstream_request() {
+    let secret = std::env::var("CARGO_PKG_NAME").expect("cargo sets CARGO_PKG_NAME for test processes");
+    let backend = start_header_echo_backend();
+    let proxy_port = free_port();
+    let config = load_example(proxy_port, backend_map(backend.port()));
+    let proxy = start_proxy(&config);
+
+    let token = mint_fixture_jwt("alice");
+    let raw = http_send(
+        proxy.addr(),
+        &format!(
+            "GET /widgets HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Authorization: Bearer {token}\r\n\
+             X-Api-Key: forged\r\n\
+             Connection: close\r\n\
+             \r\n",
+        ),
+    );
+
+    assert_eq!(parse_status(&raw), 200, "the request is admitted;\n{raw}");
+    let seen = upstream_headers(&raw);
+    assert_eq!(
+        seen.get("x-api-key").map(String::as_str),
+        Some(secret.as_str()),
+        "the declared `env` secret reaches the upstream in place of the caller's value;\n{raw}"
+    );
+    assert!(
+        !raw.contains("forged"),
+        "the caller's value must not be forwarded;\n{raw}"
+    );
+}
+
+#[test]
 fn a_caller_cannot_forge_an_asserted_header() {
     let backend = start_header_echo_backend();
     let proxy_port = free_port();

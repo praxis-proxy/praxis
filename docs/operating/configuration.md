@@ -17,7 +17,7 @@ admin:                 # Optional. Admin health endpoint.
 body_limits:           # Optional. Global body size ceilings.
 metrics:               # Optional. Prometheus metric collection toggles.
 runtime:               # Optional. Thread pool and logging tuning.
-shutdown_timeout_secs: # Optional. Graceful drain time (default: 30).
+shutdown_timeout_secs: # Optional. Shutdown budget (default: 30 seconds).
 insecure_options:      # Optional. Dev/test overrides. See developing/getting-started.md.
 ```
 
@@ -104,7 +104,8 @@ rather than silently adopted as the baseline.
 - Startup-only `runtime` settings (`threads`,
   `work_stealing`, `global_queue_interval`,
   `max_connections`, `max_memory_bytes`,
-  `max_open_files`, `shed_on_fd_pressure`,
+  `max_open_files`, `overload_gauges`,
+  `shed_on_fd_pressure`,
   `subrequest_pool_size`,
   `subrequest_max_connections`,
   `subrequest_circuit_breaker`, `upstream_ca_file`,
@@ -493,7 +494,36 @@ size. These apply across all body modes (Stream,
 StreamBuffer). When a filter also declares a per-filter
 `max_bytes`, the smaller of the two limits is enforced.
 Requests exceeding the limit receive 413 (Payload Too
-Large).
+Large), subject to the gRPC mapping below.
+
+Request-body limit failures log a warning with the limit,
+bytes seen, and rejection phase. Body-phase failures return
+a JSON 413 response, or a gRPC Trailers-Only response when
+the `grpc_status` filter has armed the request. A declared
+`Content-Length` above the effective input limit is rejected
+before reading the body or sending 100 Continue and returns JSON 413.
+This includes matching comma-separated lengths accepted by the HTTP parser.
+
+For a local HTTP/1 response that closes the connection
+with an unread upload, the Pingora backend sends the
+response, records request completion, shuts down the write
+side, and discards remaining body data. Streaming body
+rejections release the upstream connection before sending
+the response. Access logs and request duration metrics
+exclude the subsequent cleanup time. Cleanup has a
+30-second deadline and a 128 MiB discard budget;
+downstream read timeouts still apply. The budget is checked
+between native body reads, so the last chunk can cross it.
+This also covers early responses
+such as 401, 403, and 429. HTTP/2 uses its native stream
+cleanup. Clients should stop uploading after a rejection.
+Overload admission failures still close promptly.
+
+Rejected uploads retain any listener and runtime connection
+permits until cleanup finishes. Account for this grace period
+when sizing `max_connections`: stalled rejected uploads can
+occupy those slots for up to 30 seconds. A configured
+`downstream_read_timeout_ms` can end a stalled read sooner.
 
 ```yaml
 body_limits:
@@ -598,6 +628,20 @@ runtime:
   Startup logs the limit in effect and warns when it is
   below 4096, or below what `max_connections` implies.
   See [Capacity Planning](capacity-planning.md).
+- `overload_gauges`: publish `praxis_overload_pressure`
+  for cgroup memory, anonymous resident memory, CPU
+  stall time, connections, and file descriptors.
+  `bool`, defaults to `false`. This does not refuse
+  work or change timeouts. Scraped at `/metrics` on
+  `admin.metrics_address`; `admin.address` does not
+  serve these gauges. Cgroup pressure uses the
+  highest working-set ratio of this process's cgroup
+  and its ancestors, so a parent slice limit still
+  counts when `memory.max` is `max` on the service
+  cgroup. Heap pressure needs `max_memory_bytes`.
+  Connection pressure needs `max_connections`. The
+  task starts at process start, so changing it needs
+  a restart. See [Observability](observability.md).
 - `shed_on_fd_pressure`: reject new requests with `503
   Service Unavailable` (and close new TCP connections)
   when open file descriptors near the process limit,
@@ -674,11 +718,14 @@ flooding output from every module.
 
 ## Key-Value Stores
 
-In-memory key-value stores for runtime-updatable
-mappings. A store is created in code through
-`KvStoreRegistry::get_or_create`; the admin API reads
-and updates entries in stores that already exist but
-does not create them. No built-in filter or
+Key-value stores for runtime-updatable mappings. A
+store is created in code:
+`KvStoreRegistry::get_or_create_memory` creates an
+in-memory store, and `KvStoreRegistry::register` adds a
+caller-supplied `KvBackend` under a new name, for
+example one that stores data outside the process. The
+admin API reads and updates entries in stores that
+already exist but does not create them. No built-in filter or
 configuration section creates a store yet, so in a
 standard deployment the registry is empty and the
 admin key-value endpoints answer 404 for every store
@@ -716,8 +763,11 @@ threads. Unknown store names return 404.
 ### Runtime Cache Semantics
 
 Key-value stores are **runtime caches, not durable
-storage**. Data lives in memory, survives config
-reloads, and is lost on process exit.
+storage**. Every store survives config reloads. With
+`InMemoryKvBackend`, entries live in process memory and
+are lost on process exit; a backend added with
+`KvStoreRegistry::register` keeps them wherever it
+stores them.
 
 The store is designed for operational overrides (routing
 tables, feature flags, config knobs) that can be
@@ -733,24 +783,30 @@ module docs for the trait definition.
 
 ## Graceful Shutdown
 
-The `shutdown_timeout_secs` field controls how long the
-server drains in-flight connections before forcing
+With the default Pingora backend, `shutdown_timeout_secs`
+sets the budget for the request grace period and runtime
 shutdown:
 
 ```yaml
 shutdown_timeout_secs: 60    # default: 30
 ```
 
-On SIGTERM listeners stop accepting new connections. The
-first up-to-5 s is a grace period in which in-flight
-requests keep running; the remainder bounds the runtime
-drain; the total never exceeds `shutdown_timeout_secs`.
+On SIGTERM listeners stop accepting new connections.
+In-flight requests have a grace period of
+`min(shutdown_timeout_secs, 5)` seconds. Runtime shutdown
+then cancels remaining async tasks; the rest of the budget
+bounds the wait for blocking work. A setting of `60`
+therefore still gives requests at most five seconds to
+finish. Drain traffic before SIGTERM when requests need
+longer; see [Diagnostics](diagnostics.md#draining-before-shutdown).
 
-Once the drain completes, Praxis flushes queued log lines
-and exports pending OTLP spans, then exits `0`. A startup
-failure after logging is initialized (a listener that
-cannot be registered, a filter that cannot be built) is
-logged the same way, flushed, and exits `1`.
+Once runtime shutdown completes, Praxis flushes queued
+log lines and attempts to export pending OTLP spans, then
+exits `0`. OTLP shutdown errors go to stderr and do not
+change the exit status.
+
+Praxis logs and flushes errors returned while building
+filters or registering listeners, then exits `1`.
 
 ## Default Configuration
 
@@ -810,6 +866,20 @@ Without that feature, HTTP probes remain plaintext. Top-level data-path
 settings such as `retry_policy`, connection timeouts, `load_balancer_strategy`
 and `trusted_private_endpoints` do not configure proxied traffic. Configure
 those on the inline load-balancer cluster instead.
+
+An inline cluster that shares its name with a top-level declaration can
+omit its endpoints: validation fills them in from the declaration, so the
+routed and health-checked addresses stay together. If the inline list is
+present it stays the routing truth, and validation warns when it diverges
+from the declaration — a diverged endpoint is routed but never
+health-gated, or probed but never routed. An inline `health_check` is
+rejected: probes are configured only at top level.
+
+Filled endpoints are copied per reference, so the copies are capped at
+16 MiB of endpoint string data (addresses, zones, and metadata). Config
+validation applies the cap across all filter chains, and pipeline
+construction applies it again across the inline outbound chains it binds;
+a config that exceeds either is rejected.
 
 ## Slow Start
 

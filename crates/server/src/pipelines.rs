@@ -211,8 +211,13 @@ pub(crate) fn resolve_pipelines_with_composition(
         // the full configuration or conditional filters and branch chains would
         // appear absent.
         let entry_snapshot = entries.clone();
-        let mut pipeline =
-            FilterPipeline::build_with_chains(&mut entries, &registry, &chains, &config.insecure_options)?;
+        let mut pipeline = FilterPipeline::build_with_chains(
+            &mut entries,
+            &registry,
+            &chains,
+            &config.insecure_options,
+            &config.clusters,
+        )?;
         configure_pipeline(
             &mut pipeline,
             config,
@@ -1442,7 +1447,7 @@ filter_chains:
     /// KV store registry with one test store.
     fn make_kv_registry() -> praxis_core::kv::KvStoreRegistry {
         let registry = praxis_core::kv::KvStoreRegistry::new();
-        registry.get_or_create("test");
+        registry.get_or_create_memory("test");
         registry
     }
 

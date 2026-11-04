@@ -14,6 +14,7 @@ mod access_log_syslog;
 mod access_log_template;
 mod access_logging;
 mod admin_interface;
+mod admin_kv_store;
 mod all_examples_validate;
 mod api_key_filter;
 mod authority_from_endpoint;
@@ -27,6 +28,7 @@ mod circuit_breaker;
 #[cfg(feature = "cloud-events-filter")]
 mod cloud_events;
 mod cluster_base_path;
+mod cluster_references;
 mod conditional_filters;
 mod credential_injection;
 mod credential_injection_env_vars;
@@ -72,6 +74,8 @@ mod max_body_guard;
 mod max_connections;
 mod multi_listener;
 mod operations;
+#[cfg(unix)]
+mod overload_gauges;
 mod p2c;
 mod path_based_routing;
 mod path_rewriting;

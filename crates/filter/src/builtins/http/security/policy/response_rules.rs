@@ -349,22 +349,7 @@ fn condition_reads_response_content(condition: &Condition) -> bool {
 /// Whether opaque PDP arguments contain a response-content attribute reference.
 fn yaml_reads_response_content(value: &Value) -> bool {
     match value {
-        Value::String(value) => {
-            let trimmed = value.trim();
-            let quoted_literal = ['\'', '"'].iter().any(|quote| {
-                trimmed
-                    .strip_prefix(*quote)
-                    .and_then(|value| value.strip_suffix(*quote))
-                    .is_some_and(|value| !value.contains(*quote))
-            });
-            if quoted_literal && !trimmed.contains('.') {
-                false
-            } else {
-                trimmed
-                    .split(|character: char| !character.is_alphanumeric() && character != '_' && character != '.')
-                    .any(content_key)
-            }
-        },
+        Value::String(value) => unquoted_tokens_read_response_content(value),
         Value::Sequence(values) => values.iter().any(yaml_reads_response_content),
         Value::Mapping(values) => values
             .iter()
@@ -372,6 +357,34 @@ fn yaml_reads_response_content(value: &Value) -> bool {
         Value::Tagged(tagged) => yaml_reads_response_content(&tagged.value),
         Value::Null | Value::Bool(_) | Value::Number(_) => false,
     }
+}
+
+/// Check attribute-like tokens outside quoted string literals.
+fn unquoted_tokens_read_response_content(value: &str) -> bool {
+    let mut token = String::new();
+    let mut quote = None;
+    for character in value.chars() {
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if content_key(&token) {
+                return true;
+            }
+            token.clear();
+            quote = Some(character);
+        } else if character.is_alphanumeric() || matches!(character, '_' | '.') {
+            token.push(character);
+        } else if content_key(&token) {
+            return true;
+        } else {
+            token.clear();
+        }
+    }
+    content_key(&token)
 }
 
 /// Whether a policy attribute belongs to the unavailable response body.
@@ -472,6 +485,26 @@ routes:
         - "require(completion.tokens.total > 100)"
 "#;
         assert!(metadata_only_policy(yaml).expect("filter policy").is_none());
+    }
+
+    #[test]
+    fn quoted_result_literal_in_pdp_expression_is_not_content() {
+        let yaml = format!(
+            r#"{PLUGINS}
+routes:
+  - llm: "*"
+    authorization:
+      post_invocation:
+        - cel:
+            expr: "custom.phase != 'result'"
+        - "run(metadata)"
+"#,
+        );
+        let filtered = metadata_only_policy(&yaml)
+            .expect("filter policy")
+            .expect("metadata rule remains");
+        assert!(filtered.contains("custom.phase"));
+        assert!(filtered.contains("run(metadata)"));
     }
 }
 

@@ -65,6 +65,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [http-active-requests.yaml](configs/observability/http-active-requests.yaml) | Prometheus gauge for HTTP requests currently in flight per listener |
 | [logging.yaml](configs/observability/logging.yaml) | request_id — ensures every request has a correlation ID |
 | [metric-label-sets.yaml](configs/observability/metric-label-sets.yaml) | Selectively disables individual label dimensions on Prometheus metrics to bound total time-series cardinality |
+| [overload-gauges.yaml](configs/observability/overload-gauges.yaml) | Publishes smoothed `praxis_overload_pressure` gauges for cgroup memory, anonymous resident memory, CPU stall time, connections, and file descriptors |
 | [process-logging.yaml](configs/observability/process-logging.yaml) | Non-blocking process logs written to a file |
 | [route-templates.yaml](configs/observability/route-templates.yaml) | Collapses dynamic path segments in the Prometheus route label into stable templates, so high-variety URLs share one series instead of widening cardinality |
 | [tcp-access-log.yaml](configs/observability/tcp-access-log.yaml) | Structured JSON logging of TCP connection events (connect and disconnect) |
@@ -82,6 +83,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | File | Description |
 | ------ | ------------- |
 | [admin-interface.yaml](configs/operations/admin-interface.yaml) | Exposes separate admin API and health/metrics listeners |
+| [admin-kv-store.yaml](configs/operations/admin-kv-store.yaml) | Serves runtime key-value stores on the admin API for an application that embeds Praxis and registers the stores in code |
 | [container-default.yaml](configs/operations/container-default.yaml) | Default config for containerized deployments |
 | [file-descriptor-limits.yaml](configs/operations/file-descriptor-limits.yaml) | Size and protect the proxy's open file descriptor budget: pin the process limit, shed requests with 503 before descriptors run out, and close idle keep-alive clients and pooled upstream connections so they cannot pin descriptors |
 | [hot-reload.yaml](configs/operations/hot-reload.yaml) | Filter pipelines are swapped atomically at runtime when the config file changes |
@@ -186,6 +188,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
 | [cluster-application-metadata.yaml](configs/traffic-management/cluster-application-metadata.yaml) | Tags an upstream cluster with opaque application metadata that consuming filters interpret |
 | [cluster-base-path.yaml](configs/traffic-management/cluster-base-path.yaml) | Prepends a path to the upstream request for the cluster the load balancer selected, so one gateway can front several upstreams that each serve the same API under their own prefix |
+| [cluster-references.yaml](configs/traffic-management/cluster-references.yaml) | An inline load-balancer cluster that shares its name with a top-level declaration may omit its endpoints: validation fills them in from the declaration, so the routed addresses and the health-checked addresses cannot drift apart |
 | [endpoint-selector.yaml](configs/traffic-management/endpoint-selector.yaml) | Selects an upstream endpoint from a trusted mutation source (e.g. external processing) |
 | [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detects gRPC requests from the content-type header and promotes the variant to filter metadata and results |
 | [grpc-timeout.yaml](configs/traffic-management/grpc-timeout.yaml) | Honours the `grpc-timeout` request header as a real deadline |

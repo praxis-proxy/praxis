@@ -143,12 +143,11 @@ dependencies = [
 
 [[package]]
 name = "antlr4rust"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "093d520274bfff7278d776f7ea12981a0a0a6f96db90964658e0f38fc6e9a6a6"
+checksum = "003352ee03bab0eea34057cc541fa4362734220ca381343c7e9c35050c1fc942"
 dependencies = [
- "better_any",
- "bit-set 0.8.0",
+ "bit-set 0.11.1",
  "byteorder",
  "lazy_static",
  "murmur3",
@@ -396,12 +395,6 @@ name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
-
-[[package]]
-name = "better_any"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4372b9543397a4b86050cc5e7ee36953edf4bac9518e8a774c2da694977fb6e4"
 
 [[package]]
 name = "bit-set"
@@ -685,12 +678,13 @@ dependencies = [
 
 [[package]]
 name = "cel"
-version = "0.14.5"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ae7daebcd4d032c9a5288790c2facde6fab3f9a9ff8d5028765e8b48a36eeb2"
+checksum = "044e21070125024b84c8058036de182400bd99212cab3faa4f19566f7733b6dc"
 dependencies = [
  "antlr4rust",
  "chrono",
+ "chrono-tz",
  "lazy_static",
  "nom",
  "pastey",
@@ -3175,9 +3169,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "16a15db17e236119799a946d479574af9202880f588ddc437730cd0ed20fecaa"
+checksum = "c38539da1fc52a1cad1124aba99216eed98d602212f65ea913c37f7c96c6a526"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
@@ -3188,10 +3182,11 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-cmf"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d027a9e6e1be7a6ca70a8cd7124f52a46b3be9d9d48baba03cb41c65b48d2319"
+checksum = "02c17a247088d1aead6446293fa37affc68cd695e1f24cd93983fc9e0bfb2fae"
 dependencies = [
+ "chrono",
  "praxis-policy-apl-core",
  "praxis-policy-core",
  "serde_json",
@@ -3199,9 +3194,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-core"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab3103d91e74eaea5ebf4088c44cc3faf1622befe0a7dcc9bed44b882ec392ac"
+checksum = "1fa4564e982ddf61d7bb79a1e914a402be3d70f2e849370d1a7051c7f02274be"
 dependencies = [
  "async-trait",
  "futures",
@@ -3216,9 +3211,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-runtime"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2526dddeb0a1a5c982a5ca646b64b93b5f933854e1db8ea01856ec58e5c5ff7f"
+checksum = "94af76898d0400135296c76b0a19a5c3d4c783a9824d3638726b70c012ee195b"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3235,9 +3230,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-builtins"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0de898d5b7db29bf2b1eb1ab35ae50f5bcf8ad08184bf78239d6a0e652b0fa36"
+checksum = "514f8817828c4563b523c48e25e81afcfb6b4cd1e9282136f9dff8c13d506601"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3272,9 +3267,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-core"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93404cbc73d95267705f6aef5ab533525243f6fb4d4c8519aaa47b75529617fa"
+checksum = "fd60a2e3d73a8d139684dcab02afe73bba5e6496f15fbba1986f935b8b4174a4"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3300,9 +3295,9 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-orchestration"
-version = "0.4.1"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca9e7e35d58c278047576090f9425f036ea31ffb66708388c1d33db51944be46"
+checksum = "8f194b463d5304f8267f89e3f4ec1c50953ff3ad8bb287186455943bb78b566b"
 dependencies = [
  "futures",
  "tokio",

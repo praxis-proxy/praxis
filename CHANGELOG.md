@@ -17,12 +17,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- Disable TLS session resumption on listeners with client authentication
+  and TLS hot-reload. A handshake authenticated before a CA/CRL reload
+  could finish afterward and cache stale authentication, allowing new
+  connections to bypass the updated trust. New connections now perform
+  full certificate verification; static mTLS and non-mTLS listeners
+  retain resumption.
+
 ### Added
 
 - The `policy` filter accepts trusted metadata-only inference response context
   from host filters, dispatches it through `cmf.llm_output` without buffering
   response content, and exposes plugin-written custom values to downstream
   response filters.
+- Implicit cluster references: an inline load-balancer cluster that shares
+  its name with a top-level cluster may omit its endpoints, which are
+  filled in from the declaration at validation time, keeping the routed
+  and health-checked addresses together. A divergent endpoint list now
+  warns at startup and on reload, and an inline `health_check` is
+  rejected: probes are configured only at top level. Filling is capped at
+  16 MiB of copied endpoint data in validation and again in each pipeline
+  build, so many references to one large declaration cannot expand a small
+  config into an out-of-memory reload.
+- A [support diagnostics reference](docs/operating/diagnostics.md) covering
+  config checks, live state, logging, reloads and draining before shutdown.
+- `SUPPORT.md` with guidance on where to ask questions, report bugs,
+  report security vulnerabilities, and propose enhancements.
+- `runtime.overload_gauges` publishes `praxis_overload_pressure`
+ for cgroup memory, anonymous resident memory, CPU stall time,
+ connections, and file descriptors. The gauges do not shed load.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
@@ -34,9 +59,67 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- The policy filter registers the `env` secret provider, so a policy
+  document's `secrets:` block using `env` now loads instead of failing at
+  startup. Any other provider kind, including `file` and `vault`, is still
+  refused. Values are read when the filter is built, so a changed value
+  takes effect on the next restart.
+
+### Changed
+
+- The policy engine is updated to PPE 0.5.0, which tightens OAuth
+  `delegate(...)` by default: a token-exchange response must name an
+  access-token or JWT `issued_token_type`, unrequested scopes outside
+  `allowed_extra_scopes` are refused, and a minted JWT's `aud` and `sub`
+  must match. `strict_response_validation: false` turns these checks off.
+  JWTs with an unsupported `crit` header are rejected, an `env` secret
+  provider with unused settings fails to load, and CEL `size()` and
+  `exists()` change in ways that can allow requests that were denied. See
+  `docs/filters/http/security/policy.md`.
+- `KvStoreRegistry::register` adds a caller-supplied `KvBackend` under a
+  name, rejecting duplicates with `KvRegistryError::AlreadyRegistered`.
+- `KvStoreRegistry::get_or_create_memory` deliberately creates an
+  in-memory store.
+
+### Removed
+
+- `KvStoreRegistry::get_or_create`, which silently created an in-memory
+  store for any unknown name. Use `get` to look up a configured store, or
+  `get_or_create_memory` to choose memory explicitly.
+
+### Changed
+
+- `FilterPipeline::build_with_chains` takes a new required
+  `top_level_clusters: &[Cluster]` argument. Rust callers pass the
+  config's top-level `clusters:` list, or `&[]` when none exists.
 
 ### Fixed
 
+- A delegated credential is sent with its own prefix rather than always
+  `Bearer `, so a Vault credential with no `scheme_prefix` goes out bare
+  and a custom prefix such as `token ` is kept.
+- A request header asserted from `secret.<name>` stays redacted in the
+  views that request-body and response policy hooks receive, rather than
+  reaching those plugins and PDPs in plaintext.
+
+- Request-body limit rejections log structured warnings and return JSON 413
+  responses across buffering and streaming paths. Body-phase rejections
+  for requests armed by `grpc_status` return gRPC Trailers-Only responses
+  instead. Oversized declared Content-Length values, including validated
+  matching comma-separated lengths, are rejected before reading the body
+  or sending 100 Continue. Local body-limit rejections are not retried upstream,
+  even when 413 is configured as retriable. HEAD rejection responses retain
+  representation headers without sending payload bytes, including over HTTP/2.
+  Streaming rejections also cancel HTTP/2 upstream streams promptly instead of
+  waiting for an upstream response or allowing it to replace the rejection.
+- Early HTTP/1 responses with unread uploads use Pingora's write-side
+  shutdown and bounded cleanup before closing, including authentication
+  and rate-limit rejections and successful terminal responses. Cleanup has
+  a 30-second deadline and a 128 MiB discard budget checked between body
+  reads. Streaming rejections release the upstream before responding;
+  access logs and request duration metrics are recorded before downstream
+  cleanup. Expected client-error filter rejections no longer produce a
+  duplicate Pingora error log.
 - The FIPS runtime probe selects the Pingora backend when compiling its
   listener tests with default features disabled.
 - The Hyper backend rejects reserved client trailer names before forwarding

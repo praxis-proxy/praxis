@@ -2217,7 +2217,6 @@ fn append_unique_fields(target: &mut Vec<FieldInfo>, items: Vec<FieldInfo>) {
     }
 }
 
-
 /// Extract the final component of a directory path as a string.
 fn dir_file_name(dir: &Path) -> String {
     dir.file_name()
