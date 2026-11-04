@@ -29,8 +29,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - The `policy` filter accepts trusted metadata-only inference response context
-  from host filters, dispatches it through `cmf.llm_output` without buffering
-  response content, and exposes plugin-written custom values to downstream
+  from host filters and dispatches it through `cmf.llm_output` at end of stream.
+  With `body_access: read_only`, or for SSE responses, response content is not
+  buffered. Non-SSE responses under `body_access: read_write` stay buffered and
+  are evaluated as content. Plugin-written custom values reach downstream
   response filters.
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are

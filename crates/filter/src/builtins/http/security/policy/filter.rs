@@ -72,6 +72,16 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// Marker retained from `on_response` until the body EOF callback.
 struct StreamedInferenceResponse;
 
+/// How a response policy handled the custom extension namespace.
+enum ResponseCustomState {
+    /// The policy did not return modified extensions.
+    Unmodified,
+    /// The policy returned a replacement custom namespace.
+    Replaced(Arc<std::collections::HashMap<String, serde_json::Value>>),
+    /// The policy explicitly removed the custom namespace.
+    Removed,
+}
+
 // -----------------------------------------------------------------------------
 // PolicyFilter
 // -----------------------------------------------------------------------------
@@ -1515,7 +1525,12 @@ impl PolicyFilter {
             Err(error) if response_context.is_some() => {
                 let violation = PluginViolation::new("llm.response_context_unavailable", error.to_string());
                 if let Some(host_custom) = response_context.clone() {
-                    Self::publish_response_output(ctx, host_custom, Some(violation));
+                    Self::publish_response_output(
+                        ctx,
+                        host_custom.as_ref(),
+                        ResponseCustomState::Unmodified,
+                        Some(violation),
+                    );
                 }
                 tracing::warn!(target: "policy.filter", %error, "response policy dispatch failed; applying failure_mode");
                 return Err(error);
@@ -1523,12 +1538,17 @@ impl PolicyFilter {
             Err(error) => return Err(error),
         };
         if let Some(host_custom) = response_context {
-            let custom = cmf_result
-                .modified_extensions
-                .as_ref()
-                .and_then(|modified| modified.custom.clone())
-                .unwrap_or(host_custom);
-            Self::publish_response_output(ctx, custom, cmf_result.violation.clone());
+            let custom_state =
+                cmf_result
+                    .modified_extensions
+                    .as_ref()
+                    .map_or(ResponseCustomState::Unmodified, |modified| {
+                        modified
+                            .custom
+                            .clone()
+                            .map_or(ResponseCustomState::Removed, ResponseCustomState::Replaced)
+                    });
+            Self::publish_response_output(ctx, host_custom.as_ref(), custom_state, cmf_result.violation.clone());
         }
 
         if !cmf_result.continue_processing {
@@ -1572,15 +1592,17 @@ impl PolicyFilter {
         let Some(context) = ctx.extensions.get::<PolicyResponseContext>() else {
             return Ok(FilterAction::Continue);
         };
-        let host_custom = context.custom();
         let Some(manager) = self.response_context_mgr.as_ref() else {
-            Self::publish_response_output(ctx, host_custom, None);
+            let host_custom = context.custom();
+            Self::publish_response_output(ctx, host_custom.as_ref(), ResponseCustomState::Unmodified, None);
             return Ok(FilterAction::Continue);
         };
         let Some(InferenceRequest { model }) = ctx.extensions.get::<InferenceRequest>() else {
-            Self::publish_response_output(ctx, host_custom, None);
+            let host_custom = context.custom();
+            Self::publish_response_output(ctx, host_custom.as_ref(), ResponseCustomState::Unmodified, None);
             return Ok(FilterAction::Continue);
         };
+        let host_custom = context.custom();
         let model = model.clone();
         let mut headers = Self::snapshot_headers(ctx);
         Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
@@ -1589,10 +1611,16 @@ impl PolicyFilter {
                 "llm.response_context_unavailable",
                 "request identity unavailable for metadata-only response policy",
             );
-            Self::publish_response_output(ctx, host_custom, Some(violation));
+            Self::publish_response_output(
+                ctx,
+                host_custom.as_ref(),
+                ResponseCustomState::Unmodified,
+                Some(violation),
+            );
             return Ok(FilterAction::Continue);
         };
         let mut extensions = Self::extensions_from_identity(&headers, identity, ENTITY_LLM, &model, &self.cfg);
+        Self::attach_http_attributes(ctx, &mut extensions, headers);
         extensions.llm = Some(Arc::new(LLMExtension {
             model_id: Some(model),
             provider: self.cfg.llm.provider.clone(),
@@ -1612,22 +1640,31 @@ impl PolicyFilter {
             Ok(result) => result,
             Err(error) => {
                 let violation = PluginViolation::new("llm.response_context_unavailable", error.to_string());
-                Self::publish_response_output(ctx, host_custom, Some(violation));
+                Self::publish_response_output(
+                    ctx,
+                    host_custom.as_ref(),
+                    ResponseCustomState::Unmodified,
+                    Some(violation),
+                );
                 tracing::warn!(target: "policy.filter", %error, "metadata-only response policy dispatch failed; continuing");
                 return Ok(FilterAction::Continue);
             },
         };
-        let custom = result
+        let custom_state = result
             .modified_extensions
             .as_ref()
-            .and_then(|modified| modified.custom.clone())
-            .unwrap_or(host_custom);
+            .map_or(ResponseCustomState::Unmodified, |modified| {
+                modified
+                    .custom
+                    .clone()
+                    .map_or(ResponseCustomState::Removed, ResponseCustomState::Replaced)
+            });
         let violation = ctx
             .extensions
             .get::<PolicyResponseOutput>()
             .and_then(|output| output.violation().cloned())
             .or_else(|| result.violation.clone());
-        Self::publish_response_output(ctx, custom, violation.clone());
+        Self::publish_response_output(ctx, host_custom.as_ref(), custom_state, violation.clone());
         if !result.continue_processing {
             tracing::warn!(
                 target: "policy.filter",
@@ -1642,15 +1679,31 @@ impl PolicyFilter {
     /// Publish host-visible response output without erasing an earlier denial.
     fn publish_response_output(
         ctx: &mut HttpFilterContext<'_>,
-        custom: Arc<std::collections::HashMap<String, serde_json::Value>>,
+        host_custom: &std::collections::HashMap<String, serde_json::Value>,
+        custom_state: ResponseCustomState,
         violation: Option<PluginViolation>,
     ) {
-        let earlier = ctx
-            .extensions
-            .get::<PolicyResponseOutput>()
-            .and_then(|output| output.violation().cloned());
+        let earlier_output = ctx.extensions.get::<PolicyResponseOutput>();
+        let mut custom =
+            earlier_output.map_or_else(std::collections::HashMap::new, |output| (*output.custom()).clone());
+        let custom_modified = !matches!(custom_state, ResponseCustomState::Unmodified);
+        let current = match custom_state {
+            ResponseCustomState::Unmodified => host_custom.clone(),
+            ResponseCustomState::Replaced(values) => (*values).clone(),
+            ResponseCustomState::Removed => std::collections::HashMap::new(),
+        };
+        // A modified namespace is authoritative for host keys: an omitted host
+        // key was intentionally removed. Preserve keys produced by earlier
+        // policy instances, then let the later instance win on conflicts.
+        if custom_modified {
+            for key in host_custom.keys().filter(|key| !current.contains_key(*key)) {
+                custom.remove(key);
+            }
+        }
+        custom.extend(current);
+        let earlier = earlier_output.and_then(|output| output.violation().cloned());
         ctx.extensions
-            .insert(PolicyResponseOutput::new(custom, earlier.or(violation)));
+            .insert(PolicyResponseOutput::new(Arc::new(custom), earlier.or(violation)));
     }
 
     /// Return the request model for a non-streaming inference response.

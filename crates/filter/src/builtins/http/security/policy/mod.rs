@@ -81,6 +81,9 @@
 //! values at end of stream without buffering or exposing response content, and
 //! returns plugin-written custom values through [`PolicyResponseOutput`]. APL
 //! field mutators do not rewrite inference bodies in either direction.
+//! Host filters that create [`PolicyResponseContext`] at end of stream must be
+//! placed after `policy` in the filter chain, because response-body filters
+//! execute in reverse chain order.
 //!
 //! # The policy document
 //!

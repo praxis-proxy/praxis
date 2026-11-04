@@ -46,6 +46,11 @@ impl PolicyResponseOutput {
         self.custom.get(key)
     }
 
+    /// Return the complete custom namespace for policy-instance composition.
+    pub(crate) fn custom(&self) -> Arc<HashMap<String, serde_json::Value>> {
+        Arc::clone(&self.custom)
+    }
+
     /// Return the response-phase denial, when policy rejected the context.
     #[must_use]
     pub fn violation(&self) -> Option<&PluginViolation> {

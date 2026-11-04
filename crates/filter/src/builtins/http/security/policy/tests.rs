@@ -5807,6 +5807,9 @@ async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse()
         .headers
         .insert("content-type", HeaderValue::from_static("text/event-stream"));
     ctx.response_header = Some(&mut response);
+    let response_action = filter.on_response(&mut ctx).await.expect("response header phase ran");
+    assert!(matches!(response_action, FilterAction::Continue));
+    ctx.response_header = None;
     let mut body = Some(bytes::Bytes::from_static(b"data: {\"delta\":\"hi\"}\n\n"));
     let action = filter
         .on_response_body(&mut ctx, &mut body, false)
@@ -5845,6 +5848,9 @@ async fn metadata_only_response_denial_is_published_without_rewriting_the_body()
         .headers
         .insert("content-type", HeaderValue::from_static("text/event-stream"));
     ctx.response_header = Some(&mut response);
+    let response_action = filter.on_response(&mut ctx).await.expect("response header phase ran");
+    assert!(matches!(response_action, FilterAction::Continue));
+    ctx.response_header = None;
     let original = bytes::Bytes::from_static(b"data: [DONE]\n\n");
     let mut body = Some(original.clone());
     let action = filter
@@ -5853,13 +5859,12 @@ async fn metadata_only_response_denial_is_published_without_rewriting_the_body()
 
     assert!(matches!(action, FilterAction::Continue));
     assert_eq!(body, Some(original));
-    assert!(
-        ctx.extensions
-            .get::<PolicyResponseOutput>()
-            .and_then(PolicyResponseOutput::violation)
-            .is_some(),
-        "the downstream host must receive the late denial",
-    );
+    let violation = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .and_then(PolicyResponseOutput::violation)
+        .expect("the downstream host must receive the late denial");
+    assert_eq!(violation.code, "metadata_denied");
 }
 
 #[tokio::test(flavor = "multi_thread")]
