@@ -41,6 +41,9 @@ const FAST_SHUTDOWN_BOUND: Duration = Duration::from_secs(1); // 1 s
 /// How long dropping the tokio runtime waits for blocking work to stop.
 const RUNTIME_DROP_TIMEOUT: Duration = Duration::from_secs(1); // 1 s
 
+/// How long an aborted service gets to finish before shutdown proceeds.
+const ABORT_JOIN_BOUND: Duration = Duration::from_secs(1); // 1 s
+
 /// Name of every tokio worker thread.
 const WORKER_THREAD_NAME: &str = "praxis-worker";
 
@@ -390,7 +393,9 @@ impl ServiceSet {
         self.tasks.abort_all();
 
         let aborted = self.names.iter().map(|(_, name)| name.clone()).collect::<Vec<_>>();
-        self.join_all().await;
+        if tokio::time::timeout(ABORT_JOIN_BOUND, self.join_all()).await.is_err() {
+            warn!("aborted services did not finish before the abort join bound");
+        }
         if !aborted.is_empty() {
             warn!(aborted = aborted.len(), services = ?aborted, "aborted services that outlived the shutdown bound");
         }
