@@ -768,8 +768,11 @@ In-flight requests have a grace period of
 then cancels remaining async tasks; the rest of the budget
 bounds the wait for blocking work. A setting of `60`
 therefore still gives requests at most five seconds to
-finish. Drain traffic before SIGTERM when requests need
-longer; see [Diagnostics](diagnostics.md#draining-before-shutdown).
+finish. This limit also applies to streaming responses and
+SSE; a stream that has not completed when the grace period
+ends can be cut short. Drain traffic before SIGTERM when
+requests need longer; see
+[Diagnostics](diagnostics.md#draining-before-shutdown).
 
 Once runtime shutdown completes, Praxis flushes queued
 log lines and attempts to export pending OTLP spans, then
