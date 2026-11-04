@@ -18,7 +18,9 @@ use std::collections::VecDeque;
 use bytes::Bytes;
 #[cfg(feature = "pingora")]
 use pingora_proxy::Session;
-use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection};
+#[cfg(feature = "pingora")]
+use praxis_filter::connection_close_reason;
+use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection, cancel_bandwidth};
 use tracing::error;
 
 #[cfg(feature = "pingora")]
@@ -111,8 +113,14 @@ pub(super) async fn execute(
     ctx: &mut PingoraRequestCtx,
 ) -> pingora_core::Result<()> {
     let Err(halt) = run_request_body(pipeline, body, end_of_stream, ctx).await else {
+        // Pingora's duplex loop lives in the library, so this hook waits out
+        // the deadline. Hyper races it in the exchange loop instead.
+        super::bandwidth::await_upload_release(&mut ctx.extensions).await;
         return Ok(());
     };
+    if let Some(reason) = halt.rejection.as_ref().and_then(connection_close_reason) {
+        return Err(super::bandwidth::close_error(reason));
+    }
     if let Some(rejection) = halt.rejection {
         send_rejection_for(session, rejection, ctx).await;
     }
@@ -125,6 +133,10 @@ pub(super) async fn execute(
 
 /// Run body filters on a request body chunk, enforcing size limits; the
 /// backend-neutral core of `execute`.
+///
+/// A positive upload wait is recorded as a deadline and left uncommitted.
+/// The caller races that deadline with the upstream response and the read
+/// timeout, and commits only when the reserved bytes are released.
 ///
 /// # Errors
 ///
@@ -230,6 +242,7 @@ pub(in crate::http) async fn run_request_body(
             | FilterAction::StreamingTerminalResponse(_),
         ) => {
             suppress_stream_buffer_chunk(body, is_stream_buffer, ctx.request_body_released, end_of_stream);
+            super::bandwidth::arm_upload_release(&mut ctx.extensions);
             Ok(())
         },
         Ok(FilterAction::Release) => {
@@ -240,9 +253,11 @@ pub(in crate::http) async fn run_request_body(
                 &mut ctx.request_body_buffer,
                 end_of_stream,
             );
+            super::bandwidth::arm_upload_release(&mut ctx.extensions);
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
+            cancel_bandwidth(&mut ctx.extensions);
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
             Err(RequestBodyHalt::refused(
                 "request body rejected by filter pipeline",
@@ -250,6 +265,7 @@ pub(in crate::http) async fn run_request_body(
             ))
         },
         Err(e) => {
+            cancel_bandwidth(&mut ctx.extensions);
             error!(error = %e, "filter pipeline error during request body");
             ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_INTERNAL);
             Err(RequestBodyHalt::internal(

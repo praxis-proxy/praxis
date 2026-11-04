@@ -17,6 +17,7 @@
 use std::{fmt, mem, sync::Arc};
 
 use arc_swap::ArcSwap;
+use bytes::Bytes;
 use http::{HeaderValue, Method, Request, Response, Version};
 use hyper::body::Incoming;
 use praxis_filter::FilterPipeline;
@@ -24,7 +25,7 @@ use tracing::{Instrument as _, debug};
 
 use super::{
     admission,
-    body::ProxyBody,
+    body::{ProxyBody, Relay},
     downstream::DownstreamBody,
     listener::{ConnectionFacts, ListenerShared},
     reply::LocalReply,
@@ -76,6 +77,10 @@ async fn answer(
         },
         RequestPhase::Reply(reply) => Ok(flight.reply(reply).await),
         RequestPhase::Stream(response) => Ok(Box::pin(terminal::stream(flight, *response)).await),
+        RequestPhase::Close => {
+            flight.complete().await;
+            Err(ResponseAbort)
+        },
     }
 }
 
@@ -164,12 +169,100 @@ impl Flight {
         response
     }
 
-    /// Answer the request with `reply`, complete it, and hand back the
-    /// response for hyper to write.
+    /// Answer the request with `reply` and hand back the response for hyper
+    /// to write.
+    ///
+    /// A pending download wait does not hold this return. The head goes
+    /// back immediately and the body is written after that wait.
     pub(super) async fn reply(mut self, reply: LocalReply) -> Response<ProxyBody> {
+        if praxis_filter::download_pace_delay(&self.ctx.extensions).is_some() {
+            return self.reply_after_head(reply);
+        }
         let response = self.local_response(reply);
         self.complete().await;
         response
+    }
+
+    /// Return the head now. The bandwidth wait and the body write follow.
+    fn reply_after_head(mut self, mut reply: LocalReply) -> Response<ProxyBody> {
+        let chunk = take_paced_chunk(&self, &mut reply);
+        let mut response = self.local_response(reply);
+        let relay = chunk.is_some().then(|| {
+            let (relay, body) = Relay::new();
+            *response.body_mut() = body;
+            relay
+        });
+        let span = self.ctx.request_span.clone();
+        let task = PacedReply {
+            chunk,
+            flight: self,
+            relay,
+            settled: false,
+        };
+        drop(tokio::spawn(task.run().instrument(span)));
+        response
+    }
+}
+
+/// The bytes of `reply` that still have to be written after its head.
+fn take_paced_chunk(flight: &Flight, reply: &mut LocalReply) -> Option<Bytes> {
+    if flight.is_head() || reply.body_suppressed {
+        return None;
+    }
+    reply.body.take().filter(|bytes| !bytes.is_empty())
+}
+
+/// A local body written after [`Flight::reply`] has already returned its head.
+struct PacedReply {
+    /// The bytes to send once the bandwidth wait is over.
+    chunk: Option<Bytes>,
+
+    /// Completed after the body is settled.
+    flight: Flight,
+
+    /// The body hyper is already reading, when there are bytes to send.
+    relay: Option<Relay>,
+
+    /// Whether the download grant was committed or cancelled.
+    settled: bool,
+}
+
+impl PacedReply {
+    /// Wait, write the body, then complete the request.
+    ///
+    /// A client that leaves during the wait ends the task immediately. A reply
+    /// with nothing to write cancels the grant instead of sleeping.
+    async fn run(mut self) {
+        let had_chunk = self.chunk.is_some();
+        let paced = match self.relay.as_ref() {
+            Some(relay) if had_chunk => super::stream::pace_unless_closed(relay, &mut self.flight).await,
+            _ => false,
+        };
+        let wrote = paced && self.send_chunk().await;
+        praxis_filter::settle_download_write(&mut self.flight.ctx.extensions, wrote);
+        self.settled = true;
+        if had_chunk && !wrote {
+            self.flight.error = Some(ErrorOrigin::Downstream);
+        }
+        self.flight.complete().await;
+    }
+
+    /// Send the chunk and end the body. `false` when there is nothing to send or the client is gone.
+    async fn send_chunk(&mut self) -> bool {
+        let (Some(relay), Some(chunk)) = (self.relay.take(), self.chunk.take()) else {
+            return false;
+        };
+        let wrote = relay.data(chunk).await.is_ok();
+        let _end = relay.end().await;
+        wrote
+    }
+}
+
+impl Drop for PacedReply {
+    fn drop(&mut self) {
+        if !self.settled {
+            praxis_filter::cancel_download_pace(&mut self.flight.ctx.extensions);
+        }
     }
 }
 
