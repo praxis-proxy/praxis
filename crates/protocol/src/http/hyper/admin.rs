@@ -23,8 +23,9 @@ use hyper_util::{
     server::graceful::GracefulShutdown,
 };
 use praxis_core::{
+    config::ReadinessMode,
     health::HealthRegistry,
-    server::{HyperRuntime, hyper::ShutdownWatch},
+    server::{HyperRuntime, LifecycleHandle, hyper::ShutdownWatch},
 };
 use tokio::net::{TcpSocket, TcpStream};
 use tracing::{debug, error, info};
@@ -133,11 +134,38 @@ pub fn add_health_endpoint_with_pipelines(
     verbose: bool,
     pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
 ) {
+    add_health_endpoint_with_pipelines_and_policy(
+        runtime,
+        metrics_addr,
+        registry,
+        verbose,
+        pipelines,
+        ReadinessMode::Serving,
+        None,
+    );
+}
+
+/// Add health and metrics endpoints with readiness policy and lifecycle state.
+pub fn add_health_endpoint_with_pipelines_and_policy(
+    runtime: &mut HyperRuntime,
+    metrics_addr: &str,
+    registry: Option<HealthRegistry>,
+    verbose: bool,
+    pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+    readiness: ReadinessMode,
+    lifecycle: Option<LifecycleHandle>,
+) {
     let Some(listener) = bind_listener("metrics", metrics_addr) else {
         return;
     };
     let require_loopback_host = admin_host::is_loopback_host(metrics_addr);
-    let health = PingoraHealthService::new(registry, verbose).require_loopback_host(require_loopback_host);
+    let health = PingoraHealthService::new(registry, verbose)
+        .with_readiness(readiness)
+        .require_loopback_host(require_loopback_host);
+    let health = match lifecycle {
+        Some(lifecycle) => health.with_lifecycle(lifecycle),
+        None => health,
+    };
     let health = match pipelines {
         Some((pipelines, meta)) => health.with_live_pipelines(pipelines, meta),
         None => health,
@@ -361,7 +389,7 @@ mod tests {
     };
 
     use praxis_core::{
-        config::Config,
+        config::{Config, ReadinessMode},
         health::{ClusterHealthEntry, EndpointHealth},
         kv::KvStoreRegistry,
         server::ServerRuntime as _,
@@ -401,7 +429,15 @@ mod tests {
         let degraded: HealthRegistry = Arc::new([(Arc::from("backend"), Arc::new(entry))].into_iter().collect());
         let addr = free_addr();
         let mut runtime = empty_runtime();
-        add_health_endpoint_with_pipelines(&mut runtime, &addr, Some(degraded), false, None);
+        add_health_endpoint_with_pipelines_and_policy(
+            &mut runtime,
+            &addr,
+            Some(degraded),
+            false,
+            None,
+            ReadinessMode::Upstreams,
+            None,
+        );
         let _running = start(runtime);
 
         let ready = get(&addr, "/ready");
@@ -425,7 +461,15 @@ mod tests {
         let registry: HealthRegistry = Arc::new([(Arc::from("backend"), Arc::clone(&entry))].into_iter().collect());
         let addr = free_addr();
         let mut runtime = empty_runtime();
-        add_health_endpoint_with_pipelines(&mut runtime, &addr, Some(registry), false, None);
+        add_health_endpoint_with_pipelines_and_policy(
+            &mut runtime,
+            &addr,
+            Some(registry),
+            false,
+            None,
+            ReadinessMode::Upstreams,
+            None,
+        );
         let _running = start(runtime);
 
         let degraded = get(&addr, "/ready");

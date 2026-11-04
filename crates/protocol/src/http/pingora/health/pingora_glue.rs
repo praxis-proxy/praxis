@@ -24,7 +24,7 @@ use pingora_core::{
         listening::Service,
     },
 };
-use praxis_core::{PingoraServerRuntime, health::HealthRegistry};
+use praxis_core::{PingoraServerRuntime, config::ReadinessMode, health::HealthRegistry, server::LifecycleHandle};
 use tracing::info;
 
 use super::{
@@ -124,12 +124,35 @@ pub fn add_health_endpoint_with_pipelines(
     verbose: bool,
     pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
 ) {
-    add_health_endpoint_to_pingora_server_with_pipelines(
+    add_health_endpoint_with_pipelines_and_policy(
+        runtime,
+        metrics_addr,
+        registry,
+        verbose,
+        pipelines,
+        ReadinessMode::Serving,
+        None,
+    );
+}
+
+/// Add health and metrics endpoints with readiness policy and lifecycle state.
+pub fn add_health_endpoint_with_pipelines_and_policy(
+    runtime: &mut PingoraServerRuntime,
+    metrics_addr: &str,
+    registry: Option<HealthRegistry>,
+    verbose: bool,
+    pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+    readiness: ReadinessMode,
+    lifecycle: Option<LifecycleHandle>,
+) {
+    add_health_endpoint_to_pingora_server_with_policy(
         runtime.server_mut(),
         metrics_addr,
         registry,
         verbose,
         pipelines,
+        readiness,
+        lifecycle,
     );
 }
 
@@ -188,8 +211,35 @@ pub fn add_health_endpoint_to_pingora_server_with_pipelines(
     verbose: bool,
     pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
 ) {
+    add_health_endpoint_to_pingora_server_with_policy(
+        server,
+        metrics_addr,
+        registry,
+        verbose,
+        pipelines,
+        ReadinessMode::Serving,
+        None,
+    );
+}
+
+/// Add health and metrics endpoints to Pingora with readiness policy.
+fn add_health_endpoint_to_pingora_server_with_policy(
+    server: &mut Server,
+    metrics_addr: &str,
+    registry: Option<HealthRegistry>,
+    verbose: bool,
+    pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+    readiness: ReadinessMode,
+    lifecycle: Option<LifecycleHandle>,
+) {
     let require_loopback_host = admin_host::is_loopback_host(metrics_addr);
-    let health = PingoraHealthService::new(registry, verbose).require_loopback_host(require_loopback_host);
+    let health = PingoraHealthService::new(registry, verbose)
+        .with_readiness(readiness)
+        .require_loopback_host(require_loopback_host);
+    let health = match lifecycle {
+        Some(lifecycle) => health.with_lifecycle(lifecycle),
+        None => health,
+    };
     let health = match pipelines {
         Some((pipelines, meta)) => health.with_live_pipelines(pipelines, meta),
         None => health,

@@ -162,9 +162,12 @@ without the other; the two listeners must not overlap.
   once the server is accepting connections (liveness).
 - `/ready` returns per-cluster health status with
   healthy/unhealthy/total counts when active health
-  checks are configured; it returns `503 SERVICE UNAVAILABLE` when any
-  cluster has zero healthy endpoints. Without health
-  checks, `/ready` returns `{"status":"ok"}`.
+  checks are configured. The default `readiness: serving`
+  returns `200 OK` once the replica is serving, even when
+  an upstream cluster is degraded. Set `readiness: upstreams`
+  to return `503 SERVICE UNAVAILABLE` when any checked cluster
+  has zero healthy endpoints. Without health checks, both modes
+  return `{"status":"ok"}`.
 - `/metrics` returns Prometheus text exposition format
   with HTTP request metrics (`praxis_http_requests_total`,
   `praxis_http_request_duration_seconds`). When
@@ -200,12 +203,17 @@ the configured metrics port.
 admin:
   address: "127.0.0.1:9901"
   metrics_address: "127.0.0.1:9902"
+  readiness: serving # or upstreams for upstream-dependent readiness
 ```
 
 When `admin.verbose: true`, the `/ready` response
 includes per-cluster detail (cluster names, health
 counts). Default is `false` to avoid leaking internal
 topology.
+
+`admin.readiness` defaults to `serving`. It is a startup
+setting: changing it in a watched file logs a restart warning
+and leaves the running listener unchanged.
 
 ```yaml
 admin:

@@ -297,7 +297,8 @@ fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
 fn detect_admin_changes(old: &Config, new: &Config) {
     let changed = old.admin.address != new.admin.address
         || old.admin.verbose != new.admin.verbose
-        || old.admin.metrics_address != new.admin.metrics_address;
+        || old.admin.metrics_address != new.admin.metrics_address
+        || old.admin.readiness != new.admin.readiness;
     if changed {
         warn!(
             old_address = ?old.admin.address,
@@ -306,6 +307,8 @@ fn detect_admin_changes(old: &Config, new: &Config) {
             new_metrics_address = ?new.admin.metrics_address,
             old_verbose = ?old.admin.verbose,
             new_verbose = ?new.admin.verbose,
+            old_readiness = ?old.admin.readiness,
+            new_readiness = ?new.admin.readiness,
             "admin configuration changed; requires restart (listener addresses bind at startup)"
         );
     }

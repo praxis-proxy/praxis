@@ -28,6 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Add configurable `/ready` policy: `admin.readiness: serving` (the default)
+  keeps a serving replica ready during upstream degradation, while
+  `admin.readiness: upstreams` preserves upstream-dependent readiness.
+
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
   filled in from the declaration at validation time, keeping the routed

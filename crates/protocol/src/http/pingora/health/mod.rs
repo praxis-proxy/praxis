@@ -46,8 +46,8 @@ pub use listener_meta::{ListenerMeta, ListenerMetaStore, listener_meta_from_conf
 #[cfg(all(feature = "admin-api", feature = "pingora"))]
 pub use pingora_glue::{
     add_admin_api, add_admin_api_to_pingora_server, add_health_endpoint, add_health_endpoint_to_pingora_server,
-    add_health_endpoint_to_pingora_server_with_pipelines, add_health_endpoint_with_pipelines, add_prometheus_upkeep,
-    add_prometheus_upkeep_to_pingora_server,
+    add_health_endpoint_to_pingora_server_with_pipelines, add_health_endpoint_with_pipelines,
+    add_health_endpoint_with_pipelines_and_policy, add_prometheus_upkeep, add_prometheus_upkeep_to_pingora_server,
 };
 #[cfg(feature = "admin-api")]
 pub(in crate::http::pingora) use service::escape_json_string;
