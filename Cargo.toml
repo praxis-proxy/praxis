@@ -152,7 +152,7 @@ tonic-prost = "0.14.6"
 # Pingora 0.11 creates zero-capacity BufStreams, which Tokio 1.54 rejects.
 # Keep the 1.53 patch line until Pingora supports the new constructor contract.
 # https://github.com/tokio-rs/tokio/pull/8494
-tokio = { version = "~1.53.3", features = ["macros", "rt"] }
+tokio = { version = "~1.54.1", features = ["macros", "rt"] }
 tokio-stream = "0.1.19"
 tokio-util = "0.7.20"
 tracing = "0.1.44"
