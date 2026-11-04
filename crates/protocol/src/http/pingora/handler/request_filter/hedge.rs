@@ -26,9 +26,10 @@ use praxis_core::{
     hedge::{HedgeAttempt, HedgeDelivery, drive},
     subrequest::{SubRequest, SubRequestClient, SubRequestError, SubResponse},
 };
-use praxis_filter::{EndpointReselector, FilterPipeline, Rejection, TerminalResponse};
+use praxis_filter::{EndpointReselector, FilterPipeline, TerminalResponse};
 
 use super::super::super::context::PingoraRequestCtx;
+use crate::http::body_limit::{BodyLimitPhase, body_limit_rejection};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -49,7 +50,12 @@ enum PreparedBody {
     /// Bytes to replay. Empty for a request that has no body.
     Ready(Bytes),
     /// The body is larger than the selected-upstream limit.
-    TooLarge,
+    TooLarge {
+        /// Size the body would reach after adding the rejected chunk.
+        attempted: usize,
+        /// Selected-upstream buffering limit.
+        limit: usize,
+    },
 }
 
 /// Shared inputs for one attempt.
@@ -120,12 +126,14 @@ pub(super) async fn dispatch(
     };
     let body = match prepare_body(pipeline, session, ctx).await {
         Ok(PreparedBody::Ready(body)) => body,
-        Ok(PreparedBody::TooLarge) => return Ok(reject_oversized(session, ctx).await),
-        Err(error) => return answered_or_err(ctx, error),
+        Ok(PreparedBody::TooLarge { attempted, limit }) => {
+            return Ok(reject_oversized(session, ctx, limit, attempted).await);
+        },
+        Err(error) => return preparation_failed(ctx, error),
     };
     let plan = match AttemptPlan::from_request(client, ctx, session, body) {
         Ok(plan) => plan,
-        Err(error) => return answered_or_err(ctx, error),
+        Err(error) => return preparation_failed(ctx, error),
     };
     let raced = tokio::select! {
         biased;
@@ -230,22 +238,24 @@ fn contains_header_ascii(session: &Session, header: http::HeaderName, needle: &[
     })
 }
 
-/// The body filter already wrote the client response.
-fn answered_or_err(ctx: &mut PingoraRequestCtx, error: Box<pingora_core::Error>) -> Result<bool> {
+/// Release preparation resources and let the final error handler respond.
+fn preparation_failed(ctx: &mut PingoraRequestCtx, error: Box<pingora_core::Error>) -> Result<bool> {
     release_selected(ctx);
     end_lease(ctx);
-    if matches!(error.etype(), pingora_core::ErrorType::HTTPStatus(_)) {
-        return Ok(true);
-    }
     Err(error)
 }
 
 /// Reject a body the hedge cannot replay, and drop the primary's load slot.
-async fn reject_oversized(session: &mut Session, ctx: &mut PingoraRequestCtx) -> bool {
+async fn reject_oversized(session: &mut Session, ctx: &mut PingoraRequestCtx, limit: usize, attempted: usize) -> bool {
     release_selected(ctx);
     end_lease(ctx);
     ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
-    super::super::super::convert::send_rejection_for(session, Rejection::status(413), ctx).await;
+    let rejection = body_limit_rejection(
+        limit,
+        u64::try_from(attempted).unwrap_or(u64::MAX),
+        BodyLimitPhase::Hedge,
+    );
+    super::super::super::convert::send_rejection_for(session, rejection, ctx).await;
     true
 }
 
@@ -273,8 +283,9 @@ async fn prepare_body(
 fn concat(chunks: VecDeque<Bytes>, limit: usize) -> PreparedBody {
     let mut buf = BytesMut::new();
     for chunk in chunks {
-        if buf.len().saturating_add(chunk.len()) > limit {
-            return PreparedBody::TooLarge;
+        let attempted = buf.len().saturating_add(chunk.len());
+        if attempted > limit {
+            return PreparedBody::TooLarge { attempted, limit };
         }
         buf.extend_from_slice(&chunk);
     }
@@ -302,15 +313,16 @@ async fn read_downstream(
             .await
             .map_err(pingora_core::Error::into_down)?;
         let end_of_stream = piece.is_none();
-        super::super::request_body_filter::execute(pipeline, session, &mut piece, end_of_stream, ctx).await?;
+        super::super::request_body_filter::execute(pipeline, &mut piece, end_of_stream, ctx).await?;
         let Some(chunk) = piece else {
             if end_of_stream {
                 return Ok(PreparedBody::Ready(buf.freeze()));
             }
             continue;
         };
-        if buf.len().saturating_add(chunk.len()) > limit {
-            return Ok(PreparedBody::TooLarge);
+        let attempted = buf.len().saturating_add(chunk.len());
+        if attempted > limit {
+            return Ok(PreparedBody::TooLarge { attempted, limit });
         }
         buf.extend_from_slice(&chunk);
         if end_of_stream {
@@ -857,6 +869,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preparation_rejection_reaches_the_final_error_handler() {
+        let mut ctx = PingoraRequestCtx {
+            pending_rejection: Some(praxis_filter::Rejection::status(413)),
+            ..PingoraRequestCtx::default()
+        };
+        let error = preparation_failed(
+            &mut ctx,
+            pingora_core::Error::new(pingora_core::ErrorType::HTTPStatus(413)),
+        )
+        .expect_err("a pending rejection must not be mistaken for a delivered response");
+
+        assert_eq!(error.etype(), &pingora_core::ErrorType::HTTPStatus(413));
+        assert_eq!(
+            ctx.pending_rejection.as_ref().map(|rejection| rejection.status),
+            Some(413)
+        );
+        drop(ctx);
+    }
+
+    #[test]
     fn client_status_keeps_final_http_statuses() {
         assert_eq!(client_status(Some(200)), 200);
         assert_eq!(client_status(Some(404)), 404);
@@ -894,7 +926,10 @@ mod tests {
     #[test]
     fn concat_stops_at_the_limit() {
         let chunks = VecDeque::from([Bytes::from_static(b"hello"), Bytes::from_static(b"!")]);
-        assert!(matches!(concat(chunks, 5), PreparedBody::TooLarge));
+        assert!(matches!(
+            concat(chunks, 5),
+            PreparedBody::TooLarge { attempted: 6, limit: 5 }
+        ));
         let chunks = VecDeque::from([Bytes::from_static(b"hi")]);
         let PreparedBody::Ready(body) = concat(chunks, 5) else {
             panic!("a short body is replayable");

@@ -98,6 +98,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   views that request-body and response policy hooks receive, rather than
   reaching those plugins and PDPs in plaintext.
 
+- Request-body limit rejections log structured warnings and return JSON 413
+  responses across buffering and streaming paths. Body-phase rejections
+  for requests armed by `grpc_status` return gRPC Trailers-Only responses
+  instead. Oversized declared Content-Length values, including validated
+  matching comma-separated lengths, are rejected before reading the body
+  or sending 100 Continue. Local body-limit rejections are not retried upstream,
+  even when 413 is configured as retriable. HEAD rejection responses retain
+  representation headers without sending payload bytes, including over HTTP/2.
+  Streaming rejections also cancel HTTP/2 upstream streams promptly instead of
+  waiting for an upstream response or allowing it to replace the rejection.
+- Early HTTP/1 responses with unread uploads use Pingora's write-side
+  shutdown and bounded cleanup before closing, including authentication
+  and rate-limit rejections and successful terminal responses. Cleanup has
+  a 30-second deadline and a 128 MiB discard budget checked between body
+  reads. Streaming rejections release the upstream before responding;
+  access logs and request duration metrics are recorded before downstream
+  cleanup. Expected client-error filter rejections no longer produce a
+  duplicate Pingora error log.
 - The FIPS runtime probe selects the Pingora backend when compiling its
   listener tests with default features disabled.
 - The Hyper backend rejects reserved client trailer names before forwarding

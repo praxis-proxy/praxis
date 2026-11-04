@@ -63,13 +63,13 @@ pub(super) async fn execute(
     } else if pending_rejection.is_some() {
         ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
     }
+    if let Some(rejection) = pending_rejection {
+        return handle_pending_rejection(session, rejection, ctx).await;
+    }
     let formatter = ctx.extensions.get::<ErrorResponseFormatterHandle>();
     let grpc = ctx.extensions.get::<praxis_filter::GrpcErrorMapping>();
 
     if let ErrorType::HTTPStatus(code) = etype {
-        if let Some(rejection) = pending_rejection {
-            return handle_pending_rejection(session, code, rejection, grpc).await;
-        }
         return handle_http_status(session, code, formatter, grpc).await;
     }
 
@@ -182,32 +182,34 @@ async fn handle_http_status(
     write_error_response(session, err, formatter, grpc).await
 }
 
-/// Deliver a rejection raised during the response phase with its full
+/// Deliver a rejection raised during body processing with its full
 /// configured headers and body.
 ///
-/// A response-phase `Reject` cannot write to the session directly (the
-/// upstream response is mid-flight), so the rejection crosses the error
-/// boundary via the request context and is written here.
+/// Crossing the error boundary releases the upstream session before response
+/// delivery. Lingering downstream cleanup runs after completion logging.
 #[cfg(feature = "pingora")]
 async fn handle_pending_rejection(
     session: &mut Session,
-    code: u16,
     rejection: Rejection,
-    grpc: Option<&praxis_filter::GrpcErrorMapping>,
+    ctx: &mut PingoraRequestCtx,
 ) -> FailToProxy {
+    let code = rejection.status;
     if final_response_written(session) {
         return done(code);
     }
-    if let Some(grpc) = grpc.filter(|_mapping| rejection.status >= 400) {
-        let message = rejection_message(&rejection);
-        crate::http::pingora::grpc_trailers::send_trailers_only(session, grpc, rejection.status, message).await;
-        return done(code);
-    }
-    crate::http::pingora::convert::send_rejection(session, rejection).await;
+    crate::http::pingora::convert::send_rejection_for(session, rejection, ctx).await;
     done(code)
 }
 
+/// Whether a client-error halt represents an expected filter rejection.
+#[cfg(feature = "pingora")]
+pub(super) fn expected_filter_rejection(error: &pingora_core::Error, ctx: &PingoraRequestCtx) -> bool {
+    matches!(error.etype(), ErrorType::HTTPStatus(400..=499))
+        && ctx.error_type == Some(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT)
+}
+
 /// The text to carry as `grpc-message` for a rejection.
+#[cfg(feature = "hyper")]
 pub(in crate::http) fn rejection_message(rejection: &Rejection) -> &str {
     rejection
         .body
@@ -420,6 +422,32 @@ fn classify_error_tuple(etype: &ErrorType, source: &pingora_core::ErrorSource) -
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_expected_client_rejections_suppress_the_native_error_log() {
+        for (etype, expected) in [
+            (ErrorType::HTTPStatus(400), true),
+            (ErrorType::HTTPStatus(413), true),
+            (ErrorType::HTTPStatus(429), true),
+            (ErrorType::HTTPStatus(500), false),
+            (ErrorType::InternalError, false),
+            (ErrorType::WriteError, false),
+        ] {
+            let error = pingora_core::Error::new(etype);
+            let mut ctx = PingoraRequestCtx::default();
+            assert!(
+                !expected_filter_rejection(&error, &ctx),
+                "an unclassified error must remain visible"
+            );
+            ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
+            assert_eq!(
+                expected_filter_rejection(&error, &ctx),
+                expected,
+                "only classified client-error rejections are expected"
+            );
+            drop(ctx);
+        }
+    }
 
     #[test]
     fn problem_details_body_has_rfc9457_fields() {

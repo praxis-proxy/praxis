@@ -660,29 +660,40 @@ async fn head_response_carries_no_body() {
 }
 
 #[tokio::test]
-async fn oversized_body_is_rejected_with_413() {
+async fn oversized_declared_body_is_rejected_before_upload() {
     let backend = Backend::start(Reply::Fixed(ok("x"))).await;
     let yaml = format!(
         "{}\nbody_limits:\n  max_request_bytes: 16\n",
         routed_yaml(backend.addr, "")
     );
     let proxy = Proxy::start(&yaml).await;
-    let body = "x".repeat(64);
-
     let response = proxy
-        .send(&format!(
-            "POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 64\r\n\r\n{body}"
-        ))
+        .send("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 64\r\nExpect: 100-continue\r\n\r\n")
         .await;
 
-    assert_eq!(response.status, 413, "a body over the limit is refused");
+    assert_eq!(
+        response.status, 413,
+        "the oversized declaration is refused before upload"
+    );
+    assert_eq!(
+        response.body, r#"{"error":"request body too large"}"#,
+        "header admission uses the shared JSON rejection"
+    );
+    assert!(
+        backend.requests().is_empty(),
+        "header admission must not contact the upstream"
+    );
 }
 
 #[tokio::test]
 async fn early_answer_reaches_the_client_while_the_upstream_ignores_the_body() {
     let early = b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 8\r\n\r\ntoo much".to_vec();
     let backend = Backend::start(Reply::Early(early)).await;
-    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let yaml = format!(
+        "{}\nbody_limits:\n  max_request_bytes: {LARGE_BODY_BYTES}\n",
+        routed_yaml(backend.addr, "")
+    );
+    let proxy = Proxy::start(&yaml).await;
     let (mut reader, writer) = TcpStream::connect(proxy.addr).await.unwrap().into_split();
     let upload = tokio::spawn(write_large_body(writer, LARGE_BODY_BYTES));
 
@@ -707,6 +718,7 @@ async fn upstream_that_stops_reading_the_body_is_a_write_timeout() {
         "            endpoints:",
         "            write_timeout_ms: 200\n            endpoints:",
     );
+    let yaml = format!("{yaml}\nbody_limits:\n  max_request_bytes: {LARGE_BODY_BYTES}\n");
     let proxy = Proxy::start(&yaml).await;
     let (mut reader, writer) = TcpStream::connect(proxy.addr).await.unwrap().into_split();
     let upload = tokio::spawn(write_large_body(writer, LARGE_BODY_BYTES));
