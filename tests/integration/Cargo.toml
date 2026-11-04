@@ -14,12 +14,17 @@ tls-health-check = ["praxis/tls-health-check"]
 # configuration the standard build ships. `--no-default-features` builds the
 # proxy under test with the FIPS build's feature set instead
 # (`make test-integration-fips`).
-default = ["pingora", "policy-engine"]
+default = ["pingora", "policy-builtins"]
 # The network backend of the proxy under test; exactly one. `make
 # test-integration-hyper` builds with `--no-default-features --features hyper`.
 pingora = ["praxis-test-utils/pingora", "praxis/pingora"]
 hyper = ["praxis-test-utils/hyper", "praxis/hyper"]
-policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine"]
+policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine", "praxis-test-utils/policy-engine"]
+policy-builtins = ["policy-engine", "praxis/policy-builtins", "praxis-test-utils/policy-builtins"]
+policy-api-key = ["policy-engine", "praxis/policy-api-key", "praxis-test-utils/policy-api-key"]
+policy-crypto-default = ["policy-engine", "praxis/policy-crypto-default", "praxis-test-utils/policy-crypto-default"]
+policy-crypto-fips = ["policy-engine", "praxis/policy-crypto-fips", "praxis-test-utils/policy-crypto-fips"]
+policy-api-key-fips = ["policy-api-key", "policy-crypto-fips"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter"]
 cloud-events-filter = ["praxis/cloud-events-filter"]
 upstream-binding = ["praxis/upstream-binding"]

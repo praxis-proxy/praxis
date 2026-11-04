@@ -1,13 +1,14 @@
 # FIPS 140-3
 
-Praxis does all of its cryptography in the system OpenSSL library. On a Red
-Hat Enterprise Linux 9 host in FIPS mode, that library's provider is the
+The FIPS build routes TLS and Policy API-key hashing through system OpenSSL.
+Praxis selects the API-key builtin alone and checks Policy's whole-graph
+capability report before accepting required-FIPS startup. On a Red Hat
+Enterprise Linux 9 host in FIPS mode, the OpenSSL provider is the
 validated module (Red Hat Enterprise Linux 9 OpenSSL FIPS Provider, CMVP
 certificate #4857 at the time of writing; Red Hat keeps the current list at
-<https://access.redhat.com/compliance/fips>). There, praxis does its TLS,
-hashing and random numbers inside a FIPS 140-3 validated boundary. Praxis
-itself is not a validated module and never turns FIPS mode on: the host does,
-and praxis reports it and, on request, enforces it.
+<https://access.redhat.com/compliance/fips>). Praxis itself is not a validated
+module and never turns FIPS mode on: the host does, and praxis reports it and,
+on request, enforces it.
 
 This page is for operators deploying the FIPS build. How the build is checked
 is in [FIPS Tooling](../developing/fips.md).
@@ -15,20 +16,25 @@ is in [FIPS Tooling](../developing/fips.md).
 ## The FIPS build
 
 The standard build (`make release`, `make container`) uses the default
-features. The FIPS build leaves out what is not yet FIPS compliant:
+features, including the complete policy builtin set. The FIPS build selects
+Policy's API-key plugin with its FIPS crypto backend:
 
 | | Standard | FIPS |
 |---|---|---|
 | Make targets | `release`, `container` | `release-fips`, `container-fips` |
-| Cargo features | defaults | `pingora,config-reload,admin-api` |
-| `policy` filter (policy engine) | yes | no: its dependencies carry their own cryptography |
+| Cargo features | defaults | `pingora,config-reload,admin-api,policy-api-key,policy-crypto-fips` |
+| `policy` filter (policy engine) | yes, with all supported builtins | API-key identity; other crypto builtins are excluded |
 | Base image | Alpine, praxis built with upstream Rust | `ubi9/ubi-minimal`, praxis built with Red Hat's `rust-toolset` on `ubi9/ubi`, both pinned by digest and signature-verified |
 | OpenSSL | Alpine's, dynamically linked | UBI's, dynamically linked (`openssl-libs` and `openssl-fips-provider-so`), the validated module on a FIPS host |
 | Published tags | `<version>`, `<major>.<minor>`, `latest`, `sha-<hash>`, `nightly` (see [image tags](../release.md#image-tags)) | the same with a `-fips` suffix (`0.7.0-fips`, `latest-fips`) |
 
-The FIPS build rejects a configuration that uses the `policy` filter at
-startup. Everything else, including TLS listeners, mTLS, SNI, the admin API
-and hot reload, works as in the standard build.
+The FIPS feature set includes Policy's `api-key` and `fips` features. Policy's
+capability report verifies that the unified graph contains no other builtin
+crypto paths, and startup checks that OpenSSL can fetch SHA-256 with
+`fips=yes`. Host-registered policy plugins have no capability evidence and
+remain refused when `PRAXIS_REQUIRE_FIPS=1`. Everything else, including TLS
+listeners, mTLS, SNI, the admin API and hot reload, works as in the standard
+build.
 
 The binary links `libcrypto.so.3` and `libssl.so.3` dynamically. The only
 crates in the image that do security-relevant cryptography are rustls and the
@@ -91,10 +97,9 @@ turns it on. It is a check, not a switch. With it on, praxis refuses to start:
 
 - unless all three signals above are present, and names each one that is missing;
 - when a listener's TLS configuration is not FIPS-approved by rustls;
-- when the binary registers the `policy` filter, as the standard build does:
-  the policy engine verifies JWTs with aws-lc-rs and its OAuth and Valkey
-  plugins hash with the RustCrypto `hmac` and `sha2` crates, none of which
-  is the system OpenSSL. Use the FIPS build.
+- when the registered `policy` filter's capability report is outside the
+  supported API-key plus FIPS-backend selection, its OpenSSL FIPS digest is
+  unavailable, or host-registered policy plugins have no FIPS capability evidence.
 
 Upstream connections always require Extended Master Secret and use the same
 provider, so they are FIPS whenever the listeners are. Without the variable,
@@ -250,7 +255,7 @@ kept out of it:
 | ahash, crc32fast, blake2, digest | hash maps, gzip checksums, Pingora cache keys | not security functions |
 | x509-parser (parsing only, no `verify` feature) | peer certificate fields in the Pingora fork; praxis's own SPIFFE use is outside the FIPS feature set | parse only |
 | subtle, zeroize | constant-time comparison, wiping | helpers |
-| policy engine (`policy` filter) | JWT, OAuth, Valkey builtins carry aws-lc, sha2 and hmac | not in the FIPS build |
+| policy engine (`policy` filter) | API-key uses Policy's OpenSSL FIPS backend; other crypto builtins are omitted and reported | API-key plus FIPS-backend selection is supported; host plugins are refused |
 | `basic_auth` filter (feature `basic-auth-filter`) | password hashing through OpenSSL's SHA-256 (EVP) | not in the FIPS build (the feature is off by default); ready to join it |
 | sha1, rcgen, ring | test utilities and fixtures | development only, absent from the shipped binary and its manifest |
 

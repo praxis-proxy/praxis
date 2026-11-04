@@ -12,8 +12,8 @@ use serde::Deserialize;
 // -----------------------------------------------------------------------------
 
 /// Configuration block for the `policy` filter, which embeds the Praxis
-/// Policy Engine in-process (gated behind the `policy-engine` feature,
-/// on by default).
+/// Policy Engine in-process (gated behind the `policy-engine` feature;
+/// the default feature set also includes all supported builtins).
 ///
 /// Praxis filter configs are flat: the filter's typed fields sit
 /// directly under the `- filter:` entry alongside the structural keys

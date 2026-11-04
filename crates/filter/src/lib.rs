@@ -123,7 +123,16 @@ pub use builtins::{
     normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]
-pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, fips_crypto_blocker, register_policy_plugin_factory};
+#[cfg(not(feature = "policy-engine"))]
+/// Report missing capability evidence for a policy filter registered by another factory.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keep the FIPS blocker contract consistent when policy support is disabled"
+)]
+pub fn fips_crypto_blocker() -> Option<String> {
+    Some("policy filter capability evidence is unavailable in this build".to_owned())
+}
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{
     HttpFilterContext, PendingHeaderResult, Request, Response, StreamTermination, StreamTerminationCause,

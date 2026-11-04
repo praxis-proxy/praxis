@@ -75,18 +75,16 @@ pingora-proxy = { version = "0.11.0", package = "quixotic-plecostomus-proxy", fe
 percent-encoding = "2.3.2"
 rand = "0.10.3"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
-ppe = { version = "0.5.0", package = "praxis-policy", features = ["builtins"] }
+# Policy owns its builtin selection: this workspace dependency stays engine-only
+# until a Praxis feature explicitly forwards a builtin selection.
+ppe = { git = "https://github.com/evacchi/policy", rev = "ad990cbe095a090540d387c1e44e702fb154468d", package = "praxis-policy", default-features = false }
 parking_lot = "0.12.5"
 portable-atomic = "1.15.0"
 proptest = "1.12.0"
 quote = "1.0.47"
-# default-features = false for the same reason as praxis-filter below: the
-# binary's default set includes `policy-engine`, and the test harness depends
-# on this crate, so leaving the defaults on made every test suite build the
-# policy engine (and its aws-lc-rs, sha2 and hmac) no matter which features the
-# suite asked for. Each dependant now names the features it needs; the test
-# crates keep `policy-engine` in their own defaults, so the standard test run is
-# unchanged, and `--no-default-features` gives the FIPS build's feature set.
+# default-features = false: test suites and binaries select the policy engine
+# and its builtin set through their own features, while policy-free builds stay
+# free of the policy dependency graph.
 praxis = { path = "crates/server", package = "praxis-proxy", default-features = false }
 # default-features = false, like praxis-filter below: the core crate's only
 # default is the `pingora` network backend, and the backend is chosen once, by
@@ -94,11 +92,9 @@ praxis = { path = "crates/server", package = "praxis-proxy", default-features = 
 # through praxis-protocol. A member that inherits this entry gets the backend
 # through that chain, never by accident.
 praxis-core = { version = "0.7.5", path = "crates/core", package = "praxis-proxy-core", default-features = false }
-# default-features = false: the filter crate's own default (`policy-engine`)
-# must not leak in through this dependency edge, or a build that turns the
-# policy engine off at the binary (`--no-default-features`, the FIPS build)
-# would still link it. The `praxis-proxy` binary's default feature set forwards
-# `policy-engine` explicitly, so the standard build is unchanged.
+# default-features = false: the filter's default (`policy-builtins`) must not
+# leak through library or harness edges. The binary and standard test-suite
+# defaults select the supported builtin union explicitly.
 praxis-filter = { version = "0.7.5", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
 # default-features = false: the harness's default is the Pingora backend, and
 # a suite crate that runs on hyper must be able to leave it off, so each suite

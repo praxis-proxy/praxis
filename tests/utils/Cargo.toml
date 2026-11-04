@@ -16,6 +16,12 @@ default = ["pingora"]
 pingora = ["praxis/pingora"]
 hyper = ["praxis/hyper"]
 tls-health-check = ["praxis/tls-health-check"]
+policy-engine = ["praxis/policy-engine"]
+policy-builtins = ["policy-engine", "praxis/policy-builtins"]
+policy-api-key = ["policy-engine", "praxis/policy-api-key"]
+policy-crypto-default = ["policy-engine", "praxis/policy-crypto-default"]
+policy-crypto-fips = ["policy-engine", "praxis/policy-crypto-fips"]
+policy-api-key-fips = ["policy-api-key", "policy-crypto-fips"]
 
 [lints]
 workspace = true
@@ -24,7 +30,7 @@ workspace = true
 # The same two features as praxis-protocol below, plus the backend the suite
 # crate forwards, and nothing else: the workspace declares the binary crate
 # without its defaults so the policy engine is a choice each test crate makes
-# (its `policy-engine` feature), not a side effect of depending on the
+# (its policy feature), not a side effect of depending on the
 # harness. `--no-default-features` on a test crate therefore builds the proxy
 # exactly as the FIPS build does, once it names the backend.
 praxis = { workspace = true, features = ["config-reload", "admin-api"] }

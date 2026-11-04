@@ -49,7 +49,7 @@ fn hint_location(crate_name: &str) -> &'static str {
              Cargo.toml); jsonwebtoken via the policy engine 'jwt' builtin"
         },
         "sha2" => {
-            "praxis-policy-apl-runtime session_resolver.rs; policy 'oauth' and 'valkey' builtins; basic-auth filter \
+            "policy 'api-key' with crypto-rustcrypto, 'jwt', 'oauth' and 'valkey' builtins; basic-auth filter \
              (feature basic-auth-filter)"
         },
         "hmac" => "policy 'oauth' builtin (delegator-oauth cache/key.rs)",

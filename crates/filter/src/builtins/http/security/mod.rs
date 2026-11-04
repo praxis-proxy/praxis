@@ -31,4 +31,4 @@ pub use ip_acl::IpAclFilter;
 #[cfg(feature = "spiffe")]
 pub use peer_identity_trust::PeerIdentityTrustFilter;
 #[cfg(feature = "policy-engine")]
-pub use policy::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use policy::{PolicyFilter, PolicyPluginFactoryFn, fips_crypto_blocker, register_policy_plugin_factory};

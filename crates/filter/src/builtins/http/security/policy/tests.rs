@@ -1,6 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
+#![expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::tests_outside_test_module,
+    reason = "policy test functions live in this cfg(test) module"
+)]
+
 //! Tests for the `policy` security filter.
 //!
 //! Uses HMAC (HS256) JWTs throughout for setup simplicity — the
@@ -245,59 +254,6 @@ global:
   pdp:
     - kind: cel
 "#
-    );
-    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
-    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
-}
-
-/// API key the `identity/api-key` fixture resolves to subject `alice`.
-const TEST_API_KEY: &str = "sk-test-alice";
-
-/// `sha256:` digest of [`TEST_API_KEY`], the form the file directory indexes.
-const TEST_API_KEY_DIGEST: &str = "sha256:4d692786b022a5d5a48381dcaf1e5e346366feb5579a1d699de2991d153b05f9";
-
-/// Write a pure-L7 policy whose only identity resolver is `identity/api-key`,
-/// backed by a one-record file directory.
-#[expect(
-    clippy::too_many_lines,
-    reason = "test fixture, the YAML literal is the bulk; splitting it would obscure the shape under test"
-)]
-fn write_api_key_config() -> (TempDir, String) {
-    let dir = TempDir::new().expect("create tempdir");
-    let keys_path = dir.path().join("keys.yaml");
-    std::fs::write(
-        &keys_path,
-        format!("keys:\n  - hash: \"{TEST_API_KEY_DIGEST}\"\n    user: alice\n"),
-    )
-    .expect("write keys.yaml");
-    let cfg_path = dir.path().join("cpex.yaml");
-    let yaml = format!(
-        r#"plugins:
-  - name: api-keys
-    kind: identity/api-key
-    hooks:
-      - identity.resolve
-    on_error: fail
-    config:
-      credential:
-        kind: header
-        name: Authorization
-      prefix: "Bearer sk-test-"
-      provider:
-        kind: file
-        path: "{keys}"
-        index: sha256
-      record_map:
-        subject:
-          id: user
-global:
-  authentication:
-    - api-keys
-  authorization:
-    pre_invocation:
-      - "require(authenticated)"
-"#,
-        keys = keys_path.display()
     );
     std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
@@ -1926,52 +1882,6 @@ async fn pure_l7_allow_publishes_authenticated_identity() {
             .map(AuthenticatedIdentity::subject_id),
         Some("alice"),
     );
-}
-
-/// Run one pure-L7 request through the `identity/api-key` policy, with
-/// `authorization` as the `Authorization` header when present. Returns the
-/// reject status (`None` on Continue) and the published subject, so no
-/// key-derived value reaches an assertion message.
-async fn dispatch_api_key(authorization: Option<&str>) -> (Option<u16>, Option<String>) {
-    let (_dir, path) = write_api_key_config();
-    let filter = build_filter(path);
-    let mut req = make_request(Method::GET, "/");
-    if let Some(value) = authorization {
-        req.headers
-            .insert("Authorization", HeaderValue::from_str(value).expect("header value"));
-    }
-    let mut ctx = make_filter_context(&req);
-    let status = match filter.on_request(&mut ctx).await.expect("filter ran") {
-        FilterAction::Continue => None,
-        FilterAction::Reject(rej) => Some(rej.status),
-        _ => panic!("api-key dispatch must Continue or Reject"),
-    };
-    let subject = ctx
-        .extensions
-        .get::<AuthenticatedIdentity>()
-        .map(|id| id.subject_id().to_owned());
-    (status, subject)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn api_key_known_key_resolves_identity() {
-    let (status, subject) = dispatch_api_key(Some(&format!("Bearer {TEST_API_KEY}"))).await;
-    assert_eq!(status, None, "a known key must Continue");
-    assert_eq!(subject.as_deref(), Some("alice"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn api_key_unknown_key_is_rejected() {
-    let (status, subject) = dispatch_api_key(Some("Bearer sk-test-mallory")).await;
-    assert_eq!(status, Some(401), "an unknown key must be rejected 401");
-    assert_eq!(subject, None, "no identity is published on a rejection");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn api_key_missing_key_is_rejected() {
-    let (status, subject) = dispatch_api_key(None).await;
-    assert_eq!(status, Some(401), "a request with no key must be rejected 401");
-    assert_eq!(subject, None, "no identity is published on a rejection");
 }
 
 /// Write a pure-L7 JWT policy whose one authorization rule is `rule`.

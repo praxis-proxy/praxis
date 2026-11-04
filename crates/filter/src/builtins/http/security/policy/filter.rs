@@ -25,7 +25,7 @@ use ppe::praxis_policy_core::{
     },
     engine::PolicyEngine,
     error::{PluginError, PluginViolation},
-    extensions::{LLMExtension, LlmRequestDocument, MetaExtension, http::SecretHeaderProvenance},
+    extensions::{Credential, LLMExtension, LlmRequestDocument, MetaExtension, http::SecretHeaderProvenance},
     hooks::Extensions,
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
@@ -100,9 +100,10 @@ enum GatedIdentity {
 /// request / response body rewriting. Content scanning is a host plugin
 /// the engine dispatches, not a bundled one.
 ///
-/// Registered under the YAML filter name `policy`. The `policy-engine`
-/// cargo feature is on by default; `--no-default-features` leaves the
-/// filter out.
+/// Registered under the YAML filter name `policy`. The standard build selects
+/// `policy-builtins`; `policy-engine` enables the engine without bundled
+/// plugins. Individual `policy-*` features select plugins, and a separate
+/// `policy-crypto-*` feature selects the Policy crypto backend.
 ///
 /// A single request can carry multiple identity sources — user JWT in
 /// `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in
@@ -306,7 +307,7 @@ pub struct PolicyFilter {
     response_dispatch_timeout: std::time::Duration,
     /// The transport installed on the engine, kept so tests can see which
     /// connector policy calls go through.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     transport: Arc<PolicyHttpTransport>,
 }
 
@@ -374,7 +375,34 @@ impl PolicyFilter {
         })?;
 
         let mgr = Arc::new(PolicyEngine::default());
+        #[cfg(any(
+            feature = "policy-builtins",
+            feature = "policy-jwt",
+            feature = "policy-api-key",
+            feature = "policy-api-key-fips",
+            feature = "policy-oauth",
+            feature = "policy-delegator-vault",
+            feature = "policy-elicitation-ciba",
+            feature = "policy-cedar",
+            feature = "policy-cel",
+            feature = "policy-opa",
+            feature = "policy-valkey"
+        ))]
         ppe::install_builtins(&mgr);
+        #[cfg(not(any(
+            feature = "policy-builtins",
+            feature = "policy-jwt",
+            feature = "policy-api-key",
+            feature = "policy-api-key-fips",
+            feature = "policy-oauth",
+            feature = "policy-delegator-vault",
+            feature = "policy-elicitation-ciba",
+            feature = "policy-cedar",
+            feature = "policy-cel",
+            feature = "policy-opa",
+            feature = "policy-valkey"
+        )))]
+        let _visitor = ppe::register_apl(&mgr, ppe::AplOptions::in_process());
 
         // The lazy connection pool must not bind to the temporary init runtime.
         let transport = Self::http_transport(
@@ -586,32 +614,32 @@ impl PolicyFilter {
             llm_request_mutator_warned: AtomicBool::new(false),
             llm_response_mutator_warned: AtomicBool::new(false),
             response_dispatch_timeout: dispatch_timeout,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "policy-builtins"))]
             transport,
         })
     }
 
     /// Test accessor for the transport installed on the engine.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn transport(&self) -> &PolicyHttpTransport {
         &self.transport
     }
 
     /// Test accessor for the hook the response half dispatches, if any.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn response_hook(&self) -> Option<&'static str> {
         self.response_hook
     }
 
     /// Test accessor for the shape derived from the loaded policy:
     /// `(http_global, entity_routes)`.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn derived_shape(&self) -> (bool, bool) {
         (self.http_global, self.entity_routes)
     }
 
     /// Return `(llm_routes, llm_post)` for tests.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn derived_llm_shape(&self) -> (bool, bool) {
         (self.llm_routes, self.llm_post)
     }
@@ -1699,10 +1727,6 @@ impl PolicyFilter {
     ///
     /// Returns [`FilterError`] when the hook times out or yields no result,
     /// so the response fails under the filter's `failure_mode`.
-    #[expect(
-        clippy::large_stack_frames,
-        reason = "PPE response dispatch carries large async payloads"
-    )]
     fn dispatch_response_cmf(
         &self,
         hook: &'static str,
@@ -1712,7 +1736,7 @@ impl PolicyFilter {
     ) -> Result<ppe::praxis_policy_core::executor::PipelineResult, FilterError> {
         let mgr = Arc::clone(&self.mgr);
         let invoke = async move {
-            let (r, _bg) = mgr.invoke_named::<CmfHook>(hook, payload, extensions, None).await;
+            let (r, _bg) = Box::pin(mgr.invoke_named::<CmfHook>(hook, payload, extensions, None)).await;
             r
         };
         block_on_bounded(invoke, self.response_dispatch_timeout)
@@ -2650,23 +2674,48 @@ pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extension
     // `request_headers_to_set` overwrites, no remove needed).
     if count > 0 {
         for inbound in raw.inbound_tokens.values() {
-            let normalized = inbound.source_header.to_ascii_lowercase();
+            let Some(source_header) = inbound_source_header(&inbound.source) else {
+                tracing::warn!(
+                    target: "policy.filter",
+                    source = %inbound.source,
+                    "inbound credential location cannot be stripped from request headers",
+                );
+                continue;
+            };
+            let normalized = source_header.to_ascii_lowercase();
             if attached_outbound.contains(&normalized) {
                 continue;
             }
-            if let Ok(n) = http::header::HeaderName::try_from(inbound.source_header.as_str()) {
-                ctx.request_headers_to_remove.push(n);
+            if let Ok(header_name) = http::header::HeaderName::try_from(source_header) {
+                ctx.request_headers_to_remove.push(header_name);
             } else {
                 tracing::warn!(
                     target: "policy.filter",
-                    header = %inbound.source_header,
-                    "inbound source_header is not a valid HTTP header name; cannot strip",
+                    header = source_header,
+                    "inbound credential source is not a valid HTTP header name; cannot strip",
                 );
             }
         }
     }
 
     count
+}
+
+/// Map a Policy credential location to the HTTP header that can be stripped.
+fn inbound_source_header(source: &Credential) -> Option<&str> {
+    match source {
+        Credential::Header { name } => Some(name),
+        Credential::Cookie { .. } => Some(http::header::COOKIE.as_str()),
+        Credential::QueryParam { .. } => None,
+        other => {
+            tracing::warn!(
+                target: "policy.filter",
+                source = %other,
+                "unsupported inbound credential location; cannot strip",
+            );
+            None
+        },
+    }
 }
 
 // -----------------------------------------------------------------------------

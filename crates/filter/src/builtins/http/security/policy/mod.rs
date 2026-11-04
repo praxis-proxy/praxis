@@ -190,12 +190,40 @@ mod transport;
 pub use filter::PolicyFilter;
 pub use host_plugins::{PolicyPluginFactoryFn, register_policy_plugin_factory};
 
+/// Explain why this policy filter cannot be used with required FIPS mode.
+pub fn fips_crypto_blocker() -> Option<String> {
+    if host_plugins::host_plugin_count() > 0 {
+        return Some("host policy plugin factories have no FIPS capability evidence".to_owned());
+    }
+
+    let report = ppe::crypto_capability_report();
+    if !report.fips_profile_is_safe() {
+        return Some(format!(
+            "Policy's compiled crypto capabilities are outside the supported FIPS profile: {report:?}"
+        ));
+    }
+
+    #[cfg(feature = "policy-crypto-fips")]
+    if let Err(error) = ppe::validate_api_key_crypto() {
+        return Some(format!("Policy API-key FIPS crypto is unavailable: {error}"));
+    }
+
+    None
+}
+
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    reason = "tests"
-)]
+mod crypto_capabilities;
+
+#[cfg(all(test, feature = "policy-builtins"))]
 mod tests;
+
+#[cfg(all(
+    test,
+    any(
+        feature = "policy-builtins",
+        feature = "policy-api-key-fips",
+        all(feature = "policy-api-key", feature = "policy-crypto-default"),
+        all(feature = "policy-api-key", feature = "policy-crypto-fips")
+    )
+))]
+mod api_key_tests;

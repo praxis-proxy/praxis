@@ -32,14 +32,20 @@ exist so that proof is a Make target, not a manual session.
 **The suites as the FIPS build.** `make test-integration-fips` runs the
 schema, security, integration and resilience suites (and
 `test-conformance-fips` the conformance suite) with `--no-default-features`,
-so the proxy each suite starts in process is built exactly as the FIPS binary
-is: the workspace declares the binary crate without its defaults, and every
-test crate opts into `policy-engine` through its own default feature. The
+so the proxy each suite starts in process is built exactly as the default FIPS
+binary is: the workspace declares the binary crate without its defaults and
+the test harness does not select a policy feature. The
 tests that spawn the binary get the FIPS build through `PRAXIS_BIN`
 (`make build-fips` produces it first) rather than the standard binary the
 harness would otherwise build. `cargo tree -e normal,dev --no-default-features
 -p praxis-tests-integration -i aws-lc-rs` prints nothing for that graph; only
 `ring` remains, for rcgen's test certificates.
+
+The FIPS feature set includes Policy's API-key builtin with its OpenSSL FIPS
+backend. The whole-graph capability report rejects other bundled crypto paths,
+including features unified through another dependency edge. Praxis also checks
+the API-key digest provider at startup and refuses host-registered Policy
+plugins that provide no FIPS capability evidence.
 
 **Both branches, always.** The FIPS behavior tests
 (`crates/tls/tests/fips_mode.rs`, `tests/integration/tests/suite/fips.rs`)
@@ -201,9 +207,10 @@ linked. On a stable toolchain cargo-auditable derives the list from
 `cargo metadata`, whose resolve is not the build's:
 
 - It unifies features across every workspace member, dev-dependencies
-  included. rcgen in the tls and protocol crates pulls `ring`; the test
-  utilities enable the policy engine, which pulls `aws-lc-rs`, `sha2` and
-  `hmac`.
+  included. rcgen in the tls and protocol crates pulls `ring`; the filter's
+  `jsonwebtoken` development dependency can add `aws-lc-rs` to test builds.
+  The FIPS dependency selection enables Policy's API-key plugin and FIPS crypto
+  backend; the capability report rejects any other bundled crypto builtin.
 - It activates weak features (`dep?/feature`) the real build never turns on.
   rustls always enables rustls-webpki's `alloc`, whose `ring?/alloc` entry
   puts `ring` in the resolve of a binary that never compiled it. No rustls

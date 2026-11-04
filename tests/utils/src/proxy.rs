@@ -149,16 +149,44 @@ fn build_target_dir() -> PathBuf {
 
 /// The feature arguments selecting the backend this harness tests: the
 /// binary's defaults, or under `hyper` that backend with the binary's other
-/// default features, as `make build-hyper` builds it.
+/// default features, as `make build-hyper` builds it. Narrow policy selections
+/// are forwarded when this harness builds the subprocess itself.
 fn backend_build_args() -> &'static [&'static str] {
     if cfg!(feature = "hyper") {
+        hyper_backend_build_args()
+    } else {
+        &[]
+    }
+}
+
+/// Return the selected Policy feature set for a hyper subprocess.
+fn hyper_backend_build_args() -> &'static [&'static str] {
+    if cfg!(feature = "policy-builtins") {
+        &[
+            "--no-default-features",
+            "--features",
+            "hyper,config-reload,admin-api,policy-builtins",
+        ]
+    } else if cfg!(all(feature = "policy-api-key", feature = "policy-crypto-fips")) {
+        &[
+            "--no-default-features",
+            "--features",
+            "hyper,config-reload,admin-api,policy-api-key,policy-crypto-fips",
+        ]
+    } else if cfg!(all(feature = "policy-api-key", feature = "policy-crypto-default")) {
+        &[
+            "--no-default-features",
+            "--features",
+            "hyper,config-reload,admin-api,policy-api-key,policy-crypto-default",
+        ]
+    } else if cfg!(feature = "policy-engine") {
         &[
             "--no-default-features",
             "--features",
             "hyper,config-reload,admin-api,policy-engine",
         ]
     } else {
-        &[]
+        &["--no-default-features", "--features", "hyper,config-reload,admin-api"]
     }
 }
 
