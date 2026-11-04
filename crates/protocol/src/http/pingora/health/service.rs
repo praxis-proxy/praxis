@@ -13,7 +13,7 @@ use std::sync::{
 };
 
 use http::Response;
-use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
+use praxis_core::{config::ReadinessMode, health::HealthRegistry, kv::KvStoreRegistry, server::LifecycleHandle};
 use tokio::{sync::watch, time::Duration};
 use tracing::{error, warn};
 
@@ -107,6 +107,12 @@ pub struct PingoraHealthService {
 
     /// When `true`, reject requests whose `Host` is not loopback.
     require_loopback_host: bool,
+
+    /// Lifecycle gate shared by the runtime and management service.
+    lifecycle: Option<LifecycleHandle>,
+
+    /// Policy controlling whether upstream health affects readiness status.
+    readiness: ReadinessMode,
 }
 
 impl PingoraHealthService {
@@ -127,7 +133,23 @@ impl PingoraHealthService {
             pipelines: None,
             verbose,
             require_loopback_host: false,
+            lifecycle: None,
+            readiness: ReadinessMode::Serving,
         }
+    }
+
+    /// Attach the shared process lifecycle gate.
+    #[must_use]
+    pub fn with_lifecycle(mut self, lifecycle: LifecycleHandle) -> Self {
+        self.lifecycle = Some(lifecycle);
+        self
+    }
+
+    /// Select the readiness policy.
+    #[must_use]
+    pub fn with_readiness(mut self, readiness: ReadinessMode) -> Self {
+        self.readiness = readiness;
+        self
     }
 
     /// Resolve readiness against current pipelines after a config reload.
@@ -182,7 +204,15 @@ impl PingoraHealthService {
             Some(state) => stats_admin::resolve_health_registry(self.registry.as_ref(), Some(state), &state.meta),
             None => self.registry.clone(),
         };
-        compute_ready_response(registry.as_ref(), self.verbose)
+        match self.lifecycle.as_ref().map(LifecycleHandle::phase) {
+            Some(praxis_core::server::LifecyclePhase::Initializing) => (503, r#"{"status":"initializing"}"#.to_owned()),
+            Some(praxis_core::server::LifecyclePhase::Draining | praxis_core::server::LifecyclePhase::Stopped) => {
+                (503, r#"{"status":"draining"}"#.to_owned())
+            },
+            Some(praxis_core::server::LifecyclePhase::Serving) | None => {
+                compute_ready_response(registry.as_ref(), self.verbose, self.readiness)
+            },
+        }
     }
 
     /// Answer one request on the health and metrics listener.
@@ -471,7 +501,7 @@ pub fn install_prometheus_admin_recorder() -> PrometheusAdminRecorder {
 /// Build the `/ready` response status and body from a health registry.
 ///
 /// Used by [`PingoraHealthService`] to build a `/ready` response.
-fn compute_ready_response(registry: Option<&HealthRegistry>, verbose: bool) -> (u16, String) {
+fn compute_ready_response(registry: Option<&HealthRegistry>, verbose: bool, readiness: ReadinessMode) -> (u16, String) {
     let Some(registry) = registry else {
         return (200, r#"{"status":"ok"}"#.to_owned());
     };
@@ -484,8 +514,16 @@ fn compute_ready_response(registry: Option<&HealthRegistry>, verbose: bool) -> (
     }
 
     let agg = aggregate_health(registry, verbose);
-    let status_str = if agg.any_down { "degraded" } else { "ok" };
-    let status_code: u16 = if agg.any_down { 503 } else { 200 };
+    let status_str = if agg.any_down && readiness == ReadinessMode::Upstreams {
+        "degraded"
+    } else {
+        "ok"
+    };
+    let status_code: u16 = if agg.any_down && readiness == ReadinessMode::Upstreams {
+        503
+    } else {
+        200
+    };
 
     let body = format_ready_body(status_str, &agg);
     (status_code, body)
@@ -651,13 +689,15 @@ mod tests {
         let stale = PingoraHealthService::new(Some(Arc::clone(&degraded)), false);
         assert_eq!(
             stale.ready_response().0,
-            503,
-            "a fully degraded startup snapshot alone is 503"
+            200,
+            "serving readiness ignores a fully degraded startup snapshot"
         );
 
         let pipelines = Arc::new(crate::ListenerPipelines::new(HashMap::new()));
         let meta = new_listener_meta_store(HashMap::new());
-        let live = PingoraHealthService::new(Some(degraded), false).with_live_pipelines(pipelines, meta);
+        let live = PingoraHealthService::new(Some(degraded), false)
+            .with_readiness(ReadinessMode::Upstreams)
+            .with_live_pipelines(pipelines, meta);
         assert_eq!(
             live.ready_response().0,
             200,
@@ -751,6 +791,18 @@ mod tests {
     }
 
     #[test]
+    fn ready_follows_lifecycle_before_upstream_policy() {
+        let lifecycle = LifecycleHandle::new();
+        let svc = PingoraHealthService::new(None, false).with_lifecycle(lifecycle.clone());
+
+        assert_eq!(svc.ready_response(), (503, r#"{"status":"initializing"}"#.to_owned()));
+        lifecycle.mark_serving().unwrap();
+        assert_eq!(svc.ready_response(), (200, r#"{"status":"ok"}"#.to_owned()));
+        assert!(lifecycle.begin_drain());
+        assert_eq!(svc.ready_response(), (503, r#"{"status":"draining"}"#.to_owned()));
+    }
+
+    #[test]
     fn ready_empty_registry_returns_200() {
         let registry: HealthRegistry = Arc::new(HashMap::new());
         let svc = PingoraHealthService::new(Some(registry), false);
@@ -815,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn ready_all_unhealthy_returns_503() {
+    fn ready_all_unhealthy_is_ready_by_default() {
         let mut map = HashMap::new();
         let entry = make_health_entry(1);
         entry.endpoints()[0].mark_unhealthy();
@@ -823,8 +875,8 @@ mod tests {
         let registry: HealthRegistry = Arc::new(map);
         let svc = PingoraHealthService::new(Some(registry), false);
         let (status, body) = svc.ready_response();
-        assert_eq!(status, 503, "all-unhealthy should return 503");
-        assert!(body.contains("degraded"), "status should be degraded: {body}");
+        assert_eq!(status, 200, "serving readiness should ignore upstream health");
+        assert!(body.contains(r#""status":"ok""#), "status should be ok: {body}");
         assert!(body.contains(r#""degraded":1"#), "should report 1 degraded: {body}");
         assert!(
             !body.contains("backend"),
@@ -833,14 +885,14 @@ mod tests {
     }
 
     #[test]
-    fn ready_multiple_clusters_one_down_returns_503() {
+    fn ready_upstreams_mode_returns_503_for_degraded_cluster() {
         let mut map = HashMap::new();
         map.insert(Arc::from("good"), make_health_entry(1));
         let bad = make_health_entry(1);
         bad.endpoints()[0].mark_unhealthy();
         map.insert(Arc::from("bad"), bad);
         let registry: HealthRegistry = Arc::new(map);
-        let svc = PingoraHealthService::new(Some(registry), false);
+        let svc = PingoraHealthService::new(Some(registry), false).with_readiness(ReadinessMode::Upstreams);
         let (status, body) = svc.ready_response();
         assert_eq!(status, 503, "any cluster with zero healthy should trigger 503");
         assert!(body.contains(r#""total":2"#), "should report 2 total clusters: {body}");

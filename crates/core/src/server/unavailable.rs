@@ -3,7 +3,7 @@
 
 //! The stand-in runtime for a build with no network backend.
 
-use super::{ServerRuntime, ShutdownFuture};
+use super::{LifecycleHandle, ServerRuntime, ShutdownFuture};
 use crate::config::Config;
 
 /// Runtime for a build that carries no network backend.
@@ -27,5 +27,9 @@ impl ServerRuntime for UnavailableRuntime {
     fn run_with_shutdown(self, shutdown: ShutdownFuture) {
         drop(shutdown);
         tracing::error!("no network backend is compiled into this build; nothing to serve");
+    }
+
+    fn lifecycle(&self) -> LifecycleHandle {
+        LifecycleHandle::new()
     }
 }

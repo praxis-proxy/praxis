@@ -30,7 +30,7 @@ use praxis_core::{
     ProxyError,
     config::Listener,
     egress::hyper::HyperConnector,
-    server::{HyperRuntime, hyper::ShutdownWatch},
+    server::{HyperRuntime, LifecycleHandle, hyper::ShutdownWatch},
 };
 use praxis_filter::FilterPipeline;
 use praxis_tls::CachedCaCerts;
@@ -92,6 +92,8 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60); // 60 s
 
 /// What every request on one listener shares.
 pub(super) struct ListenerShared {
+    /// Process lifecycle, used to stop reusing HTTP/1 connections while draining.
+    pub(super) lifecycle: LifecycleHandle,
     /// Listener name, as the active-request gauge labels it.
     pub(super) name: ::metrics::SharedString,
 
@@ -122,6 +124,7 @@ impl ListenerShared {
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         connector: HyperConnector,
         trust_anchors: Option<Arc<CachedCaCerts>>,
+        lifecycle: LifecycleHandle,
     ) -> Self {
         // Pingora applies the keep-alive timeout in whole seconds, rounded up;
         // the read timeout bounds body reads only, as there.
@@ -129,6 +132,7 @@ impl ListenerShared {
             .downstream_keepalive_timeout_ms
             .map(|millis| Duration::from_secs(millis.div_ceil(1_000)));
         Self {
+            lifecycle,
             name: ::metrics::SharedString::from_shared(Arc::from(listener.name.as_str())),
             connection_limit: listener
                 .max_connections
@@ -897,6 +901,7 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(empty_pipeline())),
             HyperConnector::new(4),
             None,
+            LifecycleHandle::new(),
         );
         let mut watchers = Vec::new();
         register(&mut runtime, &listener, shared, &mut watchers)?;
@@ -939,6 +944,7 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(pipeline)),
             HyperConnector::new(4),
             None,
+            LifecycleHandle::new(),
         )
     }
 

@@ -23,6 +23,7 @@ pub(crate) fn log_restart_required_changes(old: &Config, new: &Config) {
     detect_subrequest_max_connections_change(old, new);
     detect_subrequest_circuit_breaker_change(old, new);
     detect_startup_only_runtime_changes(old, new);
+    detect_shutdown_timing_changes(old, new);
     detect_admin_changes(old, new);
     detect_logging_change(old, new);
     detect_metrics_labels_change(old, new);
@@ -293,11 +294,27 @@ fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
     );
 }
 
+/// Detect shutdown timing changes captured by the runtime at startup.
+fn detect_shutdown_timing_changes(old: &Config, new: &Config) {
+    if old.shutdown_timeout_secs != new.shutdown_timeout_secs
+        || old.shutdown_drain_delay_secs != new.shutdown_drain_delay_secs
+    {
+        warn!(
+            old_timeout = old.shutdown_timeout_secs,
+            new_timeout = new.shutdown_timeout_secs,
+            old_drain_delay = old.shutdown_drain_delay_secs,
+            new_drain_delay = new.shutdown_drain_delay_secs,
+            "shutdown timing changed; requires restart (runtime captures it at startup)"
+        );
+    }
+}
+
 /// Detect changes to the admin endpoint configuration.
 fn detect_admin_changes(old: &Config, new: &Config) {
     let changed = old.admin.address != new.admin.address
         || old.admin.verbose != new.admin.verbose
-        || old.admin.metrics_address != new.admin.metrics_address;
+        || old.admin.metrics_address != new.admin.metrics_address
+        || old.admin.readiness != new.admin.readiness;
     if changed {
         warn!(
             old_address = ?old.admin.address,
@@ -306,6 +323,8 @@ fn detect_admin_changes(old: &Config, new: &Config) {
             new_metrics_address = ?new.admin.metrics_address,
             old_verbose = ?old.admin.verbose,
             new_verbose = ?new.admin.verbose,
+            old_readiness = ?old.admin.readiness,
+            new_readiness = ?new.admin.readiness,
             "admin configuration changed; requires restart (listener addresses bind at startup)"
         );
     }
@@ -614,6 +633,18 @@ mod tests {
             warnings[0].contains("requires restart"),
             "the descriptor limit is set once at startup: {:?}",
             warnings[0]
+        );
+    }
+
+    #[test]
+    fn shutdown_drain_delay_change_warns() {
+        let old = config_with_runtime("");
+        let new = config_with_runtime("shutdown_drain_delay_secs: 2\n");
+        let warnings = capture_warnings(|| detect_shutdown_timing_changes(&old, &new));
+        assert_eq!(warnings.len(), 1, "changed drain delay should produce one warning");
+        assert!(
+            warnings[0].contains("requires restart"),
+            "warning should require restart: {warnings:?}"
         );
     }
 

@@ -468,6 +468,7 @@ insecure_options:
             }],
             metrics: MetricsConfig::default(),
             runtime: RuntimeConfig::default(),
+            shutdown_drain_delay_secs: 0,
             shutdown_timeout_secs: 10,
             telemetry: TelemetryConfig::default(),
         }

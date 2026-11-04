@@ -94,12 +94,13 @@ rotation that writes a temp file and then renames it over
 the original triggers a single reload after the rename
 completes.
 
-**Alternative: graceful restart.** Pingora supports
-graceful restart via SIGHUP with FD passing. This reloads
-all configuration including certificates, but drains
-in-flight connections. Use graceful restart when
-hot-reload is not needed or for config changes beyond
-certificate rotation.
+**Alternative: graceful restart.** Use the normal process
+supervisor restart path for a graceful restart. SIGHUP is
+reserved for configuration reload handling and is not a
+graceful-restart signal. A supervisor restart reloads all
+configuration, including certificates, while allowing
+in-flight connections to drain according to the shutdown
+settings.
 
 ### Minimum TLS Version
 

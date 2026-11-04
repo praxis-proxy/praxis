@@ -36,7 +36,7 @@ pub mod runtime;
 mod telemetry;
 mod validate;
 
-pub use admin::AdminConfig;
+pub use admin::{AdminConfig, ReadinessMode};
 pub use body_limits::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, DEFAULT_MAX_BODY_BYTES};
 pub use bootstrap::{ConfigFile, DEFAULT_CONFIG, load_config};
 pub use branch_chain::{BranchChainConfig, BranchCondition, ResultMatch};
@@ -132,6 +132,10 @@ pub struct Config {
     /// Runtime configuration knobs.
     #[serde(default)]
     pub runtime: RuntimeConfig,
+
+    /// Delay after shutdown begins before graceful connection shutdown.
+    #[serde(default)]
+    pub shutdown_drain_delay_secs: u64,
 
     /// Drain time for graceful shutdown.
     #[serde(default = "default_shutdown_timeout_secs")]
@@ -335,6 +339,10 @@ mod tests {
     #[test]
     fn default_shutdown_timeout_is_30() {
         let config = Config::from_yaml(VALID_YAML).unwrap();
+        assert_eq!(
+            config.shutdown_drain_delay_secs, 0,
+            "drain delay should default to zero"
+        );
         assert_eq!(
             config.shutdown_timeout_secs, 30,
             "default shutdown timeout should be 30s"
@@ -757,6 +765,10 @@ filter_chains:
         assert_eq!(
             roundtripped.shutdown_timeout_secs, original.shutdown_timeout_secs,
             "shutdown_timeout_secs should survive roundtrip"
+        );
+        assert_eq!(
+            roundtripped.shutdown_drain_delay_secs, original.shutdown_drain_delay_secs,
+            "shutdown_drain_delay_secs should survive roundtrip"
         );
     }
 

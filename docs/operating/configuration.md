@@ -18,6 +18,7 @@ body_limits:           # Optional. Global body size ceilings.
 metrics:               # Optional. Prometheus metric collection toggles.
 runtime:               # Optional. Thread pool and logging tuning.
 shutdown_timeout_secs: # Optional. Shutdown budget (default: 30 seconds).
+shutdown_drain_delay_secs: # Optional. Readiness-first drain delay (default: 0).
 insecure_options:      # Optional. Dev/test overrides. See developing/getting-started.md.
 ```
 
@@ -162,9 +163,12 @@ without the other; the two listeners must not overlap.
   once the server is accepting connections (liveness).
 - `/ready` returns per-cluster health status with
   healthy/unhealthy/total counts when active health
-  checks are configured; it returns `503 SERVICE UNAVAILABLE` when any
-  cluster has zero healthy endpoints. Without health
-  checks, `/ready` returns `{"status":"ok"}`.
+  checks are configured. The default `readiness: serving`
+  returns `200 OK` once the replica is serving, even when
+  an upstream cluster is degraded. Set `readiness: upstreams`
+  to return `503 SERVICE UNAVAILABLE` when any checked cluster
+  has zero healthy endpoints. Without health checks, both modes
+  return `{"status":"ok"}`.
 - `/metrics` returns Prometheus text exposition format
   with HTTP request metrics (`praxis_http_requests_total`,
   `praxis_http_request_duration_seconds`). When
@@ -200,12 +204,17 @@ the configured metrics port.
 admin:
   address: "127.0.0.1:9901"
   metrics_address: "127.0.0.1:9902"
+  readiness: serving # or upstreams for upstream-dependent readiness
 ```
 
 When `admin.verbose: true`, the `/ready` response
 includes per-cluster detail (cluster names, health
 counts). Default is `false` to avoid leaking internal
 topology.
+
+`admin.readiness` defaults to `serving`. It is a startup
+setting: changing it in a watched file logs a restart warning
+and leaves the running listener unchanged.
 
 ```yaml
 admin:
@@ -760,9 +769,16 @@ shutdown:
 
 ```yaml
 shutdown_timeout_secs: 60    # default: 30
+shutdown_drain_delay_secs: 2 # optional readiness-first handoff delay
 ```
 
-On SIGTERM listeners stop accepting new connections.
+On SIGTERM listeners stop accepting new connections and immediately become
+unready. `shutdown_drain_delay_secs` keeps the process alive in that draining
+state before graceful connection shutdown begins, allowing load balancers to
+observe the readiness change and stop sending traffic. The delay must not
+exceed `shutdown_timeout_secs`; zero preserves the immediate handoff.
+
+Listeners stop accepting new connections.
 In-flight requests have a grace period of
 `min(shutdown_timeout_secs, 5)` seconds. Runtime shutdown
 then cancels remaining async tasks; the rest of the budget
