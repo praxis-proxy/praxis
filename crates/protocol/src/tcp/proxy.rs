@@ -32,7 +32,9 @@ use praxis_core::{
     config::{Config, Listener},
     connectivity::is_private_upstream_ip,
 };
-use praxis_filter::{FilterAction, FilterPipeline, TcpBandwidthPacer, TcpFilterContext};
+#[cfg(feature = "bandwidth")]
+use praxis_filter::TcpBandwidthPacer;
+use praxis_filter::{FilterAction, FilterPipeline, TcpFilterContext};
 use praxis_tls::sni;
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf},
@@ -55,7 +57,34 @@ const PEEK_INITIAL: usize = 1_024; // 1 KiB
 const PEEK_MAX: usize = 16_384; // 16 KiB
 
 /// Bytes read in one paced copy.
+#[cfg(feature = "bandwidth")]
 const PACED_CHUNK: usize = 16_384;
+
+/// Upstream selected for one TCP connection, plus its pacer when one was installed.
+#[cfg(feature = "bandwidth")]
+type ConnectOutcome = Option<(String, Option<Arc<TcpBandwidthPacer>>)>;
+
+/// Upstream selected for one TCP connection.
+#[cfg(not(feature = "bandwidth"))]
+type ConnectOutcome = Option<String>;
+
+/// Pair a resolved address with the pacer the connect filters installed.
+#[cfg_attr(
+    not(feature = "bandwidth"),
+    expect(unused_mut, reason = "the pacer field exists only with the bandwidth feature")
+)]
+fn release_choice(mut ctx: TcpFilterContext<'_>, addr: Option<String>) -> ConnectOutcome {
+    #[cfg(feature = "bandwidth")]
+    {
+        let pacer = ctx.bandwidth.take();
+        return addr.map(|addr| (addr, pacer));
+    }
+    #[cfg(not(feature = "bandwidth"))]
+    {
+        let _ = ctx;
+        addr
+    }
+}
 
 /// Timeout for upstream TCP connect (including DNS resolution).
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -188,7 +217,7 @@ impl PingoraTcpProxy {
         shutdown_rx: &mut watch::Receiver<bool>,
         upstream_addr: &str,
         counters: &ByteCounters,
-        pacer: Option<&TcpBandwidthPacer>,
+        #[cfg(feature = "bandwidth")] pacer: Option<&TcpBandwidthPacer>,
         peeked: Vec<u8>,
     ) -> SessionEnd
     where
@@ -199,7 +228,14 @@ impl PingoraTcpProxy {
             counters,
         };
         let prefix_written = AtomicBool::new(false);
-        let work = paced_session(&mut counted, upstream, pacer, peeked, &prefix_written);
+        let work = paced_session(
+            &mut counted,
+            upstream,
+            #[cfg(feature = "bandwidth")]
+            pacer,
+            peeked,
+            &prefix_written,
+        );
         let bound = self.bound_forward(work, shutdown_rx, upstream_addr).await;
         session_end(bound, prefix_written.load(Ordering::Relaxed), upstream_addr)
     }
@@ -240,7 +276,7 @@ impl PingoraTcpProxy {
         local_addr: &str,
         sni: Option<&str>,
         connect_time: std::time::Instant,
-    ) -> Option<(String, Option<Arc<TcpBandwidthPacer>>)> {
+    ) -> ConnectOutcome {
         let upstream_cow = self.upstream_addr.as_deref().map(Cow::Borrowed);
         let health_registry = pipeline.health_registry().cloned();
 
@@ -255,6 +291,7 @@ impl PingoraTcpProxy {
             connect_time,
             bytes_in: 0,
             bytes_out: 0,
+            #[cfg(feature = "bandwidth")]
             bandwidth: None,
         };
 
@@ -267,8 +304,7 @@ impl PingoraTcpProxy {
             );
             log_early_close(connect_time, "filter_rejection");
         }
-        let pacer = ctx.bandwidth.take();
-        result.map(|addr| (addr, pacer))
+        release_choice(ctx, result)
     }
 
     /// Run TCP disconnect filters for logging.
@@ -296,6 +332,7 @@ impl PingoraTcpProxy {
             connect_time,
             bytes_in,
             bytes_out,
+            #[cfg(feature = "bandwidth")]
             bandwidth: None,
         };
         let _result = pipeline.execute_tcp_disconnect(&mut ctx).await;
@@ -397,7 +434,7 @@ impl PingoraTcpProxy {
             // stays on the same instance across a hot reload.
             let pipeline = self.pipeline.load_full();
 
-            let Some((upstream_addr, pacer)) = self
+            let connected = self
                 .run_connect_filters(
                     &pipeline,
                     remote_addr,
@@ -405,8 +442,13 @@ impl PingoraTcpProxy {
                     sni_hostname.as_deref(),
                     connect_time,
                 )
-                .await
-            else {
+                .await;
+            #[cfg(feature = "bandwidth")]
+            let Some((upstream_addr, pacer)) = connected else {
+                return;
+            };
+            #[cfg(not(feature = "bandwidth"))]
+            let Some(upstream_addr) = connected else {
                 return;
             };
 
@@ -457,6 +499,7 @@ impl PingoraTcpProxy {
                     &mut shutdown_rx,
                     &upstream_addr,
                     &counters,
+                    #[cfg(feature = "bandwidth")]
                     pacer.as_deref(),
                     peeked_bytes,
                 )
@@ -1030,6 +1073,7 @@ fn session_end(bound: Bound<Result<(u64, u64), CopyFault>>, prefix_written: bool
 // -----------------------------------------------------------------------------
 
 /// Which side of a TCP connection a copy is charging.
+#[cfg(feature = "bandwidth")]
 #[derive(Clone, Copy)]
 enum CopyDirection {
     /// Client to upstream.
@@ -1040,6 +1084,7 @@ enum CopyDirection {
 }
 
 /// Bidirectional copy that reserves each chunk before writing it.
+#[cfg(feature = "bandwidth")]
 async fn copy_bidirectional_paced<A, B>(
     client: &mut A,
     upstream: &mut B,
@@ -1057,6 +1102,7 @@ where
 }
 
 /// Copy one direction until EOF, then half-close the writer.
+#[cfg(feature = "bandwidth")]
 async fn copy_paced<R, W>(
     mut reader: R,
     mut writer: W,
@@ -1087,7 +1133,7 @@ where
 async fn paced_session<A, B>(
     client: &mut A,
     upstream: &mut B,
-    pacer: Option<&TcpBandwidthPacer>,
+    #[cfg(feature = "bandwidth")] pacer: Option<&TcpBandwidthPacer>,
     peeked: Vec<u8>,
     prefix_written: &AtomicBool,
 ) -> Result<(u64, u64), CopyFault>
@@ -1095,19 +1141,37 @@ where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
-    let written = write_client_prefix(upstream, &peeked, pacer).await;
+    let written = write_client_prefix(
+        upstream,
+        &peeked,
+        #[cfg(feature = "bandwidth")]
+        pacer,
+    )
+    .await;
     drop(peeked);
     written.map_err(CopyFault::Prefix)?;
     prefix_written.store(true, Ordering::Relaxed);
-    copy_rest(client, upstream, pacer).await.map_err(CopyFault::Forward)
+    copy_rest(
+        client,
+        upstream,
+        #[cfg(feature = "bandwidth")]
+        pacer,
+    )
+    .await
+    .map_err(CopyFault::Forward)
 }
 
 /// Copy both directions, pacing when `pacer` is installed.
-async fn copy_rest<A, B>(client: &mut A, upstream: &mut B, pacer: Option<&TcpBandwidthPacer>) -> io::Result<(u64, u64)>
+async fn copy_rest<A, B>(
+    client: &mut A,
+    upstream: &mut B,
+    #[cfg(feature = "bandwidth")] pacer: Option<&TcpBandwidthPacer>,
+) -> io::Result<(u64, u64)>
 where
     A: AsyncRead + AsyncWrite + Unpin,
     B: AsyncRead + AsyncWrite + Unpin,
 {
+    #[cfg(feature = "bandwidth")]
     if let Some(pacer) = pacer {
         return copy_bidirectional_paced(client, upstream, pacer).await;
     }
@@ -1115,13 +1179,18 @@ where
 }
 
 /// Write bytes already read from the client, pacing them when a pacer is installed.
-async fn write_client_prefix<W>(upstream: &mut W, peeked: &[u8], pacer: Option<&TcpBandwidthPacer>) -> io::Result<()>
+async fn write_client_prefix<W>(
+    upstream: &mut W,
+    peeked: &[u8],
+    #[cfg(feature = "bandwidth")] pacer: Option<&TcpBandwidthPacer>,
+) -> io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
     if peeked.is_empty() {
         return Ok(());
     }
+    #[cfg(feature = "bandwidth")]
     if let Some(pacer) = pacer {
         write_paced(upstream, peeked, peeked.len(), pacer, CopyDirection::Upload).await?;
         return Ok(());
@@ -1133,6 +1202,7 @@ where
 ///
 /// The flush happens before the commit. A TLS writer can accept bytes in
 /// `write_all` and still hold them. A failed flush drops the reservation.
+#[cfg(feature = "bandwidth")]
 async fn write_paced<W>(
     writer: &mut W,
     buf: &[u8],
@@ -1165,6 +1235,7 @@ where
 }
 
 /// Shut down one direction and leave the other copy running.
+#[cfg(feature = "bandwidth")]
 async fn half_close<W>(writer: &mut W)
 where
     W: AsyncWrite + Unpin,
@@ -1587,6 +1658,7 @@ mod tests {
             connect_time: std::time::Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
+            #[cfg(feature = "bandwidth")]
             bandwidth: None,
         }
     }
@@ -2251,6 +2323,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "bandwidth")]
     #[tokio::test]
     async fn paced_copy_keeps_download_open_after_upload_eof() {
         let (mut client, mut client_peer) = tokio::io::duplex(64 * 1024);
@@ -2279,6 +2352,7 @@ mod tests {
         assert_eq!(downloaded, 4, "download byte count");
     }
 
+    #[cfg(feature = "bandwidth")]
     #[tokio::test]
     async fn paced_copy_delays_a_limited_upload() {
         let (mut client, mut client_peer) = tokio::io::duplex(64 * 1024);
@@ -2304,6 +2378,7 @@ mod tests {
         let _counts = copy.await.unwrap();
     }
 
+    #[cfg(feature = "bandwidth")]
     #[tokio::test]
     async fn peeked_prefix_is_paced() {
         let (mut upstream, mut upstream_peer) = tokio::io::duplex(64 * 1024);
@@ -2323,6 +2398,7 @@ mod tests {
         assert_eq!(got, payload, "the peeked prefix is written upstream");
     }
 
+    #[cfg(feature = "bandwidth")]
     #[tokio::test]
     async fn paced_prefix_wait_ends_on_shutdown() {
         let (tx, mut shutdown) = watch::channel(false);
@@ -2351,6 +2427,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "bandwidth")]
     #[tokio::test]
     async fn paced_prefix_wait_ends_on_session_timeout() {
         let (_tx, mut shutdown) = watch::channel(false);

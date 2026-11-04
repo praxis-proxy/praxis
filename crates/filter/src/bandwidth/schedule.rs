@@ -36,13 +36,24 @@ struct ScheduleInner {
 
     /// Whether [`ScheduleInner::tat`] has been initialized.
     initialized: bool,
+
+    /// Grants not yet committed or dropped.
+    outstanding: u64,
+
+    /// Cost of cancelled grants still covered by a later outstanding grant.
+    pending_refund_ns: i128,
+
+    /// Cost of grants marked sent. Zero means a full cancel restores a fresh schedule.
+    committed_ns: i128,
 }
 
 /// A reserved slice of a [`Schedule`].
 ///
-/// Drop refunds the reservation when it is still the tail of the
-/// schedule and [`Self::commit`] was not called. Bytes already sent
-/// must be committed so a later failure does not return them.
+/// Drop returns the reservation unless [`Self::commit`] was called.
+/// A later outstanding grant keeps the hole covered until it commits
+/// or drops, so cancelled bytes are reclaimed whatever the drop order.
+/// Bytes already sent must be committed so a later failure does not
+/// return them.
 pub(crate) struct BandwidthGrant {
     /// Schedule that owns the reservation.
     schedule: Arc<Schedule>,
@@ -73,6 +84,9 @@ impl Schedule {
             inner: Mutex::new(ScheduleInner {
                 tat: 0,
                 initialized: false,
+                outstanding: 0,
+                pending_refund_ns: 0,
+                committed_ns: 0,
             }),
         })
     }
@@ -93,6 +107,7 @@ impl Schedule {
         inner.initialized = true;
         let tat_after = base.saturating_add(cost_ns);
         inner.tat = tat_after;
+        inner.outstanding = inner.outstanding.saturating_add(1);
         drop(inner);
         BandwidthGrant {
             schedule: Arc::clone(self),
@@ -117,12 +132,15 @@ impl Schedule {
         inner.tat <= now.saturating_sub(self.burst_ns)
     }
 
-    /// Roll back a tail reservation. A hole is left when a later reservation exists.
-    fn refund(&self, cost_ns: i128, tat_after: i128) {
+    /// Account for a grant that was sent or cancelled.
+    fn settle_grant(&self, cost_ns: i128, tat_after: i128, committed: bool) {
         let mut inner = self.lock();
-        if inner.tat == tat_after {
-            inner.tat = inner.tat.saturating_sub(cost_ns);
+        inner.outstanding = inner.outstanding.saturating_sub(1);
+        if committed {
+            note_commit(&mut inner, cost_ns);
+            return;
         }
+        note_cancel(&mut inner, cost_ns, tat_after);
     }
 
     /// Nanoseconds since this schedule was created.
@@ -150,10 +168,45 @@ impl BandwidthGrant {
 
 impl Drop for BandwidthGrant {
     fn drop(&mut self) {
-        if !self.committed {
-            self.schedule.refund(self.cost_ns, self.tat_after);
+        if self.cost_ns == 0 {
+            return;
         }
+        self.schedule.settle_grant(self.cost_ns, self.tat_after, self.committed);
     }
+}
+
+/// Record a sent grant and release cancelled bytes once nothing is in flight.
+fn note_commit(inner: &mut ScheduleInner, cost_ns: i128) {
+    inner.committed_ns = inner.committed_ns.saturating_add(cost_ns);
+    if inner.outstanding == 0 {
+        reclaim_finished(inner, 0);
+    }
+}
+
+/// Return a cancelled grant. A non-tail grant stays pending while a later one is outstanding.
+fn note_cancel(inner: &mut ScheduleInner, cost_ns: i128, tat_after: i128) {
+    if inner.outstanding == 0 {
+        reclaim_finished(inner, cost_ns);
+        return;
+    }
+    if inner.tat == tat_after {
+        inner.tat = inner.tat.saturating_sub(cost_ns);
+        return;
+    }
+    inner.pending_refund_ns = inner.pending_refund_ns.saturating_add(cost_ns);
+}
+
+/// Remove cancelled cost. A schedule with nothing sent becomes fresh again.
+fn reclaim_finished(inner: &mut ScheduleInner, extra: i128) {
+    if inner.committed_ns == 0 {
+        inner.tat = 0;
+        inner.pending_refund_ns = 0;
+        inner.initialized = false;
+        return;
+    }
+    let reclaim = extra.saturating_add(inner.pending_refund_ns);
+    inner.tat = inner.tat.saturating_sub(reclaim);
+    inner.pending_refund_ns = 0;
 }
 
 /// A grant that does not change the schedule.
@@ -325,16 +378,83 @@ mod tests {
     }
 
     #[test]
-    fn dropping_an_earlier_reservation_leaves_the_tail_in_place() {
+    fn dropping_an_earlier_reservation_still_refunds_it() {
         let schedule = Schedule::new(1_000, 0);
-        let first = schedule.reserve_at(500, 0);
-        let second = schedule.reserve_at(500, 0);
-        drop(first);
-        drop(second);
+        let earlier = schedule.reserve_at(500, 0);
+        let later = schedule.reserve_at(500, 0);
+        drop(earlier);
+        drop(later);
+
         let next = schedule.reserve_at(1, 0);
-        assert!(
-            next.delay() >= Duration::from_millis(500),
-            "an earlier hole stays when the tail was already accounted"
+        assert_eq!(
+            next.delay(),
+            Duration::from_millis(1),
+            "cancelling the earlier grant first still returns both"
+        );
+    }
+
+    #[test]
+    fn an_earlier_cancel_stays_covered_until_the_later_grant_settles() {
+        let schedule = Schedule::new(1_000, 0);
+        let earlier = schedule.reserve_at(500, 0);
+        let later = schedule.reserve_at(500, 0);
+        drop(earlier);
+
+        let next = schedule.reserve_at(1, 0);
+        assert_eq!(
+            next.delay(),
+            Duration::from_millis(1_001),
+            "a later outstanding grant still occupies the schedule"
+        );
+        drop(later);
+        drop(next);
+    }
+
+    #[test]
+    fn an_earlier_cancel_is_reclaimed_when_the_later_grant_is_sent() {
+        let schedule = Schedule::new(1_000, 0);
+        let earlier = schedule.reserve_at(500, 0);
+        let later = schedule.reserve_at(500, 0);
+        drop(earlier);
+        later.commit();
+
+        let next = schedule.reserve_at(1, 0);
+        assert_eq!(
+            next.delay(),
+            Duration::from_millis(501),
+            "only the sent grant remains after the earlier cancel"
+        );
+    }
+
+    #[test]
+    fn repeated_resets_do_not_bank_delay_for_the_next_connection() {
+        let schedule = Schedule::new(1_000, 0);
+        for _stream_pair in 0..4 {
+            let earlier = schedule.reserve_at(500, 0);
+            let later = schedule.reserve_at(500, 0);
+            drop(earlier);
+            drop(later);
+        }
+
+        assert!(schedule.is_fresh_at(0), "a fully cancelled schedule is fresh again");
+        let next = schedule.reserve_at(1, 0);
+        assert_eq!(
+            next.delay(),
+            Duration::from_millis(1),
+            "http/2 resets do not leave per-ip delay behind"
+        );
+    }
+
+    #[test]
+    fn a_canceled_burst_is_offered_again() {
+        let schedule = Schedule::new(1_000, 1_000);
+        drop(schedule.reserve_at(1_000, 0));
+
+        assert!(schedule.is_fresh_at(0), "nothing was sent");
+        assert_eq!(
+            schedule.reserve_at(1_000, 0).delay(),
+            Duration::ZERO,
+            "the burst is restored"
         );
     }
 

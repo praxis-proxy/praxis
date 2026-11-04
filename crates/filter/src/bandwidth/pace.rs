@@ -108,6 +108,17 @@ impl TcpBandwidthPacer {
         self.reserve(bytes, true)
     }
 
+    /// Reserve `bytes` on every upload leg as if the current time were `now` nanoseconds.
+    #[cfg(test)]
+    pub(crate) fn reserve_upload_at(&self, bytes: u64, now: i128) -> PaceReservation {
+        let grants = self
+            .schedules(true)
+            .iter()
+            .map(|schedule| schedule.reserve_at(bytes, now))
+            .collect();
+        PaceReservation { grants }
+    }
+
     /// Reserve `bytes` on every download leg.
     pub fn reserve_download(&self, bytes: u64) -> PaceReservation {
         self.reserve(bytes, false)
@@ -202,14 +213,40 @@ pub fn commit_download_pace(extensions: &mut RequestExtensions) {
     }
 }
 
+/// Marks a request that has a download byte rate.
+///
+/// The protocol uses this to flush the response head before any body wait.
+/// The marker stays for the request, including when the burst covers a body
+/// and the wait is zero.
+#[derive(Debug, Clone, Copy)]
+pub struct DownloadLimited;
+
+/// Whether `extensions` carries a download byte rate.
+#[must_use]
+pub fn limits_download(extensions: &RequestExtensions) -> bool {
+    extensions.get::<DownloadLimited>().is_some()
+}
+
+/// Whether a download grant is still waiting for its write.
+#[must_use]
+pub fn download_grants_pending(extensions: &RequestExtensions) -> bool {
+    extensions
+        .get::<DownloadPace>()
+        .is_some_and(|pace| !pace.grants.is_empty())
+}
+
 /// Refund upload grants that will not be sent.
 pub fn cancel_upload_pace(extensions: &mut RequestExtensions) {
-    let _pace = extensions.remove::<UploadPace>();
+    if let Some(pace) = extensions.remove::<UploadPace>() {
+        refund_grants(pace.grants);
+    }
 }
 
 /// Refund download grants that will not be sent.
 pub fn cancel_download_pace(extensions: &mut RequestExtensions) {
-    let _pace = extensions.remove::<DownloadPace>();
+    if let Some(pace) = extensions.remove::<DownloadPace>() {
+        refund_grants(pace.grants);
+    }
 }
 
 /// Refund every uncommitted upload and download grant.
@@ -267,6 +304,13 @@ fn total_delay(grants: &[BandwidthGrant]) -> Duration {
 fn commit_grants(grants: Vec<BandwidthGrant>) {
     for grant in grants {
         grant.commit();
+    }
+}
+
+/// Refund every uncommitted grant. Drop order does not change the result.
+fn refund_grants(grants: Vec<BandwidthGrant>) {
+    for grant in grants {
+        drop(grant);
     }
 }
 
@@ -341,6 +385,23 @@ mod tests {
             again.delay(),
             Duration::from_secs(1),
             "a cancelled tail reservation is refunded"
+        );
+    }
+
+    #[test]
+    #[test]
+    fn a_failed_batch_refunds_every_unsent_grant() {
+        let schedule = Schedule::new(1_000, 0);
+        let mut extensions = RequestExtensions::new();
+        push_download(&mut extensions, schedule.reserve_at(1_000, 0));
+        push_download(&mut extensions, schedule.reserve_at(1_000, 0));
+        cancel_download_pace(&mut extensions);
+
+        let again = schedule.reserve_at(1_000, 0);
+        assert_eq!(
+            again.delay(),
+            Duration::from_secs(1),
+            "a failed batch returns every unsent byte"
         );
     }
 

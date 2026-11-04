@@ -72,7 +72,7 @@ pub(in crate::http) mod via;
 mod with_body;
 
 /// Protocol waits for bandwidth reservations.
-mod bandwidth;
+pub(in crate::http) mod bandwidth;
 /// Body mode clamping and stream buffer utilities.
 mod body_util;
 /// Passive health checking utilities.

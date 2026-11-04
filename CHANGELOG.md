@@ -29,12 +29,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 - `bandwidth_limit` paces HTTP request and response bodies, and TCP
-  payloads, to a configured byte rate. An omitted direction is unlimited.
+  payloads, to a configured byte rate. It is off unless the build enables
+  the experimental `bandwidth` feature. An omitted direction is unlimited.
   `per_connection` shares one budget across a downstream connection, and
   `per_ip` shares one budget across connections from the same source through
   that filter instance. A full per-IP table closes a new connection instead
   of pacing it. IRR steps and bound outbound chains wait for the same
   reservations before a request body is sent or response bytes are released.
+  A downstream write that fails refunds those unsent bytes instead of
+  spending the shared burst. The response head is flushed before that
+  download wait, so the status line is not held for the byte rate. An
+  upload wait is a deadline in the exchange loop, so an upstream response
+  and the read timeout stay active until the reserved bytes are released.
+  Canceled reservations return to the shared schedule in any order, so an
+  HTTP/2 reset does not leave per-IP delay for the next connection.
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
   filled in from the declaration at validation time, keeping the routed

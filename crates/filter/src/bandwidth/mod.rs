@@ -12,9 +12,10 @@ mod schedule;
 mod table;
 
 pub use pace::{
-    DownstreamConnectionId, PaceReservation, TcpBandwidthPacer, cancel_bandwidth, cancel_download_pace,
-    cancel_upload_pace, commit_download_pace, commit_upload_pace, connection_close_reason, download_pace_delay,
-    settle_bandwidth, settle_download_write, upload_pace_delay,
+    DownloadLimited, DownstreamConnectionId, PaceReservation, TcpBandwidthPacer, cancel_bandwidth,
+    cancel_download_pace, cancel_upload_pace, commit_download_pace, commit_upload_pace, connection_close_reason,
+    download_grants_pending, download_pace_delay, limits_download, settle_bandwidth, settle_download_write,
+    upload_pace_delay,
 };
 pub(crate) use pace::{push_download, push_upload};
 pub(crate) use schedule::{BandwidthGrant, Schedule};

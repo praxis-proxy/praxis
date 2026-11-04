@@ -6,8 +6,11 @@
 # same source through that filter instance. A full per-IP table closes a new
 # connection instead of pacing it.
 #
+# ⚠️  EXPERIMENTAL: This example uses the `bandwidth` experimental feature.
+# Not recommended for production use. Build with --features bandwidth.
+#
 # Usage:
-#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/bandwidth-limiting.yaml
+#   cargo run -p praxis-proxy --features bandwidth -- -c examples/configs/traffic-management/bandwidth-limiting.yaml
 
 listeners:
   - name: http

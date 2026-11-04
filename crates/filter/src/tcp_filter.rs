@@ -8,7 +8,9 @@ use std::{borrow::Cow, sync::Arc, time::Instant};
 use async_trait::async_trait;
 use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
 
-use crate::{actions::FilterAction, bandwidth::TcpBandwidthPacer, filter::FilterError};
+#[cfg(feature = "bandwidth")]
+use crate::bandwidth::TcpBandwidthPacer;
+use crate::{actions::FilterAction, filter::FilterError};
 
 // -----------------------------------------------------------------------------
 // TcpFilter Trait
@@ -51,6 +53,7 @@ use crate::{actions::FilterAction, bandwidth::TcpBandwidthPacer, filter::FilterE
 ///     connect_time: Instant::now(),
 ///     bytes_in: 0,
 ///     bytes_out: 0,
+///     #[cfg(feature = "bandwidth")]
 ///     bandwidth: None,
 /// };
 /// # }
@@ -128,6 +131,7 @@ pub struct TcpFilterContext<'a> {
     ///
     /// `None` when the connection is not paced. The TCP proxy applies
     /// it while copying bytes and drops it when the connection ends.
+    #[cfg(feature = "bandwidth")]
     pub bandwidth: Option<Arc<TcpBandwidthPacer>>,
 }
 
@@ -161,6 +165,7 @@ mod tests {
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
+            #[cfg(feature = "bandwidth")]
             bandwidth: None,
         };
         let action = filter.on_connect(&mut ctx).await.unwrap();
@@ -181,6 +186,7 @@ mod tests {
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
+            #[cfg(feature = "bandwidth")]
             bandwidth: None,
         };
         filter.on_disconnect(&mut ctx).await.unwrap();

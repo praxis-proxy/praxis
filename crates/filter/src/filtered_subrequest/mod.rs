@@ -11,9 +11,9 @@
 //! either buffered or streaming mode, and captures a
 //! [`FilteredSubrequestContinuation`] the caller drives to completion.
 //!
-//! `bandwidth_limit` only reserves bytes. This executor waits for those
-//! reservations before it sends a request body or releases response bytes, and
-//! refunds a reservation it does not release.
+//! With the `bandwidth` feature, `bandwidth_limit` only reserves bytes and this
+//! executor waits for those reservations before it sends a request body or
+//! releases response bytes. A reservation it does not release is refunded.
 //!
 //! The executor owns three transient extension mechanisms end-to-end
 //! ([`RetainedFilterResults`], [`PendingStreamChunks`], and
@@ -41,6 +41,7 @@
 
 mod context;
 mod continuation;
+#[cfg(feature = "bandwidth")]
 mod pace;
 mod sanitize;
 mod streaming;
@@ -1008,6 +1009,7 @@ impl FilteredSubrequestExecutor {
             // The body filters have reserved upload bytes. Wait before the
             // dial so an IRR step or bound outbound chain cannot outrun the
             // limit. A reservation the deadline cannot cover is not sent.
+            #[cfg(feature = "bandwidth")]
             pace::pace_upload(&mut filter_ctx.extensions, step_deadline).await?;
 
             match filter_ctx.subrequest_response_mode {
@@ -1229,6 +1231,7 @@ impl FilteredSubrequestExecutor {
                             message: "filtered_subrequest: transformed step response exceeds configured body limit",
                         });
                     }
+                    #[cfg(feature = "bandwidth")]
                     pace::pace_download(&mut filter_ctx.extensions, step_deadline).await?;
                     response.body = body.unwrap_or_default();
                     if let Some(metadata) = filter_ctx.response_header.as_deref() {
@@ -1325,6 +1328,7 @@ impl FilteredSubrequestExecutor {
                 });
                 return Err(error);
             }
+            #[cfg(feature = "bandwidth")]
             pace::pace_download(&mut filter_ctx.extensions, step_deadline)
                 .await
                 .map_err(|error| FilteredSubrequestError::capture(error, &mut filter_ctx))?;

@@ -33,10 +33,12 @@ pub use security::{
 pub use security::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
 #[cfg(feature = "iterative-request-router")]
 pub use traffic_management::IterativeRequestRouterFilter;
+#[cfg(feature = "bandwidth")]
+pub use traffic_management::{BandwidthLimitFilter, BandwidthMode};
 pub use traffic_management::{
-    BandwidthLimitFilter, BandwidthMode, CircuitBreakerFilter, EndpointReselector, EndpointSelectorFilter,
-    GrpcDetectionFilter, GrpcTimeoutFilter, HeadClassifierFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode,
-    RedirectFilter, RedirectStatus, RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
+    CircuitBreakerFilter, EndpointReselector, EndpointSelectorFilter, GrpcDetectionFilter, GrpcTimeoutFilter,
+    HeadClassifierFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
+    RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
     sticky_sessions::{SessionStore, SessionStoreRegistry},
 };
 pub use transformation::{

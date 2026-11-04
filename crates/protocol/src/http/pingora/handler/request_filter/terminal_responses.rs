@@ -168,7 +168,6 @@ pub(in crate::http) fn run_parent_terminal_body_filters(
     body: &mut Option<Bytes>,
     end_of_stream: bool,
 ) -> Result<(), Rejection> {
-    praxis_filter::commit_download_pace(&mut ctx.extensions);
     let (
         result,
         response_body_bytes,
@@ -321,6 +320,7 @@ pub(super) async fn run_streaming_terminal_response(
         };
         let Some(source_result) = source_result else {
             streaming_body.swap_extensions(&mut ctx.extensions);
+            praxis_filter::settle_download_write(&mut ctx.extensions, false);
             streaming_body.cancel().await;
             session.as_downstream_mut().shutdown().await;
             return;
@@ -332,14 +332,14 @@ pub(super) async fn run_streaming_terminal_response(
                 if run_parent_terminal_body_filters(pipeline, ctx, &resp, &mut body, false).is_err()
                     || streaming_size_limit_exceeded(ctx, pipeline)
                 {
+                    praxis_filter::settle_download_write(&mut ctx.extensions, false);
                     streaming_body.cancel().await;
                     session.as_downstream_mut().shutdown().await;
                     return;
                 }
-                super::super::bandwidth::pace_download(&ctx.extensions).await;
+                let wrote = write_paced_terminal_chunk(session, ctx, body, false).await;
                 streaming_body.swap_extensions(&mut ctx.extensions);
-                if let Err(e) = session.write_response_body(body, false).await {
-                    debug!(error = %e, "failed to write streaming terminal response body");
+                if !wrote {
                     streaming_body.swap_extensions(&mut ctx.extensions);
                     streaming_body.cancel().await;
                     session.as_downstream_mut().shutdown().await;
@@ -351,25 +351,51 @@ pub(super) async fn run_streaming_terminal_response(
                 streaming_body.swap_extensions(&mut ctx.extensions);
                 let mut completion_body = None;
                 if run_parent_terminal_body_filters(pipeline, ctx, &resp, &mut completion_body, true).is_err() {
+                    praxis_filter::settle_download_write(&mut ctx.extensions, false);
                     streaming_body.cancel().await;
                     session.as_downstream_mut().shutdown().await;
                     return;
                 }
-                super::super::bandwidth::pace_download(&ctx.extensions).await;
-                if let Err(e) = session.write_response_body(completion_body, true).await {
-                    debug!(error = %e, "failed to finish streaming terminal response");
+                if !write_paced_terminal_chunk(session, ctx, completion_body, true).await {
                     session.as_downstream_mut().shutdown().await;
                 }
                 return;
             },
             Err(e) => {
                 streaming_body.swap_extensions(&mut ctx.extensions);
+                praxis_filter::settle_download_write(&mut ctx.extensions, false);
                 warn!(error = %e, "streaming terminal response source failed after commitment");
                 streaming_body.cancel().await;
                 session.as_downstream_mut().shutdown().await;
                 return;
             },
         }
+    }
+}
+
+/// Pace one streaming terminal chunk and settle its grant from that write.
+#[cfg(feature = "pingora")]
+async fn write_paced_terminal_chunk(
+    session: &mut Session,
+    ctx: &mut PingoraRequestCtx,
+    body: Option<Bytes>,
+    end_of_stream: bool,
+) -> bool {
+    super::super::bandwidth::pace_download(&ctx.extensions).await;
+    match session.write_response_body(body, end_of_stream).await {
+        Ok(()) => {
+            praxis_filter::settle_download_write(&mut ctx.extensions, true);
+            true
+        },
+        Err(error) => {
+            debug!(
+                error = %error,
+                end_of_stream,
+                "failed to write streaming terminal response body"
+            );
+            praxis_filter::settle_download_write(&mut ctx.extensions, false);
+            false
+        },
     }
 }
 
@@ -512,8 +538,9 @@ fn build_terminal_header(
 
 /// Write a terminal response (headers + optional body) to the Pingora session.
 ///
-/// The status line goes out before the bandwidth wait, so a slow byte rate
-/// cannot hold the headers after the response is already prepared.
+/// The status line is flushed before the bandwidth wait. A content-length
+/// head would stay in the write buffer until the body finished, so a paced
+/// body is framed without that length and the head leaves before the wait.
 #[cfg(feature = "pingora")]
 async fn send_terminal_to_session(
     session: &mut Session,
@@ -525,12 +552,14 @@ async fn send_terminal_to_session(
     let status = resp.status;
     let body_prohibited = status == http::StatusCode::NO_CONTENT || status == http::StatusCode::NOT_MODIFIED;
 
-    let Some(header) = build_terminal_header(resp, body.as_ref(), body_prohibited, is_head) else {
+    let Some(mut header) = build_terminal_header(resp, body.as_ref(), body_prohibited, is_head) else {
         praxis_filter::cancel_download_pace(&mut ctx.extensions);
         send_rejection(session, Rejection::status(500)).await;
         return;
     };
     let send_body = !is_head && !body_prohibited;
+    let version = super::super::bandwidth::downstream_version(session);
+    super::super::bandwidth::frame_paced_head(&mut header, &ctx.extensions, version);
     if let Err(error) = session
         .write_response_header(Box::new(header), !send_body || body.is_none())
         .await

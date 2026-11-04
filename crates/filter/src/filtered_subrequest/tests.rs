@@ -4546,15 +4546,19 @@ impl crate::HttpFilter for BranchCalloutFilter {
 // -----------------------------------------------------------------------------
 
 /// Upload and download size that each take 250 ms at [`PACED_BYTE_RATE`].
+#[cfg(feature = "bandwidth")]
 const PACED_BYTES: usize = 1_000;
 
 /// Byte rate that turns [`PACED_BYTES`] into a quarter-second reservation.
+#[cfg(feature = "bandwidth")]
 const PACED_BYTE_RATE: u64 = 4_000;
 
 /// Both directions of a 1 KB body. One missing direction finishes well under this.
+#[cfg(feature = "bandwidth")]
 const BOTH_DIRECTIONS: std::time::Duration = std::time::Duration::from_millis(350);
 
 // Read a request until its Content-Length body has arrived.
+#[cfg(feature = "bandwidth")]
 fn request_complete(buf: &[u8]) -> bool {
     let Some(split) = buf.windows(4).position(|marker| marker == b"\r\n\r\n") else {
         return false;
@@ -4573,6 +4577,7 @@ fn request_complete(buf: &[u8]) -> bool {
 }
 
 // Accept one request, record it, and answer with `response`.
+#[cfg(feature = "bandwidth")]
 async fn spawn_recording_backend(
     response: Vec<u8>,
     captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
@@ -4604,6 +4609,7 @@ async fn spawn_recording_backend(
     (addr, handle)
 }
 
+#[cfg(feature = "bandwidth")]
 fn http_ok(body: &[u8]) -> Vec<u8> {
     let mut response = format!(
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -4614,6 +4620,7 @@ fn http_ok(body: &[u8]) -> Vec<u8> {
     response
 }
 
+#[cfg(feature = "bandwidth")]
 fn paced_chain(addr: std::net::SocketAddr, rate: u64, streaming: bool) -> String {
     let selector = if streaming {
         "- filter: test_streaming_selector\n"
@@ -4640,10 +4647,12 @@ fn paced_chain(addr: std::net::SocketAddr, rate: u64, streaming: bool) -> String
     )
 }
 
+#[cfg(feature = "bandwidth")]
 fn contains_slice(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|window| window == needle)
 }
 
+#[cfg(feature = "bandwidth")]
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
 async fn subrequest_pace_waits_for_both_directions() {
@@ -4700,6 +4709,7 @@ async fn subrequest_pace_waits_for_both_directions() {
     );
 }
 
+#[cfg(feature = "bandwidth")]
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
 async fn subrequest_pace_streaming_waits_for_both_directions() {
@@ -4751,6 +4761,7 @@ async fn subrequest_pace_streaming_waits_for_both_directions() {
     );
 }
 
+#[cfg(feature = "bandwidth")]
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
 async fn subrequest_pace_refunds_when_the_deadline_cannot_cover() {

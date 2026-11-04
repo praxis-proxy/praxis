@@ -49,6 +49,7 @@
 )]
 
 mod adversarial;
+#[cfg(feature = "bandwidth")]
 mod bandwidth_limit;
 mod body;
 mod body_filter_failures;

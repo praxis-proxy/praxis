@@ -34,8 +34,11 @@ use super::{
 };
 use crate::http::pingora::{
     handler::{
-        health_util::ErrorOrigin, hop_by_hop::strip_reserved_internal_header_map,
-        response_body_filter::run_response_body, response_trailer_filter, response_trailers,
+        bandwidth::{cancel_upload_hold, release_upload, upload_release_at},
+        health_util::ErrorOrigin,
+        hop_by_hop::strip_reserved_internal_header_map,
+        response_body_filter::run_response_body,
+        response_trailer_filter, response_trailers,
     },
     metrics,
 };
@@ -177,13 +180,16 @@ impl Relaying {
     }
 
     /// Wait for whatever happens next: the client leaving, an upstream
-    /// chunk, a client body frame when nothing is queued for the upstream,
-    /// or the time to offer the queued body again.
+    /// chunk, the upload deadline, a client body frame when nothing is
+    /// queued and no upload wait is outstanding, or the time to offer the
+    /// queued body again.
     ///
     /// `due` is when the awaited upstream chunk is overdue. It is kept
-    /// across the turns spent offering the queued body again, so those do
-    /// not restart the read timeout the way every other step does.
+    /// across upload waits and the turns spent offering the queued body
+    /// again, so those do not restart the read timeout.
     async fn next_step(&mut self, due: &mut Option<Due>) -> Step {
+        let release_at = upload_release_at(&self.flight.ctx.extensions);
+        let held = release_at.is_some_and(|at| at > Instant::now());
         let queued = self.upload.has_outgoing();
         if due.is_none() {
             *due = self.read_timeout.and_then(Due::within);
@@ -193,10 +199,11 @@ impl Relaying {
             () = self.relay.closed() => Step::ClientGone,
             chunk = self.session.read_response_body() => Step::Upstream(chunk.map_err(|err| Failure::exchange(&err))),
             limit = overdue(*due) => Step::Upstream(Err(Failure::read_timeout(limit))),
-            frame = self.upload.next_live(), if self.upload.is_live() && !queued => Step::Client(frame),
-            () = tokio::time::sleep(UPLOAD_RETRY), if queued => Step::Retry,
+            () = sleep_until_release(release_at), if held => Step::Release,
+            frame = self.upload.next_live(), if self.upload.is_live() && !queued && !held => Step::Client(frame),
+            () = tokio::time::sleep(UPLOAD_RETRY), if queued && !held => Step::Retry,
         };
-        if !matches!(step, Step::Retry) {
+        if !matches!(step, Step::Retry | Step::Release) {
             *due = None;
         }
         step
@@ -209,7 +216,8 @@ impl Relaying {
         }
         let mut due = None;
         loop {
-            if self.upload.has_outgoing() && self.push_upload().await {
+            self.release_elapsed_upload();
+            if self.may_push_upload() && self.push_upload().await {
                 due = None;
             }
             let step = Box::pin(self.next_step(&mut due)).await;
@@ -217,6 +225,19 @@ impl Relaying {
                 return ended;
             }
         }
+    }
+
+    /// Commit an upload wait whose deadline has already passed.
+    fn release_elapsed_upload(&mut self) {
+        let elapsed = upload_release_at(&self.flight.ctx.extensions).is_some_and(|at| at <= Instant::now());
+        if elapsed {
+            release_upload(&mut self.flight.ctx.extensions);
+        }
+    }
+
+    /// Whether queued upload bytes are waiting on no deadline.
+    fn may_push_upload(&self) -> bool {
+        self.upload.has_outgoing() && upload_release_at(&self.flight.ctx.extensions).is_none()
     }
 
     /// Hand what is queued of the client's body to the upstream, for as long
@@ -280,6 +301,7 @@ impl Relaying {
             relay.flushed().await;
         }
         drop(relay);
+        cancel_upload_hold(&mut flight.ctx.extensions);
         super::upstream::release(&connector, session, keepalive);
         flight.complete().await;
     }
@@ -294,6 +316,7 @@ impl Relaying {
             reason,
             "stopped forwarding the request body while relaying the response"
         );
+        cancel_upload_hold(&mut self.flight.ctx.extensions);
         self.upload.abandon();
     }
 
@@ -301,6 +324,10 @@ impl Relaying {
     async fn take_step(&mut self, step: Step) -> Option<Ended> {
         match step {
             Step::Retry => None,
+            Step::Release => {
+                release_upload(&mut self.flight.ctx.extensions);
+                None
+            },
             Step::ClientGone => Some(Ended::ClientGone),
             Step::Upstream(Ok(Some(chunk))) if self.session.response_done() => {
                 Some(Box::pin(self.deliver_last(chunk)).await)
@@ -340,6 +367,9 @@ enum Step {
     /// Time to offer the queued request body to the upstream again.
     Retry,
 
+    /// The upload deadline passed. Its grants may be committed.
+    Release,
+
     /// A frame of the client's body.
     Client(Result<DownstreamFrame, Failure>),
 
@@ -363,6 +393,14 @@ enum Ended {
 
     /// Reading the upstream body failed.
     Upstream(Failure),
+}
+
+/// Sleep until an upload deadline. Pending when `deadline` is absent.
+async fn sleep_until_release(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// When the awaited upstream chunk is overdue.
@@ -391,16 +429,24 @@ impl Due {
 /// `false` means the client left. The unsent grant is refunded, so the
 /// relay does not keep its task and the reservation until the timer ends.
 pub(super) async fn pace_unless_closed(relay: &Relay, flight: &mut Flight) -> bool {
-    let Some(delay) = praxis_filter::download_pace_delay(&flight.ctx.extensions) else {
+    #[cfg(not(feature = "bandwidth"))]
+    {
+        let _ = (relay, flight);
         return true;
-    };
-    tokio::select! {
-        biased;
-        () = relay.closed() => {
-            praxis_filter::cancel_download_pace(&mut flight.ctx.extensions);
-            false
-        },
-        () = tokio::time::sleep(delay) => true,
+    }
+    #[cfg(feature = "bandwidth")]
+    {
+        let Some(delay) = praxis_filter::download_pace_delay(&flight.ctx.extensions) else {
+            return true;
+        };
+        tokio::select! {
+            biased;
+            () = relay.closed() => {
+                praxis_filter::cancel_download_pace(&mut flight.ctx.extensions);
+                false
+            },
+            () = tokio::time::sleep(delay) => true,
+        }
     }
 }
 

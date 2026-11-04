@@ -60,6 +60,9 @@ test-support = []
 # Hedged requests. Off by default. The server feature of the same name also
 # turns on `experimental`.
 hedged-requests = []
+# Bandwidth pacing for HTTP and TCP. Off by default. The server feature of
+# the same name also turns on `experimental`.
+bandwidth = ["praxis-filter/bandwidth"]
 # The `policy` filter (Praxis Policy Engine) in the filter crate this crate
 # embeds. Off by default at the library level, like the other forwards here;
 # the `praxis-proxy` binary turns it on via its own default. A library consumer

@@ -15,16 +15,18 @@ pub use http::IterativeRequestRouterFilter;
 #[cfg(feature = "spiffe")]
 pub use http::PeerIdentityTrustFilter;
 pub use http::{
-    AccessLogFilter, BandwidthLimitFilter, BandwidthMode, CircuitBreakerFilter, CompressionFilter, ContainsValue,
-    CorsFilter, CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, EndpointReselector,
-    EndpointSelectorFilter, ForwardedHeadersFilter, GrpcDetectionFilter, GrpcStatusFilter, GrpcTimeoutFilter,
-    GrpcWebFilter, GuardrailsAction, GuardrailsFilter, HeadClassifierFilter, HeaderFilter, IpAclFilter,
-    JsonBodyFieldFilter, JsonBodyFilter, JsonBodyOps, JsonRpcFilter, LoadBalancerFilter, PathRewriteFilter, PiiKind,
-    RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind,
-    SessionStore, SessionStoreRegistry, StaticResponseFilter, StickySessionsFilter, TimeoutFilter, TraceContextFilter,
-    UrlRewriteFilter, access_record_already_emitted, bodyless_response, emit_access_record, encode_trailer_frame,
-    has_dot_dot_traversal, mark_access_record_emitted, normalize_rewritten_path, shutdown_access_log_sinks,
+    AccessLogFilter, CircuitBreakerFilter, CompressionFilter, ContainsValue, CorsFilter, CredentialInjectionFilter,
+    CsrfFilter, DisallowedOriginMode, EndpointReselector, EndpointSelectorFilter, ForwardedHeadersFilter,
+    GrpcDetectionFilter, GrpcStatusFilter, GrpcTimeoutFilter, GrpcWebFilter, GuardrailsAction, GuardrailsFilter,
+    HeadClassifierFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonBodyFilter, JsonBodyOps, JsonRpcFilter,
+    LoadBalancerFilter, PathRewriteFilter, PiiKind, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
+    RequestIdFilter, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry, StaticResponseFilter,
+    StickySessionsFilter, TimeoutFilter, TraceContextFilter, UrlRewriteFilter, access_record_already_emitted,
+    bodyless_response, emit_access_record, encode_trailer_frame, has_dot_dot_traversal, mark_access_record_emitted,
+    normalize_rewritten_path, shutdown_access_log_sinks,
 };
+#[cfg(feature = "bandwidth")]
+pub use http::{BandwidthLimitFilter, BandwidthMode};
 #[cfg(feature = "policy-engine")]
 pub use http::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

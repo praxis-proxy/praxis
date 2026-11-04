@@ -521,6 +521,12 @@ mod tests {
 
     use super::*;
 
+    /// One schedule instant, in nanoseconds, for every reservation in these tests.
+    ///
+    /// Both sides of a sharing check use this instant, so a scheduling pause cannot
+    /// refill the byte the assertion expects to delay.
+    const RESERVED_AT: i128 = 0;
+
     fn ip(last: u8) -> BudgetKey {
         BudgetKey::Ip(IpAddr::from([10, 0, 0, last]))
     }
@@ -540,10 +546,34 @@ mod tests {
     }
 
     #[test]
+    fn a_reused_address_does_not_keep_reset_stream_delay() {
+        let table = shared_table(0, 10, 10);
+        let first = table.acquire(ip(1), None).unwrap();
+        {
+            let upload = first.upload.as_ref().unwrap();
+            for _pair in 0..3 {
+                let earlier = upload.reserve_at(500, RESERVED_AT);
+                let later = upload.reserve_at(500, RESERVED_AT);
+                drop(earlier);
+                drop(later);
+            }
+        }
+        drop(first);
+
+        let again = table.acquire(ip(1), None).unwrap();
+        let next = again.upload.as_ref().unwrap().reserve_at(1, RESERVED_AT);
+        assert_eq!(
+            next.delay(),
+            Duration::from_millis(1),
+            "http/2 resets do not bank delay for the next connection from this address"
+        );
+    }
+
+    #[test]
     fn the_same_key_shares_one_burst() {
         let table = shared_table(1_000, 10, 10);
         let first = table.acquire(ip(1), None).unwrap();
-        let burst = first.upload.as_ref().unwrap().reserve(1_000);
+        let burst = first.upload.as_ref().unwrap().reserve_at(1_000, RESERVED_AT);
         assert_eq!(
             burst.delay(),
             Duration::ZERO,
@@ -553,7 +583,7 @@ mod tests {
         drop(first);
 
         let second = table.acquire(ip(1), None).unwrap();
-        let next = second.upload.as_ref().unwrap().reserve(1);
+        let next = second.upload.as_ref().unwrap().reserve_at(1, RESERVED_AT);
         assert!(
             next.delay() > Duration::ZERO,
             "a second connection must not receive a new burst"
@@ -564,9 +594,9 @@ mod tests {
     fn different_keys_have_independent_bursts() {
         let table = shared_table(1_000, 10, 10);
         let first = table.acquire(ip(1), None).unwrap();
-        first.upload.as_ref().unwrap().reserve(1_000).commit();
+        first.upload.as_ref().unwrap().reserve_at(1_000, RESERVED_AT).commit();
         let second = table.acquire(ip(2), None).unwrap();
-        let grant = second.upload.as_ref().unwrap().reserve(1_000);
+        let grant = second.upload.as_ref().unwrap().reserve_at(1_000, RESERVED_AT);
         assert_eq!(grant.delay(), Duration::ZERO, "another address keeps its own burst");
     }
 
@@ -589,13 +619,13 @@ mod tests {
     fn an_in_flight_slot_is_not_replaced() {
         let table = shared_table(0, 1, 1);
         let held = table.acquire(ip(1), None).unwrap();
-        held.upload.as_ref().unwrap().reserve(1_000).commit();
+        held.upload.as_ref().unwrap().reserve_at(1_000, RESERVED_AT).commit();
         assert!(
             table.acquire(ip(2), None).is_err(),
             "the live key occupies the only slot"
         );
         let again = table.acquire(ip(1), None).unwrap();
-        let grant = again.upload.as_ref().unwrap().reserve(1);
+        let grant = again.upload.as_ref().unwrap().reserve_at(1, RESERVED_AT);
         assert!(
             grant.delay() > Duration::from_millis(500),
             "the live key keeps its depleted allowance"
@@ -606,14 +636,19 @@ mod tests {
     fn eviction_preserves_a_depleted_allowance() {
         let table = shared_table(0, 1, 3);
         let depleted = table.acquire(ip(1), None).unwrap();
-        depleted.upload.as_ref().unwrap().reserve(1_000).commit();
+        depleted
+            .upload
+            .as_ref()
+            .unwrap()
+            .reserve_at(1_000, RESERVED_AT)
+            .commit();
         drop(depleted);
         let fresh = table.acquire(ip(2), None).unwrap();
         drop(fresh);
 
         let _inserted = table.acquire(ip(3), None).unwrap();
         let again = table.acquire(ip(1), None).unwrap();
-        let grant = again.upload.as_ref().unwrap().reserve(1);
+        let grant = again.upload.as_ref().unwrap().reserve_at(1, RESERVED_AT);
         assert!(
             grant.delay() > Duration::from_millis(500),
             "a depleted address keeps its allowance across reconnects"
@@ -627,13 +662,13 @@ mod tests {
         let first = table
             .acquire(connection(7), Some(ConnectionAlive::watch(&socket)))
             .unwrap();
-        first.upload.as_ref().unwrap().reserve(1_000).commit();
+        first.upload.as_ref().unwrap().reserve_at(1_000, RESERVED_AT).commit();
         drop(first);
 
         let second = table
             .acquire(connection(7), Some(ConnectionAlive::watch(&socket)))
             .unwrap();
-        let next = second.upload.as_ref().unwrap().reserve(1);
+        let next = second.upload.as_ref().unwrap().reserve_at(1, RESERVED_AT);
         assert!(
             next.delay() > Duration::ZERO,
             "keep-alive requests share the connection budget"
@@ -647,7 +682,7 @@ mod tests {
         let first = table
             .acquire(connection(7), Some(ConnectionAlive::watch(&socket)))
             .unwrap();
-        first.upload.as_ref().unwrap().reserve(1_000).commit();
+        first.upload.as_ref().unwrap().reserve_at(1_000, RESERVED_AT).commit();
         drop(first);
         let Err(blocked) = table.acquire(connection(8), Some(ConnectionAlive::watch(&Arc::new(())))) else {
             panic!("an open connection should still occupy the only slot");
@@ -663,7 +698,7 @@ mod tests {
         let again = table
             .acquire(connection(7), Some(ConnectionAlive::watch(&replacement)))
             .unwrap();
-        let grant = again.upload.as_ref().unwrap().reserve(1_000);
+        let grant = again.upload.as_ref().unwrap().reserve_at(1_000, RESERVED_AT);
         assert_eq!(
             grant.delay(),
             Duration::ZERO,
@@ -675,11 +710,11 @@ mod tests {
     fn a_tcp_connection_budget_ends_when_its_guard_drops() {
         let table = shared_table(1_000, 10, 10);
         let first = table.acquire(connection(4), None).unwrap();
-        first.upload.as_ref().unwrap().reserve(1_000).commit();
+        first.upload.as_ref().unwrap().reserve_at(1_000, RESERVED_AT).commit();
         drop(first);
 
         let again = table.acquire(connection(4), None).unwrap();
-        let grant = again.upload.as_ref().unwrap().reserve(1_000);
+        let grant = again.upload.as_ref().unwrap().reserve_at(1_000, RESERVED_AT);
         assert_eq!(
             grant.delay(),
             Duration::ZERO,
@@ -700,7 +735,7 @@ mod tests {
         let next = table
             .acquire(connection(2), Some(ConnectionAlive::watch(&Arc::new(()))))
             .unwrap();
-        let grant = next.upload.as_ref().unwrap().reserve(1_000);
+        let grant = next.upload.as_ref().unwrap().reserve_at(1_000, RESERVED_AT);
         assert_eq!(grant.delay(), Duration::ZERO, "a closed connection yields its slot");
     }
 
@@ -708,7 +743,12 @@ mod tests {
         let acquired = table
             .acquire(connection(id), Some(ConnectionAlive::watch(socket)))
             .unwrap();
-        acquired.upload.as_ref().unwrap().reserve(1_000).commit();
+        acquired
+            .upload
+            .as_ref()
+            .unwrap()
+            .reserve_at(1_000, RESERVED_AT)
+            .commit();
     }
 
     #[test]

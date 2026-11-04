@@ -4,7 +4,7 @@
 //! Pull-based streaming body for a filtered sub-request's response.
 //!
 //! Pulls upstream chunks through the sub-request pipeline's response-body
-//! filters, waits for any download bandwidth reservation, accumulates state
+//! filters, and with the `bandwidth` feature waits for a download reservation, accumulates state
 //! in the owned [`FilteredSubrequestContinuation`], and runs the completion
 //! lifecycle exactly once after upstream EOF.
 
@@ -282,6 +282,7 @@ impl FilteredStreamingBody {
     async fn paced_completion(&mut self, completion: Option<Bytes>) -> Result<Option<Bytes>, FilterError> {
         let output = self.handled_completion_output(completion);
         if output.is_some() {
+            #[cfg(feature = "bandwidth")]
             super::pace::pace_download(&mut self.continuation.extensions, self.continuation.step_deadline).await?;
         } else {
             crate::cancel_download_pace(&mut self.continuation.extensions);
@@ -312,6 +313,7 @@ impl FilteredStreamingBody {
             Ok(body) => body,
             Err(error) => return Box::pin(self.handle_filter_error(error)).await.map(Pull::Yield),
         };
+        #[cfg(feature = "bandwidth")]
         super::pace::pace_download(&mut self.continuation.extensions, self.continuation.step_deadline).await?;
         Ok(match self.enqueue_filtered(body) {
             Some(bytes) => Pull::Yield(Some(bytes)),
@@ -325,6 +327,7 @@ impl FilteredStreamingBody {
             crate::cancel_download_pace(&mut self.continuation.extensions);
             return Err(error);
         }
+        #[cfg(feature = "bandwidth")]
         if let Err(error) =
             super::pace::pace_download(&mut self.continuation.extensions, self.continuation.step_deadline).await
         {

@@ -3,8 +3,9 @@
 
 //! Bandwidth limit filter.
 //!
-//! Counts body bytes that pass this filter instance and delays them
-//! to the configured rate. Omitting a direction leaves it unlimited.
+//! Requires the off-by-default `bandwidth` feature. Counts body bytes that
+//! pass this filter instance and delays them to the configured rate.
+//! Omitting a direction leaves it unlimited.
 //! `per_connection` shares one budget across the downstream connection.
 //! `per_ip` shares one budget across connections from the same source
 //! that pass through this filter instance.
@@ -27,8 +28,8 @@ use crate::{
     BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, RequestExtensions,
     TcpFilter, TcpFilterContext,
     bandwidth::{
-        AcquireError, Acquired, BandwidthGrant, BandwidthTable, BudgetKey, ConnectionAlive, DownstreamConnectionId,
-        InFlightGuard, Schedule, TcpBandwidthPacer, pointer_key, push_download, push_upload,
+        AcquireError, Acquired, BandwidthGrant, BandwidthTable, BudgetKey, ConnectionAlive, DownloadLimited,
+        DownstreamConnectionId, InFlightGuard, Schedule, TcpBandwidthPacer, pointer_key, push_download, push_upload,
     },
     factory::parse_filter_config,
 };
@@ -407,6 +408,9 @@ fn attached(extensions: &RequestExtensions, instance: u64) -> bool {
 
 /// Remember a new claim.
 fn store_attachment(extensions: &mut RequestExtensions, instance: u64, acquired: Acquired) {
+    if acquired.download.is_some() {
+        extensions.insert(DownloadLimited);
+    }
     extensions
         .get_or_insert_with(BandwidthAttachments::default)
         .items
@@ -516,6 +520,12 @@ mod tests {
         test_utils::{make_filter_context, make_request},
     };
 
+    /// One schedule instant, in nanoseconds, for a sharing check's reservations.
+    ///
+    /// Both reservations use this instant, so a scheduling pause cannot refill the
+    /// byte the assertion expects to delay.
+    const RESERVED_AT: i128 = 0;
+
     fn parse(yaml: &str) -> BandwidthLimitFilter {
         let value = serde_yaml::from_str(yaml).unwrap();
         BandwidthLimitFilter::parse(&value).unwrap()
@@ -540,6 +550,14 @@ mod tests {
     fn remember_connection(ctx: &mut HttpFilterContext<'_>, id: u64, socket: &Arc<()>) {
         ctx.extensions.insert(DownstreamConnectionId(id));
         ctx.extensions.insert(ConnectionAlive::watch(socket));
+    }
+
+    /// Upload schedule this filter attached while handling `ctx`.
+    fn upload_schedule(ctx: &HttpFilterContext<'_>) -> Arc<Schedule> {
+        ctx.extensions
+            .get::<BandwidthAttachments>()
+            .and_then(|items| items.items.iter().find_map(|item| item.upload.as_ref().map(Arc::clone)))
+            .expect("the filter attached an upload schedule")
     }
 
     fn close_reason_of(action: FilterAction) -> Option<&'static str> {
@@ -599,26 +617,20 @@ mod tests {
     async fn per_connection_keeps_a_spent_burst_for_the_next_request() {
         let filter = parse("mode: per_connection\nupload_bytes_per_sec: 1000\nburst_bytes: 1000\n");
         let socket = Arc::new(());
-        {
-            let req = make_request(Method::POST, "/");
-            let mut ctx = make_filter_context(&req);
-            remember_connection(&mut ctx, 7, &socket);
-            let mut body = Some(Bytes::from(vec![1_u8; 1_000]));
-            expect_continue(&filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
-            assert_eq!(
-                upload_pace_delay(&ctx.extensions),
-                Some(Duration::ZERO),
-                "the burst covers the first body"
-            );
-            commit_upload_pace(&mut ctx.extensions);
-        }
         let req = make_request(Method::POST, "/");
-        let mut ctx = make_filter_context(&req);
-        remember_connection(&mut ctx, 7, &socket);
-        let mut body = Some(Bytes::from(vec![1_u8; 1]));
-        expect_continue(&filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+        let mut first = make_filter_context(&req);
+        remember_connection(&mut first, 7, &socket);
+        expect_continue(&filter.on_request(&mut first).await.unwrap());
+        let burst = upload_schedule(&first).reserve_at(1_000, RESERVED_AT);
+        assert_eq!(burst.delay(), Duration::ZERO, "the burst covers the first body");
+        burst.commit();
+
+        let mut second = make_filter_context(&req);
+        remember_connection(&mut second, 7, &socket);
+        expect_continue(&filter.on_request(&mut second).await.unwrap());
+        let next = upload_schedule(&second).reserve_at(1, RESERVED_AT);
         assert!(
-            upload_pace_delay(&ctx.extensions).unwrap_or(Duration::ZERO) > Duration::ZERO,
+            next.delay() > Duration::ZERO,
             "the same connection does not get a new burst"
         );
     }
@@ -747,13 +759,13 @@ mod tests {
         let mut ctx = tcp_ctx("192.0.2.10:40000");
         expect_continue(&filter.on_connect(&mut ctx).await.unwrap());
         let pacer = ctx.bandwidth.as_ref().unwrap();
-        let first = pacer.reserve_upload(1_000);
+        let first = pacer.reserve_upload_at(1_000, RESERVED_AT);
         assert_eq!(first.delay(), Duration::ZERO, "the burst covers the first upload");
         first.commit();
 
         let mut again = tcp_ctx("192.0.2.10:40001");
         expect_continue(&filter.on_connect(&mut again).await.unwrap());
-        let second = again.bandwidth.as_ref().unwrap().reserve_upload(1);
+        let second = again.bandwidth.as_ref().unwrap().reserve_upload_at(1, RESERVED_AT);
         assert!(
             second.delay() > Duration::ZERO,
             "the same address shares the upload budget"
