@@ -8,7 +8,9 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-use pingora_core::server::{RunArgs, Server, ShutdownSignal, ShutdownSignalWatch, configuration::ServerConf};
+use pingora_core::server::{
+    ExecutionPhase, RunArgs, Server, ShutdownSignal, ShutdownSignalWatch, configuration::ServerConf,
+};
 use tracing::info;
 
 use super::{LifecycleHandle, RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
@@ -76,6 +78,7 @@ impl PingoraServerRuntime {
     ///
     /// [`run_until_shutdown`]: ServerRuntime::run_until_shutdown
     pub fn run(self) -> ! {
+        let _phase_monitor = monitor_lifecycle(self.server.watch_execution_phase(), self.lifecycle.clone());
         self.server.run_forever()
     }
 
@@ -89,9 +92,35 @@ impl PingoraServerRuntime {
     /// [`run_with_shutdown`]: ServerRuntime::run_with_shutdown
     /// [`RunArgs`]: pingora_core::server::RunArgs
     pub fn run_with_args(self, args: RunArgs) {
-        _ = self.lifecycle.mark_serving();
+        let monitor = monitor_lifecycle(self.server.watch_execution_phase(), self.lifecycle.clone());
         self.server.run(args);
+        self.lifecycle.begin_drain();
+        self.lifecycle.mark_stopped();
+        drop(monitor.join());
     }
+}
+
+/// Mirror Pingora's execution phases into the process lifecycle.
+fn monitor_lifecycle(
+    mut phases: tokio::sync::broadcast::Receiver<ExecutionPhase>,
+    lifecycle: LifecycleHandle,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while let Ok(phase) = phases.blocking_recv() {
+            if matches!(phase, ExecutionPhase::Running) {
+                _ = lifecycle.mark_serving();
+            } else if matches!(
+                phase,
+                ExecutionPhase::GracefulTerminate | ExecutionPhase::ShutdownStarted
+            ) {
+                lifecycle.begin_drain();
+            } else if matches!(phase, ExecutionPhase::Terminated) {
+                lifecycle.mark_stopped();
+                return;
+            }
+        }
+        lifecycle.mark_stopped();
+    })
 }
 
 impl ServerRuntime for PingoraServerRuntime {
