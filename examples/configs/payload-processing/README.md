@@ -33,6 +33,6 @@ Payload processing filters inspect, validate, and extract data from request and 
 
 ## Related Documentation
 
-- [Body Processing](../../../docs/architecture/body-processing.md)
+- [Payload Processing](../../../docs/architecture/payload-processing.md)
 - [JSON Body Field Filter](../../../docs/filters/http/payload_processing/json_body_field.md)
-- [Conditional Filtering](../../../docs/filters/conditions.md)
+- [Pipeline Concepts](../../../docs/architecture/pipeline-concepts.md)
