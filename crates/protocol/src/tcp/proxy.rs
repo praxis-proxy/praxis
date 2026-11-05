@@ -102,13 +102,13 @@ pub(crate) struct PingoraTcpProxy {
     /// order.
     default_listener_name: ::metrics::SharedString,
 
-    /// Bind-address â†’ listener name for connection metrics.
+    /// Bind-address → listener name for connection metrics.
     ///
     /// Grouped TCP listeners share one service; looking up by the
     /// connection's local address keeps the `listener` label accurate.
     listener_names: HashMap<String, ::metrics::SharedString>,
 
-    /// Port â†’ listener name fallback for wildcard binds, precomputed
+    /// Port → listener name fallback for wildcard binds, precomputed
     /// from `listener_names` (the fallback runs per connection).
     listener_ports: HashMap<String, ::metrics::SharedString>,
 
@@ -1068,7 +1068,7 @@ fn resolve_listener_label(
     default_listener_name.clone()
 }
 
-/// Derive the port â†’ listener-name fallback map from the bind map.
+/// Derive the port → listener-name fallback map from the bind map.
 fn ports_by_listener(names: &HashMap<String, ::metrics::SharedString>) -> HashMap<String, ::metrics::SharedString> {
     let mut ports = HashMap::with_capacity(names.len());
     for (bind_addr, name) in names {

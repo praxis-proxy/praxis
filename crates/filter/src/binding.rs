@@ -1736,6 +1736,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "verifies outbound runtime resource propagation")]
     fn outbound_pipeline_receives_and_retains_runtime_resources() {
         let mut registry = FilterRegistry::with_builtins();
         register_outbound_callout(&mut registry);
