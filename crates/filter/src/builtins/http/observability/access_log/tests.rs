@@ -1077,6 +1077,8 @@ fn response_body_access_is_read_only() {
         BodyAccess::ReadOnly,
         "access_log should declare ReadOnly response body access"
     );
+    assert_eq!(filter.request_body_access(), BodyAccess::None);
+    assert_eq!(filter.response_body_mode(), crate::BodyMode::Stream);
 }
 
 #[test]
