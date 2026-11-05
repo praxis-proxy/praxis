@@ -5852,6 +5852,10 @@ async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the test covers both allowed and denied buffered response paths"
+)]
 async fn buffered_response_policy_reads_http_request_attributes() {
     let (_dir, path) = write_llm_http_response_config();
     let filter = build_read_write_filter(path);
