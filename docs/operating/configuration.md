@@ -129,6 +129,19 @@ rather than silently adopted as the baseline.
   `insecure_options.allow_private_upstreams` while TCP
   listeners exist. The TCP service captures these at
   startup.
+- A change to a bound HTTP listener's `forward_proxy`
+  block (`forward-proxy` builds; including adding or
+  removing the block), removal of a bound listener that
+  has one, or a change to
+  `insecure_options.allow_private_upstreams` while a
+  bound listener has an enabled block. The CONNECT
+  runtime (not yet in this release; the block is parsed
+  and validated but accepts no CONNECT) captures the
+  CONNECT gate, destination rules, tunnel timeouts, and
+  the private-address setting when the handler starts.
+  These reloads are refused now so that applying only
+  the new pipeline can never leave CONNECT open with
+  the egress filters removed once it lands.
 
 Stateful filters (rate limiter, circuit breaker) reset
 their state on reload. Operators should expect a brief

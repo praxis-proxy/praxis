@@ -48,8 +48,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `SUPPORT.md` with guidance on where to ask questions, report bugs,
   report security vulnerabilities, and propose enhancements.
 - `runtime.overload_gauges` publishes `praxis_overload_pressure`
- for cgroup memory, anonymous resident memory, CPU stall time,
- connections, and file descriptors. The gauges do not shed load.
+  for cgroup memory, anonymous resident memory, CPU stall time,
+  connections, and file descriptors. The gauges do not shed load.
+- A `forward_proxy` block on `protocol: http` listeners, behind the
+  experimental `forward-proxy` cargo feature (off by default; config
+  surface for CONNECT-based forward proxying): destination allowlisting with
+  wildcard host patterns and optional ports, tunnel idle timeout and
+  optional max duration. Validation rejects the block on TCP listeners
+  and requires egress control (a non-empty `allow_destinations` list or
+  an `ip_acl`/`policy` filter without `conditions` in the listener's
+  chains); the check is structural — that the configured control actually
+  restricts egress remains the operator's responsibility. Destination
+  patterns ending in a numeric label (`*.0.1`) are rejected so no pattern
+  can match an IP literal. A reload that changes a bound listener's
+  `forward_proxy` block, removes a listener that has one, or changes
+  `insecure_options.allow_private_upstreams` while a bound listener has
+  an enabled block, is rejected. The CONNECT runtime is a follow-up
+ change; the block is inert until it lands.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
