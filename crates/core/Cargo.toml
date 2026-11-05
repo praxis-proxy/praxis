@@ -25,7 +25,7 @@ tls-health-check = []
 # `praxis-proxy` binary refuses to build without one. See
 # docs/developing/adding-backends.md.
 default = ["pingora"]
-pingora = ["dep:pingora-core", "dep:pingora-http"]
+pingora = ["dep:pingora-core", "dep:pingora-http", "dep:async-trait"]
 # The hyper network backend: `backend::Runtime` and `backend::Connector`
 # resolve to the hyper implementations. Off by default and experimental; the
 # `praxis-proxy` binary's `hyper` feature turns it on together with
@@ -65,7 +65,7 @@ otel = [
 ]
 
 [dependencies]
-async-trait = { workspace = true }
+async-trait = { workspace = true, optional = true }
 bytes = { workspace = true }
 dashmap = { workspace = true }
 http = { workspace = true }
