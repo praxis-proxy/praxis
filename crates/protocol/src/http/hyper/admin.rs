@@ -134,6 +134,7 @@ pub fn add_health_endpoint_with_pipelines(
     verbose: bool,
     pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
 ) {
+    let lifecycle = runtime.lifecycle();
     add_health_endpoint_with_pipelines_and_policy(
         runtime,
         metrics_addr,
@@ -141,7 +142,7 @@ pub fn add_health_endpoint_with_pipelines(
         verbose,
         pipelines,
         ReadinessMode::Serving,
-        Some(runtime.lifecycle()),
+        Some(lifecycle),
     );
 }
 

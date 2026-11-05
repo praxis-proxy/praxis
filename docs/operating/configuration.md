@@ -815,10 +815,11 @@ shutdown_drain_delay_secs: 2 # optional readiness-first handoff delay
 ```
 
 On SIGTERM listeners become unready immediately but continue accepting new
-connections during `shutdown_drain_delay_secs`. Responses for connections
-accepted during this handoff carry `Connection: close`; after the delay,
-listeners stop accepting and graceful connection shutdown begins. The delay
-must not exceed `shutdown_timeout_secs`; zero preserves the immediate handoff.
+connections during `shutdown_drain_delay_secs`. Eligible HTTP/1 responses for
+connections accepted during this handoff carry `Connection: close`; HTTP/2
+and upgraded connections do not use that header. After the delay, listeners
+stop accepting and graceful connection shutdown begins. The delay must not
+exceed `shutdown_timeout_secs`; zero preserves the immediate handoff.
 
 Listeners stop accepting new connections.
 In-flight requests have a grace period of
