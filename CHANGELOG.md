@@ -118,6 +118,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   while keeping them bodyless, including responses with huge hypothetical
   lengths.
 
+- Decode `grpc-web-text` request bodies during pre-read inspection before
+  forwarding them to HTTP/2 backends. Invalid base64 now follows the filter
+  rejection policy even before request-phase state is initialized.
+
 - Flush small HTTP/1.1 server-sent events promptly when the upstream supplies
   `Content-Length`. Body-bearing event streams use chunked downstream framing;
   the upstream length still detects truncated responses.

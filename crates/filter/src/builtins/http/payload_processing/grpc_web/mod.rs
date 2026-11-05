@@ -266,10 +266,15 @@ impl HttpFilter for GrpcWebFilter {
         if !end_of_stream {
             return Ok(FilterAction::Continue);
         }
-        let Some(state) = ctx.get_filter_state::<GrpcWebState>() else {
+        // StreamBuffer pre-read runs before `on_request` creates the state.
+        // Classify from the same request headers until that state exists.
+        let kind = ctx
+            .get_filter_state::<GrpcWebState>()
+            .map_or_else(|| GrpcWebKind::from_headers(&ctx.request.headers), |state| state.kind);
+        if !self.accepts(kind) {
             return Ok(FilterAction::Continue);
-        };
-        if !state.kind.is_text() {
+        }
+        if !kind.is_text() {
             return Ok(FilterAction::Release);
         }
 
