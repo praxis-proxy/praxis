@@ -323,12 +323,15 @@ fn detect_logging_change(old: &Config, new: &Config) {
 /// The selected label set installs once per process: a gauge guard acquired
 /// before a change and released after it would increment one series and
 /// decrement another, so a reload that alters `metrics.labels` is ignored
-/// until restart. Compared as a set, so merely reordering `disabled` does
-/// not warn.
+/// until restart. Both `disabled` and the opt-in `enabled` list are
+/// compared, since either changes the emitted series key. Compared as
+/// sets, so merely reordering a list does not warn.
 fn detect_metrics_labels_change(old: &Config, new: &Config) {
     let old_disabled: std::collections::HashSet<_> = old.metrics.labels.disabled.iter().copied().collect();
     let new_disabled: std::collections::HashSet<_> = new.metrics.labels.disabled.iter().copied().collect();
-    if old_disabled != new_disabled {
+    let old_enabled: std::collections::HashSet<_> = old.metrics.labels.enabled.iter().copied().collect();
+    let new_enabled: std::collections::HashSet<_> = new.metrics.labels.enabled.iter().copied().collect();
+    if old_disabled != new_disabled || old_enabled != new_enabled {
         warn!("metrics.labels changed; requires restart (label selection installs once per process)");
     }
 }
@@ -526,6 +529,7 @@ pub(crate) fn diff_named_items<T: serde::Serialize>(
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use praxis_core::config::MetricLabel;
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
@@ -764,7 +768,7 @@ mod tests {
     fn metrics_labels_change_warns() {
         let old = config_with_circuit_breaker(None);
         let mut new = old.clone();
-        new.metrics.labels.disabled = vec![praxis_core::config::MetricLabel::Cluster];
+        new.metrics.labels.disabled = vec![MetricLabel::Cluster];
         let warnings = capture_warnings(|| detect_metrics_labels_change(&old, &new));
         assert_eq!(warnings.len(), 1, "a metrics.labels change should warn once");
         assert!(
@@ -775,7 +779,7 @@ mod tests {
 
     #[test]
     fn metrics_labels_reorder_does_not_warn() {
-        use praxis_core::config::MetricLabel::{Endpoint, Route};
+        use MetricLabel::{Endpoint, Route};
         let mut old = config_with_circuit_breaker(None);
         old.metrics.labels.disabled = vec![Route, Endpoint];
         let mut new = old.clone();
@@ -785,6 +789,43 @@ mod tests {
             warnings.is_empty(),
             "a mere reorder of disabled dimensions must not warn"
         );
+    }
+
+    #[test]
+    fn metrics_labels_opt_in_change_warns() {
+        let old = config_with_circuit_breaker(None);
+        let mut new = old.clone();
+        new.metrics.labels.enabled = vec![MetricLabel::StatusCode];
+        let warnings = capture_warnings(|| detect_metrics_labels_change(&old, &new));
+        assert_eq!(
+            warnings.len(),
+            1,
+            "adding an opt-in dimension changes the series key, so it must warn"
+        );
+        assert!(
+            warnings[0].contains("metrics.labels"),
+            "warning should mention metrics.labels"
+        );
+    }
+
+    #[test]
+    fn metrics_labels_opt_in_removal_warns() {
+        let mut old = config_with_circuit_breaker(None);
+        old.metrics.labels.enabled = vec![MetricLabel::StatusCode];
+        let mut new = old.clone();
+        new.metrics.labels.enabled = vec![];
+        let warnings = capture_warnings(|| detect_metrics_labels_change(&old, &new));
+        assert_eq!(warnings.len(), 1, "dropping an opt-in dimension must warn too");
+    }
+
+    #[test]
+    fn metrics_labels_unchanged_does_not_warn() {
+        let mut old = config_with_circuit_breaker(None);
+        old.metrics.labels.disabled = vec![MetricLabel::Route];
+        old.metrics.labels.enabled = vec![MetricLabel::StatusCode];
+        let new = old.clone();
+        let warnings = capture_warnings(|| detect_metrics_labels_change(&old, &new));
+        assert!(warnings.is_empty(), "an identical label selection must stay quiet");
     }
 
     // -------------------------------------------------------------------------
