@@ -84,6 +84,9 @@ router-json-aliases = ["praxis-filter/router-json-aliases", "experimental"]
 # Per-cluster slow start. Off by default; experimental. With the feature on,
 # weighted strategies apply the ramp. Hash strategies do not.
 slow-start = ["praxis-filter/slow-start", "experimental"]
+# The listener `forward_proxy` block (HTTP CONNECT forward proxying). Off by
+# default; experimental. Without it the block is an unknown key.
+forward-proxy = ["praxis-core/forward-proxy", "experimental"]
 # The bound-upstream request-body hook. Off by default; experimental.
 bound-upstream-request-body = ["praxis-filter/bound-upstream-request-body", "upstream-binding", "experimental"]
 # The chain-binding registry extension API. Off by default; experimental.
