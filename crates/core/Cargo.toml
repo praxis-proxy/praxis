@@ -50,6 +50,10 @@ upstream-binding = []
 # weighted strategies apply the ramp. Hash strategies do not. Without this
 # feature the field is an unknown key.
 slow-start = []
+# The listener `forward_proxy` block. Off by default; experimental. The server
+# crate's `forward-proxy` turns it on. Without this feature the block is an
+# unknown key; `ForwardProxyConfig` itself is always compiled.
+forward-proxy = []
 spiffe = ["praxis-tls/spiffe"]
 test-support = []
 otel = [
