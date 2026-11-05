@@ -531,6 +531,48 @@ Requires `admin.metrics_address` to scrape via `/metrics`.
 Enabling `filter_duration` without a metrics listener logs a startup
 warning; metrics are recorded but not exposed.
 
+### Label Dimensions
+
+`metrics.labels` selects which label dimensions metrics
+carry, bounding total time-series cardinality.
+
+```yaml
+metrics:
+  labels:
+    disabled:        # drop default-on dimensions
+      - route
+      - endpoint
+    enabled:         # add opt-in dimensions
+      - status_code
+```
+
+- `disabled`: dimensions to drop from every metric that
+  carries them. The metric stays available, with the
+  series that differed only by that dimension collapsed
+  into one. Empty by default, so the default
+  configuration emits every default-on dimension
+  (`cluster`, `endpoint`, `listener`, `method`, `route`,
+  `status_class`).
+- `enabled`: opt-in dimensions to add to the metrics
+  that carry them. A dimension that multiplies
+  cardinality without being useful to every deployment
+  is absent unless named here; `status_code` on
+  `praxis_http_requests_total` is the only one today.
+  Listing a default-on dimension is a no-op. Empty by
+  default.
+
+`disabled` takes precedence: a dimension named in both
+lists is dropped, so a contradictory configuration
+resolves to the lower-cardinality reading rather than
+silently picking one.
+
+Label selection installs once at startup and is not
+hot-reloadable. A reload that changes either list is
+ignored and logs a warning; the new set takes effect on
+restart. For the per-dimension table and what enabling
+`status_code` costs, see
+[Metric Label Sets](observability.md#metric-label-sets).
+
 ## Header and Request Limits
 
 Praxis inherits header and request limits from Pingora's
