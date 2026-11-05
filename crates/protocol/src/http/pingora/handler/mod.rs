@@ -267,6 +267,7 @@ mod tests {
             None,
             None,
             "test".into(),
+            LifecycleHandle::new(),
         );
         let (_client, stream) = tokio::io::duplex(1024);
         let mut session = pingora_proxy::Session::new_h1(Box::new(stream));
