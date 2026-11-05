@@ -29,7 +29,8 @@ use crate::{
     TcpFilter, TcpFilterContext,
     bandwidth::{
         AcquireError, Acquired, BandwidthGrant, BandwidthTable, BudgetKey, ConnectionAlive, DownloadLimited,
-        DownstreamConnectionId, InFlightGuard, Schedule, TcpBandwidthPacer, pointer_key, push_download, push_upload,
+        DownstreamConnectionId, InFlightGuard, Schedule, TcpBandwidthPacer, pointer_key, push_download,
+        push_download_schedule, push_upload,
     },
     factory::parse_filter_config,
 };
@@ -411,8 +412,9 @@ fn attached(extensions: &RequestExtensions, instance: u64) -> bool {
 
 /// Remember a new claim.
 fn store_attachment(extensions: &mut RequestExtensions, instance: u64, acquired: Acquired) {
-    if acquired.download.is_some() {
+    if let Some(schedule) = acquired.download.as_ref() {
         extensions.insert(DownloadLimited);
+        push_download_schedule(extensions, Arc::clone(schedule));
     }
     extensions
         .get_or_insert_with(BandwidthAttachments::default)

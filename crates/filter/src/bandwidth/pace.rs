@@ -38,6 +38,40 @@ struct DownloadPace {
     grants: Vec<BandwidthGrant>,
 }
 
+/// Download schedules attached before a locally generated response.
+#[derive(Default)]
+struct GeneratedDownloadSchedules {
+    /// One schedule for each attached bandwidth filter instance.
+    schedules: Vec<Arc<Schedule>>,
+}
+
+/// Remember a download budget for responses that bypass body filters.
+pub(crate) fn push_download_schedule(extensions: &mut RequestExtensions, schedule: Arc<Schedule>) {
+    extensions
+        .get_or_insert_with(GeneratedDownloadSchedules::default)
+        .schedules
+        .push(schedule);
+}
+
+/// Reserve a locally generated body unless body filters already reserved it.
+pub fn reserve_generated_download(extensions: &mut RequestExtensions, bytes: u64) {
+    if download_grants_pending(extensions) || bytes == 0 {
+        return;
+    }
+    let grants: Vec<_> = extensions
+        .get::<GeneratedDownloadSchedules>()
+        .map_or_else(Vec::new, |attached| {
+            attached
+                .schedules
+                .iter()
+                .map(|schedule| schedule.reserve(bytes))
+                .collect()
+        });
+    for grant in grants {
+        push_download(extensions, grant);
+    }
+}
+
 /// One paced direction inside a [`TcpBandwidthPacer`].
 struct Leg {
     /// Upload schedule. `None` leaves that direction unlimited.
@@ -345,6 +379,15 @@ fn direction_schedule(leg: &Leg, upload: bool) -> Option<Arc<Schedule>> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_body_is_not_reserved_twice() {
+        let mut extensions = RequestExtensions::new();
+        push_download_schedule(&mut extensions, Schedule::new(1_000, 0));
+        reserve_generated_download(&mut extensions, 1_000);
+        reserve_generated_download(&mut extensions, 1_000);
+        assert_eq!(download_pace_delay(&extensions), Some(Duration::from_secs(1)));
+    }
 
     #[test]
     fn stacked_upload_grants_add_their_delays() {

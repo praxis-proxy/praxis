@@ -63,3 +63,6 @@ pub fn settle_download_write(_extensions: &mut RequestExtensions, _wrote: bool) 
 pub fn connection_close_reason(rejection: &Rejection) -> Option<&'static str> {
     rejection.close_reason
 }
+
+/// Nothing to reserve without the `bandwidth` feature.
+pub fn reserve_generated_download(_extensions: &mut RequestExtensions, _bytes: u64) {}

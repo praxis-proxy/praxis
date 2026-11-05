@@ -116,14 +116,14 @@ pub use any_filter::AnyFilter;
 pub use bandwidth::{
     ConnectionAlive, DownloadLimited, DownstreamConnectionId, PaceReservation, TcpBandwidthPacer, cancel_bandwidth,
     cancel_download_pace, cancel_upload_pace, commit_download_pace, commit_upload_pace, connection_close_reason,
-    download_grants_pending, download_pace_delay, limits_download, settle_bandwidth, settle_download_write,
-    upload_pace_delay,
+    download_grants_pending, download_pace_delay, limits_download, reserve_generated_download, settle_bandwidth,
+    settle_download_write, upload_pace_delay,
 };
 #[cfg(not(feature = "bandwidth"))]
 pub use bandwidth_absent::{
     ConnectionAlive, cancel_bandwidth, cancel_download_pace, cancel_upload_pace, commit_download_pace,
-    commit_upload_pace, connection_close_reason, download_pace_delay, settle_bandwidth, settle_download_write,
-    upload_pace_delay,
+    commit_upload_pace, connection_close_reason, download_pace_delay, reserve_generated_download, settle_bandwidth,
+    settle_download_write, upload_pace_delay,
 };
 pub use binding::ChainBindingContext;
 #[cfg(feature = "chain-binding")]

@@ -14,10 +14,10 @@ mod table;
 pub use pace::{
     DownloadLimited, DownstreamConnectionId, PaceReservation, TcpBandwidthPacer, cancel_bandwidth,
     cancel_download_pace, cancel_upload_pace, commit_download_pace, commit_upload_pace, connection_close_reason,
-    download_grants_pending, download_pace_delay, limits_download, settle_bandwidth, settle_download_write,
-    upload_pace_delay,
+    download_grants_pending, download_pace_delay, limits_download, reserve_generated_download, settle_bandwidth,
+    settle_download_write, upload_pace_delay,
 };
-pub(crate) use pace::{push_download, push_upload};
+pub(crate) use pace::{push_download, push_download_schedule, push_upload};
 pub(crate) use schedule::{BandwidthGrant, Schedule};
 pub use table::ConnectionAlive;
 pub(crate) use table::{AcquireError, Acquired, BandwidthTable, BudgetKey, InFlightGuard};
