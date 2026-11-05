@@ -964,6 +964,30 @@ async fn promotes_even_when_target_header_already_in_extras() {
     );
 }
 
+#[tokio::test]
+async fn invalid_utf8_in_ignored_json_value_cannot_promote() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extra_request_headers.push(("X-Trusted".into(), "keep".to_owned()));
+    let original = Bytes::from_static(b"{\"model\":\"blue\",\"unused\":\"\xff\"}");
+    assert!(serde_json::from_slice::<serde_json::Value>(&original).is_err());
+    let mut body = Some(original.clone());
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(body.as_ref(), Some(&original));
+    assert_eq!(ctx.extra_request_headers.len(), 1);
+    assert_eq!(ctx.extra_request_headers[0].1, "keep");
+
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from("{\"model\":\"blue\",\"unused\":\"café\"}"));
+    assert!(matches!(
+        filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::BodyDone
+    ));
+    assert_eq!(ctx.extra_request_headers[0].1, "blue");
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

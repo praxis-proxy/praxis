@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Validate the complete input's UTF-8 before `json_body` rewrites or
+  `json_body_field` header promotion. Invalid bytes in ignored JSON values
+  can no longer produce trusted metadata or bypass the configured invalid-input
+  behavior.
 - Disable TLS session resumption on listeners with client authentication
   and TLS hot-reload. A handshake authenticated before a CA/CRL reload
   could finish afterward and cache stale authentication, allowing new

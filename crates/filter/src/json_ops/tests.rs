@@ -518,3 +518,32 @@ fn extract_header_allows_trailing_whitespace() {
         .unwrap();
     assert_eq!(store.request_headers(), &[("X-Model".to_owned(), "premium".to_owned())]);
 }
+
+#[test]
+fn invalid_encoding_in_skipped_values_cannot_commit_extraction_or_rewrite() {
+    let ops = JsonOps::builder()
+        .extract("/model", ExtractDest::header("X-Model"))
+        .unwrap()
+        .replace("/model", JsonValue::static_json(json!("rewritten")).unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    let cases: &[&[u8]] = &[b"{\"model\":\"trusted\",\"unused\":\"\xff\"}"];
+    for input in cases {
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(input).is_err(),
+            "reference must reject the input"
+        );
+        let mut store = MapStore::new();
+        store.set_metadata("trusted".to_owned(), "keep".to_owned());
+        assert!(
+            matches!(ops.apply(input, Some(&mut store)), Err(JsonError::InvalidJson)),
+            "input {input:?}"
+        );
+        assert!(
+            store.request_headers().is_empty(),
+            "invalid document must not promote metadata"
+        );
+        assert_eq!(store.get_metadata("trusted"), Some("keep"));
+    }
+}

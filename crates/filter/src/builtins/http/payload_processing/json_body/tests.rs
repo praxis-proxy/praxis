@@ -1370,3 +1370,37 @@ async fn content_types_set_but_response_ops_empty_passes_through() {
     );
     assert_eq!(body.as_ref().unwrap().as_ref(), original, "body unchanged");
 }
+
+#[tokio::test]
+async fn invalid_utf8_obeys_request_and_response_failure_policies() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let original = Bytes::from_static(b"{\"model\":\"blue\",\"unused\":\"\xff\"}");
+    for mode in ["continue", "reject", "error"] {
+        let filter = parse_filter(&format!(
+            "on_invalid: {mode}\nrequest_remove:\n  - /model\nresponse_remove:\n  - /model\n"
+        ));
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("trusted".to_owned(), "keep".to_owned());
+        let mut request = Some(original.clone());
+        let action = filter.on_request_body(&mut ctx, &mut request, true).await;
+        match mode {
+            "continue" => assert!(matches!(action, Ok(FilterAction::Continue))),
+            "reject" => assert!(matches!(action, Ok(FilterAction::Reject(r)) if r.status == 400)),
+            "error" => assert!(action.is_err()),
+            _ => unreachable!(),
+        }
+        assert_eq!(request.as_ref(), Some(&original));
+        assert_eq!(ctx.get_metadata("trusted"), Some("keep"));
+
+        let mut response = Some(original.clone());
+        let action = filter.on_response_body(&mut ctx, &mut response, true);
+        match mode {
+            "continue" => assert!(matches!(action, Ok(FilterAction::Continue))),
+            "reject" => assert!(matches!(action, Ok(FilterAction::Reject(r)) if r.status == 400)),
+            "error" => assert!(action.is_err()),
+            _ => unreachable!(),
+        }
+        assert_eq!(response.as_ref(), Some(&original));
+        assert_eq!(ctx.get_metadata("trusted"), Some("keep"));
+    }
+}
