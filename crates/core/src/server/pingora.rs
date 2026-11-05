@@ -83,6 +83,7 @@ impl PingoraServerRuntime {
     ///
     /// [`run_until_shutdown`]: ServerRuntime::run_until_shutdown
     pub fn run(self) -> ! {
+        _ = self.lifecycle.mark_serving();
         self.server.run_forever()
     }
 

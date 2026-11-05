@@ -937,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn sigterm_and_sighup_stop_gracefully_and_sigint_stops_fast() {
+    fn stop_signal_kind_maps_sigterm_sighup_and_sigint() {
         assert_eq!(
             StopSignal::Terminate.kind(),
             SignalKind::terminate(),
