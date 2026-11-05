@@ -110,6 +110,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Remove forbidden `Content-Length` and `Transfer-Encoding` headers from
+  204 responses after response filters run, preserving valid downstream
+  framing for the following response.
+
+- Preserve valid `Content-Length` metadata on Hyper HTTP/1 304 responses
+  while keeping them bodyless, including responses with huge hypothetical
+  lengths.
+
+- Flush small HTTP/1.1 server-sent events promptly when the upstream supplies
+  `Content-Length`. Body-bearing event streams use chunked downstream framing;
+  the upstream length still detects truncated responses.
+
 - A delegated credential is sent with its own prefix rather than always
   `Bearer `, so a Vault credential with no `scheme_prefix` goes out bare
   and a custom prefix such as `token ` is kept.

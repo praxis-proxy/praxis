@@ -1077,6 +1077,123 @@ async fn no_content_and_not_modified_carry_no_body_on_either_protocol() {
 }
 
 #[tokio::test]
+async fn not_modified_http1_metadata_and_keepalive() {
+    let head = b"HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nContent-Length: 1073741824\r\n\r\n";
+    let backend = Backend::start(Reply::Fixed(head.to_vec())).await;
+    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let (mut reader, mut writer) = TcpStream::connect(proxy.addr).await.unwrap().into_split();
+    writer
+        .write_all(b"GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"v1\"\r\n\r\n")
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(10), read_until(&mut reader, b"\r\n\r\n"))
+        .await
+        .expect("first 304 head must arrive");
+    assert_not_modified_metadata(&RawResponse::parse(&first));
+    writer
+        .write_all(b"GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"v1\"\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(10), read_to_close(&mut reader))
+        .await
+        .expect("next 304 must complete on the same connection");
+    assert_not_modified_metadata(&RawResponse::parse(&second));
+}
+
+/// A 304 length describes the selected representation, not a response body.
+fn assert_not_modified_metadata(response: &RawResponse) {
+    assert_eq!(response.status, 304, "304 status must reach the client");
+    assert_eq!(response.header("etag"), Some("\"v1\""), "validator must survive");
+    assert_eq!(
+        response.header("content-length"),
+        Some("1073741824"),
+        "the hypothetical length must survive without becoming a body length"
+    );
+    assert!(response.body.is_empty(), "304 must not emit representation bytes");
+    assert!(
+        response.header("transfer-encoding").is_none(),
+        "304 must not be chunked"
+    );
+}
+
+#[tokio::test]
+async fn not_modified_http1_sanitizes_invalid_or_duplicate_lengths() {
+    for (headers, expected) in [
+        ("", None),
+        ("Content-Length: 0\r\n", Some("0")),
+        ("Content-Length: 18446744073709551615\r\n", Some("18446744073709551615")),
+        ("Content-Length: 18446744073709551616\r\n", None),
+        ("Content-Length: -1\r\n", None),
+        ("Content-Length: +1\r\n", None),
+        ("Content-Length: \r\n", None),
+        ("Content-Length: 1, 1\r\n", None),
+        ("Content-Length: 1\r\nContent-Length: 1\r\n", None),
+        ("Content-Length: 1\r\nContent-Length: 2\r\n", None),
+    ] {
+        let upstream = format!("HTTP/1.1 304 Not Modified\r\n{headers}\r\n");
+        let backend = Backend::start(Reply::Fixed(upstream.into_bytes())).await;
+        let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+        let response = proxy
+            .send("GET / HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"v1\"\r\n\r\n")
+            .await;
+        assert_eq!(response.status, 304, "case {headers:?} must remain bodyless");
+        assert_eq!(response.header("content-length"), expected, "case {headers:?}");
+        assert!(response.body.is_empty(), "case {headers:?} must not emit a body");
+        assert!(response.header("transfer-encoding").is_none(), "case {headers:?}");
+    }
+}
+
+#[tokio::test]
+async fn not_modified_hypothetical_length_survives_http10_and_http2() {
+    let head = b"HTTP/1.1 304 Not Modified\r\nETag: \"v1\"\r\nContent-Length: 1073741824\r\n\r\n";
+    let backend = Backend::start(Reply::Fixed(head.to_vec())).await;
+    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let h1 = proxy
+        .send("GET / HTTP/1.0\r\nHost: a\r\nIf-None-Match: \"v1\"\r\n\r\n")
+        .await;
+    assert_not_modified_metadata(&h1);
+    let h2 = tokio::time::timeout(
+        Duration::from_secs(10),
+        h2_exchange_with_condition(proxy.addr, Method::GET, "/", Some("\"v1\"")),
+    )
+    .await
+    .expect("conditional HTTP/2 response must complete");
+    assert_eq!(h2.head.status, 304, "304 reaches the HTTP/2 client");
+    assert_eq!(
+        h2.head.headers.get("content-length").unwrap(),
+        "1073741824",
+        "HTTP/2 preserves the hypothetical length"
+    );
+    assert!(h2.ended_with_head, "HTTP/2 304 must end with its headers");
+    assert!(
+        h2.body.is_empty() && h2.error.is_none(),
+        "HTTP/2 must complete without body bytes"
+    );
+    assert!(h2.trailers.is_none(), "HTTP/2 304 must not emit trailers");
+}
+
+#[tokio::test]
+async fn head_and_no_content_length_framing_are_unchanged() {
+    let head = b"HTTP/1.1 200 OK\r\nContent-Length: 1073741824\r\n\r\n";
+    let backend = Backend::start(Reply::Fixed(head.to_vec())).await;
+    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let response = proxy.send("HEAD / HTTP/1.1\r\nHost: a\r\n\r\n").await;
+    assert_eq!(
+        response.header("content-length"),
+        Some("1073741824"),
+        "HEAD metadata survives"
+    );
+    assert!(response.body.is_empty(), "HEAD emits no body");
+    let head = b"HTTP/1.1 204 No Content\r\nContent-Length: 1073741824\r\n\r\n";
+    let backend = Backend::start(Reply::Fixed(head.to_vec())).await;
+    let proxy = Proxy::start(&routed_yaml(backend.addr, "")).await;
+    let response = proxy.send("GET / HTTP/1.1\r\nHost: a\r\n\r\n").await;
+    assert_eq!(response.status, 204, "204 reaches the client");
+    assert!(response.header("content-length").is_none(), "204 cannot carry a length");
+    assert!(response.body.is_empty(), "204 emits no body");
+}
+
+#[tokio::test]
 async fn upstream_trailers_reach_an_http2_client() {
     let upstream = start_h2_backend().await;
     let yaml = with_cluster(
@@ -1525,14 +1642,21 @@ struct H2Reply {
 /// One HTTP/2 request with prior knowledge to `addr`, read to the end of
 /// its response stream.
 async fn h2_exchange(addr: SocketAddr, method: Method, path: &str) -> H2Reply {
+    h2_exchange_with_condition(addr, method, path, None).await
+}
+
+/// Send an HTTP/2 request, optionally adding a conditional validator.
+async fn h2_exchange_with_condition(addr: SocketAddr, method: Method, path: &str, etag: Option<&str>) -> H2Reply {
     let tcp = TcpStream::connect(addr).await.unwrap();
     let (mut client, connection) = h2::client::handshake(tcp).await.unwrap();
     drop(tokio::spawn(connection));
-    let request = http::Request::builder()
+    let mut request = http::Request::builder()
         .method(method)
-        .uri(format!("http://example.test{path}"))
-        .body(())
-        .unwrap();
+        .uri(format!("http://example.test{path}"));
+    if let Some(etag) = etag {
+        request = request.header("if-none-match", etag);
+    }
+    let request = request.body(()).unwrap();
     let (response, _stream) = client.send_request(request, true).unwrap();
     let response = response.await.unwrap();
     let ended_with_head = response.body().is_end_stream();
