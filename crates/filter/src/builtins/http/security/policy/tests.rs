@@ -4792,6 +4792,23 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+/// Write an inference response policy whose decision depends on the request path.
+fn write_llm_http_response_config() -> (TempDir, String) {
+    let (dir, path) = write_llm_post_config();
+    let yaml = std::fs::read_to_string(&path)
+        .expect("read inference policy")
+        .replace(
+            "global:\n  authentication:\n    - jwt-user\nroutes:",
+            "global:\n  authentication:\n    - jwt-user\n  pdp:\n    - kind: cel\nroutes:",
+        )
+        .replace(
+            "        - \"completion.tokens.total > 100: deny('completion too long', 'completion_too_long')\"",
+            "        - cel:\n            expr: \"http.path == '/v1/chat/completions'\"",
+        );
+    std::fs::write(&path, yaml).expect("rewrite inference policy");
+    (dir, path)
+}
+
 /// Write an inference policy that runs a host plugin over metadata-only
 /// response context.
 #[expect(
@@ -5832,6 +5849,37 @@ async fn metadata_only_response_context_runs_through_ppe_without_buffering_sse()
         output.get("quota_output"),
         Some(&json!({"engine": "ppe", "observed": {"tokens": 42}})),
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn buffered_response_policy_reads_http_request_attributes() {
+    let (_dir, path) = write_llm_http_response_config();
+    let filter = build_read_write_filter(path);
+
+    for (request_path, allowed) in [("/v1/chat/completions", true), ("/v1/other", false)] {
+        let mut req = request_for_alice();
+        req.uri = request_path.parse().expect("valid request path");
+        let mut ctx = make_filter_context(&req);
+        admit_inference(&filter, &mut ctx).await;
+
+        let mut response = crate::test_utils::make_response();
+        response
+            .headers
+            .insert("content-type", HeaderValue::from_static("application/json"));
+        ctx.response_header = Some(&mut response);
+        let original = bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes());
+        let mut body = Some(original.clone());
+        let action = filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("buffered response policy ran");
+        assert!(matches!(action, FilterAction::Continue));
+
+        assert_eq!(
+            body == Some(original),
+            allowed,
+            "unexpected policy result for {request_path}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
