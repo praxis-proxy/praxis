@@ -28,6 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Experimental `bandwidth` filter-library support for independent upload
+  and download budgets, per downstream connection or source IP, with burst
+  allowances, bounded tracking, and cancellable byte reservations.
+
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
   filled in from the declaration at validation time, keeping the routed

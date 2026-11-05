@@ -148,21 +148,10 @@ impl RegisteredFilterFactory {
     fn create_with_binding(
         &self,
         config: &serde_yaml::Value,
-        #[cfg_attr(
-            not(any(
-                feature = "iterative-request-router",
-                feature = "chain-binding",
-                feature = "policy-engine"
-            )),
-            expect(
-                unused_variables,
-                reason = "ctx is read only by the gated HttpWithRegistry, ChainBinding, and Policy arms"
-            )
-        )]
         ctx: &ChainBindingContext<'_>,
     ) -> Result<AnyFilter, FilterError> {
         match self {
-            Self::Standard(factory) => factory.create(config),
+            Self::Standard(factory) => factory.create_for(config, ctx.protocol()),
             #[cfg(feature = "iterative-request-router")]
             Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, ctx)?)),
             #[cfg(feature = "chain-binding")]
@@ -566,6 +555,13 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
         RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter, TraceContextFilter, UrlRewriteFilter,
     };
 
+    #[cfg(feature = "bandwidth")]
+    register_dual_security(
+        filters,
+        "bandwidth_limit",
+        crate::BandwidthLimitFilter::from_config,
+        crate::BandwidthLimitFilter::from_config_tcp,
+    );
     register_http(filters, "access_log", AccessLogFilter::from_config);
     #[cfg(feature = "basic-auth-filter")]
     register_http_security(filters, "basic_auth", crate::BasicAuthFilter::from_config);
@@ -686,6 +682,25 @@ fn register_tcp_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     );
 }
 
+/// Registers one filter that has both an HTTP and a TCP factory.
+#[cfg(feature = "bandwidth")]
+fn register_dual_security(
+    filters: &mut HashMap<String, FilterRegistration>,
+    name: &str,
+    http: HttpFilterFactoryFn,
+    tcp: TcpFilterFactoryFn,
+) {
+    insert_registration(
+        filters,
+        name,
+        FilterFactory::Dual {
+            http: std::sync::Arc::new(http),
+            tcp: std::sync::Arc::new(tcp),
+        },
+        SecurityClass::Security,
+    );
+}
+
 /// Registers a single TCP filter factory with [`SecurityClass::Standard`].
 fn register_tcp(filters: &mut HashMap<String, FilterRegistration>, name: &str, factory_fn: TcpFilterFactoryFn) {
     insert_registration(filters, name, tcp_builtin(factory_fn), SecurityClass::Standard);
@@ -734,6 +749,11 @@ mod tests {
         names.sort();
 
         assert!(names.contains(&"access_log"), "access_log should be registered");
+        #[cfg(feature = "bandwidth")]
+        assert!(
+            names.contains(&"bandwidth_limit"),
+            "bandwidth_limit should be registered"
+        );
         #[cfg(feature = "basic-auth-filter")]
         assert!(names.contains(&"basic_auth"), "basic_auth should be registered");
         assert!(
@@ -871,7 +891,7 @@ mod tests {
     #[test]
     fn builtin_security_filters_classified() {
         let registry = FilterRegistry::with_builtins();
-        #[allow(unused_mut, reason = "mutated only with basic-auth-filter or spiffe")]
+        #[allow(unused_mut, reason = "mutated only with basic-auth-filter, bandwidth, or spiffe")]
         let mut expected_security = vec![
             "cors",
             "credential_injection",
@@ -881,6 +901,8 @@ mod tests {
             "ip_acl",
             "rate_limit",
         ];
+        #[cfg(feature = "bandwidth")]
+        expected_security.push("bandwidth_limit");
         #[cfg(feature = "basic-auth-filter")]
         expected_security.push("basic_auth");
         #[cfg(feature = "spiffe")]
@@ -933,6 +955,11 @@ mod tests {
 
         #[cfg(feature = "basic-auth-filter")]
         assert!(sec.contains(&"basic_auth"), "basic_auth should be in security_filters");
+        #[cfg(feature = "bandwidth")]
+        assert!(
+            sec.contains(&"bandwidth_limit"),
+            "bandwidth_limit should be in security_filters"
+        );
         assert!(sec.contains(&"cors"), "cors should be in security_filters");
         assert!(
             sec.contains(&"credential_injection"),
