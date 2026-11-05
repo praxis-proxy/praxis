@@ -118,6 +118,101 @@ async fn request_trailers_survive_streaming_and_pre_read_to_http2() {
 }
 
 #[tokio::test]
+async fn large_preread_trailers_survive_both_ingress_versions_to_http2() {
+    for ingress_h2 in [false, true] {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (backend, mut captured) = trailer_backend(false, &[200]).await;
+            let filter = "\n      - filter: json_body_field\n        field: model\n        header: X-Model\n        max_body_bytes: 2097152\n";
+            let yaml = with_cluster(&routed_yaml(backend, filter), "            http:\n              version: h2\n");
+            let proxy = Proxy::start(&yaml).await;
+            let body = format!(r#"{{"padding":"{}","model":"m1"}}"#, "x".repeat(1_048_576));
+            if ingress_h2 {
+                send_large_h2_with_trailers(&proxy, &body).await;
+            } else {
+                send_large_h1_with_trailers(&proxy, &body).await;
+            }
+            let (actual, trailers) = captured.recv().await.unwrap();
+            assert_eq!(actual, body.as_bytes(), "ingress_h2={ingress_h2}");
+            assert_eq!(trailers.get("x-checksum").unwrap(), "mib-complete");
+            assert_eq!(trailers.get("x-ext-tenant").unwrap(), "public");
+            assert_eq!(trailers.len(), 2, "trailer fields arrive exactly once");
+        }).await.expect("large request plus real upstream trailers deadline");
+    }
+}
+
+/// Send the generated body as HTTP/2 DATA frames followed by trailers.
+async fn send_large_h2_with_trailers(proxy: &Proxy, body: &str) {
+    let socket = TcpStream::connect(proxy.addr).await.unwrap();
+    let (mut client, connection) = h2::client::handshake(socket).await.unwrap();
+    let driver = tokio::spawn(async move {
+        let _result = connection.await;
+    });
+    let request = http::Request::post("/").header("host", "a").body(()).unwrap();
+    let (response, mut sender) = client.send_request(request, false).unwrap();
+    send_large_h2_chunks(&mut sender, body).await;
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert("x-checksum", "mib-complete".parse().unwrap());
+    trailers.insert("x-ext-tenant", "public".parse().unwrap());
+    sender.send_trailers(trailers).unwrap();
+    let response = response.await.unwrap();
+    assert_eq!(response.status(), 200);
+    let mut body = response.into_body();
+    while let Some(chunk) = body.data().await {
+        assert!(
+            chunk.expect("response DATA must not reset").is_empty(),
+            "response has no content"
+        );
+    }
+    assert!(
+        body.trailers().await.expect("response must not reset").is_none(),
+        "response has no trailers"
+    );
+    assert!(body.is_end_stream(), "zero-body response reaches a clean EOS");
+    driver.abort();
+    let _closed = driver.await;
+}
+
+/// Send the generated body in flow-controlled HTTP/2 DATA frames.
+async fn send_large_h2_chunks(sender: &mut h2::SendStream<Bytes>, body: &str) {
+    let mut offset = 0;
+    while offset < body.len() {
+        sender.reserve_capacity(8191);
+        let capacity = std::future::poll_fn(|cx| sender.poll_capacity(cx))
+            .await
+            .unwrap()
+            .unwrap();
+        if capacity == 0 {
+            continue;
+        }
+        let end = (offset + capacity.min(8191)).min(body.len());
+        sender
+            .send_data(Bytes::copy_from_slice(body.as_bytes().get(offset..end).unwrap()), false)
+            .unwrap();
+        offset = end;
+    }
+}
+
+/// Send the same body and trailers as a chunked HTTP/1 request.
+async fn send_large_h1_with_trailers(proxy: &Proxy, body: &str) {
+    use std::fmt::Write as _;
+
+    let mut request =
+        "POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\nTrailer: x-checksum, x-ext-tenant\r\n\r\n"
+            .to_owned();
+    for chunk in body.as_bytes().chunks(1009) {
+        write!(
+            request,
+            "{:x}\r\n{}\r\n",
+            chunk.len(),
+            std::str::from_utf8(chunk).unwrap()
+        )
+        .unwrap();
+    }
+    request.push_str("0\r\nx-checksum: mib-complete\r\nx-ext-tenant: public\r\n\r\n");
+    assert_eq!(proxy.send(&request).await.status, 200);
+}
+
+#[tokio::test]
 async fn reserved_request_trailers_are_rejected_streaming_and_pre_read_to_http2() {
     for filter in [
         "",
