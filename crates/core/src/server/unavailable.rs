@@ -11,13 +11,16 @@ use crate::config::Config;
 /// It exists so the library crates compile and type-check without a backend;
 /// there are no protocol adapters to register onto it, and running it logs
 /// that nothing can be served and returns at once.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UnavailableRuntime;
+#[derive(Clone, Debug, Default)]
+pub struct UnavailableRuntime {
+    /// Shared lifecycle state, which stays initializing because nothing serves.
+    lifecycle: LifecycleHandle,
+}
 
 impl ServerRuntime for UnavailableRuntime {
     fn from_config(config: &Config) -> Self {
         _ = config;
-        Self
+        Self::default()
     }
 
     fn run_until_shutdown(self) {
@@ -30,6 +33,6 @@ impl ServerRuntime for UnavailableRuntime {
     }
 
     fn lifecycle(&self) -> LifecycleHandle {
-        LifecycleHandle::new()
+        self.lifecycle.clone()
     }
 }

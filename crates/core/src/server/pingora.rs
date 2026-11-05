@@ -5,13 +5,18 @@
 
 use std::{
     pin::Pin,
-    sync::{Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
+    thread::JoinHandle,
 };
 
-use pingora_core::server::{
-    ExecutionPhase, RunArgs, Server, ShutdownSignal, ShutdownSignalWatch, configuration::ServerConf,
+use async_trait::async_trait;
+use pingora_core::{
+    server::{
+        ExecutionPhase, RunArgs, Server, ShutdownSignal, ShutdownSignalWatch, ShutdownWatch, configuration::ServerConf,
+    },
+    services::background::{BackgroundService, background_service},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{LifecycleHandle, RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
 use crate::config::Config;
@@ -35,6 +40,9 @@ pub struct PingoraServerRuntime {
 
     /// Shared lifecycle state for management services and handlers.
     lifecycle: LifecycleHandle,
+
+    /// Slot holding the monitor thread the Pingora service starts.
+    monitor: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for PingoraServerRuntime {
@@ -50,22 +58,19 @@ impl PingoraServerRuntime {
     #[must_use]
     pub fn new(config: &Config) -> Self {
         let opts = RuntimeOptions::from(&config.runtime);
-        let server = build_http_server(config.shutdown_timeout_secs, &opts);
+        let mut server = build_http_server(config.shutdown_timeout_secs, &opts);
+        let lifecycle = LifecycleHandle::new();
+        let monitor = register_lifecycle_monitor(&mut server, lifecycle.clone());
         Self {
             server,
-            lifecycle: LifecycleHandle::new(),
+            lifecycle,
+            monitor,
         }
     }
 
     /// Access the inner Pingora server for service registration.
     pub fn server_mut(&mut self) -> &mut Server {
         &mut self.server
-    }
-
-    /// Return the lifecycle handle shared with registered protocol services.
-    #[must_use]
-    pub fn lifecycle(&self) -> LifecycleHandle {
-        self.lifecycle.clone()
     }
 
     /// Start all registered services. Blocks forever.
@@ -78,7 +83,6 @@ impl PingoraServerRuntime {
     ///
     /// [`run_until_shutdown`]: ServerRuntime::run_until_shutdown
     pub fn run(self) -> ! {
-        let _phase_monitor = monitor_lifecycle(self.server.watch_execution_phase(), self.lifecycle.clone());
         self.server.run_forever()
     }
 
@@ -92,11 +96,86 @@ impl PingoraServerRuntime {
     /// [`run_with_shutdown`]: ServerRuntime::run_with_shutdown
     /// [`RunArgs`]: pingora_core::server::RunArgs
     pub fn run_with_args(self, args: RunArgs) {
-        let monitor = monitor_lifecycle(self.server.watch_execution_phase(), self.lifecycle.clone());
         self.server.run(args);
         self.lifecycle.begin_drain();
         self.lifecycle.mark_stopped();
-        drop(monitor.join());
+        join_monitor(&self.monitor);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Lifecycle Monitor Service
+// -----------------------------------------------------------------------------
+
+/// Register the lifecycle monitor as a Pingora background service.
+///
+/// Pingora forks for daemon mode inside [`Server::run`], which discards every
+/// thread created before the fork. Starting the monitor from a service runs it
+/// in the daemon child, so readiness still follows the process lifecycle.
+fn register_lifecycle_monitor(server: &mut Server, lifecycle: LifecycleHandle) -> Arc<Mutex<Option<JoinHandle<()>>>> {
+    let phases = server.watch_execution_phase();
+    let monitor = Arc::new(Mutex::new(None));
+    server.add_service(background_service(
+        "lifecycle monitor",
+        LifecycleMonitor::new(phases, lifecycle, Arc::clone(&monitor)),
+    ));
+    monitor
+}
+
+/// Pingora background service that starts the lifecycle monitor thread.
+///
+/// The service starts after any daemon fork, which is what keeps the monitor
+/// alive in the daemon child.
+struct LifecycleMonitor {
+    /// Pingora's execution-phase stream, taken when the service starts.
+    phases: Mutex<Option<tokio::sync::broadcast::Receiver<ExecutionPhase>>>,
+
+    /// Process lifecycle the monitor thread publishes into.
+    lifecycle: LifecycleHandle,
+
+    /// Join handle for the monitor thread, shared with the runtime.
+    thread: Arc<Mutex<Option<JoinHandle<()>>>>,
+}
+
+impl LifecycleMonitor {
+    /// Build the service around Pingora's phase stream.
+    fn new(
+        phases: tokio::sync::broadcast::Receiver<ExecutionPhase>,
+        lifecycle: LifecycleHandle,
+        thread: Arc<Mutex<Option<JoinHandle<()>>>>,
+    ) -> Self {
+        Self {
+            phases: Mutex::new(Some(phases)),
+            lifecycle,
+            thread,
+        }
+    }
+
+    /// Start the monitor thread once, in whichever process runs services.
+    fn spawn_monitor(&self) {
+        let Some(phases) = self.phases.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            return;
+        };
+        let monitor = monitor_lifecycle(phases, self.lifecycle.clone());
+        *self.thread.lock().unwrap_or_else(PoisonError::into_inner) = Some(monitor);
+    }
+}
+
+#[async_trait]
+impl BackgroundService for LifecycleMonitor {
+    async fn start(&self, _shutdown: ShutdownWatch) {
+        self.spawn_monitor();
+    }
+}
+
+/// Join the monitor thread after Pingora has stopped.
+fn join_monitor(monitor: &Arc<Mutex<Option<JoinHandle<()>>>>) {
+    let thread = monitor.lock().unwrap_or_else(PoisonError::into_inner).take();
+    let Some(thread) = thread else {
+        return;
+    };
+    if thread.join().is_err() {
+        warn!("lifecycle monitor thread panicked");
     }
 }
 
@@ -104,7 +183,7 @@ impl PingoraServerRuntime {
 fn monitor_lifecycle(
     mut phases: tokio::sync::broadcast::Receiver<ExecutionPhase>,
     lifecycle: LifecycleHandle,
-) -> std::thread::JoinHandle<()> {
+) -> JoinHandle<()> {
     std::thread::spawn(move || {
         while let Ok(phase) = phases.blocking_recv() {
             if matches!(phase, ExecutionPhase::Running) {
@@ -144,7 +223,7 @@ impl ServerRuntime for PingoraServerRuntime {
     }
 
     fn lifecycle(&self) -> LifecycleHandle {
-        self.lifecycle()
+        self.lifecycle.clone()
     }
 }
 
@@ -286,10 +365,17 @@ fn warn_unsupported_global_queue_interval(runtime: &RuntimeOptions) {
     reason = "tests use expect/unwrap for brevity"
 )]
 mod tests {
-    use std::{thread, time::Duration};
+    use std::{
+        sync::atomic::{AtomicBool, Ordering},
+        thread,
+        time::Duration,
+    };
 
     use super::*;
     use crate::server::LifecyclePhase;
+
+    /// How long a test waits for the lifecycle to reach a phase.
+    const PHASE_DEADLINE: Duration = Duration::from_secs(10); // 10 s
 
     #[test]
     fn build_http_server_returns_bootstrapped_server() {
@@ -381,6 +467,35 @@ mod tests {
     }
 
     #[test]
+    fn run_with_args_marks_serving_while_pingora_runs() {
+        let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
+        let runtime = PingoraServerRuntime::new(&config);
+        let lifecycle = runtime.lifecycle();
+        let observed_serving = Arc::new(AtomicBool::new(false));
+
+        runtime.run_with_args(RunArgs {
+            shutdown_signal: Box::new(WaitForServing {
+                lifecycle: lifecycle.subscribe(),
+                observed_serving: Arc::clone(&observed_serving),
+            }),
+        });
+
+        assert!(
+            observed_serving.load(Ordering::SeqCst),
+            "the lifecycle must report serving while Pingora is running"
+        );
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Stopped,
+            "the lifecycle must report stopped after Pingora returns"
+        );
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test covers every phase the monitor recognises"
+    )]
     fn lifecycle_monitor_publishes_each_phase() {
         let lifecycle = LifecycleHandle::new();
         let (sender, receiver) = tokio::sync::broadcast::channel(8);
@@ -390,37 +505,55 @@ mod tests {
         sender.send(ExecutionPhase::Terminated).unwrap();
         drop(sender);
         monitor.join().unwrap();
-        assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped, "terminated Pingora must stop the lifecycle");
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Stopped,
+            "terminated Pingora must stop the lifecycle"
+        );
 
         for phase in [ExecutionPhase::GracefulTerminate, ExecutionPhase::ShutdownStarted] {
-            let lifecycle = LifecycleHandle::new();
-            let (sender, receiver) = tokio::sync::broadcast::channel(8);
-            let monitor = monitor_lifecycle(receiver, lifecycle.clone());
-            sender.send(phase).unwrap();
-            wait_for_phase(&lifecycle, LifecyclePhase::Draining);
-            sender.send(ExecutionPhase::Terminated).unwrap();
-            drop(sender);
-            monitor.join().unwrap();
-            assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped, "Pingora shutdown must stop the lifecycle");
+            let shutdown_lifecycle = LifecycleHandle::new();
+            let (shutdown_sender, shutdown_receiver) = tokio::sync::broadcast::channel(8);
+            let shutdown_monitor = monitor_lifecycle(shutdown_receiver, shutdown_lifecycle.clone());
+            shutdown_sender.send(phase).unwrap();
+            wait_for_phase(&shutdown_lifecycle, LifecyclePhase::Draining);
+            shutdown_sender.send(ExecutionPhase::Terminated).unwrap();
+            drop(shutdown_sender);
+            shutdown_monitor.join().unwrap();
+            assert_eq!(
+                shutdown_lifecycle.phase(),
+                LifecyclePhase::Stopped,
+                "Pingora shutdown must stop the lifecycle"
+            );
         }
 
-        let lifecycle = LifecycleHandle::new();
-        let (sender, receiver) = tokio::sync::broadcast::channel(8);
-        let monitor = monitor_lifecycle(receiver, lifecycle.clone());
-        drop(sender);
-        monitor.join().unwrap();
-        assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped, "a closed Pingora phase stream must stop the lifecycle");
+        let closed_lifecycle = LifecycleHandle::new();
+        let (closed_sender, closed_receiver) = tokio::sync::broadcast::channel(8);
+        let closed_monitor = monitor_lifecycle(closed_receiver, closed_lifecycle.clone());
+        drop(closed_sender);
+        closed_monitor.join().unwrap();
+        assert_eq!(
+            closed_lifecycle.phase(),
+            LifecyclePhase::Stopped,
+            "a closed Pingora phase stream must stop the lifecycle"
+        );
     }
 
     /// Wait for the monitor thread to publish `expected` without racing it.
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the monitor runs on its own thread; poll it from this synchronous test"
+    )]
     fn wait_for_phase(lifecycle: &LifecycleHandle, expected: LifecyclePhase) {
-        for _ in 0..100 {
-            if lifecycle.phase() == expected {
-                return;
-            }
+        let start = std::time::Instant::now();
+        while lifecycle.phase() != expected && start.elapsed() < PHASE_DEADLINE {
             thread::sleep(Duration::from_millis(1));
         }
-        assert_eq!(lifecycle.phase(), expected, "Pingora lifecycle monitor did not publish the expected phase");
+        assert_eq!(
+            lifecycle.phase(),
+            expected,
+            "Pingora lifecycle monitor did not publish the expected phase"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -440,11 +573,44 @@ mod tests {
         }
     }
 
+    /// Shutdown watch that waits for the serving phase, records the
+    /// observation, then asks for a fast shutdown.
+    struct WaitForServing {
+        /// Lifecycle phases to observe.
+        lifecycle: tokio::sync::watch::Receiver<LifecyclePhase>,
+
+        /// Set when serving was observed before the deadline.
+        observed_serving: Arc<AtomicBool>,
+    }
+
+    impl ShutdownSignalWatch for WaitForServing {
+        fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
+        where
+            'watch: 'fut,
+            Self: 'fut,
+        {
+            let mut lifecycle = self.lifecycle.clone();
+            let observed_serving = Arc::clone(&self.observed_serving);
+            Box::pin(async move {
+                let serving = tokio::time::timeout(PHASE_DEADLINE, async move {
+                    while *lifecycle.borrow() != LifecyclePhase::Serving {
+                        if lifecycle.changed().await.is_err() {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .await
+                .unwrap_or(false);
+                observed_serving.store(serving, Ordering::SeqCst);
+                ShutdownSignal::FastShutdown
+            })
+        }
+    }
+
     /// Run `func` under a thread-local subscriber that records everything
     /// logged at WARN or above, returning the value and captured output.
     fn capture_warnings<T, F: FnOnce() -> T>(func: F) -> (T, String) {
-        use std::sync::Arc;
-
         #[derive(Clone)]
         struct Buffer(Arc<Mutex<Vec<u8>>>);
 

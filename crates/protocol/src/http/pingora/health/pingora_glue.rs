@@ -136,6 +136,10 @@ pub fn add_health_endpoint_with_pipelines(
 }
 
 /// Add health and metrics endpoints with readiness policy and lifecycle state.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the endpoint's independent inputs mirror the configuration it serves"
+)]
 pub fn add_health_endpoint_with_pipelines_and_policy(
     runtime: &mut PingoraServerRuntime,
     metrics_addr: &str,
@@ -222,8 +226,16 @@ pub fn add_health_endpoint_to_pingora_server_with_pipelines(
     );
 }
 
-/// Add health and metrics endpoints to Pingora with readiness policy.
-fn add_health_endpoint_to_pingora_server_with_policy(
+/// Add health and metrics endpoints to a Pingora server with a readiness
+/// policy and optional lifecycle gate.
+///
+/// This does not install the Prometheus recorder or its upkeep service; use
+/// [`add_health_endpoint_to_pingora_server`] when the caller wants both.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the endpoint's independent inputs mirror the configuration it serves"
+)]
+pub fn add_health_endpoint_to_pingora_server_with_policy(
     server: &mut Server,
     metrics_addr: &str,
     registry: Option<HealthRegistry>,

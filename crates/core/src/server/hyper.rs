@@ -236,22 +236,12 @@ impl HyperRuntime {
     /// # Panics
     ///
     /// Panics when the tokio runtime cannot be built or a required service exits early.
-    #[expect(
-        clippy::panic,
-        reason = "a proxy without a runtime must not look like a clean shutdown"
-    )]
     fn run<Stop, MakeStop>(self, make_stop: MakeStop)
     where
         Stop: Future<Output = ShutdownMode> + Send,
         MakeStop: FnOnce() -> Stop + Send,
     {
-        let runtime = match build_tokio(self.threads, &self.options) {
-            Ok(runtime) => runtime,
-            Err(err) => {
-                error!(error = %err, threads = self.threads, "failed to build the tokio runtime; nothing to serve");
-                panic!("failed to build the tokio runtime: {err}");
-            },
-        };
+        let runtime = self.runtime_or_panic();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let graceful = self.shutdown_timeout;
         let lifecycle = self.lifecycle.clone();
@@ -284,6 +274,26 @@ impl HyperRuntime {
         assert_ne!(mode, ShutdownMode::Failed, "required service exited before shutdown");
     }
 
+    /// Build the service runtime, failing the process when it cannot start.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the tokio runtime cannot be built; returning would let the
+    /// server report a clean shutdown with nothing ever served.
+    #[expect(
+        clippy::panic,
+        reason = "a proxy without a runtime must not look like a clean shutdown"
+    )]
+    fn runtime_or_panic(&self) -> TokioRuntime {
+        match build_tokio(self.threads, &self.options) {
+            Ok(runtime) => runtime,
+            Err(err) => {
+                error!(error = %err, threads = self.threads, "failed to build the tokio runtime; nothing to serve");
+                panic!("failed to build the tokio runtime: {err}");
+            },
+        }
+    }
+
     /// How long a graceful shutdown may take (`shutdown_timeout_secs`).
     #[must_use]
     pub fn shutdown_timeout(&self) -> Duration {
@@ -300,12 +310,6 @@ impl HyperRuntime {
     #[must_use]
     pub fn trust_anchors(&self) -> Option<Arc<CachedCaCerts>> {
         self.trust_anchors.as_ref().map(Arc::clone)
-    }
-
-    /// Return the lifecycle handle shared with registered protocol services.
-    #[must_use]
-    pub fn lifecycle(&self) -> LifecycleHandle {
-        self.lifecycle.clone()
     }
 }
 
@@ -328,7 +332,7 @@ impl ServerRuntime for HyperRuntime {
     }
 
     fn lifecycle(&self) -> LifecycleHandle {
-        self.lifecycle()
+        self.lifecycle.clone()
     }
 }
 
@@ -747,8 +751,7 @@ mod tests {
     use tracing::Level;
 
     use super::*;
-    use crate::config::DEFAULT_CONFIG;
-    use crate::server::LifecyclePhase;
+    use crate::{config::DEFAULT_CONFIG, server::LifecyclePhase};
 
     #[test]
     fn run_with_shutdown_flips_the_watch_once_the_future_resolves() {
@@ -774,6 +777,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one test covers every lifecycle phase the runtime publishes"
+    )]
     fn run_with_shutdown_reports_serving_draining_and_stopped() {
         let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 2\n"));
         let lifecycle = runtime.lifecycle();
@@ -796,9 +803,21 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }));
-        assert_eq!(*serving.lock().unwrap(), Some(LifecyclePhase::Serving), "required services must reach serving");
-        assert_eq!(*draining.lock().unwrap(), Some(LifecyclePhase::Draining), "drain must precede service stop");
-        assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped, "runtime must be stopped after return");
+        assert_eq!(
+            *serving.lock().unwrap(),
+            Some(LifecyclePhase::Serving),
+            "required services must reach serving"
+        );
+        assert_eq!(
+            *draining.lock().unwrap(),
+            Some(LifecyclePhase::Draining),
+            "drain must precede service stop"
+        );
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Stopped,
+            "runtime must be stopped after return"
+        );
     }
 
     #[test]
