@@ -19,6 +19,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- An opt-in `status_code` label on `praxis_http_requests_total`, enabled
+  with `metrics.labels.enabled: [status_code]`. It separates an auth
+  rejection from a rate limit, which `status_class` reports as one `4xx`
+  series. Codes outside the allowlist the proxy's own filters return
+  collapse to their class, so the dimension stays at about seventeen
+  values, and `status_class` is unchanged. Off by default, so no existing
+  series move.
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
   filled in from the declaration at validation time, keeping the routed

@@ -186,16 +186,26 @@ Total completed HTTP requests.
 | `status_class` | `1xx`, `2xx`, `3xx`, `4xx`, `5xx`, `unknown` |
 | `route` | Route path-match pattern (e.g. `/api/*`), a configured path template, or `"unknown"` |
 | `cluster` | Cluster name or `"none"` |
+| `status_code` | Opt-in. `400`, `401`, `403`, `404`, `405`, `413`, `429`, `500`, `502`, `503`, `504`, or the `status_class` value for any other code |
 
 Non-standard HTTP methods (e.g. `PURGE`) are
 collapsed to `OTHER` to bound cardinality. Status
 code `0` (no response written) maps to `unknown`.
 
+`status_class` cannot separate an auth rejection
+(`401`) from a rate limit (`429`): a gateway running
+both reports them as one `4xx` series. Enabling
+`status_code` splits that series by code while
+leaving `status_class` in place, so existing queries
+keep working. It is off by default and bounded to an
+allowlist; see [Metric Label Sets](#metric-label-sets).
+
 #### `praxis_http_request_duration_seconds` (histogram)
 
 Wall-clock duration of completed HTTP requests in
 seconds. Uses the same label set as
-`praxis_http_requests_total`.
+`praxis_http_requests_total`, except `status_code`,
+which it never carries.
 
 #### `praxis_http_active_requests` (gauge)
 
@@ -499,10 +509,12 @@ requests are tracked separately by
 
 ### Metric Label Sets
 
-Every label dimension is emitted by default. In
+Most label dimensions are emitted by default. In
 large deployments the combination of dimensions can
 produce more time series than a Prometheus server
-should hold, so each can be turned off individually:
+should hold, so each can be turned off individually.
+A dimension that is off by default is turned on the
+same way, through `enabled`:
 
 ```yaml
 metrics:
@@ -510,6 +522,8 @@ metrics:
     disabled:
       - route
       - endpoint
+    enabled:
+      - status_code
 ```
 
 | Dimension | Default | Grows with |
@@ -520,13 +534,31 @@ metrics:
 | `method` | on | Bounded: ten values |
 | `route` | on | Configured routes, or path templates |
 | `status_class` | on | Bounded: six values |
+| `status_code` | off | Bounded: about seventeen values |
 
 Disabling a dimension drops it from every metric
 that carries it; the metric itself stays available,
 with the series that differed only by that dimension
 collapsed into one. `endpoint` and `route` are the
 usual candidates, since they grow with traffic shape
-rather than with config size.
+rather than with config size. Listing a dimension in
+both lists disables it: a contradictory
+configuration resolves to the lower-cardinality
+reading.
+
+`status_code` appears only on
+`praxis_http_requests_total`. Codes the proxy's own
+filters return (`400`, `401`, `403`, `404`, `405`,
+`413`, `429`, `500`, `502`, `503`, `504`) keep their
+own value and everything else collapses to its
+class, so an upstream returning unusual codes cannot
+grow the dimension. Enabling it roughly triples the
+series count of that metric, since `status_class`
+stays alongside it. The duration metric does not
+carry it: that metric is exposed as a summary, and
+summary quantiles cannot be aggregated back across a
+label, so splitting it by code would cost the
+overall latency view.
 
 The one exception is `cluster` on the per-cluster
 health gauges (`praxis_upstream_healthy_endpoints`

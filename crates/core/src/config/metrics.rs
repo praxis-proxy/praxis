@@ -21,6 +21,11 @@
 //! collapsing the series that differ only by the disabled label. This bounds
 //! cardinality while keeping the metric itself available.
 //!
+//! A dimension that multiplies cardinality without being useful to every
+//! deployment is instead opt-in: absent unless named in `enabled`, so the
+//! default configuration emits exactly the series it emitted before the
+//! dimension existed. `status_code` is the one such dimension today.
+//!
 //! # Route templates
 //!
 //! The `route` label grows with the number of configured routes. Without a
@@ -115,14 +120,31 @@ pub enum MetricLabel {
 
     /// The `status_class` label. Bounded to six values.
     StatusClass,
+
+    /// The `status_code` label on `praxis_http_requests_total`. Opt-in.
+    /// Carries the response status code, so an auth rejection (`401`) and a
+    /// rate limit (`429`) no longer share the `4xx` series.
+    StatusCode,
+}
+
+impl MetricLabel {
+    /// Whether this dimension is absent until explicitly enabled.
+    const fn is_opt_in(self) -> bool {
+        matches!(self, Self::StatusCode)
+    }
 }
 
 /// Which label dimensions metrics carry.
 ///
-/// Every dimension is emitted unless listed in `disabled`, so the default
-/// configuration emits exactly the series it emitted before this setting
-/// existed. Disabling a dimension removes it from the series key,
-/// collapsing the series that differed only by it.
+/// Every default-on dimension is emitted unless listed in `disabled`, so the
+/// default configuration emits exactly the series it emitted before this
+/// setting existed. Disabling a dimension removes it from the series key,
+/// collapsing the series that differed only by it. An opt-in dimension works
+/// the other way around: absent unless listed in `enabled`.
+///
+/// `disabled` wins when a dimension appears in both lists, so a contradictory
+/// configuration resolves to the lower-cardinality reading rather than
+/// silently picking one.
 ///
 /// This is read once at startup and never re-read. A gauge whose guard is
 /// acquired before a reload and released after it would otherwise increment
@@ -133,31 +155,43 @@ pub enum MetricLabel {
 ///
 /// let labels = MetricLabelsConfig::default();
 /// assert!(labels.is_enabled(MetricLabel::Route));
-/// assert!(labels.all_enabled());
+/// assert!(!labels.is_enabled(MetricLabel::StatusCode));
+/// assert!(labels.default_set());
 ///
 /// let labels: MetricLabelsConfig = serde_yaml::from_str("disabled: [route]").unwrap();
 /// assert!(!labels.is_enabled(MetricLabel::Route));
 /// assert!(labels.is_enabled(MetricLabel::Cluster));
-/// assert!(!labels.all_enabled());
+/// assert!(!labels.default_set());
+///
+/// let labels: MetricLabelsConfig = serde_yaml::from_str("enabled: [status_code]").unwrap();
+/// assert!(labels.is_enabled(MetricLabel::StatusCode));
+/// assert!(!labels.default_set());
 /// ```
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MetricLabelsConfig {
     /// Dimensions to drop from every metric that carries them.
     pub disabled: Vec<MetricLabel>,
+
+    /// Opt-in dimensions to add to the metrics that carry them.
+    pub enabled: Vec<MetricLabel>,
 }
 
 impl MetricLabelsConfig {
     /// Whether `label` is emitted.
     #[must_use]
     pub fn is_enabled(&self, label: MetricLabel) -> bool {
-        !self.disabled.contains(&label)
+        !self.disabled.contains(&label) && (!label.is_opt_in() || self.enabled.contains(&label))
     }
 
-    /// Whether every dimension is enabled, i.e. the default label set.
+    /// Whether this is the default label set, with nothing added or removed.
+    ///
+    /// Recorders take a static-label fast path when this holds, so it must
+    /// stay false for any configuration whose emitted labels differ from the
+    /// default — including one that only adds an opt-in dimension.
     #[must_use]
-    pub fn all_enabled(&self) -> bool {
-        self.disabled.is_empty()
+    pub fn default_set(&self) -> bool {
+        self.disabled.is_empty() && self.enabled.is_empty()
     }
 }
 
@@ -288,7 +322,7 @@ mod tests {
     #[test]
     fn label_dimensions_default_to_enabled() {
         let labels = MetricLabelsConfig::default();
-        assert!(labels.all_enabled(), "the default must emit today's label set exactly");
+        assert!(labels.default_set(), "the default must emit today's label set exactly");
         for label in [
             MetricLabel::Cluster,
             MetricLabel::Endpoint,
@@ -302,14 +336,58 @@ mod tests {
     }
 
     #[test]
-    fn disabling_one_dimension_clears_all_enabled() {
+    fn opt_in_dimensions_default_to_disabled() {
+        let labels = MetricLabelsConfig::default();
+        assert!(
+            !labels.is_enabled(MetricLabel::StatusCode),
+            "status_code must stay off until it is asked for"
+        );
+    }
+
+    #[test]
+    fn enabling_an_opt_in_dimension_emits_it() {
+        let labels: MetricLabelsConfig = serde_yaml::from_str("enabled: [status_code]").unwrap();
+        assert!(labels.is_enabled(MetricLabel::StatusCode), "status_code should be on");
+        assert!(
+            labels.is_enabled(MetricLabel::StatusClass),
+            "the aggregated class stays, so existing queries keep working"
+        );
+        assert!(!labels.default_set(), "the fast path must not be taken");
+    }
+
+    #[test]
+    fn disabled_wins_over_enabled() {
+        let labels: MetricLabelsConfig =
+            serde_yaml::from_str("disabled: [status_code]\nenabled: [status_code]").unwrap();
+        assert!(
+            !labels.is_enabled(MetricLabel::StatusCode),
+            "a contradictory config must resolve to the lower-cardinality reading"
+        );
+    }
+
+    #[test]
+    fn enabling_a_default_on_dimension_is_a_no_op() {
+        let labels: MetricLabelsConfig = serde_yaml::from_str("enabled: [route]").unwrap();
+        assert!(labels.is_enabled(MetricLabel::Route), "route was already emitted");
+    }
+
+    #[test]
+    fn status_code_without_status_class_is_allowed() {
+        let labels: MetricLabelsConfig =
+            serde_yaml::from_str("disabled: [status_class]\nenabled: [status_code]").unwrap();
+        assert!(!labels.is_enabled(MetricLabel::StatusClass), "the class is dropped");
+        assert!(labels.is_enabled(MetricLabel::StatusCode), "the exact code remains");
+    }
+
+    #[test]
+    fn disabling_one_dimension_clears_the_default_set() {
         let labels: MetricLabelsConfig = serde_yaml::from_str("disabled: [endpoint]").unwrap();
         assert!(!labels.is_enabled(MetricLabel::Endpoint), "endpoint should be disabled");
         assert!(
             labels.is_enabled(MetricLabel::Cluster),
             "unlisted dimensions stay enabled"
         );
-        assert!(!labels.all_enabled(), "the fast path must not be taken");
+        assert!(!labels.default_set(), "the fast path must not be taken");
     }
 
     #[test]
@@ -339,7 +417,7 @@ mod tests {
     fn metrics_config_defaults_to_all_labels() {
         let metrics: MetricsConfig = serde_yaml::from_str("{}").unwrap();
         assert!(
-            metrics.labels.all_enabled(),
+            metrics.labels.default_set(),
             "an empty metrics section must not change any series"
         );
     }

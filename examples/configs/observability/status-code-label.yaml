@@ -1,0 +1,55 @@
+# Status Code Metric Label
+#
+# Adds the opt-in `status_code` label to `praxis_http_requests_total`, so a
+# rate limit (429) and a missing route (404) stop sharing one `4xx` series.
+# The label is off unless named in `enabled`, and codes outside a fixed
+# allowlist collapse to their class, holding it to about seventeen values.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/observability/status-code-label.yaml
+#
+# Exercise:
+#   curl -s http://localhost:8080/api/hello            # 200
+#   curl -s -o /dev/null http://localhost:8080/missing # 404
+#   for _ in $(seq 10); do curl -s -o /dev/null http://localhost:8080/api/hello; done  # 429
+#   curl -s http://localhost:9903/metrics | grep praxis_http_requests_total
+
+admin:
+  metrics_address: "127.0.0.1:9903"
+
+metrics:
+  labels:
+    # Opt-in dimensions. `status_class` is untouched and stays enabled, so
+    # existing 4xx/5xx dashboards and alerts keep working; `status_code`
+    # refines the same information for the queries that need it.
+    enabled:
+      - status_code
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - routing
+
+filter_chains:
+  - name: routing
+    filters:
+      # Deliberately tiny so a handful of curls produce 429s to graph.
+      - filter: rate_limit
+        mode: global
+        rate: 1
+        burst: 3
+
+      - filter: router
+        routes:
+          - path_prefix: "/api"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

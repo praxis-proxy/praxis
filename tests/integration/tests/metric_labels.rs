@@ -85,6 +85,7 @@ fn disabled_dimensions_disappear_from_the_scrape() {
     // on the happy path) drop the label too, not just the request metrics.
     praxis_protocol::http::pingora::metrics::install_metric_labels(MetricLabelsConfig {
         disabled: vec![MetricLabel::Route, MetricLabel::Endpoint, MetricLabel::Cluster],
+        enabled: vec![],
     });
 
     let backend = praxis_test_utils::start_backend_with_shutdown("label-sets");
@@ -149,6 +150,7 @@ fn disabled_cluster_drops_from_the_failure_path_metrics() {
     // cluster dimension too.
     praxis_protocol::http::pingora::metrics::install_metric_labels(MetricLabelsConfig {
         disabled: vec![MetricLabel::Route, MetricLabel::Endpoint, MetricLabel::Cluster],
+        enabled: vec![],
     });
 
     let proxy_port = free_port();

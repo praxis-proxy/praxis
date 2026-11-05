@@ -68,6 +68,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [overload-gauges.yaml](configs/observability/overload-gauges.yaml) | Publishes smoothed `praxis_overload_pressure` gauges for cgroup memory, anonymous resident memory, CPU stall time, connections, and file descriptors |
 | [process-logging.yaml](configs/observability/process-logging.yaml) | Non-blocking process logs written to a file |
 | [route-templates.yaml](configs/observability/route-templates.yaml) | Collapses dynamic path segments in the Prometheus route label into stable templates, so high-variety URLs share one series instead of widening cardinality |
+| [status-code-label.yaml](configs/observability/status-code-label.yaml) | Adds the opt-in `status_code` label to `praxis_http_requests_total`, so a rate limit (429) and a missing route (404) stop sharing one `4xx` series |
 | [tcp-access-log.yaml](configs/observability/tcp-access-log.yaml) | Structured JSON logging of TCP connection events (connect and disconnect) |
 | [tcp-active-connections.yaml](configs/observability/tcp-active-connections.yaml) | Prometheus gauge for TCP connections currently open per listener |
 | [tcp-byte-counters.yaml](configs/observability/tcp-byte-counters.yaml) | Prometheus counters for bytes forwarded over TCP connections in each direction, labeled by listener |

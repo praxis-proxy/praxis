@@ -47,6 +47,7 @@ pub(in crate::http) fn emit_request_metrics_for(status_code: u16, request_method
         method,
         route,
         status_class,
+        status_code: metrics::status_code_label(status_code),
     };
 
     emit_upstream_request_metric(ctx, &cluster);
