@@ -748,6 +748,7 @@ mod tests {
 
     use super::*;
     use crate::config::DEFAULT_CONFIG;
+    use crate::server::LifecyclePhase;
 
     #[test]
     fn run_with_shutdown_flips_the_watch_once_the_future_resolves() {
@@ -770,6 +771,34 @@ mod tests {
             observed.load(Ordering::SeqCst),
             "the service should see the watch flip before run_with_shutdown returns"
         );
+    }
+
+    #[test]
+    fn run_with_shutdown_reports_serving_draining_and_stopped() {
+        let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 2\n"));
+        let lifecycle = runtime.lifecycle();
+        let serving = Arc::new(Mutex::new(None));
+        let serving_seen = Arc::clone(&serving);
+        let shutdown_lifecycle = lifecycle.clone();
+        let draining = Arc::new(Mutex::new(None));
+        let draining_seen = Arc::clone(&draining);
+        let service_lifecycle = lifecycle.clone();
+        runtime.add_required_service("probe", move |mut shutdown| async move {
+            drop(shutdown.wait_for(|stopping| *stopping).await);
+            *draining_seen.lock().unwrap() = Some(service_lifecycle.phase());
+        });
+        runtime.run_with_shutdown(Box::pin(async move {
+            for _ in 0..100 {
+                if shutdown_lifecycle.phase() == LifecyclePhase::Serving {
+                    *serving_seen.lock().unwrap() = Some(LifecyclePhase::Serving);
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }));
+        assert_eq!(*serving.lock().unwrap(), Some(LifecyclePhase::Serving), "required services must reach serving");
+        assert_eq!(*draining.lock().unwrap(), Some(LifecyclePhase::Draining), "drain must precede service stop");
+        assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped, "runtime must be stopped after return");
     }
 
     #[test]
