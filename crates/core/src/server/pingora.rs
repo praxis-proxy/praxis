@@ -286,7 +286,10 @@ fn warn_unsupported_global_queue_interval(runtime: &RuntimeOptions) {
     reason = "tests use expect/unwrap for brevity"
 )]
 mod tests {
+    use std::{thread, time::Duration};
+
     use super::*;
+    use crate::server::LifecyclePhase;
 
     #[test]
     fn build_http_server_returns_bootstrapped_server() {
@@ -375,6 +378,49 @@ mod tests {
         let runtime = PingoraServerRuntime::from_config(&config);
 
         runtime.run_with_shutdown(Box::pin(std::future::ready(())));
+    }
+
+    #[test]
+    fn lifecycle_monitor_publishes_each_phase() {
+        let lifecycle = LifecycleHandle::new();
+        let (sender, receiver) = tokio::sync::broadcast::channel(8);
+        let monitor = monitor_lifecycle(receiver, lifecycle.clone());
+        sender.send(ExecutionPhase::Running).unwrap();
+        wait_for_phase(&lifecycle, LifecyclePhase::Serving);
+        sender.send(ExecutionPhase::Terminated).unwrap();
+        drop(sender);
+        monitor.join().unwrap();
+        assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped, "terminated Pingora must stop the lifecycle");
+
+        for phase in [ExecutionPhase::GracefulTerminate, ExecutionPhase::ShutdownStarted] {
+            let lifecycle = LifecycleHandle::new();
+            let (sender, receiver) = tokio::sync::broadcast::channel(8);
+            let monitor = monitor_lifecycle(receiver, lifecycle.clone());
+            sender.send(phase).unwrap();
+            wait_for_phase(&lifecycle, LifecyclePhase::Draining);
+            sender.send(ExecutionPhase::Terminated).unwrap();
+            drop(sender);
+            monitor.join().unwrap();
+            assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped, "Pingora shutdown must stop the lifecycle");
+        }
+
+        let lifecycle = LifecycleHandle::new();
+        let (sender, receiver) = tokio::sync::broadcast::channel(8);
+        let monitor = monitor_lifecycle(receiver, lifecycle.clone());
+        drop(sender);
+        monitor.join().unwrap();
+        assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped, "a closed Pingora phase stream must stop the lifecycle");
+    }
+
+    /// Wait for the monitor thread to publish `expected` without racing it.
+    fn wait_for_phase(lifecycle: &LifecycleHandle, expected: LifecyclePhase) {
+        for _ in 0..100 {
+            if lifecycle.phase() == expected {
+                return;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(lifecycle.phase(), expected, "Pingora lifecycle monitor did not publish the expected phase");
     }
 
     // -------------------------------------------------------------------------
