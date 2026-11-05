@@ -279,6 +279,10 @@ impl FilteredStreamingBody {
     }
 
     /// Wait for a completion chunk that will be released, or refund one that will not.
+    #[cfg_attr(
+        not(feature = "bandwidth"),
+        expect(clippy::unused_async, reason = "awaits pacing only with the bandwidth feature")
+    )]
     async fn paced_completion(&mut self, completion: Option<Bytes>) -> Result<Option<Bytes>, FilterError> {
         let output = self.handled_completion_output(completion);
         if output.is_some() {
@@ -322,6 +326,10 @@ impl FilteredStreamingBody {
     }
 
     /// Finish the upstream and wait for a completion reservation before releasing it.
+    #[cfg_attr(
+        not(feature = "bandwidth"),
+        expect(clippy::unused_async, reason = "awaits pacing only with the bandwidth feature")
+    )]
     async fn finish_stream(&mut self) -> Result<Option<Bytes>, FilterError> {
         if let Err(error) = self.handle_upstream_eof() {
             crate::cancel_download_pace(&mut self.continuation.extensions);
