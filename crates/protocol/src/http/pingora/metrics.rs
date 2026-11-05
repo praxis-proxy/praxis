@@ -476,6 +476,35 @@ pub fn status_class(code: u16) -> &'static str {
     }
 }
 
+/// Map an HTTP status code to its bounded `status_code` label value.
+///
+/// The codes Praxis returns from its own filters each keep their own value;
+/// anything else collapses to the class [`status_class`] would give it.
+///
+/// ```
+/// use praxis_protocol::http::pingora::metrics::status_code_label;
+///
+/// assert_eq!(status_code_label(429), "429");
+/// assert_eq!(status_code_label(418), "4xx");
+/// assert_eq!(status_code_label(200), "2xx");
+/// ```
+pub fn status_code_label(code: u16) -> &'static str {
+    match code {
+        400 => "400",
+        401 => "401",
+        403 => "403",
+        404 => "404",
+        405 => "405",
+        413 => "413",
+        429 => "429",
+        500 => "500",
+        502 => "502",
+        503 => "503",
+        504 => "504",
+        other => status_class(other),
+    }
+}
+
 /// Map an HTTP method to a bounded label value.
 ///
 /// Returns the method string for the nine standard methods
@@ -523,12 +552,14 @@ pub(crate) struct RequestMetricLabels {
     pub route: SharedString,
     /// Status class (e.g. `"2xx"`).
     pub status_class: &'static str,
+    /// Bounded status code (e.g. `"429"`), emitted only when opted in.
+    pub status_code: &'static str,
 }
 
 /// Build the enabled subset of the request-metric labels.
-fn selected_request_labels(labels: RequestMetricLabels) -> Vec<Label> {
+fn selected_request_labels(labels: RequestMetricLabels) -> (Vec<Label>, Vec<Label>) {
     let selected = metric_labels();
-    let pairs = [
+    let shared = [
         (
             "method",
             label_if(
@@ -549,7 +580,12 @@ fn selected_request_labels(labels: RequestMetricLabels) -> Vec<Label> {
             label_if(selected.is_enabled(MetricLabel::Cluster), labels.cluster),
         ),
     ];
-    selected_labels(&pairs)
+    let duration = selected_labels(&shared);
+    let mut request = duration.clone();
+    if selected.is_enabled(MetricLabel::StatusCode) {
+        request.push(Label::new("status_code", SharedString::const_str(labels.status_code)));
+    }
+    (request, duration)
 }
 
 /// Record HTTP request metrics for a completed request.
@@ -557,10 +593,10 @@ pub(crate) fn record_request_metrics(labels: RequestMetricLabels, duration_secs:
     if !is_recorder_installed() {
         return;
     }
-    if !metric_labels().all_enabled() {
-        let emitted = selected_request_labels(labels);
-        counter!(HTTP_REQUESTS_TOTAL, emitted.clone()).increment(1);
-        histogram!(HTTP_REQUEST_DURATION_SECONDS, emitted).record(duration_secs);
+    if !metric_labels().default_set() {
+        let (request, duration) = selected_request_labels(labels);
+        counter!(HTTP_REQUESTS_TOTAL, request).increment(1);
+        histogram!(HTTP_REQUEST_DURATION_SECONDS, duration).record(duration_secs);
         return;
     }
     record_request_metrics_all_labels(labels, duration_secs);
@@ -659,7 +695,7 @@ pub(crate) fn record_body_size_metrics(
     )]
     let (request_bytes, response_bytes) = (request_body_bytes as f64, response_body_bytes as f64);
 
-    if !metric_labels().all_enabled() {
+    if !metric_labels().default_set() {
         let emitted = selected_body_labels(method, status_class, cluster);
         histogram!(HTTP_REQUEST_BODY_BYTES, emitted.clone()).record(request_bytes);
         histogram!(HTTP_RESPONSE_BODY_BYTES, emitted).record(response_bytes);
@@ -831,7 +867,7 @@ pub(crate) fn record_upstream_request(cluster: SharedString, endpoint: SharedStr
         return;
     }
     let selected = metric_labels();
-    if !selected.all_enabled() {
+    if !selected.default_set() {
         let pairs = [
             ("cluster", label_if(selected.is_enabled(MetricLabel::Cluster), cluster)),
             (
@@ -1059,6 +1095,49 @@ mod tests {
     }
 
     #[test]
+    fn status_code_label_keeps_allowlisted_codes() {
+        for code in [400_u16, 401, 403, 404, 405, 413, 429, 500, 502, 503, 504] {
+            assert_eq!(
+                status_code_label(code),
+                code.to_string(),
+                "{code} is returned by a filter and must keep its own series"
+            );
+        }
+    }
+
+    #[test]
+    fn status_code_label_collapses_everything_else() {
+        assert_eq!(status_code_label(200), "2xx", "a success needs no per-code series");
+        assert_eq!(status_code_label(301), "3xx", "a redirect needs no per-code series");
+        assert_eq!(status_code_label(418), "4xx", "an unlisted 4xx collapses to its class");
+        assert_eq!(status_code_label(599), "5xx", "an unlisted 5xx collapses to its class");
+    }
+
+    #[test]
+    fn status_code_label_stays_bounded() {
+        let distinct: std::collections::BTreeSet<&str> = (0_u16..=1000).map(status_code_label).collect();
+        assert!(
+            distinct.len() <= 17,
+            "the dimension must stay bounded, saw {} values: {distinct:?}",
+            distinct.len()
+        );
+    }
+
+    #[test]
+    fn status_code_label_agrees_with_status_class() {
+        for code in 0_u16..=1000 {
+            let label = status_code_label(code);
+            let class = status_class(code);
+            let consistent = label == class || label.parse::<u16>().map(status_class) == Ok(class);
+            assert!(
+                consistent,
+                "{code} labelled {label} must stay inside class {class}, so the two \
+                 dimensions never contradict each other"
+            );
+        }
+    }
+
+    #[test]
     fn method_label_standard_methods() {
         for m in [
             "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE", "CONNECT",
@@ -1213,11 +1292,11 @@ mod tests {
     }
 
     #[test]
-    fn metric_labels_default_to_all_enabled() {
+    fn metric_labels_default_to_the_default_set() {
         assert!(
-            metric_labels().all_enabled(),
-            "without an explicit install every dimension must stay on, so the \
-             recorders keep their allocation-free fast path"
+            metric_labels().default_set(),
+            "without an explicit install the label set must stay the default one, so \
+             the recorders keep their allocation-free fast path"
         );
     }
 
