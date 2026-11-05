@@ -36,6 +36,7 @@ pub enum LifecycleError {
 }
 
 impl std::fmt::Display for LifecycleError {
+    /// Write the error's operator-facing description.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ShutdownStarted => f.write_str("server shutdown has already started"),
@@ -61,6 +62,7 @@ pub struct LifecycleHandle {
 }
 
 impl Default for LifecycleHandle {
+    /// Build a handle in the initializing phase, like [`LifecycleHandle::new`].
     fn default() -> Self {
         Self::new()
     }

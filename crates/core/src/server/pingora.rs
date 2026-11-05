@@ -46,6 +46,7 @@ pub struct PingoraServerRuntime {
 }
 
 impl std::fmt::Debug for PingoraServerRuntime {
+    /// Format the runtime's worker-thread count.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PingoraServerRuntime")
             .field("threads", &self.server.configuration.threads)
@@ -163,6 +164,7 @@ impl LifecycleMonitor {
 
 #[async_trait]
 impl BackgroundService for LifecycleMonitor {
+    /// Start the monitor thread in the process Pingora runs services in.
     async fn start(&self, _shutdown: ShutdownWatch) {
         self.spawn_monitor();
     }
@@ -203,6 +205,7 @@ fn monitor_lifecycle(
 }
 
 impl ServerRuntime for PingoraServerRuntime {
+    /// Build the runtime from `config`; the same as [`PingoraServerRuntime::new`].
     fn from_config(config: &Config) -> Self {
         Self::new(config)
     }
@@ -216,12 +219,14 @@ impl ServerRuntime for PingoraServerRuntime {
         self.run_with_args(RunArgs::default());
     }
 
+    /// Stop as soon as `shutdown` resolves, by requesting a fast shutdown.
     fn run_with_shutdown(self, shutdown: ShutdownFuture) {
         self.run_with_args(RunArgs {
             shutdown_signal: Box::new(FutureShutdown::new(shutdown)),
         });
     }
 
+    /// Return the lifecycle handle shared with registered protocol services.
     fn lifecycle(&self) -> LifecycleHandle {
         self.lifecycle.clone()
     }
@@ -282,6 +287,8 @@ impl FutureShutdown {
 }
 
 impl ShutdownSignalWatch for FutureShutdown {
+    /// Hand the shutdown future to Pingora and request a fast shutdown when it
+    /// resolves.
     fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
     where
         'watch: 'fut,

@@ -18,20 +18,24 @@ pub struct UnavailableRuntime {
 }
 
 impl ServerRuntime for UnavailableRuntime {
+    /// Build the runtime from `config`, which is unused because no backend is present.
     fn from_config(config: &Config) -> Self {
         _ = config;
         Self::default()
     }
 
+    /// Report that nothing can be served and return.
     fn run_until_shutdown(self) {
         self.run_with_shutdown(Box::pin(std::future::ready(())));
     }
 
+    /// Drop `shutdown`, log that nothing can be served, and stop.
     fn run_with_shutdown(self, shutdown: ShutdownFuture) {
         drop(shutdown);
         tracing::error!("no network backend is compiled into this build; nothing to serve");
     }
 
+    /// Return a clone of the runtime's lifecycle handle.
     fn lifecycle(&self) -> LifecycleHandle {
         self.lifecycle.clone()
     }

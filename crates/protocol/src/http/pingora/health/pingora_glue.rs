@@ -42,18 +42,22 @@ use super::{
 // -----------------------------------------------------------------------------
 
 impl AdminRequest for ServerSession {
+    /// Return the request method.
     fn method(&self) -> &Method {
         &self.req_header().method
     }
 
+    /// Return the request target.
     fn uri(&self) -> &Uri {
         &self.req_header().uri
     }
 
+    /// Return the request headers.
     fn headers(&self) -> &HeaderMap {
         &self.req_header().headers
     }
 
+    /// Read the request body up to `limit` bytes.
     async fn read_body(&mut self, limit: usize) -> Result<Vec<u8>, BodyReadError> {
         let mut buf = Vec::new();
 
@@ -80,6 +84,7 @@ impl AdminRequest for ServerSession {
 
 #[async_trait]
 impl ServeHttp for PingoraHealthService {
+    /// Serve one request on the health and metrics listener.
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
         self.respond(http_session)
     }
@@ -87,6 +92,7 @@ impl ServeHttp for PingoraHealthService {
 
 #[async_trait]
 impl ServeHttp for PingoraAdminService {
+    /// Serve one request on the admin listener.
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
         self.respond(http_session).await
     }
@@ -283,6 +289,7 @@ struct PrometheusUpkeepService {
 
 #[async_trait]
 impl BackgroundService for PrometheusUpkeepService {
+    /// Run recorder upkeep until shutdown.
     async fn start(&self, shutdown: ShutdownWatch) {
         let handle = self.handle.clone();
         run_prometheus_upkeep(

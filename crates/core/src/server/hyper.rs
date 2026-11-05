@@ -107,6 +107,7 @@ pub struct HyperRuntime {
 }
 
 impl fmt::Debug for HyperRuntime {
+    /// Format the runtime's tuning and registered services.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HyperRuntime")
             .field("services", &self.services)
@@ -168,9 +169,10 @@ impl HyperRuntime {
             name: name.to_owned(),
             required: false,
             start: Box::new(move |shutdown, ready| {
+                let running = service(shutdown);
                 Box::pin(async move {
                     _ = ready.send(());
-                    service(shutdown).await;
+                    running.await;
                 })
             }),
         });
@@ -189,9 +191,10 @@ impl HyperRuntime {
             name: name.to_owned(),
             required: true,
             start: Box::new(move |shutdown, ready| {
+                let running = service(shutdown);
                 Box::pin(async move {
                     _ = ready.send(());
-                    service(shutdown).await;
+                    running.await;
                 })
             }),
         });
@@ -314,6 +317,7 @@ impl HyperRuntime {
 }
 
 impl ServerRuntime for HyperRuntime {
+    /// Build the runtime from `config`; the same as [`HyperRuntime::new`].
     fn from_config(config: &Config) -> Self {
         Self::new(config)
     }
@@ -331,6 +335,7 @@ impl ServerRuntime for HyperRuntime {
         self.run(move || future_stop(shutdown));
     }
 
+    /// Return the lifecycle handle shared with registered protocol services.
     fn lifecycle(&self) -> LifecycleHandle {
         self.lifecycle.clone()
     }
@@ -359,6 +364,7 @@ struct Service {
 }
 
 impl fmt::Debug for Service {
+    /// Format the service's registered name.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Service")
             .field("name", &self.name)

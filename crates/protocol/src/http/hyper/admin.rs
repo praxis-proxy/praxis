@@ -327,18 +327,22 @@ struct HyperAdminRequest {
 }
 
 impl AdminRequest for HyperAdminRequest {
+    /// Return the request method.
     fn method(&self) -> &Method {
         &self.parts.method
     }
 
+    /// Return the request target.
     fn uri(&self) -> &Uri {
         &self.parts.uri
     }
 
+    /// Return the request headers.
     fn headers(&self) -> &HeaderMap {
         &self.parts.headers
     }
 
+    /// Read the request body up to `limit` bytes.
     async fn read_body(&mut self, limit: usize) -> Result<Vec<u8>, BodyReadError> {
         let mut buf = Vec::new();
 
