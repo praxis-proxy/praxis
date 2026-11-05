@@ -1,0 +1,59 @@
+# Bandwidth Limiting
+#
+# Delays HTTP request and response bodies, and TCP payloads, to a byte rate.
+# Omitted directions are unlimited. per_connection shares one budget across a
+# downstream connection. per_ip shares one budget across connections from the
+# same source through that filter instance. A full per-IP table closes a new
+# connection instead of pacing it.
+#
+# ⚠️  EXPERIMENTAL: This example uses the `bandwidth` experimental feature.
+# Not recommended for production use. Build with --features bandwidth.
+#
+# Usage:
+#   cargo run -p praxis-proxy --features bandwidth -- -c examples/configs/traffic-management/bandwidth-limiting.yaml
+
+listeners:
+  - name: http
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - http-chain
+
+  - name: tcp
+    address: "127.0.0.1:8082"
+    protocol: tcp
+    upstream: "127.0.0.1:3001"
+    filter_chains:
+      - tcp-chain
+
+filter_chains:
+  - name: http-chain
+    filters:
+      - filter: bandwidth_limit
+        mode: per_ip
+        upload_bytes_per_sec: 1000000
+        download_bytes_per_sec: 1000000
+        burst_bytes: 65536
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+  - name: tcp-chain
+    filters:
+      - filter: bandwidth_limit
+        mode: per_connection
+        upload_bytes_per_sec: 1000000
+        download_bytes_per_sec: 1000000
+        burst_bytes: 65536
+
+# Both example backends run on loopback addresses.
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_upstreams: true

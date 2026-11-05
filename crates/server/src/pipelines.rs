@@ -211,12 +211,13 @@ pub(crate) fn resolve_pipelines_with_composition(
         // the full configuration or conditional filters and branch chains would
         // appear absent.
         let entry_snapshot = entries.clone();
-        let mut pipeline = FilterPipeline::build_with_chains(
+        let mut pipeline = FilterPipeline::build_with_chains_for(
             &mut entries,
             &registry,
             &chains,
             &config.insecure_options,
             &config.clusters,
+            listener.protocol,
         )?;
         configure_pipeline(
             &mut pipeline,
