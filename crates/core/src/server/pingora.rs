@@ -5,7 +5,7 @@
 
 use std::{
     pin::Pin,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Mutex, PoisonError},
     thread::JoinHandle,
 };
 
@@ -16,7 +16,7 @@ use pingora_core::{
     },
     services::background::{BackgroundService, background_service},
 };
-use tracing::{info, warn};
+use tracing::info;
 
 use super::{LifecycleHandle, RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
 use crate::config::Config;
@@ -40,9 +40,6 @@ pub struct PingoraServerRuntime {
 
     /// Shared lifecycle state for management services and handlers.
     lifecycle: LifecycleHandle,
-
-    /// Slot holding the monitor thread the Pingora service starts.
-    monitor: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl std::fmt::Debug for PingoraServerRuntime {
@@ -61,12 +58,12 @@ impl PingoraServerRuntime {
         let opts = RuntimeOptions::from(&config.runtime);
         let mut server = build_http_server(config.shutdown_timeout_secs, &opts);
         let lifecycle = LifecycleHandle::new();
-        let monitor = register_lifecycle_monitor(&mut server, lifecycle.clone());
-        Self {
-            server,
-            lifecycle,
-            monitor,
-        }
+        let phases = server.watch_execution_phase();
+        server.add_service(background_service(
+            "lifecycle monitor",
+            LifecycleMonitor::new(phases, lifecycle.clone()),
+        ));
+        Self { server, lifecycle }
     }
 
     /// Access the inner Pingora server for service registration.
@@ -100,65 +97,28 @@ impl PingoraServerRuntime {
         self.server.run(args);
         self.lifecycle.begin_drain();
         self.lifecycle.mark_stopped();
-        join_monitor(&self.monitor);
     }
-}
-
-// -----------------------------------------------------------------------------
-// Lifecycle Monitor Service
-// -----------------------------------------------------------------------------
-
-/// Register the lifecycle monitor as a Pingora background service.
-///
-/// Pingora forks for daemon mode inside [`Server::run`], which discards every
-/// thread created before the fork. Starting the monitor from a service runs it
-/// in the daemon child, so readiness still follows the process lifecycle.
-fn register_lifecycle_monitor(server: &mut Server, lifecycle: LifecycleHandle) -> Arc<Mutex<Option<JoinHandle<()>>>> {
-    let phases = server.watch_execution_phase();
-    let monitor = Arc::new(Mutex::new(None));
-    server.add_service(background_service(
-        "lifecycle monitor",
-        LifecycleMonitor::new(phases, lifecycle, Arc::clone(&monitor)),
-    ));
-    monitor
 }
 
 /// Pingora background service that starts the lifecycle monitor thread.
 ///
-/// The service starts after any daemon fork, which is what keeps the monitor
-/// alive in the daemon child.
+/// Pingora forks for daemon mode inside [`Server::run`] and discards threads
+/// created before the fork, so starting the monitor from a service keeps it in
+/// the daemon child.
 struct LifecycleMonitor {
     /// Pingora's execution-phase stream, taken when the service starts.
     phases: Mutex<Option<tokio::sync::broadcast::Receiver<ExecutionPhase>>>,
-
     /// Process lifecycle the monitor thread publishes into.
     lifecycle: LifecycleHandle,
-
-    /// Join handle for the monitor thread, shared with the runtime.
-    thread: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl LifecycleMonitor {
     /// Build the service around Pingora's phase stream.
-    fn new(
-        phases: tokio::sync::broadcast::Receiver<ExecutionPhase>,
-        lifecycle: LifecycleHandle,
-        thread: Arc<Mutex<Option<JoinHandle<()>>>>,
-    ) -> Self {
+    fn new(phases: tokio::sync::broadcast::Receiver<ExecutionPhase>, lifecycle: LifecycleHandle) -> Self {
         Self {
             phases: Mutex::new(Some(phases)),
             lifecycle,
-            thread,
         }
-    }
-
-    /// Start the monitor thread once, in whichever process runs services.
-    fn spawn_monitor(&self) {
-        let Some(phases) = self.phases.lock().unwrap_or_else(PoisonError::into_inner).take() else {
-            return;
-        };
-        let monitor = monitor_lifecycle(phases, self.lifecycle.clone());
-        *self.thread.lock().unwrap_or_else(PoisonError::into_inner) = Some(monitor);
     }
 }
 
@@ -166,18 +126,10 @@ impl LifecycleMonitor {
 impl BackgroundService for LifecycleMonitor {
     /// Start the monitor thread in the process Pingora runs services in.
     async fn start(&self, _shutdown: ShutdownWatch) {
-        self.spawn_monitor();
-    }
-}
-
-/// Join the monitor thread after Pingora has stopped.
-fn join_monitor(monitor: &Arc<Mutex<Option<JoinHandle<()>>>>) {
-    let thread = monitor.lock().unwrap_or_else(PoisonError::into_inner).take();
-    let Some(thread) = thread else {
-        return;
-    };
-    if thread.join().is_err() {
-        warn!("lifecycle monitor thread panicked");
+        let Some(phases) = self.phases.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            return;
+        };
+        drop(monitor_lifecycle(phases, self.lifecycle.clone()));
     }
 }
 
@@ -373,7 +325,10 @@ fn warn_unsupported_global_queue_interval(runtime: &RuntimeOptions) {
 )]
 mod tests {
     use std::{
-        sync::atomic::{AtomicBool, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         thread,
         time::Duration,
     };

@@ -519,16 +519,8 @@ fn compute_ready_response(registry: Option<&HealthRegistry>, verbose: bool, read
     }
 
     let agg = aggregate_health(registry, verbose);
-    let status_str = if agg.any_down && readiness == ReadinessMode::Upstreams {
-        "degraded"
-    } else {
-        "ok"
-    };
-    let status_code: u16 = if agg.any_down && readiness == ReadinessMode::Upstreams {
-        503
-    } else {
-        200
-    };
+    let degraded = agg.any_down && readiness == ReadinessMode::Upstreams;
+    let (status_str, status_code) = if degraded { ("degraded", 503) } else { ("ok", 200) };
 
     let body = format_ready_body(status_str, &agg);
     (status_code, body)

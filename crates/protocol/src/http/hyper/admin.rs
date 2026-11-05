@@ -146,10 +146,7 @@ pub fn add_health_endpoint_with_pipelines(
 }
 
 /// Add health and metrics endpoints with readiness policy and lifecycle state.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the endpoint's independent inputs mirror the configuration it serves"
-)]
+#[expect(clippy::too_many_arguments, reason = "endpoint wiring mirrors its configuration")]
 pub fn add_health_endpoint_with_pipelines_and_policy(
     runtime: &mut HyperRuntime,
     metrics_addr: &str,

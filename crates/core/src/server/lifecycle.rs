@@ -7,10 +7,6 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-// -----------------------------------------------------------------------------
-// LifecyclePhase
-// -----------------------------------------------------------------------------
-
 /// The externally visible phase of a Praxis server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecyclePhase {
@@ -23,10 +19,6 @@ pub enum LifecyclePhase {
     /// Shutdown has completed.
     Stopped,
 }
-
-// -----------------------------------------------------------------------------
-// LifecycleError
-// -----------------------------------------------------------------------------
 
 /// Why a lifecycle transition could not be applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,15 +38,11 @@ impl std::fmt::Display for LifecycleError {
 
 impl std::error::Error for LifecycleError {}
 
-// -----------------------------------------------------------------------------
-// LifecycleHandle
-// -----------------------------------------------------------------------------
-
 /// Cloneable handle for the one server lifecycle state machine.
 ///
 /// The watch channel is both the source of truth and the notification
-/// mechanism. Keeping the state in one channel prevents readiness readers and
-/// shutdown listeners from observing contradictory copies of the phase.
+/// mechanism, so readers and shutdown listeners cannot observe contradictory
+/// copies of the phase.
 #[derive(Clone, Debug)]
 pub struct LifecycleHandle {
     /// The current phase, shared with every clone and subscriber.
@@ -94,20 +82,16 @@ impl LifecycleHandle {
     ///
     /// # Errors
     ///
-    /// Returns [`LifecycleError::ShutdownStarted`] when the process is
-    /// already draining or stopped, because serving cannot resume.
+    /// Returns [`LifecycleError::ShutdownStarted`] once shutdown has begun.
     pub fn mark_serving(&self) -> Result<(), LifecycleError> {
-        if matches!(self.phase(), LifecyclePhase::Draining | LifecyclePhase::Stopped) {
-            return Err(LifecycleError::ShutdownStarted);
-        }
-        _ = self.transition(|phase| match phase {
+        let changed = self.transition(|phase| match phase {
             LifecyclePhase::Initializing | LifecyclePhase::Serving => Some(LifecyclePhase::Serving),
             LifecyclePhase::Draining | LifecyclePhase::Stopped => None,
         });
-        if matches!(self.phase(), LifecyclePhase::Draining | LifecyclePhase::Stopped) {
-            Err(LifecycleError::ShutdownStarted)
-        } else {
+        if changed || self.phase() == LifecyclePhase::Serving {
             Ok(())
+        } else {
+            Err(LifecycleError::ShutdownStarted)
         }
     }
 
@@ -121,12 +105,7 @@ impl LifecycleHandle {
 
     /// Mark shutdown complete.
     pub fn mark_stopped(&self) {
-        self.transition(|phase| match phase {
-            LifecyclePhase::Stopped => Some(LifecyclePhase::Stopped),
-            LifecyclePhase::Initializing | LifecyclePhase::Serving | LifecyclePhase::Draining => {
-                Some(LifecyclePhase::Stopped)
-            },
-        });
+        _ = self.transition(|_phase| Some(LifecyclePhase::Stopped));
     }
 
     /// Apply one state transition through the watch channel's synchronized value.
