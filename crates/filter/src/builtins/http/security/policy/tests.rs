@@ -5860,7 +5860,15 @@ async fn buffered_response_policy_reads_http_request_attributes() {
         let mut req = request_for_alice();
         req.uri = request_path.parse().expect("valid request path");
         let mut ctx = make_filter_context(&req);
-        admit_inference(&filter, &mut ctx).await;
+        let mut request = Some(bytes::Bytes::from_static(INFERENCE_REQUEST));
+        let request_action = filter
+            .on_request_body(&mut ctx, &mut request, true)
+            .await
+            .expect("request phase ran");
+        assert!(
+            matches!(request_action, FilterAction::BodyDone),
+            "request must be admitted before the response hook for {request_path}; got {request_action:?}"
+        );
 
         let mut response = crate::test_utils::make_response();
         response
@@ -5874,11 +5882,21 @@ async fn buffered_response_policy_reads_http_request_attributes() {
             .expect("buffered response policy ran");
         assert!(matches!(action, FilterAction::Continue));
 
-        assert_eq!(
-            body == Some(original),
-            allowed,
-            "unexpected policy result for {request_path}"
-        );
+        if allowed {
+            assert_eq!(
+                body,
+                Some(original),
+                "allowed response must remain unchanged for {request_path}"
+            );
+        } else {
+            let served = body.expect("denied response must have a body");
+            let envelope: serde_json::Value =
+                serde_json::from_slice(&served).expect("denied response must be valid JSON");
+            assert_eq!(envelope["error"]["type"], "policy_violation");
+            assert_eq!(envelope["error"]["code"], "cel");
+            assert_eq!(envelope["error"]["message"], "CEL expression evaluated to false");
+            assert_ne!(served, original, "denied response must replace the upstream body");
+        }
     }
 }
 
