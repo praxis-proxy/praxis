@@ -5149,6 +5149,42 @@ fn the_lower_ceiling_binds_when_both_apply() {
 }
 
 #[test]
+fn policy_body_capabilities_reflect_both_limits_and_access_tiers() {
+    for (access, inference, buffer, expected_request, expected_response) in [
+        (BodyAccessMode::ReadOnly, 4_096, 8_192, 4_096, None),
+        (BodyAccessMode::ReadWrite, 4_096, 8_192, 4_096, Some(8_192)),
+        (BodyAccessMode::ReadWrite, 8_192, 4_096, 4_096, Some(4_096)),
+    ] {
+        let (_dir, path) = write_llm_route_config();
+        let mut cfg = filter_config(path);
+        cfg.body_access = access;
+        cfg.max_buffer_bytes = buffer;
+        cfg.llm.max_request_bytes = inference;
+        let filter = PolicyFilter::new(cfg, None).unwrap();
+        assert_eq!(
+            filter.request_body_mode(),
+            BodyMode::StreamBuffer {
+                max_bytes: Some(expected_request)
+            }
+        );
+        assert_eq!(
+            filter.response_body_mode(),
+            expected_response.map_or(BodyMode::Stream, |limit| BodyMode::StreamBuffer {
+                max_bytes: Some(limit)
+            })
+        );
+        assert_eq!(
+            filter.request_body_access(),
+            if matches!(access, BodyAccessMode::ReadWrite) {
+                BodyAccess::ReadWrite
+            } else {
+                BodyAccess::ReadOnly
+            }
+        );
+    }
+}
+
+#[test]
 fn rejects_an_out_of_range_inference_ceiling() {
     for (max_request_bytes, expected) in [
         (0, "llm.max_request_bytes must be > 0"),
@@ -6073,6 +6109,95 @@ async fn a_malformed_body_is_not_reported_as_a_duplicate_key() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn large_late_duplicates_and_malformed_json_have_distinct_policy_outcomes() {
+    let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
+    let filter = build_filter(path);
+    let padding = "x".repeat(900_000);
+    let duplicate = format!(r#"{{"model":"m","padding":"{padding}","mo\u0064el":"m"}}"#);
+    let malformed = format!(r#"{{"model":"m","padding":"{padding}","mo\u0064el":"m""#);
+    let allowed = format!(r#"{{"padding":"{padding}","model":"m","tools":[]}}"#);
+    assert!(matches!(
+        dispatch_inference_as(&filter, "alice", &allowed).await,
+        FilterAction::BodyDone
+    ));
+    for (body, status, violation) in [
+        (duplicate, 400, "llm.duplicate_key"),
+        (malformed, 403, "llm.model_missing"),
+    ] {
+        let action = dispatch_inference_as(&filter, "alice", &body).await;
+        let FilterAction::Reject(rejection) = action else {
+            panic!("expected rejection, got {action:?}");
+        };
+        assert_eq!(rejection.status, status);
+        assert!(has_header(&rejection, "x-policy-violation", violation));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn large_policy_request_uses_the_late_model_and_tool_content() {
+    let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            max_request_bytes: 1_000_000,
+            ..Default::default()
+        },
+    );
+    let padding = "x".repeat(900_000);
+    let body =
+        |tool: &str| format!(r#"{{"padding":"{padding}","model":"m","tools":[{{"function":{{"name":"{tool}"}}}}]}}"#);
+    let allowed = body("weather");
+    let forbidden = body("transfer_funds");
+    assert!(matches!(
+        dispatch_inference_as(&filter, "alice", &allowed).await,
+        FilterAction::BodyDone
+    ));
+    assert!(
+        matches!(dispatch_inference_as(&filter, "alice", &forbidden).await, FilterAction::Reject(rejection) if rejection.status == 403)
+    );
+    let missing = format!(r#"{{"padding":"{padding}"}}"#);
+    let wrong_type = format!(r#"{{"padding":"{padding}","model":123}}"#);
+    for body in [missing, wrong_type] {
+        let FilterAction::Reject(rejection) = dispatch_inference_as(&filter, "alice", &body).await else {
+            panic!("missing or unusable model must be denied");
+        };
+        assert!(has_header(&rejection, "x-policy-violation", "llm.model_missing"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_size_failure_is_distinct_from_invalid_input_at_the_limit() {
+    let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            max_request_bytes: 1_000_000,
+            ..Default::default()
+        },
+    );
+    let prefix = r#"{"padding":""#;
+    let suffix = r#"","model":"m"}"#;
+    let exact = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(1_000_000 - prefix.len() - suffix.len())
+    );
+    assert_eq!(exact.len(), 1_000_000);
+    assert!(matches!(
+        dispatch_inference_as(&filter, "alice", &exact).await,
+        FilterAction::BodyDone
+    ));
+    let over = format!("{exact} ");
+    let malformed = format!("{}!", &exact[..exact.len() - 1]);
+    for (body, status, violation) in [(over, 413, "llm.body_too_large"), (malformed, 403, "llm.model_missing")] {
+        let FilterAction::Reject(rejection) = dispatch_inference_as(&filter, "alice", &body).await else {
+            panic!("expected rejection");
+        };
+        assert_eq!(rejection.status, status);
+        assert!(has_header(&rejection, "x-policy-violation", violation));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_streaming_request_still_records_the_stream_flag() {
     let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
     let filter = build_filter(path);
@@ -6547,6 +6672,46 @@ async fn a_result_pipeline_alone_redacts_the_response() {
         "the `result:` pipeline is the only declaration on the route; it still has to mask the \
          value on the way back. got {served}",
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn large_policy_mutations_preserve_unrelated_request_and_response_content() {
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    args:
+      ssn: "str | mask(2)"
+    result:
+      ssn: "str | mask(2)"
+"#,
+    );
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let padding = "x".repeat(900_000);
+    let original = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"padding":padding,"ssn":"123-45-6789"}}}).to_string();
+    let mut request = Some(bytes::Bytes::from(original));
+    let action = filter.on_request_body(&mut ctx, &mut request, true).await.unwrap();
+    assert!(matches!(action, FilterAction::BodyDone));
+    let transformed = request.unwrap();
+    let parsed: serde_json::Value = serde_json::from_slice(&transformed).unwrap();
+    assert_ne!(parsed["params"]["arguments"]["ssn"], "123-45-6789");
+    assert_eq!(parsed["params"]["arguments"]["padding"], padding);
+    assert!(!transformed.windows(11).any(|part| part == b"123-45-6789"));
+
+    let original_response = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"padding":padding,"ssn":"123-45-6789"}}}).to_string();
+    let original_len = original_response.len();
+    let mut response = Some(bytes::Bytes::from(original_response));
+    let action = filter.on_response_body(&mut ctx, &mut response, true).unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    let transformed = response.unwrap();
+    assert_eq!(transformed.len(), original_len);
+    let parsed: serde_json::Value = serde_json::from_slice(&transformed).unwrap();
+    assert_ne!(parsed["result"]["structuredContent"]["ssn"], "123-45-6789");
+    assert_eq!(parsed["result"]["structuredContent"]["padding"], padding);
+    assert!(!transformed.windows(11).any(|part| part == b"123-45-6789"));
 }
 
 // -----------------------------------------------------------------------------
