@@ -19,6 +19,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Apply the policy filter's configured failure mode when a classified tool
+  response is malformed JSON or lacks both a result and a valid JSON-RPC error.
+  Policies with tool response hooks no longer silently skip those inputs;
+  fail-closed pipelines stop delivery before the buffered payload escapes.
 - Validate the complete input's UTF-8 before `json_body` rewrites or
   `json_body_field` header promotion. Invalid bytes in ignored JSON values
   can no longer produce trusted metadata or bypass the configured invalid-input
