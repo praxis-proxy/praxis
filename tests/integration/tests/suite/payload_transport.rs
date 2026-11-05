@@ -376,7 +376,7 @@ fn scheduled_opaque_upload_at_64_mib_limit() {
 fn scheduled_unbounded_opaque_upload_256_mib() {
     opaque_upload(
         &PayloadSpec::binary(268_435_456, SEED),
-        "body_limits:\n  max_request_bytes: null\n  max_response_bytes: 1024",
+        "body_limits:\n  max_buffer_bytes: 268435456\n  max_request_bytes: null\n  max_response_bytes: 1024",
         "POST",
         false,
         "upload",
@@ -1682,7 +1682,7 @@ fn h2_reset_during_preread_does_not_dispatch_or_stop_control_stream() {
 fn scheduled_unbounded_opaque_upload_one_gib() {
     opaque_upload(
         &PayloadSpec::binary(1_073_741_824, SEED),
-        "body_limits:\n  max_request_bytes: null\n  max_response_bytes: 1024",
+        "body_limits:\n  max_buffer_bytes: 1073741824\n  max_request_bytes: null\n  max_response_bytes: 1024",
         "POST",
         false,
         "upload",

@@ -128,7 +128,13 @@ fn profile_cloud_events_response(length: usize) -> (u64, u64, u64) {
         original.contains(json_filter),
         "profile must remove the request JSON filter"
     );
+    // Keep the stepped sizes explicit in policy as well as in the generator.
     let yaml = original
+        .replacen(
+            "body_limits:\n",
+            &format!("body_limits:\n  max_buffer_bytes: {}\n", length.max(67_108_864)),
+            1,
+        )
         .replace(&finite, "  max_response_bytes: null\n")
         .replace(json_filter, "")
         .replace(

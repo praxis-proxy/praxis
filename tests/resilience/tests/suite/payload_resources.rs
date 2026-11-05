@@ -199,7 +199,14 @@ fn opaque_response(length: u64, access_log: bool) -> (u64, u64) {
     } else {
         ""
     };
-    let mut process = PraxisProcess::spawn(&config(port, backend.port, clean.port(), filters, ""), &addr);
+    // Large scheduled profiles explicitly opt into their payload-sized cap.
+    // Other resource fixtures retain the ordinary 64 MiB buffering default.
+    let yaml = config(port, backend.port, clean.port(), filters, "").replacen(
+        "body_limits:\n",
+        &format!("body_limits:\n  max_buffer_bytes: {}\n", length.max(67_108_864)),
+        1,
+    );
+    let mut process = PraxisProcess::spawn(&yaml, &addr);
     let before = sample_process(process.pid()).unwrap();
     let (_, samples) = measure(process.pid(), || {
         thread::scope(|scope| {
