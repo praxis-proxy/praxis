@@ -16,8 +16,8 @@ use pingora_proxy::Session;
 #[cfg(feature = "pingora")]
 use praxis_core::connectivity::normalize_mapped_ipv4;
 #[cfg(feature = "pingora")]
-use praxis_filter::BodyMode;
-use praxis_filter::{FilterAction, FilterError, FilterPipeline, Rejection, Request};
+use praxis_filter::{BodyMode, Rejection};
+use praxis_filter::{FilterAction, FilterError, FilterPipeline, Request};
 #[cfg(feature = "pingora")]
 use tracing::{Instrument as _, error};
 
@@ -36,6 +36,7 @@ use super::{
     header_mutations::apply_pending_header_mutations,
     request_utils::templated_route,
 };
+use crate::http::body_limit::{BodyLimitPhase, body_limit_rejection};
 
 // -----------------------------------------------------------------------------
 // PipelineResult
@@ -113,7 +114,7 @@ pub(in crate::http) async fn execute(
         return Ok(true);
     }
 
-    if let Some(handled) = super::validation::handle_max_forwards(session).await {
+    if let Some(handled) = super::validation::handle_max_forwards(session, ctx).await {
         if handled {
             snapshot_for_early_exit(session, ctx);
         }
@@ -153,18 +154,12 @@ pub(in crate::http) async fn execute(
     ctx.request_body_mode = caps.request_body_mode;
     ctx.response_body_mode = caps.response_body_mode;
 
-    // Request-head phase: runs once before any StreamBuffer pre-read and the
-    // main request phase, so a head-only classifier's facts are visible to
-    // body filters during pre-read. Gated on opt-in, so the zero-buffering
-    // fast path is untouched when no filter participates.
-    if pipeline.has_request_head_phase() {
-        let span = ctx.request_span.clone();
-        if super::request_head::execute(pipeline, session, &mut request, ctx)
-            .instrument(span)
-            .await
-        {
-            return Ok(true);
-        }
+    let span = ctx.request_span.clone();
+    if super::request_head::prepare(pipeline, session, &mut request, ctx)
+        .instrument(span)
+        .await
+    {
+        return Ok(true);
     }
 
     if matches!(caps.request_body_mode, BodyMode::StreamBuffer { .. }) {
@@ -382,8 +377,13 @@ pub(in crate::http) async fn run_pipeline(
                 Ok(_) => {
                     if pipeline.body_capabilities().any_selected_upstream_request_body_writer {
                         let adapted_len = working_body.as_ref().map_or(0, Bytes::len);
-                        if adapted_len > selected_upstream_body_limit(pipeline) {
-                            action = Ok(FilterAction::Reject(Rejection::status(413)));
+                        let limit = selected_upstream_body_limit(pipeline);
+                        if adapted_len > limit {
+                            action = Ok(FilterAction::Reject(body_limit_rejection(
+                                limit,
+                                u64::try_from(adapted_len).unwrap_or(u64::MAX),
+                                BodyLimitPhase::SelectedUpstream,
+                            )));
                         } else {
                             adapted_body = Some(AdaptedRequestBody(working_body));
                         }
@@ -537,7 +537,7 @@ mod tests {
     #[cfg(not(feature = "pingora"))]
     use praxis_core::connectivity::normalize_mapped_ipv4;
     #[cfg(not(feature = "pingora"))]
-    use praxis_filter::BodyMode;
+    use praxis_filter::{BodyMode, Rejection};
     use praxis_filter::{FilterRegistry, TrustedHeaderMutation};
 
     use super::*;

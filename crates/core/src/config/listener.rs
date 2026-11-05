@@ -13,6 +13,8 @@
 pub use praxis_tls::ListenerTls;
 use serde::Deserialize;
 
+use super::forward_proxy::ForwardProxyConfig;
+
 // -----------------------------------------------------------------------------
 // Listener
 // -----------------------------------------------------------------------------
@@ -83,6 +85,42 @@ pub struct Listener {
     /// Named filter chains to apply to this listener.
     #[serde(default)]
     pub filter_chains: Vec<String>,
+
+    /// Forward-proxy (HTTP CONNECT) settings.
+    ///
+    /// When enabled, the listener accepts `CONNECT host:port` requests,
+    /// runs the filter pipeline and destination rules on them, and
+    /// tunnels bytes to the approved destination. Only applies to
+    /// `protocol: http` listeners; rejected on TCP listeners. A reload
+    /// that changes the block on a bound listener is rejected (the setting
+    /// is captured at service creation; restart to apply it).
+    ///
+    /// Requires the `forward-proxy` Cargo feature, which is off by default;
+    /// without it the key is rejected as unknown and the field stays `None`.
+    ///
+    /// ```
+    /// use praxis_core::config::Listener;
+    ///
+    /// let parsed = serde_yaml::from_str::<Listener>(
+    ///     r#"
+    /// name: egress
+    /// address: "127.0.0.1:32123"
+    /// forward_proxy:
+    ///   enabled: true
+    ///   allow_destinations:
+    ///     - host: api.example.com
+    ///       port: 443
+    /// "#,
+    /// );
+    /// if cfg!(feature = "forward-proxy") {
+    ///     assert!(parsed.unwrap().forward_proxy.is_some_and(|fp| fp.enabled));
+    /// } else {
+    ///     assert!(parsed.is_err(), "the key is unknown without the feature");
+    /// }
+    /// ```
+    #[cfg_attr(not(feature = "forward-proxy"), serde(skip))]
+    #[serde(default)]
+    pub forward_proxy: Option<ForwardProxyConfig>,
 
     /// Maximum concurrent connections for this listener.
     ///
