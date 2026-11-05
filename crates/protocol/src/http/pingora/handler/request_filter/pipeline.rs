@@ -947,6 +947,66 @@ mod tests {
 
     struct SelectedUpstreamUppercaseFilter;
 
+    /// Expands or empties the selected-upstream body to test its final limit.
+    struct SelectedUpstreamResizeFilter;
+
+    /// Attempts unbounded runtime upgrades during both header phases.
+    struct WidenBodyModesFilter;
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for WidenBodyModesFilter {
+        fn name(&self) -> &'static str {
+            "widen_body_modes"
+        }
+
+        async fn on_request(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            ctx.set_request_body_mode(BodyMode::StreamBuffer { max_bytes: None });
+            ctx.set_response_body_mode(BodyMode::StreamBuffer { max_bytes: None });
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(
+            &self,
+            ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<FilterAction, FilterError> {
+            ctx.set_response_body_mode(BodyMode::StreamBuffer { max_bytes: None });
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for SelectedUpstreamResizeFilter {
+        fn name(&self) -> &'static str {
+            "selected_upstream_resize"
+        }
+
+        async fn on_request(&self, _: &mut praxis_filter::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn selected_upstream_request_body_access(&self) -> praxis_filter::BodyAccess {
+            praxis_filter::BodyAccess::ReadWrite
+        }
+
+        fn request_body_mode(&self) -> BodyMode {
+            BodyMode::StreamBuffer { max_bytes: Some(4) }
+        }
+
+        async fn on_selected_upstream_request_body(
+            &self,
+            _: &mut praxis_filter::HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+        ) -> Result<praxis_filter::SelectedUpstreamBodyOutcome, FilterError> {
+            *body = body.as_ref().and_then(|bytes| {
+                (bytes.as_ref() != b"-").then(|| Bytes::from([bytes.as_ref(), bytes.as_ref()].concat()))
+            });
+            Ok(praxis_filter::SelectedUpstreamBodyOutcome::Continue)
+        }
+    }
+
     #[async_trait::async_trait]
     impl praxis_filter::HttpFilter for SelectedUpstreamUppercaseFilter {
         fn name(&self) -> &'static str {
@@ -1106,6 +1166,62 @@ mod tests {
             Some(VecDeque::from([Bytes::from_static(b"original")])),
             "canonical pre-read body is left intact and untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn selected_upstream_final_output_respects_effective_limit() {
+        let mut pipeline = participant_pipeline("selected_upstream_resize", || Box::new(SelectedUpstreamResizeFilter));
+        pipeline.apply_body_limits(Some(4), None, false).unwrap();
+        for (original, expected) in [
+            (b"x".as_slice(), Some(b"xx".as_slice())),
+            (b"xy", Some(b"xyxy")),
+            (b"xyz", None),
+            (b"-", Some(b"")),
+        ] {
+            let mut ctx = make_ctx();
+            ctx.pre_read_body = Some(VecDeque::from([Bytes::copy_from_slice(original)]));
+            ctx.upstream = Some(make_test_upstream());
+            let result = run_pipeline(&pipeline, make_request(), &mut ctx).await.unwrap();
+            if let Some(expected) = expected {
+                assert!(matches!(result.action, FilterAction::Continue));
+                assert_eq!(ctx.adapted_request_body_len, Some(expected.len()));
+                let actual: Vec<u8> = ctx
+                    .adapted_request_body
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|chunk| chunk.iter().copied())
+                    .collect();
+                assert_eq!(actual, expected);
+            } else {
+                assert!(matches!(result.action, FilterAction::Reject(rejection) if rejection.status == 413));
+                assert!(ctx.adapted_request_body.is_none());
+            }
+            assert_eq!(ctx.pre_read_body.unwrap().front().unwrap().as_ref(), original);
+        }
+    }
+
+    #[tokio::test]
+    async fn header_phase_runtime_upgrades_preserve_independent_ceilings() {
+        let mut pipeline = participant_pipeline("widen_body_modes", || Box::new(WidenBodyModesFilter));
+        pipeline.apply_body_limits(Some(4), Some(7), false).unwrap();
+        let mut ctx = make_ctx();
+        ctx.request_body_mode = pipeline.body_capabilities().request_body_mode;
+        ctx.response_body_mode = pipeline.body_capabilities().response_body_mode;
+        let result = run_pipeline(&pipeline, make_request(), &mut ctx).await.unwrap();
+        assert!(matches!(result.action, FilterAction::Continue));
+        assert_eq!(ctx.request_body_mode, BodyMode::StreamBuffer { max_bytes: Some(4) });
+        assert_eq!(ctx.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
+        let mut response = praxis_filter::Response {
+            status: http::StatusCode::OK,
+            headers: HeaderMap::new(),
+        };
+        let (action, _) =
+            super::super::super::response_filter::run_response_filters(&pipeline, &mut ctx, &mut response)
+                .await
+                .unwrap();
+        assert!(matches!(action.unwrap(), FilterAction::Continue));
+        assert_eq!(ctx.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
     }
 
     #[tokio::test]

@@ -1581,6 +1581,47 @@ fn body_capabilities_multiple_stream_buffer_largest_wins() {
     );
 }
 
+#[test]
+fn body_mode_composition_is_order_independent_in_both_directions() {
+    let modes = [
+        BodyMode::StreamBuffer { max_bytes: Some(3) },
+        BodyMode::SizeLimit { max_bytes: 1 },
+        BodyMode::StreamBuffer { max_bytes: Some(7) },
+    ];
+    for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        let filters = order
+            .into_iter()
+            .map(|index| {
+                let filter: Box<dyn HttpFilter> = Box::new(BidirectionalModeFilter { mode: modes[index] });
+                filter
+            })
+            .collect();
+        let mut pipeline = make_pipeline(filters);
+        let caps = pipeline.body_capabilities();
+        assert_eq!(caps.request_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
+        assert_eq!(caps.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
+        pipeline.apply_body_limits(Some(5), Some(11), false).unwrap();
+        let caps = pipeline.body_capabilities();
+        assert_eq!(caps.request_body_mode, BodyMode::StreamBuffer { max_bytes: Some(5) });
+        assert_eq!(caps.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
+    }
+    let mut pipeline = make_pipeline(vec![
+        Box::new(BidirectionalModeFilter {
+            mode: BodyMode::StreamBuffer { max_bytes: None },
+        }),
+        Box::new(BidirectionalModeFilter {
+            mode: BodyMode::StreamBuffer { max_bytes: Some(3) },
+        }),
+    ]);
+    pipeline.apply_body_limits(None, None, true).unwrap();
+    let caps = pipeline.body_capabilities();
+    let clamped = BodyMode::StreamBuffer {
+        max_bytes: Some(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES),
+    };
+    assert_eq!(caps.request_body_mode, clamped);
+    assert_eq!(caps.response_body_mode, clamped);
+}
+
 #[tokio::test]
 async fn execute_request_body_release_propagates() {
     let pipeline = make_pipeline(vec![Box::new(StreamBufferReleaseFilter { marker: b"GO" })]);
@@ -4904,6 +4945,38 @@ impl HttpFilter for StreamBufferReleaseFilter {
 /// A filter that declares StreamBuffer mode with a finite byte limit.
 struct BoundedStreamBufferFilter {
     max_bytes: usize,
+}
+
+/// Declares the same access and mode in both body directions.
+struct BidirectionalModeFilter {
+    mode: BodyMode,
+}
+
+#[async_trait]
+impl HttpFilter for BidirectionalModeFilter {
+    fn name(&self) -> &'static str {
+        "bidirectional_mode"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        self.mode
+    }
+
+    fn response_body_mode(&self) -> BodyMode {
+        self.mode
+    }
 }
 
 #[async_trait]
@@ -8267,7 +8340,8 @@ mod bound_upstream_body_barrier {
     /// the pipeline's action, and the recorded rewrite.
     async fn rewrite_with_output_near_the_limit(over_by_one: bool) -> (usize, FilterAction, Option<Bytes>) {
         let (participant, ..) = MarkingParticipant::new("limit", None);
-        let pipeline = make_pipeline(vec![binding_router("inference"), Box::new(participant)]);
+        let mut pipeline = make_pipeline(vec![binding_router("inference"), Box::new(participant)]);
+        pipeline.apply_body_limits(Some(16), None, false).unwrap();
         let limit = pipeline.selected_upstream_request_body_limit();
         let at_limit = limit.checked_sub("|limit".len()).expect("the limit covers the marker");
         let mut pre_read = vec![b'x'; at_limit];

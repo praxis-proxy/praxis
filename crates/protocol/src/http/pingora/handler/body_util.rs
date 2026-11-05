@@ -55,11 +55,13 @@ pub(super) fn clamp_body_mode_to_ceiling(mode: BodyMode, baseline: BodyMode) -> 
 /// the total exceeds `max_bytes`. Returns `false` when the body is `None`.
 pub(super) fn check_body_size_limit(body: Option<&Bytes>, accumulated_bytes: &mut u64, max_bytes: usize) -> bool {
     if let Some(chunk) = body {
-        let chunk_len = chunk.len() as u64;
-        *accumulated_bytes += chunk_len;
-
-        let limit = max_bytes as u64;
-        return *accumulated_bytes > limit;
+        let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        let Some(total) = accumulated_bytes.checked_add(chunk_len) else {
+            *accumulated_bytes = u64::MAX;
+            return true;
+        };
+        *accumulated_bytes = total;
+        return total > u64::try_from(max_bytes).unwrap_or(u64::MAX);
     }
     false
 }
@@ -67,8 +69,12 @@ pub(super) fn check_body_size_limit(body: Option<&Bytes>, accumulated_bytes: &mu
 /// Whether `chunk` would take a body already `counted` bytes long past the
 /// global `ceiling`. Does not update the count.
 pub(super) fn exceeds_body_ceiling(ceiling: Option<usize>, counted: u64, chunk: Option<&Bytes>) -> bool {
-    let chunk_len = chunk.map_or(0, Bytes::len) as u64;
-    ceiling.is_some_and(|max| counted.saturating_add(chunk_len) > max as u64)
+    let chunk_len = u64::try_from(chunk.map_or(0, Bytes::len)).unwrap_or(u64::MAX);
+    ceiling.is_some_and(|max| {
+        counted
+            .checked_add(chunk_len)
+            .is_none_or(|total| total > u64::try_from(max).unwrap_or(u64::MAX))
+    })
 }
 
 /// Push `chunk` into the stream buffer, creating it if absent. At end-of-stream

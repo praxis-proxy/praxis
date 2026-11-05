@@ -118,6 +118,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   while keeping them bodyless, including responses with huge hypothetical
   lengths.
 
+- Count an original request-body prefix once across Pingora retries while
+  continuing to count newly received tail bytes. Stale-connection retries also
+  respect the 64 KiB original and final transformed body retention ceiling.
+  Requests whose streaming writer output was not retained now return the
+  upstream error instead of retrying with an unsafe reconstruction.
+
 - Decode `grpc-web-text` request bodies during pre-read inspection before
   forwarding them to HTTP/2 backends. Invalid base64 now follows the filter
   rejection policy even before request-phase state is initialized.
