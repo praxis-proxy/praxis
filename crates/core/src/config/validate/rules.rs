@@ -1240,6 +1240,53 @@ filter_chains:
     }
 
     #[test]
+    fn body_limits_validate_each_direction_independently() {
+        for field in ["max_request_bytes", "max_response_bytes"] {
+            for (value, override_flag, accepted) in [
+                ("0", false, true),
+                ("67108864", false, true),
+                ("67108865", false, false),
+                ("null", false, false),
+                ("null", true, true),
+                ("-1", false, false),
+                ("18446744073709551616", false, false),
+            ] {
+                let yaml = format!(
+                    "listeners:\n  - name: web\n    address: '127.0.0.1:8080'\n    filter_chains: [main]\n\
+                     filter_chains:\n  - name: main\n    filters:\n      - filter: static_response\n        status: 200\n\
+                     body_limits:\n  {field}: {value}\n\
+                     insecure_options:\n  allow_unbounded_body: {override_flag}\n"
+                );
+                let result = Config::from_yaml(&yaml);
+                if accepted {
+                    let config = result.expect("valid independent body limit");
+                    let (specified, other) = if field == "max_request_bytes" {
+                        (
+                            config.body_limits.max_request_bytes,
+                            config.body_limits.max_response_bytes,
+                        )
+                    } else {
+                        (
+                            config.body_limits.max_response_bytes,
+                            config.body_limits.max_request_bytes,
+                        )
+                    };
+                    assert_eq!(other, Some(DEFAULT_MAX_BODY_BYTES));
+                    assert_eq!(specified, value.parse::<usize>().ok());
+                } else {
+                    let error = result.unwrap_err().to_string();
+                    let expected = match value {
+                        "67108865" => format!("body_limits.{field} (67108865 bytes) exceeds maximum"),
+                        "null" => "allow_unbounded_body".to_owned(),
+                        _ => "invalid YAML".to_owned(),
+                    };
+                    assert!(error.contains(&expected), "{field}={value}: {error}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn reject_body_limits_exceeding_ceiling() {
         let yaml = r#"
 listeners:
