@@ -8,7 +8,7 @@
 //! [`FilterPipeline::build`](super::FilterPipeline::build) (in
 //! [`build`]) skips branch resolution;
 //! [`FilterPipeline::build_with_chains`](super::FilterPipeline::build_with_chains)
-//! delegates here via [`resolve_chain_filters`].
+//! delegates here via [`resolve_chain_filters_for`].
 //!
 //! ## Resolution flow
 //!
@@ -36,7 +36,8 @@
 use std::{cell::Cell, collections::HashMap, mem, sync::Arc};
 
 use praxis_core::config::{
-    BranchChainConfig, BranchCondition, ChainRef, FilterEntry, InsecureOptions, MAX_BRANCH_DEPTH, count_build_branches,
+    BranchChainConfig, BranchCondition, ChainRef, Cluster, ClusterDeclarations, FilterEntry, InsecureOptions,
+    MAX_BRANCH_DEPTH, ProtocolKind, count_build_branches,
 };
 use tracing::debug;
 
@@ -54,8 +55,6 @@ use tracing::debug;
 /// and counting materialized instances against this ceiling fails such a
 /// config fast instead.
 const MAX_PIPELINE_FILTER_INSTANCES: usize = 100_000;
-
-use praxis_core::config::{Cluster, ClusterDeclarations};
 
 use super::{
     branch::{RejoinTarget, ResolvedBranch, ResolvedBranchCondition},
@@ -117,6 +116,10 @@ struct BuildContext<'a> {
     /// inheriting the branch depth.
     outbound_depth: usize,
 
+    /// Protocol the resolved filters are built for. Nested branch chains keep
+    /// the protocol of the pipeline that started the resolution.
+    protocol: ProtocolKind,
+
     /// Top-level cluster declarations, threaded so outbound chains bound
     /// from inside a branch resolve cluster references against the same
     /// set whole-config validation uses.
@@ -134,6 +137,7 @@ struct BuildContext<'a> {
 /// resolves nested branches up to [`MAX_BRANCH_DEPTH`].
 ///
 /// [`ResolvedBranch`]: super::branch::ResolvedBranch
+#[cfg(test)]
 #[expect(
     clippy::too_many_arguments,
     reason = "threads the shared build resources plus the cluster declarations the binding path needs"
@@ -145,6 +149,34 @@ pub(super) fn resolve_chain_filters(
     depth: usize,
     insecure: &InsecureOptions,
     top_level_clusters: &[Cluster],
+) -> Result<Vec<PipelineFilter>, FilterError> {
+    resolve_chain_filters_for(
+        entries,
+        registry,
+        chains,
+        depth,
+        insecure,
+        top_level_clusters,
+        ProtocolKind::Http,
+    )
+}
+
+/// Resolve filter entries, building a dual filter for `protocol`.
+///
+/// `top_level_clusters` fills name-only inline clusters reached through an
+/// outbound chain bound while this pipeline is built.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "threads the listener protocol and the cluster declarations the binding path needs"
+)]
+pub(super) fn resolve_chain_filters_for(
+    entries: &mut [FilterEntry],
+    registry: &FilterRegistry,
+    chains: &HashMap<&str, &[FilterEntry]>,
+    depth: usize,
+    insecure: &InsecureOptions,
+    top_level_clusters: &[Cluster],
+    protocol: ProtocolKind,
 ) -> Result<Vec<PipelineFilter>, FilterError> {
     let mut next_filter_id: usize = 0;
     let stack = ResolutionStack::new();
@@ -161,6 +193,7 @@ pub(super) fn resolve_chain_filters(
     let known: std::collections::HashSet<&str> = chains.keys().copied().collect();
     let chain_slices: Vec<&[FilterEntry]> = chains.values().copied().collect();
     let branch_budget = Cell::new(count_build_branches(entries, &chain_slices, &known));
+    let clusters = ClusterDeclarations::new(top_level_clusters);
     resolve_chain_filters_with_stack(
         entries,
         registry,
@@ -172,8 +205,18 @@ pub(super) fn resolve_chain_filters(
         &budget,
         &branch_budget,
         0,
-        &ClusterDeclarations::new(top_level_clusters),
+        protocol,
+        &clusters,
     )
+}
+
+/// Reject branch nesting past [`MAX_BRANCH_DEPTH`].
+fn ensure_branch_depth(depth: usize) -> Result<(), FilterError> {
+    if depth > MAX_BRANCH_DEPTH {
+        Err(format!("branch nesting depth exceeds maximum ({MAX_BRANCH_DEPTH})").into())
+    } else {
+        Ok(())
+    }
 }
 
 /// Inner implementation that threads a shared filter-ID counter and a shared
@@ -197,11 +240,10 @@ pub(crate) fn resolve_chain_filters_with_stack(
     budget: &Cell<usize>,
     branch_budget: &Cell<usize>,
     outbound_depth: usize,
+    protocol: ProtocolKind,
     top_level_clusters: &ClusterDeclarations<'_>,
 ) -> Result<Vec<PipelineFilter>, FilterError> {
-    if depth > MAX_BRANCH_DEPTH {
-        return Err(format!("branch nesting depth exceeds maximum ({MAX_BRANCH_DEPTH})").into());
-    }
+    ensure_branch_depth(depth)?;
     // Branch depth and outbound depth are tracked independently: `depth` bounds
     // branch nesting within this pipeline, while `outbound_depth` bounds how many
     // outbound bindings deep we are. The binding context carries only the latter.
@@ -214,6 +256,7 @@ pub(crate) fn resolve_chain_filters_with_stack(
         top_level_clusters,
         budget,
         branch_budget,
+        protocol,
     );
     let (mut filters, branch_configs) = build_filters(entries, next_filter_id, &binding_ctx, budget)?;
     let pipeline_filter_type_names: Vec<&str> = filters.iter().map(|pf| pf.filter.name()).collect();
@@ -227,6 +270,7 @@ pub(crate) fn resolve_chain_filters_with_stack(
         budget,
         branch_budget,
         outbound_depth,
+        protocol,
         top_level_clusters,
     };
     let name_index = build_name_index(&filters);
@@ -464,6 +508,7 @@ fn resolve_chain_refs(
             bctx.budget,
             bctx.branch_budget,
             bctx.outbound_depth,
+            bctx.protocol,
             bctx.top_level_clusters,
         )?);
     }
@@ -566,6 +611,7 @@ mod tests {
             &clusters,
             &budget,
             &branch_budget,
+            ProtocolKind::Http,
         );
         let (filters, _) = build_filters(&mut entries, &mut 0, &ctx, &budget).unwrap();
         let index = build_name_index(&filters);
@@ -592,6 +638,7 @@ mod tests {
             &clusters,
             &budget,
             &branch_budget,
+            ProtocolKind::Http,
         );
         let (filters, _) = build_filters(&mut entries, &mut 0, &ctx, &budget).unwrap();
         let index = build_name_index(&filters);
@@ -668,6 +715,7 @@ mod tests {
             &clusters,
             &budget,
             &branch_budget,
+            ProtocolKind::Http,
         );
         let (filters, _) = build_filters(&mut entries, &mut 0, &ctx, &budget).unwrap();
         let index = build_name_index(&filters);
@@ -913,6 +961,7 @@ mod tests {
             budget: &budget,
             branch_budget: &branch_budget,
             outbound_depth: 0,
+            protocol: ProtocolKind::Http,
             top_level_clusters: &clusters,
         };
         let refs = vec![ChainRef::Named("nonexistent".to_owned())];

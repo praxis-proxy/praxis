@@ -535,6 +535,8 @@ mod tests {
             connect_time: std::time::Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
+            #[cfg(feature = "bandwidth")]
+            bandwidth: None,
         }
     }
 }

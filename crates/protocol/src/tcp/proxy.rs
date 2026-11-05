@@ -244,6 +244,8 @@ impl PingoraTcpProxy {
             connect_time,
             bytes_in: 0,
             bytes_out: 0,
+            #[cfg(feature = "bandwidth")]
+            bandwidth: None,
         };
 
         let result = resolve_connect_result(pipeline, &mut ctx, remote_addr).await;
@@ -283,6 +285,8 @@ impl PingoraTcpProxy {
             connect_time,
             bytes_in,
             bytes_out,
+            #[cfg(feature = "bandwidth")]
+            bandwidth: None,
         };
         let _result = pipeline.execute_tcp_disconnect(&mut ctx).await;
     }
@@ -1301,6 +1305,8 @@ mod tests {
             connect_time: std::time::Instant::now(),
             bytes_in: 0,
             bytes_out: 0,
+            #[cfg(feature = "bandwidth")]
+            bandwidth: None,
         }
     }
 

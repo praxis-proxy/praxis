@@ -28,6 +28,10 @@ use super::super::{
 
 /// Run response filters on a buffered terminal response and send it downstream.
 #[cfg(feature = "pingora")]
+#[expect(
+    clippy::large_stack_frames,
+    reason = "terminal delivery owns Pingora inline response header buffers"
+)]
 pub(super) async fn run_terminal_response(
     pipeline: &FilterPipeline,
     session: &mut Session,
