@@ -8,7 +8,7 @@
 //! [`FilterPipeline::build`](super::FilterPipeline::build) (in
 //! [`build`]) skips branch resolution;
 //! [`FilterPipeline::build_with_chains`](super::FilterPipeline::build_with_chains)
-//! delegates here via [`resolve_chain_filters`].
+//! delegates here via [`resolve_chain_filters_for`].
 //!
 //! ## Resolution flow
 //!
@@ -181,8 +181,8 @@ pub(super) fn resolve_chain_filters_for(
     let mut next_filter_id: usize = 0;
     let stack = ResolutionStack::new();
     let budget = Cell::new(0);
-    // Seed the shared branch budget with the configuration-wide branch count —
-    // this pipeline's own entries plus every named chain — so bound outbound
+    // Seed the shared branch budget with the configuration-wide branch count â€”
+    // this pipeline's own entries plus every named chain â€” so bound outbound
     // chains are counted on top of the whole configuration rather than each
     // starting from zero. A named outbound chain the listener never references
     // still materializes when bound and is already counted config-wide by
