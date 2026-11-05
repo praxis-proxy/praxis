@@ -7,17 +7,17 @@
 //! which instantiate filters from [`FilterEntry`] slices via the
 //! [`FilterRegistry`], compute [`BodyCapabilities`], and run ordering
 //! validation checks. Branch-aware builds delegate to
-//! [`build_branch::resolve_chain_filters`] for recursive resolution.
+//! [`build_branch::resolve_chain_filters_for`] for recursive resolution.
 //!
 //! [`FilterEntry`]: praxis_core::config::FilterEntry
 //! [`FilterRegistry`]: crate::registry::FilterRegistry
 //! [`BodyCapabilities`]: crate::body::BodyCapabilities
-//! [`build_branch::resolve_chain_filters`]: super::build_branch::resolve_chain_filters
+//! [`build_branch::resolve_chain_filters_for`]: super::build_branch::resolve_chain_filters_for
 
 use std::{collections::HashMap, mem, sync::Arc};
 
 use praxis_core::{
-    config::{FilterEntry, InsecureOptions, SkipPipelineChecks},
+    config::{FilterEntry, InsecureOptions, ProtocolKind, SkipPipelineChecks},
     id::IdGenerator,
     time::SystemTimeSource,
 };
@@ -110,13 +110,48 @@ impl FilterPipeline {
         insecure_options: &InsecureOptions,
         top_level_clusters: &[praxis_core::config::Cluster],
     ) -> Result<Self, FilterError> {
-        let filters = super::build_branch::resolve_chain_filters(
+        Self::build_with_chains_for(
+            entries,
+            registry,
+            chains,
+            insecure_options,
+            top_level_clusters,
+            ProtocolKind::Http,
+        )
+    }
+
+    /// Build a pipeline for `protocol`.
+    ///
+    /// A dual filter follows `protocol`. HTTP-only and TCP-only filters do not.
+    /// `top_level_clusters` fills name-only inline clusters in outbound chains,
+    /// the same declarations [`build_with_chains`] threads for an HTTP listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] when a filter fails to instantiate or a branch
+    /// chain cannot be resolved.
+    ///
+    /// [`build_with_chains`]: Self::build_with_chains
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "HTTP builds delegate here with the listener protocol and the top-level clusters"
+    )]
+    pub fn build_with_chains_for(
+        entries: &mut [FilterEntry],
+        registry: &FilterRegistry,
+        chains: &HashMap<&str, &[FilterEntry]>,
+        insecure_options: &InsecureOptions,
+        top_level_clusters: &[praxis_core::config::Cluster],
+        protocol: ProtocolKind,
+    ) -> Result<Self, FilterError> {
+        let filters = super::build_branch::resolve_chain_filters_for(
             entries,
             registry,
             chains,
             0,
             insecure_options,
             top_level_clusters,
+            protocol,
         )?;
         Ok(Self::from_filters(filters))
     }

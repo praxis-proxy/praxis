@@ -11,6 +11,10 @@
 //! either buffered or streaming mode, and captures a
 //! [`FilteredSubrequestContinuation`] the caller drives to completion.
 //!
+//! With the `bandwidth` feature, `bandwidth_limit` only reserves bytes and this
+//! executor waits for those reservations before it sends a request body or
+//! releases response bytes. A reservation it does not release is refunded.
+//!
 //! The executor owns three transient extension mechanisms end-to-end
 //! ([`RetainedFilterResults`], [`PendingStreamChunks`], and
 //! [`StreamTermination`]) and recognizes two framework-defined caller-staged
@@ -37,6 +41,8 @@
 
 mod context;
 mod continuation;
+#[cfg(feature = "bandwidth")]
+mod pace;
 mod sanitize;
 mod streaming;
 #[cfg(test)]
@@ -101,6 +107,7 @@ use crate::{
     FilterAction, FilterError, FilterPipeline, StreamTermination, StreamTerminationCause, SubRequest,
     SubRequestResponseMode, SubResponse,
     actions::Rejection,
+    cancel_bandwidth,
     context::PendingStreamChunks,
     extensions::{RequestExtensions, SelectedClusterApplication},
     results::RetainedFilterResults,
@@ -249,6 +256,9 @@ impl FilteredSubrequestError {
         ctx.extensions.remove::<PendingStreamChunks>();
         ctx.extensions.remove::<RetainedFilterResults>();
         ctx.extensions.remove::<StreamTermination>();
+        // A failed step did not release its body. Dropping the grants here
+        // returns the unsent bytes to the shared schedule immediately.
+        cancel_bandwidth(&mut ctx.extensions);
         Self::new(error, std::mem::take(&mut ctx.extensions))
     }
 
@@ -996,6 +1006,11 @@ impl FilteredSubrequestExecutor {
             if transport_budget.is_zero() {
                 return Ok(RawResponse::Rejected(Rejection::status(504)));
             }
+            // The body filters have reserved upload bytes. Wait before the
+            // dial so an IRR step or bound outbound chain cannot outrun the
+            // limit. A reservation the deadline cannot cover is not sent.
+            #[cfg(feature = "bandwidth")]
+            pace::pace_upload(&mut filter_ctx.extensions, step_deadline).await?;
 
             match filter_ctx.subrequest_response_mode {
                 SubRequestResponseMode::Streaming => {
@@ -1216,6 +1231,8 @@ impl FilteredSubrequestExecutor {
                             message: "filtered_subrequest: transformed step response exceeds configured body limit",
                         });
                     }
+                    #[cfg(feature = "bandwidth")]
+                    pace::pace_download(&mut filter_ctx.extensions, step_deadline).await?;
                     response.body = body.unwrap_or_default();
                     if let Some(metadata) = filter_ctx.response_header.as_deref() {
                         response.status = metadata.status.as_u16();
@@ -1311,6 +1328,10 @@ impl FilteredSubrequestExecutor {
                 });
                 return Err(error);
             }
+            #[cfg(feature = "bandwidth")]
+            pace::pace_download(&mut filter_ctx.extensions, step_deadline)
+                .await
+                .map_err(|error| FilteredSubrequestError::capture(error, &mut filter_ctx))?;
             outcome.response.body = completion_body.unwrap_or_default();
         }
         let (kind, response_snapshot, completed) = match raw {
@@ -1363,6 +1384,10 @@ impl FilteredSubrequestExecutor {
             uri: filter_ctx.request.uri.clone(),
             headers: filter_ctx.request.headers.clone(),
         };
+        // Commit already removed reservations whose bytes were released.
+        // Anything still stored was not sent; return it to the schedule
+        // before the continuation keeps the extensions alive.
+        cancel_bandwidth(&mut filter_ctx.extensions);
         let continuation = FilteredSubrequestContinuation::capture(
             Arc::clone(pipeline),
             request_snapshot,

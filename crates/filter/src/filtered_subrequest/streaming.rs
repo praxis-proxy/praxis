@@ -4,8 +4,9 @@
 //! Pull-based streaming body for a filtered sub-request's response.
 //!
 //! Pulls upstream chunks through the sub-request pipeline's response-body
-//! filters, accumulates state in the owned [`FilteredSubrequestContinuation`],
-//! and runs the completion lifecycle exactly once after upstream EOF.
+//! filters, and with the `bandwidth` feature waits for a download reservation, accumulates state
+//! in the owned [`FilteredSubrequestContinuation`], and runs the completion
+//! lifecycle exactly once after upstream EOF.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -30,6 +31,15 @@ use crate::{
 /// delivery evidence recorded before suppression.
 #[derive(Clone, Copy, Debug)]
 pub struct StreamBodySuppressed;
+
+/// What one upstream read produced for the streaming caller.
+enum Pull {
+    /// A chunk, or `None` once the stream has ended.
+    Yield(Option<Bytes>),
+
+    /// Filters kept the chunk. Read the upstream again.
+    Again,
+}
 
 /// The streaming callout's response exceeded its configured byte ceiling.
 ///
@@ -193,10 +203,19 @@ impl FilteredStreamingBody {
         Ok(body)
     }
 
-    /// Handle a chunk received from the upstream.
-    fn handle_upstream_chunk(&mut self, chunk: Bytes) -> Result<Option<Bytes>, FilterError> {
+    /// Run response-body filters on one upstream chunk.
+    ///
+    /// The filtered bytes stay in `body` until the caller has waited for
+    /// any download reservation. Queueing them first would let a later
+    /// poll release the tail after a failed wait.
+    fn filter_upstream_chunk(&mut self, chunk: Bytes) -> Result<Option<Bytes>, FilterError> {
         let mut body = Some(chunk);
         self.run_step_body_filters(&mut body, false)?;
+        Ok(body)
+    }
+
+    /// Queue filtered output and take the first chunk a caller may observe.
+    fn enqueue_filtered(&mut self, body: Option<Bytes>) -> Option<Bytes> {
         let emitted = self
             .continuation
             .extensions
@@ -204,7 +223,7 @@ impl FilteredStreamingBody {
             .map_or_else(VecDeque::new, PendingStreamChunks::drain_chunks);
         self.pending_chunks.extend(emitted);
         self.pending_chunks.extend(body.filter(|bytes| !bytes.is_empty()));
-        Ok(self.pending_chunks.pop_front())
+        self.pending_chunks.pop_front()
     }
 
     /// Complete the step after a response-body filter failure.
@@ -216,6 +235,10 @@ impl FilteredStreamingBody {
         self.continuation
             .extensions
             .insert(StreamTermination::new(StreamTerminationCause::Filter));
+        // The failed chunk was reserved and is not released. Refund it
+        // before completion reserves a new tail, or the earlier grant can
+        // no longer be returned to the schedule.
+        crate::cancel_download_pace(&mut self.continuation.extensions);
         let completion = self.complete_step().map_err(|completion_error| -> FilterError {
             format!(
                 "filtered_subrequest: response filter failed ({error}); completion also failed ({completion_error})"
@@ -223,7 +246,7 @@ impl FilteredStreamingBody {
             .into()
         })?;
         self.finished = true;
-        self.deferred_completion_output = self.handled_completion_output(completion);
+        self.deferred_completion_output = self.paced_completion(completion).await?;
         Ok(None)
     }
 
@@ -251,8 +274,99 @@ impl FilteredStreamingBody {
             .insert(StreamTermination::new(termination_cause(&e)));
         let completion = self.complete_step()?;
         self.finished = true;
-        self.deferred_completion_output = self.handled_completion_output(completion);
+        self.deferred_completion_output = self.paced_completion(completion).await?;
         Ok(None)
+    }
+
+    /// Wait for a completion chunk that will be released, or refund one that will not.
+    #[cfg_attr(
+        not(feature = "bandwidth"),
+        expect(clippy::unused_async, reason = "awaits pacing only with the bandwidth feature")
+    )]
+    async fn paced_completion(&mut self, completion: Option<Bytes>) -> Result<Option<Bytes>, FilterError> {
+        let output = self.handled_completion_output(completion);
+        if output.is_some() {
+            #[cfg(feature = "bandwidth")]
+            super::pace::pace_download(&mut self.continuation.extensions, self.continuation.step_deadline).await?;
+        } else {
+            crate::cancel_download_pace(&mut self.continuation.extensions);
+        }
+        Ok(output)
+    }
+
+    /// Read the next upstream chunk, preserving its transport error.
+    async fn read_upstream_chunk(
+        &mut self,
+    ) -> Result<Result<Option<Bytes>, praxis_core::subrequest::SubRequestError>, FilterError> {
+        let upstream = self
+            .upstream
+            .as_mut()
+            .ok_or_else(|| -> FilterError { "filtered_subrequest: upstream already consumed".to_owned().into() })?;
+        // Let SubResponseBody observe the absolute step deadline itself.
+        // An outer timeout here drops its future before the body can run
+        // its timeout cleanup and record DeadlineExceeded on the CLIENT
+        // span. The body also enforces its own read/idle limits, so this
+        // cap is the single authoritative bound for the next read.
+        upstream.cap_stream_deadline(std_instant_to_tokio(self.continuation.step_deadline));
+        Ok(upstream.next_chunk().await)
+    }
+
+    /// Filter one chunk and wait for its download reservation before queueing it.
+    async fn accept_upstream_chunk(&mut self, chunk: Bytes) -> Result<Pull, FilterError> {
+        let body = match self.filter_upstream_chunk(chunk) {
+            Ok(body) => body,
+            Err(error) => return Box::pin(self.handle_filter_error(error)).await.map(Pull::Yield),
+        };
+        #[cfg(feature = "bandwidth")]
+        super::pace::pace_download(&mut self.continuation.extensions, self.continuation.step_deadline).await?;
+        Ok(match self.enqueue_filtered(body) {
+            Some(bytes) => Pull::Yield(Some(bytes)),
+            None => Pull::Again,
+        })
+    }
+
+    /// Finish the upstream and wait for a completion reservation before releasing it.
+    #[cfg_attr(
+        not(feature = "bandwidth"),
+        expect(clippy::unused_async, reason = "awaits pacing only with the bandwidth feature")
+    )]
+    async fn finish_stream(&mut self) -> Result<Option<Bytes>, FilterError> {
+        if let Err(error) = self.handle_upstream_eof() {
+            crate::cancel_download_pace(&mut self.continuation.extensions);
+            return Err(error);
+        }
+        #[cfg(feature = "bandwidth")]
+        if let Err(error) =
+            super::pace::pace_download(&mut self.continuation.extensions, self.continuation.step_deadline).await
+        {
+            // The completion bytes were stored before the wait. Drop them
+            // so a caller that drains after this error cannot skip the pace.
+            self.deferred_completion_output = None;
+            return Err(error);
+        }
+        Ok(None)
+    }
+
+    /// Turn one upstream read into a chunk, a finished stream, or another read.
+    async fn dispatch_upstream(
+        &mut self,
+        next: Result<Option<Bytes>, praxis_core::subrequest::SubRequestError>,
+    ) -> Result<Pull, FilterError> {
+        match next {
+            Ok(Some(chunk)) => self.accept_upstream_chunk(chunk).await,
+            Ok(None) => self.finish_stream().await.map(Pull::Yield),
+            Err(error) => Box::pin(self.handle_upstream_error(error)).await.map(Pull::Yield),
+        }
+    }
+
+    /// Read until a chunk is ready or the stream ends.
+    async fn pull_until_output(&mut self) -> Result<Option<Bytes>, FilterError> {
+        loop {
+            let next = self.read_upstream_chunk().await?;
+            if let Pull::Yield(bytes) = self.dispatch_upstream(next).await? {
+                return Ok(bytes);
+            }
+        }
     }
 
     /// Expose an abnormal completion body only when a filter explicitly
@@ -277,32 +391,7 @@ impl StreamingResponseBody for FilteredStreamingBody {
         if self.finished {
             return Ok(None);
         }
-
-        loop {
-            let next = {
-                let upstream = self.upstream.as_mut().ok_or_else(|| -> FilterError {
-                    "filtered_subrequest: upstream already consumed".to_owned().into()
-                })?;
-
-                // Let SubResponseBody observe the absolute step deadline itself.
-                // An outer timeout here drops its future before the body can run
-                // its timeout cleanup and record DeadlineExceeded on the CLIENT
-                // span. The body also enforces its own read/idle limits, so this
-                // cap is the single authoritative bound for the next read.
-                upstream.cap_stream_deadline(std_instant_to_tokio(self.continuation.step_deadline));
-                upstream.next_chunk().await
-            };
-
-            match next {
-                Ok(Some(chunk)) => match self.handle_upstream_chunk(chunk) {
-                    Ok(Some(bytes)) => return Ok(Some(bytes)),
-                    Ok(None) => {},
-                    Err(error) => return Box::pin(self.handle_filter_error(error)).await,
-                },
-                Ok(None) => return self.handle_upstream_eof(),
-                Err(e) => return Box::pin(self.handle_upstream_error(e)).await,
-            }
-        }
+        self.pull_until_output().await
     }
 
     async fn suppress(&mut self) -> Result<(), FilterError> {
@@ -313,6 +402,9 @@ impl StreamingResponseBody for FilteredStreamingBody {
             }
             self.continuation.extensions.insert(StreamBodySuppressed);
             let completion = self.complete_step();
+            // Suppression discards the completion bytes, so the reservation
+            // must not stay charged.
+            crate::cancel_download_pace(&mut self.continuation.extensions);
             let _ = self.continuation.extensions.remove::<StreamBodySuppressed>();
             completion?;
         }
