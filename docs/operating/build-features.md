@@ -113,6 +113,7 @@ on that edge too. Adding a backend is described in
 | `iterative-request-router` | off (experimental) | The `iterative_request_router` filter: a bounded loop of sub-requests for provider failover and agentic/tool loops. | On for callout and failover pipelines (the AI gateway relies on it). No extra dependencies; pulls in `upstream-binding`, since its steps dispatch from the binding. |
 | `router-json-aliases` | off (experimental) | The `router` filter's JSON-alias body-routing groundwork. | Groundwork only: it is not wired into routing, and a route that sets `json_aliases` is rejected at build even with the feature on. Default builds do not accept the keys. |
 | `slow-start` | off (experimental) | Per-cluster `slow_start` config. | The key is rejected unless the feature is on. With the feature on, weighted strategies apply the ramp. Hash strategies do not. |
+| `forward-proxy` | off (experimental) | The listener `forward_proxy` block (HTTP CONNECT forward proxying). | The key is rejected unless the feature is on. The CONNECT runtime is not merged yet, so the block is parsed and validated but accepts no CONNECT requests. |
 | `bound-upstream-request-body` | off (experimental) | The `HttpFilter::on_bound_upstream_request_body` hook, run once at the logical-binding barrier. | For out-of-tree filters that must inspect or rewrite the request body against the bound upstream; no in-tree filter uses it yet. Pulls in `upstream-binding`. |
 | `chain-binding` | off (experimental) | The `register_chain_binding` outbound-callout API (`ChainBindingContext::bind_chain`) and its authority-bound deferred credentials (`PendingCredentials`, `DeferredCredential`). | For out-of-tree callout filters; no in-tree consumer yet. |
 | `spiffe` | off (experimental) | SPIFFE X.509-SVID mTLS peer identity (the `require_named` listener mode) and the `peer_identity_trust` filter. | On for mTLS peer-identity authorization. Adds `spiffe` and `x509-parser`. |
@@ -164,6 +165,11 @@ production` at startup. Do not run an experimental build in production.
   key. With the feature on, round robin, random, least-connections, and
   power-of-two-choices apply the ramp. Hash strategies keep the configured
   weight.
+- **`forward-proxy`**: the `forward_proxy` block on `protocol: http`
+  listeners, which turns a listener into an HTTP CONNECT egress gateway.
+  Default builds reject the key. The config surface (destination allowlist,
+  tunnel timeouts, the no-open-relay check) is in place; the CONNECT tunnel
+  runtime is still to land.
 - **`bound-upstream-request-body`**: the once-per-request bound-upstream
   request-body hook (`bound_upstream_request_body_access` and
   `on_bound_upstream_request_body` on `HttpFilter`). It runs right after the

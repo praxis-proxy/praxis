@@ -14,7 +14,10 @@ use praxis_filter::{
 };
 use tracing::{debug, warn};
 
-use crate::http::pingora::context::PingoraRequestCtx;
+use crate::http::{
+    body_limit::{BodyLimitPhase, body_limit_rejection},
+    pingora::context::PingoraRequestCtx,
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -235,10 +238,15 @@ impl PreReadPass {
         // size even when a ReadWrite filter shrinks or grows the body.
         self.original_body_bytes += downstream_chunk_len;
 
-        if let Some(b) = &body
-            && self.buffer.push(b.clone()).is_err()
+        if let Some(chunk) = &body
+            && let Err(overflow) = self.buffer.push(chunk.clone())
         {
-            return Err(PreReadStop::Rejected(Rejection::status(413)));
+            ctx.request_body_bytes = self.original_body_bytes;
+            return Err(PreReadStop::Rejected(body_limit_rejection(
+                overflow.limit,
+                u64::try_from(overflow.attempted).unwrap_or(u64::MAX),
+                BodyLimitPhase::PreRead,
+            )));
         }
 
         // At EOS, deliver the accumulated body to filters so
@@ -396,6 +404,8 @@ pub(super) fn push_grouped_queues(filter_ctx: &HttpFilterContext<'_>, log: &mut 
 
 #[cfg(test)]
 mod tests {
+    use tracing::instrument::WithSubscriber as _;
+
     use super::*;
 
     #[test]
@@ -520,11 +530,72 @@ mod tests {
         }
     }
 
-    #[test]
-    fn body_buffer_overflow_produces_413() {
-        let mut buffer = BodyBuffer::new(10);
-        let large = bytes::Bytes::from(vec![0_u8; 20]);
-        assert!(buffer.push(large).is_err(), "oversized push should fail");
+    #[tokio::test]
+    async fn pre_read_overflow_returns_json_413_and_accounts_for_rejected_chunk()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = limited_pipeline()?;
+        let mut pass = PreReadPass::new(&pipeline).ok_or("expected StreamBuffer pre-read")?;
+        let mut ctx = PingoraRequestCtx::default();
+        let request = post_request();
+
+        let result = pass
+            .feed(
+                &pipeline,
+                &mut ctx,
+                &request,
+                Some(bytes::Bytes::from_static(b"01234567890")),
+            )
+            .await;
+
+        let Err(PreReadStop::Rejected(rejection)) = result else {
+            return Err("buffer overflow must return a rejection".into());
+        };
+        assert_eq!(rejection.status, 413, "overflow must retain its client-error status");
+        let error: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().ok_or("missing error body")?)?;
+        assert_eq!(
+            error.get("error").and_then(serde_json::Value::as_str),
+            Some("request body too large")
+        );
+        assert_eq!(
+            ctx.request_body_bytes, 11,
+            "rejection accounting includes the overflowing chunk"
+        );
+        drop(ctx);
+        assert_eq!(pass.buffer.total_bytes(), 0, "overflowing bytes must not be retained");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pre_read_overflow_logs_warning_with_limit_and_attempted_size()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = limited_pipeline()?;
+        let mut pass = PreReadPass::new(&pipeline).ok_or("expected StreamBuffer pre-read")?;
+        let mut ctx = PingoraRequestCtx::default();
+        let request = post_request();
+        let output = tempfile::NamedTempFile::new()?;
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(output.reopen()?)
+            .finish();
+        let chunk = Some(bytes::Bytes::from_static(b"01234567890"));
+
+        let result = pass
+            .feed(&pipeline, &mut ctx, &request, chunk)
+            .with_subscriber(subscriber)
+            .await;
+        drop(ctx);
+
+        assert!(
+            matches!(result, Err(PreReadStop::Rejected(_))),
+            "overflow must reject the request"
+        );
+        let log = std::fs::read_to_string(output.path())?;
+        assert!(log.contains("WARN") && log.contains("request body exceeds configured limit"));
+        assert!(log.contains("status=413") && log.contains("limit=10") && log.contains("attempted=11"));
+        assert!(log.contains("bytes_seen=11") && log.contains("phase=PreRead"));
+        Ok(())
     }
 
     #[test]
@@ -537,6 +608,29 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Build a pipeline with a ten-byte request-body inspection limit.
+    fn limited_pipeline() -> Result<FilterPipeline, Box<dyn std::error::Error + Send + Sync>> {
+        let mut entries = vec![praxis_filter::FilterEntry {
+            name: None,
+            branch_chains: None,
+            conditions: vec![],
+            config: serde_yaml::from_str("field: model\nheader: X-Model\nmax_body_bytes: 10\n")?,
+            failure_mode: praxis_core::config::FailureMode::default(),
+            filter_type: "json_body_field".into(),
+            response_conditions: vec![],
+        }];
+        FilterPipeline::build(&mut entries, &praxis_filter::FilterRegistry::with_builtins())
+    }
+
+    /// Build a POST request for body pre-read tests.
+    fn post_request() -> Request {
+        Request {
+            headers: http::HeaderMap::new(),
+            method: http::Method::POST,
+            uri: http::Uri::from_static("/"),
+        }
+    }
 
     fn is_trace_allowed(name: &str) -> bool {
         TRACE_ALLOWED_HEADERS.contains(&name)

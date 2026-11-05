@@ -53,6 +53,9 @@ pub mod kv;
 pub mod listener;
 /// Prometheus metrics: recorder, HTTP request counters, and scrape endpoint.
 pub mod metrics;
+/// Bounded cleanup of unread HTTP/1 uploads after local responses.
+#[cfg(feature = "pingora")]
+mod rejection_cleanup;
 
 // -----------------------------------------------------------------------------
 // PingoraHttp
@@ -152,6 +155,7 @@ mod tests {
             downstream_keepalive_timeout_ms: None,
             downstream_read_timeout_ms: None,
             filter_chains: vec![],
+            forward_proxy: None,
             max_connections: None,
             tcp_max_duration_secs: None,
             tcp_session_timeout_ms: None,

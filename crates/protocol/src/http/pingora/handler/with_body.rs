@@ -243,7 +243,7 @@ impl ProxyHttp for PingoraHttpHandler {
 
     async fn request_body_filter(
         &self,
-        session: &mut Session,
+        _session: &mut Session,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
         ctx: &mut Self::CTX,
@@ -266,7 +266,7 @@ impl ProxyHttp for PingoraHttpHandler {
         }
         let pipeline = ctx.pipeline(&self.pipeline);
         let span = ctx.request_span.clone();
-        request_body_filter::execute(&pipeline, session, body, end_of_stream, ctx)
+        request_body_filter::execute(&pipeline, body, end_of_stream, ctx)
             .instrument(span)
             .await
     }
@@ -365,12 +365,10 @@ impl ProxyHttp for PingoraHttpHandler {
         client_reused: bool,
     ) -> Box<pingora_core::Error> {
         connected_to_upstream::record_attempt_failure(e.as_ref(), ctx);
-        // Never retry once a final response reached the client: a second
-        // attempt cannot rewrite the response line, so its body would be
-        // spliced after whatever was already sent. A non-final 1xx (e.g.
-        // 100 Continue) does not commit the final response, so it must not
-        // block a retry; mirror fail_to_proxy's final-response predicate.
-        if session.response_written().is_some_and(fail_to_proxy::is_final_response) {
+        // Local rejections remain final even before fail_to_proxy writes them.
+        // A committed final response also cannot be replaced; informational
+        // responses do not commit it and must not block an upstream retry.
+        if ctx.pending_rejection.is_some() || session.response_written().is_some_and(fail_to_proxy::is_final_response) {
             let mut e = e;
             e.set_retry(false);
             return e;
@@ -417,6 +415,12 @@ impl ProxyHttp for PingoraHttpHandler {
     {
         let span = ctx.request_span.clone();
         fail_to_proxy::execute(session, e, ctx).instrument(span).await
+    }
+
+    fn suppress_error_log(&self, session: &Session, ctx: &Self::CTX, error: &pingora_core::Error) -> bool {
+        ctx.rejection_cleanup_pending
+            && fail_to_proxy::expected_filter_rejection(error, ctx)
+            && session.response_written().is_some_and(fail_to_proxy::is_final_response)
     }
 
     async fn upstream_request_filter(
@@ -543,6 +547,10 @@ impl ProxyHttp for PingoraHttpHandler {
         }
         .instrument(span)
         .await;
+        // Pingora has released the upstream; record completion before lingering.
+        if std::mem::take(&mut ctx.rejection_cleanup_pending) {
+            crate::http::pingora::rejection_cleanup::finish_rejection(session).await;
+        }
     }
 }
 

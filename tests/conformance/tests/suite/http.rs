@@ -184,6 +184,9 @@ fn negative_content_length_rejected() {
     );
 }
 
+/// Conflicting or invalid lengths are refused under [RFC 9110 Section 8.6].
+///
+/// [RFC 9110 Section 8.6]: https://datatracker.ietf.org/doc/html/rfc9110#section-8.6
 #[test]
 fn duplicate_content_length_rejected() {
     let backend_port = start_backend("ok");
@@ -192,22 +195,16 @@ fn duplicate_content_length_rejected() {
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        "POST / HTTP/1.1\r\n\
-         Host: localhost\r\n\
-         Content-Length: 5\r\n\
-         Content-Length: 10\r\n\
-         \r\n\
-         hello",
-    );
-    let status = parse_status(&raw);
+    for lengths in ["5\r\nContent-Length: 10", "5, 10", "16777216, 1", "5, invalid", "5,"] {
+        let request = format!("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {lengths}\r\n\r\nhello");
+        let raw = http_send(proxy.addr(), &request);
+        let status = parse_status(&raw);
 
-    assert!(
-        status == 400 || status == 0,
-        "expected 400 or connection close for \
-         conflicting Content-Length, got {status}"
-    );
+        assert!(
+            status == 400 || status == 0,
+            "expected 400 or connection close for invalid Content-Length {lengths:?}, got {status}"
+        );
+    }
 }
 
 #[test]
