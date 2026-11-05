@@ -50,6 +50,28 @@ fn from_config_rejects_a_zero_buffer() {
     );
 }
 
+#[test]
+fn from_config_accepts_addressable_buffer_overrides() {
+    let hard = praxis_core::config::MAX_BUFFER_BYTES;
+    for size in [67_108_865, hard - 1, hard, hard + 1, usize::MAX] {
+        let value = serde_yaml::from_str(&format!("max_buffer_bytes: {size}")).unwrap();
+        match GrpcWebFilter::from_config(&value) {
+            Ok(filter) => assert_eq!(
+                filter.request_body_mode(),
+                crate::BodyMode::StreamBuffer {
+                    max_bytes: Some(size.min(hard)),
+                }
+            ),
+            Err(error) => {
+                assert!(size > hard, "valid buffer limit rejected: {error}");
+                assert!(error.to_string().contains("addressable buffer maximum"));
+                continue;
+            },
+        }
+        assert!(size <= hard, "an oversized buffer configuration was accepted");
+    }
+}
+
 #[tokio::test]
 async fn a_grpc_web_request_is_rewritten_to_native_grpc() {
     let req = grpc_web_request("application/grpc-web+proto");

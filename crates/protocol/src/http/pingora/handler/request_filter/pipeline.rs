@@ -458,7 +458,8 @@ pub(in crate::http) async fn run_pipeline(
     // set, so the OTel `http.route` attribute read from the same field
     // later cannot disagree with the metric.
     ctx.metrics_route = templated_route(pipeline, ctx, metrics_route);
-    ctx.response_body_mode = clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
+    ctx.response_body_mode =
+        clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode, pipeline.buffer_cap());
 
     // Write back the request-scoped upstream and retry lifecycle on EVERY
     // outcome, not just Continue. A filter ordered after the load_balancer
@@ -476,7 +477,8 @@ pub(in crate::http) async fn run_pipeline(
     match action {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             ctx.rewritten_path = rewritten_path;
-            ctx.request_body_mode = clamp_body_mode_to_ceiling(request_body_mode, baseline_request_body_mode);
+            ctx.request_body_mode =
+                clamp_body_mode_to_ceiling(request_body_mode, baseline_request_body_mode, pipeline.buffer_cap());
             ctx.attempted_endpoints = attempted_endpoints;
             ctx.retry_policy = retry_policy;
             ctx.route_retry_policy = route_retry_policy;
@@ -686,6 +688,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -699,6 +702,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: None },
             BodyMode::SizeLimit { max_bytes: 512 },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -709,7 +713,11 @@ mod tests {
 
     #[test]
     fn clamp_body_mode_to_ceiling_stream_passes_through_with_ceiling() {
-        let clamped = clamp_body_mode_to_ceiling(BodyMode::Stream, BodyMode::StreamBuffer { max_bytes: Some(1024) });
+        let clamped = clamp_body_mode_to_ceiling(
+            BodyMode::Stream,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
+        );
         assert_eq!(
             clamped,
             BodyMode::Stream,
@@ -719,7 +727,11 @@ mod tests {
 
     #[test]
     fn clamp_body_mode_to_ceiling_stream_passes_through_without_ceiling() {
-        let clamped = clamp_body_mode_to_ceiling(BodyMode::Stream, BodyMode::Stream);
+        let clamped = clamp_body_mode_to_ceiling(
+            BodyMode::Stream,
+            BodyMode::Stream,
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
+        );
         assert_eq!(
             clamped,
             BodyMode::Stream,
@@ -732,6 +744,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::SizeLimit { max_bytes: 8192 },
             BodyMode::SizeLimit { max_bytes: 2048 },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -745,6 +758,7 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: Some(4096) },
             BodyMode::StreamBuffer { max_bytes: None },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
@@ -758,11 +772,88 @@ mod tests {
         let clamped = clamp_body_mode_to_ceiling(
             BodyMode::StreamBuffer { max_bytes: Some(512) },
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         );
         assert_eq!(
             clamped,
             BodyMode::StreamBuffer { max_bytes: Some(512) },
             "runtime limit within baseline ceiling should be unchanged"
+        );
+    }
+
+    #[test]
+    fn runtime_modes_obey_configured_caps_without_capping_stream_totals() {
+        for cap in [1, 65_537, 67_108_865, 1_073_741_824] {
+            for baseline in [
+                BodyMode::Stream,
+                BodyMode::SizeLimit { max_bytes: usize::MAX },
+                BodyMode::StreamBuffer { max_bytes: None },
+            ] {
+                for requested in [None, Some(1), Some(cap), Some(usize::MAX)] {
+                    assert_eq!(
+                        clamp_body_mode_to_ceiling(BodyMode::StreamBuffer { max_bytes: requested }, baseline, cap),
+                        BodyMode::StreamBuffer {
+                            max_bytes: Some(cap.min(requested.unwrap_or(cap)))
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_buffer_caps_preserve_streaming_and_zero_transfer_limits() {
+        for cap in [1, 65_537, 67_108_865, 1_073_741_824] {
+            assert_eq!(
+                clamp_body_mode_to_ceiling(BodyMode::Stream, BodyMode::Stream, cap),
+                BodyMode::Stream
+            );
+            assert_eq!(
+                clamp_body_mode_to_ceiling(BodyMode::SizeLimit { max_bytes: usize::MAX }, BodyMode::Stream, cap),
+                BodyMode::SizeLimit { max_bytes: usize::MAX }
+            );
+            assert_eq!(
+                clamp_body_mode_to_ceiling(
+                    BodyMode::StreamBuffer { max_bytes: None },
+                    BodyMode::SizeLimit { max_bytes: 0 },
+                    cap
+                ),
+                BodyMode::StreamBuffer { max_bytes: Some(0) }
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_buffer_modes_cannot_override_the_hard_ceiling() {
+        let hard = praxis_core::config::DEFAULT_MAX_BUFFER_BYTES;
+        for baseline in [
+            BodyMode::Stream,
+            BodyMode::SizeLimit { max_bytes: usize::MAX },
+            BodyMode::StreamBuffer { max_bytes: None },
+            BodyMode::StreamBuffer {
+                max_bytes: Some(usize::MAX),
+            },
+        ] {
+            for requested in [None, Some(hard), Some(hard + 1), Some(usize::MAX)] {
+                assert_eq!(
+                    clamp_body_mode_to_ceiling(
+                        BodyMode::StreamBuffer { max_bytes: requested },
+                        baseline,
+                        praxis_core::config::DEFAULT_MAX_BUFFER_BYTES
+                    ),
+                    BodyMode::StreamBuffer { max_bytes: Some(hard) },
+                    "runtime buffering remains bounded with baseline {baseline:?}"
+                );
+            }
+        }
+        assert_eq!(
+            clamp_body_mode_to_ceiling(
+                BodyMode::SizeLimit { max_bytes: usize::MAX },
+                BodyMode::Stream,
+                praxis_core::config::DEFAULT_MAX_BUFFER_BYTES
+            ),
+            BodyMode::SizeLimit { max_bytes: usize::MAX },
+            "a non-buffering cumulative limit is independent of the buffer ceiling"
         );
     }
 

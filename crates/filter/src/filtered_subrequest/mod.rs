@@ -1132,7 +1132,7 @@ impl FilteredSubrequestExecutor {
                         let outcome = match peer {
                             Ok(peer) => match self
                                 .client
-                                .execute(peer, &request, self.max_response_bytes, attempt_budget, Some(&framework_headers))
+                                .execute(peer, &request, self.max_response_bytes.min(pipeline.response_buffer_limit()), attempt_budget, Some(&framework_headers))
                                 .await
                             {
                                 Ok(response) => (response, ResponseOrigin::Upstream, None),
@@ -1189,7 +1189,7 @@ impl FilteredSubrequestExecutor {
                     let mut body = Some(std::mem::take(&mut response.body));
                     if let Some(limit) = response_body_overflow_limit(
                         pipeline.body_capabilities().response_body_mode,
-                        self.max_response_bytes,
+                        self.max_response_bytes.min(pipeline.response_buffer_limit()),
                         body.as_ref().map_or(0, Bytes::len),
                     ) {
                         return Ok(RawResponse::ResponseTooLarge {
@@ -1207,7 +1207,7 @@ impl FilteredSubrequestExecutor {
                     }
                     if let Some(limit) = response_body_overflow_limit(
                         pipeline.body_capabilities().response_body_mode,
-                        self.max_response_bytes,
+                        self.max_response_bytes.min(pipeline.response_buffer_limit()),
                         body.as_ref().map_or(0, Bytes::len),
                     ) {
                         return Ok(RawResponse::ResponseTooLarge {
@@ -1296,7 +1296,7 @@ impl FilteredSubrequestExecutor {
             // be relaxed to admit a tighter response mode here.
             if let Some(limit) = response_body_overflow_limit(
                 pipeline.body_capabilities().response_body_mode,
-                self.max_response_bytes,
+                self.max_response_bytes.min(pipeline.response_buffer_limit()),
                 completion_body.as_ref().map_or(0, Bytes::len),
             ) {
                 let error = FilteredSubrequestError::capture(
@@ -1324,6 +1324,20 @@ impl FilteredSubrequestExecutor {
             },
             RawResponse::Rejected(rejection) => {
                 let response = subresponse_from_rejection(rejection);
+                if let Some(limit) = response_body_overflow_limit(
+                    pipeline.body_capabilities().response_body_mode,
+                    self.max_response_bytes.min(pipeline.response_buffer_limit()),
+                    response.body.len(),
+                ) {
+                    return Err(FilteredSubrequestError::capture(
+                        "filtered_subrequest: local response exceeds configured body limit".into(),
+                        &mut filter_ctx,
+                    )
+                    .with_too_large(ResponseTooLargeInfo {
+                        actual: Some(response.body.len()),
+                        limit,
+                    }));
+                }
                 let snapshot = crate::Response {
                     status: http::StatusCode::from_u16(response.status).unwrap_or(http::StatusCode::BAD_GATEWAY),
                     headers: response.headers.clone(),

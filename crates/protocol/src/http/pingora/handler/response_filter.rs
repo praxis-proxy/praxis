@@ -255,7 +255,8 @@ pub(in crate::http) async fn run_response_filters(
     let headers_modified = strip_no_content_framing(resp) || headers_modified;
     ctx.cluster = cluster;
     ctx.cluster_retry_state_released = cluster_retry_state_released;
-    ctx.response_body_mode = clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
+    ctx.response_body_mode =
+        clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode, pipeline.buffer_cap());
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;

@@ -1466,7 +1466,7 @@ fn rejects_oversized_max_buffer_bytes() {
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
-        max_buffer_bytes: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1,
+        max_buffer_bytes: praxis_core::config::MAX_BUFFER_BYTES + 1,
         llm: super::config::LlmOptions::default(),
         context_headers: HashMap::default(),
         context_meta: ContextMetaConfig::default(),
@@ -5197,7 +5197,7 @@ fn assert_policy_body_capabilities(
 fn rejects_an_out_of_range_inference_ceiling() {
     for (max_request_bytes, expected) in [
         (0, "llm.max_request_bytes must be > 0"),
-        (praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1, "exceeds the maximum"),
+        (praxis_core::config::MAX_BUFFER_BYTES + 1, "exceeds the maximum"),
     ] {
         let (_dir, path) = write_llm_route_config();
         let err = PolicyFilter::new(

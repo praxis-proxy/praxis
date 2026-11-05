@@ -19,7 +19,7 @@ use http::HeaderMap;
 use pingora_core::Result;
 use pingora_proxy::Session;
 use praxis_core::{
-    config::ABSOLUTE_MAX_BODY_BYTES,
+    config::DEFAULT_MAX_BUFFER_BYTES,
     connectivity::Upstream,
     egress::PeerSpec,
     health::{ClusterHealthState, HealthRegistry},
@@ -643,9 +643,7 @@ impl AttemptPlan {
             headers: req.headers.clone(),
             body,
             allow_private: pinned.is_some_and(|pipeline| pipeline.allow_private_upstreams()),
-            limit: pinned
-                .and_then(|pipeline| pipeline.response_body_ceiling())
-                .unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            limit: pinned.map_or(DEFAULT_MAX_BUFFER_BYTES, |pipeline| pipeline.response_buffer_limit()),
             per_try_ms: ctx.retry_policy.as_ref().and_then(|policy| policy.per_try_timeout_ms),
             sni: primary_sni(ctx),
             cluster: ctx.cluster.clone(),

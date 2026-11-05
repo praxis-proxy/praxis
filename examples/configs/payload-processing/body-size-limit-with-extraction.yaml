@@ -1,13 +1,13 @@
 # Body Size Limit with Field Extraction
 #
-# Combines body_limits.max_request_bytes with json_body_field to
-# enforce a global body ceiling while still performing
+# Combines body_limits.max_buffer_bytes with json_body_field to
+# enforce a buffering cap while still performing
 # body-based routing. Requests exceeding the limit receive
 # 413 (Payload Too Large) before any extraction occurs.
 #
-# The global limit caps the StreamBuffer accumulation, so
-# even if the filter declares no per-filter limit, the
-# pipeline enforces the ceiling.
+# The buffering cap defaults to 64 MiB; this example lowers it to 1 KiB.
+# Raise max_buffer_bytes, max_request_bytes, and the filter max_body_bytes
+# together when intentionally accepting larger buffered requests.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/payload-processing/body-size-limit-with-extraction.yaml
@@ -48,10 +48,11 @@ filter_chains:
             endpoints:
               - "127.0.0.1:3000"
 
-# 1 KB ceiling: any request body over 1024 bytes is
-# rejected with 413 before field extraction runs.
+# The 1 KiB buffering cap is stricter than the 2 KiB transfer limit.
+# A 1025-byte request fails the buffering cap before extraction.
 body_limits:
-  max_request_bytes: 1024
+  max_buffer_bytes: 1024
+  max_request_bytes: 2048
 
 insecure_options:
   allow_private_endpoints: true # example proxies to local backends

@@ -86,6 +86,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Default accumulated bodies and buffered subrequest responses to a 64 MiB
+  cap, configurable through `body_limits.max_buffer_bytes`. The cap covers
+  explicit filter limits, runtime-selected buffering, nested pipelines, and
+  iterative-router state, including after reload. Request and response transfer
+  limits retain their 10 MiB defaults and remain independent for streams.
+  Larger JSON, policy, gRPC-Web, and iterative-router buffer settings are
+  accepted subject to the configured cap.
+- Keep Pingora uploads open while runtime-selected buffering withholds
+  non-final chunks, instead of sending a premature upstream end marker.
+
 - The policy engine is updated to PPE 0.5.0, which tightens OAuth
   `delegate(...)` by default: a token-exchange response must name an
   access-token or JWT `issued_token_type`, unrequested scopes outside

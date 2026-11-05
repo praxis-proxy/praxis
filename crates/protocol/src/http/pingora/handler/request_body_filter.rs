@@ -6,12 +6,11 @@
 //!
 //! Implements Pingora's `request_body_filter` hook. Chunks are
 //! accumulated or streamed based on the pipeline's [`BodyMode`];
-//! the absolute ceiling ([`ABSOLUTE_MAX_BODY_BYTES`]) is enforced
+//! the configured buffering cap (64 MiB by default) is enforced
 //! regardless of per-filter declarations. Rejections from body
 //! filters are converted to downstream error responses.
 //!
 //! [`BodyMode`]: praxis_filter::BodyMode
-//! [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
 
 use std::collections::VecDeque;
 
@@ -107,6 +106,11 @@ pub(super) async fn execute(
     ctx: &mut PingoraRequestCtx,
 ) -> pingora_core::Result<()> {
     let Err(halt) = run_request_body(pipeline, body, end_of_stream, ctx).await else {
+        // Pingora treats None as upstream EOF, even before downstream EOS.
+        // An empty chunk instead keeps a withheld buffered upload open.
+        if !end_of_stream && body.is_none() {
+            *body = Some(Bytes::new());
+        }
         return Ok(());
     };
     ctx.request_body_buffer = None;
@@ -202,7 +206,7 @@ pub(in crate::http) async fn run_request_body(
                 return Err(RequestBodyHalt::refused(
                     "request body exceeds stream_buffer size limit",
                     body_limit_rejection(
-                        max_bytes.unwrap_or(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES),
+                        max_bytes.unwrap_or(praxis_core::config::DEFAULT_MAX_BUFFER_BYTES),
                         attempted,
                         BodyLimitPhase::StreamBuffer,
                     ),
@@ -318,6 +322,38 @@ mod tests {
 
     use super::{drain_pre_read_body, run_request_body};
     use crate::http::pingora::context::PingoraRequestCtx;
+
+    #[cfg(feature = "pingora")]
+    #[tokio::test]
+    async fn withheld_request_chunks_do_not_signal_upstream_eof() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let mut pipeline =
+            praxis_filter::FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins())?;
+        pipeline.apply_body_limits(Some(10), None, false)?;
+        let mut ctx = make_ctx();
+        ctx.request_snapshot = Some(praxis_filter::Request {
+            method: http::Method::POST,
+            uri: http::Uri::from_static("/"),
+            headers: http::HeaderMap::new(),
+        });
+        ctx.request_body_mode = praxis_filter::BodyMode::StreamBuffer { max_bytes: Some(10) };
+        let mut body = Some(Bytes::from_static(b"hello"));
+        super::execute(&pipeline, &mut body, false, &mut ctx).await?;
+        assert_eq!(body, Some(Bytes::new()), "None would terminate the upstream body");
+        let mut end = None;
+        super::execute(&pipeline, &mut end, true, &mut ctx).await?;
+        assert_eq!(
+            end.as_deref(),
+            Some(b"hello".as_slice()),
+            "EOS releases the complete body"
+        );
+        let mut empty_end = None;
+        let mut empty_ctx = make_ctx();
+        empty_ctx.request_snapshot = ctx.request_snapshot.clone();
+        super::execute(&pipeline, &mut empty_end, true, &mut empty_ctx).await?;
+        assert_eq!(empty_end, None, "a real empty EOS keeps its end marker");
+        Ok(())
+    }
 
     #[cfg(feature = "pingora")]
     #[tokio::test]

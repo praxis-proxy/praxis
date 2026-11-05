@@ -83,7 +83,7 @@ struct GrpcWebConfig {
     /// Downstream encodings to translate.
     encodings: Encodings,
 
-    /// Maximum bytes buffered while decoding a base64 request body.
+    /// Maximum bytes buffered while decoding a base64 request body (also bounded by `body_limits.max_buffer_bytes`).
     max_buffer_bytes: usize,
 
     /// Behaviour when the upstream response carries no gRPC status.
@@ -181,6 +181,9 @@ impl GrpcWebFilter {
         }
         if cfg.max_buffer_bytes == 0 {
             return Err("grpc_web: max_buffer_bytes must be greater than 0".into());
+        }
+        if cfg.max_buffer_bytes > praxis_core::config::MAX_BUFFER_BYTES {
+            return Err("grpc_web: max_buffer_bytes exceeds the addressable buffer maximum".into());
         }
         Ok(Box::new(Self {
             encodings: cfg.encodings,

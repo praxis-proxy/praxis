@@ -3,6 +3,7 @@
 
 //! Byte and framing observations at the proxy transport boundary.
 
+mod buffer_ceiling;
 #[cfg(target_os = "linux")]
 mod campaigns;
 

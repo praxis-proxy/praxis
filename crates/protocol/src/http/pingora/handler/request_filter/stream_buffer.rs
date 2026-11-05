@@ -7,7 +7,8 @@ use std::{collections::VecDeque, fmt::Write as _};
 
 #[cfg(feature = "pingora")]
 use pingora_proxy::Session;
-use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
+#[cfg(test)]
+use praxis_core::config::DEFAULT_MAX_BUFFER_BYTES;
 use praxis_filter::{
     BodyBuffer, BodyMode, FilterAction, FilterError, FilterPipeline, HttpFilterContext, Rejection, Request,
     TrustedHeaderMutation,
@@ -202,7 +203,9 @@ impl PreReadPass {
         let BodyMode::StreamBuffer { max_bytes } = pipeline.body_capabilities().request_body_mode else {
             return None;
         };
-        let max_bytes = max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES);
+        let max_bytes = max_bytes
+            .unwrap_or_else(|| pipeline.buffer_cap())
+            .min(pipeline.buffer_cap());
         Some(Self {
             buffer: BodyBuffer::new(max_bytes),
             eos_body: None,
@@ -511,7 +514,7 @@ mod tests {
         let mode = BodyMode::StreamBuffer { max_bytes: Some(4096) };
         #[expect(clippy::wildcard_enum_match_arm, reason = "BodyMode is non_exhaustive")]
         let resolved = match mode {
-            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(DEFAULT_MAX_BUFFER_BYTES),
             _ => 0,
         };
         assert_eq!(resolved, 4096, "explicit max_bytes should be used");
@@ -522,12 +525,12 @@ mod tests {
         let mode = BodyMode::StreamBuffer { max_bytes: None };
         #[expect(clippy::wildcard_enum_match_arm, reason = "BodyMode is non_exhaustive")]
         let resolved = match mode {
-            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(DEFAULT_MAX_BUFFER_BYTES),
             _ => 0,
         };
         assert_eq!(
-            resolved, ABSOLUTE_MAX_BODY_BYTES,
-            "None max_bytes should fall back to ABSOLUTE_MAX_BODY_BYTES"
+            resolved, DEFAULT_MAX_BUFFER_BYTES,
+            "None max_bytes should fall back to DEFAULT_MAX_BUFFER_BYTES"
         );
     }
 

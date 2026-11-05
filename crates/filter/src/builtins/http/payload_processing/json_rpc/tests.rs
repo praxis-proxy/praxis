@@ -58,7 +58,7 @@ fn reject_zero_max_body_bytes() {
 
 #[test]
 fn rejects_max_body_bytes_above_ceiling() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("max_body_bytes: 67108865").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!("max_body_bytes: {}", usize::MAX)).unwrap();
     let err = JsonRpcFilter::from_config(&yaml).err().expect("should fail");
     assert!(
         err.to_string().contains("exceeds maximum"),

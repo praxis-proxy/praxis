@@ -344,30 +344,27 @@ impl PolicyFilter {
         cfg.validate_context_headers()
             .map_err(|e| -> FilterError { format!("policy: {e}").into() })?;
 
-        // Bound the per-request ReadWrite buffer ceiling: 0 makes every
-        // non-empty body fail, and an unbounded value multiplies per-request
-        // memory by concurrency. The pipeline's unbounded-buffer startup check
-        // never fires here because this filter always passes a concrete
-        // Some(max_buffer_bytes), so validate it directly.
+        // Validate addressable, nonzero limits. The pipeline additionally clamps
+        // accumulation to body_limits.max_buffer_bytes before invoking this filter.
         if cfg.max_buffer_bytes == 0 {
             return Err("policy: max_buffer_bytes must be > 0".into());
         }
-        if cfg.max_buffer_bytes > praxis_core::config::ABSOLUTE_MAX_BODY_BYTES {
+        if cfg.max_buffer_bytes > praxis_core::config::MAX_BUFFER_BYTES {
             return Err(format!(
                 "policy: max_buffer_bytes ({}) exceeds the maximum ({})",
                 cfg.max_buffer_bytes,
-                praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+                praxis_core::config::MAX_BUFFER_BYTES
             )
             .into());
         }
         if cfg.llm.max_request_bytes == 0 {
             return Err("policy: llm.max_request_bytes must be > 0".into());
         }
-        if cfg.llm.max_request_bytes > praxis_core::config::ABSOLUTE_MAX_BODY_BYTES {
+        if cfg.llm.max_request_bytes > praxis_core::config::MAX_BUFFER_BYTES {
             return Err(format!(
                 "policy: llm.max_request_bytes ({}) exceeds the maximum ({})",
                 cfg.llm.max_request_bytes,
-                praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+                praxis_core::config::MAX_BUFFER_BYTES
             )
             .into());
         }

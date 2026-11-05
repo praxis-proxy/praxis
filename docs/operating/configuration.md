@@ -540,15 +540,31 @@ occupy those slots for up to 30 seconds. A configured
 
 ```yaml
 body_limits:
-  max_request_bytes: 10485760    # 10 MiB
-  max_response_bytes: 5242880    # 5 MiB
+  max_buffer_bytes: 67108864    # 64 MiB, per accumulated body
+  max_request_bytes: 10485760    # 10 MiB, cumulative request bytes
+  max_response_bytes: 5242880    # 5 MiB, cumulative response bytes
 ```
 
-Both default to 10 MiB (10,485,760 bytes) when
-omitted. Setting either to `null` removes the ceiling
+`max_request_bytes` and `max_response_bytes` default to
+10 MiB (10,485,760 bytes) when omitted. Setting either to
+`null` removes the ceiling
 but requires `insecure_options.allow_unbounded_body:
 true`; without that flag, startup fails with a
-validation error.
+validation error. `max_buffer_bytes` defaults to 64 MiB and can be
+raised or lowered with a positive integer byte count. Zero, null,
+and values beyond an addressable allocation are rejected. It caps
+static and runtime-selected buffering, nested pipelines, buffered
+subrequest responses, and iterative-router state. Incremental
+streams use only their cumulative transfer limits.
+
+For a 128 MiB buffered request, set `max_buffer_bytes: 134217728`,
+`max_request_bytes: 134217728`, and raise the relevant filter's
+inspection limit (for example `json_body_field.max_body_bytes`).
+Raise `max_response_bytes` too if responses need the extra capacity.
+The smallest applicable limit wins; `allow_unbounded_body` does not
+remove the buffering cap. Reloads update new requests while in-flight
+requests keep their pinned limits. This bounds accumulated bytes,
+not parsed-object memory or aggregate memory across concurrent requests.
 
 ## Metrics
 

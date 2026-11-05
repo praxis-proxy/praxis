@@ -1658,11 +1658,7 @@ fn pipelines(config: &Config, registry: &FilterRegistry) -> ListenerPipelines {
         )
         .unwrap();
         pipeline
-            .apply_body_limits(
-                config.body_limits.max_request_bytes,
-                config.body_limits.max_response_bytes,
-                config.insecure_options.allow_unbounded_body,
-            )
+            .configure_body_limits(&config.body_limits, config.insecure_options.allow_unbounded_body)
             .unwrap();
         pipeline.set_allow_private_upstreams(config.insecure_options.allow_private_upstreams);
         built.insert(listener.name.clone(), Arc::new(pipeline));

@@ -4,6 +4,7 @@
 //! Body chunk accumulation and overflow handling.
 
 use bytes::Bytes;
+use praxis_core::config::MAX_BUFFER_BYTES;
 
 // -----------------------------------------------------------------------------
 // BodyBuffer
@@ -32,12 +33,13 @@ pub struct BodyBuffer {
 }
 
 impl BodyBuffer {
-    /// Create a new buffer with the given size limit.
+    /// Create a buffer with an explicit limit and no eager allocation.
+    /// Callers supply a limit already clamped to the configured buffering cap.
     #[must_use]
     pub fn new(max_bytes: usize) -> Self {
         Self {
             bytes: Vec::new(),
-            max_bytes,
+            max_bytes: max_bytes.min(MAX_BUFFER_BYTES),
         }
     }
 
@@ -136,6 +138,19 @@ mod tests {
 
     /// Payload size for fragmentation coverage.
     const PAYLOAD_BYTES: usize = 65_536; // 64 KiB
+
+    #[test]
+    fn explicit_buffer_limits_allow_overrides_without_eager_allocation() {
+        for requested in [0, 1, 67_108_864, 67_108_865, MAX_BUFFER_BYTES, usize::MAX] {
+            let buffer = BodyBuffer::new(requested);
+            assert_eq!(buffer.max_bytes, requested.min(MAX_BUFFER_BYTES));
+            assert_eq!(
+                buffer.bytes.capacity(),
+                0,
+                "constructing a large limit must not allocate it"
+            );
+        }
+    }
 
     #[test]
     fn buffer_empty_freeze_returns_empty_bytes() {

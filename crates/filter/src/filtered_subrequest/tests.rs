@@ -2844,7 +2844,18 @@ async fn callout_separate_limits_allow_stream_larger_than_buffered_cap() {
         spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n8\r\nabcdefgh\r\n0\r\n\r\n").await;
     let registry = callout_registry();
     let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
-    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+    let mut pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+    pipeline
+        .configure_body_limits(
+            &praxis_core::config::BodyLimitsConfig {
+                max_buffer_bytes: 1.try_into().unwrap(),
+                max_request_bytes: None,
+                max_response_bytes: None,
+            },
+            true,
+        )
+        .unwrap();
+    let pipeline = Arc::new(pipeline);
     let executor = dual_limit_executor(4, 8);
     let request = crate::SubRequest {
         method: http::Method::GET,
@@ -3457,6 +3468,80 @@ fn buffered_chain_yaml(addr: std::net::SocketAddr, prefix: &str) -> String {
         - \"{addr}\"
 "
     )
+}
+
+#[tokio::test]
+#[expect(
+    clippy::large_futures,
+    reason = "drives buffered subrequest paths with configured caps"
+)]
+async fn configured_buffer_cap_bounds_transport_local_and_transformed_subresponses() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+    for path in ["transport", "local", "transformed"] {
+        for cap in [4, 5] {
+            let raw_response = if path == "transformed" {
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+            } else {
+                "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabcde"
+            };
+            let (addr, backend) = spawn_raw_backend(raw_response).await;
+            let mut registry = crate::FilterRegistry::with_builtins();
+            registry
+                .register(
+                    "test_body_expanding",
+                    crate::FilterFactory::Http(Arc::new(|_| Ok(Box::new(BodyExpandingFilter { target: 5 })))),
+                )
+                .unwrap();
+            let yaml = match path {
+                "local" => "- filter: static_response\n  status: 200\n  body: abcde\n".to_owned(),
+                "transformed" => buffered_chain_yaml(addr, "- filter: test_body_expanding\n"),
+                "transport" => buffered_chain_yaml(addr, ""),
+                _ => unreachable!(),
+            };
+            let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+            let mut pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+            pipeline
+                .configure_body_limits(
+                    &praxis_core::config::BodyLimitsConfig {
+                        max_buffer_bytes: cap.try_into().unwrap(),
+                        max_request_bytes: None,
+                        max_response_bytes: None,
+                    },
+                    true,
+                )
+                .unwrap();
+            let request = crate::SubRequest {
+                method: http::Method::GET,
+                uri: http::Uri::from_static("/"),
+                headers: HeaderMap::new(),
+                body: bytes::Bytes::new(),
+            };
+            let outcome = buffered_executor(128)
+                .run_classified(
+                    &Arc::new(pipeline),
+                    &request,
+                    crate::RequestExtensions::default(),
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+            backend.abort();
+            match outcome {
+                crate::CalloutOutcome::ResponseTooLarge { limit, .. } => assert_eq!((cap, limit), (4, 4), "{path}"),
+                crate::CalloutOutcome::Response(crate::CalloutResponse::Buffered(response)) => {
+                    assert_eq!(cap, 5, "{path}");
+                    assert_eq!(response.body.len(), 5, "{path}");
+                    assert_eq!(response.status, 200, "{path}");
+                },
+                crate::CalloutOutcome::Response(crate::CalloutResponse::Streaming { .. }) => {
+                    panic!("{path} unexpectedly streamed")
+                },
+            }
+        }
+    }
 }
 
 #[tokio::test]

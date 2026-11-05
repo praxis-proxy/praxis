@@ -88,7 +88,7 @@ pub(super) fn store_canonical_request_body(ctx: &mut PingoraRequestCtx, body: By
     reason = "tests"
 )]
 mod tests {
-    use praxis_core::config::{ABSOLUTE_MAX_BODY_BYTES, FailureMode};
+    use praxis_core::config::{DEFAULT_MAX_BUFFER_BYTES, FailureMode};
     use praxis_filter::{BodyMode, FilterRegistry};
 
     use super::*;
@@ -162,7 +162,10 @@ mod tests {
 
     #[test]
     fn selected_upstream_body_limit_falls_back_to_absolute_max() {
-        assert_eq!(selected_upstream_body_limit(&empty_pipeline()), ABSOLUTE_MAX_BODY_BYTES);
+        assert_eq!(
+            selected_upstream_body_limit(&empty_pipeline()),
+            DEFAULT_MAX_BUFFER_BYTES
+        );
     }
 
     #[test]
