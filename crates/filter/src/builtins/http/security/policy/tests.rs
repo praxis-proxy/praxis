@@ -9,7 +9,7 @@
 //! deployments use RS256 with JWKS endpoints; the YAML schema
 //! supports both via the `decoding_key.kind` discriminant.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use http::{HeaderValue, Method};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -19,7 +19,7 @@ use tempfile::TempDir;
 use super::{
     config::{BodyAccessMode, ContextField, ContextMetaConfig, PolicyFilterConfig},
     context::{PolicyResponseContext, PolicyResponseOutput},
-    filter::PolicyFilter,
+    filter::{PolicyFilter, ResponseCustomState},
 };
 use crate::{
     AuthenticatedIdentity, BodyAccess, BodyMode, FilterAction, FilterEntry, FilterFactory, FilterPipeline,
@@ -3533,7 +3533,7 @@ async fn concurrent_cmf_dispatch_completes_without_blocking() {
 // -----------------------------------------------------------------------------
 
 use std::sync::{
-    Arc, Mutex,
+    Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -5865,6 +5865,28 @@ async fn metadata_only_response_denial_is_published_without_rewriting_the_body()
         .and_then(PolicyResponseOutput::violation)
         .expect("the downstream host must receive the late denial");
     assert_eq!(violation.code, "metadata_denied");
+}
+
+#[test]
+fn later_unmodified_policy_preserves_earlier_custom_output() {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    let host_custom = HashMap::from([("quota_input".to_owned(), json!({"tokens": 1}))]);
+    let earlier_custom = Arc::new(HashMap::from([("quota_input".to_owned(), json!({"tokens": 2}))]));
+
+    PolicyFilter::publish_response_output(
+        &mut ctx,
+        &host_custom,
+        ResponseCustomState::Replaced(earlier_custom),
+        None,
+    );
+    PolicyFilter::publish_response_output(&mut ctx, &host_custom, ResponseCustomState::Unmodified, None);
+
+    let output = ctx
+        .extensions
+        .get::<PolicyResponseOutput>()
+        .expect("policy output is published");
+    assert_eq!(output.get("quota_input"), Some(&json!({"tokens": 2})));
 }
 
 #[tokio::test(flavor = "multi_thread")]

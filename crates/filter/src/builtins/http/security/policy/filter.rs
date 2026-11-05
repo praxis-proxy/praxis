@@ -73,7 +73,7 @@ static EMPTY_BODY: Bytes = Bytes::new();
 struct StreamedInferenceResponse;
 
 /// How a response policy handled the custom extension namespace.
-enum ResponseCustomState {
+pub(super) enum ResponseCustomState {
     /// The policy did not return modified extensions.
     Unmodified,
     /// The policy returned a replacement custom namespace.
@@ -1497,6 +1497,7 @@ impl PolicyFilter {
         };
 
         let mut extensions = Self::extensions_from_identity(&headers, identity, entity_type, &model, &self.cfg);
+        Self::attach_http_attributes(ctx, &mut extensions, headers);
         extensions.llm = Some(Arc::new(LLMExtension {
             model_id: Some(model.clone()),
             provider: self.cfg.llm.provider.clone(),
@@ -1677,7 +1678,7 @@ impl PolicyFilter {
     }
 
     /// Publish host-visible response output without erasing an earlier denial.
-    fn publish_response_output(
+    pub(super) fn publish_response_output(
         ctx: &mut HttpFilterContext<'_>,
         host_custom: &std::collections::HashMap<String, serde_json::Value>,
         custom_state: ResponseCustomState,
@@ -1688,9 +1689,9 @@ impl PolicyFilter {
             earlier_output.map_or_else(std::collections::HashMap::new, |output| (*output.custom()).clone());
         let custom_modified = !matches!(custom_state, ResponseCustomState::Unmodified);
         let current = match custom_state {
-            ResponseCustomState::Unmodified => host_custom.clone(),
+            ResponseCustomState::Unmodified if earlier_output.is_none() => host_custom.clone(),
             ResponseCustomState::Replaced(values) => (*values).clone(),
-            ResponseCustomState::Removed => std::collections::HashMap::new(),
+            ResponseCustomState::Unmodified | ResponseCustomState::Removed => std::collections::HashMap::new(),
         };
         // A modified namespace is authoritative for host keys: an omitted host
         // key was intentionally removed. Preserve keys produced by earlier
