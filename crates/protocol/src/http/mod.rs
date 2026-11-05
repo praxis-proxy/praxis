@@ -13,6 +13,9 @@
 //! [`metrics`]: crate::http::metrics
 //! [`pingora`]: crate::http::pingora
 
+/// Shared request-body size admission and rejection diagnostics.
+#[cfg(any(feature = "pingora", feature = "hyper"))]
+mod body_limit;
 /// hyper-backed HTTP implementation: listeners, the proxy service and the
 /// admin glue.
 #[cfg(feature = "hyper")]

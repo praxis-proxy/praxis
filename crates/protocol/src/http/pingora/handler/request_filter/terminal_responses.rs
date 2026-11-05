@@ -19,7 +19,7 @@ use tracing::debug;
 use tracing::{error, warn};
 
 #[cfg(feature = "pingora")]
-use super::super::super::convert::{send_rejection, send_rejection_for};
+use super::super::super::convert::send_rejection_for;
 use super::super::{
     super::context::PingoraRequestCtx,
     body_util::clamp_body_mode_to_ceiling,
@@ -61,7 +61,7 @@ pub(super) async fn run_terminal_response(
     }
     strip_hop_by_hop_header_map(&mut resp.headers, RESPONSE_HOP_BY_HOP);
     strip_reserved_internal_header_map(&mut resp.headers);
-    send_terminal_to_session(session, &resp, body).await;
+    send_terminal_to_session(session, &resp, body, ctx).await;
 }
 
 /// Run response-header filters and persist their request-scoped state.
@@ -491,13 +491,18 @@ fn build_terminal_header(
 
 /// Write a terminal response (headers + optional body) to the Pingora session.
 #[cfg(feature = "pingora")]
-async fn send_terminal_to_session(session: &mut Session, resp: &praxis_filter::Response, body: Option<Bytes>) {
+async fn send_terminal_to_session(
+    session: &mut Session,
+    resp: &praxis_filter::Response,
+    body: Option<Bytes>,
+    ctx: &mut PingoraRequestCtx,
+) {
     let is_head = session.req_header().method == http::Method::HEAD;
     let status = resp.status;
     let body_prohibited = status == http::StatusCode::NO_CONTENT || status == http::StatusCode::NOT_MODIFIED;
 
     let Some(header) = build_terminal_header(resp, body.as_ref(), body_prohibited, is_head) else {
-        send_rejection(session, Rejection::status(500)).await;
+        send_rejection_for(session, Rejection::status(500), ctx).await;
         return;
     };
     let send_body = !is_head && !body_prohibited;
@@ -508,6 +513,7 @@ async fn send_terminal_to_session(session: &mut Session, resp: &praxis_filter::R
         debug!(error = %e, "failed to write terminal response header");
         return;
     }
+    ctx.rejection_cleanup_pending = true;
     if send_body
         && let Some(b) = body
         && let Err(e) = session.write_response_body(Some(b), true).await

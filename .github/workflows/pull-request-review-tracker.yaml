@@ -8,17 +8,20 @@ name: Pull Request Review Tracker
 # fields on organization project #13 in step, and reminds anyone who is
 # overdue. Shared from praxis-proxy/conventions (pr-review-tracker.yaml).
 #
-# Defaults are inert: dry run is on and both opt-ins are off, so a run reads
-# only and writes its findings to the job summary. A write needs dry-run set
-# to false AND the matching opt-in set to true.
+# The weekday run is live: it writes both project fields and posts reminder
+# comments. A manual dispatch still defaults to inert, so dry run is on and
+# both opt-ins are off unless they are checked.
 #
-# There is deliberately no schedule yet. Add one once the reported people and
-# waits have been checked here; see the conventions docs for the cron, which
-# has to pass the opt-ins explicitly because a scheduled run gets no inputs.
+# A scheduled run gets no `inputs`, so every value below is supplied
+# explicitly rather than through `inputs.*`, which is empty outside a
+# dispatch.
 #
 # The called job only uses the praxis-bot token, so it gets no permissions.
 
 on:
+  schedule:
+    # 08:15 UTC, Monday to Friday.
+    - cron: "15 8 * * 1-5"
   workflow_dispatch:
     inputs:
       dry-run:
@@ -40,9 +43,12 @@ jobs:
   track:
     uses: praxis-proxy/conventions/.github/workflows/pr-review-tracker.yaml@169157db08ef3fdf1b72641efb65e44e2baac23d # unreleased, after v0.5.0
     with:
-      dry-run: ${{ inputs.dry-run }}
-      apply-project: ${{ inputs.apply-project }}
-      apply-reminders: ${{ inputs.apply-reminders }}
+      # On a schedule these resolve to a live run with both opt-ins on. On a
+      # dispatch they resolve to whatever was checked, so the toggles in the
+      # Actions UI still mean what they say.
+      dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || false }}
+      apply-project: ${{ github.event_name != 'workflow_dispatch' || inputs.apply-project }}
+      apply-reminders: ${{ github.event_name != 'workflow_dispatch' || inputs.apply-reminders }}
     secrets:
       PRAXIS_BOT_APP_ID: ${{ secrets.PRAXIS_BOT_APP_ID }}
       PRAXIS_BOT_APP_PRIVATE_KEY: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}

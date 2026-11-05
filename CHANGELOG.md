@@ -53,6 +53,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `runtime.overload_gauges` publishes `praxis_overload_pressure`
   for cgroup memory, anonymous resident memory, CPU stall time,
   connections, and file descriptors. The gauges do not shed load.
+- A `forward_proxy` block on `protocol: http` listeners, behind the
+  experimental `forward-proxy` cargo feature (off by default; config
+  surface for CONNECT-based forward proxying): destination allowlisting with
+  wildcard host patterns and optional ports, tunnel idle timeout and
+  optional max duration. Validation rejects the block on TCP listeners
+  and requires egress control (a non-empty `allow_destinations` list or
+  an `ip_acl`/`policy` filter without `conditions` in the listener's
+  chains); the check is structural — that the configured control actually
+  restricts egress remains the operator's responsibility. Destination
+  patterns ending in a numeric label (`*.0.1`) are rejected so no pattern
+  can match an IP literal. A reload that changes a bound listener's
+  `forward_proxy` block, removes a listener that has one, or changes
+  `insecure_options.allow_private_upstreams` while a bound listener has
+  an enabled block, is rejected. The CONNECT runtime is a follow-up
+  change; the block is inert until it lands.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
@@ -107,6 +122,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   views that request-body and response policy hooks receive, rather than
   reaching those plugins and PDPs in plaintext.
 
+- Request-body limit rejections log structured warnings and return JSON 413
+  responses across buffering and streaming paths. Body-phase rejections
+  for requests armed by `grpc_status` return gRPC Trailers-Only responses
+  instead. Oversized declared Content-Length values, including validated
+  matching comma-separated lengths, are rejected before reading the body
+  or sending 100 Continue. Local body-limit rejections are not retried upstream,
+  even when 413 is configured as retriable. HEAD rejection responses retain
+  representation headers without sending payload bytes, including over HTTP/2.
+  Streaming rejections also cancel HTTP/2 upstream streams promptly instead of
+  waiting for an upstream response or allowing it to replace the rejection.
+- Early HTTP/1 responses with unread uploads use Pingora's write-side
+  shutdown and bounded cleanup before closing, including authentication
+  and rate-limit rejections and successful terminal responses. Cleanup has
+  a 30-second deadline and a 128 MiB discard budget checked between body
+  reads. Streaming rejections release the upstream before responding;
+  access logs and request duration metrics are recorded before downstream
+  cleanup. Expected client-error filter rejections no longer produce a
+  duplicate Pingora error log.
 - The FIPS runtime probe selects the Pingora backend when compiling its
   listener tests with default features disabled.
 - The Hyper backend rejects reserved client trailer names before forwarding
