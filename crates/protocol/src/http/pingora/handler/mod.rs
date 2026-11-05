@@ -140,6 +140,10 @@ pub use with_body::PingoraHttpHandler;
 ///
 /// Returns [`ProxyError`] if the listener fails to bind.
 ///
+/// This compatibility entry point uses an isolated lifecycle and therefore
+/// does not observe runtime drain transitions. Production wiring should use
+/// [`load_http_handler_with_lifecycle`].
+///
 /// [`ProxyError`]: praxis_core::ProxyError
 #[cfg(feature = "pingora")]
 pub fn load_http_handler(

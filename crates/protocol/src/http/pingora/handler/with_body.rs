@@ -134,6 +134,7 @@ impl PingoraHttpHandler {
 
 /// Mark HTTP/1 responses so clients reconnect after readiness-first drain.
 fn add_drain_connection_close(
+    session: &mut Session,
     response: &mut pingora_http::ResponseHeader,
     ctx: &PingoraRequestCtx,
     lifecycle: &LifecycleHandle,
@@ -143,6 +144,7 @@ fn add_drain_connection_close(
         Some(http::Version::HTTP_10 | http::Version::HTTP_11)
     );
     if lifecycle.phase() == praxis_core::server::LifecyclePhase::Draining && is_http1 && !ctx.connection_upgraded {
+        session.set_keepalive(None);
         response.remove_header("Connection");
         response.insert_header("Connection", "close")?;
     }
@@ -502,7 +504,7 @@ impl ProxyHttp for PingoraHttpHandler {
             .instrument(span)
             .await;
         if result.is_ok() {
-            add_drain_connection_close(upstream_response, ctx, &self.lifecycle)?;
+            add_drain_connection_close(session, upstream_response, ctx, &self.lifecycle)?;
             // RFC 9110 §7.6.3: the response Via received-protocol is the leg this
             // proxy received the response on — the upstream connection — not the
             // downstream client's version, captured before filters can rebuild

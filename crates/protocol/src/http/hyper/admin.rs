@@ -141,7 +141,7 @@ pub fn add_health_endpoint_with_pipelines(
         verbose,
         pipelines,
         ReadinessMode::Serving,
-        None,
+        Some(runtime.lifecycle()),
     );
 }
 

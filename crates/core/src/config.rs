@@ -732,6 +732,7 @@ listeners:
   - name: web
     address: "127.0.0.1:8080"
     filter_chains: [main]
+shutdown_drain_delay_secs: 2
 filter_chains:
   - name: main
     filters:

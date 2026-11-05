@@ -172,7 +172,7 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
     }
 
     let mut header = build_rejection_header(&rejection);
-    let has_body = rejection.body.is_some();
+    let has_body = rejection.body.is_some() && session.req_header().method != http::Method::HEAD;
     if let Some(body) = &rejection.body {
         let _insert = header.insert_header("content-length", body.len().to_string());
     }
@@ -180,7 +180,7 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
         debug!(error = %e, "failed to write rejection response header");
         return;
     }
-    if let Some(body) = rejection.body
+    if has_body && let Some(body) = rejection.body
         && let Err(e) = session.write_response_body(Some(body), true).await
     {
         debug!(error = %e, "failed to write rejection response body");

@@ -414,7 +414,7 @@ mod tests {
     fn pinned_pipeline_outlives_a_reload() {
         let original = Arc::new(empty_pipeline());
         let swap = ArcSwap::new(Arc::clone(&original));
-        let flight = Flight::new(&swap, Method::GET, Version::HTTP_11);
+        let flight = Flight::new(&swap, Method::GET, Version::HTTP_11, LifecycleHandle::new());
 
         swap.store(Arc::new(empty_pipeline()));
 

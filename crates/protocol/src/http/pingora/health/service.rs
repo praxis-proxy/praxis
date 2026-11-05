@@ -803,6 +803,23 @@ mod tests {
     }
 
     #[test]
+    fn ready_upstreams_mode_follows_lifecycle() {
+        let lifecycle = LifecycleHandle::new();
+        let registry: HealthRegistry = Arc::new(
+            [(Arc::from("backend"), make_health_entry(1))].into_iter().collect(),
+        );
+        let svc = PingoraHealthService::new(Some(registry), false)
+            .with_readiness(ReadinessMode::Upstreams)
+            .with_lifecycle(lifecycle.clone());
+
+        assert_eq!(svc.ready_response().0, 503);
+        lifecycle.mark_serving().unwrap();
+        assert_eq!(svc.ready_response().0, 200);
+        assert!(lifecycle.begin_drain());
+        assert_eq!(svc.ready_response(), (503, r#"{"status":"draining"}"#.to_owned()));
+    }
+
+    #[test]
     fn ready_empty_registry_returns_200() {
         let registry: HealthRegistry = Arc::new(HashMap::new());
         let svc = PingoraHealthService::new(Some(registry), false);
