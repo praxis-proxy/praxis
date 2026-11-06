@@ -11,7 +11,8 @@
 #
 # Point `config_path` at an operator-supplied policy. The integration fixture
 # at `tests/integration/fixtures/llm-input-policy.yaml` denies an offered
-# `transfer_funds` tool and a completion cap above 4096 tokens.
+# `transfer_funds` tool, a completion cap above 4096 tokens, a forced tool
+# other than `lookup_invoice`, and instructions other than the pinned prompt.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/security/policy-llm-input.yaml
