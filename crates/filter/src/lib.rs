@@ -46,6 +46,8 @@ mod any_filter;
 mod binding;
 pub mod body;
 pub mod builtins;
+#[cfg(feature = "policy-engine")]
+mod client_address;
 mod condition;
 mod context;
 #[cfg(feature = "chain-binding")]

@@ -8,8 +8,9 @@ use std::{collections::HashMap, net::IpAddr, sync::Arc};
 
 use http::HeaderMap;
 use ppe::praxis_policy_core::extensions::{HttpExtension, http::SecretHeaderProvenance};
+use praxis_core::connectivity::CidrRange;
 
-use crate::{Request, filter::HttpFilterContext};
+use crate::{Request, client_address::resolve_client_address, filter::HttpFilterContext};
 
 // -----------------------------------------------------------------------------
 // RequestFacts
@@ -34,7 +35,8 @@ pub(super) struct RequestFacts {
     host: Option<String>,
     /// `https` when the downstream connection is TLS, else `http`.
     scheme: &'static str,
-    /// TCP peer address.
+    /// Effective client address: the TCP peer, or a hop a trusted proxy
+    /// reported.
     client_address: Option<IpAddr>,
     /// Lowercased request headers, duplicate field lines comma-joined.
     headers: HashMap<String, String>,
@@ -43,8 +45,9 @@ pub(super) struct RequestFacts {
 impl RequestFacts {
     /// Capture the facts of `ctx`'s request.
     ///
-    /// The scheme comes from the connection, never `X-Forwarded-Proto`.
-    pub(super) fn capture(ctx: &HttpFilterContext<'_>) -> Self {
+    /// The scheme comes from the connection, never `X-Forwarded-Proto`; the
+    /// client address is resolved against `trusted_proxies`.
+    pub(super) fn capture(ctx: &HttpFilterContext<'_>, trusted_proxies: &[CidrRange]) -> Self {
         let request = ctx.request;
         Self {
             method: request.method.as_str().to_owned(),
@@ -52,7 +55,8 @@ impl RequestFacts {
             query: request.uri.query().map(str::to_owned),
             host: authority(request),
             scheme: if ctx.downstream_tls { "https" } else { "http" },
-            client_address: ctx.client_addr,
+            client_address: resolve_client_address(&request.headers, ctx.client_addr, trusted_proxies)
+                .map(|address| address.ip),
             headers: snapshot_headers(&request.headers),
         }
     }
@@ -198,7 +202,7 @@ mod tests {
         let mut ctx = make_filter_context(&req);
         ctx.downstream_tls = tls;
         ctx.client_addr = Some("203.0.113.7".parse().expect("address"));
-        let facts = Arc::new(RequestFacts::capture(&ctx));
+        let facts = Arc::new(RequestFacts::capture(&ctx, &[]));
         let headers = facts.headers_with_reserved(&ctx.request.headers);
         RequestView::new(facts, headers, SecretHeaderProvenance::default()).http_extension()
     }
@@ -247,7 +251,7 @@ mod tests {
         original
             .headers
             .insert("authorization", "Bearer original".parse().expect("header value"));
-        let facts = RequestFacts::capture(&make_filter_context(&original));
+        let facts = RequestFacts::capture(&make_filter_context(&original), &[]);
 
         let mut later = req;
         later

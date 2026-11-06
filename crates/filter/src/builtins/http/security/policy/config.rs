@@ -94,6 +94,23 @@ pub(crate) struct PolicyFilterConfig {
     #[serde(default)]
     pub trusted_private_endpoints: Vec<String>,
 
+    /// CIDR ranges of proxies trusted to report the client in
+    /// `X-Forwarded-For`.
+    ///
+    /// Empty by default, so `http.client_address` is the TCP peer. When the
+    /// peer is in a listed range, the field lines are joined and walked right
+    /// to left, and the first hop outside every range is the client; when
+    /// every hop is trusted, the leftmost is. A malformed hop falls back to
+    /// the peer. Ports are dropped. RFC 7239 `Forwarded` is not read. This
+    /// changes only what the policy engine sees; IP ACLs and upstream
+    /// headers still use the TCP peer.
+    ///
+    /// ```yaml
+    /// trusted_proxies: ["10.0.0.0/8", "fd00::/8"]
+    /// ```
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+
     /// Fail-closed policy gate for misconfigured chains. When `true`
     /// (default), `on_request_body` rejects any request that reaches
     /// it without `mcp.method` filter-metadata. The metadata is set

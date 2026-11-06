@@ -241,6 +241,7 @@ pub(super) fn filter_config(config_path: String) -> PolicyFilterConfig {
         config_path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 5,

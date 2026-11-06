@@ -85,6 +85,11 @@ const AUTHENTICATED: &str = "    pre_invocation:\n      - \"require(authenticate
 /// A filter over [`API_KEY_POLICY`] with `credential` and `rules`; the
 /// returned directory holds the policy and key file.
 fn api_key_filter(credential: &str, rules: &str) -> (TempDir, PolicyFilter) {
+    api_key_filter_trusting(credential, rules, &[])
+}
+
+/// [`api_key_filter`] trusting `trusted_proxies` to report the client.
+fn api_key_filter_trusting(credential: &str, rules: &str, trusted_proxies: &[&str]) -> (TempDir, PolicyFilter) {
     let dir = TempDir::new().expect("create tempdir");
     let keys = dir.path().join("keys.yaml");
     std::fs::write(
@@ -98,8 +103,9 @@ fn api_key_filter(credential: &str, rules: &str) -> (TempDir, PolicyFilter) {
         .replace("{keys}", keys.to_str().expect("a UTF-8 tempdir path"));
     let path = dir.path().join("policy.yaml");
     std::fs::write(&path, yaml).expect("write policy.yaml");
-    let filter = PolicyFilter::new(filter_config(path.to_str().expect("utf8").to_owned()), None)
-        .expect("the API-key policy builds");
+    let mut cfg = filter_config(path.to_str().expect("utf8").to_owned());
+    cfg.trusted_proxies = trusted_proxies.iter().map(|cidr| (*cidr).to_owned()).collect();
+    let filter = PolicyFilter::new(cfg, None).expect("the API-key policy builds");
     (dir, filter)
 }
 
@@ -212,6 +218,35 @@ async fn the_scheme_comes_from_downstream_tls() {
         .await
         .expect("X-Forwarded-Proto must not make a plaintext request https");
     assert_eq!(violation(&rejection), Some("test.plaintext"));
+}
+
+/// A trusted proxy chain reports the client to policy; an untrusted peer
+/// cannot.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trusted_proxy_chain_sets_the_client_address() {
+    let rules = "    pre_invocation:\n      - \"require(authenticated)\"\n      - \"http.client_address != '203.0.113.7': deny('other client', 'test.other_client')\"";
+    let (_dir, filter) = api_key_filter_trusting(HEADER_CREDENTIAL, rules, &["10.0.0.0/8"]);
+    let req = request(
+        "/",
+        &[
+            ("x-api-key", TEST_API_KEY),
+            ("x-forwarded-for", "203.0.113.7, 10.0.0.1"),
+        ],
+    );
+    for (peer, admitted) in [("10.0.0.2", true), ("198.51.100.9", false)] {
+        let mut ctx = make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.client_addr = Some(peer.parse().expect("address"));
+        let action = filter.on_request(&mut ctx).await.expect("the filter runs");
+        match action {
+            FilterAction::Continue => assert!(admitted, "peer {peer}: a spoofed XFF must not pass"),
+            FilterAction::Reject(rejection) => {
+                assert!(!admitted, "peer {peer}: the forwarded client must reach policy");
+                assert_eq!(violation(&rejection), Some("test.other_client"));
+            },
+            other => panic!("unexpected action {other:?}"),
+        }
+    }
 }
 
 /// The response hook evaluates the query the client sent, even after a later

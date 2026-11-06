@@ -12,6 +12,7 @@ use ppe::praxis_policy_core::{
     error::PluginError,
     identity::RouteIdentityConfig,
 };
+use praxis_core::connectivity::CidrRange;
 
 use crate::FilterError;
 
@@ -27,6 +28,19 @@ const DELEGATOR_KIND_PREFIX: &str = "delegator/";
 
 /// `credential.kind` of a query-parameter credential.
 const QUERY_CREDENTIAL_KIND: &str = "query_param";
+
+// -----------------------------------------------------------------------------
+// Trusted proxies
+// -----------------------------------------------------------------------------
+
+/// Parse `trusted_proxies`, refusing a malformed CIDR.
+pub(super) fn parse_trusted_proxies(entries: &[String]) -> Result<Vec<CidrRange>, FilterError> {
+    entries
+        .iter()
+        .map(|entry| CidrRange::parse(entry))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("policy: trusted_proxies: {e}").into())
+}
 
 // -----------------------------------------------------------------------------
 // Crypto failures

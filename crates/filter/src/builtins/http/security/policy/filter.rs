@@ -31,7 +31,7 @@ use ppe::praxis_policy_core::{
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
     secrets::backends::EnvSecretProviderFactory,
 };
-use praxis_core::subrequest::SubRequestConnector;
+use praxis_core::{connectivity::CidrRange, subrequest::SubRequestConnector};
 
 use super::{
     assertions::{
@@ -40,7 +40,9 @@ use super::{
     },
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
-    construction::{engine_error, refuse_query_credentials_with_delegation, require_dpop_external_base_url},
+    construction::{
+        engine_error, parse_trusted_proxies, refuse_query_credentials_with_delegation, require_dpop_external_base_url,
+    },
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
@@ -173,6 +175,12 @@ enum GatedIdentity {
 /// request it authorizes is the one the client sent. A `DPoP` issuer must set
 /// `dpop.external_base_url`, so a proof's `htu` is never checked against the
 /// client-sent `Host`.
+///
+/// `http.client_address` is the TCP peer, without a port. When the peer is in
+/// `trusted_proxies`, it is the rightmost `X-Forwarded-For` hop outside those
+/// ranges instead, or the leftmost hop when every hop is trusted; a malformed
+/// hop falls back to the peer. RFC 7239 `Forwarded` is not supported. Only
+/// policy input changes: `ip_acl` and `forwarded_headers` still see the peer.
 ///
 /// Policy can read a credential from a query parameter
 /// (`credential: { kind: query_param, name: ... }`, with the `read_query`
@@ -337,6 +345,8 @@ pub struct PolicyFilter {
     /// Bound on one response-phase hook dispatch, derived from the engine's
     /// per-plugin timeout.
     response_dispatch_timeout: std::time::Duration,
+    /// Proxies trusted to report the client in `X-Forwarded-For`.
+    trusted_proxies: Vec<CidrRange>,
     /// The transport installed on the engine, kept so tests can see which
     /// connector policy calls go through.
     #[cfg(all(test, feature = "policy-builtins"))]
@@ -398,6 +408,7 @@ impl PolicyFilter {
         // Reject a malformed pinned-endpoint entry at startup rather than let it
         // silently never match at request time.
         praxis_core::connectivity::validate_host_entries("policy", &cfg.trusted_private_endpoints)?;
+        let trusted_proxies = parse_trusted_proxies(&cfg.trusted_proxies)?;
 
         let yaml = std::fs::read_to_string(&cfg.config_path).map_err(|e| -> FilterError {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
@@ -625,6 +636,7 @@ impl PolicyFilter {
             llm_request_mutator_warned: AtomicBool::new(false),
             llm_response_mutator_warned: AtomicBool::new(false),
             response_dispatch_timeout: dispatch_timeout,
+            trusted_proxies,
             #[cfg(all(test, feature = "policy-builtins"))]
             transport,
         })
@@ -849,11 +861,11 @@ impl PolicyFilter {
     /// Capture this instance's [`RequestFacts`] at its first callback.
     ///
     /// Direct unit-test calls have no filter ID and capture per call instead.
-    fn capture_request_facts(ctx: &mut HttpFilterContext<'_>) {
+    fn capture_request_facts(&self, ctx: &mut HttpFilterContext<'_>) {
         if ctx.current_filter_id.is_none() || Self::stored_request_facts(ctx).is_some() {
             return;
         }
-        let facts = Some(Arc::new(RequestFacts::capture(ctx)));
+        let facts = Some(Arc::new(RequestFacts::capture(ctx, &self.trusted_proxies)));
         if let Some(state) = ctx.get_filter_state_mut::<AdmissionState>() {
             state.facts = facts;
         } else {
@@ -872,12 +884,12 @@ impl PolicyFilter {
 
     /// What a hook invocation sees of the request: the captured facts, the
     /// trusted header overlays, and the secret provenance of applied
-    /// assertions.
+    /// assertions. Without a capture, the client address is the TCP peer.
     fn request_view(
         ctx: &HttpFilterContext<'_>,
         context_headers: &std::collections::HashMap<super::config::ContextField, String>,
     ) -> RequestView {
-        let facts = Self::stored_request_facts(ctx).unwrap_or_else(|| Arc::new(RequestFacts::capture(ctx)));
+        let facts = Self::stored_request_facts(ctx).unwrap_or_else(|| Arc::new(RequestFacts::capture(ctx, &[])));
         let mut headers = facts.headers_with_reserved(&ctx.request.headers);
         Self::overlay_effective_context_headers(ctx, &mut headers, context_headers);
         let secret_headers = ctx
@@ -2013,7 +2025,7 @@ impl HttpFilter for PolicyFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        Self::capture_request_facts(ctx);
+        self.capture_request_facts(ctx);
         // A StreamBuffer filter can force the body phase to run before this
         // header phase. In that case admission already ran in on_request_body,
         // and re-running it could fail after credential-stripping mutations.
@@ -2060,7 +2072,7 @@ impl HttpFilter for PolicyFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        Self::capture_request_facts(ctx);
+        self.capture_request_facts(ctx);
         // A downstream StreamBuffer filter makes this body hook run before
         // on_request. Pure-L7 and identity-only admission needs no body, so run
         // it on the first chunk before any later body filter can act. In the
