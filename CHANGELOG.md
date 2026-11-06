@@ -33,6 +33,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   connections to bypass the updated trust. New connections now perform
   full certificate verification; static mTLS and non-mTLS listeners
   retain resumption.
+- LLM policies now apply HTTP authorization, delegation and request assertions
+  to accepted unclassified requests without a model when
+  `llm.require_model: false`. Adding a body to a discovery request no longer
+  skips the HTTP policy. Move inference-only global rules into `llm:` routes
+  or `global.defaults.llm`; MCP-only and classified non-entity MCP admission
+  retain their existing behavior.
+- Policy credential stripping, delegation and asserted headers now survive
+  preceding ordered body-filter mutations, including stripped headers
+  introduced during earlier pre-read passes.
 
 ### Changed
 
