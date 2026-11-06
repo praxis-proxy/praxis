@@ -381,12 +381,15 @@ fn delegation_beside_a_query_credential_is_rejected_without_leaking_it() {
         ctx.request_headers_to_set.is_empty() && ctx.request_headers_to_remove.is_empty(),
         "nothing is attached or stripped on a refusal"
     );
-    for secret in [TEST_API_KEY, "delegated-secret"] {
+    for (label, secret) in [
+        ("the inbound key", TEST_API_KEY),
+        ("the delegated token", "delegated-secret"),
+    ] {
         assert!(
             !body_text(&rejection).contains(secret),
-            "the body must not carry {secret}"
+            "the body must not carry {label}"
         );
-        assert!(!logs.contains(secret), "the logs must not carry {secret}: {logs}");
+        assert!(!logs.contains(secret), "the logs must not carry {label}");
     }
     assert!(logs.contains("refusing to forward a delegated token"), "got {logs}");
 }
