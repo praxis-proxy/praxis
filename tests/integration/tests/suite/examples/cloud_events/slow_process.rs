@@ -31,6 +31,8 @@ const DELIVERY_LIMIT: usize = 64;
 const CANARY: &[u8] = b"W6_CLOUD_BODY_CANARY_49d1";
 /// Socket and fixture deadlines, separate from the proxy's policy.
 const WAIT: Duration = Duration::from_secs(15);
+/// Each resource needs its own `ulimit` invocation for shells such as dash.
+const PROCESS_LIMITS: &str = "-v 4194304 && ulimit -t 120 && ulimit -f 2048 && export RUST_LOG=info";
 
 #[test]
 #[cfg_attr(coverage, ignore = "spawns an isolated praxis process")]
@@ -43,8 +45,7 @@ fn slow_cloud_events_survive_large_cycles_failures_and_recover() {
     let addr = format!("127.0.0.1:{port}");
     let admin = format!("127.0.0.1:{admin_port}");
     let yaml = process_config(port, admin_port, bulk.port, probe.port(), receiver.port);
-    let mut process =
-        PraxisProcess::spawn_with_ulimit(&yaml, &addr, Some("-v 4194304 -t 120 -f 2048 && export RUST_LOG=info"));
+    let mut process = PraxisProcess::spawn_with_ulimit(&yaml, &addr, Some(PROCESS_LIMITS));
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         exercise(&process, &mut bulk, &receiver, &addr, &admin)
     }));
@@ -141,8 +142,7 @@ fn profile_cloud_events_response(length: usize) -> (u64, u64, u64) {
             "  allow_private_endpoints: true\n",
             "  allow_private_endpoints: true\n  allow_unbounded_body: true\n",
         );
-    let mut process =
-        PraxisProcess::spawn_with_ulimit(&yaml, &addr, Some("-v 4194304 -t 120 -f 2048 && export RUST_LOG=info"));
+    let mut process = PraxisProcess::spawn_with_ulimit(&yaml, &addr, Some(PROCESS_LIMITS));
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         profile_workload(&process, &mut bulk, &receiver, (&addr, &admin), length)
     }));

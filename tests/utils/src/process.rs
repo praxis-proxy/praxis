@@ -72,6 +72,9 @@ impl PraxisProcess {
     /// Like [`PraxisProcess::spawn`], first running the shell `ulimit`
     /// arguments in `ulimit` (for example `"-S -n 512"`) so the child
     /// starts with those resource limits.
+    /// Set each resource in a separate invocation, for example
+    /// `"-v 4194304 && ulimit -t 120"`: not every `sh` supports multiple
+    /// resources in one invocation. A failed limit prevents startup.
     ///
     /// # Panics
     ///
