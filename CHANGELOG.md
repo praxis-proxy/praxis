@@ -139,6 +139,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Bodyless requests on LLM policies, such as `GET /v1/models`, now run HTTP
+  authorization, delegation and request assertions before they reach the
+  upstream: a matching `http:` route, or the `global` rules otherwise.
+  Before, a valid identity alone admitted them. Migration: a global rule
+  that requires `llm.request` now denies discovery; move inference-only
+  rules into `llm:` routes or `global.defaults.llm`. A startup warning
+  names the `llm.require_model: false` and `require_protocol_metadata:
+  false` fallbacks, which still admit on identity alone.
 - The policy filter refuses to build when a JWT trusted issuer enables DPoP
   (`dpop.mode: optional` or `required`) without `dpop.external_base_url`,
   so the proof's `htu` never depends on the client-sent `Host` header. The

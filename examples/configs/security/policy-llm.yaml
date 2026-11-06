@@ -4,6 +4,11 @@
 # The proxy reads the top-level `model`; missing, unlisted, and ambiguous
 # models fail closed by default. No protocol classifier is required.
 #
+# Bodyless requests such as `GET /v1/models` carry no model. They run the
+# policy's HTTP authorization, delegation and request assertions: an `http:`
+# route when one matches, the `global` rules otherwise. Keep rules that read
+# the inference request in `llm:` routes or `global.defaults.llm`.
+#
 # Point `config_path` at an operator-supplied policy. The integration fixture
 # at `tests/integration/fixtures/llm-policy.yaml` provides a local example.
 # `tests/integration/fixtures/llm-request-policy.yaml` adds OPA and CEL
