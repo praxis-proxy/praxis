@@ -72,6 +72,7 @@ mod logging;
 mod maglev;
 mod max_body_guard;
 mod max_connections;
+mod metric_label_sets;
 mod multi_listener;
 mod operations;
 #[cfg(unix)]
