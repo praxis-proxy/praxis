@@ -383,6 +383,62 @@ fn delegation_beside_a_header_credential_strips_it() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "delegation and assertion ordering regression")]
+fn ordered_delegation_strips_inbound_and_yields_to_assertions() {
+    use http::HeaderName;
+    use ppe::praxis_policy_core::{
+        assertions::Direction,
+        extensions::{Credential, HttpExtension},
+    };
+
+    use super::assertions::{GovernedNames, apply_request_assertions};
+    use crate::TrustedHeaderMutation;
+
+    let ext = delegation_extensions(Credential::Header {
+        name: "X-Api-Key".to_owned(),
+    });
+    let req = make_request(Method::GET, "/widgets");
+    let mut ctx = make_filter_context(&req);
+    ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+        HeaderName::from_static("x-api-key"),
+        "pending-key".to_owned(),
+    ));
+    ctx.extra_request_headers
+        .push(("Authorization".into(), "pending-token".to_owned()));
+    assert_eq!(
+        attach_delegated_tokens(&mut ctx, Some(&ext)).expect("delegation attaches"),
+        1
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "a grouped add cannot revive the old credential"
+    );
+    assert!(
+        matches!(&ctx.pre_read_mutations[1], TrustedHeaderMutation::Set(name, value)
+        if name == "authorization" && value == "Bearer delegated-secret")
+    );
+    assert!(matches!(&ctx.pre_read_mutations[2], TrustedHeaderMutation::Remove(name) if name == "x-api-key"));
+
+    let config = ppe::praxis_policy_core::config::parse_config(
+        "global:\n  assertions:\n    request:\n      strip: [authorization]\n",
+    )
+    .expect("assertion contract");
+    let governed = GovernedNames::from_config(&config, Direction::Request);
+    let rendered = ppe::prelude::Extensions {
+        http: Some(Arc::new(HttpExtension::default())),
+        ..Default::default()
+    };
+    apply_request_assertions(&mut ctx, Some(&rendered), &governed);
+    assert!(
+        ctx.request_headers_to_set.is_empty(),
+        "assertions govern delegated headers"
+    );
+    assert!(
+        matches!(ctx.pre_read_mutations.last(), Some(TrustedHeaderMutation::Remove(name)) if name == "authorization")
+    );
+}
+
+#[test]
 fn a_query_credential_beside_delegation_is_refused_at_construction() {
     let yaml = API_KEY_POLICY
         .replace("{credential}", QUERY_CREDENTIAL)

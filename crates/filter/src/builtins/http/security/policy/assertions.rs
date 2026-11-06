@@ -14,7 +14,10 @@ use ppe::praxis_policy_core::{
     hooks::Extensions,
 };
 
-use super::filter::{AssertedSecretHeaders, PolicyFilter};
+use super::{
+    filter::{AssertedSecretHeaders, PolicyFilter},
+    request_headers,
+};
 use crate::filter::HttpFilterContext;
 
 // -----------------------------------------------------------------------------
@@ -92,22 +95,6 @@ impl GovernedNames {
 // Request-side: queue the upstream mutations
 // -----------------------------------------------------------------------------
 
-/// Drop queued request mutations for a case-insensitive header name.
-fn purge_pending_request(ctx: &mut HttpFilterContext<'_>, lowercase: &str) -> bool {
-    let mut purged = false;
-    ctx.request_headers_to_set.retain(|(name, _)| {
-        let hit = name.as_str() == lowercase;
-        purged |= hit;
-        !hit
-    });
-    ctx.extra_request_headers.retain(|(name, _)| {
-        let hit = name.eq_ignore_ascii_case(lowercase);
-        purged |= hit;
-        !hit
-    });
-    purged
-}
-
 /// Queue a rendered header, warning when Praxis cannot represent it.
 fn queue_set(ctx: &mut HttpFilterContext<'_>, lowercase: &str, value: &str) -> bool {
     let (Ok(header), Ok(header_value)) = (
@@ -121,7 +108,7 @@ fn queue_set(ctx: &mut HttpFilterContext<'_>, lowercase: &str, value: &str) -> b
         );
         return false;
     };
-    ctx.request_headers_to_set.push((header, header_value));
+    request_headers::set(ctx, header, header_value);
     true
 }
 
@@ -130,7 +117,7 @@ fn queue_remove(ctx: &mut HttpFilterContext<'_>, lowercase: &str) -> bool {
     let Ok(header) = http::header::HeaderName::try_from(lowercase) else {
         return false;
     };
-    ctx.request_headers_to_remove.push(header);
+    request_headers::remove(ctx, header);
     true
 }
 
@@ -174,6 +161,7 @@ fn names_in_play(
         .keys()
         .cloned()
         .chain(rendered.keys().cloned())
+        .chain(request_headers::pending_names(ctx).map(|name| name.as_str().to_owned()))
         .chain(
             ctx.request_headers_to_set
                 .iter()
@@ -202,7 +190,7 @@ fn govern_request(
     let mut set = 0;
     let mut removed = 0;
     for lowercase in governed.candidates(in_play.iter().map(String::as_str)) {
-        let had_pending = purge_pending_request(ctx, &lowercase);
+        let had_pending = request_headers::purge_pending(ctx, &lowercase);
         if let Some(value) = rendered.get(&lowercase).cloned() {
             if queue_set(ctx, &lowercase, &value) {
                 set += 1;

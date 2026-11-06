@@ -8,6 +8,8 @@
 # policy's HTTP authorization, delegation and request assertions: an `http:`
 # route when one matches, the `global` rules otherwise. Keep rules that read
 # the inference request in `llm:` routes or `global.defaults.llm`.
+# If `llm.require_model` is disabled, accepted unclassified bodies without a
+# model still run this HTTP admission; the flag only relaxes the model gate.
 #
 # Point `config_path` at an operator-supplied policy. The integration fixture
 # at `tests/integration/fixtures/llm-policy.yaml` provides a local example.
