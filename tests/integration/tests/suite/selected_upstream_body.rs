@@ -749,7 +749,7 @@ fn max_retries_zero_forwards_adapted_body_on_single_attempt() {
 mod payload_retry {
     use std::{
         io::{BufRead as _, BufReader, Read as _, Write as _},
-        net::{TcpListener, TcpStream},
+        net::TcpStream,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -872,9 +872,8 @@ mod payload_retry {
     }
 
     fn backend(status: u16) -> ObservedBackend {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (listener, port) = praxis_test_utils::bind_unique_port();
         listener.set_nonblocking(true).unwrap();
-        let port = listener.local_addr().unwrap().port();
         let (accepted_tx, accepted) = mpsc::channel();
         let (sender, received) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));

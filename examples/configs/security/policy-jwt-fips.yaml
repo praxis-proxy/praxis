@@ -6,7 +6,7 @@
 # endpoint or a PEM file) and one issuer whose tokens are DPoP-bound, so each
 # request also carries a proof signed by the client's key. A FIPS build refuses
 # HMAC algorithms and shared-secret keys at load and skips unsupported JWKS
-# entries; a missing, expired or mis-addressed token is rejected with HTTP 401.
+# entries; a missing, expired or incorrectly addressed token is rejected with HTTP 401.
 #
 # Usage:
 #   make build-fips FIPS_POLICY_PROFILE=jwt

@@ -6,7 +6,7 @@
 use std::{
     collections::HashMap,
     io::{Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::mpsc::{self, Receiver},
     thread::{self, JoinHandle},
     time::Duration,
@@ -20,8 +20,7 @@ use serde_json::Value;
 // -----------------------------------------------------------------------------
 
 fn start_event_receiver(response: &'static [u8]) -> (u16, Receiver<String>, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let (sender, received) = mpsc::channel();
     let receiver_thread = thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
