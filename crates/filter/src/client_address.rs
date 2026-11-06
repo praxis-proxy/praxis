@@ -41,27 +41,28 @@ pub(crate) struct ClientAddress {
 ///
 /// `X-Forwarded-For` is read only when `peer` is in `trusted`. Its field lines
 /// are joined and walked right to left; the first hop outside `trusted` is
-/// the client, and the leftmost hop when every hop is trusted. A missing,
-/// non-text or malformed value falls back to the peer. No peer, no address.
+/// the client, and the leftmost hop when every hop is trusted. Hops left of
+/// the client are never parsed, since a client can write anything there. A
+/// malformed or non-text hop reached before the client yields no address,
+/// not the trusted peer, so clients cannot collapse onto a proxy's address.
+/// A trusted peer with no `X-Forwarded-For` is the client. No peer, no
+/// address.
 pub(crate) fn resolve_client_address(
     headers: &HeaderMap,
     peer: Option<IpAddr>,
     trusted: &[CidrRange],
 ) -> Option<ClientAddress> {
     let peer = normalize_mapped_ipv4(peer?);
-    let forwarded = is_trusted(peer, trusted)
-        .then(|| forwarded_client(headers, trusted))
-        .flatten();
-    Some(forwarded.map_or(
-        ClientAddress {
+    if !is_trusted(peer, trusted) || !headers.contains_key("x-forwarded-for") {
+        return Some(ClientAddress {
             ip: peer,
             source: AddressSource::Peer,
-        },
-        |ip| ClientAddress {
-            ip,
-            source: AddressSource::Forwarded,
-        },
-    ))
+        });
+    }
+    forwarded_client(headers, trusted).map(|ip| ClientAddress {
+        ip,
+        source: AddressSource::Forwarded,
+    })
 }
 
 /// Whether `ip` is in any of `trusted`.
@@ -69,20 +70,31 @@ fn is_trusted(ip: IpAddr, trusted: &[CidrRange]) -> bool {
     trusted.iter().any(|range| range.contains(&ip))
 }
 
-/// The client `X-Forwarded-For` names, or `None` when it is absent or any
-/// hop is malformed.
+/// The client `X-Forwarded-For` names, walking hops right to left and
+/// stopping at the first untrusted one; `None` when a hop reached first is
+/// malformed.
 fn forwarded_client(headers: &HeaderMap, trusted: &[CidrRange]) -> Option<IpAddr> {
-    let mut hops = Vec::new();
-    for line in headers.get_all("x-forwarded-for") {
-        for hop in line.to_str().ok()?.split(',') {
-            hops.push(parse_hop(hop)?);
+    let mut leftmost = None;
+    for hop in hops_right_to_left(headers) {
+        let ip = hop?;
+        if !is_trusted(ip, trusted) {
+            return Some(ip);
         }
+        leftmost = Some(ip);
     }
-    hops.iter()
+    leftmost
+}
+
+/// Every `X-Forwarded-For` hop, rightmost first, parsed lazily; `None` for a
+/// malformed hop.
+fn hops_right_to_left(headers: &HeaderMap) -> impl Iterator<Item = Option<IpAddr>> + '_ {
+    headers
+        .get_all("x-forwarded-for")
+        .iter()
         .rev()
-        .find(|hop| !is_trusted(**hop, trusted))
-        .or_else(|| hops.first())
-        .copied()
+        // A non-text line reads as one empty, hence malformed, hop.
+        .flat_map(|line| line.to_str().unwrap_or_default().rsplit(','))
+        .map(parse_hop)
 }
 
 /// One `X-Forwarded-For` hop: an IP, optionally with a port (`[v6]:port` for
@@ -193,17 +205,62 @@ mod tests {
     }
 
     #[test]
-    fn a_malformed_hop_falls_back_to_the_peer() {
+    fn a_malformed_hop_before_the_client_yields_no_address() {
         for value in [
-            "unknown, 203.0.113.7",
+            "203.0.113.7, unknown",
             "203.0.113.7,,10.0.0.1",
             "",
             "_hidden",
             "[::1",
             "1.2.3.4:x",
         ] {
-            assert_eq!(resolve(&[value], Some("10.0.0.2")), peer("10.0.0.2"), "{value:?}");
+            assert_eq!(resolve(&[value], Some("10.0.0.2")), None, "{value:?}");
         }
+    }
+
+    #[test]
+    fn junk_left_of_the_client_is_ignored() {
+        for value in [
+            "unknown, 203.0.113.7",
+            "_hidden, [::1, 203.0.113.7, 10.0.0.1",
+            ",203.0.113.7",
+        ] {
+            assert_eq!(
+                resolve(&[value], Some("10.0.0.2")),
+                forwarded("203.0.113.7"),
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            resolve(&["junk", "203.0.113.7"], Some("10.0.0.2")),
+            forwarded("203.0.113.7"),
+            "an earlier field line"
+        );
+    }
+
+    #[test]
+    fn a_non_text_line_is_a_malformed_hop() {
+        let mut headers = HeaderMap::new();
+        let opaque = http::HeaderValue::from_bytes(b"\xff").expect("header value");
+        headers.append("x-forwarded-for", opaque.clone());
+        headers.append("x-forwarded-for", "203.0.113.7".parse().expect("header value"));
+        let peer = Some(ip("10.0.0.2"));
+        assert_eq!(
+            resolve_client_address(&headers, peer, &trusted()),
+            forwarded("203.0.113.7"),
+            "left of the client"
+        );
+        headers.append("x-forwarded-for", opaque);
+        assert_eq!(
+            resolve_client_address(&headers, peer, &trusted()),
+            None,
+            "before the client"
+        );
+    }
+
+    #[test]
+    fn an_untrusted_peer_ignores_malformed_forwarded_hops() {
+        assert_eq!(resolve(&["junk"], Some("203.0.113.7")), peer("203.0.113.7"));
     }
 
     #[test]

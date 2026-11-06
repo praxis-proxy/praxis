@@ -100,8 +100,9 @@ pub(crate) struct PolicyFilterConfig {
     /// Empty by default, so `http.client_address` is the TCP peer. When the
     /// peer is in a listed range, the field lines are joined and walked right
     /// to left, and the first hop outside every range is the client; when
-    /// every hop is trusted, the leftmost is. A malformed hop falls back to
-    /// the peer. Ports are dropped. RFC 7239 `Forwarded` is not read. This
+    /// every hop is trusted, the leftmost is. Hops left of the client are
+    /// ignored; a malformed hop reached before it leaves the request with no
+    /// client address. Ports are dropped. RFC 7239 `Forwarded` is not read. This
     /// changes only what the policy engine sees; IP ACLs and upstream
     /// headers still use the TCP peer.
     ///
