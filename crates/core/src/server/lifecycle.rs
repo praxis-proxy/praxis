@@ -128,6 +128,7 @@ mod tests {
     use super::*;
 
     #[test]
+    /// A new handle starts initializing and can become serving.
     fn starts_initializing_and_can_become_serving() {
         let lifecycle = LifecycleHandle::new();
 
@@ -137,6 +138,7 @@ mod tests {
     }
 
     #[test]
+    /// Drain is irreversible and repeated calls are no-ops.
     fn drain_is_irreversible_and_repeated_drain_is_a_noop() {
         let lifecycle = LifecycleHandle::new();
 
@@ -147,6 +149,7 @@ mod tests {
     }
 
     #[test]
+    /// A stopped handle ignores later transitions.
     fn stopped_wins_over_later_transitions() {
         let lifecycle = LifecycleHandle::new();
 
@@ -157,6 +160,7 @@ mod tests {
     }
 
     #[test]
+    /// Clones and subscribers observe the same lifecycle state.
     fn clones_and_subscribers_observe_one_state() {
         let lifecycle = LifecycleHandle::new();
         let clone = lifecycle.clone();

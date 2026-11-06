@@ -22,7 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Add `shutdown_drain_delay_secs` for readiness-first SIGTERM handoff. The
   process becomes unready, waits for the configured delay, then begins
   graceful connection shutdown; HTTP/1 responses during the drain advertise
-  `Connection: close`.
+  `Connection: close`. The orchestrator's termination timeout must cover this
+  delay, `shutdown_timeout_secs`, any `preStop` hook, and final cleanup.
 
 - Add configurable `/ready` policy: `admin.readiness: serving` (the default)
   keeps a serving replica ready during upstream degradation, while
@@ -37,6 +38,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `shutdown_drain_delay_secs`, and `UnavailableRuntime` is no longer a unit
   value or `Copy`; use `UnavailableRuntime::default()` or `from_config`, and
   `clone()` where a copy was relied on.
+- **Behavior change:** `/ready` defaults to `admin.readiness: serving`, so a
+  serving replica stays ready when a checked cluster has no healthy endpoints.
+  Set `admin.readiness: upstreams` to preserve upstream-dependent readiness.
 
 ## [0.8.0] - 2026-11-06
 

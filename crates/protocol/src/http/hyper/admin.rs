@@ -490,6 +490,7 @@ mod tests {
     }
 
     #[test]
+    /// Readiness reports lifecycle phases while the listener serves.
     fn readiness_reports_lifecycle_phases_while_the_listener_serves() {
         let addr = free_addr();
         let lifecycle = LifecycleHandle::new();

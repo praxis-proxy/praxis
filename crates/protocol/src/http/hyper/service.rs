@@ -318,6 +318,7 @@ mod tests {
     }
 
     #[test]
+    /// A draining HTTP/1 reply closes the connection despite keep-alive.
     fn draining_reply_closes_an_http1_connection_even_when_keepalive_was_requested() {
         let lifecycle = LifecycleHandle::new();
         assert!(lifecycle.begin_drain());

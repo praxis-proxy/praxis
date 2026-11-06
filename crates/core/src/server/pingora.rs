@@ -227,6 +227,7 @@ struct DelayedShutdownWatch {
 
 #[cfg(unix)]
 impl ShutdownSignalWatch for DelayedShutdownWatch {
+    /// Wait for the next shutdown signal.
     #[expect(
         clippy::wildcard_enum_match_arm,
         reason = "ShutdownSignal is non_exhaustive; unknown signals pass through unchanged"
@@ -445,6 +446,7 @@ mod tests {
     }
 
     #[test]
+    /// The drain delay is subtracted from the shutdown budget.
     fn new_subtracts_drain_delay_from_shutdown_budget() {
         let yaml = format!(
             "{}\nshutdown_timeout_secs: 30\nshutdown_drain_delay_secs: 10\n",
@@ -535,6 +537,7 @@ mod tests {
     }
 
     #[test]
+    /// The lifecycle becomes serving while Pingora runs.
     fn run_with_args_marks_serving_while_pingora_runs() {
         let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
         let runtime = PingoraServerRuntime::new(&config);
@@ -564,6 +567,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "one test covers every phase the monitor recognises"
     )]
+    /// The monitor publishes each Pingora execution phase.
     fn lifecycle_monitor_publishes_each_phase() {
         let lifecycle = LifecycleHandle::new();
         let (sender, receiver) = tokio::sync::broadcast::channel(8);
@@ -632,6 +636,7 @@ mod tests {
     struct ImmediateShutdown;
 
     impl ShutdownSignalWatch for ImmediateShutdown {
+        /// Wait for the next shutdown signal.
         fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
         where
             'watch: 'fut,
@@ -652,6 +657,7 @@ mod tests {
     }
 
     impl ShutdownSignalWatch for WaitForServing {
+        /// Wait for the next shutdown signal.
         fn recv<'watch, 'fut>(&'watch self) -> Pin<Box<dyn Future<Output = ShutdownSignal> + Send + 'fut>>
         where
             'watch: 'fut,

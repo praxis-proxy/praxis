@@ -1872,6 +1872,7 @@ filter_chains:
     }
 
     #[test]
+    /// Reject a drain delay above the one-hour ceiling.
     fn reject_shutdown_drain_delay_exceeding_maximum() {
         let yaml = r#"
 listeners:
@@ -1893,6 +1894,7 @@ filter_chains:
     }
 
     #[test]
+    /// Accept a drain delay exactly at the one-hour ceiling.
     fn accept_shutdown_drain_delay_at_maximum() {
         let yaml = r#"
 listeners:
@@ -1911,6 +1913,7 @@ filter_chains:
     }
 
     #[test]
+    /// Reject a drain delay above the shutdown timeout.
     fn reject_shutdown_drain_delay_exceeding_timeout() {
         let yaml = r#"
 listeners:

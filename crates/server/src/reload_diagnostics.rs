@@ -635,6 +635,7 @@ mod tests {
     }
 
     #[test]
+    /// A drain delay change emits a restart warning.
     fn shutdown_drain_delay_change_warns() {
         let old = config_with_runtime("");
         let new = config_with_runtime("shutdown_drain_delay_secs: 2\n");

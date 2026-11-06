@@ -796,6 +796,7 @@ mod tests {
     }
 
     #[test]
+    /// Lifecycle phases gate readiness before the upstream policy.
     fn ready_follows_lifecycle_before_upstream_policy() {
         let lifecycle = LifecycleHandle::new();
         let svc = PingoraHealthService::new(None, false).with_lifecycle(lifecycle.clone());
@@ -808,6 +809,7 @@ mod tests {
     }
 
     #[test]
+    /// Upstreams mode still follows lifecycle phases.
     fn ready_upstreams_mode_follows_lifecycle() {
         let lifecycle = LifecycleHandle::new();
         let registry: HealthRegistry = Arc::new([(Arc::from("backend"), make_health_entry(1))].into_iter().collect());
@@ -823,6 +825,7 @@ mod tests {
     }
 
     #[test]
+    /// A stopped lifecycle reports readiness distinctly.
     fn ready_reports_stopped_lifecycle_distinctly() {
         let lifecycle = LifecycleHandle::new();
         let svc = PingoraHealthService::new(None, false).with_lifecycle(lifecycle.clone());
@@ -897,6 +900,7 @@ mod tests {
     }
 
     #[test]
+    /// Serving mode stays ready when all upstreams are unhealthy.
     fn ready_all_unhealthy_is_ready_by_default() {
         let mut map = HashMap::new();
         let entry = make_health_entry(1);
@@ -915,6 +919,7 @@ mod tests {
     }
 
     #[test]
+    /// Upstreams mode returns 503 for a degraded cluster.
     fn ready_upstreams_mode_returns_503_for_degraded_cluster() {
         let mut map = HashMap::new();
         map.insert(Arc::from("good"), make_health_entry(1));

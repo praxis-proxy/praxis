@@ -821,6 +821,7 @@ mod tests {
         clippy::too_many_lines,
         reason = "one test covers every lifecycle phase the runtime publishes"
     )]
+    /// Serve, drain, and stop publish the expected lifecycle phases.
     fn run_with_shutdown_reports_serving_draining_and_stopped() {
         let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 2\n"));
         let lifecycle = runtime.lifecycle();
@@ -1032,6 +1033,7 @@ mod tests {
     }
 
     #[test]
+    /// Map each stop signal to its configured kind.
     fn stop_signal_kind_maps_sigterm_sighup_and_sigint() {
         assert_eq!(
             StopSignal::Terminate.kind(),
@@ -1066,6 +1068,7 @@ mod tests {
     }
 
     #[test]
+    /// New runtimes read threads and the shutdown timeout.
     fn new_reads_threads_and_shutdown_timeout() {
         let runtime = HyperRuntime::new(&config_with(
             "shutdown_timeout_secs: 7\nshutdown_drain_delay_secs: 2\nruntime:\n  threads: 3\n",

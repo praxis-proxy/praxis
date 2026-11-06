@@ -29,6 +29,7 @@ const DRAIN_DELAY_SECS: u64 = 40; // 40 s
     coverage,
     ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
 )]
+/// Verify drain headers across HTTP/1.1, HTTP/2, and upgrades.
 fn drain_marks_http1_and_spares_http2_and_upgrades() {
     let upstream = keepalive_upstream();
     let port = free_port();

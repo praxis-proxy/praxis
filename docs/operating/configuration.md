@@ -861,11 +861,11 @@ connections. Clients of those see the connection or
 stream close before the request completes and should be
 ready to reconnect, retrying only idempotent requests.
 
-On Kubernetes, `terminationGracePeriodSeconds` only caps
-this window. A larger value does not extend it. A
-smaller one, once any `preStop` hook time is taken out,
-lets the kubelet kill the container before the grace
-period ends. Streams still open when the window ends are
+On Kubernetes, `terminationGracePeriodSeconds` must cover
+the drain delay, `shutdown_timeout_secs`, any `preStop`
+hook, and time for final cleanup. A smaller value lets the
+kubelet kill the container before the shutdown budget
+completes. Streams still open when the window ends are
 closed on every pod deletion, rolling update, and node
 drain.
 
