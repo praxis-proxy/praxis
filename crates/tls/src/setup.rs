@@ -250,14 +250,17 @@ fn startup_file_hashes(tls: &ListenerTls) -> Vec<Option<[u8; 32]>> {
     let Some(primary) = tls.certificates.first() else {
         return Vec::new();
     };
-    let mut paths = vec![primary.cert_path.clone(), primary.key_path.clone()];
-    if tls.client_cert_mode != ClientCertMode::None
-        && let Some(ca_cfg) = tls.client_ca.as_ref()
-    {
-        paths.push(ca_cfg.ca_path.clone());
-        paths.extend(ca_cfg.crl_paths.iter().cloned());
-    }
-    paths.iter().map(|path| crate::watcher::file_digest(path)).collect()
+    let ca_cfg = (tls.client_cert_mode != ClientCertMode::None)
+        .then_some(tls.client_ca.as_ref())
+        .flatten();
+    crate::watcher::watched_paths(
+        primary,
+        ca_cfg.map(|ca| ca.ca_path.as_str()),
+        ca_cfg.map_or(&[], |ca| ca.crl_paths.as_slice()),
+    )
+    .iter()
+    .map(|path| crate::watcher::file_digest(path))
+    .collect()
 }
 
 // -----------------------------------------------------------------------------
@@ -978,6 +981,62 @@ mod tests {
                 "no client-requested TLS 1.3 tickets"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "config-reload")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture walks the no-mTLS, mTLS and CRL baseline cases"
+    )]
+    fn startup_file_hashes_follow_the_configured_client_auth_files() -> Result<(), Box<dyn std::error::Error>> {
+        let certs = gen_test_certs();
+        let mut tls = ListenerTls::new_validated(
+            certs.cert_path.to_str().ok_or("cert path is not UTF-8")?,
+            certs.key_path.to_str().ok_or("key path is not UTF-8")?,
+        )?;
+        let cert = crate::watcher::file_digest(&tls.certificates[0].cert_path);
+        let key = crate::watcher::file_digest(&tls.certificates[0].key_path);
+        assert_eq!(
+            startup_file_hashes(&tls),
+            vec![cert, key],
+            "no client auth watches only the certificate and key"
+        );
+
+        let ca_path = certs.ca_cert_path.to_str().ok_or("CA path is not UTF-8")?.to_owned();
+        let ca = crate::watcher::file_digest(&ca_path);
+        tls.client_ca = Some(CaConfig {
+            ca_path: ca_path.clone(),
+            crl_paths: Vec::new(),
+        });
+        tls.client_cert_mode = ClientCertMode::Require;
+        assert_eq!(
+            startup_file_hashes(&tls),
+            vec![cert, key, ca],
+            "mTLS adds the client CA and no CRL paths"
+        );
+
+        let crl_one = tempfile::NamedTempFile::new()?;
+        let crl_two = tempfile::NamedTempFile::new()?;
+        let crl_one_path = crl_one.path().to_str().ok_or("CRL path is not UTF-8")?.to_owned();
+        let crl_two_path = crl_two.path().to_str().ok_or("CRL path is not UTF-8")?.to_owned();
+        let expected = vec![
+            cert,
+            key,
+            ca,
+            crate::watcher::file_digest(&crl_one_path),
+            crate::watcher::file_digest(&crl_two_path),
+        ];
+        tls.client_ca = Some(CaConfig {
+            ca_path,
+            crl_paths: vec![crl_one_path, crl_two_path],
+        });
+        assert_eq!(
+            startup_file_hashes(&tls),
+            expected,
+            "mTLS covers every configured CRL in order"
+        );
         Ok(())
     }
 

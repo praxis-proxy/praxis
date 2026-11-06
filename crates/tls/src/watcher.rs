@@ -43,6 +43,15 @@ const MAX_BACKOFF_MS: u64 = 60_000; // 60 seconds
 /// Fallback interval for filesystems whose atomic updates generate no events.
 const CERTIFICATE_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
+// Completed certificate polls on this thread. Tests use it to wait for an
+// explicit poll instead of inferring completion from a sleep. Thread-local
+// keeps parallel tests from waking each other.
+#[cfg(test)]
+thread_local! {
+    /// Number of polls this thread has finished.
+    static POLLS_COMPLETED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 // -----------------------------------------------------------------------------
 // ClientVerifierReload
 // -----------------------------------------------------------------------------
@@ -243,6 +252,8 @@ async fn watch_events(
                 if observed != file_hashes || observed.iter().any(Option::is_none) {
                     retry_pending = !reload_tracked(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms, &mut file_hashes).await;
                 }
+                #[cfg(test)]
+                POLLS_COMPLETED.with(|completed| completed.set(completed.get().saturating_add(1)));
             }
             () = tokio::time::sleep(Duration::from_millis(backoff_ms)), if retry_pending => {
                 tracing::info!("retrying the failed certificate reload");
@@ -407,11 +418,34 @@ fn next_backoff(reloaded: bool, backoff_ms: u64) -> u64 {
 /// The reads and hashing run on the blocking pool so a slow filesystem or a
 /// large CRL cannot stall the watcher's runtime while a poll is in flight.
 async fn watched_file_hashes(pair: &CertKeyPair, verifier: Option<&ClientVerifierReload>) -> Vec<Option<[u8; 32]>> {
-    let paths = watched_paths(pair, verifier);
+    let (ca_path, crl_paths) = verifier_paths(verifier);
+    let paths = watched_paths(pair, ca_path, crl_paths);
     let count = paths.len();
     tokio::task::spawn_blocking(move || paths.iter().map(|path| file_digest(path)).collect())
         .await
         .unwrap_or_else(|_| vec![None; count])
+}
+
+/// Paths the watcher fingerprints, shared with the startup snapshot.
+///
+/// The order is the primary certificate, its key, then the client CA and any
+/// CRLs. Both the startup baseline and polling must use this one function so a
+/// mismatch in order or membership cannot masquerade as an unchanged file.
+pub(crate) fn watched_paths(pair: &CertKeyPair, ca_path: Option<&str>, crl_paths: &[String]) -> Vec<String> {
+    let mut paths = vec![pair.cert_path.clone(), pair.key_path.clone()];
+    if let Some(ca_path) = ca_path {
+        paths.push(ca_path.to_owned());
+        paths.extend(crl_paths.iter().cloned());
+    }
+    paths
+}
+
+/// Split a verifier reload into the CA and CRL inputs [`watched_paths`] takes.
+fn verifier_paths(verifier: Option<&ClientVerifierReload>) -> (Option<&str>, &[String]) {
+    match verifier {
+        Some(verifier) => (Some(verifier.ca_path.as_str()), verifier.crl_paths.as_slice()),
+        None => (None, &[]),
+    }
 }
 
 /// Fingerprints the watched files on the calling thread.
@@ -419,20 +453,11 @@ async fn watched_file_hashes(pair: &CertKeyPair, verifier: Option<&ClientVerifie
 /// Test helper that mirrors the pre-load snapshot the startup path takes.
 #[cfg(test)]
 fn file_hashes_now(pair: &CertKeyPair, verifier: Option<&ClientVerifierReload>) -> Vec<Option<[u8; 32]>> {
-    watched_paths(pair, verifier)
+    let (ca_path, crl_paths) = verifier_paths(verifier);
+    watched_paths(pair, ca_path, crl_paths)
         .iter()
         .map(|path| file_digest(path))
         .collect()
-}
-
-/// Paths whose contents the watcher fingerprints, in a stable order.
-fn watched_paths(pair: &CertKeyPair, verifier: Option<&ClientVerifierReload>) -> Vec<String> {
-    let mut paths = vec![pair.cert_path.clone(), pair.key_path.clone()];
-    if let Some(verifier) = verifier {
-        paths.push(verifier.ca_path.clone());
-        paths.extend(verifier.crl_paths.iter().cloned());
-    }
-    paths
 }
 
 /// SHA-256 of one watched file, or `None` when it cannot be read.
@@ -934,7 +959,9 @@ mod tests {
             shutdown,
             events,
         ));
-        tokio::task::yield_now().await;
+        // The first interval tick is immediate. Consume it so a later poll
+        // counter increment can only come from the poll this test schedules.
+        wait_for(|| polls_completed() > 0).await;
         let before = swap.load_full();
         let now = rustls::pki_types::UnixTime::now();
         assert!(
@@ -952,8 +979,7 @@ mod tests {
             "the replacement CA must initially be untrusted"
         );
         std::fs::copy(&replacement_trust.ca_path, &ca_path).unwrap();
-        tokio::time::advance(CERTIFICATE_POLL_INTERVAL).await;
-        wait_until(|| !Arc::ptr_eq(&before, &swap.load_full())).await;
+        advance_one_poll().await;
         let after_ca = swap.load_full();
         assert!(
             !Arc::ptr_eq(&before, &after_ca),
@@ -967,8 +993,7 @@ mod tests {
             "CA-only polling must trust a client issued by the new CA"
         );
         std::fs::write(&crl_path, &replacement_trust.revoked_crl).unwrap();
-        tokio::time::advance(CERTIFICATE_POLL_INTERVAL).await;
-        wait_until(|| !Arc::ptr_eq(&after_ca, &swap.load_full())).await;
+        advance_one_poll().await;
         let after_crl = swap.load_full();
         assert!(
             !Arc::ptr_eq(&after_ca, &after_crl),
@@ -981,22 +1006,26 @@ mod tests {
             ),
             "CRL-only polling must reject the newly revoked client"
         );
+        let polls_before_notification = polls_completed();
         let notification_ca = crate::test_utils::gen_ca_file();
         std::fs::copy(&notification_ca.ca_path, &ca_path).unwrap();
         notifications.send(()).await.unwrap();
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(DEBOUNCE_MS)).await;
-        wait_until(|| !Arc::ptr_eq(&after_crl, &swap.load_full())).await;
+        // Do not advance the poll interval here: the reload must come from the
+        // notification, not from a poll racing it to the same file change.
+        wait_for(|| !Arc::ptr_eq(&after_crl, &swap.load_full())).await;
         let after_notification = swap.load_full();
         assert!(
             !Arc::ptr_eq(&after_crl, &after_notification),
             "a notification reload must install a new verifier"
         );
-        tokio::time::advance(CERTIFICATE_POLL_INTERVAL).await;
-        for _ in 0..5 {
-            std::thread::sleep(Duration::from_millis(2));
-            tokio::task::yield_now().await;
-        }
+        assert_eq!(
+            polls_completed(),
+            polls_before_notification,
+            "the notification reload must not be a poll in disguise"
+        );
+        advance_one_poll().await;
         assert!(
             Arc::ptr_eq(&after_notification, &swap.load_full()),
             "a successful notification reload must not be repeated by the next poll"
@@ -1102,6 +1131,34 @@ mod tests {
             tokio::task::yield_now().await;
             tokio::time::advance(CERTIFICATE_POLL_INTERVAL).await;
         }
+    }
+
+    /// Waits until `condition` holds without moving the paused clock.
+    ///
+    /// Use this when a timer-driven branch (such as a poll) must not run while
+    /// waiting for another branch, so a reload cannot be attributed to the
+    /// wrong trigger.
+    async fn wait_for(mut condition: impl FnMut() -> bool) {
+        for _ in 0..1000 {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            tokio::task::yield_now().await;
+        }
+        assert!(condition(), "condition did not become true in time");
+    }
+
+    /// Advances exactly one poll interval and waits for that poll to finish.
+    async fn advance_one_poll() {
+        let before = polls_completed();
+        tokio::time::advance(CERTIFICATE_POLL_INTERVAL).await;
+        wait_for(|| polls_completed() > before).await;
+    }
+
+    /// Completed certificate polls on this thread.
+    fn polls_completed() -> u64 {
+        POLLS_COMPLETED.with(std::cell::Cell::get)
     }
 
     /// Client identity and trust files used to prove polling changes decisions.
