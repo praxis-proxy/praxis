@@ -263,12 +263,10 @@ impl HttpFilter for HeaderFilter {
         #[cfg(feature = "local-http")]
         crate::local_http::record_response_header_effects(
             &mut ctx.extensions,
-            self.response_remove.iter().cloned().chain(
-                self.response_add
-                    .iter()
-                    .chain(&self.response_set)
-                    .map(|(name, _)| name.clone()),
-            ),
+            self.response_remove
+                .iter()
+                .cloned()
+                .chain(self.response_set.iter().map(|(name, _)| name.clone())),
         );
 
         Ok(FilterAction::Continue)

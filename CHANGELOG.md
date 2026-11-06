@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Replay local response-header appends without retaining discarded handler
+  values on policy denials or precommit 500 replacements. Appending a policy
+  cookie no longer leaks the handler's session cookie into the replacement.
 - Apply the policy filter's configured failure mode when a classified tool
   response is malformed JSON or lacks both a result and a valid JSON-RPC error.
   Policies with tool response hooks no longer silently skip those inputs;

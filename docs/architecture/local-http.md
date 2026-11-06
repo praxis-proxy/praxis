@@ -60,12 +60,19 @@ therefore apply CORS and security headers to local outcomes.
 
 External `Policy` filters use
 `praxis_filter::local_http::record_response_header_effects` from
-`on_response` after editing the response to record unchanged writes and
-removals of absent headers. Pass `&mut ctx.extensions` and the affected
-`HeaderName`s. Their final values at hook completion, including all values
-of repeated fields or the field's absence, survive later replacements.
-Changed fields are detected automatically. Recording has no effect outside
-a local response-header hook; later policies can still override the fields.
+`on_response` after editing the response to record whole-field sets and
+removals, including unchanged writes and removals of absent headers. Pass
+`&mut ctx.extensions` and the affected `HeaderName`s. Their final values at
+hook completion, including all values of repeated fields or the field's
+absence, survive later replacements.
+Append-only changes are detected automatically and replay only the added
+values, preserving the replacement's own values. Do not record append-only
+fields as whole-field sets, since that also preserves pre-existing handler
+values. Other changed fields are detected automatically; record sets
+explicitly to distinguish them from appends when the old values form a
+prefix of the new ones. Operations replay in response-hook order.
+Recording has no effect outside a local response-header hook; later
+policies can still override the fields.
 
 The coordinator preflights one filtered response chunk before committing.
 A precommit source/filter/limit failure becomes an empty 500, retaining

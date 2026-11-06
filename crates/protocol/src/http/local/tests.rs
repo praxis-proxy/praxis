@@ -226,6 +226,60 @@ async fn response_rejection_replaces_without_restarting_or_losing_earlier_header
 }
 
 #[tokio::test]
+async fn response_add_replays_only_policy_cookies_on_replacement() {
+    for (kind, denied, status) in [
+        (HandlerKind::Consume, false, 200),
+        (HandlerKind::Consume, true, 451),
+        (HandlerKind::SourceErrorBefore, false, 500),
+    ] {
+        let state = State::default();
+        let mut owner = Fixture::owner(state.clone());
+        owner.handler = kind;
+        for value in ["session=handler", "policy=value"] {
+            owner
+                .response_headers
+                .append(http::header::SET_COOKIE, http::HeaderValue::from_static(value));
+        }
+        let mut denial = Fixture::policy("denial", state.clone());
+        denial.behavior = Behavior::RejectResponse;
+        denial
+            .rejection_headers
+            .insert(http::header::SET_COOKIE, http::HeaderValue::from_static("denial=value"));
+        let registry = registry(vec![owner, denial]);
+        let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(
+            "
+- filter: owner
+- filter: headers
+  response_add:
+    - name: Set-Cookie
+      value: policy=value
+    - name: Set-Cookie
+      value: policy=value
+",
+        )
+        .unwrap();
+        if denied {
+            entries.insert(0, serde_yaml::from_str("filter: denial").unwrap());
+        }
+        let pipeline = Arc::new(FilterPipeline::build(&mut entries, &registry).unwrap());
+        let result = run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
+        assert_eq!(result.status, status);
+        let observed = state.inner.lock().unwrap();
+        let (_, headers) = observed.head.as_ref().unwrap();
+        let cookies = headers.get_all(http::header::SET_COOKIE).iter().collect::<Vec<_>>();
+        let mut expected = match status {
+            200 => vec!["session=handler", "policy=value"],
+            451 => vec!["denial=value"],
+            _ => vec![],
+        };
+        expected.extend(["policy=value", "policy=value"]);
+        assert_eq!(cookies, expected, "only appended policy values survive replacement");
+        drop(observed);
+        assert_complete(&state, 1);
+    }
+}
+
+#[tokio::test]
 async fn external_policy_header_effects_survive_denial_and_precommit_replacements() {
     for kind in [HandlerKind::Consume, HandlerKind::SourceErrorBefore] {
         let state = State::default();

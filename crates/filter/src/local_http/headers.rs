@@ -3,7 +3,7 @@
 
 //! Preserve applied policy mutations when a later hook replaces a response.
 
-use http::{HeaderMap, header::HeaderName};
+use http::{HeaderMap, HeaderValue, header::HeaderName};
 
 use crate::RequestExtensions;
 
@@ -14,8 +14,9 @@ use crate::RequestExtensions;
 /// survive later policy denials and precommit error replacements. All values of
 /// a named field are preserved together; later policies can still override them.
 ///
-/// Changed fields are detected automatically. Record unchanged writes and
-/// removals of absent fields here, since those effects have no value difference.
+/// Record whole-field sets and removals, including unchanged writes and removals
+/// of absent fields. Append-only edits are detected automatically; do not name
+/// those fields here, since doing so also preserves their pre-existing values.
 /// This only records effects; callers must edit the response headers themselves.
 /// Calls outside a local response-header hook have no effect.
 ///
@@ -51,41 +52,77 @@ where
 /// Only policy edits survive replacement; handler-originated headers do not.
 #[derive(Default)]
 pub(crate) struct HeaderEdits {
-    /// Final values for fields written by policies.
-    written: HeaderMap,
-    /// Fields removed by policies.
-    removed: Vec<HeaderName>,
+    /// Policy operations in response-hook order.
+    operations: Vec<HeaderEdit>,
 }
 
 impl HeaderEdits {
     /// Record changes and explicit writes/removals, even when values match.
     pub(crate) fn record(&mut self, before: &HeaderMap, after: &HeaderMap, touched: &[HeaderName]) {
-        for name in before.keys().chain(after.keys()).chain(touched) {
-            if !touched.contains(name) && before.get_all(name).iter().eq(after.get_all(name).iter()) {
+        for name in touched {
+            self.operations.push(HeaderEdit::replacement(name, after));
+        }
+        for name in before
+            .keys()
+            .chain(after.keys().filter(|name| !before.contains_key(*name)))
+        {
+            if touched.contains(name) || before.get_all(name).iter().eq(after.get_all(name).iter()) {
                 continue;
             }
-            self.written.remove(name);
-            self.removed.retain(|removed| removed != name);
-            if after.contains_key(name) {
-                for value in after.get_all(name) {
-                    self.written.append(name.clone(), value.clone());
-                }
-            } else {
-                self.removed.push(name.clone());
-            }
+            self.record_change(name, before, after);
         }
     }
 
     /// Apply accumulated edits over a new denial's headers in phase order.
     pub(crate) fn apply(&self, headers: &mut HeaderMap) {
-        for name in &self.removed {
-            headers.remove(name);
-        }
-        for name in self.written.keys() {
-            headers.remove(name);
-            for value in self.written.get_all(name) {
-                headers.append(name.clone(), value.clone());
+        for operation in &self.operations {
+            match operation {
+                HeaderEdit::Append(name, value) => {
+                    headers.append(name.clone(), value.clone());
+                },
+                HeaderEdit::Set(name, values) => {
+                    headers.remove(name);
+                    for value in values {
+                        headers.append(name.clone(), value.clone());
+                    }
+                },
+                HeaderEdit::Remove(name) => {
+                    headers.remove(name);
+                },
             }
+        }
+    }
+
+    /// Retain only the added suffix of an append-only edit.
+    fn record_change(&mut self, name: &HeaderName, before: &HeaderMap, after: &HeaderMap) {
+        let current = after.get_all(name);
+        let mut values = current.iter();
+        if before.get_all(name).iter().all(|value| Some(value) == values.next()) {
+            self.operations
+                .extend(values.cloned().map(|value| HeaderEdit::Append(name.clone(), value)));
+        } else {
+            self.operations.push(HeaderEdit::replacement(name, after));
+        }
+    }
+}
+
+/// Only values introduced by a policy belong in append operations.
+enum HeaderEdit {
+    /// Add a value without replacing the new response's existing values.
+    Append(HeaderName, HeaderValue),
+    /// Replace all values with an authoritative policy write.
+    Set(HeaderName, Vec<HeaderValue>),
+    /// Remove every value, including values introduced by a replacement.
+    Remove(HeaderName),
+}
+
+impl HeaderEdit {
+    /// Preserve an explicit whole-field write or removal.
+    fn replacement(name: &HeaderName, headers: &HeaderMap) -> Self {
+        if headers.contains_key(name) {
+            Self::Set(name.clone(), headers.get_all(name).iter().cloned().collect())
+        } else {
+            Self::Remove(name.clone())
         }
     }
 }
@@ -93,6 +130,6 @@ impl HeaderEdits {
 /// Explicit policy effects cannot be inferred from header value differences.
 #[derive(Default)]
 pub(crate) struct PolicyHeaders {
-    /// Fields written or removed by the current response hook.
+    /// Fields authoritatively set or removed by the current response hook.
     pub(crate) touched: Vec<HeaderName>,
 }

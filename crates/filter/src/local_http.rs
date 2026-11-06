@@ -28,7 +28,7 @@ use crate::{FilterError, HttpFilterContext};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalCompatibility {
     /// Head, response, and streaming response-body hooks support local traffic.
-    /// Record unchanged header writes and absent removals with
+    /// Record whole-field header sets and removals with
     /// [`record_response_header_effects`].
     ///
     /// [`record_response_header_effects`]: self::record_response_header_effects

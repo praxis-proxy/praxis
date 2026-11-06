@@ -83,6 +83,79 @@ fn response_replacement_retains_policy_edits_without_leaking_source_headers() {
 }
 
 #[test]
+fn response_replacement_replays_appends_without_adopting_existing_values() {
+    let name = http::header::SET_COOKIE;
+    let mut original = http::HeaderMap::new();
+    original.append(name.clone(), http::HeaderValue::from_static("session=handler"));
+    original.append(name.clone(), http::HeaderValue::from_static("policy=value"));
+    let mut filtered = original.clone();
+    filtered.append(name.clone(), http::HeaderValue::from_static("policy=value"));
+    let mut edits = headers::HeaderEdits::default();
+    edits.record(&original, &filtered, &[]);
+    let mut next = filtered.clone();
+    next.append(name.clone(), http::HeaderValue::from_static("policy=value"));
+    edits.record(&filtered, &next, &[]);
+    for value in ["first=denial", "second=denial"] {
+        let mut replacement = http::HeaderMap::new();
+        replacement.insert(name.clone(), http::HeaderValue::from_static(value));
+        edits.apply(&mut replacement);
+        assert_eq!(
+            replacement.get_all(&name).iter().collect::<Vec<_>>(),
+            [value, "policy=value", "policy=value"],
+            "appends preserve replacement values and duplicate policy values in order"
+        );
+    }
+}
+
+#[test]
+fn response_replacement_preserves_append_set_remove_order() {
+    let name = http::header::SET_COOKIE;
+    let mut current = http::HeaderMap::new();
+    current.insert(name.clone(), http::HeaderValue::from_static("session=handler"));
+    let mut edits = headers::HeaderEdits::default();
+    for (value, authoritative, expected) in [
+        (Some("first=policy"), false, vec!["denial=value", "first=policy"]),
+        (Some("session=handler"), true, vec!["session=handler"]),
+        (Some("second=policy"), false, vec!["session=handler", "second=policy"]),
+        (None, true, vec![]),
+        (Some("last=policy"), false, vec!["last=policy"]),
+    ] {
+        let before = current.clone();
+        if authoritative {
+            current.remove(&name);
+        }
+        if let Some(value) = value {
+            current.append(name.clone(), http::HeaderValue::from_static(value));
+        }
+        let touched = if authoritative { vec![name.clone()] } else { vec![] };
+        edits.record(&before, &current, &touched);
+        let mut replacement = http::HeaderMap::new();
+        replacement.insert(name.clone(), http::HeaderValue::from_static("denial=value"));
+        edits.apply(&mut replacement);
+        assert_eq!(replacement.get_all(&name).iter().collect::<Vec<_>>(), expected);
+    }
+}
+
+#[test]
+fn response_replacement_retains_explicit_sets_that_resemble_appends() {
+    let name = http::header::SET_COOKIE;
+    let mut original = http::HeaderMap::new();
+    original.insert(name.clone(), http::HeaderValue::from_static("first=policy"));
+    let mut filtered = original.clone();
+    filtered.append(name.clone(), http::HeaderValue::from_static("second=policy"));
+    let mut edits = headers::HeaderEdits::default();
+    edits.record(&original, &filtered, std::slice::from_ref(&name));
+    let mut replacement = http::HeaderMap::new();
+    replacement.insert(name.clone(), http::HeaderValue::from_static("denial=value"));
+    edits.apply(&mut replacement);
+    assert_eq!(
+        replacement.get_all(&name).iter().collect::<Vec<_>>(),
+        ["first=policy", "second=policy"],
+        "an explicit set replaces the entire field even when the previous values match its prefix"
+    );
+}
+
+#[test]
 fn response_replacement_retains_explicit_unchanged_writes_and_absent_removals() {
     let mut original = http::HeaderMap::new();
     original.insert("x-frame-options", http::HeaderValue::from_static("DENY"));
