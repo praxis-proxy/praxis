@@ -23,7 +23,7 @@ fn process(config: &Config, port: u16) -> PraxisProcess {
     PraxisProcess::spawn_with_ulimit(
         &serde_yaml::to_string(config).unwrap(),
         &format!("127.0.0.1:{port}"),
-        Some("-v 8388608 -f 40960"),
+        Some("-v 8388608 && ulimit -f 40960"),
     )
 }
 

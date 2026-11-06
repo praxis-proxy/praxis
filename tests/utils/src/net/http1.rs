@@ -66,6 +66,50 @@ where
     result
 }
 
+/// Verify rejection of a buffered upstream 200 response without releasing its body.
+///
+/// Before headers are committed, Praxis sends its default internal-error response.
+/// After commitment, it must abort without delivering any buffered content.
+///
+/// # Panics
+///
+/// Panics on leaked content, incomplete error responses, or any other outcome,
+/// including a read deadline expiring instead of a peer abort.
+pub fn assert_buffered_response_rejected(response: &H1Response, body: &[u8]) {
+    assert_eq!(response.body_bytes, body.len() as u64, "{response:?}");
+    if response.status == Some(500) {
+        assert_internal_error_response(response, body);
+        return;
+    }
+    assert_eq!(response.status, Some(200), "{response:?}");
+    assert!(body.is_empty(), "buffered content escaped: {response:?}");
+    assert_eq!(response.completion, None, "overrun must not complete: {response:?}");
+    assert!(
+        response.abort.as_ref().is_some_and(|(kind, _)| matches!(
+            kind,
+            ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
+        )),
+        "overrun must abort at the peer, not time out: {response:?}"
+    );
+}
+
+/// Require the complete default error envelope, with no upstream bytes mixed in.
+fn assert_internal_error_response(response: &H1Response, body: &[u8]) {
+    assert_eq!(response.completion, Some(H1Completion::ContentLength), "{response:?}");
+    assert_eq!(response.abort, None, "{response:?}");
+    assert!(
+        response
+            .headers
+            .iter()
+            .any(|(name, value)| name == "content-type" && value == "application/problem+json"),
+        "{response:?}"
+    );
+    assert_eq!(
+        body, br#"{"type":"about:blank","title":"Internal Server Error","status":500,"detail":"Internal proxy error"}"#,
+        "only the sanitized proxy error may be delivered: {response:?}"
+    );
+}
+
 /// Parsed bounded HTTP/1 header block.
 #[derive(Debug)]
 pub(crate) struct Head {
@@ -374,7 +418,63 @@ fn parse_header_line(line: &str) -> io::Result<(&str, &str)> {
 mod tests {
     use std::io::{BufReader, Cursor, ErrorKind};
 
-    use super::{H1Completion, read_h1_response};
+    use super::{H1Completion, assert_buffered_response_rejected, read_h1_response};
+
+    #[test]
+    fn buffered_rejection_accepts_errors_before_and_after_headers() {
+        let problem =
+            br#"{"type":"about:blank","title":"Internal Server Error","status":500,"detail":"Internal proxy error"}"#;
+        let error = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/problem+json\r\nContent-Length: {}\r\n\r\n{}",
+            problem.len(),
+            str::from_utf8(problem).unwrap()
+        );
+        for wire in [
+            error.as_bytes(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 65538\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+        ] {
+            let mut body = Vec::new();
+            let result = read_h1_response(&mut Cursor::new(wire), false, 1024, |part| {
+                body.extend_from_slice(part);
+                Ok(())
+            });
+            assert_buffered_response_rejected(&result, &body);
+        }
+    }
+
+    #[test]
+    fn buffered_rejection_rejects_leaks_success_and_broken_errors() {
+        for wire in [
+            b"HTTP/1.1 200 OK\r\nContent-Length: 65538\r\n\r\nleaked".as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/problem+json\r\nContent-Length: 99\r\n\r\n{",
+            b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/problem+json\r\nContent-Length: 6\r\n\r\nleaked",
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n",
+        ] {
+            let mut body = Vec::new();
+            let result = read_h1_response(&mut Cursor::new(wire), false, 1024, |part| {
+                body.extend_from_slice(part);
+                Ok(())
+            });
+            assert!(std::panic::catch_unwind(|| assert_buffered_response_rejected(&result, &body)).is_err());
+        }
+    }
+
+    #[test]
+    fn buffered_rejection_does_not_mistake_deadlines_for_peer_aborts() {
+        let mut result = read_h1_response(
+            &mut Cursor::new(b"HTTP/1.1 200 OK\r\nContent-Length: 65538\r\n\r\n"),
+            false,
+            1024,
+            |_| Ok(()),
+        );
+        for kind in [ErrorKind::TimedOut, ErrorKind::WouldBlock] {
+            result.abort = Some((kind, "deadline expired".to_owned()));
+            assert!(std::panic::catch_unwind(|| assert_buffered_response_rejected(&result, &[])).is_err());
+        }
+    }
 
     #[test]
     fn chunk_body_can_contain_terminal_marker_and_have_trailers() {

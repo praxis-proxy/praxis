@@ -300,20 +300,7 @@ fn response_over_stream_buffer_ceiling_is_not_delivered() {
         body.extend_from_slice(part);
         Ok(())
     });
-    assert_eq!(
-        result.status,
-        Some(500),
-        "buffer overflow is detected before headers are sent: {result:?}"
-    );
-    assert_eq!(
-        result.completion,
-        Some(praxis_test_utils::H1Completion::ContentLength),
-        "{result:?}"
-    );
-    assert!(
-        !body.windows(big_body.len()).any(|window| window == big_body.as_bytes()),
-        "the buffered upstream response must not be released"
-    );
+    praxis_test_utils::assert_buffered_response_rejected(&result, &body);
 }
 
 #[test]
