@@ -92,7 +92,8 @@ fn expired_wrong_issuer_and_wrong_audience_tokens_are_rejected() {
         let raw = proxy.get("/widgets", &format!("Bearer {}", jwt::es256(&claims, None, &key)), None);
         assert_eq!(parse_status(&raw), 401, "{code}: must be rejected; got:\n{raw}");
         assert!(
-            raw.contains(&format!("X-Policy-Violation: {code}")),
+            raw.to_ascii_lowercase()
+                .contains(&format!("x-policy-violation: {code}")),
             "{code}: got:\n{raw}"
         );
     }
@@ -108,7 +109,8 @@ fn a_missing_token_is_rejected() {
         "a request without a token is rejected; got:\n{raw}"
     );
     assert!(
-        raw.contains("X-Policy-Violation: auth.missing_credential"),
+        raw.to_ascii_lowercase()
+            .contains("x-policy-violation: auth.missing_credential"),
         "got:\n{raw}"
     );
 }
@@ -155,7 +157,9 @@ fn a_dpop_bound_token_with_a_valid_proof_reaches_the_backend_once() {
         "a second request with the proof is a replay; got:\n{replay}"
     );
     assert!(
-        replay.contains("X-Policy-Violation: auth.dpop_replay"),
+        replay
+            .to_ascii_lowercase()
+            .contains("x-policy-violation: auth.dpop_replay"),
         "got:\n{replay}"
     );
 }
@@ -196,7 +200,8 @@ fn a_dpop_proof_for_another_method_url_token_or_key_is_rejected() {
             "a proof with the wrong {case} is rejected; got:\n{raw}"
         );
         assert!(
-            raw.contains(&format!("X-Policy-Violation: {code}")),
+            raw.to_ascii_lowercase()
+                .contains(&format!("x-policy-violation: {code}")),
             "wrong {case}: got:\n{raw}"
         );
     }

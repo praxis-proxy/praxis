@@ -55,7 +55,9 @@ fn a_dpop_proof_survives_both_identity_resolutions_and_cannot_be_replayed() {
         "a new request reusing the proof; got:\n{replay}"
     );
     assert!(
-        replay.contains("X-Policy-Violation: auth.dpop_replay"),
+        replay
+            .to_ascii_lowercase()
+            .contains("x-policy-violation: auth.dpop_replay"),
         "got:\n{replay}"
     );
 }

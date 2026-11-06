@@ -86,7 +86,11 @@ fn policy_api_key_unknown_key_is_rejected() {
         return;
     };
     assert_eq!(parse_status(&raw), 401, "an unknown key should be rejected");
-    assert!(raw.contains("X-Policy-Violation: auth.key_unknown"), "got: {raw}");
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("x-policy-violation: auth.key_unknown"),
+        "got: {raw}"
+    );
 }
 
 #[test]
@@ -100,7 +104,8 @@ fn policy_api_key_unrecognized_credential_is_rejected() {
         "a credential without the key prefix should be rejected"
     );
     assert!(
-        raw.contains("X-Policy-Violation: auth.unrecognized_credential"),
+        raw.to_ascii_lowercase()
+            .contains("x-policy-violation: auth.unrecognized_credential"),
         "got: {raw}"
     );
 }
@@ -110,7 +115,8 @@ fn policy_api_key_missing_key_is_rejected() {
     let Some(raw) = send(None) else { return };
     assert_eq!(parse_status(&raw), 401, "a request with no key should be rejected");
     assert!(
-        raw.contains("X-Policy-Violation: auth.missing_credential"),
+        raw.to_ascii_lowercase()
+            .contains("x-policy-violation: auth.missing_credential"),
         "got: {raw}"
     );
 }

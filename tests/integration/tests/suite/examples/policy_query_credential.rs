@@ -75,7 +75,11 @@ fn policy_query_credential_known_key_passes_through() {
 fn policy_query_credential_unknown_key_is_rejected() {
     let raw = send("/events?api_key=sk-test-mallory");
     assert_eq!(parse_status(&raw), 401, "an unknown key should be rejected");
-    assert!(raw.contains("X-Policy-Violation: auth.key_unknown"), "got: {raw}");
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("x-policy-violation: auth.key_unknown"),
+        "got: {raw}"
+    );
     assert!(
         !raw.contains("sk-test-mallory"),
         "the rejection must not echo the key: {raw}"
@@ -88,7 +92,8 @@ fn policy_query_credential_missing_key_is_rejected() {
         let raw = send(target);
         assert_eq!(parse_status(&raw), 401, "{target} carries no key");
         assert!(
-            raw.contains("X-Policy-Violation: auth.missing_credential"),
+            raw.to_ascii_lowercase()
+                .contains("x-policy-violation: auth.missing_credential"),
             "{target}: got {raw}"
         );
     }
@@ -103,7 +108,8 @@ fn policy_query_credential_repeated_key_is_rejected() {
         let raw = send(&target);
         assert_eq!(parse_status(&raw), 401, "{target} names the key twice");
         assert!(
-            raw.contains("X-Policy-Violation: auth.ambiguous_credential"),
+            raw.to_ascii_lowercase()
+                .contains("x-policy-violation: auth.ambiguous_credential"),
             "{target}: got {raw}"
         );
         assert!(!raw.contains(KNOWN_KEY), "the rejection must not echo the key: {raw}");
