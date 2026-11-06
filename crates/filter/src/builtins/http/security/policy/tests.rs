@@ -11,8 +11,9 @@
 
 use std::collections::HashMap;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::{HeaderValue, Method};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -38,11 +39,27 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
+/// Mint a compact HS256 JWT over `claims`, signed with `secret` through the
+/// system OpenSSL (RFC 7515 section 5.1).
+fn hs256(claims: &serde_json::Value, secret: &[u8]) -> String {
+    let header = json!({ "alg": "HS256", "typ": "JWT" });
+    let signing_input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header.to_string()),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    let key = PKey::hmac(secret).expect("HMAC key");
+    let mut signer = Signer::new(MessageDigest::sha256(), &key).expect("HMAC-SHA256 signer");
+    signer
+        .update(signing_input.as_bytes())
+        .expect("feed the JWT signing input");
+    let signature = signer.sign_to_vec().expect("HMAC-SHA256 signature");
+    format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature))
+}
+
 /// Mint an HS256 JWT signed with [`TEST_SECRET`].
 fn mint_jwt(claims: &serde_json::Value) -> String {
-    let header = Header::new(Algorithm::HS256);
-    let key = EncodingKey::from_secret(TEST_SECRET.as_bytes());
-    encode(&header, claims, &key).expect("sign JWT")
+    hs256(claims, TEST_SECRET.as_bytes())
 }
 
 /// Standard token claims: test issuer + audience, fresh `exp`.
@@ -3749,12 +3766,7 @@ fn mint_route_jwt(subject: &str) -> String {
         "exp": now_unix() + 300,
         "iat": now_unix(),
     });
-    encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(ROUTE_SECRET.as_bytes()),
-    )
-    .expect("sign route JWT")
+    hs256(&claims, ROUTE_SECRET.as_bytes())
 }
 
 /// Return identity plugins that trust distinct global and route issuers.
@@ -7250,6 +7262,78 @@ async fn cancelling_suspended_policy_releases_payload_and_next_request_is_clean(
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
+/// A host plugin whose policy hook fails with a crypto backend error.
+struct CryptoFailingPlugin {
+    cfg: PluginConfig,
+}
+
+impl Plugin for CryptoFailingPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+/// Type-erased handler that reports a crypto failure instead of a decision.
+struct CryptoFailingHandler;
+
+#[async_trait::async_trait]
+impl AnyHookHandler for CryptoFailingHandler {
+    async fn invoke(
+        &self,
+        _payload: &dyn ppe::prelude::PluginPayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+        Err(PluginError::Crypto {
+            source: ppe::CryptoError::DigestLength,
+        }
+        .boxed())
+    }
+
+    fn hook_type_name(&self) -> &'static str {
+        <CmfHook as ppe::prelude::HookTypeDef>::NAME
+    }
+}
+
+/// Factory for [`CryptoFailingPlugin`].
+struct CryptoFailingFactory;
+
+impl PluginFactory for CryptoFailingFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(CryptoFailingPlugin { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(CryptoFailingHandler);
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_pre_invoke", adapter)],
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crypto_failure_in_a_policy_hook_denies_the_request() {
+    register_policy_plugin_factory("test/crypto-failing", Arc::new(|| Box::new(CryptoFailingFactory)));
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "run(crypto-failing)"
+"#,
+    );
+    let yaml = std::fs::read_to_string(&path).unwrap().replace(
+        "\nglobal:",
+        "\n  - name: crypto-failing\n    kind: test/crypto-failing\n    hooks: [cmf.tool_pre_invoke]\n    mode: sequential\n    on_error: fail\nglobal:",
+    );
+    std::fs::write(&path, yaml).unwrap();
+    let filter = build_filter(path);
+
+    let action = dispatch_echo_as(&filter, "alice").await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "a crypto backend failure must deny an authenticated request, never allow it; got {action:?}",
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Load-time warnings
 // -----------------------------------------------------------------------------
@@ -7302,6 +7386,16 @@ fn a_read_only_tool_response_policy_warns_that_the_rules_will_not_run() {
     assert!(
         logs.contains("response-phase `tool:` rules") && logs.contains("body_access: read_write"),
         "a `read_only` filter must name the remedy for tool response rules; got {logs}",
+    );
+}
+
+#[test]
+fn a_legacy_header_credential_loads_with_a_deprecation_warning() {
+    let (_dir, path) = write_l7_global_config();
+    let logs = capture_warnings(|| drop(build_filter(path)));
+    assert!(
+        logs.contains("deprecated `header:` setting"),
+        "the legacy `header:` form must still load and name its replacement; got {logs}",
     );
 }
 

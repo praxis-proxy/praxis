@@ -16,6 +16,8 @@ name = "praxis_filter"
 default = ["policy-engine"]
 policy-engine = [
     "dep:ppe",
+    "ppe/builtins",
+    "ppe/crypto-rustcrypto",
     "dep:unicase",
     "tokio/rt-multi-thread",
 ]
@@ -119,7 +121,9 @@ url = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-jsonwebtoken = { workspace = true }
+# The policy tests mint HS256 JWTs through the system OpenSSL rather than
+# jsonwebtoken, whose crypto backend would unify into Policy's own copy.
+openssl = { workspace = true }
 # The filter's own tests dial real sockets through the sub-request client, so
 # they need a backend even though the library does not.
 praxis-core = { workspace = true, features = ["pingora"] }
