@@ -246,10 +246,10 @@ fn the_fips_aliases_combine_one_plugin_with_the_fips_backend() {
             && !jwt_fips.contains("policy-api-key"),
         "`policy-jwt-fips` is the OpenSSL JWT plugin plus the FIPS backend, without API-key: {jwt_fips}"
     );
-    let api_key_alias = declaration_in(FILTER_MANIFEST, "policy-api-key-fips").expect("FIPS API-key alias");
+    let alias_features = declaration_in(FILTER_MANIFEST, "policy-api-key-fips").expect("FIPS API-key alias");
     assert!(
-        api_key_alias.contains("\"policy-api-key\"") && api_key_alias.contains("\"policy-crypto-fips\""),
-        "`policy-api-key-fips` is API-key plus the FIPS backend: {api_key_alias}"
+        alias_features.contains("\"policy-api-key\"") && alias_features.contains("\"policy-crypto-fips\""),
+        "`policy-api-key-fips` must select the API-key plugin and the FIPS backend"
     );
 }
 
