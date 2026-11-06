@@ -224,22 +224,26 @@ fn response_boundary(
     stream
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
+    let succeeds = length <= cap;
     let mut verified = 0;
-    let observed = praxis_test_utils::read_h1_response(&mut BufReader::new(stream), false, spec.len() + 1, |chunk| {
-        assert_eq!(
-            chunk,
-            spec.chunk(verified, chunk.len()),
-            "response mismatch at {verified}"
-        );
-        verified += chunk.len() as u64;
-        Ok(())
-    });
-    assert_eq!(
-        observed.status,
-        Some(200),
-        "headers precede body processing: {observed:?}"
-    );
-    if length <= cap {
+    let mut rejected_body = Vec::new();
+    let observation_limit = if succeeds { spec.len() + 1 } else { 1024 };
+    let observed =
+        praxis_test_utils::read_h1_response(&mut BufReader::new(stream), false, observation_limit, |chunk| {
+            if succeeds {
+                assert_eq!(
+                    chunk,
+                    spec.chunk(verified, chunk.len()),
+                    "{at:?}, cap={cap}, length={length}, framing={framing:?}: response mismatch at {verified}"
+                );
+                verified += chunk.len() as u64;
+            } else {
+                rejected_body.extend_from_slice(chunk);
+            }
+            Ok(())
+        });
+    if succeeds {
+        assert_eq!(observed.status, Some(200), "{observed:?}");
         assert_eq!(verified, spec.len(), "every accepted response byte must be verified");
         assert_eq!(
             observed.body_bytes,
@@ -251,12 +255,13 @@ fn response_boundary(
             "{observed:?}"
         );
     } else {
-        assert_eq!(verified, 0, "an oversized buffered response cannot escape");
-        assert_eq!(observed.completion, None, "overrun must not end cleanly: {observed:?}");
-        assert!(observed.abort.is_some(), "{observed:?}");
+        praxis_test_utils::assert_buffered_response_rejected(&observed, &rejected_body);
     }
     let receipt = source.receipt.recv_timeout(DEADLINE).unwrap();
-    assert!(receipt.written_bytes >= cap.min(length) as u64, "{receipt:?}");
+    assert_eq!(receipt.written_bytes, length as u64, "{receipt:?}");
+    if succeeds {
+        assert!(receipt.complete, "{receipt:?}");
+    }
     probe(proxy.addr());
     source.join();
     other.join();

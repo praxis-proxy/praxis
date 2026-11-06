@@ -29,7 +29,7 @@ pub use http_client::{
     http_get_retry, http_get_v6, http_post, http_put_json, http_send, http_send_on_connection, json_post, parse_body,
     parse_header, parse_header_all, parse_status,
 };
-pub use http1::{H1Completion, H1Response, read_h1_response};
+pub use http1::{H1Completion, H1Response, assert_buffered_response_rejected, read_h1_response};
 pub use http2::{
     H2PausedResult, H2PausedUploads, H2Response, H2Upload, read_h2_response, send_h2_payload, start_h2_paused_uploads,
 };
