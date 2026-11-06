@@ -804,9 +804,35 @@ mod tests {
         let lifecycle = LifecycleHandle::new();
         let svc = PingoraHealthService::new(None, false).with_lifecycle(lifecycle.clone());
 
+        assert!(lifecycle.begin_drain());
         lifecycle.mark_stopped();
 
         assert_eq!(svc.ready_response(), (503, r#"{"status":"stopped"}"#.to_owned()));
+    }
+
+    #[test]
+    fn ready_serving_lifecycle_still_applies_the_upstream_policy() {
+        let lifecycle = LifecycleHandle::new();
+        lifecycle.mark_serving().unwrap();
+        let mut map = HashMap::new();
+        let entry = make_health_entry(1);
+        entry.endpoints()[0].mark_unhealthy();
+        map.insert(Arc::from("backend"), entry);
+        let registry: HealthRegistry = Arc::new(map);
+        let svc = PingoraHealthService::new(Some(registry), false)
+            .with_readiness(ReadinessMode::Upstreams)
+            .with_lifecycle(lifecycle);
+
+        let (status, body) = svc.ready_response();
+
+        assert_eq!(
+            status, 503,
+            "serving only lifts the lifecycle gate; upstream readiness must still fail"
+        );
+        assert!(
+            body.contains(r#""status":"degraded""#),
+            "status should be degraded: {body}"
+        );
     }
 
     #[test]

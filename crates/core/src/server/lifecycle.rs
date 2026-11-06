@@ -104,8 +104,18 @@ impl LifecycleHandle {
     }
 
     /// Mark shutdown complete.
+    ///
+    /// Only a draining server can stop, so subscribers never observe
+    /// `Serving` followed directly by `Stopped`. A caller that has not
+    /// drained yet must call [`begin_drain`] first; any other phase,
+    /// including a repeated stop, is a no-op.
+    ///
+    /// [`begin_drain`]: Self::begin_drain
     pub fn mark_stopped(&self) {
-        _ = self.transition(|_phase| Some(LifecyclePhase::Stopped));
+        _ = self.transition(|phase| match phase {
+            LifecyclePhase::Draining => Some(LifecyclePhase::Stopped),
+            LifecyclePhase::Initializing | LifecyclePhase::Serving | LifecyclePhase::Stopped => None,
+        });
     }
 
     /// Apply one state transition through the watch channel's synchronized value.
@@ -150,10 +160,40 @@ mod tests {
     fn stopped_wins_over_later_transitions() {
         let lifecycle = LifecycleHandle::new();
 
+        assert!(lifecycle.begin_drain());
         lifecycle.mark_stopped();
         assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped);
         assert!(!lifecycle.begin_drain());
         assert_eq!(lifecycle.mark_serving(), Err(LifecycleError::ShutdownStarted));
+    }
+
+    #[test]
+    fn stopping_without_draining_is_a_noop() {
+        let lifecycle = LifecycleHandle::new();
+
+        lifecycle.mark_stopped();
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Initializing,
+            "a server must drain before it stops"
+        );
+
+        lifecycle.mark_serving().unwrap();
+        lifecycle.mark_stopped();
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Serving,
+            "serving must drain before it stops"
+        );
+
+        assert!(lifecycle.begin_drain());
+        lifecycle.mark_stopped();
+        lifecycle.mark_stopped();
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Stopped,
+            "a repeated stop after draining stays stopped"
+        );
     }
 
     #[test]
