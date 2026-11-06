@@ -46,6 +46,8 @@ mod any_filter;
 mod binding;
 pub mod body;
 pub mod builtins;
+#[cfg(feature = "policy-engine")]
+mod client_address;
 mod condition;
 mod context;
 #[cfg(feature = "chain-binding")]
@@ -123,7 +125,17 @@ pub use builtins::{
     normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]
-pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, fips_crypto_blocker, register_policy_plugin_factory};
+/// Why a `policy` filter registered by another factory cannot run under
+/// `PRAXIS_REQUIRE_FIPS`: this build has no Policy capability evidence for it.
+#[cfg(not(feature = "policy-engine"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "matches the signature of the policy-engine build"
+)]
+pub fn fips_crypto_blocker() -> Option<String> {
+    Some("this build has no Policy crypto capability evidence for a `policy` filter".to_owned())
+}
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{
     HttpFilterContext, PendingHeaderResult, Request, Response, StreamTermination, StreamTerminationCause,

@@ -4,17 +4,22 @@
 # The proxy reads the top-level `model`; missing, unlisted, and ambiguous
 # models fail closed by default. No protocol classifier is required.
 #
+# Bodyless requests such as `GET /v1/models` carry no model. They run the
+# policy's HTTP authorization, delegation and request assertions: an `http:`
+# route when one matches, the `global` rules otherwise. Keep rules that read
+# the inference request in `llm:` routes or `global.defaults.llm`.
+#
 # Point `config_path` at an operator-supplied policy. The integration fixture
 # at `tests/integration/fixtures/llm-policy.yaml` provides a local example.
 # `tests/integration/fixtures/llm-request-policy.yaml` adds OPA and CEL
 # rules that read the parsed request body, such as its `tools`, as
 # `llm.request`. It also demonstrates a prompt rule over Responses tool history.
 #
-# Requires building with the `policy-engine` feature, which is off
-# by default:
+# The standard build includes the Policy builtins. For a build with defaults
+# disabled, select the builtins referenced by the operator-supplied policy.
 #
 # Usage:
-#   cargo run -p praxis-proxy --features policy-engine -- -c examples/configs/security/policy-llm.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/security/policy-llm.yaml
 #
 listeners:
   - name: default

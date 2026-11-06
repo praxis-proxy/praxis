@@ -231,6 +231,28 @@ pub fn start_keepalive_poison_backend() -> (BackendGuard, ReusedConnectionLog) {
     (guard, log)
 }
 
+/// Start a backend answering every request `200` with `body`, counting the
+/// requests it receives. The listener closes when the guard drops.
+///
+/// # Panics
+///
+/// Panics if the server fails to bind.
+pub fn start_request_counting_backend(body: &str) -> (BackendGuard, Arc<AtomicUsize>) {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let guard = spawn_tcp_server_with_shutdown(move |mut stream| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _headers = read_until_headers_complete(&mut stream);
+        counter.fetch_add(1, Ordering::SeqCst);
+        let _sent = stream.write_all(response.as_bytes());
+    });
+    (guard, hits)
+}
+
 /// Start a backend that returns a `Content-Encoding: gzip` body.
 ///
 /// # Panics

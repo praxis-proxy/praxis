@@ -19,6 +19,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- The policy filter no longer forwards a delegated token while the caller's
+  credential sits where it cannot be stripped from the upstream request,
+  such as a query parameter. That request now receives HTTP 500
+  (`policy.unstrippable_credential`) instead of reaching the upstream with
+  both credentials. A policy that reads a query credential and also
+  delegates fails to load.
+- Every policy hook now sees the request as the client sent it: the raw
+  query, the effective client address as `http.client_address` (the TCP
+  peer, or with `trusted_proxies` the rightmost untrusted `X-Forwarded-For`
+  hop; absent when a trusted chain cannot be resolved because of a malformed
+  hop, which denies address-keyed rate limits), the validated bare host as
+  `http.host` (lowercased, no port), and a scheme taken from the downstream
+  TLS state, never from `X-Forwarded-Proto`. Before, response and body-phase hooks rebuilt
+  this from a request that earlier phases could already have changed, and
+  the scheme was usually missing. Place `policy` before `path_rewrite`,
+  `url_rewrite` and header-rewriting filters.
+- A policy with request assertions but no `http.request` rules and no
+  entity routes now applies its header set and strip rules instead of
+  admitting the request on identity alone.
+- A delegation where no minted token forms a valid upstream header now
+  receives HTTP 500 (`policy.delegation_failed`) instead of forwarding the
+  inbound credential.
+- With `PRAXIS_REQUIRE_FIPS` set, building the policy filter refuses a build
+  that is not FIPS-capable (such as a host plugin factory registered after
+  startup), so that reload fails and the previous pipeline stays in place.
+
 - Apply the policy filter's configured failure mode when a classified tool
   response is malformed JSON or lacks both a result and a valid JSON-RPC error.
   Policies with tool response hooks no longer silently skip those inputs;
@@ -44,6 +70,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `clone()`; the runtime keeps the same backend-less behavior.
 
 ### Added
+
+- Policy rate limiting (experimental): the policy filter runs a policy's
+  `rate_limits:` before identity resolution, keyed on the client address,
+  and after it, keyed on the resolved identity, each once per request. A
+  denial returns 429 with `Retry-After` (or 400, 401 or 503), fixed text and
+  only the limit counters, never the limiter's own message, and does not
+  reach the upstream. Counters are per replica and reset on reload. See the
+  example `security/policy-rate-limit.yaml`.
+- Query-parameter credentials for the policy filter
+  (`credential: { kind: query_param, name: ... }` with `read_query`), with
+  the example `security/policy-query-credential.yaml`. A repeated or
+  percent-encoded repeated parameter is denied as ambiguous. Query strings
+  can appear in access logs outside Policy; prefer a header where the client
+  can send one.
 
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
@@ -87,6 +127,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- Granular Policy Engine Cargo features. `policy-builtins` (on by default)
+  is the complete bundle; a `--no-default-features` build names
+  `policy-engine` or individual builtins (`policy-api-key`, `policy-jwt`,
+  `policy-oauth`, `policy-cedar`, ...) plus exactly one shared crypto backend,
+  `policy-crypto-default` or `policy-crypto-fips`. A policy naming a plugin
+  kind the build did not compile in fails to load. `praxis --version` lists
+  the compiled Policy features. See `docs/operating/build-features.md`.
+- The default build includes Policy's experimental rate limiter
+  (`ratelimit/limitador`, feature `policy-experimental-ratelimit`). It counts
+  nothing unless a policy declares the plugin and lists it under
+  `rate_limits:`, and loading such a policy logs a warning at startup and on
+  every reload. Because the default build now carries an experimental
+  feature, it logs the experimental-features warning at startup, which now
+  names each experimental feature compiled in.
+- Opt-in Policy FIPS profiles: `FIPS_POLICY_PROFILE=engine|api-key|jwt|both`
+  selects Policy on its OpenSSL FIPS backend for every FIPS Make target,
+  including `container-fips` (a separately tagged image) and
+  `fips-runtime-probe`, which then sends API-key, JWT and DPoP traffic
+  through the image. `make test-fips-provider` runs a profile's suites on
+  Red Hat's FIPS module on any host. The default FIPS build and image stay
+  policy-free. New example: `security/policy-jwt-fips.yaml`.
+- `make fips-deps` also checks the FIPS unit-test graph: test edges may not
+  unify crypto features into `jsonwebtoken`, Policy, rustls or openssl, never
+  bring in `aws-lc-rs`, and bring in another denied crate only with a
+  recorded reason.
 - The policy filter registers the `env` secret provider, so a policy
   document's `secrets:` block using `env` now loads instead of failing at
   startup. Any other provider kind, including `file` and `vault`, is still
@@ -95,6 +160,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Bodyless requests on LLM policies, such as `GET /v1/models`, now run HTTP
+  authorization, delegation and request assertions before they reach the
+  upstream: a matching `http:` route, or the `global` rules otherwise.
+  Before, a valid identity alone admitted them. Migration: a global rule
+  that requires `llm.request` now denies discovery; move inference-only
+  rules into `llm:` routes or `global.defaults.llm`. A startup warning
+  names the `llm.require_model: false` and `require_protocol_metadata:
+  false` fallbacks, which still admit on identity alone.
+- The policy filter refuses to build when a JWT trusted issuer enables DPoP
+  (`dpop.mode: optional` or `required`) without `dpop.external_base_url`,
+  so the proof's `htu` never depends on the client-sent `Host` header. The
+  error names the plugin and the issuer. Set the URL clients address, such
+  as `https://api.example.com`. A reload with such a document is rejected
+  and the previous pipeline keeps serving.
+- A Policy crypto backend failure (no SHA-256 provider, non-FIPS OpenSSL
+  defaults under FIPS JWT, or another `jsonwebtoken` provider installed
+  first) now fails policy filter construction with a `policy.crypto_failed`
+  error naming the remedy, at startup and on reload, instead of surfacing
+  as request-time denials.
+- `PRAXIS_REQUIRE_FIPS` judges a registered `policy` filter by Policy's
+  compiled crypto capability report instead of refusing it outright. It
+  still refuses the default build, any host policy plugin factory, and the
+  unvalidated combination of `policy-experimental-ratelimit` with
+  `policy-crypto-fips`. The default FIPS build stays policy-free.
 - Default accumulated bodies and buffered subrequest responses to a 64 MiB
   cap, configurable through `body_limits.max_buffer_bytes`. The cap covers
   explicit filter limits, runtime-selected buffering, nested pipelines, and
@@ -141,6 +230,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- The policy filter resolves `http.client_address` through
+  `trusted_proxies` on every request path.
+- On inference requests a `ratelimit.post_identity` limiter can bind
+  `llm.model_id`, `llm.provider` and `custom.llm.*`; such a limiter used to
+  deny every request.
 - Remove forbidden `Content-Length` and `Transfer-Encoding` headers from
   204 responses after response filters run, preserving valid downstream
   framing for the following response.
