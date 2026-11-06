@@ -72,19 +72,11 @@ impl PingoraServerRuntime {
 
     /// Start all registered services. Blocks forever.
     ///
-    /// Ends in `process::exit(0)` once a graceful shutdown or an upgrade
-    /// hand-off completes, so the caller's destructors never run. Prefer
-    /// [`run_until_shutdown`] when something held by the caller, such as the
-    /// tracing guard that flushes buffered logs and spans, must run on the
-    /// way out.
-    ///
-    /// [`run_forever`](Server::run_forever) is diverging, so there is no
-    /// return path on which to join the lifecycle monitor: the thread is
-    /// detached on purpose and lives until the process exits. Use
-    /// [`run_with_args`] when the monitor's termination has to be observed.
+    /// Ends in `process::exit(0)`, so caller destructors never run; prefer
+    /// [`run_until_shutdown`] when they must. The lifecycle monitor is detached
+    /// here because this path never returns.
     ///
     /// [`run_until_shutdown`]: ServerRuntime::run_until_shutdown
-    /// [`run_with_args`]: Self::run_with_args
     pub fn run(self) -> ! {
         let _phase_monitor = monitor_lifecycle(self.server.watch_execution_phase(), self.lifecycle.clone());
         self.server.run_forever()
@@ -110,12 +102,8 @@ impl PingoraServerRuntime {
 
 /// Mirror Pingora's execution phases into the process lifecycle.
 ///
-/// Pingora publishes [`ExecutionPhase::Running`] once it has started every
-/// registered service and entered its main loop, which is the earliest signal
-/// its public API exposes that the services are up. Per-listener readiness is
-/// not observable: the fork's `ServiceReadyNotifier` fires before a listener
-/// binds, so it cannot gate `Serving`. Until that changes upstream, `Serving`
-/// means every service has been started.
+/// `Running` is the earliest public signal that services started; per-listener
+/// readiness is not observable through Pingora's API.
 fn monitor_lifecycle(
     mut phases: tokio::sync::broadcast::Receiver<ExecutionPhase>,
     lifecycle: LifecycleHandle,
@@ -137,15 +125,11 @@ fn monitor_lifecycle(
                         return;
                     }
                 },
-                // The monitor fell behind and missed phases. They are
-                // cumulative, so the next phase it reads still describes the
-                // current state; keep following the stream instead of
-                // mistaking the gap for the server having stopped.
+                // Phases are cumulative, so the next read still describes the state.
                 Err(RecvError::Lagged(missed)) => {
                     warn!(missed, "lifecycle monitor fell behind Pingora's execution phases");
                 },
-                // The sender is gone, so the server dropped it after
-                // terminating; there are no more phases to follow.
+                // The sender is gone; no more phases will arrive.
                 Err(RecvError::Closed) => {
                     lifecycle.begin_drain();
                     lifecycle.mark_stopped();

@@ -65,18 +65,8 @@ pub type ShutdownWatch = watch::Receiver<bool>;
 
 /// A required service's handle for reporting that it can accept work.
 ///
-/// [`HyperRuntime::add_required_service`] hands one to the service, and the
-/// service calls [`ready`](Self::ready) once every socket it serves is
-/// listening. Until every required service has done so, the runtime keeps the
-/// lifecycle in [`LifecyclePhase::Initializing`] instead of publishing
-/// [`LifecyclePhase::Serving`]. Dropping the handle without calling `ready`
-/// leaves the service unready, so startup fails rather than claiming to serve
-/// work it cannot accept.
-///
-/// Bind sockets before registering the service; call `ready` after `listen`.
-///
-/// [`LifecyclePhase::Initializing`]: crate::server::LifecyclePhase::Initializing
-/// [`LifecyclePhase::Serving`]: crate::server::LifecyclePhase::Serving
+/// Call [`ready`](Self::ready) after every socket is listening. Dropping it
+/// without calling `ready` leaves the service unready, so startup fails.
 pub struct Readiness(oneshot::Sender<()>);
 
 impl Readiness {
@@ -92,11 +82,8 @@ impl Readiness {
 
 /// The hyper backend's runtime: a tokio runtime, its services and shutdown.
 ///
-/// Building it from a [`Config`] binds nothing and starts no threads.
-/// Protocol adapters bind their listeners when they register and hand the
-/// bound sockets to [`add_required_service`]; one of the [`ServerRuntime`]
-/// `run_*` methods then builds the tokio runtime, starts every service and
-/// blocks until the server has stopped.
+/// Building it from a [`Config`] binds nothing. Adapters bind listeners when
+/// they register; a `run_*` method then starts services and blocks until stop.
 ///
 /// ```
 /// use praxis_core::{
@@ -180,18 +167,10 @@ impl HyperRuntime {
 
     /// Register a named service.
     ///
-    /// `service` is called once, inside the tokio runtime, when the runtime
-    /// starts; the future it returns is spawned and runs until it completes
-    /// or the runtime shuts down. Services start in registration order and
-    /// run concurrently. They stop accepting work when the [`ShutdownWatch`]
-    /// flips and finish in-flight work themselves; the runtime waits for them
-    /// up to the shutdown bound, then aborts whatever is left. A service that
-    /// panics is logged with its name and the others keep running.
+    /// Services start in registration order and run concurrently until they
+    /// finish or the runtime shuts down. A non-required service does not gate
+    /// `Serving`; use [`add_required_service`] for listeners that must be ready.
     ///
-    /// A non-required service does not gate [`LifecyclePhase::Serving`]; use
-    /// [`add_required_service`] for listeners that must be ready first.
-    ///
-    /// [`LifecyclePhase::Serving`]: crate::server::LifecyclePhase::Serving
     /// [`add_required_service`]: Self::add_required_service
     pub fn add_service<F, Fut>(&mut self, name: &str, service: F)
     where
@@ -212,15 +191,9 @@ impl HyperRuntime {
 
     /// Register a listener that must run until shutdown.
     ///
-    /// The service receives a [`Readiness`] and must call [`Readiness::ready`]
-    /// once its sockets are listening. The lifecycle advances to
-    /// [`LifecyclePhase::Serving`] only after every required service has
-    /// reported readiness. An early return or panic before that signal fails
-    /// startup; an early return or panic afterwards shuts down every service,
-    /// then fails the runtime so another listener cannot mask the outage with
-    /// healthy probes.
-    ///
-    /// [`LifecyclePhase::Serving`]: crate::server::LifecyclePhase::Serving
+    /// The service receives a [`Readiness`] and calls [`Readiness::ready`] once
+    /// listening. Early exit before that fails startup; early exit afterwards
+    /// shuts down every service and fails the runtime.
     pub fn add_required_service<F, Fut>(&mut self, name: &str, service: F)
     where
         F: FnOnce(ShutdownWatch, Readiness) -> Fut + Send + 'static,
@@ -297,8 +270,7 @@ impl HyperRuntime {
     ///
     /// # Panics
     ///
-    /// Panics when the runtime cannot be built: returning would let the server
-    /// report a clean shutdown with nothing ever served.
+    /// Panics when the runtime cannot be built, so a broken server never looks clean.
     #[expect(
         clippy::panic,
         reason = "a proxy without a runtime must not look like a clean shutdown"
@@ -315,8 +287,7 @@ impl HyperRuntime {
 
     /// Start the services, publish lifecycle transitions, and drain to stop.
     ///
-    /// Runs inside the tokio runtime so `make_stop` can install signal
-    /// handlers before any service accepts a connection.
+    /// Runs inside the tokio runtime so `make_stop` installs signal handlers first.
     async fn serve<Stop, MakeStop>(
         self,
         make_stop: MakeStop,
@@ -475,14 +446,10 @@ impl ServiceSet {
         aborted.len()
     }
 
-    /// Wait until every required service reports readiness, failing as soon as
-    /// one exits without doing so.
+    /// Wait until every required service reports readiness or exits.
     ///
-    /// A required service that returns or panics before signalling drops its
-    /// `Readiness` sender, which fails the matching waiter, so startup fails
-    /// instead of waiting for a service that will never accept work.
-    /// Cancelling this future drops the wait set, and dropping a
-    /// [`JoinSet`] aborts its tasks; each waiter owns only its receiver.
+    /// A service that returns or panics before signalling drops its sender, so
+    /// startup fails instead of waiting for work it will never accept.
     async fn wait_for_required_ready(&mut self) -> bool {
         let mut waiting = JoinSet::new();
         for signal in self.ready.drain(..) {

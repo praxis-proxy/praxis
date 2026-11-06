@@ -52,9 +52,7 @@ impl std::error::Error for LifecycleError {}
 
 /// Cloneable handle for the one server lifecycle state machine.
 ///
-/// The watch channel is both the source of truth and the notification
-/// mechanism. Keeping the state in one channel prevents readiness readers and
-/// shutdown listeners from observing contradictory copies of the phase.
+/// The watch channel is both the source of truth and the notification mechanism.
 #[derive(Clone, Debug)]
 pub struct LifecycleHandle {
     /// The watch channel holding the current phase and notifying subscribers.
@@ -92,15 +90,12 @@ impl LifecycleHandle {
 
     /// Publish serving after all required startup work has succeeded.
     ///
-    /// This is a state assertion, not a readiness event: calling it again
-    /// while already serving is a no-op that still returns `Ok(())` and
-    /// notifies no subscriber. Only the transition out of
-    /// [`LifecyclePhase::Initializing`] reaches the watch channel.
+    /// This is a state assertion: calling it while already serving is a no-op
+    /// that notifies no subscriber.
     ///
     /// # Errors
     ///
-    /// Returns [`LifecycleError::ShutdownStarted`] when shutdown has already
-    /// begun, since a draining server must never report itself as serving.
+    /// Returns [`LifecycleError::ShutdownStarted`] once shutdown has begun.
     pub fn mark_serving(&self) -> Result<(), LifecycleError> {
         let mut accepted = false;
         self.state.send_if_modified(|phase| match phase {
@@ -128,11 +123,8 @@ impl LifecycleHandle {
 
     /// Mark shutdown complete.
     ///
-    /// Completion is only valid from [`LifecyclePhase::Draining`]. Publishing
-    /// [`LifecyclePhase::Stopped`] straight from `Initializing` or `Serving`
-    /// would report a finished shutdown before startup completed or cleanup
-    /// ran, and subscribers would never observe the drain transition, so
-    /// those transitions are ignored: callers must [`begin_drain`] first.
+    /// Completion is only valid from [`LifecyclePhase::Draining`]; other phases
+    /// are ignored, so callers must [`begin_drain`] first.
     ///
     /// [`begin_drain`]: Self::begin_drain
     pub fn mark_stopped(&self) {
@@ -144,13 +136,9 @@ impl LifecycleHandle {
 
     /// Apply one state transition through the watch channel's synchronized value.
     ///
-    /// `transition` runs while the watch channel holds its lock, so it must
-    /// stay a pure calculation of the next phase: no blocking, no external
-    /// work, and no calls back into this handle, which would deadlock.
-    ///
-    /// Returns whether the closure accepted a transition, which is not the
-    /// same as whether the phase changed: accepting the current phase is a
-    /// no-op that notifies no subscriber.
+    /// `transition` runs while the channel holds its lock, so it must be a pure
+    /// next-phase calculation: no blocking, external work, or re-entry. Returns
+    /// whether the transition was accepted, not whether the phase changed.
     fn transition(&self, transition: impl FnOnce(LifecyclePhase) -> Option<LifecyclePhase>) -> bool {
         let mut accepted = false;
         self.state.send_if_modified(|phase| match transition(*phase) {
