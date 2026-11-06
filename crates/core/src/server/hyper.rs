@@ -102,6 +102,7 @@ pub struct HyperRuntime {
 
     /// Trust anchors loaded from `runtime.upstream_ca_file`.
     trust_anchors: Option<Arc<CachedCaCerts>>,
+    /// Shared lifecycle state for management services and handlers.
     lifecycle: LifecycleHandle,
 }
 
@@ -378,6 +379,7 @@ struct ServiceSet {
 
     /// The service tasks.
     tasks: JoinSet<()>,
+    /// Readiness signals for required services.
     ready: Vec<oneshot::Receiver<()>>,
 }
 
