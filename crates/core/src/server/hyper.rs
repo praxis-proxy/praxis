@@ -168,13 +168,7 @@ impl HyperRuntime {
         self.services.push(Service {
             name: name.to_owned(),
             required: false,
-            start: Box::new(move |shutdown, ready| {
-                let running = service(shutdown);
-                Box::pin(async move {
-                    _ = ready.send(());
-                    running.await;
-                })
-            }),
+            start: Box::new(move |shutdown, ready| start_and_signal_ready(service(shutdown), ready)),
         });
     }
 
@@ -190,13 +184,7 @@ impl HyperRuntime {
         self.services.push(Service {
             name: name.to_owned(),
             required: true,
-            start: Box::new(move |shutdown, ready| {
-                let running = service(shutdown);
-                Box::pin(async move {
-                    _ = ready.send(());
-                    running.await;
-                })
-            }),
+            start: Box::new(move |shutdown, ready| start_and_signal_ready(service(shutdown), ready)),
         });
     }
 
@@ -350,6 +338,25 @@ type ServiceFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Turns a service's shutdown watch into the future to spawn.
 type ServiceStart = Box<dyn FnOnce(ShutdownWatch, oneshot::Sender<()>) -> ServiceFuture + Send>;
+
+/// Poll the service once so synchronous listener setup runs before readiness
+/// is reported.
+///
+/// A required service that finishes on its first poll never signals readiness,
+/// so the runtime treats its early exit as a startup failure.
+fn start_and_signal_ready(
+    running: impl Future<Output = ()> + Send + 'static,
+    ready: oneshot::Sender<()>,
+) -> ServiceFuture {
+    Box::pin(async move {
+        let mut running = pin!(running);
+        let first = std::future::poll_fn(|cx| std::task::Poll::Ready(running.as_mut().poll(cx))).await;
+        if first.is_pending() {
+            _ = ready.send(());
+        }
+        running.await;
+    })
+}
 
 /// A registered service, waiting for the runtime to start it.
 struct Service {
