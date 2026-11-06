@@ -17,6 +17,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `cargo xtask rollout` and `make test-rollout` exercise Kubernetes pod
+  loss, rollouts, config reloads, TLS rotation, node drain, and upstream
+  failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
+
 ### Security
 
 - LLM policies now apply HTTP authorization, delegation and request assertions
