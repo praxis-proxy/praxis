@@ -359,6 +359,15 @@ async fn the_original_query_reaches_a_later_cmf_hook() {
 /// Extensions carrying an inbound credential at `source` and one delegated
 /// token for `Authorization`.
 fn delegation_extensions(source: ppe::praxis_policy_core::extensions::Credential) -> ppe::prelude::Extensions {
+    delegation_extensions_to(source, "Authorization")
+}
+
+/// Extensions carrying an inbound credential at `source` and one delegated
+/// token for `outbound_header`.
+fn delegation_extensions_to(
+    source: ppe::praxis_policy_core::extensions::Credential,
+    outbound_header: &str,
+) -> ppe::prelude::Extensions {
     use chrono::{Duration, Utc};
     use ppe::praxis_policy_core::extensions::raw_credentials::{
         DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind,
@@ -374,7 +383,7 @@ fn delegation_extensions(source: ppe::praxis_policy_core::extensions::Credential
         DelegationKey::new(DelegationMode::OnBehalfOfUser, "api", Vec::new()).with_subject_id("alice"),
         RawDelegatedToken::new(
             "delegated-secret",
-            "Authorization",
+            outbound_header,
             "api",
             Vec::<String>::new(),
             Utc::now() + Duration::hours(1),
@@ -414,6 +423,38 @@ fn delegation_beside_a_query_credential_is_rejected_without_leaking_it() {
         assert!(!logs.contains(secret), "the logs must not carry {label}");
     }
     assert!(logs.contains("refusing to forward a delegated token"), "got {logs}");
+}
+
+#[test]
+fn a_delegation_with_no_valid_header_is_rejected_without_leaking_it() {
+    use ppe::praxis_policy_core::extensions::Credential;
+
+    let ext = delegation_extensions_to(
+        Credential::Header {
+            name: "X-Api-Key".to_owned(),
+        },
+        "not a header",
+    );
+    let req = make_request(Method::GET, "/widgets");
+    let mut ctx = make_filter_context(&req);
+    let (result, logs) = capture_logs(|| attach_delegated_tokens(&mut ctx, Some(&ext)));
+    let rejection = result.expect_err("a delegation that attaches nothing must fail closed");
+    assert_eq!(rejection.status, 500);
+    assert_eq!(violation(&rejection), Some("policy.delegation_failed"));
+    assert!(
+        ctx.request_headers_to_set.is_empty() && ctx.request_headers_to_remove.is_empty(),
+        "nothing is attached or stripped on a refusal"
+    );
+    for (label, secret) in [
+        ("the inbound key", TEST_API_KEY),
+        ("the delegated token", "delegated-secret"),
+    ] {
+        assert!(
+            !body_text(&rejection).contains(secret),
+            "the body must not carry {label}"
+        );
+        assert!(!logs.contains(secret), "the logs must not carry {label}");
+    }
 }
 
 #[test]

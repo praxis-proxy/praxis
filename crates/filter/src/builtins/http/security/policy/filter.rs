@@ -184,7 +184,9 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// with `delegate(...)` fails to load. At request time, a delegated token is
 /// never forwarded while an inbound credential sits where the filter cannot
 /// strip it; that request receives HTTP 500
-/// (`policy.unstrippable_credential`).
+/// (`policy.unstrippable_credential`). A delegation none of whose tokens
+/// forms a valid upstream header receives HTTP 500
+/// (`policy.delegation_failed`) rather than forwarding the inbound one.
 ///
 /// The filter registers only the `env` secret provider. A `secrets:` block
 /// naming any other provider kind, including `file`, fails to load. Secret
@@ -2738,7 +2740,9 @@ fn missing_protocol_metadata_rejection() -> Rejection {
 /// Returns a rejection, attaching nothing, when a token would be forwarded
 /// while an inbound credential sits where it cannot be stripped (a query
 /// parameter, or a location this build does not know): the upstream would
-/// receive the caller's credential beside the delegated one.
+/// receive the caller's credential beside the delegated one. Also rejects
+/// when delegation ran but no token forms a valid header, so the inbound
+/// credential is never forwarded in the delegated one's place.
 pub(super) fn attach_delegated_tokens(
     ctx: &mut HttpFilterContext<'_>,
     extensions: Option<&Extensions>,
@@ -2748,21 +2752,17 @@ pub(super) fn attach_delegated_tokens(
     };
     let outbound = delegated_headers(raw);
     if outbound.is_empty() {
-        return Ok(0);
-    }
-    if let Some(inbound) = raw
-        .inbound_tokens
-        .values()
-        .find(|inbound| inbound_source_header(&inbound.source).is_none())
-    {
+        if raw.delegated_tokens.is_empty() {
+            return Ok(0);
+        }
         tracing::warn!(
             target: "policy.filter",
-            source = %inbound.source,
-            "refusing to forward a delegated token: the inbound credential cannot be stripped \
-             from the upstream request",
+            "refusing to forward the request: no delegated token forms a valid upstream header, \
+             so the inbound credential would travel in its place",
         );
-        return Err(unstrippable_credential_rejection());
+        return Err(delegation_failed_rejection());
     }
+    refuse_unstrippable_inbound(raw)?;
     let attached: std::collections::HashSet<http::header::HeaderName> =
         outbound.iter().map(|(name, _)| name.clone()).collect();
     let count = outbound.len();
@@ -2771,6 +2771,31 @@ pub(super) fn attach_delegated_tokens(
         strip_inbound_header(ctx, &inbound.source, &attached);
     }
     Ok(count)
+}
+
+/// Refuse delegation while an inbound credential in `raw` sits where it
+/// cannot be stripped.
+///
+/// # Errors
+///
+/// Returns [`unstrippable_credential_rejection`] for such a credential.
+fn refuse_unstrippable_inbound(
+    raw: &ppe::praxis_policy_core::extensions::raw_credentials::RawCredentialsExtension,
+) -> Result<(), Rejection> {
+    let Some(inbound) = raw
+        .inbound_tokens
+        .values()
+        .find(|inbound| inbound_source_header(&inbound.source).is_none())
+    else {
+        return Ok(());
+    };
+    tracing::warn!(
+        target: "policy.filter",
+        source = %inbound.source,
+        "refusing to forward a delegated token: the inbound credential cannot be stripped \
+         from the upstream request",
+    );
+    Err(unstrippable_credential_rejection())
 }
 
 /// The `(header, value)` pairs for the delegated tokens in `raw`.
@@ -2865,6 +2890,17 @@ fn unstrippable_credential_rejection() -> Rejection {
         .with_body(Bytes::from_static(
             b"policy: a delegated token cannot be forwarded while the inbound credential \
               sits in a location the filter cannot strip from the upstream request",
+        ))
+}
+
+/// Rejection for a delegation whose every token failed to form an upstream
+/// header. HTTP 500: the body names no credential.
+fn delegation_failed_rejection() -> Rejection {
+    Rejection::status(500)
+        .with_header("Content-Type", "text/plain")
+        .with_header(VIOLATION_HEADER, "policy.delegation_failed")
+        .with_body(Bytes::from_static(
+            b"policy: no delegated token could be attached to the upstream request",
         ))
 }
 
