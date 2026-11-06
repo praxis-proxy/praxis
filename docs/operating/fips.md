@@ -273,6 +273,13 @@ A failure in any of these fails filter construction with a
 previous pipeline keeps serving. A missing SHA-256 provider is a startup
 failure, never an API-key request answered with 401.
 
+To build one, name a profile: `make container-fips FIPS_POLICY_PROFILE=jwt`
+(or `engine`, `api-key`, `both`). The image is tagged
+`<version>-fips-policy-<profile>`, apart from the published policy-free one;
+`make fips-runtime-probe FIPS_POLICY_PROFILE=jwt` then sends API-key, JWT and
+DPoP traffic through it. See
+[`examples/configs/security/policy-jwt-fips.yaml`](../../examples/configs/security/policy-jwt-fips.yaml).
+
 JWT under FIPS accepts RS256/384/512, PS256/384/512 and ES256/384 on RSA
 2048-8192 or P-256/P-384 keys, and refuses HMAC, EdDSA and
 `decoding_key: { kind: secret }` at load.

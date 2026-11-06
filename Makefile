@@ -301,11 +301,23 @@ container-run: | require-container-engine ## run the container image (host netwo
 #
 #   policy-*        the policy filter and its plugins; the ordinary bundle
 #                   (`policy-builtins`) links non-FIPS crypto (RustCrypto,
-#                   jsonwebtoken on aws-lc-rs), so no Policy feature is on
+#                   jsonwebtoken on aws-lc-rs), so no Policy feature is on unless
+#                   FIPS_POLICY_PROFILE names a FIPS-backend selection
 #
 # Everything else in the default set stays on (config-reload, admin-api).
-# FIPS_FEATURES is the single place this is defined; Containerfile.fips
+# FIPS_BASE_FEATURES is the single place this is defined; Containerfile.fips
 # (CARGO_FEATURES) mirrors it and must be kept in sync.
+#
+# Policy FIPS is opt-in through FIPS_POLICY_PROFILE, which every FIPS target
+# below (build, lint, tests, graph, report, image, probe) honors:
+#
+#   none      no Policy feature (the default and the published image)
+#   engine    the engine on the FIPS crypto backend, no identity plugin
+#   api-key   the API-key plugin (policy-api-key-fips)
+#   jwt       JWT and DPoP verified through OpenSSL (policy-jwt-fips)
+#   both      api-key and jwt together
+#
+#   make lint-fips test-fips FIPS_POLICY_PROFILE=jwt
 #
 # The FIPS build goes to its own target directory so it never overwrites,
 # or is mistaken for, the standard build.
@@ -338,9 +350,20 @@ container-run: | require-container-engine ## run the container image (host netwo
 #
 # See docs/developing/fips.md and docs/developing/getting-started.md.
 
-FIPS_FEATURES           := pingora,config-reload,admin-api
-# The same list qualified for a multi-package cargo invocation.
 _COMMA                  := ,
+FIPS_BASE_FEATURES      := pingora,config-reload,admin-api
+FIPS_POLICY_PROFILE     ?= none
+FIPS_POLICY_none        :=
+FIPS_POLICY_engine      := policy-engine,policy-crypto-fips
+FIPS_POLICY_api-key     := policy-api-key-fips
+FIPS_POLICY_jwt         := policy-jwt-fips
+FIPS_POLICY_both        := policy-api-key-fips,policy-jwt-fips
+ifeq ($(filter $(FIPS_POLICY_PROFILE),none engine api-key jwt both),)
+$(error FIPS_POLICY_PROFILE must be one of none, engine, api-key, jwt, both; got '$(FIPS_POLICY_PROFILE)')
+endif
+FIPS_POLICY_FEATURES    := $(FIPS_POLICY_$(FIPS_POLICY_PROFILE))
+FIPS_FEATURES           := $(FIPS_BASE_FEATURES)$(if $(FIPS_POLICY_FEATURES),$(_COMMA)$(FIPS_POLICY_FEATURES))
+# The same list qualified for a multi-package cargo invocation.
 FIPS_FEATURES_QUALIFIED := $(subst $(_COMMA),$(_COMMA)praxis-proxy/,praxis-proxy/$(FIPS_FEATURES))
 FIPS_TARGET_DIR         ?= target/fips
 FIPS_BIN                ?= $(FIPS_TARGET_DIR)/release/praxis
@@ -357,8 +380,10 @@ FIPS_CARGO_ARGS         := -p praxis-proxy --no-default-features --features $(FI
 FIPS_TEST_SUITES        := -p praxis-tests-schema -p praxis-tests-security \
 	-p praxis-tests-integration -p praxis-tests-resilience -p praxis-test-utils
 # A suite names its backend itself (the harness has no backend without
-# defaults), so the FIPS runs, which drop every default, name Pingora.
-FIPS_TEST_SUITE_FEATURES := praxis-tests-schema/pingora,praxis-tests-security/pingora,praxis-tests-integration/pingora,praxis-tests-resilience/pingora
+# defaults), so the FIPS runs, which drop every default, name Pingora. The
+# Policy profile goes to the integration suite, whose features forward it to
+# the in-process proxy and to the harness that checks PRAXIS_BIN.
+FIPS_TEST_SUITE_FEATURES := praxis-tests-schema/pingora,praxis-tests-security/pingora,praxis-tests-integration/pingora,praxis-tests-resilience/pingora$(if $(FIPS_POLICY_FEATURES),$(_COMMA)$(subst $(_COMMA),$(_COMMA)praxis-tests-integration/,praxis-tests-integration/$(FIPS_POLICY_FEATURES)))
 # The toolchain stage of Containerfile.fips, built by `fips-toolchain`.
 FIPS_TOOLCHAIN_IMAGE    ?= praxis-fips-toolchain
 # Multiplier for the resilience suite's throughput floors when the suites run
@@ -393,11 +418,13 @@ FIPS_UBI9_IMAGE         := registry.access.redhat.com/ubi9/ubi@$(FIPS_UBI9_DIGES
 FIPS_UBI9_MINIMAL_IMAGE := registry.access.redhat.com/ubi9/ubi-minimal@$(FIPS_UBI9_MINIMAL_DIGEST)
 FIPS_CHECK_IMAGE        ?= praxis-fips-check
 # CARGO_FEATURES is left to the Containerfile default, which is what the
-# release workflows build; fips-deps checks it matches FIPS_FEATURES. So
-# overriding FIPS_FEATURES on the command line does not change the image:
-# edit both FIPS_FEATURES and the Containerfile.fips default instead.
+# release workflows build; fips-deps checks it matches FIPS_BASE_FEATURES.
+# Only a Policy profile passes it, so the default image is the one released,
+# and a profile image gets its own tag (FIPS_IMAGE_TAG).
 FIPS_BUILD_ARGS         := --build-arg UBI9_DIGEST=$(FIPS_UBI9_DIGEST) \
-	--build-arg UBI9_MINIMAL_DIGEST=$(FIPS_UBI9_MINIMAL_DIGEST)
+	--build-arg UBI9_MINIMAL_DIGEST=$(FIPS_UBI9_MINIMAL_DIGEST) \
+	$(if $(FIPS_POLICY_FEATURES),--build-arg CARGO_FEATURES=$(FIPS_FEATURES))
+FIPS_IMAGE_TAG          := $(VERSION)-fips$(if $(FIPS_POLICY_FEATURES),-policy-$(FIPS_POLICY_PROFILE))
 XTASK_FIPS              := cargo run -q -p xtask --no-default-features --
 # Red Hat's scanner, openshift/check-payload, at the revision that added Rust
 # support (the head of its PR #360, fetched by commit so a rewrite of the PR
@@ -410,7 +437,7 @@ CHECK_PAYLOAD           ?= $(CHECK_PAYLOAD_DIR)/check-payload
 # The FIPS image as podman's storage names it: a bare name gets podman's
 # implicit localhost/ prefix, a registry-qualified IMAGE does not.
 _IMAGE_HEAD             := $(firstword $(subst /, ,$(IMAGE)))
-FIPS_IMAGE_REF          := $(if $(or $(findstring .,$(_IMAGE_HEAD)),$(findstring :,$(_IMAGE_HEAD)),$(filter localhost,$(_IMAGE_HEAD))),$(IMAGE),localhost/$(IMAGE)):$(VERSION)-fips
+FIPS_IMAGE_REF          := $(if $(or $(findstring .,$(_IMAGE_HEAD)),$(findstring :,$(_IMAGE_HEAD)),$(filter localhost,$(_IMAGE_HEAD))),$(IMAGE),localhost/$(IMAGE)):$(FIPS_IMAGE_TAG)
 # The scanner mounts the image from podman's store, which needs the user
 # namespace only for rootless podman.
 PODMAN_UNSHARE          := $(if $(filter 0,$(shell id -u)),,podman unshare)
@@ -424,7 +451,7 @@ require-go:
 require-oc:
 	@command -v oc >/dev/null || { echo "oc (the OpenShift CLI) is required: check-payload refuses to scan without it on PATH"; exit 1; }
 
-##@ FIPS (policy engine off; see FIPS_FEATURES)
+##@ FIPS (Policy off unless FIPS_POLICY_PROFILE names one)
 # The debug build is the edit-compile loop; only the release build carries
 # the manifest.
 build-fips: ## FIPS build, debug profile, into target/fips
@@ -456,8 +483,13 @@ lint-fips: ## clippy (all targets) + rustfmt for the FIPS feature set
 # the FIPS build resolves them: no default features anywhere, only
 # FIPS_FEATURES on the binary. The integration suites against the same
 # feature set are `test-integration-fips` and `test-conformance-fips`.
+# A Policy profile refuses to construct without a FIPS provider, so its tests
+# need one: the host's in FIPS mode, or FIPS_PROVIDER_CONF, an OpenSSL config
+# that activates the FIPS module for the test processes only.
+FIPS_PROVIDER_CONF      ?=
+_FIPS_TEST_ENV           = $(if $(FIPS_PROVIDER_CONF),OPENSSL_CONF=$(abspath $(FIPS_PROVIDER_CONF)))
 test-fips: ## unit tests resolved as the FIPS build
-	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
+	$(_FIPS_TEST_ENV) cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
 		-p praxis-proxy -p praxis-proxy-protocol -p praxis-proxy-filter \
 		-p praxis-proxy-core -p praxis-proxy-tls \
 		--features $(FIPS_FEATURES_QUALIFIED) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
@@ -477,7 +509,8 @@ test-fips-policy-startup: ## Policy FIPS construction checks, one process per ca
 		--features $(FIPS_POLICY_STARTUP_FEATURES) $(FIPS_CARGO_EXTRA) --lib \
 		-- policy::fips_startup_tests --nocapture
 
-.PHONY: test-integration-fips test-conformance-fips test-fips-host fips-toolchain fips-host-facts test-fips-policy-startup
+.PHONY: test-integration-fips test-conformance-fips test-fips-host fips-toolchain fips-host-facts test-fips-policy-startup \
+	test-fips-provider
 
 # The integration suites against the FIPS build. The proxy they start in
 # process is built without default features, and the tests that spawn the
@@ -489,12 +522,12 @@ test-fips-policy-startup: ## Policy FIPS construction checks, one process per ca
 # host, run it through `test-fips-host`, which declares the host as such so
 # the same tests insist on their approved-mode branch instead.
 test-integration-fips: build-fips ## integration suites against the FIPS build
-	PRAXIS_BIN=$(abspath $(FIPS_TARGET_DIR))/debug/praxis \
+	$(_FIPS_TEST_ENV) PRAXIS_BIN=$(abspath $(FIPS_TARGET_DIR))/debug/praxis \
 	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
 		$(FIPS_TEST_SUITES) --features $(FIPS_TEST_SUITE_FEATURES) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
 
 test-conformance-fips: build-fips $(H2SPEC) ## conformance suite against the FIPS build
-	PATH="$(BINUTILS_PATH):$(PATH)" PRAXIS_BIN=$(abspath $(FIPS_TARGET_DIR))/debug/praxis \
+	$(_FIPS_TEST_ENV) PATH="$(BINUTILS_PATH):$(PATH)" PRAXIS_BIN=$(abspath $(FIPS_TARGET_DIR))/debug/praxis \
 	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
 		-p praxis-tests-conformance --features praxis-tests-conformance/pingora \
 		$(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
@@ -524,7 +557,30 @@ test-fips-host: fips-toolchain ## every suite as the FIPS build, on a FIPS host 
 		-e PRAXIS_TEST_THROUGHPUT_SCALE=$(FIPS_HOST_THROUGHPUT_SCALE) \
 		$(FIPS_TOOLCHAIN_IMAGE) \
 		make fips-host-facts test-fips test-fips-policy-startup test-integration-fips test-conformance-fips \
-			FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version \
+			FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version FIPS_POLICY_PROFILE=$(FIPS_POLICY_PROFILE) \
+			FIPS_POLICY_PROVIDER_CONF=xtask/assets/fips/fips-provider.cnf $(if $(V),V=$(V))
+
+# The unit and integration suites as the FIPS build inside the toolchain
+# image, on any host: Red Hat's FIPS module, activated by
+# xtask/assets/fips/fips-provider.cnf, does the crypto, but the kernel is not
+# in FIPS mode, so the tests that need a FIPS host take their other branch.
+# Runs the selected FIPS_POLICY_PROFILE; any container engine works.
+# FIPS_POLICY_SOURCE mounts a local Policy checkout where the root Cargo.toml's
+# [patch.crates-io] table expects it (../praxis-policy); development only.
+FIPS_POLICY_SOURCE      ?=
+# The suites run as the invoking user: praxis refuses to start as root.
+_FIPS_RUN_AS = $(if $(findstring podman,$(notdir $(CONTAINER_ENGINE))),--userns=keep-id,--user $(shell id -u):$(shell id -g) -e HOME=/tmp)
+test-fips-provider: | require-container-engine ## FIPS suites on the FIPS module, any host (toolchain image)
+	$(CONTAINER_ENGINE) run --rm --security-opt label=disable $(_FIPS_RUN_AS) \
+		-v $(CURDIR):/src -w /src \
+		$(if $(FIPS_POLICY_SOURCE),-v $(abspath $(FIPS_POLICY_SOURCE)):/praxis-policy:ro) \
+		-v praxis-fips-host-cargo:/cargo \
+		-v praxis-fips-host-target:/target \
+		-e CARGO_TERM_COLOR=always -e CARGO_INCREMENTAL=0 \
+		$(FIPS_TOOLCHAIN_IMAGE) \
+		make test-fips test-fips-policy-startup test-integration-fips \
+			FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version FIPS_POLICY_PROFILE=$(FIPS_POLICY_PROFILE) \
+			FIPS_PROVIDER_CONF=xtask/assets/fips/fips-provider.cnf \
 			FIPS_POLICY_PROVIDER_CONF=xtask/assets/fips/fips-provider.cnf $(if $(V),V=$(V))
 
 # What the process the suites run as actually sees, printed into the log next
@@ -569,7 +625,7 @@ fips-verify-image: | require-podman ## verify the pinned UBI 9 base images (dige
 
 container-fips: fips-verify-image ## FIPS runtime image on UBI 9
 	podman build -f Containerfile.fips --target runtime $(FIPS_BUILD_ARGS) \
-		-t $(IMAGE):$(VERSION)-fips .
+		-t $(IMAGE):$(FIPS_IMAGE_TAG) .
 
 # Red Hat's toolchain and OpenSSL, no sources: the image `test-fips-host`
 # runs the suites in.
@@ -578,12 +634,12 @@ fips-toolchain: fips-verify-image ## UBI 9 toolchain image that test-fips-host r
 		-t $(FIPS_TOOLCHAIN_IMAGE) .
 
 container-fips-run: | require-podman ## run the FIPS image (host network)
-	podman run --rm --network=host $(IMAGE):$(VERSION)-fips 2>&1
+	podman run --rm --network=host $(IMAGE):$(FIPS_IMAGE_TAG) 2>&1
 
 # The binary starts on ubi-minimal, loads the system OpenSSL and accepts the
 # shipped config; a cheap proof that the image runs before the scan.
 fips-smoke: | require-podman ## run the FIPS image once to validate its config
-	podman run --rm --entrypoint praxis $(IMAGE):$(VERSION)-fips \
+	podman run --rm --entrypoint praxis $(IMAGE):$(FIPS_IMAGE_TAG) \
 		--validate -c /etc/praxis/config.yaml
 
 fips-check: fips-check-ubi ## build on UBI 9 and print the compliance report
@@ -601,8 +657,8 @@ fips-report: ## compliance report against the local FIPS build (FIPS_BIN)
 # workspace-wide, and the test crates always enable the policy engine on
 # the binary, so it cannot see the FIPS build's real graph.
 fips-deps: ## FIPS dependency graph check (seconds, no build)
-	@grep -qx 'ARG CARGO_FEATURES="$(FIPS_FEATURES)"' Containerfile.fips || { \
-		echo "Containerfile.fips CARGO_FEATURES default differs from FIPS_FEATURES ($(FIPS_FEATURES))"; exit 1; }
+	@grep -qx 'ARG CARGO_FEATURES="$(FIPS_BASE_FEATURES)"' Containerfile.fips || { \
+		echo "Containerfile.fips CARGO_FEATURES default differs from FIPS_BASE_FEATURES ($(FIPS_BASE_FEATURES))"; exit 1; }
 	$(XTASK_FIPS) fips report --deps-only --features $(FIPS_FEATURES)
 
 # --fail-on-warnings makes an inconclusive verdict (for example a binary
@@ -648,7 +704,7 @@ fips-host-check: | require-podman ## attest the FIPS host and the FIPS image
 # image; keeps the container's log in target/fips/.
 fips-runtime-probe: | require-podman ## probe the FIPS image's listeners on a FIPS host
 	@mkdir -p $(FIPS_TARGET_DIR)
-	$(XTASK_FIPS) fips runtime-probe $(FIPS_IMAGE_REF) \
+	$(XTASK_FIPS) fips runtime-probe $(FIPS_IMAGE_REF) --policy-profile $(FIPS_POLICY_PROFILE) \
 		--toolchain-image $(FIPS_TOOLCHAIN_IMAGE) --log $(FIPS_TARGET_DIR)/runtime-probe.log
 
 # Hand the built image to another machine as an archive (the FIPS runner

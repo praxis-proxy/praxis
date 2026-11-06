@@ -92,6 +92,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   every reload. Because the default build now carries an experimental
   feature, it logs the experimental-features warning at startup, which now
   names each experimental feature compiled in.
+- Opt-in Policy FIPS profiles: `FIPS_POLICY_PROFILE=engine|api-key|jwt|both`
+  selects Policy on its OpenSSL FIPS backend for every FIPS Make target,
+  including `container-fips` (a separately tagged image) and
+  `fips-runtime-probe`, which then sends API-key, JWT and DPoP traffic
+  through the image. `make test-fips-provider` runs a profile's suites on
+  Red Hat's FIPS module on any host. The default FIPS build and image stay
+  policy-free. New example: `security/policy-jwt-fips.yaml`.
+- `make fips-deps` also checks the FIPS unit-test graph: test edges may not
+  unify crypto features into `jsonwebtoken`, Policy, rustls or openssl, never
+  bring in `aws-lc-rs`, and bring in another denied crate only with a
+  recorded reason.
 - The policy filter registers the `env` secret provider, so a policy
   document's `secrets:` block using `env` now loads instead of failing at
   startup. Any other provider kind, including `file` and `vault`, is still

@@ -13,7 +13,8 @@ use super::{
     filter::{PolicyFilter, declares_rate_limits},
 };
 
-/// A JWT identity policy; its key never verifies anything here.
+/// A JWT identity policy; its key, RFC 7515 appendix A.3's P-256 public
+/// key, never verifies anything here. ES256 loads on every JWT backend.
 const JWT_POLICY: &str = r#"plugins:
   - name: jwt-user
     kind: identity/jwt
@@ -23,10 +24,14 @@ const JWT_POLICY: &str = r#"plugins:
       trusted_issuers:
         - issuer: "https://idp.test.local"
           audiences: ["test-api"]
-          algorithms: ["HS256"]
+          algorithms: ["ES256"]
           decoding_key:
-            kind: secret
-            secret: "praxis-feature-test-secret-not-for-production-use"
+            kind: jwk
+            jwk:
+              kty: EC
+              crv: P-256
+              x: "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU"
+              y: "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"
       claim_mapper: standard
 global:
   authentication: [jwt-user]
@@ -108,6 +113,24 @@ fn a_build_without_jwt_rejects_a_jwt_policy_by_kind() {
 fn a_build_with_jwt_loads_a_jwt_policy() {
     let (_dir, path) = write_policy(JWT_POLICY);
     PolicyFilter::new(filter_config(path), None).expect("a JWT build must register `identity/jwt`");
+}
+
+#[cfg(feature = "policy-jwt-openssl-fips")]
+#[test]
+fn a_fips_jwt_build_refuses_a_shared_secret_key() {
+    let hs256 = JWT_POLICY
+        .replace(r#"algorithms: ["ES256"]"#, r#"algorithms: ["HS256"]"#)
+        .replace(
+            "kind: jwk\n            jwk:\n              kty: EC\n              crv: P-256\n              x: \"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU\"\n              y: \"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0\"",
+            "kind: secret\n            secret: \"praxis-feature-test-secret-not-for-production-use\"",
+        );
+    assert!(hs256.contains("kind: secret"), "the fixture rewrite applied: {hs256}");
+    let (_dir, path) = write_policy(&hs256);
+    let error = construction_error(path);
+    assert!(
+        error.contains("jwt-openssl-fips") && (error.contains("HS256") || error.contains("secret")),
+        "an HMAC key must be refused when the FIPS JWT plugin loads: {error}"
+    );
 }
 
 #[cfg(not(any(feature = "policy-builtins", feature = "policy-api-key")))]

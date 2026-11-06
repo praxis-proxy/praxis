@@ -65,7 +65,7 @@ mod iterative_request_router_origin_failover;
 #[cfg(feature = "iterative-request-router")]
 mod iterative_request_router_sequence;
 mod json_rpc;
-#[cfg(feature = "policy-builtins")]
+#[cfg(any(feature = "policy-builtins", feature = "policy-jwt-openssl-fips"))]
 mod jwt;
 mod least_connections;
 mod logging;
@@ -101,6 +101,8 @@ mod policy_context;
 mod policy_http;
 #[cfg(feature = "policy-builtins")]
 mod policy_jwks;
+#[cfg(feature = "policy-jwt-fips")]
+mod policy_jwt_fips;
 #[cfg(feature = "policy-builtins")]
 mod policy_llm;
 #[cfg(feature = "policy-builtins")]

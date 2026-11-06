@@ -172,6 +172,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [policy-assertions.yaml](configs/security/policy-assertions.yaml) | Projects policy-derived identity into request headers and removes credentials that should not reach the upstream |
 | [policy-context.yaml](configs/security/policy-context.yaml) | Demonstrates the host-supplied context surface: `context_headers` maps reserved-prefix HTTP headers to agent / framework extension fields so APL rules can reference them; `context_meta` stamps operator-defined scope, tags, and properties onto every policy evaluation |
 | [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the Praxis Policy Engine |
+| [policy-jwt-fips.yaml](configs/security/policy-jwt-fips.yaml) | Authenticates generic HTTP traffic with asymmetric JWTs, verified through the system OpenSSL FIPS provider |
 | [policy-llm.yaml](configs/security/policy-llm.yaml) | Authorizes body-addressed inference requests against `llm:` policy routes |
 | [policy.yaml](configs/security/policy.yaml) | Embeds the Praxis Policy Engine in-process to enforce multi-source identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, field redaction, session taint, audit emission, and (under `body_access: read_write`) request / response body rewriting |
 

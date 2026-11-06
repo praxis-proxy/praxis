@@ -106,6 +106,39 @@ FIPS defaults, and `test-fips-host` passes
 `default_properties` check of its own: Policy's JWT load enforces it, and
 the filter reports that as a construction error.
 
+**Policy FIPS profiles.** The default FIPS build leaves Policy out.
+`FIPS_POLICY_PROFILE` opts one in, and every FIPS target honors it: the
+build, `lint-fips`, `test-fips`, `test-integration-fips`, `fips-deps`,
+`fips-report`, `container-fips` (tagged `<version>-fips-policy-<profile>`),
+`fips-scan` and `fips-runtime-probe`.
+
+| Profile | Policy features |
+|---|---|
+| `none` (default) | none |
+| `engine` | `policy-engine,policy-crypto-fips` |
+| `api-key` | `policy-api-key-fips` |
+| `jwt` | `policy-jwt-fips` |
+| `both` | `policy-api-key-fips,policy-jwt-fips` |
+
+A Policy profile refuses to build its filter without a FIPS provider, so its
+tests need one. `make test-fips-provider FIPS_POLICY_PROFILE=jwt` runs
+`test-fips`, `test-fips-policy-startup` and `test-integration-fips` inside
+the toolchain image with Red Hat's module activated by
+`xtask/assets/fips/fips-provider.cnf`. It works on any host and with docker or
+podman, but the kernel is not in FIPS mode, so `test-fips-host` remains the
+FIPS-host proof. On the host itself those tests check the refusal instead. The
+`FIPS Policy profiles` workflow runs the four profiles nightly and on
+dispatch. The JWT example tests sign RS256 and ES256 tokens and DPoP proofs
+at run time with the test-only keys in `tests/integration/fixtures/policy-fips/`;
+the runtime probe signs its own with keys generated for the run.
+
+`fips-deps` checks the profile's production graph (normal and build edges)
+and, separately, the unit-test graph `make test-fips` compiles. A test edge
+may not add a feature to a crypto-selecting crate (`jsonwebtoken`, the Policy
+crates, rustls, openssl), may never bring in `aws-lc-rs`, and may bring in
+another denied crate only with a reason in `TEST_ONLY`
+(`xtask/src/fips/test_graph.rs`).
+
 **The fixtures.** `tests/integration/fixtures/fips/` holds a short RSA key
 and a SHA-1-signed certificate, with the commands that made them in its
 `README.md`.
