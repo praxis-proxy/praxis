@@ -24,7 +24,10 @@ use hyper_util::{
 };
 use praxis_core::{
     health::HealthRegistry,
-    server::{HyperRuntime, hyper::ShutdownWatch},
+    server::{
+        HyperRuntime,
+        hyper::{Readiness, ShutdownWatch},
+    },
 };
 use tokio::net::{TcpSocket, TcpStream};
 use tracing::{debug, error, info};
@@ -195,7 +198,9 @@ impl ManagementHandler {
 /// Register the runtime service `name` that serves `handler` on `socket`.
 fn serve_on(runtime: &mut HyperRuntime, name: &'static str, socket: TcpSocket, handler: ManagementHandler) {
     let handler = Arc::new(handler);
-    runtime.add_required_service(name, move |shutdown| serve_management(name, socket, handler, shutdown));
+    runtime.add_required_service(name, move |shutdown, ready| {
+        serve_management(name, socket, handler, shutdown, ready)
+    });
 }
 
 /// Listen on `socket` and serve management connections until `shutdown`
@@ -206,14 +211,13 @@ async fn serve_management(
     socket: TcpSocket,
     handler: Arc<ManagementHandler>,
     mut shutdown: ShutdownWatch,
+    ready: Readiness,
 ) {
-    let listener = match socket.listen(LISTEN_BACKLOG) {
-        Ok(listener) => listener,
-        Err(err) => {
-            error!(listener = name, error = %err, "management listener could not listen; it will not accept");
-            return;
-        },
-    };
+    let listener = socket.listen(LISTEN_BACKLOG).inspect_err(|err| {
+        error!(listener = name, error = %err, "management listener could not listen; it will not accept");
+    });
+    let Ok(listener) = listener else { return };
+    ready.ready();
     let builder = connection_builder();
     let connections = GracefulShutdown::new();
 

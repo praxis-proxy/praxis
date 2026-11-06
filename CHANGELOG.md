@@ -39,6 +39,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Clarify that the default Pingora shutdown grace period is capped at five
   seconds, including for streaming responses, regardless of a larger
   `shutdown_timeout_secs` value.
+- `UnavailableRuntime` is no longer `Copy` because it now owns the shared
+  server lifecycle. Callers that relied on implicit copies should use
+  `clone()`; the runtime keeps the same backend-less behavior.
 
 ### Added
 

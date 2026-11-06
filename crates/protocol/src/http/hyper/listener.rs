@@ -30,7 +30,10 @@ use praxis_core::{
     ProxyError,
     config::Listener,
     egress::hyper::HyperConnector,
-    server::{HyperRuntime, hyper::ShutdownWatch},
+    server::{
+        HyperRuntime,
+        hyper::{Readiness, ShutdownWatch},
+    },
 };
 use praxis_filter::FilterPipeline;
 use praxis_tls::CachedCaCerts;
@@ -208,9 +211,8 @@ pub(super) fn register(
         drain_bound: runtime.shutdown_timeout().saturating_sub(DRAIN_HEADROOM),
         shared: Arc::new(shared),
     };
-    runtime.add_required_service(&format!("http-proxy:{name}", name = listener.name), move |shutdown| {
-        accept.run(socket, shutdown)
-    });
+    let name = format!("http-proxy:{name}", name = listener.name);
+    runtime.add_required_service(&name, move |shutdown, ready| accept.run(socket, shutdown, ready));
     Ok(())
 }
 
@@ -299,8 +301,9 @@ impl AcceptLoop {
     }
 
     /// Listen on `socket` and serve connections until `shutdown` flips,
-    /// then let open connections finish within the shutdown bound.
-    async fn run(self, socket: TcpSocket, mut shutdown: ShutdownWatch) {
+    /// then let open connections finish within the shutdown bound. Reports
+    /// [`Readiness`] only once the socket is listening.
+    async fn run(self, socket: TcpSocket, mut shutdown: ShutdownWatch, ready: Readiness) {
         let listener = match socket.listen(LISTEN_BACKLOG) {
             Ok(listener) => listener,
             Err(err) => {
@@ -308,6 +311,7 @@ impl AcceptLoop {
                 return;
             },
         };
+        ready.ready();
         let graceful = GracefulShutdown::new();
         let connections = shutdown.clone();
         while !*shutdown.borrow_and_update() {
