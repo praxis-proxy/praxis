@@ -42,6 +42,7 @@ impl ServerRuntime for UnavailableRuntime {
     fn run_with_shutdown(self, shutdown: ShutdownFuture) {
         drop(shutdown);
         tracing::error!("no network backend is compiled into this build; nothing to serve");
+        self.lifecycle.begin_drain();
         self.lifecycle.mark_stopped();
     }
 

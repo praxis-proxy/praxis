@@ -334,14 +334,17 @@ impl HyperRuntime {
             biased;
             mode = stop.as_mut() => mode,
             ready = services.wait_for_required_ready() => {
-                if ready {
-                    if let Err(error) = self.lifecycle.mark_serving() {
-                        warn!(%error, "lifecycle shutdown began before hyper startup completed");
-                    }
-                    services.serve_until(stop.as_mut()).await
-                } else {
+                if !ready {
                     error!("required service failed before becoming ready");
                     ShutdownMode::Failed
+                } else if let Err(error) = self.lifecycle.mark_serving() {
+                    // Shutdown won the race before startup completed, so there
+                    // is nothing left to serve: stop instead of waiting for
+                    // services as if they had started.
+                    warn!(%error, "lifecycle shutdown began before hyper startup completed");
+                    ShutdownMode::Fast
+                } else {
+                    services.serve_until(stop.as_mut()).await
                 }
             },
         };
@@ -474,6 +477,12 @@ impl ServiceSet {
 
     /// Wait until every required service reports readiness, failing as soon as
     /// one exits without doing so.
+    ///
+    /// A required service that returns or panics before signalling drops its
+    /// `Readiness` sender, which fails the matching waiter, so startup fails
+    /// instead of waiting for a service that will never accept work.
+    /// Cancelling this future drops the wait set, and dropping a
+    /// [`JoinSet`] aborts its tasks; each waiter owns only its receiver.
     async fn wait_for_required_ready(&mut self) -> bool {
         let mut waiting = JoinSet::new();
         for signal in self.ready.drain(..) {
@@ -975,6 +984,50 @@ mod tests {
         assert!(
             observed.load(Ordering::SeqCst),
             "the health listener must shut down too"
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic,
+        reason = "the test needs a service that panics before reporting readiness"
+    )]
+    fn required_service_panic_before_readiness_fails_startup() {
+        let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 1\n"));
+        runtime.add_required_service("doomed", |_shutdown, _ready| async { panic!("no listener") });
+
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.run_with_shutdown(Box::pin(std::future::pending::<()>()));
+        }));
+
+        assert!(
+            failed.is_err(),
+            "a required service that panics before readiness must fail startup, not hang it"
+        );
+    }
+
+    #[test]
+    fn shutdown_before_startup_completes_stops_instead_of_serving() {
+        let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 2\n"));
+        let lifecycle = runtime.lifecycle_handle();
+        runtime.add_required_service("late", move |_shutdown, ready| {
+            let lifecycle = lifecycle.clone();
+            async move {
+                lifecycle.begin_drain();
+                ready.ready();
+                std::future::pending::<()>().await;
+            }
+        });
+
+        let started = Instant::now();
+        runtime.run_with_shutdown(Box::pin(async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }));
+
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "startup must stop once shutdown has begun instead of waiting for services: {:?}",
+            started.elapsed()
         );
     }
 

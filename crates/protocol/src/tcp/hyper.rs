@@ -270,7 +270,10 @@ impl BoundListener {
 /// until `shutdown` flips and wait for the group's connections to finish.
 ///
 /// Listening happens before the readiness signal so `Serving` is never
-/// published for a group that cannot accept work.
+/// published for a group that cannot accept work. A socket that fails to
+/// listen returns before any accept loop starts, which closes the sockets
+/// that did listen and drops the [`Readiness`] handle, so the group fails
+/// startup as a whole instead of half-serving.
 async fn serve_group(
     proxy: Arc<PingoraTcpProxy>,
     sockets: Vec<BoundListener>,

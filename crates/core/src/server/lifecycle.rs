@@ -92,6 +92,11 @@ impl LifecycleHandle {
 
     /// Publish serving after all required startup work has succeeded.
     ///
+    /// This is a state assertion, not a readiness event: calling it again
+    /// while already serving is a no-op that still returns `Ok(())` and
+    /// notifies no subscriber. Only the transition out of
+    /// [`LifecyclePhase::Initializing`] reaches the watch channel.
+    ///
     /// # Errors
     ///
     /// Returns [`LifecycleError::ShutdownStarted`] when shutdown has already
@@ -122,11 +127,30 @@ impl LifecycleHandle {
     }
 
     /// Mark shutdown complete.
+    ///
+    /// Completion is only valid from [`LifecyclePhase::Draining`]. Publishing
+    /// [`LifecyclePhase::Stopped`] straight from `Initializing` or `Serving`
+    /// would report a finished shutdown before startup completed or cleanup
+    /// ran, and subscribers would never observe the drain transition, so
+    /// those transitions are ignored: callers must [`begin_drain`] first.
+    ///
+    /// [`begin_drain`]: Self::begin_drain
     pub fn mark_stopped(&self) {
-        self.transition(|_phase| Some(LifecyclePhase::Stopped));
+        _ = self.transition(|phase| match phase {
+            LifecyclePhase::Draining => Some(LifecyclePhase::Stopped),
+            LifecyclePhase::Initializing | LifecyclePhase::Serving | LifecyclePhase::Stopped => None,
+        });
     }
 
     /// Apply one state transition through the watch channel's synchronized value.
+    ///
+    /// `transition` runs while the watch channel holds its lock, so it must
+    /// stay a pure calculation of the next phase: no blocking, no external
+    /// work, and no calls back into this handle, which would deadlock.
+    ///
+    /// Returns whether the closure accepted a transition, which is not the
+    /// same as whether the phase changed: accepting the current phase is a
+    /// no-op that notifies no subscriber.
     fn transition(&self, transition: impl FnOnce(LifecyclePhase) -> Option<LifecyclePhase>) -> bool {
         let mut accepted = false;
         self.state.send_if_modified(|phase| match transition(*phase) {
@@ -168,13 +192,46 @@ mod tests {
     }
 
     #[test]
-    fn stopped_wins_over_later_transitions() {
+    fn stopped_requires_a_drain_and_wins_over_later_transitions() {
         let lifecycle = LifecycleHandle::new();
 
+        lifecycle.mark_stopped();
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Initializing,
+            "completion must not skip startup and its cleanup"
+        );
+
+        lifecycle.mark_serving().unwrap();
+        lifecycle.mark_stopped();
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Serving,
+            "completion must not overwrite serving without a drain"
+        );
+
+        assert!(lifecycle.begin_drain());
         lifecycle.mark_stopped();
         assert_eq!(lifecycle.phase(), LifecyclePhase::Stopped);
         assert!(!lifecycle.begin_drain());
         assert_eq!(lifecycle.mark_serving(), Err(LifecycleError::ShutdownStarted));
+    }
+
+    #[test]
+    fn repeated_mark_serving_is_an_idempotent_noop() {
+        let lifecycle = LifecycleHandle::new();
+        let mut receiver = lifecycle.subscribe();
+
+        lifecycle.mark_serving().unwrap();
+        assert!(receiver.has_changed().is_ok_and(|changed| changed));
+        receiver.borrow_and_update();
+
+        lifecycle.mark_serving().unwrap();
+        assert!(
+            !receiver.has_changed().is_ok_and(|changed| changed),
+            "a repeated mark_serving must not notify subscribers"
+        );
+        assert_eq!(lifecycle.phase(), LifecyclePhase::Serving);
     }
 
     #[test]

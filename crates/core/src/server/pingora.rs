@@ -11,7 +11,8 @@ use std::{
 use pingora_core::server::{
     ExecutionPhase, RunArgs, Server, ShutdownSignal, ShutdownSignalWatch, configuration::ServerConf,
 };
-use tracing::info;
+use tokio::sync::broadcast::error::RecvError;
+use tracing::{info, warn};
 
 use super::{LifecycleHandle, RuntimeOptions, ServerRuntime, ShutdownFuture, resolve_thread_count};
 use crate::config::Config;
@@ -77,7 +78,13 @@ impl PingoraServerRuntime {
     /// tracing guard that flushes buffered logs and spans, must run on the
     /// way out.
     ///
+    /// [`run_forever`](Server::run_forever) is diverging, so there is no
+    /// return path on which to join the lifecycle monitor: the thread is
+    /// detached on purpose and lives until the process exits. Use
+    /// [`run_with_args`] when the monitor's termination has to be observed.
+    ///
     /// [`run_until_shutdown`]: ServerRuntime::run_until_shutdown
+    /// [`run_with_args`]: Self::run_with_args
     pub fn run(self) -> ! {
         let _phase_monitor = monitor_lifecycle(self.server.watch_execution_phase(), self.lifecycle.clone());
         self.server.run_forever()
@@ -114,20 +121,38 @@ fn monitor_lifecycle(
     lifecycle: LifecycleHandle,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        while let Ok(phase) = phases.blocking_recv() {
-            if matches!(phase, ExecutionPhase::Running) {
-                _ = lifecycle.mark_serving();
-            } else if matches!(
-                phase,
-                ExecutionPhase::GracefulTerminate | ExecutionPhase::ShutdownStarted
-            ) {
-                lifecycle.begin_drain();
-            } else if matches!(phase, ExecutionPhase::Terminated) {
-                lifecycle.mark_stopped();
-                return;
+        loop {
+            match phases.blocking_recv() {
+                Ok(phase) => {
+                    if matches!(phase, ExecutionPhase::Running) {
+                        _ = lifecycle.mark_serving();
+                    } else if matches!(
+                        phase,
+                        ExecutionPhase::GracefulTerminate | ExecutionPhase::ShutdownStarted
+                    ) {
+                        lifecycle.begin_drain();
+                    } else if matches!(phase, ExecutionPhase::Terminated) {
+                        lifecycle.begin_drain();
+                        lifecycle.mark_stopped();
+                        return;
+                    }
+                },
+                // The monitor fell behind and missed phases. They are
+                // cumulative, so the next phase it reads still describes the
+                // current state; keep following the stream instead of
+                // mistaking the gap for the server having stopped.
+                Err(RecvError::Lagged(missed)) => {
+                    warn!(missed, "lifecycle monitor fell behind Pingora's execution phases");
+                },
+                // The sender is gone, so the server dropped it after
+                // terminating; there are no more phases to follow.
+                Err(RecvError::Closed) => {
+                    lifecycle.begin_drain();
+                    lifecycle.mark_stopped();
+                    return;
+                },
             }
         }
-        lifecycle.mark_stopped();
     })
 }
 
@@ -437,6 +462,24 @@ mod tests {
             LifecyclePhase::Stopped,
             "a closed Pingora phase stream must stop the lifecycle"
         );
+    }
+
+    #[test]
+    fn lifecycle_monitor_keeps_following_a_lagged_phase_stream() {
+        let lifecycle = LifecycleHandle::new();
+        let (sender, receiver) = tokio::sync::broadcast::channel(1);
+        sender.send(ExecutionPhase::Running).unwrap();
+        sender.send(ExecutionPhase::GracefulTerminate).unwrap();
+        let monitor = monitor_lifecycle(receiver, lifecycle.clone());
+
+        wait_for_phase(&lifecycle, LifecyclePhase::Draining);
+
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Draining,
+            "a monitor that fell behind must keep following the phase stream, not publish Stopped"
+        );
+        stop_monitor(&sender, monitor, &lifecycle);
     }
 
     /// Drive a fresh monitor into `Draining` with `phase`, then terminate it.
