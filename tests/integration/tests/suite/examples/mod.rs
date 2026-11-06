@@ -72,6 +72,7 @@ mod logging;
 mod maglev;
 mod max_body_guard;
 mod max_connections;
+mod metric_label_sets;
 mod multi_listener;
 mod operations;
 #[cfg(unix)]
@@ -117,6 +118,7 @@ mod selected_upstream_conditions;
 mod session_affinity;
 mod slow_start;
 mod static_response;
+mod status_code_label;
 mod sticky_sessions;
 mod stream_buffer;
 mod subset_lb;

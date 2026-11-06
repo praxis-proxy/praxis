@@ -84,6 +84,7 @@ mod iterative_request_router;
 mod json_body_field;
 mod json_rpc;
 mod kv_admin;
+mod metric_labels;
 mod path_rewrite;
 mod payload_processing;
 mod payload_transport;
