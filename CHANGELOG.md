@@ -65,12 +65,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Clarify that the default Pingora shutdown grace period is capped at five
   seconds, including for streaming responses, regardless of a larger
   `shutdown_timeout_secs` value.
+- **Breaking:** `praxis_core::server::ServerRuntime` now requires `lifecycle()`,
+  which returns the process `LifecycleHandle` shared with protocol adapters.
+- **Breaking:** `HyperRuntime::add_required_service` callbacks now receive a
+  `Readiness` handle and must call `Readiness::ready()` after their sockets are
+  listening. Dropping it without signalling fails startup; retaining it keeps
+  startup waiting.
 - `UnavailableRuntime` is no longer `Copy` because it now owns the shared
   server lifecycle. Callers that relied on implicit copies should use
   `clone()`; the runtime keeps the same backend-less behavior.
 
 ### Added
 
+- Process lifecycle API: `LifecyclePhase` (`Initializing`, `Serving`,
+  `Draining`, `Stopped`), `LifecycleError`, and `LifecycleHandle` with `new`,
+  `phase`, `subscribe`, `mark_serving`, `begin_drain`, and `mark_stopped`.
+  `ServerRuntime` exposes `lifecycle()`, and `PingoraServerRuntime` and
+  `HyperRuntime` expose `lifecycle_handle()`.
 - Policy rate limiting (experimental): the policy filter runs a policy's
   `rate_limits:` before identity resolution, keyed on the client address,
   and after it, keyed on the resolved identity, each once per request. A
