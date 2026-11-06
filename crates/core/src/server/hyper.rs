@@ -250,7 +250,7 @@ impl HyperRuntime {
     {
         let runtime = self.runtime_or_panic();
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let graceful = self.shutdown_timeout;
+        let graceful = self.shutdown_timeout.saturating_sub(self.shutdown_drain_delay);
         let lifecycle = self.lifecycle.clone();
         info!(
             services = self.services.len(),

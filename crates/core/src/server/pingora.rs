@@ -62,7 +62,10 @@ impl PingoraServerRuntime {
     #[must_use]
     pub fn new(config: &Config) -> Self {
         let opts = RuntimeOptions::from(&config.runtime);
-        let mut server = build_http_server(config.shutdown_timeout_secs, &opts);
+        let shutdown_budget = config
+            .shutdown_timeout_secs
+            .saturating_sub(config.shutdown_drain_delay_secs);
+        let mut server = build_http_server(shutdown_budget, &opts);
         let lifecycle = LifecycleHandle::new();
         let phases = server.watch_execution_phase();
         server.add_service(background_service(
@@ -350,7 +353,7 @@ impl ShutdownSignalWatch for FutureShutdown {
 /// requests finish, then shuts the runtimes down with the graceful
 /// shutdown timeout. The grace period is capped at
 /// [`SHUTDOWN_GRACE_CAP_SECS`] and the timeout gets the remainder, so
-/// the two phases sum to `shutdown_timeout_secs`.
+/// the two phases sum to the shutdown budget left after the drain delay.
 ///
 /// Runtime shutdown drops async tasks at their next yield and only
 /// waits on blocking threads, so requests still in flight when the
@@ -438,6 +441,22 @@ mod tests {
             server.configuration.graceful_shutdown_timeout_seconds,
             Some(25),
             "drain should get the remainder of the shutdown timeout"
+        );
+    }
+
+    #[test]
+    fn new_subtracts_drain_delay_from_shutdown_budget() {
+        let yaml = format!(
+            "{}\nshutdown_timeout_secs: 30\nshutdown_drain_delay_secs: 10\n",
+            crate::config::DEFAULT_CONFIG
+        );
+        let config = Config::from_yaml(&yaml).unwrap();
+        let runtime = PingoraServerRuntime::new(&config);
+        assert_eq!(runtime.server.configuration.grace_period_seconds, Some(5));
+        assert_eq!(
+            runtime.server.configuration.graceful_shutdown_timeout_seconds,
+            Some(15),
+            "the drain delay must come out of the shutdown budget"
         );
     }
 

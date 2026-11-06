@@ -825,8 +825,8 @@ module docs for the trait definition.
 ## Graceful Shutdown
 
 With the default Pingora backend, `shutdown_timeout_secs`
-sets the budget for the request grace period and runtime
-shutdown:
+sets the total SIGTERM-to-exit budget, including the
+readiness-first drain delay:
 
 ```yaml
 shutdown_timeout_secs: 60    # default: 30
@@ -838,11 +838,12 @@ connections during `shutdown_drain_delay_secs`. Eligible HTTP/1 responses for
 connections accepted during this handoff carry `Connection: close`; HTTP/2
 and upgraded connections do not use that header. After the delay, listeners
 stop accepting and graceful connection shutdown begins. The delay must not
-exceed `shutdown_timeout_secs`; zero preserves the immediate handoff.
+exceed `shutdown_timeout_secs` and consumes that budget; zero preserves the
+immediate handoff.
 
 Listeners stop accepting new connections.
 In-flight requests have a grace period of
-`min(shutdown_timeout_secs, 5)` seconds. Runtime shutdown
+`min(shutdown_timeout_secs - shutdown_drain_delay_secs, 5)` seconds. Runtime shutdown
 then cancels remaining async tasks; the rest of the budget
 bounds the wait for blocking work. A setting of `60`
 therefore still gives requests at most five seconds to
@@ -870,8 +871,9 @@ drain.
 
 On the experimental hyper backend, HTTP listeners let
 in-flight connections finish for up to
-`shutdown_timeout_secs` minus a 1 s reserve, so
-`shutdown_timeout_secs: 1` leaves them no drain time.
+`shutdown_timeout_secs` minus `shutdown_drain_delay_secs`
+and a 1 s reserve, so `shutdown_timeout_secs: 1` leaves
+them no drain time.
 Active TCP forwarding stops as soon as the signal
 arrives. See
 [Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).

@@ -525,7 +525,8 @@ fn validate_logging(logging: &crate::config::LoggingConfig) -> Result<(), ProxyE
     Ok(())
 }
 
-/// Reject a drain delay above the one-hour safety ceiling.
+/// Reject a drain delay above the one-hour safety ceiling or above the
+/// shutdown timeout it consumes.
 fn validate_shutdown_drain_delay(secs: u64, timeout_secs: u64) -> Result<(), ProxyError> {
     if secs > MAX_SHUTDOWN_TIMEOUT_SECS {
         return Err(ProxyError::Config(format!(

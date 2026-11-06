@@ -138,11 +138,12 @@ pub struct Config {
     #[serde(default)]
     pub runtime: RuntimeConfig,
 
-    /// Delay after shutdown begins before graceful connection shutdown.
+    /// Delay after shutdown begins before graceful connection shutdown; it
+    /// counts against `shutdown_timeout_secs`.
     #[serde(default)]
     pub shutdown_drain_delay_secs: u64,
 
-    /// Upper bound on the duration of a graceful shutdown.
+    /// Total budget for a graceful shutdown, including the drain delay.
     #[serde(default = "default_shutdown_timeout_secs")]
     pub shutdown_timeout_secs: u64,
 

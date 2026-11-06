@@ -30,6 +30,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `/ready` also reports the `initializing`, `draining`, and `stopped`
   lifecycle phases with `503` instead of claiming readiness.
 
+### Changed
+
+- **Breaking:** Rust API: `ServerRuntime` implementations must implement
+  `lifecycle()`, explicit `Config` struct literals must set
+  `shutdown_drain_delay_secs`, and `UnavailableRuntime` is no longer a unit
+  value or `Copy`; use `UnavailableRuntime::default()` or `from_config`, and
+  `clone()` where a copy was relied on.
+
 ## [0.8.0] - 2026-11-06
 
 ### Added

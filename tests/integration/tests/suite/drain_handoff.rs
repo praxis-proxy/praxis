@@ -17,8 +17,8 @@ use std::{
 
 use praxis_test_utils::{PraxisProcess, free_port, http_get};
 
-/// Drain window long enough to probe every protocol after `SIGTERM`.
-const DRAIN_DELAY_SECS: u64 = 4; // 4 s
+/// Drain window long enough for the readiness polls and all three probes.
+const DRAIN_DELAY_SECS: u64 = 40; // 40 s
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -68,7 +68,7 @@ fn drain_marks_http1_and_spares_http2_and_upgrades() {
         "an upgraded connection must not be told to close: {upgrade}"
     );
 
-    let status = proxy.wait_for_exit(Duration::from_secs(20));
+    let status = proxy.wait_for_exit(Duration::from_secs(90));
     assert!(
         status.is_some_and(|status| status.success()),
         "the delayed handoff must exit cleanly"
@@ -83,7 +83,7 @@ fn drain_marks_http1_and_spares_http2_and_upgrades() {
 fn proxy_config(port: u16, admin_port: u16, upstream: u16) -> String {
     format!(
         r#"
-shutdown_timeout_secs: 10
+shutdown_timeout_secs: 60
 shutdown_drain_delay_secs: {DRAIN_DELAY_SECS}
 runtime:
   threads: 2
