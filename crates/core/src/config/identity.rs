@@ -100,7 +100,13 @@ mod tests {
 
     #[test]
     fn document_framing_is_ordered_and_length_delimited() {
-        assert_ne!(documents_hash(&[b"ab", b"c"]).unwrap(), documents_hash(&[b"a", b"bc"]).unwrap());
-        assert_ne!(documents_hash(&[b"ab", b"c"]).unwrap(), documents_hash(&[b"c", b"ab"]).unwrap());
+        assert_ne!(
+            documents_hash(&[b"ab", b"c"]).unwrap(),
+            documents_hash(&[b"a", b"bc"]).unwrap()
+        );
+        assert_ne!(
+            documents_hash(&[b"ab", b"c"]).unwrap(),
+            documents_hash(&[b"c", b"ab"]).unwrap()
+        );
     }
 }

@@ -262,3 +262,46 @@ fn json_body_rejects_invalid_json() {
     let raw = http_send(proxy.addr(), &json_post("/v1/chat", "not-json"));
     assert_eq!(parse_status(&raw), 400, "on_invalid reject should return 400");
 }
+
+#[test]
+fn json_body_example_composes_processors_at_first_filter_boundary() {
+    use std::time::Duration;
+
+    use praxis_test_utils::{PayloadSpec, start_counting_backend};
+
+    let input_prefix = br#"{"model":"old","secret":"remove","prompt":""#;
+    let input_suffix = br#"","stream":true,"user":{"id":1}}"#;
+    let output_prefix = br#"{"model":"forced-model","prompt":""#;
+    let output_suffix = br#"","stream":true,"user":{"id":1},"tenant":"acme","original_model":"old","extracted_model":"old","extracted_user":{"id":1}}"#;
+    for size in [1_048_576, 1_048_577] {
+        let input = PayloadSpec::padded(size, input_prefix, input_suffix, b'x').unwrap();
+        let output_size = size - u64::try_from(input_prefix.len() + input_suffix.len()).unwrap()
+            + u64::try_from(output_prefix.len() + output_suffix.len()).unwrap();
+        let expected = PayloadSpec::padded(output_size, output_prefix, output_suffix, b'x').unwrap();
+        let backend = start_counting_backend(expected, "json-body-example", output_size);
+        let proxy_port = free_port();
+        let config = load_example_config(
+            JSON_BODY_EXAMPLE,
+            proxy_port,
+            HashMap::from([("127.0.0.1:3000", backend.port)]),
+        );
+        let proxy = praxis_test_utils::start_full_proxy(&config);
+        praxis_test_utils::wait_for_tcp(proxy.addr());
+        let body = String::from_utf8(input.chunk(0, usize::try_from(size).unwrap())).unwrap();
+        assert_eq!(
+            parse_status(&http_send(proxy.addr(), &json_post("/v1/chat", &body))),
+            200
+        );
+        let receipt = backend.receipt.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(receipt.verified_bytes, output_size);
+        assert_eq!(receipt.mismatch, None);
+        assert!(receipt.completion.is_some());
+        assert!(
+            receipt
+                .headers
+                .iter()
+                .any(|(name, value)| name == "x-stream" && value == "true")
+        );
+        backend.join();
+    }
+}

@@ -45,6 +45,9 @@ filter_chains:
             failover: true
             max_entries: 10000
             eviction: lru
+            # Bindings live in this process only: they are not shared with
+            # other replicas and are lost on restart.
+            storage: local
 
       - filter: load_balancer
         clusters:
@@ -70,6 +73,7 @@ filter_chains:
             failover: true
             max_entries: 10000
             eviction: lru
+            storage: local
 
       - filter: load_balancer
         clusters:
@@ -94,6 +98,7 @@ filter_chains:
             failover: true
             max_entries: 10000
             eviction: lru
+            storage: local
 
       - filter: load_balancer
         clusters:

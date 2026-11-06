@@ -9,6 +9,7 @@
 
 use std::{
     fs,
+    io::{self, Read as _, Seek as _, SeekFrom},
     net::TcpStream,
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
@@ -22,6 +23,24 @@ use crate::praxis_bin;
 
 /// How long a spawned process may take to start listening.
 pub const READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Read offsets for bounded incremental process log capture.
+#[derive(Debug, Default)]
+pub struct ProcessLogCursor {
+    /// Next byte offset in stdout.
+    pub stdout: u64,
+    /// Next byte offset in stderr.
+    pub stderr: u64,
+}
+
+/// Newly read raw process output, bounded by the requested byte limit.
+#[derive(Debug)]
+pub struct ProcessLogChunk {
+    /// Captured stdout bytes.
+    pub stdout: Vec<u8>,
+    /// Captured stderr bytes.
+    pub stderr: Vec<u8>,
+}
 
 // -----------------------------------------------------------------------------
 // PraxisProcess
@@ -53,6 +72,9 @@ impl PraxisProcess {
     /// Like [`PraxisProcess::spawn`], first running the shell `ulimit`
     /// arguments in `ulimit` (for example `"-S -n 512"`) so the child
     /// starts with those resource limits.
+    /// Set each resource in a separate invocation, for example
+    /// `"-v 4194304 && ulimit -t 120"`: not every `sh` supports multiple
+    /// resources in one invocation. A failed limit prevents startup.
     ///
     /// # Panics
     ///
@@ -89,6 +111,23 @@ impl PraxisProcess {
     pub fn logs(&self) -> String {
         let read = |name: &str| fs::read_to_string(self.dir.path().join(name)).unwrap_or_default();
         strip_ansi(&format!("{}{}", read("stdout.log"), read("stderr.log")))
+    }
+
+    /// Read at most `max_bytes` of new stdout/stderr without collecting the
+    /// complete log. The cursor preserves unread bytes for subsequent calls.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if a captured log cannot be opened, sought or read.
+    pub fn logs_since(&self, cursor: &mut ProcessLogCursor, max_bytes: usize) -> io::Result<ProcessLogChunk> {
+        let stdout_budget = max_bytes / 2 + max_bytes % 2;
+        let stdout = read_log_chunk(self.dir.path().join("stdout.log"), &mut cursor.stdout, stdout_budget)?;
+        let stderr = read_log_chunk(
+            self.dir.path().join("stderr.log"),
+            &mut cursor.stderr,
+            max_bytes - stdout.len(),
+        )?;
+        Ok(ProcessLogChunk { stdout, stderr })
     }
 
     /// Send SIGTERM, wait for exit, and return the exit status. Buffered
@@ -140,6 +179,26 @@ impl PraxisProcess {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Wait for exit until `timeout`, then kill and reap the child. The
+    /// boolean reports whether the deadline forced termination.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the process was already terminated or cannot be killed or reaped.
+    pub fn wait_or_kill(&mut self, timeout: Duration) -> (ExitStatus, bool) {
+        if let Some(status) = self.wait_for_exit(timeout) {
+            return (status, false);
+        }
+        let mut child = self.child.take().expect("process was terminated");
+        if let Err(error) = child.kill() {
+            if let Some(status) = child.try_wait().expect("wait after failed kill") {
+                return (status, false);
+            }
+            panic!("kill timed-out praxis process: {error}");
+        }
+        (child.wait().expect("reap timed-out praxis process"), true)
     }
 
     /// Number of descriptors the process holds open right now.
@@ -330,6 +389,19 @@ fn open_file_limits_of(path: &str) -> (u64, u64) {
 // Utility Functions
 // -----------------------------------------------------------------------------
 
+/// Read a bounded suffix from a single captured log file.
+fn read_log_chunk(path: std::path::PathBuf, offset: &mut u64, max_bytes: usize) -> io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    if *offset > file.metadata()?.len() {
+        *offset = 0;
+    }
+    file.seek(SeekFrom::Start(*offset))?;
+    let mut bytes = Vec::new();
+    file.take(max_bytes as u64).read_to_end(&mut bytes)?;
+    *offset += bytes.len() as u64;
+    Ok(bytes)
+}
+
 /// Remove ANSI SGR escape sequences (`ESC [ ... m`).
 fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -346,4 +418,60 @@ fn strip_ansi(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write as _;
+    #[cfg(unix)]
+    use std::{process::Command, time::Duration};
+
+    use super::read_log_chunk;
+    #[cfg(unix)]
+    use super::{PraxisProcess, ProcessLogCursor};
+
+    #[test]
+    fn incremental_logs_resume_without_exceeding_the_budget() {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(b"abcdefgh").unwrap();
+        let mut offset = 0;
+        assert_eq!(read_log_chunk(file.path().to_owned(), &mut offset, 3).unwrap(), b"abc");
+        assert_eq!(read_log_chunk(file.path().to_owned(), &mut offset, 3).unwrap(), b"def");
+        assert_eq!(read_log_chunk(file.path().to_owned(), &mut offset, 3).unwrap(), b"gh");
+        assert_eq!(read_log_chunk(file.path().to_owned(), &mut offset, 3).unwrap(), b"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_logs_are_bounded_and_keep_independent_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("stdout.log"), b"abcdef").unwrap();
+        std::fs::write(dir.path().join("stderr.log"), b"123456").unwrap();
+        let child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let process = PraxisProcess {
+            child: Some(child),
+            dir,
+        };
+        let mut cursor = ProcessLogCursor::default();
+        let first = process.logs_since(&mut cursor, 4).unwrap();
+        assert_eq!(first.stdout, b"ab");
+        assert_eq!(first.stderr, b"12");
+        let second = process.logs_since(&mut cursor, 4).unwrap();
+        assert_eq!(second.stdout, b"cd");
+        assert_eq!(second.stderr, b"34");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_deadline_kills_and_reaps_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let child = Command::new("sh").args(["-c", "exec sleep 5"]).spawn().unwrap();
+        let mut process = PraxisProcess {
+            child: Some(child),
+            dir,
+        };
+        let (status, forced) = process.wait_or_kill(Duration::from_millis(10));
+        assert!(forced);
+        assert!(!status.success());
+    }
 }

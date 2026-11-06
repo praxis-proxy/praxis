@@ -4,9 +4,9 @@
 //! Runtime release transitions and the separate request pre-read contract.
 
 use std::{
-    io::{Read as _, Write as _},
+    io::{BufReader, Read as _, Write as _},
     net::TcpStream,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
 
@@ -16,7 +16,7 @@ use praxis_filter::{
     BodyAccess, BodyMode, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext,
 };
 use praxis_test_utils::{
-    custom_filter_yaml, free_port, http_get, parse_status, read_http_request, spawn_raw_http_backend,
+    custom_filter_yaml, free_port, http_get, parse_status, read_h1_response, read_http_request, spawn_raw_http_backend,
     start_echo_backend, start_full_proxy_with_registry, wait_for_tcp,
 };
 
@@ -71,6 +71,72 @@ fn response_release_exposes_stream_on_nonempty_eos() {
             .iter()
             .any(|observation| observation.end_of_stream && observation.bytes > 0),
         "the streamed final callback carries a nonempty final chunk"
+    );
+}
+
+#[test]
+fn response_release_prefix_and_tail_progress_before_ceiling_aborts() {
+    const CHUNK: usize = 16_384; // 16 KiB, larger than the transport write buffer
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let backend_observations = Arc::clone(&observations);
+    let (continue_tx, continue_rx) = mpsc::channel();
+    let (backend_port, backend_thread) = spawn_raw_http_backend(move |mut stream| {
+        read_http_request(&mut stream);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 49152\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream.write_all(&vec![b'a'; CHUNK]).unwrap();
+        stream.flush().unwrap();
+        wait_for_prefix(&backend_observations);
+        continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stream.write_all(&vec![b'b'; CHUNK]).unwrap();
+        stream.flush().unwrap();
+        continue_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The crossing chunk must be withheld after Release.
+        let _result = stream.write_all(&vec![b'c'; CHUNK]);
+    });
+    let config = release_config(backend_port, 32_768);
+    let registry = release_registry(Direction::Response, &observations);
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+    wait_for_tcp(proxy.addr());
+    let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut body = Vec::new();
+    let mut acknowledged = 0;
+    let result = read_h1_response(&mut BufReader::new(stream), false, 49_152, |part| {
+        body.extend_from_slice(part);
+        while acknowledged < 2 && body.len() >= (acknowledged + 1) * CHUNK {
+            continue_tx.send(()).unwrap();
+            acknowledged += 1;
+        }
+        Ok(())
+    });
+    backend_thread.join().unwrap();
+    assert_eq!(
+        result.status,
+        Some(200),
+        "response headers were already sent: {result:?}"
+    );
+    assert_eq!(
+        acknowledged, 2,
+        "the released prefix and subsequent tail must reach the client before crossing"
+    );
+    let mut expected = vec![b'a'; CHUNK];
+    expected.extend(vec![b'b'; CHUNK]);
+    assert_eq!(
+        body, expected,
+        "overflow must not duplicate or forward the crossing chunk"
+    );
+    assert_eq!(
+        result.completion, None,
+        "declared Content-Length cannot complete: {result:?}"
+    );
+    assert!(
+        result.abort.is_some(),
+        "the truncated response must be observable: {result:?}"
     );
 }
 
@@ -202,7 +268,9 @@ impl HttpFilter for ReleaseProbe {
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if matches!(self.direction, Direction::Response) {
-            ctx.set_response_body_mode(BodyMode::StreamBuffer { max_bytes: Some(2) });
+            ctx.set_response_body_mode(BodyMode::StreamBuffer {
+                max_bytes: Some(16_384),
+            });
         }
         Ok(FilterAction::Continue)
     }

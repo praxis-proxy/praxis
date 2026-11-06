@@ -509,6 +509,7 @@ mod tests {
             trace_context_filter_indices: Vec::new(),
             pipeline_extensions: Vec::new(),
             time_source: Arc::new(praxis_core::time::SystemTimeSource),
+            buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
             request_body_ceiling: None,
             response_body_ceiling: None,
             request_head_filter_indices: Vec::new(),

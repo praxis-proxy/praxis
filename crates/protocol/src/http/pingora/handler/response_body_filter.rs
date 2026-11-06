@@ -187,6 +187,7 @@ fn mark_delivered_at_eos(ctx: &mut PingoraRequestCtx, end_of_stream: bool) {
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::significant_drop_tightening,
+    clippy::too_many_lines,
     reason = "tests"
 )]
 mod tests {
@@ -300,9 +301,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn size_limit_mode_tracks_bytes() {
-        let pipeline = make_pipeline();
+        let mut pipeline = make_pipeline();
+        pipeline.apply_body_limits(None, Some(1024), false).unwrap();
         let mut body = Some(Bytes::from_static(b"test"));
         let mut ctx = make_ctx();
         ctx.response_body_mode = BodyMode::SizeLimit { max_bytes: 1024 };
@@ -313,10 +314,10 @@ mod tests {
         assert_eq!(ctx.response_body_bytes, 4, "should track 4 bytes");
     }
 
-    #[ignore]
     #[test]
     fn size_limit_mode_exceeds_limit() {
-        let pipeline = make_pipeline();
+        let mut pipeline = make_pipeline();
+        pipeline.apply_body_limits(None, Some(5), false).unwrap();
         let mut body = Some(Bytes::from_static(b"too much data"));
         let mut ctx = make_ctx();
         ctx.response_body_mode = BodyMode::SizeLimit { max_bytes: 5 };
@@ -331,10 +332,10 @@ mod tests {
             "error should mention size limit"
         );
     }
-    #[ignore]
     #[test]
     fn size_limit_mode_cumulative_exceeds() {
-        let pipeline = make_pipeline();
+        let mut pipeline = make_pipeline();
+        pipeline.apply_body_limits(None, Some(10), false).unwrap();
         let mut body = Some(Bytes::from_static(b"more"));
         let mut ctx = make_ctx();
         ctx.response_body_mode = BodyMode::SizeLimit { max_bytes: 10 };
@@ -371,9 +372,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn stream_buffer_mode_exceeds_limit() {
-        let pipeline = make_pipeline();
+        let pipeline = release_pipeline(1024, true).unwrap();
         let mut body = Some(Bytes::from_static(b"way too much data"));
         let mut ctx = make_ctx();
         ctx.response_body_mode = BodyMode::StreamBuffer { max_bytes: Some(5) };
@@ -391,24 +391,19 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
-    fn stream_buffer_mode_at_eos_resets_byte_counter() {
-        let pipeline = make_pipeline();
-        let mut ctx = make_ctx();
-        ctx.response_body_mode = BodyMode::StreamBuffer { max_bytes: Some(1024) };
-        ctx.response_body_released = false;
-        ctx.response_body_bytes = 100;
+    fn stream_buffer_mode_at_eos_counts_the_aggregate_once() {
+        let pipeline = release_pipeline(1024, true).unwrap();
+        let mut ctx = release_ctx(BodyMode::StreamBuffer { max_bytes: Some(2) });
+        let mut first = Some(Bytes::from_static(b"a"));
+        execute(&pipeline, &mut first, false, &mut ctx).unwrap();
+        assert!(first.is_none(), "the first byte stays buffered");
+        assert_eq!(ctx.response_body_bytes, 1, "count the input incrementally");
 
-        let mut body1 = Some(Bytes::from_static(b"chunk1"));
-        execute(&pipeline, &mut body1, false, &mut ctx).unwrap();
-
-        let mut body2 = Some(Bytes::from_static(b"chunk2"));
-        execute(&pipeline, &mut body2, true, &mut ctx).unwrap();
-
-        assert_eq!(
-            ctx.response_body_bytes, 0,
-            "should reset counter at EOS before final count"
-        );
+        let mut last = Some(Bytes::from_static(b"b"));
+        execute(&pipeline, &mut last, true, &mut ctx).unwrap();
+        assert_eq!(last, Some(Bytes::from_static(b"ab")), "emit the exact aggregate");
+        assert_eq!(ctx.response_body_bytes, 2, "do not recount the buffered prefix");
+        assert!(ctx.response_delivery_complete, "successful EOS completes delivery");
     }
 
     #[test]
@@ -553,6 +548,90 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn streaming_response_writer_cannot_shrink_away_input_limit() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        for grow in [false, true] {
+            let mut registry = FilterRegistry::with_builtins();
+            registry.register(
+                "rewrite_probe",
+                FilterFactory::Http(Arc::new(move |_| Ok(Box::new(RewriteProbe { grow })))),
+            )?;
+            let mut entries: Vec<FilterEntry> = serde_yaml::from_str("- filter: rewrite_probe")?;
+            let mut pipeline = FilterPipeline::build(&mut entries, &registry)?;
+            pipeline.apply_body_limits(None, Some(4), false)?;
+            let mut ctx = release_ctx(BodyMode::Stream);
+            let mut produced = Vec::new();
+            for chunk in [b"ab".as_slice(), b"cd".as_slice()] {
+                let mut body = Some(Bytes::copy_from_slice(chunk));
+                execute(&pipeline, &mut body, false, &mut ctx)?;
+                if let Some(body) = body {
+                    produced.extend_from_slice(&body);
+                }
+            }
+            assert_eq!(ctx.response_body_bytes, 4, "count input before mutation");
+            assert_eq!(produced, if grow { b"WXYZWXYZ".to_vec() } else { Vec::new() });
+            let mut crossing = Some(Bytes::from_static(b"e"));
+            execute(&pipeline, &mut crossing, true, &mut ctx)
+                .expect_err("the whole crossing response chunk must be rejected");
+            assert!(!ctx.response_delivery_complete);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generated_response_release_matches_input_and_buffer_limits()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = release_pipeline(5, false)?;
+        for size in 0..=6 {
+            for width in [1, 2, 3] {
+                for final_chunk_is_eos in [false, true] {
+                    let input: Vec<_> = (0..size).map(|index| b'a' + u8::try_from(index).unwrap()).collect();
+                    let mut ctx = release_ctx(BodyMode::StreamBuffer { max_bytes: Some(2) });
+                    let mut forwarded = Vec::new();
+                    let mut accepted = 0;
+                    let mut rejected = false;
+                    let parts: Vec<_> = input.chunks(width).collect();
+                    for (index, chunk) in parts.iter().enumerate() {
+                        let eos = final_chunk_is_eos && index + 1 == parts.len();
+                        let mut body = Some(Bytes::copy_from_slice(chunk));
+                        let result = execute(&pipeline, &mut body, eos, &mut ctx);
+                        let should_reject = (index == 0 && chunk.len() > 2) || accepted + chunk.len() > 5;
+                        assert_eq!(
+                            result.is_err(),
+                            should_reject,
+                            "size={size}, width={width}, index={index}"
+                        );
+                        if should_reject {
+                            rejected = true;
+                            break;
+                        }
+                        accepted += chunk.len();
+                        if let Some(body) = body {
+                            forwarded.extend_from_slice(&body);
+                        }
+                    }
+                    if rejected {
+                        assert_eq!(forwarded, input[..accepted]);
+                        assert!(!ctx.response_delivery_complete);
+                    } else {
+                        if !final_chunk_is_eos || size == 0 {
+                            let mut eos = None;
+                            execute(&pipeline, &mut eos, true, &mut ctx)?;
+                            if let Some(body) = eos {
+                                forwarded.extend_from_slice(&body);
+                            }
+                        }
+                        assert_eq!(forwarded, input);
+                        assert_eq!(ctx.response_body_bytes, u64::try_from(size)?);
+                        assert!(ctx.response_delivery_complete);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -609,6 +688,38 @@ mod tests {
     struct ReleaseProbe {
         /// Whether to hold the buffer until its EOS aggregate is delivered.
         release_at_eos: bool,
+    }
+
+    /// Expands or removes each response chunk after the input counter runs.
+    struct RewriteProbe {
+        grow: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpFilter for RewriteProbe {
+        fn name(&self) -> &'static str {
+            "rewrite_probe"
+        }
+
+        async fn on_request(&self, _: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn response_body_access(&self) -> BodyAccess {
+            BodyAccess::ReadWrite
+        }
+
+        fn on_response_body(
+            &self,
+            _: &mut HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+            _: bool,
+        ) -> Result<FilterAction, FilterError> {
+            if body.is_some() {
+                *body = self.grow.then(|| Bytes::from_static(b"WXYZ"));
+            }
+            Ok(FilterAction::Continue)
+        }
     }
 
     #[async_trait::async_trait]

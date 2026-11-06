@@ -998,10 +998,19 @@ pub fn publish_config_identity(previous: Option<&ConfigIdentity>, current: &Conf
         return;
     }
     if let Some(previous) = previous {
-        gauge!(CONFIG_INFO, "hash" => previous.hash.clone(), "documents_hash" => previous.documents_hash.clone())
-            .set(0.0);
+        gauge!(
+            CONFIG_INFO,
+            "hash" => previous.hash().to_owned(),
+            "documents_hash" => previous.documents_hash().to_owned()
+        )
+        .set(0.0);
     }
-    gauge!(CONFIG_INFO, "hash" => current.hash.clone(), "documents_hash" => current.documents_hash.clone()).set(1.0);
+    gauge!(
+        CONFIG_INFO,
+        "hash" => current.hash().to_owned(),
+        "documents_hash" => current.documents_hash().to_owned()
+    )
+    .set(1.0);
 }
 
 /// Publish the process build identity with a stable label for absent git data.

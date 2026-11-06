@@ -6,12 +6,11 @@
 //!
 //! Implements Pingora's `request_body_filter` hook. Chunks are
 //! accumulated or streamed based on the pipeline's [`BodyMode`];
-//! the absolute ceiling ([`ABSOLUTE_MAX_BODY_BYTES`]) is enforced
+//! the configured buffering cap (64 MiB by default) is enforced
 //! regardless of per-filter declarations. Rejections from body
 //! filters are converted to downstream error responses.
 //!
 //! [`BodyMode`]: praxis_filter::BodyMode
-//! [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
 
 use std::collections::VecDeque;
 
@@ -107,6 +106,11 @@ pub(super) async fn execute(
     ctx: &mut PingoraRequestCtx,
 ) -> pingora_core::Result<()> {
     let Err(halt) = run_request_body(pipeline, body, end_of_stream, ctx).await else {
+        // Pingora treats None as upstream EOF, even before downstream EOS.
+        // An empty chunk instead keeps a withheld buffered upload open.
+        if !end_of_stream && body.is_none() {
+            *body = Some(Bytes::new());
+        }
         return Ok(());
     };
     ctx.request_body_buffer = None;
@@ -135,6 +139,7 @@ pub(in crate::http) async fn run_request_body(
     end_of_stream: bool,
     ctx: &mut PingoraRequestCtx,
 ) -> Result<(), RequestBodyHalt> {
+    let replay_prefix = std::mem::take(&mut ctx.request_replay_prefix_pending);
     if ctx.connection_upgraded {
         return Ok(());
     }
@@ -151,7 +156,12 @@ pub(in crate::http) async fn run_request_body(
     }
 
     let is_stream_buffer = matches!(ctx.request_body_mode, BodyMode::StreamBuffer { .. });
-    let attempted = ctx.request_body_bytes.saturating_add(
+    let prior_bytes = if replay_prefix {
+        replay_prefix_baseline(ctx, body.as_ref())
+    } else {
+        ctx.request_body_bytes
+    };
+    let attempted = prior_bytes.saturating_add(
         body.as_ref()
             .map_or(0, |chunk| u64::try_from(chunk.len()).unwrap_or(u64::MAX)),
     );
@@ -163,7 +173,7 @@ pub(in crate::http) async fn run_request_body(
     // is the accumulator. `None` is only reachable with allow_unbounded_body.
     if let Some(limit) = pipeline.request_body_ceiling()
         && !matches!(ctx.request_body_mode, BodyMode::SizeLimit { .. })
-        && exceeds_body_ceiling(Some(limit), ctx.request_body_bytes, body.as_ref())
+        && exceeds_body_ceiling(Some(limit), prior_bytes, body.as_ref())
     {
         ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
         ctx.request_body_bytes = attempted;
@@ -173,9 +183,13 @@ pub(in crate::http) async fn run_request_body(
         ));
     }
 
+    let mut pipeline_count = prior_bytes;
     match ctx.request_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if check_body_size_limit(body.as_ref(), &mut ctx.request_body_bytes, max_bytes) {
+            let mut total = prior_bytes;
+            let exceeded = check_body_size_limit(body.as_ref(), &mut total, max_bytes);
+            ctx.request_body_bytes = total;
+            if exceeded {
                 ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
                 return Err(RequestBodyHalt::refused(
                     "request body exceeds maximum size",
@@ -192,7 +206,7 @@ pub(in crate::http) async fn run_request_body(
                 return Err(RequestBodyHalt::refused(
                     "request body exceeds stream_buffer size limit",
                     body_limit_rejection(
-                        max_bytes.unwrap_or(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES),
+                        max_bytes.unwrap_or(praxis_core::config::DEFAULT_MAX_BUFFER_BYTES),
                         attempted,
                         BodyLimitPhase::StreamBuffer,
                     ),
@@ -202,7 +216,7 @@ pub(in crate::http) async fn run_request_body(
                 // Mid-stream chunks were counted incrementally; `body` now
                 // holds the frozen full buffer the pipeline counts again.
                 // Reset so the final total is the buffer size, not double it.
-                ctx.request_body_bytes = 0;
+                pipeline_count = 0;
             }
         },
 
@@ -214,6 +228,7 @@ pub(in crate::http) async fn run_request_body(
         let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
             RequestBodyHalt::internal("request snapshot not set when request body hooks are active", None)
         })?;
+        fctx.request_body_bytes = pipeline_count;
         let r = pipeline.execute_http_request_body(&mut fctx, body, end_of_stream).await;
         (
             r,
@@ -268,6 +283,24 @@ pub(in crate::http) async fn run_request_body(
     }
 }
 
+/// Credit the previously counted part of a replayed original-body prefix.
+///
+/// The ordinary counter below then adds the whole prefix, counting bytes that
+/// were read before a cancelled hook committed its counter while avoiding a
+/// second charge for bytes already recorded. New tail chunks get no credit.
+fn replay_prefix_baseline(ctx: &mut PingoraRequestCtx, body: Option<&Bytes>) -> u64 {
+    let Some(body) = body else {
+        return ctx.request_body_bytes;
+    };
+    let length = u64::try_from(body.len()).unwrap_or(u64::MAX);
+    if matches!(ctx.request_body_mode, BodyMode::StreamBuffer { .. }) && !ctx.request_body_released {
+        // Pingora replays the complete retained prefix, so rebuild the
+        // framework buffer instead of appending it to its earlier contents.
+        ctx.request_body_buffer = None;
+    }
+    ctx.request_body_bytes.saturating_sub(length)
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -279,6 +312,7 @@ pub(in crate::http) async fn run_request_body(
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::significant_drop_tightening,
+    clippy::too_many_lines,
     reason = "tests"
 )]
 mod tests {
@@ -288,6 +322,38 @@ mod tests {
 
     use super::{drain_pre_read_body, run_request_body};
     use crate::http::pingora::context::PingoraRequestCtx;
+
+    #[cfg(feature = "pingora")]
+    #[tokio::test]
+    async fn withheld_request_chunks_do_not_signal_upstream_eof() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    {
+        let mut pipeline =
+            praxis_filter::FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins())?;
+        pipeline.apply_body_limits(Some(10), None, false)?;
+        let mut ctx = make_ctx();
+        ctx.request_snapshot = Some(praxis_filter::Request {
+            method: http::Method::POST,
+            uri: http::Uri::from_static("/"),
+            headers: http::HeaderMap::new(),
+        });
+        ctx.request_body_mode = praxis_filter::BodyMode::StreamBuffer { max_bytes: Some(10) };
+        let mut body = Some(Bytes::from_static(b"hello"));
+        super::execute(&pipeline, &mut body, false, &mut ctx).await?;
+        assert_eq!(body, Some(Bytes::new()), "None would terminate the upstream body");
+        let mut end = None;
+        super::execute(&pipeline, &mut end, true, &mut ctx).await?;
+        assert_eq!(
+            end.as_deref(),
+            Some(b"hello".as_slice()),
+            "EOS releases the complete body"
+        );
+        let mut empty_end = None;
+        let mut empty_ctx = make_ctx();
+        empty_ctx.request_snapshot = ctx.request_snapshot.clone();
+        super::execute(&pipeline, &mut empty_end, true, &mut empty_ctx).await?;
+        assert_eq!(empty_end, None, "a real empty EOS keeps its end marker");
+        Ok(())
+    }
 
     #[cfg(feature = "pingora")]
     #[tokio::test]
@@ -349,6 +415,150 @@ mod tests {
             assert_eq!(ctx.request_body_bytes, 11);
         }
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn replay_prefix_is_credited_once_and_new_tail_still_hits_limit() {
+        use praxis_filter::{BodyMode, FilterPipeline, FilterRegistry};
+
+        for mode in [
+            BodyMode::SizeLimit { max_bytes: 10 },
+            BodyMode::Stream,
+            BodyMode::StreamBuffer { max_bytes: Some(10) },
+        ] {
+            let mut pipeline = FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).unwrap();
+            pipeline.apply_body_limits(Some(10), None, false).unwrap();
+            let mut ctx = make_ctx();
+            ctx.request_body_mode = mode;
+            ctx.request_snapshot = Some(praxis_filter::Request {
+                method: http::Method::POST,
+                uri: "/".parse().unwrap(),
+                headers: http::HeaderMap::new(),
+            });
+            let mut initial = Some(Bytes::from_static(b"abcdef"));
+            assert!(run_request_body(&pipeline, &mut initial, false, &mut ctx).await.is_ok());
+            assert_eq!(ctx.request_body_bytes, 6);
+            for _ in 0..2 {
+                ctx.request_replay_prefix_pending = true;
+                let mut prefix = Some(Bytes::from_static(b"abcdef"));
+                assert!(run_request_body(&pipeline, &mut prefix, false, &mut ctx).await.is_ok());
+                assert_eq!(
+                    ctx.request_body_bytes, 6,
+                    "replay must not increase the original count: {mode:?}"
+                );
+                assert!(!ctx.request_replay_prefix_pending);
+            }
+            ctx.request_replay_prefix_pending = true;
+            let mut longer_prefix = Some(Bytes::from_static(b"abcdefgh"));
+            assert!(
+                run_request_body(&pipeline, &mut longer_prefix, false, &mut ctx)
+                    .await
+                    .is_ok()
+            );
+            assert_eq!(
+                ctx.request_body_bytes, 8,
+                "previously uncommitted prefix bytes still count"
+            );
+            if matches!(mode, BodyMode::StreamBuffer { .. }) {
+                assert_eq!(
+                    ctx.request_body_buffer.as_ref().unwrap().total_bytes(),
+                    8,
+                    "replay replaces the accumulated prefix"
+                );
+            }
+            let mut tail = Some(Bytes::from_static(b"ij"));
+            assert!(run_request_body(&pipeline, &mut tail, false, &mut ctx).await.is_ok());
+            assert_eq!(ctx.request_body_bytes, 10, "new tail reaches the exact cap");
+            let mut overflow = Some(Bytes::from_static(b"k"));
+            let halt = run_request_body(&pipeline, &mut overflow, false, &mut ctx)
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(halt.rejection.unwrap().status, 413, "new tail over the cap is rejected");
+            assert_eq!(ctx.request_body_bytes, 11);
+        }
+    }
+
+    #[tokio::test]
+    async fn authoritative_drain_consumes_replay_credit_without_changing_input_count() {
+        let pipeline =
+            praxis_filter::FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins()).unwrap();
+        for adapted in [false, true] {
+            let mut ctx = make_ctx();
+            ctx.request_body_bytes = 9;
+            ctx.request_replay_prefix_pending = true;
+            if adapted {
+                ctx.retained_adapted_request_body = Some(VecDeque::from([Bytes::from_static(b"new")]));
+                ctx.adapted_request_body = ctx.retained_adapted_request_body.clone();
+            } else {
+                ctx.pre_read_body = Some(VecDeque::from([Bytes::from_static(b"new")]));
+            }
+            let mut original = Some(Bytes::from_static(b"original"));
+            assert!(run_request_body(&pipeline, &mut original, true, &mut ctx).await.is_ok());
+            assert_eq!(original.as_deref(), Some(b"new".as_slice()));
+            assert_eq!(
+                ctx.request_body_bytes, 9,
+                "authoritative drain preserves original-input accounting"
+            );
+            assert!(
+                !ctx.request_replay_prefix_pending,
+                "the credit cannot leak to a later callback"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn generated_streamed_input_partitions_obey_exact_limit() {
+        use praxis_filter::{BodyMode, FilterPipeline, FilterRegistry};
+
+        for limit in [0, 1, 2, 5] {
+            let mut pipeline = FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).unwrap();
+            pipeline.apply_body_limits(Some(limit), None, false).unwrap();
+            for size in 0..=6 {
+                for width in [1, 2, 3] {
+                    for final_chunk_is_eos in [false, true] {
+                        let bytes: Vec<_> = (0..size).map(|index| b'a' + u8::try_from(index).unwrap()).collect();
+                        let parts: Vec<_> = bytes.chunks(width).collect();
+                        let mut ctx = make_ctx();
+                        ctx.request_body_mode = BodyMode::SizeLimit { max_bytes: limit };
+                        let mut accepted = 0;
+                        let mut forwarded = Vec::new();
+                        let mut rejected = false;
+                        let mut empty = Some(Bytes::new());
+                        assert!(run_request_body(&pipeline, &mut empty, false, &mut ctx).await.is_ok());
+                        for (index, chunk) in parts.iter().enumerate() {
+                            let mut body = Some(Bytes::copy_from_slice(chunk));
+                            let result = run_request_body(
+                                &pipeline,
+                                &mut body,
+                                final_chunk_is_eos && index + 1 == parts.len(),
+                                &mut ctx,
+                            )
+                            .await;
+                            let crossing = accepted + chunk.len() > limit;
+                            assert_eq!(result.is_err(), crossing, "limit={limit}, size={size}, width={width}");
+                            if crossing {
+                                assert_eq!(result.err().unwrap().status, Some(413));
+                                rejected = true;
+                                break;
+                            }
+                            accepted += chunk.len();
+                            forwarded.extend_from_slice(body.as_deref().unwrap_or_default());
+                        }
+                        if !rejected && (!final_chunk_is_eos || size == 0) {
+                            let mut eos = None;
+                            assert!(run_request_body(&pipeline, &mut eos, true, &mut ctx).await.is_ok());
+                            assert!(eos.is_none());
+                        }
+                        assert_eq!(forwarded, bytes[..accepted]);
+                        assert_eq!(rejected, size > limit);
+                        if !rejected {
+                            assert_eq!(ctx.request_body_bytes, u64::try_from(size).unwrap());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

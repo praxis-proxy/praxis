@@ -26,9 +26,14 @@ use ppe::praxis_policy_core::cmf::{
 pub(super) struct ParsedEnvelope(serde_json::Value);
 
 impl ParsedEnvelope {
+    /// Parse one complete JSON value, retaining malformed-input errors.
+    pub(super) fn try_parse(body: &Bytes) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(body).map(Self)
+    }
+
     /// Parse `body`; malformed or empty input yields a `Null` envelope.
     pub(super) fn parse(body: &Bytes) -> Self {
-        Self(serde_json::from_slice(body).unwrap_or(serde_json::Value::Null))
+        Self::try_parse(body).unwrap_or_else(|_| Self(serde_json::Value::Null))
     }
 
     /// The raw `id` value (`Null` when absent), preserving the original
@@ -50,6 +55,25 @@ impl ParsedEnvelope {
     /// object carrying it.
     fn field(&self, name: &str) -> Option<&serde_json::Value> {
         self.0.get(name)
+    }
+
+    /// Identify a JSON-RPC error without treating arbitrary objects as errors.
+    pub(super) fn is_json_rpc_error(&self) -> bool {
+        let Some(object) = self.0.as_object() else {
+            return false;
+        };
+        let version = object.get("jsonrpc").and_then(serde_json::Value::as_str) == Some("2.0");
+        let id = object
+            .get("id")
+            .is_some_and(|id| id.is_null() || id.is_string() || id.is_number());
+        let error = object.get("error").and_then(serde_json::Value::as_object);
+        let code = error
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_number);
+        let message = error
+            .and_then(|error| error.get("message"))
+            .is_some_and(serde_json::Value::is_string);
+        version && id && code.is_some_and(|code| code.is_i64() || code.is_u64()) && message
     }
 
     /// Consume the envelope, yielding the parsed DOM for rewriting.

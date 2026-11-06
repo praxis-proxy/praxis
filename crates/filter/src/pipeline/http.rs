@@ -35,6 +35,7 @@ use crate::{
     FilterError,
     actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
+    body::BodyAccess,
     condition::should_execute_bound_selected,
     context::{EffectiveHeaders, HttpFilterContext},
     trace_context::{TraceContext, ensure_trace_context},
@@ -51,6 +52,24 @@ use crate::{actions::BoundUpstreamBodyOutcome, condition::SelectedUpstream, exte
     reason = "pipeline concerns are split across modules"
 )]
 impl FilterPipeline {
+    /// Whether a main-path request-body writer can run in this body phase.
+    ///
+    /// Request-phase execution indices already encode conditions and branch
+    /// skips. An untracked request phase is treated conservatively. Writers
+    /// confined to selected or bound phases are excluded by the body index.
+    #[must_use]
+    pub fn has_eligible_request_body_writer(&self, executed: &[bool], done: &[bool]) -> bool {
+        let tracked = executed.len() == self.filters.len();
+        self.request_body_filter_indices.iter().any(|&index| {
+            if (tracked && executed.get(index) != Some(&true)) || done.get(index) == Some(&true) {
+                return false;
+            }
+            self.filters.get(index).is_some_and(|filter| {
+                matches!(&filter.filter, AnyFilter::Http(http) if http.request_body_access() == BodyAccess::ReadWrite)
+            })
+        })
+    }
+
     /// Run the request-head phase: every opted-in filter's `on_request_head`
     /// hook, in pipeline order, before any `StreamBuffer` request-body pre-read
     /// and before the main request phase.
@@ -856,4 +875,99 @@ fn request_phase_tracked(ctx: &HttpFilterContext<'_>, filter_count: usize) -> bo
 /// [`execute_http_response`]: FilterPipeline::execute_http_response
 fn skipped_in_request_phase(ctx: &HttpFilterContext<'_>, tracked: bool, idx: usize) -> bool {
     tracked && ctx.executed_filter_indices.get(idx) == Some(&false)
+}
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "test setup")]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines, reason = "tests")]
+mod replay_writer_tests {
+    use std::sync::Arc;
+
+    use crate::{BodyAccess, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext};
+
+    /// Distinguish a main-path writer from a selected-only writer.
+    struct Writer {
+        selected_only: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpFilter for Writer {
+        fn name(&self) -> &'static str {
+            "replay_test_writer"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn request_body_access(&self) -> BodyAccess {
+            if self.selected_only {
+                BodyAccess::None
+            } else {
+                BodyAccess::ReadWrite
+            }
+        }
+
+        fn selected_upstream_request_body_access(&self) -> BodyAccess {
+            if self.selected_only {
+                BodyAccess::ReadWrite
+            } else {
+                BodyAccess::None
+            }
+        }
+    }
+
+    fn pipeline(selected_only: bool) -> crate::FilterPipeline {
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "replay_test_writer",
+                FilterFactory::Http(Arc::new(move |_| Ok(Box::new(Writer { selected_only })))),
+            )
+            .unwrap();
+        let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(
+            "- filter: replay_test_writer\n  conditions:\n    - when:\n        headers:\n          x-enable-writer: yes\n"
+        ).unwrap();
+        crate::FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    #[tokio::test]
+    async fn writer_query_uses_executed_indices_and_body_done() {
+        let pipeline = pipeline(false);
+        let mut request = crate::test_utils::make_request(http::Method::POST, "/");
+        let mut skipped = crate::test_utils::make_filter_context(&request);
+        assert!(matches!(
+            pipeline.execute_http_request(&mut skipped).await.unwrap(),
+            FilterAction::Continue
+        ));
+        assert!(
+            !pipeline.has_eligible_request_body_writer(&skipped.executed_filter_indices, &skipped.body_done_indices),
+            "a conditionally skipped writer cannot run"
+        );
+        drop(skipped);
+        request.headers.insert("x-enable-writer", "yes".parse().unwrap());
+        let mut enabled = crate::test_utils::make_filter_context(&request);
+        assert!(matches!(
+            pipeline.execute_http_request(&mut enabled).await.unwrap(),
+            FilterAction::Continue
+        ));
+        assert!(
+            pipeline.has_eligible_request_body_writer(&enabled.executed_filter_indices, &enabled.body_done_indices),
+            "the enabled writer can run"
+        );
+        assert!(
+            !pipeline.has_eligible_request_body_writer(&enabled.executed_filter_indices, &[true]),
+            "a completed writer cannot run again"
+        );
+        assert!(
+            pipeline.has_eligible_request_body_writer(&[], &[]),
+            "untracked execution is conservative"
+        );
+    }
+
+    #[test]
+    fn selected_only_writer_is_not_a_main_body_writer() {
+        let pipeline = pipeline(true);
+        assert!(!pipeline.has_eligible_request_body_writer(&[true], &[]));
+    }
 }

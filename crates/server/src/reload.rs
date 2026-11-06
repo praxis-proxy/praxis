@@ -97,7 +97,11 @@ pub(crate) fn reload_pipelines(
 
     let health_registry = build_health_registry(&new_config.clusters);
 
-    let new_ceiling = new_config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
+    let new_ceiling = new_config
+        .body_limits
+        .max_response_bytes
+        .unwrap_or(usize::MAX)
+        .min(new_config.body_limits.max_buffer_bytes.get());
     let updated_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
         subrequest_client.connector().clone(),
         new_ceiling,
@@ -1389,7 +1393,7 @@ filter_chains:
         // Per-configuration snapshot of what the framework injected into the
         // bound outbound pipeline: whether the KV registry landed, and the
         // identity (pointer) of the session-store registry that reached it.
-        type Injection = (bool, Option<usize>);
+        type Injection = (bool, Option<usize>, usize, Option<usize>);
 
         // A reference chain-binding callout: it binds an outbound chain once and
         // owns the resulting pipeline, delegating `visit_nested_pipelines` so the
@@ -1413,6 +1417,10 @@ filter_chains:
                     let snapshot = (
                         pipeline.kv_stores().is_some(),
                         pipeline.session_stores().map(|stores| Arc::as_ptr(stores).addr()),
+                        pipeline.buffer_cap(),
+                        pipeline
+                            .subrequest_client()
+                            .map(praxis_core::subrequest::SubRequestClient::max_response_bytes),
                     );
                     self.injections.lock().unwrap().push(snapshot);
                 }
@@ -1423,6 +1431,7 @@ filter_chains:
             }
         }
 
+        praxis_tls::provider::install();
         let injections: Arc<Mutex<Vec<Injection>>> = Arc::new(Mutex::new(Vec::new()));
         let mut registry = FilterRegistry::with_builtins();
         let factory_injections = Arc::clone(&injections);
@@ -1450,10 +1459,12 @@ filter_chains:
         let expected_session_ptr = Arc::as_ptr(&session_stores).addr();
         let kv_stores = empty_kv_stores();
         let health_registry: HealthRegistry = Arc::new(HashMap::new());
-        let subrequest_client = empty_subrequest_client();
 
         let old_config = Config::from_yaml(
             r#"
+body_limits:
+  max_buffer_bytes: 4096
+  max_response_bytes: 100000000
 listeners:
   - name: web
     address: "127.0.0.1:8080"
@@ -1470,6 +1481,8 @@ filter_chains:
         )
         .unwrap();
 
+        let subrequest_client = crate::pipelines::build_subrequest_client(&old_config).unwrap();
+
         let live = resolve_pipelines(
             &old_config,
             &registry,
@@ -1483,16 +1496,21 @@ filter_chains:
         let after_build = injections.lock().unwrap().clone();
         let build_count = after_build.len();
         assert!(
-            after_build
-                .iter()
-                .any(|(kv, session)| *kv && *session == Some(expected_session_ptr)),
+            after_build.iter().any(|(kv, session, cap, client)| *kv
+                && *session == Some(expected_session_ptr)
+                && *cap == 4096
+                && *client == Some(4096)),
             "resolve_pipelines must inject KV and session stores into the bound outbound pipeline"
         );
 
-        let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+        let pinned_old = live.get("web").unwrap().load_full();
+        let old_ptr = Arc::as_ptr(&pinned_old);
 
         let new_config = Config::from_yaml(
             r#"
+body_limits:
+  max_buffer_bytes: 67108865
+  max_response_bytes: 100000000
 listeners:
   - name: web
     address: "127.0.0.1:8080"
@@ -1537,6 +1555,9 @@ filter_chains:
 
         let new_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
         assert_ne!(old_ptr, new_ptr, "reload must swap in a rebuilt pipeline");
+        assert_eq!(pinned_old.buffer_cap(), 4096, "in-flight requests keep their old cap");
+        assert_eq!(pinned_old.subrequest_client().unwrap().max_response_bytes(), 4096);
+        assert_eq!(live.get("web").unwrap().load().buffer_cap(), 67_108_865);
 
         let after_reload = injections.lock().unwrap().clone();
         assert!(
@@ -1544,9 +1565,10 @@ filter_chains:
             "reload must re-run configuration over the rebuilt outbound pipeline"
         );
         assert!(
-            after_reload[build_count..]
-                .iter()
-                .any(|(kv, session)| *kv && *session == Some(expected_session_ptr)),
+            after_reload[build_count..].iter().any(|(kv, session, cap, client)| *kv
+                && *session == Some(expected_session_ptr)
+                && *cap == 67_108_865
+                && *client == Some(67_108_865)),
             "reload must re-inject KV and session stores into the rebuilt bound outbound pipeline"
         );
     }

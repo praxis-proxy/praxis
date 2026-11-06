@@ -438,6 +438,31 @@ fn response_shrink_is_padded() {
 }
 
 #[test]
+fn large_response_removal_is_valid_and_fits_committed_length() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let secret = "s".repeat(1_048_576);
+    for (input, expected) in [
+        (format!(r#"{{"keep":1,"secret":"{secret}"}}"#), json!({"keep":1})),
+        (format!(r#"{{"secret":"{secret}"}}"#), json!({})),
+        (format!(r#"{{"keep":"{secret}"}}"#), json!({"keep":secret})),
+    ] {
+        let filter = parse_filter("response_remove:\n  - /secret");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let original_len = input.len();
+        let mut body = Some(Bytes::from(input));
+        assert!(matches!(
+            filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+            FilterAction::BodyDone
+        ));
+        let output = body.unwrap();
+        assert_eq!(output.len(), original_len);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&output).unwrap(), expected);
+        let trimmed = output.iter().rposition(|byte| *byte != b' ').unwrap() + 1;
+        assert!(output[trimmed..].iter().all(|byte| *byte == b' '));
+    }
+}
+
+#[test]
 fn fit_response_refuses_growth() {
     assert!(
         super::fit_response(4, b"12345".to_vec()).is_none(),
@@ -1369,4 +1394,40 @@ async fn content_types_set_but_response_ops_empty_passes_through() {
         "empty response ops should not process body"
     );
     assert_eq!(body.as_ref().unwrap().as_ref(), original, "body unchanged");
+}
+
+/// Apply the same invalid-UTF-8 policy oracle to request and response hooks.
+fn assert_invalid_utf8_policy(mode: &str, action: Result<FilterAction, crate::FilterError>) {
+    match mode {
+        "continue" => assert!(matches!(action, Ok(FilterAction::Continue))),
+        "reject" => assert!(matches!(action, Ok(FilterAction::Reject(r)) if r.status == 400)),
+        "error" => {
+            action.expect_err("invalid UTF-8 must return a filter error");
+        },
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn invalid_utf8_obeys_request_and_response_failure_policies() {
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let original = Bytes::from_static(b"{\"model\":\"blue\",\"unused\":\"\xff\"}");
+    for mode in ["continue", "reject", "error"] {
+        let filter = parse_filter(&format!(
+            "on_invalid: {mode}\nrequest_remove:\n  - /model\nresponse_remove:\n  - /model\n"
+        ));
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("trusted".to_owned(), "keep".to_owned());
+        let mut request = Some(original.clone());
+        let action = filter.on_request_body(&mut ctx, &mut request, true).await;
+        assert_invalid_utf8_policy(mode, action);
+        assert_eq!(request.as_ref(), Some(&original));
+        assert_eq!(ctx.get_metadata("trusted"), Some("keep"));
+
+        let mut response = Some(original.clone());
+        let action = filter.on_response_body(&mut ctx, &mut response, true);
+        assert_invalid_utf8_policy(mode, action);
+        assert_eq!(response.as_ref(), Some(&original));
+        assert_eq!(ctx.get_metadata("trusted"), Some("keep"));
+    }
 }

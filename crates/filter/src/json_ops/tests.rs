@@ -518,3 +518,466 @@ fn extract_header_allows_trailing_whitespace() {
         .unwrap();
     assert_eq!(store.request_headers(), &[("X-Model".to_owned(), "premium".to_owned())]);
 }
+
+#[test]
+fn large_rewrites_preserve_unaffected_spans_and_duplicate_semantics() {
+    let padding = "x".repeat(1_048_576);
+    let input =
+        format!(r#"{{"a/b":1,"padding":{{"text":"{padding}", "values":[1, 2, 3]}},"a\u002fb":2,"tail":[10,20,30]}}"#);
+    let replacement = rewrite_str(&input, &[resolved(OpKind::Replace, "/a~1b", Some("9"))]).unwrap();
+    assert_eq!(
+        replacement,
+        format!(r#"{{"a/b":9,"padding":{{"text":"{padding}", "values":[1, 2, 3]}},"a\u002fb":9,"tail":[10,20,30]}}"#)
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&replacement).unwrap()["a/b"],
+        9
+    );
+    let removed = rewrite_str(&input, &[resolved(OpKind::Remove, "/a~1b", None)]).unwrap();
+    assert_eq!(
+        removed,
+        format!(r#"{{"padding":{{"text":"{padding}", "values":[1, 2, 3]}},"tail":[10,20,30]}}"#)
+    );
+    let added = rewrite_str(&input, &[resolved(OpKind::Add, "/tail/1", Some("15"))]).unwrap();
+    assert!(added.ends_with(r#""tail":[10,15,20,30]}"#));
+    assert!(added.contains(&format!(r#""padding":{{"text":"{padding}", "values":[1, 2, 3]}}"#)));
+    let missing = rewrite_str(&input, &[resolved(OpKind::Replace, "/missing", Some("0"))]).unwrap();
+    assert_eq!(missing, input, "unchanged value spans must be copied verbatim");
+    assert_duplicate_extraction_uses_last(&input);
+}
+
+/// Duplicate escaped and literal keys use the final value for extraction.
+fn assert_duplicate_extraction_uses_last(input: &str) {
+    let ops = JsonOps::builder()
+        .extract("/a~1b", ExtractDest::metadata("chosen"))
+        .unwrap()
+        .build()
+        .unwrap();
+    let mut store = MapStore::new();
+    let outcome = ops.apply(input.as_bytes(), Some(&mut store)).unwrap();
+    assert!(outcome.output.is_none());
+    assert_eq!(
+        store.get_metadata("chosen"),
+        Some("2"),
+        "extraction agrees with serde last-wins behavior"
+    );
+}
+
+#[test]
+fn large_array_edits_preserve_values_before_and_after_each_position() {
+    let items: Vec<_> = (0..8192)
+        .map(|index| json!({"id": index, "padding": "x".repeat(128)}))
+        .collect();
+    let document = json!({"items": items, "tail": "unchanged"});
+    let input = serde_json::to_string(&document).unwrap();
+    for index in [0, 4096, 8191] {
+        for (kind, value) in [
+            (OpKind::Remove, None),
+            (OpKind::Replace, Some(r#"{"changed":true}"#)),
+            (OpKind::Add, Some(r#"{"changed":true}"#)),
+        ] {
+            let mut expected = document.clone();
+            let array = expected["items"].as_array_mut().unwrap();
+            match kind {
+                OpKind::Remove => {
+                    array.remove(index);
+                },
+                OpKind::Replace => array[index] = json!({"changed": true}),
+                OpKind::Add => array.insert(index, json!({"changed": true})),
+                OpKind::Extract => unreachable!(),
+            }
+            let output = rewrite_str(&input, &[resolved(kind, &format!("/items/{index}"), value)]).unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&output).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
+fn mixed_container_depth_boundary_applies_to_skipped_and_edited_paths() {
+    for depth in [127, 128, 129] {
+        let mut input = String::from("1");
+        let mut pointer = String::new();
+        for index in 1..depth {
+            if index % 2 == 0 {
+                input = format!("[{input}]");
+                pointer = format!("/0{pointer}");
+            } else {
+                input = format!(r#"{{"n":{input}}}"#);
+                pointer = format!("/n{pointer}");
+            }
+        }
+        input = format!(r#"{{"padding":"{}","nested":{input}}}"#, "x".repeat(1_048_576));
+        pointer = format!("/nested{pointer}");
+        for op in [
+            resolved(OpKind::Replace, "/missing", Some("2")),
+            resolved(OpKind::Replace, &pointer, Some("2")),
+        ] {
+            let result = rewrite_str(&input, &[op]);
+            if depth <= 128 {
+                let output = result.unwrap();
+                assert!(output.len() <= input.len());
+            } else {
+                assert_eq!(result.unwrap_err(), JsonError::Depth, "depth {depth}");
+            }
+        }
+    }
+}
+
+#[test]
+fn generated_json_rewrites_match_reference_and_reject_truncated_tails() {
+    for width in [0, 1, 15, 16, 17, 127, 1024, 65_536] {
+        for original in ["plain", "café", "quote\"slash\\", "line\nend"] {
+            let document = json!({"before": "x".repeat(width), "target": original, "array": [true, null, 17]});
+            let input = serde_json::to_vec(&document).unwrap();
+            let ops = JsonOps::builder()
+                .extract("/target", ExtractDest::metadata("old"))
+                .unwrap()
+                .replace("/target", JsonValue::static_json(json!("new")).unwrap())
+                .unwrap()
+                .build()
+                .unwrap();
+            let mut store = MapStore::new();
+            let outcome = ops.apply(&input, Some(&mut store)).unwrap();
+            let mut expected = document.clone();
+            expected["target"] = json!("new");
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&outcome.output.unwrap()).unwrap(),
+                expected
+            );
+            assert_eq!(store.get_metadata("old"), Some(original));
+            assert_truncated_tail_preserves_metadata(&ops, &input);
+        }
+    }
+}
+
+/// A truncated document must leave existing and newly requested captures intact.
+fn assert_truncated_tail_preserves_metadata(ops: &JsonOps, input: &[u8]) {
+    let mut damaged = input.to_vec();
+    damaged.pop();
+    let mut untouched = MapStore::new();
+    untouched.set_metadata("trusted".to_owned(), "keep".to_owned());
+    assert!(matches!(
+        ops.apply(&damaged, Some(&mut untouched)),
+        Err(JsonError::InvalidJson)
+    ));
+    assert_eq!(untouched.get_metadata("trusted"), Some("keep"));
+    assert_eq!(
+        untouched.get_metadata("old"),
+        None,
+        "failed walk must not commit captures"
+    );
+}
+
+#[test]
+fn invalid_encoding_in_skipped_values_cannot_commit_extraction_or_rewrite() {
+    let ops = JsonOps::builder()
+        .extract("/model", ExtractDest::header("X-Model"))
+        .unwrap()
+        .replace("/model", JsonValue::static_json(json!("rewritten")).unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    let cases: &[&[u8]] = &[b"{\"model\":\"trusted\",\"unused\":\"\xff\"}"];
+    for input in cases {
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(input).is_err(),
+            "reference must reject the input"
+        );
+        let mut store = MapStore::new();
+        store.set_metadata("trusted".to_owned(), "keep".to_owned());
+        assert!(
+            matches!(ops.apply(input, Some(&mut store)), Err(JsonError::InvalidJson)),
+            "input {input:?}"
+        );
+        assert!(
+            store.request_headers().is_empty(),
+            "invalid document must not promote metadata"
+        );
+        assert_eq!(store.get_metadata("trusted"), Some("keep"));
+    }
+}
+
+#[test]
+fn lexical_mutations_of_large_documents_match_shared_json_grammar() {
+    let padding = "x".repeat(1_048_576);
+    let ops = JsonOps::builder()
+        .extract("/target", ExtractDest::metadata("chosen"))
+        .unwrap()
+        .replace("/target", JsonValue::static_json(json!("new")).unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    assert_valid_large_lexical_tokens(&ops, &padding);
+    assert_invalid_large_lexical_tokens(&ops, &padding);
+    let bom = b"\xef\xbb\xbf{\"target\":\"old\"}";
+    serde_json::from_slice::<serde_json::Value>(bom).expect_err("reference rejects a leading UTF-8 BOM");
+    assert!(
+        ops.apply(bom, None).unwrap().output.is_some(),
+        "the walker deliberately accepts a leading UTF-8 BOM"
+    );
+}
+
+/// Compare valid large-document token rewrites with a serde reference.
+fn assert_valid_large_lexical_tokens(ops: &JsonOps, padding: &str) {
+    for token in [
+        "-123456789.0123456789e+25",
+        "0.00000000000000000001",
+        r#""escaped\\\\quotes\\\"and\\u00e9""#,
+    ] {
+        let input = format!(r#"{{"target":"old","padding":"{padding}","value":{token}}}"#);
+        let mut reference: serde_json::Value = serde_json::from_str(&input).unwrap();
+        reference["target"] = json!("new");
+        let mut store = MapStore::new();
+        let output = ops.apply(input.as_bytes(), Some(&mut store)).unwrap().output.unwrap();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&output).unwrap(), reference);
+        assert_eq!(store.get_metadata("chosen"), Some("old"));
+    }
+}
+
+/// Invalid late tokens must not commit an earlier field capture.
+fn assert_invalid_large_lexical_tokens(ops: &JsonOps, padding: &str) {
+    for token in [
+        "01",
+        "1e+",
+        "1.",
+        r#""bad\q""#,
+        r#""bad\u00xz""#,
+        "\"unfinished",
+        "[true,]",
+        "null false",
+    ] {
+        let input = format!(r#"{{"target":"old","padding":"{padding}","value":{token}}}"#);
+        assert!(
+            serde_json::from_str::<serde_json::Value>(&input).is_err(),
+            "reference unexpectedly accepted {token:?}"
+        );
+        let mut store = MapStore::new();
+        assert!(
+            matches!(
+                ops.apply(input.as_bytes(), Some(&mut store)),
+                Err(JsonError::InvalidJson)
+            ),
+            "token {token:?}"
+        );
+        assert_eq!(store.get_metadata("chosen"), None);
+    }
+}
+
+/// One deterministic JSON document and the operation selected for it.
+struct SeededJsonCase {
+    /// Seed identifying the deterministic corpus.
+    seed: u64,
+    /// Index of this case within the seed.
+    index: usize,
+    /// Complete serialized JSON document.
+    input: String,
+    /// Original final value of the selected route field.
+    selected: &'static str,
+    /// Whether an earlier duplicate route member is present.
+    duplicate: bool,
+    /// One of the four selected rewrite operations.
+    kind: usize,
+}
+
+/// Deterministically choose a nested shape without affecting the other draws.
+fn seeded_json_shape(state: &mut u64) -> serde_json::Value {
+    match next_json_seed(state) % 4 {
+        0 => json!([]),
+        1 => json!([true, null, 17]),
+        2 => json!([{"inside": ["café", false]}, 3]),
+        3 => json!({"array": [[1, 2], {"route": "decoy"}]}),
+        _ => unreachable!(),
+    }
+}
+
+/// Choose a literal or Unicode-escaped spelling for the same route key.
+fn seeded_route_key(state: &mut u64) -> &'static str {
+    if next_json_seed(state) & 1 == 0 {
+        "route"
+    } else {
+        r"\u0072oute"
+    }
+}
+
+/// Produce the same widths, keys, duplicates and operation draws per seed.
+fn seeded_json_case(state: &mut u64, seed: u64, index: usize) -> SeededJsonCase {
+    let widths = [0_usize, 1, 15, 16, 17, 63, 255, 1024, 4096, 65_536];
+    let values = ["alpha", "café", "quote\"slash\\", "snowman ☃", "emoji 🦀"];
+    let width = if index == 0 {
+        1_048_576
+    } else {
+        widths[usize::try_from(next_json_seed(state) % widths.len() as u64).unwrap()]
+    };
+    let selected = values[usize::try_from(next_json_seed(state) % values.len() as u64).unwrap()];
+    let key = seeded_route_key(state);
+    let duplicate = next_json_seed(state) & 1 == 0;
+    let earlier = if duplicate { r#""route":"first","# } else { "" };
+    let shape = seeded_json_shape(state);
+    let input = format!(
+        r#"{{{earlier}"padding":"{}","nested":{{"route":"decoy","value":42}},"shape":{shape},"n":42,"{key}":{}}}"#,
+        "x".repeat(width),
+        serde_json::to_string(selected).unwrap()
+    );
+    let kind = usize::try_from(next_json_seed(state) % 4).unwrap();
+    SeededJsonCase {
+        seed,
+        index,
+        input,
+        selected,
+        duplicate,
+        kind,
+    }
+}
+
+/// Apply the same mutation to the DOM oracle and to the compiled tokenizer ops.
+fn seeded_json_ops(kind: usize, reference: &mut serde_json::Value) -> JsonOps {
+    let builder = JsonOps::builder()
+        .extract("/route", ExtractDest::metadata("chosen"))
+        .unwrap();
+    let operation = match kind {
+        0 => {
+            reference["route"] = json!("rewritten");
+            builder.replace("/route", JsonValue::static_json(json!("rewritten")).unwrap())
+        },
+        1 => {
+            reference["nested"]["value"] = json!("rewritten");
+            builder.replace("/nested/value", JsonValue::static_json(json!("rewritten")).unwrap())
+        },
+        2 => {
+            assert_eq!(
+                reference["nested"].as_object_mut().unwrap().remove("value"),
+                Some(json!(42))
+            );
+            builder.remove("/nested/value")
+        },
+        3 => {
+            reference["nested"]["new"] = json!([1, "added"]);
+            builder.add("/nested/new", JsonValue::static_json(json!([1, "added"])).unwrap())
+        },
+        _ => unreachable!(),
+    };
+    operation.unwrap().build().unwrap()
+}
+
+/// Check the complete valid rewrite, duplicate semantics and extracted value.
+fn assert_seeded_valid(case: &SeededJsonCase) -> JsonOps {
+    let (seed, index, kind) = (case.seed, case.index, case.kind);
+    let mut reference: serde_json::Value = serde_json::from_str(&case.input).unwrap();
+    assert_eq!(
+        reference["route"], case.selected,
+        "last duplicate seed={seed:#x} case={index}"
+    );
+    let ops = seeded_json_ops(kind, &mut reference);
+    let mut store = MapStore::new();
+    let output = ops
+        .apply(case.input.as_bytes(), Some(&mut store))
+        .unwrap_or_else(|err| panic!("valid seed={seed:#x} case={index} kind={kind}: {err}"));
+    let actual: serde_json::Value = serde_json::from_slice(&output.output.unwrap()).unwrap();
+    assert!(
+        actual == reference,
+        "semantic rewrite seed={seed:#x} case={index} kind={kind}"
+    );
+    assert_eq!(
+        store.get_metadata("chosen"),
+        Some(case.selected),
+        "capture seed={seed:#x} case={index} kind={kind}"
+    );
+    ops
+}
+
+/// Stable byte offsets for each invalid mutation of a generated document.
+struct SeededOffsets {
+    /// Start of the string value used for escape and encoding mutations.
+    padding: usize,
+    /// Cut point for the truncated-document case.
+    truncated: usize,
+    /// Start of the integer mutated to an invalid leading-zero number.
+    number: usize,
+}
+
+/// Choose the original per-case truncation draw after its valid rewrite.
+fn seeded_offsets(case: &SeededJsonCase, state: &mut u64) -> SeededOffsets {
+    SeededOffsets {
+        padding: case.input.find(r#""padding":""#).unwrap() + r#""padding":""#.len(),
+        truncated: 1 + usize::try_from(next_json_seed(state) % u64::try_from(case.input.len() - 1).unwrap()).unwrap(),
+        number: case.input.find(r#""n":42"#).unwrap() + r#""n":"#.len(),
+    }
+}
+
+/// Construct each of the six original truncation, suffix and lexical faults.
+fn seeded_damage(case: &SeededJsonCase, offsets: &SeededOffsets, mutation: usize) -> Vec<u8> {
+    let mut damaged = case.input.as_bytes().to_vec();
+    match mutation {
+        0 => damaged.truncate(offsets.truncated),
+        1 => damaged.extend_from_slice(b"{}"),
+        2 => {
+            damaged.insert(offsets.padding, b'q');
+            damaged.insert(offsets.padding, b'\\');
+        },
+        3 => damaged.insert(offsets.padding, 0),
+        4 => damaged.insert(offsets.padding, 0xFF),
+        5 => {
+            damaged[offsets.number] = b'0';
+            damaged.insert(offsets.number + 1, b'1');
+        },
+        _ => unreachable!(),
+    }
+    damaged
+}
+
+/// Compare every damaged input with serde and ensure no partial capture leaks.
+fn assert_seeded_invalid(case: &SeededJsonCase, ops: &JsonOps, state: &mut u64) {
+    let (seed, index, kind) = (case.seed, case.index, case.kind);
+    let offsets = seeded_offsets(case, state);
+    for mutation in 0..6 {
+        let damaged = seeded_damage(case, &offsets, mutation);
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&damaged).is_err(),
+            "reference accepted seed={seed:#x} case={index} mutation={mutation}"
+        );
+        let mut untouched = MapStore::new();
+        untouched.set_metadata("trusted".to_owned(), "keep".to_owned());
+        let result = ops.apply(&damaged, Some(&mut untouched));
+        assert!(
+            matches!(result, Err(JsonError::InvalidJson)),
+            "invalid seed={seed:#x} case={index} kind={kind} mutation={mutation}"
+        );
+        assert_eq!(
+            untouched.get_metadata("trusted"),
+            Some("keep"),
+            "seed={seed:#x} case={index} mutation={mutation}"
+        );
+        assert_eq!(
+            untouched.get_metadata("chosen"),
+            None,
+            "partial capture seed={seed:#x} case={index} mutation={mutation}"
+        );
+    }
+}
+
+#[test]
+fn seeded_json_mutations_match_reference_without_partial_captures() {
+    let seeds = [0xA11C_E001_u64, 0x5EED_2026, 0xBADC_0FFE, 0xF00D_3131];
+    let mut rewrites_seen = [false; 4];
+    let mut duplicates_seen = [false; 2];
+    for seed in seeds {
+        let mut state = seed;
+        for index in 0..24 {
+            let case = seeded_json_case(&mut state, seed, index);
+            rewrites_seen[case.kind] = true;
+            duplicates_seen[usize::from(case.duplicate)] = true;
+            let ops = assert_seeded_valid(&case);
+            assert_seeded_invalid(&case, &ops, &mut state);
+        }
+    }
+    assert!(rewrites_seen.into_iter().all(|seen| seen));
+    assert!(duplicates_seen.into_iter().all(|seen| seen));
+}
+
+/// Deterministically advance the bounded JSON mutation corpus.
+fn next_json_seed(state: &mut u64) -> u64 {
+    *state = state
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *state >> 32
+}

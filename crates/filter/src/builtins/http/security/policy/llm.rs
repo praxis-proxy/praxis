@@ -693,6 +693,25 @@ mod tests {
     }
 
     #[test]
+    fn large_shallow_padding_does_not_change_serde_depth_or_duplicate_semantics() {
+        let padding = "x".repeat(900_000);
+        for depth in [125, 126, 127, 128, 129] {
+            let body = format!(
+                r#"{{"padding":"{padding}","deep":{}0{},"model":"m"}}"#,
+                "[".repeat(depth),
+                "]".repeat(depth)
+            );
+            let reference = serde_json::from_str::<serde_json::Value>(&body);
+            let parsed = try_request(&body).unwrap().into_value();
+            assert_eq!(parsed, reference.unwrap_or(serde_json::Value::Null), "depth {depth}");
+        }
+        let duplicate = format!(r#"{{"model":"m","padding":"{padding}","mo\u0064el":"n"}}"#);
+        assert!(matches!(try_request(&duplicate), Err(DuplicateKey)));
+        let malformed = format!("{duplicate} trailing");
+        assert!(try_request(&malformed).unwrap().into_value().is_null());
+    }
+
+    #[test]
     fn the_last_wins_parse_keeps_serde_json_semantics() {
         assert_eq!(
             ParsedLlmRequest::parse_last_wins(&Bytes::from_static(br#"{"model":"a","model":"b"}"#)).model(),

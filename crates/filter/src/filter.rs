@@ -322,6 +322,12 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Tighten filter-owned body accumulators to the configured buffering cap.
+    /// Pipeline-managed buffers are bounded separately. Framework filters that
+    /// retain additional bodies or iteration state override this hook.
+    #[doc(hidden)]
+    fn apply_buffer_cap(&mut self, _max_bytes: usize) {}
+
     /// Visit pipelines owned by this filter.
     ///
     /// Framework filters that embed nested pipelines override this hook so

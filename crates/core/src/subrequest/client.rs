@@ -80,8 +80,8 @@ const MAX_CLIENT_SELECTED_DIALS: usize = 4;
 ///
 /// - An overall deadline covering admission, connect, and I/O.
 /// - Bounded response body reads: each call supplies a per-call limit, clamped to the client-wide ceiling set at
-///   construction via [`with_max_response_bytes`]. The server derives this ceiling from
-///   `body_limits.max_response_bytes`.
+///   construction via [`with_max_response_bytes`]. The server derives this ceiling from the smaller of
+///   `body_limits.max_buffer_bytes` and `body_limits.max_response_bytes`.
 /// - Hop-by-hop header sanitization on both request and response.
 /// - Proper `Host` framing.
 ///
@@ -114,18 +114,24 @@ pub struct SubRequestClient<C: Connector = backend::Connector> {
 }
 
 impl<C: Connector> SubRequestClient<C> {
+    /// Maximum buffered response bytes accepted by this client.
+    #[must_use]
+    pub fn max_response_bytes(&self) -> usize {
+        self.max_response_bytes
+    }
+
     /// Create a client wrapping the given shared connector.
     ///
     /// Defaults the client-wide response ceiling to
-    /// [`ABSOLUTE_MAX_BODY_BYTES`] (64 MiB). Use
-    /// [`with_max_response_bytes`] for a tighter cap.
+    /// [`DEFAULT_MAX_BUFFER_BYTES`] (64 MiB). Use
+    /// [`with_max_response_bytes`] for a configured cap.
     ///
-    /// [`ABSOLUTE_MAX_BODY_BYTES`]: crate::config::ABSOLUTE_MAX_BODY_BYTES
+    /// [`DEFAULT_MAX_BUFFER_BYTES`]: crate::config::DEFAULT_MAX_BUFFER_BYTES
     /// [`with_max_response_bytes`]: Self::with_max_response_bytes
     pub fn new(connector: SubRequestConnector<C>) -> Self {
         Self {
             connector,
-            max_response_bytes: crate::config::ABSOLUTE_MAX_BODY_BYTES,
+            max_response_bytes: crate::config::DEFAULT_MAX_BUFFER_BYTES,
             upstream_ca: None,
         }
     }
@@ -133,12 +139,13 @@ impl<C: Connector> SubRequestClient<C> {
     /// Create a client with an explicit response ceiling.
     ///
     /// Every `execute()` call clamps its per-call limit to
-    /// `min(per_call, ceiling)`, preventing callers from
-    /// exceeding the global cap.
+    /// `min(per_call, ceiling)`. Server callers supply the smaller of the
+    /// configured buffering cap and response transfer limit. Construction
+    /// does not allocate the requested capacity.
     pub fn with_max_response_bytes(connector: SubRequestConnector<C>, max_response_bytes: usize) -> Self {
         Self {
             connector,
-            max_response_bytes,
+            max_response_bytes: max_response_bytes.min(crate::config::MAX_BUFFER_BYTES),
             upstream_ca: None,
         }
     }
@@ -1308,8 +1315,8 @@ mod tests {
 
         assert_eq!(
             client.max_response_bytes,
-            crate::config::ABSOLUTE_MAX_BODY_BYTES,
-            "new() should default to ABSOLUTE_MAX_BODY_BYTES"
+            crate::config::DEFAULT_MAX_BUFFER_BYTES,
+            "new() should default to DEFAULT_MAX_BUFFER_BYTES"
         );
     }
 
@@ -1420,9 +1427,19 @@ mod tests {
         let large_client = SubRequestClient::with_max_response_bytes(connector, usize::MAX);
         assert_eq!(
             large_client.max_response_bytes,
-            usize::MAX,
-            "a ceiling of usize::MAX should be stored unchanged"
+            crate::config::MAX_BUFFER_BYTES,
+            "a byte buffer cannot exceed the addressable allocation maximum"
         );
+    }
+
+    #[test]
+    fn buffered_response_ceiling_can_explicitly_exceed_the_default() {
+        let hard = crate::config::DEFAULT_MAX_BUFFER_BYTES;
+        let connector = test_connector();
+        for requested in [hard - 1, hard, hard + 1, 1_073_741_824] {
+            let client = SubRequestClient::with_max_response_bytes(connector.clone(), requested);
+            assert_eq!(client.max_response_bytes, requested);
+        }
     }
 
     #[test]
@@ -1575,8 +1592,8 @@ mod tests {
         );
         assert_eq!(
             client_c.max_response_bytes,
-            crate::config::ABSOLUTE_MAX_BODY_BYTES,
-            "client_c should default to ABSOLUTE_MAX_BODY_BYTES"
+            crate::config::DEFAULT_MAX_BUFFER_BYTES,
+            "client_c should default to DEFAULT_MAX_BUFFER_BYTES"
         );
     }
 
