@@ -39,6 +39,7 @@ mod endpoint_selector;
 mod errors_total;
 #[cfg(target_os = "linux")]
 mod file_descriptor_limits;
+mod filter_resource_metrics;
 #[cfg(feature = "forward-proxy")]
 mod forward_proxy;
 mod grpc_access_log;
