@@ -196,6 +196,19 @@ impl PingoraHealthService {
     /// assert!(body.contains("ok"));
     /// ```
     pub fn ready_response(&self) -> (u16, String) {
+        match self.lifecycle.as_ref().map(LifecycleHandle::phase) {
+            Some(praxis_core::server::LifecyclePhase::Initializing) => {
+                return (503, r#"{"status":"initializing"}"#.to_owned());
+            },
+            Some(praxis_core::server::LifecyclePhase::Draining) => {
+                return (503, r#"{"status":"draining"}"#.to_owned());
+            },
+            Some(praxis_core::server::LifecyclePhase::Stopped) => {
+                return (503, r#"{"status":"stopped"}"#.to_owned());
+            },
+            Some(praxis_core::server::LifecyclePhase::Serving) | None => {},
+        }
+
         // Resolve the health registry from the live pipelines (post-reload)
         // rather than the startup snapshot, exactly as /api/stats does, so
         // /ready reflects current endpoint health after a config reload
@@ -514,16 +527,8 @@ fn compute_ready_response(registry: Option<&HealthRegistry>, verbose: bool, read
     }
 
     let agg = aggregate_health(registry, verbose);
-    let status_str = if agg.any_down && readiness == ReadinessMode::Upstreams {
-        "degraded"
-    } else {
-        "ok"
-    };
-    let status_code: u16 = if agg.any_down && readiness == ReadinessMode::Upstreams {
-        503
-    } else {
-        200
-    };
+    let degraded = agg.any_down && readiness == ReadinessMode::Upstreams;
+    let (status_str, status_code) = if degraded { ("degraded", 503) } else { ("ok", 200) };
 
     let body = format_ready_body(status_str, &agg);
     (status_code, body)
@@ -805,9 +810,7 @@ mod tests {
     #[test]
     fn ready_upstreams_mode_follows_lifecycle() {
         let lifecycle = LifecycleHandle::new();
-        let registry: HealthRegistry = Arc::new(
-            [(Arc::from("backend"), make_health_entry(1))].into_iter().collect(),
-        );
+        let registry: HealthRegistry = Arc::new([(Arc::from("backend"), make_health_entry(1))].into_iter().collect());
         let svc = PingoraHealthService::new(Some(registry), false)
             .with_readiness(ReadinessMode::Upstreams)
             .with_lifecycle(lifecycle.clone());
@@ -817,6 +820,16 @@ mod tests {
         assert_eq!(svc.ready_response().0, 200);
         assert!(lifecycle.begin_drain());
         assert_eq!(svc.ready_response(), (503, r#"{"status":"draining"}"#.to_owned()));
+    }
+
+    #[test]
+    fn ready_reports_stopped_lifecycle_distinctly() {
+        let lifecycle = LifecycleHandle::new();
+        let svc = PingoraHealthService::new(None, false).with_lifecycle(lifecycle.clone());
+
+        lifecycle.mark_stopped();
+
+        assert_eq!(svc.ready_response(), (503, r#"{"status":"stopped"}"#.to_owned()));
     }
 
     #[test]

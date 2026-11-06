@@ -7,10 +7,6 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-// -----------------------------------------------------------------------------
-// LifecyclePhase
-// -----------------------------------------------------------------------------
-
 /// The externally visible phase of a Praxis server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecyclePhase {
@@ -24,10 +20,6 @@ pub enum LifecyclePhase {
     Stopped,
 }
 
-// -----------------------------------------------------------------------------
-// LifecycleError
-// -----------------------------------------------------------------------------
-
 /// Why a lifecycle transition could not be applied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LifecycleError {
@@ -36,30 +28,29 @@ pub enum LifecycleError {
 }
 
 impl std::fmt::Display for LifecycleError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    /// Write the error's operator-facing description.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ShutdownStarted => formatter.write_str("server shutdown has already started"),
+            Self::ShutdownStarted => f.write_str("server shutdown has already started"),
         }
     }
 }
 
 impl std::error::Error for LifecycleError {}
 
-// -----------------------------------------------------------------------------
-// LifecycleHandle
-// -----------------------------------------------------------------------------
-
 /// Cloneable handle for the one server lifecycle state machine.
 ///
 /// The watch channel is both the source of truth and the notification
-/// mechanism. Keeping the state in one channel prevents readiness readers and
-/// shutdown listeners from observing contradictory copies of the phase.
+/// mechanism, so readers and shutdown listeners cannot observe contradictory
+/// copies of the phase.
 #[derive(Clone, Debug)]
 pub struct LifecycleHandle {
+    /// The current phase, shared with every clone and subscriber.
     state: Arc<watch::Sender<LifecyclePhase>>,
 }
 
 impl Default for LifecycleHandle {
+    /// Build a handle in the initializing phase, like [`LifecycleHandle::new`].
     fn default() -> Self {
         Self::new()
     }
@@ -88,19 +79,19 @@ impl LifecycleHandle {
     }
 
     /// Publish serving after all required startup work has succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LifecycleError::ShutdownStarted`] once shutdown has begun.
     pub fn mark_serving(&self) -> Result<(), LifecycleError> {
-        if matches!(self.phase(), LifecyclePhase::Draining | LifecyclePhase::Stopped) {
-            return Err(LifecycleError::ShutdownStarted);
-        }
-        _ = self.transition(|phase| match phase {
-            LifecyclePhase::Initializing => Some(LifecyclePhase::Serving),
-            LifecyclePhase::Serving => Some(LifecyclePhase::Serving),
+        let changed = self.transition(|phase| match phase {
+            LifecyclePhase::Initializing | LifecyclePhase::Serving => Some(LifecyclePhase::Serving),
             LifecyclePhase::Draining | LifecyclePhase::Stopped => None,
         });
-        if matches!(self.phase(), LifecyclePhase::Draining | LifecyclePhase::Stopped) {
-            Err(LifecycleError::ShutdownStarted)
-        } else {
+        if changed || self.phase() == LifecyclePhase::Serving {
             Ok(())
+        } else {
+            Err(LifecycleError::ShutdownStarted)
         }
     }
 
@@ -114,12 +105,7 @@ impl LifecycleHandle {
 
     /// Mark shutdown complete.
     pub fn mark_stopped(&self) {
-        self.transition(|phase| match phase {
-            LifecyclePhase::Stopped => Some(LifecyclePhase::Stopped),
-            LifecyclePhase::Initializing | LifecyclePhase::Serving | LifecyclePhase::Draining => {
-                Some(LifecyclePhase::Stopped)
-            },
-        });
+        _ = self.transition(|_phase| Some(LifecyclePhase::Stopped));
     }
 
     /// Apply one state transition through the watch channel's synchronized value.
@@ -136,6 +122,8 @@ impl LifecycleHandle {
 }
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::unwrap_used, reason = "tests use unwrap for brevity")]
 mod tests {
     use super::*;
 
@@ -144,7 +132,7 @@ mod tests {
         let lifecycle = LifecycleHandle::new();
 
         assert_eq!(lifecycle.phase(), LifecyclePhase::Initializing);
-        assert!(lifecycle.mark_serving().is_ok());
+        lifecycle.mark_serving().unwrap();
         assert_eq!(lifecycle.phase(), LifecyclePhase::Serving);
     }
 
@@ -174,7 +162,7 @@ mod tests {
         let clone = lifecycle.clone();
         let mut receiver = clone.subscribe();
 
-        assert!(lifecycle.mark_serving().is_ok());
+        lifecycle.mark_serving().unwrap();
         assert!(receiver.has_changed().is_ok_and(|changed| changed));
         assert_eq!(*receiver.borrow_and_update(), LifecyclePhase::Serving);
         assert_eq!(clone.phase(), LifecyclePhase::Serving);

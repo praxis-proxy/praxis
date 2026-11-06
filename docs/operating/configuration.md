@@ -181,7 +181,10 @@ without the other; the two listeners must not overlap.
   an upstream cluster is degraded. Set `readiness: upstreams`
   to return `503 SERVICE UNAVAILABLE` when any checked cluster
   has zero healthy endpoints. Without health checks, both modes
-  return `{"status":"ok"}`.
+  return `{"status":"ok"}`. While the replica is initializing,
+  draining, or stopped, `/ready` returns `503` with
+  `{"status":"initializing"}`, `{"status":"draining"}`, or
+  `{"status":"stopped"}`.
 - `/metrics` returns Prometheus text exposition format
   with HTTP request metrics (`praxis_http_requests_total`,
   `praxis_http_request_duration_seconds`). When

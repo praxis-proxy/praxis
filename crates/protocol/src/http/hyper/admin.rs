@@ -147,6 +147,7 @@ pub fn add_health_endpoint_with_pipelines(
 }
 
 /// Add health and metrics endpoints with readiness policy and lifecycle state.
+#[expect(clippy::too_many_arguments, reason = "endpoint wiring mirrors its configuration")]
 pub fn add_health_endpoint_with_pipelines_and_policy(
     runtime: &mut HyperRuntime,
     metrics_addr: &str,
@@ -324,18 +325,22 @@ struct HyperAdminRequest {
 }
 
 impl AdminRequest for HyperAdminRequest {
+    /// Return the request method.
     fn method(&self) -> &Method {
         &self.parts.method
     }
 
+    /// Return the request target.
     fn uri(&self) -> &Uri {
         &self.parts.uri
     }
 
+    /// Return the request headers.
     fn headers(&self) -> &HeaderMap {
         &self.parts.headers
     }
 
+    /// Read the request body up to `limit` bytes.
     async fn read_body(&mut self, limit: usize) -> Result<Vec<u8>, BodyReadError> {
         let mut buf = Vec::new();
 
@@ -390,7 +395,7 @@ mod tests {
     };
 
     use praxis_core::{
-        config::{Config, ReadinessMode},
+        config::Config,
         health::{ClusterHealthEntry, EndpointHealth},
         kv::KvStoreRegistry,
         server::ServerRuntime as _,
@@ -482,6 +487,40 @@ mod tests {
             "/ready must be 503 while the cluster has no healthy endpoint"
         );
         assert_eq!(recovered.status, 200, "/ready must be 200 once the endpoint recovers");
+    }
+
+    #[test]
+    fn readiness_reports_lifecycle_phases_while_the_listener_serves() {
+        let addr = free_addr();
+        let lifecycle = LifecycleHandle::new();
+        let mut runtime = empty_runtime();
+        add_health_endpoint_with_pipelines_and_policy(
+            &mut runtime,
+            &addr,
+            None,
+            false,
+            None,
+            ReadinessMode::Serving,
+            Some(lifecycle.clone()),
+        );
+        let _running = start(runtime);
+
+        let initializing = get(&addr, "/ready");
+        lifecycle.mark_serving().unwrap();
+        let serving = get(&addr, "/ready");
+        lifecycle.begin_drain();
+        let draining = get(&addr, "/ready");
+        lifecycle.mark_stopped();
+        let stopped = get(&addr, "/ready");
+
+        assert_eq!(initializing.status, 503, "an initializing server must not report ready");
+        assert_eq!(initializing.body, br#"{"status":"initializing"}"#);
+        assert_eq!(serving.status, 200, "a serving server must report ready");
+        assert_eq!(serving.body, br#"{"status":"ok"}"#);
+        assert_eq!(draining.status, 503, "a draining server must not report ready");
+        assert_eq!(draining.body, br#"{"status":"draining"}"#);
+        assert_eq!(stopped.status, 503, "a stopped server must not report ready");
+        assert_eq!(stopped.body, br#"{"status":"stopped"}"#);
     }
 
     #[test]

@@ -323,8 +323,6 @@ fn detect_admin_changes(old: &Config, new: &Config) {
             new_metrics_address = ?new.admin.metrics_address,
             old_verbose = ?old.admin.verbose,
             new_verbose = ?new.admin.verbose,
-            old_readiness = ?old.admin.readiness,
-            new_readiness = ?new.admin.readiness,
             "admin configuration changed; requires restart (listener addresses bind at startup)"
         );
     }

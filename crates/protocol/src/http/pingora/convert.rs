@@ -180,7 +180,8 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
         debug!(error = %e, "failed to write rejection response header");
         return;
     }
-    if has_body && let Some(body) = rejection.body
+    if has_body
+        && let Some(body) = rejection.body
         && let Err(e) = session.write_response_body(Some(body), true).await
     {
         debug!(error = %e, "failed to write rejection response body");
