@@ -78,6 +78,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- Granular Policy Engine Cargo features. `policy-builtins` (on by default)
+  is the complete bundle; a `--no-default-features` build names
+  `policy-engine` or individual builtins (`policy-api-key`, `policy-jwt`,
+  `policy-oauth`, `policy-cedar`, ...) plus exactly one shared crypto backend,
+  `policy-crypto-default` or `policy-crypto-fips`. A policy naming a plugin
+  kind the build did not compile in fails to load. `praxis --version` lists
+  the compiled Policy features. See `docs/operating/build-features.md`.
+- The default build includes Policy's experimental rate limiter
+  (`ratelimit/limitador`, feature `policy-experimental-ratelimit`). It counts
+  nothing unless a policy declares the plugin and lists it under
+  `rate_limits:`, and loading such a policy logs a warning at startup and on
+  every reload. Because the default build now carries an experimental
+  feature, it logs the experimental-features warning at startup, which now
+  names each experimental feature compiled in.
 - The policy filter registers the `env` secret provider, so a policy
   document's `secrets:` block using `env` now loads instead of failing at
   startup. Any other provider kind, including `file` and `vault`, is still

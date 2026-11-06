@@ -180,6 +180,9 @@ mod common_message_format;
 mod config;
 mod dispatch;
 mod error;
+#[cfg(test)]
+#[expect(clippy::expect_used, clippy::panic, reason = "tests")]
+mod feature_tests;
 mod filter;
 mod host_plugins;
 mod json_rpc;
@@ -191,6 +194,7 @@ pub use filter::PolicyFilter;
 pub use host_plugins::{PolicyPluginFactoryFn, register_policy_plugin_factory};
 
 #[cfg(test)]
+#[cfg(feature = "policy-builtins")]
 #[expect(
     clippy::unwrap_used,
     clippy::expect_used,

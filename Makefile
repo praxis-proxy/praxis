@@ -155,12 +155,21 @@ check: ## cargo check of the default and lean feature sets
 # enabled) is caught on every PR rather than only in the all-on or all-off
 # build.
 check-features: ## check each optional feature on its own
-	@for f in policy-engine config-reload admin-api otel basic-auth-filter \
+	@for f in policy-builtins config-reload admin-api otel basic-auth-filter \
 	          cloud-events-filter upstream-binding iterative-request-router \
 	          router-json-aliases slow-start bound-upstream-request-body chain-binding spiffe \
 	          access-log-syslog hedged-requests tls-health-check forward-proxy; do \
 		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f --all-targets =="; \
 		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f" --all-targets || exit 1; \
+	done
+	# Policy needs exactly one shared crypto backend, so each granular
+	# selection is checked with the ordinary one. The FIPS backend and the
+	# OpenSSL JWT plugin are checked by the FIPS targets.
+	@for f in policy-engine policy-api-key policy-jwt policy-oauth policy-delegator-vault \
+	          policy-elicitation-ciba policy-cedar policy-cel policy-opa policy-valkey \
+	          policy-secrets-vault policy-experimental-ratelimit; do \
+		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f,policy-crypto-default --all-targets =="; \
+		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f,policy-crypto-default" --all-targets || exit 1; \
 	done
 	# The other backend, on its own: the loop above always names pingora, and
 	# the two backends refuse to build together.
@@ -290,8 +299,9 @@ container-run: | require-container-engine ## run the container image (host netwo
 # off what is known not to be FIPS 140-3 compliant yet, so nobody has to
 # know which features to pick:
 #
-#   policy-engine   praxis-policy carries its own cryptography (sha2, hmac,
-#                   jsonwebtoken on aws-lc-rs); off until it is ported
+#   policy-*        the policy filter and its plugins; the ordinary bundle
+#                   (`policy-builtins`) links non-FIPS crypto (RustCrypto,
+#                   jsonwebtoken on aws-lc-rs), so no Policy feature is on
 #
 # Everything else in the default set stays on (config-reload, admin-api).
 # FIPS_FEATURES is the single place this is defined; Containerfile.fips
@@ -674,7 +684,7 @@ fips-version: ## print the version the FIPS image is tagged with
 # docs/architecture/hyper-backend.md.
 
 BACKEND                 ?= pingora
-HYPER_FEATURES          := hyper,config-reload,admin-api,policy-engine
+HYPER_FEATURES          := hyper,config-reload,admin-api,policy-builtins
 HYPER_FEATURES_QUALIFIED := $(subst $(_COMMA),$(_COMMA)praxis-proxy/,praxis-proxy/$(HYPER_FEATURES))
 HYPER_TARGET_DIR        ?= target/hyper
 HYPER_CARGO_ARGS        := -p praxis-proxy --no-default-features --features $(HYPER_FEATURES) --target-dir $(HYPER_TARGET_DIR)
@@ -682,7 +692,8 @@ HYPER_CARGO_ARGS        := -p praxis-proxy --no-default-features --features $(HY
 # crates, from the same `cargo xtask features` listing the standard targets
 # use (see "Feature lists" below), excluding Pingora-only features.
 # TLS health probes select Pingora's transport and cannot join a hyper build.
-hyper-suite-features = $(shell $(XTASK_FIPS) features --except pingora --except tls-health-check $(foreach pkg,$(1),-p $(pkg)))
+hyper-suite-features = $(shell $(XTASK_FIPS) features --except pingora --except tls-health-check \
+	$(POLICY_FIPS_EXCEPT) $(foreach pkg,$(1),-p $(pkg)))
 HYPER_BIN               := PRAXIS_BIN=$(abspath $(HYPER_TARGET_DIR))/debug/praxis
 # The parity record: tests that do not pass on hyper yet, one per line with
 # its bucket in a comment, skipped by name so the suites stay untouched. A
@@ -763,13 +774,17 @@ test-conformance-hyper: build-hyper $(H2SPEC) ## RFC conformance suite on hyper 
 # Feature lists
 # -------------------------------------------------------------------
 #
-# The network backends are mutually exclusive, so --all-features no longer
-# compiles the workspace. `cargo xtask features` lists every feature of the
-# selected packages except the backend named here, from cargo metadata, so a
-# feature added to any manifest is picked up without editing this file. The
-# variables expand when a recipe runs, not when make parses this file.
+# The network backends are mutually exclusive, and so are Policy's two crypto
+# backends and two JWT plugins, so --all-features does not compile the
+# workspace. `cargo xtask features` lists every feature of the selected
+# packages except the ones named here, from cargo metadata, so a feature added
+# to any manifest is picked up without editing this file. The FIPS-only Policy
+# selections are left to the FIPS targets. The variables expand when a recipe
+# runs, not when make parses this file.
 
-XTASK_FEATURES   = $(XTASK_FIPS) features --except hyper
+POLICY_FIPS_EXCEPT = --except policy-crypto-fips --except policy-jwt-openssl-fips \
+	--except policy-api-key-fips --except policy-jwt-fips
+XTASK_FEATURES   = $(XTASK_FIPS) features --except hyper $(POLICY_FIPS_EXCEPT)
 ALL_FEATURES     = $(shell $(XTASK_FEATURES))
 UNIT_FEATURES    = $(shell $(XTASK_FEATURES) --exclude praxis-tests-schema --exclude praxis-tests-security \
 	--exclude praxis-tests-resilience --exclude praxis-tests-integration --exclude praxis-tests-conformance \

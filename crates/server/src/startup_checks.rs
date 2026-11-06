@@ -413,10 +413,51 @@ fn warn_sink_path_symlink(path: &str) {
 #[cfg(not(unix))]
 pub(crate) fn warn_insecure_sink_file_permissions(_config: &Config) {}
 
-/// Logs a warning when the server includes any experimental features.
+/// Every experimental Cargo feature of this crate, paired with whether this
+/// build compiled it in. A feature that sets the `experimental` marker in
+/// `Cargo.toml` belongs here.
+#[cfg(any(test, feature = "experimental"))]
+const EXPERIMENTAL_FEATURES: &[(&str, bool)] = &[
+    ("access-log-syslog", cfg!(feature = "access-log-syslog")),
+    ("basic-auth-filter", cfg!(feature = "basic-auth-filter")),
+    (
+        "bound-upstream-request-body",
+        cfg!(feature = "bound-upstream-request-body"),
+    ),
+    ("chain-binding", cfg!(feature = "chain-binding")),
+    ("cloud-events-filter", cfg!(feature = "cloud-events-filter")),
+    ("forward-proxy", cfg!(feature = "forward-proxy")),
+    ("hedged-requests", cfg!(feature = "hedged-requests")),
+    ("hyper", cfg!(feature = "hyper")),
+    ("iterative-request-router", cfg!(feature = "iterative-request-router")),
+    (
+        "policy-experimental-ratelimit",
+        cfg!(feature = "policy-experimental-ratelimit"),
+    ),
+    ("router-json-aliases", cfg!(feature = "router-json-aliases")),
+    ("slow-start", cfg!(feature = "slow-start")),
+    ("spiffe", cfg!(feature = "spiffe")),
+    ("tls-health-check", cfg!(feature = "tls-health-check")),
+    ("upstream-binding", cfg!(feature = "upstream-binding")),
+];
+
+/// Logs a warning naming the experimental features this server includes.
 #[cfg(feature = "experimental")]
 pub(crate) fn warn_experimental_features() {
-    tracing::warn!("experimental features are enabled that should not be used in production");
+    tracing::warn!(
+        "experimental features are enabled that should not be used in production: {}",
+        compiled_experimental_features().join(", ")
+    );
+}
+
+/// The experimental features compiled into this build, in name order.
+#[cfg(feature = "experimental")]
+fn compiled_experimental_features() -> Vec<&'static str> {
+    EXPERIMENTAL_FEATURES
+        .iter()
+        .filter(|(_, compiled)| *compiled)
+        .map(|(name, _)| *name)
+        .collect()
 }
 
 /// Warn when the admin API is configured but omitted from this build.
@@ -1070,6 +1111,52 @@ insecure_options:
         );
     }
 
+    #[cfg(feature = "experimental")]
+    #[test]
+    fn the_experimental_warning_names_every_compiled_experimental_feature() {
+        let warnings = capture_warnings(super::warn_experimental_features);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one experimental warning expected, got: {warnings:?}"
+        );
+        let names = super::compiled_experimental_features();
+        assert!(
+            !names.is_empty(),
+            "the `experimental` marker implies a compiled experimental feature"
+        );
+        for name in names {
+            assert!(
+                warnings[0].contains(name),
+                "the warning must name `{name}`: {:?}",
+                warnings[0]
+            );
+        }
+    }
+
+    #[cfg(feature = "policy-experimental-ratelimit")]
+    #[test]
+    fn the_experimental_warning_names_the_policy_limiter() {
+        let warnings = capture_warnings(super::warn_experimental_features);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("policy-experimental-ratelimit")),
+            "a build with the Policy limiter must name it in the experimental warning: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn every_experimental_manifest_feature_is_listed() {
+        let listed: Vec<&str> = super::EXPERIMENTAL_FEATURES.iter().map(|(name, _)| *name).collect();
+        let marked = features_marked_experimental();
+        assert!(!marked.is_empty(), "the manifest scan found no experimental feature");
+        assert_eq!(
+            marked, listed,
+            "EXPERIMENTAL_FEATURES must list exactly the features that enable `experimental`"
+        );
+    }
+
     #[cfg(not(feature = "policy-engine"))]
     #[test]
     fn a_policy_free_registry_does_not_block_fips() {
@@ -1246,6 +1333,36 @@ filter_chains:
 "#,
         ))
         .expect("test config should parse")
+    }
+
+    /// The features in this crate's manifest whose declaration names the
+    /// `experimental` marker, sorted. Declarations may span several lines.
+    fn features_marked_experimental() -> Vec<String> {
+        let manifest = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        let mut declarations: Vec<(String, String)> = Vec::new();
+        for line in manifest
+            .lines()
+            .skip_while(|line| line.trim() != "[features]")
+            .skip(1)
+            .take_while(|line| !line.starts_with('['))
+            .filter(|line| !line.trim_start().starts_with('#'))
+        {
+            match line.split_once(" = ") {
+                Some((name, rhs)) if !line.starts_with(' ') => declarations.push((name.to_owned(), rhs.to_owned())),
+                _ => {
+                    if let Some((_, rhs)) = declarations.last_mut() {
+                        rhs.push_str(line);
+                    }
+                },
+            }
+        }
+        let mut marked: Vec<String> = declarations
+            .into_iter()
+            .filter(|(name, rhs)| name != "experimental" && rhs.contains("\"experimental\""))
+            .map(|(name, _)| name)
+            .collect();
+        marked.sort();
+        marked
     }
 
     fn capture_warnings<F: FnOnce()>(run: F) -> Vec<String> {

@@ -100,9 +100,12 @@ enum GatedIdentity {
 /// request / response body rewriting. Content scanning is a host plugin
 /// the engine dispatches, not a bundled one.
 ///
-/// Registered under the YAML filter name `policy`. The `policy-engine`
-/// cargo feature is on by default; `--no-default-features` leaves the
-/// filter out.
+/// Registered under the YAML filter name `policy`. The default build
+/// selects `policy-builtins`, which registers every Policy builtin plugin
+/// kind, including the experimental `ratelimit/limitador`. A narrower build
+/// names `policy-engine` or individual `policy-*` builtins plus one crypto
+/// backend; a policy naming a plugin kind the build did not compile in
+/// fails to load. `--no-default-features` leaves the filter out.
 ///
 /// A single request can carry multiple identity sources — user JWT in
 /// `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in
@@ -313,7 +316,7 @@ pub struct PolicyFilter {
     response_dispatch_timeout: std::time::Duration,
     /// The transport installed on the engine, kept so tests can see which
     /// connector policy calls go through.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     transport: Arc<PolicyHttpTransport>,
 }
 
@@ -378,7 +381,7 @@ impl PolicyFilter {
         })?;
 
         let mgr = Arc::new(PolicyEngine::default());
-        ppe::install_builtins(&mgr);
+        Self::install_plugins(&mgr);
 
         // The lazy connection pool must not bind to the temporary init runtime.
         let transport = Self::http_transport(
@@ -550,6 +553,7 @@ impl PolicyFilter {
             Self::warn_on_inference_gaps(&policy_config, http_global, &cfg, llm_post);
         }
         Self::warn_on_inert_inference_defaults(&policy_config, llm_routes);
+        warn_on_rate_limits(&policy_config, &cfg.config_path);
         Self::warn_on_entity_response_gaps(&cfg, mcp_post_tool, mcp_post_prompt_resource);
 
         // Reject an `http:` route that no classified request can reach.
@@ -591,32 +595,32 @@ impl PolicyFilter {
             llm_request_mutator_warned: AtomicBool::new(false),
             llm_response_mutator_warned: AtomicBool::new(false),
             response_dispatch_timeout: dispatch_timeout,
-            #[cfg(test)]
+            #[cfg(all(test, feature = "policy-builtins"))]
             transport,
         })
     }
 
     /// Test accessor for the transport installed on the engine.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn transport(&self) -> &PolicyHttpTransport {
         &self.transport
     }
 
     /// Test accessor for the hook the response half dispatches, if any.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn response_hook(&self) -> Option<&'static str> {
         self.response_hook
     }
 
     /// Test accessor for the shape derived from the loaded policy:
     /// `(http_global, entity_routes)`.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn derived_shape(&self) -> (bool, bool) {
         (self.http_global, self.entity_routes)
     }
 
     /// Return `(llm_routes, llm_post)` for tests.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn derived_llm_shape(&self) -> (bool, bool) {
         (self.llm_routes, self.llm_post)
     }
@@ -1048,6 +1052,45 @@ impl PolicyFilter {
     /// extension is absent.
     fn publish_authenticated_identity(ctx: &mut HttpFilterContext<'_>, identity: &IdentityPayload) {
         Self::publish_identity_projection(ctx, Self::authenticated_identity(identity));
+    }
+
+    /// Register the compiled builtin factories and the APL visitor on `mgr`.
+    ///
+    /// PPE exposes `install_builtins` only when at least one by-kind builtin is
+    /// compiled; an engine-only build installs the bare APL visitor so a policy
+    /// naming a builtin `kind:` fails to load instead of being skipped.
+    /// `secrets-vault` is not a by-kind builtin and does not count.
+    fn install_plugins(mgr: &Arc<PolicyEngine>) {
+        #[cfg(any(
+            feature = "policy-builtins",
+            feature = "policy-api-key",
+            feature = "policy-jwt",
+            feature = "policy-jwt-openssl-fips",
+            feature = "policy-oauth",
+            feature = "policy-delegator-vault",
+            feature = "policy-elicitation-ciba",
+            feature = "policy-cedar",
+            feature = "policy-cel",
+            feature = "policy-opa",
+            feature = "policy-valkey",
+            feature = "policy-experimental-ratelimit",
+        ))]
+        ppe::install_builtins(mgr);
+        #[cfg(not(any(
+            feature = "policy-builtins",
+            feature = "policy-api-key",
+            feature = "policy-jwt",
+            feature = "policy-jwt-openssl-fips",
+            feature = "policy-oauth",
+            feature = "policy-delegator-vault",
+            feature = "policy-elicitation-ciba",
+            feature = "policy-cedar",
+            feature = "policy-cel",
+            feature = "policy-opa",
+            feature = "policy-valkey",
+            feature = "policy-experimental-ratelimit",
+        )))]
+        let _visitor = ppe::register_apl(mgr, ppe::AplOptions::in_process());
     }
 
     /// Build the proxy-backed transport with the configured destination policy.
@@ -2684,6 +2727,30 @@ pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extension
     }
 
     count
+}
+
+/// Warn when the loaded policy declares `rate_limits:`, which runs the
+/// experimental limiter. Runs on every construction, so on every reload too.
+fn warn_on_rate_limits(policy_config: &ppe::praxis_policy_core::config::PolicyConfig, config_path: &str) {
+    if declares_rate_limits(policy_config) {
+        tracing::warn!(
+            target: "policy.filter",
+            config_path,
+            "policy declares `rate_limits:`; Policy rate limiting is experimental and outside its \
+             semver guarantees, and should not be relied on in production",
+        );
+    }
+}
+
+/// Whether any layer of `policy_config` declares a `rate_limits:` block.
+pub(super) fn declares_rate_limits(policy_config: &ppe::praxis_policy_core::config::PolicyConfig) -> bool {
+    let global = &policy_config.global;
+    // Parsing moves top-level `groups:` into `global.bundles`; read both.
+    global.rate_limits.is_some()
+        || global.bundles.values().any(|group| group.rate_limits.is_some())
+        || global.defaults.values().any(|group| group.rate_limits.is_some())
+        || policy_config.groups.values().any(|group| group.rate_limits.is_some())
+        || policy_config.routes.iter().any(|route| route.rate_limits.is_some())
 }
 
 /// Map a Policy credential location to the HTTP header that can be stripped.

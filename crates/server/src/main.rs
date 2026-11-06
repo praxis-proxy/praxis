@@ -32,7 +32,11 @@ use tracing::info;
 
 /// Cloud and AI-native proxy server.
 #[derive(Parser)]
-#[command(name = "praxis", version = env!("PRAXIS_VERSION"))]
+#[command(
+    name = "praxis",
+    version = env!("PRAXIS_VERSION"),
+    long_version = concat!(env!("PRAXIS_VERSION"), "\npolicy features: ", env!("PRAXIS_POLICY_FEATURES"))
+)]
 struct Cli {
     /// Path to the YAML configuration file.
     #[arg(short = 'c', long = "config")]

@@ -34,7 +34,7 @@ schema, security, integration and resilience suites (and
 `test-conformance-fips` the conformance suite) with `--no-default-features`,
 so the proxy each suite starts in process is built exactly as the FIPS binary
 is: the workspace declares the binary crate without its defaults, and every
-test crate opts into `policy-engine` through its own default feature. The
+test crate opts into `policy-builtins` through its own default feature. The
 tests that spawn the binary get the FIPS build through `PRAXIS_BIN`
 (`make build-fips` produces it first) rather than the standard binary the
 harness would otherwise build. `cargo tree -e normal,dev --no-default-features

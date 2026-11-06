@@ -101,7 +101,7 @@ impl PolicyHttpTransport {
     }
 
     /// Test accessor for the connector this transport was handed, if any.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn shared(&self) -> Option<&SubRequestConnector> {
         self.shared.as_ref()
     }
