@@ -29,6 +29,12 @@ const IO_TIMEOUT: Duration = Duration::from_secs(20);
 /// backends answer within seconds when the proxy admits them at all.
 const IN_FLIGHT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Pause after a failed exchange so a persistent outage cannot spin the loop.
+const RECONNECT_BACKOFF: Duration = Duration::from_millis(50);
+
+/// Longest single sleep while waiting out [`RECONNECT_BACKOFF`].
+const RECONNECT_POLL: Duration = Duration::from_millis(10);
+
 // -----------------------------------------------------------------------------
 // LoadReport
 // -----------------------------------------------------------------------------
@@ -377,7 +383,7 @@ fn healthy_response(response: &str) -> bool {
 
 /// Runs prior-knowledge HTTP/2 requests until stopped.
 fn http2_worker(stop: &AtomicBool, report: &ContinuousLoadReport, endpoint: &str) {
-    let runtime = http2_runtime();
+    let runtime = worker_runtime();
     let mut client = None;
     let mut replayed = false;
     let mut replay_pending = false;
@@ -399,12 +405,26 @@ fn http2_worker(stop: &AtomicBool, report: &ContinuousLoadReport, endpoint: &str
                 replayed = true;
                 replay_pending = true;
             },
-            Ok(Err(error)) => {
-                report.failure(format!("HTTP/2 transport: {error}"));
-                replayed = false;
-            },
-            Err(error) => report.failure(format!("HTTP/2 timeout: {error}")),
+            Ok(Err(error)) => record_http2_failure(report, stop, &mut replayed, format!("HTTP/2 transport: {error}")),
+            Err(error) => record_http2_failure(report, stop, &mut replayed, format!("HTTP/2 timeout: {error}")),
         }
+    }
+}
+
+/// Counts a failed exchange and pauses before the worker reconnects.
+fn record_http2_failure(report: &ContinuousLoadReport, stop: &AtomicBool, replayed: &mut bool, message: String) {
+    *replayed = false;
+    report.failure(message);
+    reconnect_backoff(stop);
+}
+
+/// Waits out [`RECONNECT_BACKOFF`], returning early once `stop` is set.
+fn reconnect_backoff(stop: &AtomicBool) {
+    let mut remaining = RECONNECT_BACKOFF;
+    while !remaining.is_zero() && !stop.load(Ordering::Relaxed) {
+        let slice = remaining.min(RECONNECT_POLL);
+        std::thread::sleep(slice);
+        remaining = remaining.saturating_sub(slice);
     }
 }
 
@@ -436,8 +456,8 @@ fn unprocessed_http2_goaway(error: &(dyn std::error::Error + Send + Sync + 'stat
         .is_some_and(|error| error.is_remote() && error.is_go_away() && error.reason() == Some(h2::Reason::NO_ERROR))
 }
 
-/// Builds the single-threaded runtime used by an HTTP/2 load worker.
-fn http2_runtime() -> tokio::runtime::Runtime {
+/// Builds the single-threaded runtime shared by a continuous-load worker.
+fn worker_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -476,8 +496,9 @@ fn https_worker(
     endpoint: &str,
     client_config: &Arc<rustls::ClientConfig>,
 ) {
+    let runtime = worker_runtime();
     while !stop.load(Ordering::Relaxed) {
-        let result = crate::net::https_get_attempt(endpoint, "/healthy", client_config);
+        let result = crate::net::https_get_attempt_on(&runtime, endpoint, "/healthy", client_config);
         match result {
             Ok((status, body)) if status == 200 && body == "ok" => {
                 report.https.fetch_add(1, Ordering::Relaxed);
@@ -615,7 +636,7 @@ mod continuous_tests {
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().expect("accept");
             stream.set_nonblocking(true).expect("nonblocking socket");
-            http2_runtime().block_on(async {
+            worker_runtime().block_on(async {
                 let stream = tokio::net::TcpStream::from_std(stream).expect("Tokio socket");
                 let mut connection = h2::server::handshake(stream).await.expect("handshake");
                 for index in 0..3 {
@@ -785,7 +806,7 @@ mod continuous_tests {
             let stop = Arc::new(AtomicBool::new(false));
             let server_stop = Arc::clone(&stop);
             let server = std::thread::spawn(move || {
-                http2_runtime().block_on(async {
+                worker_runtime().block_on(async {
                     for index in 1..=rejections {
                         let (stream, _) = listener.accept().expect("accept GOAWAY connection");
                         stream.set_nonblocking(true).expect("nonblocking stream");
@@ -840,7 +861,7 @@ mod continuous_tests {
         let stop = Arc::new(AtomicBool::new(false));
         let server_stop = Arc::clone(&stop);
         let server = std::thread::spawn(move || {
-            http2_runtime().block_on(async {
+            worker_runtime().block_on(async {
                 let (stream, _) = listener.accept().expect("accept");
                 stream.set_nonblocking(true).expect("nonblocking stream");
                 let stream = tokio::net::TcpStream::from_std(stream).expect("Tokio stream");
@@ -882,6 +903,24 @@ mod continuous_tests {
             server.join().expect("server");
             assert_eq!(report.failures.load(Ordering::SeqCst), 1);
         }
+    }
+
+    #[test]
+    fn reconnect_backoff_stops_early_and_otherwise_waits() {
+        let stopped = AtomicBool::new(true);
+        let started = std::time::Instant::now();
+        reconnect_backoff(&stopped);
+        assert!(
+            started.elapsed() < RECONNECT_BACKOFF,
+            "a stopped worker must not wait to reconnect"
+        );
+        let running = AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        reconnect_backoff(&running);
+        assert!(
+            started.elapsed() >= RECONNECT_BACKOFF,
+            "a running worker must back off before reconnecting"
+        );
     }
 }
 

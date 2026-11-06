@@ -494,9 +494,25 @@ pub fn https_get_attempt(
     path: &str,
     client_config: &Arc<ClientConfig>,
 ) -> Result<(u16, String), Box<dyn std::error::Error + Send + Sync>> {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    https_get_attempt_on(&runtime, addr, path, client_config)
+}
 
-    let request = rt.block_on(async {
+/// Perform one HTTPS GET on a caller-owned runtime.
+///
+/// Continuous load drivers own a single runtime so per-request setup does not
+/// dominate the load they generate.
+///
+/// # Errors
+///
+/// Returns an error when the TLS connection or HTTP/2 exchange fails.
+pub fn https_get_attempt_on(
+    runtime: &tokio::runtime::Runtime,
+    addr: &str,
+    path: &str,
+    client_config: &Arc<ClientConfig>,
+) -> Result<(u16, String), Box<dyn std::error::Error + Send + Sync>> {
+    let request = runtime.block_on(async {
         Box::pin(tokio::time::timeout(
             DEFAULT_HTTP_TIMEOUT,
             h2_get(addr, path, client_config),

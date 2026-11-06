@@ -274,6 +274,7 @@ fn check_pod_exit(
 
 /// Command-line options for `cargo xtask rollout`.
 #[derive(Debug, Parser)]
+#[expect(clippy::struct_excessive_bools, reason = "each command-line flag is independent")]
 pub struct Args {
     /// KIND cluster name.
     #[arg(long, default_value = "praxis-rollout")]
@@ -302,6 +303,10 @@ pub struct Args {
     /// Keep the KIND cluster after the run.
     #[arg(long)]
     keep_cluster: bool,
+
+    /// Reuse an existing KIND cluster, which this run mutates and leaves behind.
+    #[arg(long)]
+    reuse_cluster: bool,
 
     /// Reuse the local image, skipping the build but loading it into KIND.
     #[arg(long)]
@@ -338,6 +343,7 @@ pub fn run(args: &Args) -> Result<(), String> {
     check_prerequisites(&engine)?;
     let image = qualified_image(&args.image)?;
     let created_cluster = create_cluster(&args.cluster_name, &engine)?;
+    require_owned_cluster(created_cluster, args.reuse_cluster, &args.cluster_name)?;
     let mut cluster_cleanup = ClusterCleanup {
         cluster: args.cluster_name.clone(),
         engine: engine.clone(),
@@ -470,6 +476,9 @@ fn selected_scenarios(requested: &[Scenario]) -> Vec<Scenario> {
 }
 
 /// Deletes the acceptance cluster when an early return leaves it behind.
+///
+/// Only a cluster this run created is ever deleted; a reused cluster is left
+/// for its owner.
 struct ClusterCleanup {
     /// KIND cluster to delete.
     cluster: String,
@@ -614,6 +623,16 @@ nodes:
     Ok(true)
 }
 
+/// Refuses to mutate a cluster this run did not create unless asked to.
+fn require_owned_cluster(created: bool, reuse: bool, name: &str) -> Result<(), String> {
+    if created || reuse {
+        return Ok(());
+    }
+    Err(format!(
+        "KIND cluster {name} already exists; pass --reuse-cluster to run against it or choose a new --cluster-name"
+    ))
+}
+
 /// Uses the selected provider for every KIND operation, including image loads.
 fn kind_command(engine: &str) -> Command {
     let mut command = Command::new("kind");
@@ -654,6 +673,8 @@ fn build_and_load_images(build: &ImageBuild<'_>) -> Result<(String, String), Str
         ]))?;
     }
     if build.skip_build {
+        require_local_image(build.engine, build.image)?;
+        require_local_image(build.engine, build.operator_image)?;
         run_command(Command::new(build.engine).args(["tag", build.image, &run_image]))?;
         run_command(Command::new(build.engine).args(["tag", build.image, &next_image]))?;
     } else {
@@ -663,6 +684,24 @@ fn build_and_load_images(build: &ImageBuild<'_>) -> Result<(String, String), Str
         run_command(kind_command(build.engine).args(["load", "docker-image", loaded_image, "--name", build.cluster]))?;
     }
     Ok((run_image, next_image))
+}
+
+/// Requires an image built by an earlier run to exist in the local store.
+///
+/// `--skip-build` reuses tags from a previous run, so a stale or missing tag
+/// must fail here rather than as an opaque `kind load` or `ImagePull` error.
+fn require_local_image(engine: &str, image: &str) -> Result<(), String> {
+    let inspected = Command::new(engine)
+        .args(["image", "inspect", image])
+        .output()
+        .map_err(|error| format!("inspect local image {image}: {error}"))?;
+    if inspected.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "--skip-build requires {image} in the local image store: {}",
+        String::from_utf8_lossy(&inspected.stderr).trim()
+    ))
 }
 
 /// Gives an image per-run tags so Kubernetes sees a new pod template.
@@ -1070,6 +1109,12 @@ fn drain_node(cluster: &str) -> Result<(), String> {
     if node.is_empty() {
         return Err("no worker hosting a Praxis pod found".to_owned());
     }
+    drain_and_uncordon(cluster, node)?;
+    wait_for_ready_proxy_replicas(cluster)
+}
+
+/// Drains one node, always uncordons it, and reports both failures.
+fn drain_and_uncordon(cluster: &str, node: &str) -> Result<(), String> {
     let drained = kubectl(
         cluster,
         [
@@ -1081,9 +1126,12 @@ fn drain_node(cluster: &str) -> Result<(), String> {
         ],
     );
     let uncordoned = kubectl(cluster, ["uncordon", node]);
-    drained?;
-    uncordoned?;
-    wait_for_ready_proxy_replicas(cluster)
+    match (drained, uncordoned) {
+        (Ok(_), Ok(_)) => Ok(()),
+        (Ok(_), Err(error)) => Err(format!("uncordon {node}: {error}")),
+        (Err(error), Ok(_)) => Err(format!("drain {node}: {error}")),
+        (Err(error), Err(uncordon_error)) => Err(format!("drain {node}: {error}; uncordon {node}: {uncordon_error}")),
+    }
 }
 
 /// Scales the test upstream to zero, asserts proxy readiness, and restores it.
@@ -1361,6 +1409,15 @@ mod tests {
             vec![Scenario::ConfigHotReload, Scenario::PodDelete],
             "duplicates must not rerun a stateful scenario or reorder explicit selections"
         );
+    }
+
+    #[test]
+    fn reused_clusters_require_an_explicit_opt_in() {
+        require_owned_cluster(true, false, "fresh").unwrap();
+        require_owned_cluster(true, true, "fresh").unwrap();
+        require_owned_cluster(false, true, "reused").unwrap();
+        let error = require_owned_cluster(false, false, "reused").unwrap_err();
+        assert!(error.contains("--reuse-cluster"), "reuse must be opt-in: {error}");
     }
 
     #[test]
