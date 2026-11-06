@@ -132,22 +132,9 @@ jobs:
       - name: Conformance tests
         run: make test-conformance
 
-  # ----------------------------------------------------------------------------
-  # Supply chain audit
-  # ----------------------------------------------------------------------------
-
-  audit:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Supply chain audit
-        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+  # The supply chain audit is not part of this workflow; `supply-chain.yaml`
+  # runs it on every push to main and on its own daily schedule, and opens a
+  # tracking issue when it fails.
 
   # ----------------------------------------------------------------------------
   # Coverage gate
