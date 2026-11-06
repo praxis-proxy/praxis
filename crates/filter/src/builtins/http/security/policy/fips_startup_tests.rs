@@ -188,6 +188,8 @@ fn child_base_only(mode: HostMode) {
 /// Relaxed defaults must be rejected unless the host still enforces FIPS.
 #[cfg(feature = "policy-jwt-openssl-fips")]
 fn child_without_fips_defaults(mode: HostMode) {
+    let _default_provider = openssl::provider::Provider::load(None, "default").expect("load the default provider");
+
     match mode {
         HostMode::ConfigurableProvider => {
             assert!(
@@ -264,19 +266,14 @@ fn no_provider_conf(dir: &Path) -> PathBuf {
     conf
 }
 
-/// Load both providers without requesting FIPS defaults in the configuration.
+/// Remove FIPS defaults from the supplied configuration.
 #[cfg(feature = "policy-jwt-openssl-fips")]
 fn relaxed_provider_conf(dir: &Path) -> PathBuf {
     let text = std::fs::read_to_string(provider_conf()).expect("read the FIPS provider config");
     let relaxed: String = text
         .lines()
         .filter(|line| !line.trim_start().starts_with("default_properties"))
-        .flat_map(|line| match line.trim() {
-            "[provider_sect]" => vec![line, "default = default_sect"],
-            _ => vec![line],
-        })
         .map(|line| format!("{line}\n"))
-        .chain(["\n[default_sect]\nactivate = 1\n".to_owned()])
         .collect();
     let conf = dir.join("fips-without-defaults.cnf");
     std::fs::write(&conf, relaxed).expect("write the relaxed config");
