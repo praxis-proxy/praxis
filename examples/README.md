@@ -61,6 +61,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [cloud-events-request-complete.yaml](configs/observability/cloud-events-request-complete.yaml) | Publishes a bounded, best-effort CloudEvent when a request ends, including responses that abort after their headers are sent |
 | [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after a final bodyless response or response end-of-stream |
 | [errors-total.yaml](configs/observability/errors-total.yaml) | Prometheus counter for proxy errors classified by cause, covering filter rejections, timeouts, unreachable upstreams and internal faults |
+| [filter-resource-metrics.yaml](configs/observability/filter-resource-metrics.yaml) | Observe active filter hooks and retained body payload bytes while a JSON rewrite buffers a request |
 | [grpc-access-log.yaml](configs/observability/grpc-access-log.yaml) | Logs how each gRPC call ended |
 | [grpc-health-check.yaml](configs/observability/grpc-health-check.yaml) | Probes upstream endpoints with `grpc.health.v1.Health/Check` instead of an HTTP GET |
 | [http-active-requests.yaml](configs/observability/http-active-requests.yaml) | Prometheus gauge for HTTP requests currently in flight per listener |

@@ -40,6 +40,7 @@ impl FilterPipeline {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
             };
+            let _activity = crate::metrics::FilterActivity::new(tcp_filter.name());
             trace!(filter = tcp_filter.name(), "on_connect");
             match tcp_filter.on_connect(ctx).await {
                 Ok(
@@ -75,6 +76,7 @@ impl FilterPipeline {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
             };
+            let _activity = crate::metrics::FilterActivity::new(tcp_filter.name());
             trace!(filter = tcp_filter.name(), "on_disconnect");
             if let Err(e) = tcp_filter.on_disconnect(ctx).await
                 && let Err(closed) = check_failure_mode(tcp_filter.name(), e, "tcp disconnect", pf.failure_mode)

@@ -255,6 +255,27 @@ counter stands on its own as an error denominator
 rather than needing the connect-failure counter added
 in.
 
+### Filter and Body Resource Metrics
+
+`praxis_filter_active{filter}` counts filter hooks currently running or awaiting
+external work. It covers HTTP request, response, head, body, and trailer hooks,
+branch request hooks, and TCP connect/disconnect hooks. Each guard ends with
+its hook, including cancellation and errors. Labels use registered filter
+types, never request paths or client-supplied values.
+
+`praxis_body_buffer_bytes` measures retained payload bytes accumulated by
+`BodyBuffer`. Freezing a buffer transfers its accounting to the `Bytes` owner;
+the gauge decreases only when the final shared owner drops. Cloning a body
+does not double-count its shared payload. Overflow and abandoned buffers
+release their accounting normally. Capacity, allocator overhead, private
+filter allocations, and transport buffers are outside this gauge.
+
+Both gauges are independent of overload flags and filter duration metrics.
+Correlate them with `praxis_http_active_requests`,
+`praxis_tcp_active_connections`, and the optional
+`praxis_filter_duration_seconds` histogram to investigate retained bodies and
+filter concurrency. Active hooks include I/O waits and do not measure CPU time.
+
 ### Overload and Process Metrics
 
 #### `praxis_overload_rejects_total` (counter)
