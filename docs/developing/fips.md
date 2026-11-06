@@ -86,25 +86,38 @@ answers with a chosen `ServerHello` or alert, then watches for the client's
 alert. No cryptography is involved, which is the point: the probes work
 against any listener, including the shipped image, on any host.
 
-**Policy FIPS construction.** `make test-fips-policy-startup` builds the
-filter crate with `policy-jwt-fips,policy-api-key-fips` and runs each Policy
-crypto startup case in a child process with its own `OPENSSL_CONF`, since
-the provider, the default properties and `jsonwebtoken`'s provider are
-fixed once per process. The cases follow the host contract in
-[The policy filter on FIPS](../operating/fips.md#the-policy-filter-on-fips):
-a backend with no SHA-256 fails construction with `policy.crypto_failed`
-(this one needs only OpenSSL's `base` provider and runs anywhere); FIPS JWT
-with the module loaded beside the default provider but without
-`default_properties = fips=yes` fails its config load; a rival
-`jsonwebtoken` provider installed first is refused; and three FIPS JWT
-loads in one process all succeed, as reloads must. The last three need the
-module: `FIPS_POLICY_PROVIDER_CONF` names a config that activates it with
-FIPS defaults, and `test-fips-host` passes
-`xtask/assets/fips/fips-provider.cnf`. Without it each prints
-`fips-startup: skipped <case>` and passes, so the log counts what ran;
-`PRAXIS_FIPS_HOST` turns a missing config into a failure. Praxis adds no
-`default_properties` check of its own: Policy's JWT load enforces it, and
-the filter reports that as a construction error.
+**Policy FIPS construction.** Every run executes four startup scenarios in
+isolated child processes with their own `OPENSSL_CONF`. The expected result
+is explicit and checked against the kernel flag:
+
+| Scenario | Configurable provider, non-FIPS kernel | RHEL FIPS kernel |
+|---|---|---|
+| Base-only config | SHA-256 is unavailable; construction fails with `policy.crypto_failed` | FIPS SHA-256 remains available, MD5 is refused, construction succeeds |
+| JWT config without FIPS defaults | FIPS SHA-256 and MD5 are available; JWT construction rejects non-FIPS defaults | MD5 remains refused; FIPS JWT construction succeeds |
+| Rival `jsonwebtoken` provider | Construction refuses the rival provider | Construction refuses the rival provider |
+| Three JWT loads in one process | All succeed | All succeed |
+
+RHEL automatically activates its FIPS provider and default properties when
+the kernel requires FIPS, even if the supplied config omits them. The tests
+assert the effective crypto state before checking Policy construction.
+
+`make test-fips-policy-provider` runs all four cases in the UBI toolchain
+image on a non-FIPS kernel. The hosted `FIPS` job requires it on every PR
+and push. `make test-fips-host` runs all four on the FIPS runner, alongside
+the unit, integration and conformance suites. `make test-fips-provider`
+also includes the configurable-provider startup checks.
+
+For a direct run inside the toolchain image, use:
+
+```console
+make test-fips-policy-startup FIPS_POLICY_STARTUP_MODE=configurable-provider \
+    FIPS_POLICY_PROVIDER_CONF=xtask/assets/fips/fips-provider.cnf
+```
+
+Use mode `kernel-fips` on the FIPS host. A missing mode, wrong kernel mode,
+missing provider config, ignored test or missing scenario fails the gate.
+There are no successful skips. The tests exercise Policy's existing crypto
+validation; Praxis adds no production crypto checks.
 
 **Policy FIPS profiles.** The default FIPS build leaves Policy out.
 `FIPS_POLICY_PROFILE` opts one in, and every FIPS target honors it: the
@@ -124,9 +137,9 @@ A Policy profile refuses to build its filter without a FIPS provider, so its
 tests need one. `make test-fips-provider FIPS_POLICY_PROFILE=jwt` runs
 `test-fips`, `test-fips-policy-startup` and `test-integration-fips` inside
 the toolchain image with Red Hat's module activated by
-`xtask/assets/fips/fips-provider.cnf`. It works on any host and with docker or
-podman, but the kernel is not in FIPS mode, so `test-fips-host` remains the
-FIPS-host proof. On the host itself those tests check the refusal instead. The
+`xtask/assets/fips/fips-provider.cnf`. It works with docker or podman on a
+non-FIPS kernel, so `test-fips-host` remains the FIPS-host proof. On the host
+itself those tests check the refusal instead. The
 `FIPS Policy profiles` workflow runs the four profiles nightly and on
 dispatch. The JWT example tests sign RS256 and ES256 tokens and DPoP proofs
 at run time with the test-only keys in `tests/integration/fixtures/policy-fips/`;

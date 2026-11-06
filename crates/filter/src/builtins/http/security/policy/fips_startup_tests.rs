@@ -13,15 +13,16 @@
 //! in a child copy of this test binary with its own `OPENSSL_CONF`. The
 //! parent spawns it and asserts on its outcome.
 //!
-//! The missing-provider scenario needs only OpenSSL's `base` provider and
-//! runs everywhere. The others need the FIPS module: they run when
-//! `PRAXIS_FIPS_PROVIDER_CONF` names an OpenSSL config that activates it
-//! with `default_properties = fips=yes` (`make test-fips-policy-startup`
-//! inside the toolchain image), and otherwise print
-//! `fips-startup: skipped <scenario>` and pass. `PRAXIS_FIPS_HOST` makes a
-//! missing config a failure instead.
+//! Every scenario runs in both environments. `PRAXIS_POLICY_FIPS_TEST_MODE`
+//! explicitly selects `configurable-provider` or `kernel-fips`, and must
+//! match the kernel flag. The former proves rejection of unavailable crypto;
+//! the latter proves RHEL's automatic FIPS activation survives those configs.
+//! JWT cases require `PRAXIS_FIPS_PROVIDER_CONF`; missing prerequisites fail.
 
-use std::{path::Path, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use super::feature_tests::{filter_config, write_policy};
 use crate::builtins::http::security::policy::filter::PolicyFilter;
@@ -73,82 +74,142 @@ global:
 // -----------------------------------------------------------------------------
 
 #[test]
-fn without_a_sha256_provider_construction_fails_with_a_crypto_error() {
-    let dir = tempfile::TempDir::new().expect("create tempdir");
-    let conf = dir.path().join("no-provider.cnf");
-    std::fs::write(&conf, NO_PROVIDER_CONF).expect("write the OpenSSL config");
-    run_child("no_provider", &conf);
+fn base_only_config_preserves_crypto_validation() {
+    run_isolated(
+        "base_only_config_preserves_crypto_validation",
+        no_provider_conf,
+        child_base_only,
+    );
 }
 
 #[cfg(feature = "policy-jwt-openssl-fips")]
 #[test]
-fn jwt_without_fips_default_properties_fails_to_load() {
-    let Some(fips_conf) = provider_conf("jwt_without_fips_defaults") else {
-        return;
-    };
-    let dir = tempfile::TempDir::new().expect("create tempdir");
-    let conf = dir.path().join("fips-without-defaults.cnf");
-    let text = std::fs::read_to_string(&fips_conf).expect("read the FIPS provider config");
-    let relaxed: String = text
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("default_properties"))
-        .flat_map(|line| match line.trim() {
-            "[provider_sect]" => vec![line, "default = default_sect"],
-            _ => vec![line],
-        })
-        .map(|line| format!("{line}\n"))
-        .chain(["\n[default_sect]\nactivate = 1\n".to_owned()])
-        .collect();
-    std::fs::write(&conf, relaxed).expect("write the relaxed config");
-    run_child("jwt_without_fips_defaults", &conf);
+fn jwt_config_without_fips_defaults_preserves_crypto_validation() {
+    run_isolated(
+        "jwt_config_without_fips_defaults_preserves_crypto_validation",
+        relaxed_provider_conf,
+        child_without_fips_defaults,
+    );
 }
 
 #[cfg(feature = "policy-jwt-openssl-fips")]
 #[test]
 fn a_rival_jsonwebtoken_provider_is_refused() {
-    if let Some(conf) = provider_conf("rival_provider") {
-        run_child("rival_provider", &conf);
-    }
+    run_isolated(
+        "a_rival_jsonwebtoken_provider_is_refused",
+        |_| provider_conf(),
+        child_rival_provider,
+    );
 }
 
 #[cfg(feature = "policy-jwt-openssl-fips")]
 #[test]
 fn reloading_a_fips_jwt_policy_twice_does_not_conflict() {
-    if let Some(conf) = provider_conf("double_reload") {
-        run_child("double_reload", &conf);
-    }
-}
-
-#[test]
-fn policy_fips_child() {
-    let Ok(scenario) = std::env::var(CHILD_ENV) else {
-        return;
-    };
-    match scenario.as_str() {
-        "no_provider" => child_no_provider(),
-        #[cfg(feature = "policy-jwt-openssl-fips")]
-        "jwt_without_fips_defaults" => {
-            child_expect_jwt_crypto_failure("do not restrict operations to the FIPS provider");
-        },
-        #[cfg(feature = "policy-jwt-openssl-fips")]
-        "rival_provider" => child_rival_provider(),
-        #[cfg(feature = "policy-jwt-openssl-fips")]
-        "double_reload" => child_double_reload(),
-        other => panic!("unknown FIPS child scenario {other}"),
-    }
+    run_isolated(
+        "reloading_a_fips_jwt_policy_twice_does_not_conflict",
+        |_| provider_conf(),
+        child_double_reload,
+    );
 }
 
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-/// Engine initialization refuses a backend with no SHA-256.
-fn child_no_provider() {
+/// The explicitly requested environment; never inferred from crypto availability.
+#[derive(Clone, Copy)]
+enum HostMode {
+    /// Configuration controls which providers and default properties are active.
+    ConfigurableProvider,
+    /// RHEL activates FIPS from the kernel flag, even under a relaxed config.
+    KernelFips,
+}
+
+impl HostMode {
+    /// Require the selected environment to agree with the actual kernel flag.
+    fn required() -> Self {
+        let mode = std::env::var("PRAXIS_POLICY_FIPS_TEST_MODE").expect(
+            "PRAXIS_POLICY_FIPS_TEST_MODE must be configurable-provider or kernel-fips; use the Makefile FIPS targets",
+        );
+        let kernel_fips = match std::fs::read_to_string("/proc/sys/crypto/fips_enabled") {
+            Ok(flag) => match flag.trim() {
+                "0" => false,
+                "1" => true,
+                other => panic!("unexpected kernel FIPS flag: {other}"),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => panic!("cannot read the kernel FIPS flag: {error}"),
+        };
+        match mode.as_str() {
+            "configurable-provider" => {
+                assert!(
+                    !kernel_fips,
+                    "configurable-provider tests require a kernel without FIPS enforcement"
+                );
+                Self::ConfigurableProvider
+            },
+            "kernel-fips" => {
+                assert!(kernel_fips, "kernel-fips tests require the kernel FIPS flag to be 1");
+                Self::KernelFips
+            },
+            other => panic!("unknown policy FIPS test mode: {other}"),
+        }
+    }
+}
+
+/// A base-only config either lacks SHA-256 or retains the host's FIPS enforcement.
+fn child_base_only(mode: HostMode) {
     let (_dir, path) = write_policy("plugins: []\n");
-    let error = construction_error(path);
+    match mode {
+        HostMode::ConfigurableProvider => {
+            assert!(
+                openssl::md::Md::fetch(None, "SHA256", Some("fips=yes")).is_err(),
+                "the negative case must lack a FIPS SHA-256 implementation"
+            );
+            let error = construction_error(path);
+            assert!(
+                error.contains(ppe::CRYPTO_FAILED_CODE),
+                "a missing SHA-256 provider must fail construction with the crypto code: {error}"
+            );
+        },
+        HostMode::KernelFips => {
+            assert_fips_crypto();
+            assert!(
+                PolicyFilter::new(filter_config(path), None).is_ok(),
+                "kernel-enforced FIPS construction must succeed"
+            );
+        },
+    }
+}
+
+/// Relaxed defaults must be rejected unless the host still enforces FIPS.
+#[cfg(feature = "policy-jwt-openssl-fips")]
+fn child_without_fips_defaults(mode: HostMode) {
+    match mode {
+        HostMode::ConfigurableProvider => {
+            assert!(
+                openssl::md::Md::fetch(None, "SHA256", Some("fips=yes")).is_ok(),
+                "FIPS SHA-256 must remain available before checking the relaxed defaults"
+            );
+            assert!(
+                openssl::md::Md::fetch(None, "MD5", None).is_ok(),
+                "the negative case must have non-FIPS defaults"
+            );
+            child_expect_jwt_crypto_failure("do not restrict operations to the FIPS provider");
+        },
+        HostMode::KernelFips => child_double_reload(mode),
+    }
+}
+
+/// The effective default context admits FIPS SHA-256 and refuses non-FIPS MD5.
+fn assert_fips_crypto() {
     assert!(
-        error.contains(ppe::CRYPTO_FAILED_CODE),
-        "a missing SHA-256 provider must fail construction with the crypto code: {error}"
+        openssl::md::Md::fetch(None, "SHA256", Some("fips=yes")).is_ok(),
+        "FIPS SHA-256 must be available"
+    );
+    assert!(
+        openssl::md::Md::fetch(None, "MD5", None).is_err(),
+        "FIPS defaults must refuse MD5"
     );
 }
 
@@ -165,14 +226,16 @@ fn child_expect_jwt_crypto_failure(detail: &str) {
 
 /// A provider installed before Policy loads JWT config is refused.
 #[cfg(feature = "policy-jwt-openssl-fips")]
-fn child_rival_provider() {
+fn child_rival_provider(_mode: HostMode) {
+    assert_fips_crypto();
     rival::install();
     child_expect_jwt_crypto_failure("another jsonwebtoken crypto provider");
 }
 
 /// Policy's own provider, installed on the first load, is accepted again.
 #[cfg(feature = "policy-jwt-openssl-fips")]
-fn child_double_reload() {
+fn child_double_reload(_mode: HostMode) {
+    assert_fips_crypto();
     let (_keys, path) = write_jwt_policy();
     for attempt in 1..=3 {
         if let Err(error) = PolicyFilter::new(filter_config(path.clone()), None) {
@@ -181,55 +244,85 @@ fn child_double_reload() {
     }
 }
 
-/// The FIPS provider config, or `None` after printing a counted skip.
+/// Require a readable FIPS configuration; absence is a test failure.
 #[cfg(feature = "policy-jwt-openssl-fips")]
-#[expect(clippy::print_stdout, reason = "the skip line is how a run counts what it skipped")]
-fn provider_conf(scenario: &str) -> Option<std::path::PathBuf> {
-    let conf = std::env::var_os(PROVIDER_CONF_ENV).map(std::path::PathBuf::from);
-    if conf.is_none() {
-        assert!(
-            !fips_host_declared(),
-            "PRAXIS_FIPS_HOST is set, so {PROVIDER_CONF_ENV} must name the FIPS provider config"
-        );
-        println!("fips-startup: skipped {scenario} ({PROVIDER_CONF_ENV} is not set)");
-    }
+fn provider_conf() -> PathBuf {
+    let path = std::env::var_os(PROVIDER_CONF_ENV).map(PathBuf::from).expect(
+        "PRAXIS_FIPS_PROVIDER_CONF must name a FIPS provider config; use FIPS_POLICY_PROVIDER_CONF with the Makefile targets",
+    );
+    assert!(path.is_file(), "FIPS provider config must exist: {}", path.display());
+    path
+}
+
+/// Write the deliberately base-only config used by the first scenario.
+fn no_provider_conf(dir: &Path) -> PathBuf {
+    let conf = dir.join("no-provider.cnf");
+    std::fs::write(&conf, NO_PROVIDER_CONF).expect("write the OpenSSL config");
     conf
 }
 
-/// Whether `PRAXIS_FIPS_HOST` declares a FIPS host. An empty value, `0`,
-/// `false`, `no` or `off` leave it undeclared, as in the test harness.
+/// Load both providers without requesting FIPS defaults in the configuration.
 #[cfg(feature = "policy-jwt-openssl-fips")]
-fn fips_host_declared() -> bool {
-    std::env::var("PRAXIS_FIPS_HOST").is_ok_and(|value| {
-        !matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "" | "0" | "false" | "no" | "off"
-        )
-    })
+fn relaxed_provider_conf(dir: &Path) -> PathBuf {
+    let text = std::fs::read_to_string(provider_conf()).expect("read the FIPS provider config");
+    let relaxed: String = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("default_properties"))
+        .flat_map(|line| match line.trim() {
+            "[provider_sect]" => vec![line, "default = default_sect"],
+            _ => vec![line],
+        })
+        .map(|line| format!("{line}\n"))
+        .chain(["\n[default_sect]\nactivate = 1\n".to_owned()])
+        .collect();
+    let conf = dir.join("fips-without-defaults.cnf");
+    std::fs::write(&conf, relaxed).expect("write the relaxed config");
+    conf
 }
 
-/// Run [`policy_fips_child`] for `scenario` under `openssl_conf`.
-///
-/// [`policy_fips_child`]: policy_fips_child
-#[expect(clippy::print_stdout, reason = "the ran line is how a run counts what it ran")]
-fn run_child(scenario: &str, openssl_conf: &Path) {
+/// Re-execute this exact test in an isolated process, or perform its assertions.
+#[expect(
+    clippy::print_stdout,
+    reason = "the completion marker proves the child executed its assertions"
+)]
+fn run_isolated(test: &str, prepare: impl FnOnce(&Path) -> PathBuf, check: fn(HostMode)) {
+    let mode = HostMode::required();
+    match std::env::var(CHILD_ENV) {
+        Ok(child) => {
+            assert_eq!(child, test, "a child must execute the requested test");
+            check(mode);
+            println!("fips-startup: checked {test}");
+        },
+        Err(std::env::VarError::NotPresent) => {
+            let dir = tempfile::TempDir::new().expect("create tempdir");
+            run_child(test, &prepare(dir.path()));
+        },
+        Err(error) => panic!("invalid FIPS child marker: {error}"),
+    }
+}
+
+/// Require the exact child test to pass and report that its assertions completed.
+#[expect(clippy::print_stdout, reason = "the ran line records every completed scenario")]
+fn run_child(test: &str, openssl_conf: &Path) {
     let output = Command::new(std::env::current_exe().expect("test executable path"))
         .args([
             "--exact",
-            "builtins::http::security::policy::fips_startup_tests::policy_fips_child",
+            &format!("builtins::http::security::policy::fips_startup_tests::{test}"),
         ])
         .args(["--nocapture", "--test-threads=1"])
-        .env(CHILD_ENV, scenario)
+        .env(CHILD_ENV, test)
         .env("OPENSSL_CONF", openssl_conf)
         .output()
         .expect("spawn the FIPS child");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success() && stdout.contains("1 passed"),
-        "FIPS child {scenario} failed:\n{stdout}\n{stderr}"
+        output.status.success()
+            && stdout.contains("1 passed")
+            && stdout.contains(&format!("fips-startup: checked {test}")),
+        "FIPS child {test} failed:\n{stdout}\n{stderr}"
     );
-    println!("fips-startup: ran {scenario}");
+    println!("fips-startup: ran {test}");
 }
 
 /// The construction error for `config_path`, which must fail to build.
