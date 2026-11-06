@@ -1034,19 +1034,19 @@ mod tests {
 
     #[test]
     fn version_output_yields_the_compiled_policy_features() {
-        let version = "praxis 0.7.5 (abc)\npolicy features: policy-crypto-default,policy-engine\n";
+        let version = "praxis 0.8.0 (abc)\npolicy features: policy-crypto-default,policy-engine\n";
         assert_eq!(
             parse_policy_features(version),
             Some(vec!["policy-crypto-default", "policy-engine"]),
             "the names come from the policy features line"
         );
         assert_eq!(
-            parse_policy_features("praxis 0.7.5\npolicy features: none\n"),
+            parse_policy_features("praxis 0.8.0\npolicy features: none\n"),
             Some(vec![]),
             "`none` means a policy-free binary"
         );
         assert_eq!(
-            parse_policy_features("praxis 0.7.5\n"),
+            parse_policy_features("praxis 0.8.0\n"),
             None,
             "an older binary reports nothing"
         );

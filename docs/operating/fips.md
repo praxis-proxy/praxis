@@ -24,7 +24,7 @@ features. The FIPS build leaves out what is not yet FIPS compliant:
 | `policy` filter (policy engine) | yes | no by default; opt-in on the FIPS backend, see [The policy filter on FIPS](#the-policy-filter-on-fips) |
 | Base image | Alpine, praxis built with upstream Rust | `ubi9/ubi-minimal`, praxis built with Red Hat's `rust-toolset` on `ubi9/ubi`, both pinned by digest and signature-verified |
 | OpenSSL | Alpine's, dynamically linked | UBI's, dynamically linked (`openssl-libs` and `openssl-fips-provider-so`), the validated module on a FIPS host |
-| Published tags | `<version>`, `<major>.<minor>`, `latest`, `sha-<hash>`, `nightly` (see [image tags](../release.md#image-tags)) | the same with a `-fips` suffix (`0.7.0-fips`, `latest-fips`) |
+| Published tags | `<version>`, `<major>.<minor>`, `latest`, `sha-<hash>`, `nightly` (see [image tags](../release.md#image-tags)) | the same with a `-fips` suffix (`0.8.0-fips`, `latest-fips`) |
 
 The default FIPS build rejects a configuration that uses the `policy`
 filter at startup. Everything else, including TLS listeners, mTLS, SNI, the admin API
@@ -109,7 +109,7 @@ provider, so they are FIPS whenever the listeners are. Without the variable,
 praxis starts either way and only logs the status.
 
 ```console
-podman run --rm -e PRAXIS_REQUIRE_FIPS=1 ghcr.io/praxis-proxy/praxis:0.7.0-fips
+podman run --rm -e PRAXIS_REQUIRE_FIPS=1 ghcr.io/praxis-proxy/praxis:0.8.0-fips
 ```
 
 On a host that is not in FIPS mode this exits immediately with:

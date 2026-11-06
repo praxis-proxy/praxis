@@ -17,54 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Security
-
-- The policy filter no longer forwards a delegated token while the caller's
-  credential sits where it cannot be stripped from the upstream request,
-  such as a query parameter. That request now receives HTTP 500
-  (`policy.unstrippable_credential`) instead of reaching the upstream with
-  both credentials. A policy that reads a query credential and also
-  delegates fails to load.
-- Every policy hook now sees the request as the client sent it: the raw
-  query, the effective client address as `http.client_address` (the TCP
-  peer, or with `trusted_proxies` the rightmost untrusted `X-Forwarded-For`
-  hop; absent when a trusted chain cannot be resolved because of a malformed
-  hop, which denies address-keyed rate limits), the validated bare host as
-  `http.host` (lowercased, no port), and a scheme taken from the downstream
-  TLS state, never from `X-Forwarded-Proto`. Before, response and body-phase hooks rebuilt
-  this from a request that earlier phases could already have changed, and
-  the scheme was usually missing. Place `policy` before `path_rewrite`,
-  `url_rewrite` and header-rewriting filters.
-- A policy with request assertions but no `http.request` rules and no
-  entity routes now applies its header set and strip rules instead of
-  admitting the request on identity alone.
-- A delegation where no minted token forms a valid upstream header now
-  receives HTTP 500 (`policy.delegation_failed`) instead of forwarding the
-  inbound credential.
-- With `PRAXIS_REQUIRE_FIPS` set, building the policy filter refuses a build
-  that is not FIPS-capable (such as a host plugin factory registered after
-  startup), so that reload fails and the previous pipeline stays in place.
-
-- Apply the policy filter's configured failure mode when a classified tool
-  response is malformed JSON or lacks both a result and a valid JSON-RPC error.
-  Policies with tool response hooks no longer silently skip those inputs;
-  fail-closed pipelines stop delivery before the buffered payload escapes.
-- Validate the complete input's UTF-8 before `json_body` rewrites or
-  `json_body_field` header promotion. Invalid bytes in ignored JSON values
-  can no longer produce trusted metadata or bypass the configured invalid-input
-  behavior.
-- Disable TLS session resumption on listeners with client authentication
-  and TLS hot-reload. A handshake authenticated before a CA/CRL reload
-  could finish afterward and cache stale authentication, allowing new
-  connections to bypass the updated trust. New connections now perform
-  full certificate verification; static mTLS and non-mTLS listeners
-  retain resumption.
-
 ### Changed
 
-- Clarify that the default Pingora shutdown grace period is capped at five
-  seconds, including for streaming responses, regardless of a larger
-  `shutdown_timeout_secs` value.
 - **Breaking:** `praxis_core::server::ServerRuntime` now requires `lifecycle()`,
   which returns the process `LifecycleHandle` shared with protocol adapters.
 - **Breaking:** `HyperRuntime::add_required_service` callbacks now receive a
@@ -82,6 +36,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `phase`, `subscribe`, `mark_serving`, `begin_drain`, and `mark_stopped`.
   `ServerRuntime` exposes `lifecycle()`, and `PingoraServerRuntime` and
   `HyperRuntime` expose `lifecycle_handle()`.
+
+## [0.8.0] - 2026-11-06
+
+### Added
+
 - Policy rate limiting (experimental): the policy filter runs a policy's
   `rate_limits:` before identity resolution, keyed on the client address,
   and after it, keyed on the resolved identity, each once per request. A
@@ -171,6 +130,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Clarify that the default Pingora shutdown grace period is capped at five
+  seconds, including for streaming responses, regardless of a larger
+  `shutdown_timeout_secs` value.
 - Bodyless requests on LLM policies, such as `GET /v1/models`, now run HTTP
   authorization, delegation and request assertions before they reach the
   upstream: a matching `http:` route, or the `global` rules otherwise.
@@ -205,9 +167,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Keep Pingora uploads open while runtime-selected buffering withholds
   non-final chunks, instead of sending a premature upstream end marker.
 
-- The policy engine is updated to PPE 0.5.0, which tightens OAuth
-  `delegate(...)` by default: a token-exchange response must name an
-  access-token or JWT `issued_token_type`, unrequested scopes outside
+- The policy engine is updated to PPE 0.6.0. Its OAuth `delegate(...)`
+  validation is stricter by default: a token-exchange response must name
+  an access-token or JWT `issued_token_type`, unrequested scopes outside
   `allowed_extra_scopes` are refused, and a minted JWT's `aud` and `sub`
   must match. `strict_response_validation: false` turns these checks off.
   JWTs with an unsupported `crit` header are rejected, an `env` secret
@@ -226,6 +188,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   already the behaviour; it is now a stated choice rather than a silent
   default. Add `storage: local` to each cluster to keep the current
   behaviour. See `docs/filters/http/traffic_management/sticky_sessions.md`.
+- `FilterPipeline::build_with_chains` takes a new required
+  `top_level_clusters: &[Cluster]` argument. Rust callers pass the
+  config's top-level `clusters:` list, or `&[]` when none exists.
 
 ### Removed
 
@@ -233,14 +198,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   store for any unknown name. Use `get` to look up a configured store, or
   `get_or_create_memory` to choose memory explicitly.
 
-### Changed
-
-- `FilterPipeline::build_with_chains` takes a new required
-  `top_level_clusters: &[Cluster]` argument. Rust callers pass the
-  config's top-level `clusters:` list, or `&[]` when none exists.
-
 ### Fixed
 
+- Pingora sub-request connections now respect the cluster
+  `idle_timeout_ms` when returned to the pool, avoiding reuse of idle
+  connections silently dropped by NAT or firewall state.
 - The policy filter resolves `http.client_address` through
   `trusted_proxies` on every request path.
 - On inference requests a `ratelimit.post_identity` limiter can bind
@@ -306,6 +268,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   to HTTP/2 upstreams, and rejects unsupported HTTP/1 uploads with trailers.
 - The Hyper backend rejects strict HTTP/2 TLS upstreams that do not negotiate
   `h2` through ALPN. Automatic HTTP version selection still allows HTTP/1.1.
+
+### Security
+
+- `trusted_proxies` in the policy and `forwarded_headers` filters matches a
+  proxy range only within its address family. `0.0.0.0/0` no longer trusts
+  IPv6 peers (nor `::/0` IPv4 ones), so on a dual-stack listener a direct
+  client of the other family cannot set `X-Forwarded-For` to choose its
+  client address.
+- Updated `ctutils` to address `RUSTSEC-2026-0385`.
+- The policy filter no longer forwards a delegated token while the caller's
+  credential sits where it cannot be stripped from the upstream request,
+  such as a query parameter. That request now receives HTTP 500
+  (`policy.unstrippable_credential`) instead of reaching the upstream with
+  both credentials. A policy that reads a query credential and also
+  delegates fails to load.
+- Every policy hook now sees the request as the client sent it: the raw
+  query, the effective client address as `http.client_address` (the TCP
+  peer, or with `trusted_proxies` the rightmost untrusted `X-Forwarded-For`
+  hop; absent when a trusted chain cannot be resolved because of a malformed
+  hop, which denies address-keyed rate limits), the validated bare host as
+  `http.host` (lowercased, no port), and a scheme taken from the downstream
+  TLS state, never from `X-Forwarded-Proto`. Before, response and body-phase hooks rebuilt
+  this from a request that earlier phases could already have changed, and
+  the scheme was usually missing. Place `policy` before `path_rewrite`,
+  `url_rewrite` and header-rewriting filters.
+- A policy with request assertions but no `http.request` rules and no
+  entity routes now applies its header set and strip rules instead of
+  admitting the request on identity alone.
+- A delegation where no minted token forms a valid upstream header now
+  receives HTTP 500 (`policy.delegation_failed`) instead of forwarding the
+  inbound credential.
+- With `PRAXIS_REQUIRE_FIPS` set, building the policy filter refuses a build
+  that is not FIPS-capable (such as a host plugin factory registered after
+  startup), so that reload fails and the previous pipeline stays in place.
+
+- Apply the policy filter's configured failure mode when a classified tool
+  response is malformed JSON or lacks both a result and a valid JSON-RPC error.
+  Policies with tool response hooks no longer silently skip those inputs;
+  fail-closed pipelines stop delivery before the buffered payload escapes.
+- Validate the complete input's UTF-8 before `json_body` rewrites or
+  `json_body_field` header promotion. Invalid bytes in ignored JSON values
+  can no longer produce trusted metadata or bypass the configured invalid-input
+  behavior.
+- Disable TLS session resumption on listeners with client authentication
+  and TLS hot-reload. A handshake authenticated before a CA/CRL reload
+  could finish afterward and cache stale authentication, allowing new
+  connections to bypass the updated trust. New connections now perform
+  full certificate verification; static mTLS and non-mTLS listeners
+  retain resumption.
 
 ## [0.7.5] - 2026-10-21
 
@@ -503,6 +514,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Releases 0.1.0 through 0.7.3 came out before this file existed; their notes
 are on [GitHub Releases](https://github.com/praxis-proxy/praxis/releases).
 
-[Unreleased]: https://github.com/praxis-proxy/praxis/compare/v0.7.5...HEAD
+[Unreleased]: https://github.com/praxis-proxy/praxis/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/praxis-proxy/praxis/compare/v0.7.5...v0.8.0
 [0.7.5]: https://github.com/praxis-proxy/praxis/compare/v0.7.4...v0.7.5
 [0.7.4]: https://github.com/praxis-proxy/praxis/compare/v0.7.3...v0.7.4
