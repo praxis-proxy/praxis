@@ -178,6 +178,7 @@
 mod assertions;
 mod common_message_format;
 mod config;
+mod construction;
 mod dispatch;
 mod error;
 #[cfg(test)]
@@ -192,6 +193,68 @@ mod transport;
 
 pub use filter::PolicyFilter;
 pub use host_plugins::{PolicyPluginFactoryFn, register_policy_plugin_factory};
+
+/// Why this build's `policy` filter cannot run under `PRAXIS_REQUIRE_FIPS`,
+/// if it cannot.
+///
+/// Checks what is compiled in, not runtime readiness: host plugin factories
+/// carry no FIPS evidence, Policy's crypto capability report must be the
+/// FIPS profile, and the experimental limiter has not been validated with
+/// the FIPS backend. A missing provider or non-FIPS OpenSSL defaults fail
+/// filter construction instead, when the engine initializes or JWT config
+/// loads.
+///
+/// ```
+/// let report = ppe::crypto_capability_report();
+/// if !report.fips_profile_is_safe() {
+///     assert!(praxis_filter::fips_crypto_blocker().is_some());
+/// }
+/// ```
+pub fn fips_crypto_blocker() -> Option<String> {
+    assess_fips(host_plugins::host_plugin_count(), &ppe::crypto_capability_report())
+}
+
+/// [`fips_crypto_blocker`] for a given host plugin count and capability report.
+fn assess_fips(host_plugins: usize, report: &ppe::CryptoCapabilityReport) -> Option<String> {
+    if host_plugins > 0 {
+        return Some(format!(
+            "{host_plugins} host policy plugin factories are registered, with no FIPS capability evidence"
+        ));
+    }
+    if !report.fips_profile_is_safe() {
+        return Some(format!(
+            "Policy's compiled crypto capabilities are outside the supported FIPS profile: {report:?}"
+        ));
+    }
+    unvalidated_fips_combination()
+}
+
+/// The compiled feature combination FIPS has not been validated with.
+fn unvalidated_fips_combination() -> Option<String> {
+    (cfg!(feature = "policy-experimental-ratelimit") && cfg!(feature = "policy-crypto-fips")).then(|| {
+        "`policy-experimental-ratelimit` with `policy-crypto-fips` is an unvalidated FIPS combination; build \
+         without the experimental limiter"
+            .to_owned()
+    })
+}
+
+#[cfg(test)]
+#[expect(clippy::panic, reason = "tests")]
+mod crypto_capabilities;
+
+#[cfg(all(
+    test,
+    any(
+        feature = "policy-builtins",
+        all(feature = "policy-api-key", feature = "policy-crypto-default")
+    )
+))]
+#[expect(clippy::expect_used, clippy::panic, reason = "tests")]
+mod api_key_tests;
+
+#[cfg(all(test, feature = "policy-crypto-fips"))]
+#[expect(clippy::expect_used, clippy::panic, reason = "tests")]
+mod fips_startup_tests;
 
 #[cfg(test)]
 #[cfg(feature = "policy-builtins")]

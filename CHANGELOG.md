@@ -100,6 +100,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- The policy filter refuses to build when a JWT trusted issuer enables DPoP
+  (`dpop.mode: optional` or `required`) without `dpop.external_base_url`,
+  so the proof's `htu` never depends on the client-sent `Host` header. The
+  error names the plugin and the issuer. Set the URL clients address, such
+  as `https://api.example.com`. A reload with such a document is rejected
+  and the previous pipeline keeps serving.
+- A Policy crypto backend failure (no SHA-256 provider, non-FIPS OpenSSL
+  defaults under FIPS JWT, or another `jsonwebtoken` provider installed
+  first) now fails policy filter construction with a `policy.crypto_failed`
+  error naming the remedy, at startup and on reload, instead of surfacing
+  as request-time denials.
+- `PRAXIS_REQUIRE_FIPS` judges a registered `policy` filter by Policy's
+  compiled crypto capability report instead of refusing it outright. It
+  still refuses the default build, any host policy plugin factory, and the
+  unvalidated combination of `policy-experimental-ratelimit` with
+  `policy-crypto-fips`. The default FIPS build stays policy-free.
 - Default accumulated bodies and buffered subrequest responses to a 64 MiB
   cap, configurable through `body_limits.max_buffer_bytes`. The cap covers
   explicit filter limits, runtime-selected buffering, nested pipelines, and

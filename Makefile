@@ -69,7 +69,7 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	require-container-engine require-podman require-go require-oc \
 	container container-run \
 	test-container test-container-run \
-	build-fips release-fips check-fips lint-fips test-fips \
+	build-fips release-fips check-fips lint-fips test-fips test-fips-policy-startup \
 	container-fips container-fips-run \
 	build-hyper check-hyper lint-hyper test-hyper \
 	test-integration-hyper test-conformance-hyper test-schema-hyper \
@@ -462,7 +462,22 @@ test-fips: ## unit tests resolved as the FIPS build
 		-p praxis-proxy-core -p praxis-proxy-tls \
 		--features $(FIPS_FEATURES_QUALIFIED) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
 
-.PHONY: test-integration-fips test-conformance-fips test-fips-host fips-toolchain fips-host-facts
+# Policy FIPS construction in isolated child processes: a missing SHA-256
+# provider, FIPS JWT without `default_properties = fips=yes`, a rival
+# jsonwebtoken provider, and repeated FIPS JWT loads. The provider-dependent
+# cases need FIPS_POLICY_PROVIDER_CONF, an OpenSSL config that activates the
+# FIPS module with FIPS defaults; without it they print a counted
+# `fips-startup: skipped` line and pass, and PRAXIS_FIPS_HOST makes that a
+# failure. Policy stays out of FIPS_FEATURES; this target names its own.
+FIPS_POLICY_STARTUP_FEATURES := policy-jwt-fips,policy-api-key-fips
+FIPS_POLICY_PROVIDER_CONF    ?=
+test-fips-policy-startup: ## Policy FIPS construction checks, one process per case
+	$(if $(FIPS_POLICY_PROVIDER_CONF),PRAXIS_FIPS_PROVIDER_CONF=$(abspath $(FIPS_POLICY_PROVIDER_CONF))) \
+	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features -p praxis-proxy-filter \
+		--features $(FIPS_POLICY_STARTUP_FEATURES) $(FIPS_CARGO_EXTRA) --lib \
+		-- policy::fips_startup_tests --nocapture
+
+.PHONY: test-integration-fips test-conformance-fips test-fips-host fips-toolchain fips-host-facts test-fips-policy-startup
 
 # The integration suites against the FIPS build. The proxy they start in
 # process is built without default features, and the tests that spawn the
@@ -508,8 +523,9 @@ test-fips-host: fips-toolchain ## every suite as the FIPS build, on a FIPS host 
 		-e PRAXIS_FIPS_HOST=1 -e PRAXIS_REQUIRE_FIPS=1 -e CARGO_TERM_COLOR=always \
 		-e PRAXIS_TEST_THROUGHPUT_SCALE=$(FIPS_HOST_THROUGHPUT_SCALE) \
 		$(FIPS_TOOLCHAIN_IMAGE) \
-		make fips-host-facts test-fips test-integration-fips test-conformance-fips \
-			FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version $(if $(V),V=$(V))
+		make fips-host-facts test-fips test-fips-policy-startup test-integration-fips test-conformance-fips \
+			FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version \
+			FIPS_POLICY_PROVIDER_CONF=xtask/assets/fips/fips-provider.cnf $(if $(V),V=$(V))
 
 # What the process the suites run as actually sees, printed into the log next
 # to the results: the user, the kernel flag and boot parameter, the crypto

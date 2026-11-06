@@ -192,7 +192,7 @@ fn rate_limits_are_found_at_every_layer() {
 // -----------------------------------------------------------------------------
 
 /// Write `yaml` as a policy document in a fresh directory.
-fn write_policy(yaml: &str) -> (TempDir, String) {
+pub(super) fn write_policy(yaml: &str) -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let path = dir.path().join("policy.yaml");
     std::fs::write(&path, yaml).expect("write the policy document");
@@ -213,7 +213,7 @@ fn write_api_key_policy() -> (TempDir, String) {
 }
 
 /// The filter config pointing at `config_path`, with test-friendly defaults.
-fn filter_config(config_path: String) -> PolicyFilterConfig {
+pub(super) fn filter_config(config_path: String) -> PolicyFilterConfig {
     PolicyFilterConfig {
         config_path,
         allow_private_idp: false,
@@ -241,7 +241,7 @@ fn construction_error(config_path: String) -> String {
 }
 
 /// Run `run` with a subscriber that records the message of every warning.
-fn capture_warnings<T>(run: impl FnOnce() -> T) -> (T, Vec<String>) {
+pub(super) fn capture_warnings<T>(run: impl FnOnce() -> T) -> (T, Vec<String>) {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     let messages = Arc::new(Mutex::new(Vec::new()));

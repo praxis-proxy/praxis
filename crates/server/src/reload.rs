@@ -1613,6 +1613,98 @@ filter_chains:
         assert_eq!(old_ptr, current_ptr, "pipeline should be untouched after failure");
     }
 
+    /// A policy-filter config whose policy document is `policy_path`.
+    #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
+    fn policy_config(policy_path: &std::path::Path) -> Config {
+        Config::from_yaml(&format!(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: policy
+        config_path: "{}"
+      - filter: static_response
+        status: 200
+"#,
+            policy_path.display()
+        ))
+        .unwrap()
+    }
+
+    /// A reload whose policy document fails filter construction keeps the
+    /// policy that was serving; a valid document reloaded twice swaps both
+    /// times. On the ordinary backend: a FIPS build needs a provider to build
+    /// even the first policy.
+    #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
+    #[test]
+    fn a_policy_that_fails_construction_keeps_the_previous_policy_serving() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let good = dir.path().join("good.yaml");
+        std::fs::write(&good, "plugins: []\n").unwrap();
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(policy_config(&good));
+        let serving = Arc::as_ptr(&live.get("web").unwrap().load());
+
+        let bad = dir.path().join("bad.yaml");
+        std::fs::write(
+            &bad,
+            "plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    config:
+      trusted_issuers:
+        - issuer: https://idp.test.local
+          audiences: [api]
+          algorithms: [RS256]
+          decoding_key: { kind: pem_file, path: /unused.pem }
+          dpop: { mode: required }
+",
+        )
+        .unwrap();
+        let reload = |config: &Config| {
+            reload_pipelines(
+                config,
+                &old_config,
+                &registry,
+                &live,
+                &meta,
+                &cluster_meta,
+                &shutdown,
+                &empty_kv_stores(),
+                &empty_session_stores(),
+                &empty_slow_start_registry(),
+                &empty_subrequest_client(),
+                None,
+                &PipelineComposition::default(),
+            )
+        };
+        let error = reload(&policy_config(&bad)).expect_err("a refused policy must fail the reload");
+        assert!(
+            error.to_string().contains("dpop.external_base_url"),
+            "the reload error must carry the construction refusal: {error}"
+        );
+        assert_eq!(
+            serving,
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            "a failed policy reload must keep the previous pipeline serving"
+        );
+
+        for attempt in 1..=2 {
+            let result = reload(&policy_config(&good));
+            assert!(result.is_ok(), "valid reload {attempt} must succeed: {result:?}");
+        }
+        assert_ne!(
+            serving,
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            "a valid policy reload must swap the pipeline"
+        );
+    }
+
     #[test]
     fn old_cancellation_token_cancelled_on_success() {
         let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();

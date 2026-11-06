@@ -107,6 +107,10 @@ praxis-protocol = { version = "0.7.5", path = "crates/protocol", package = "prax
 praxis-tls = { version = "0.7.5", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils", default-features = false }
 praxis-proxy-benchmarks = "0.2.2"
+# Backend-neutral: no member may select a jsonwebtoken crypto backend, which
+# would unify into Policy's copy and pull aws-lc-rs or RustCrypto into a FIPS
+# graph. Policy selects the backend; tests only install a rival provider.
+jsonwebtoken = { version = "11.1.0", default-features = false }
 # System OpenSSL bindings, the same crate the rustls provider below uses; never
 # with the `vendored` feature, the platform library is the validated module.
 openssl = "0.10.81"

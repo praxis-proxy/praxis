@@ -40,6 +40,7 @@ use super::{
     },
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
+    construction::{engine_error, require_dpop_external_base_url},
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
@@ -433,10 +434,16 @@ impl PolicyFilter {
             mgr.register_factory(kind, factory);
         }
 
+        // Parsed separately because the engine does not retain the document.
+        // The DPoP check runs before the engine builds any plugin, since the
+        // JWT factory reads keys and installs its crypto provider. A parse
+        // error is reported after the engine's own, more specific one.
+        let parsed = ppe::praxis_policy_core::config::parse_config(&yaml);
+        if let Ok(document) = &parsed {
+            require_dpop_external_base_url(document)?;
+        }
         mgr.load_config_yaml(&yaml)
-            .map_err(|e: Box<PluginError>| -> FilterError {
-                format!("policy: load_config_yaml failed for {}: {e}", cfg.config_path).into()
-            })?;
+            .map_err(|e: Box<PluginError>| engine_error("load_config_yaml", &cfg.config_path, &e))?;
 
         // `initialize()` is async. The praxis filter-factory signature
         // is sync, so we drive init to completion here. We spawn a
@@ -455,7 +462,8 @@ impl PolicyFilter {
         // could legitimately stall.
         let mgr_for_init = Arc::clone(&mgr);
         let init_timeout = std::time::Duration::from_secs(cfg.init_timeout_secs);
-        let init: Result<(), String> = std::thread::spawn(move || -> Result<(), String> {
+        let config_path = cfg.config_path.clone();
+        let init: Result<(), FilterError> = std::thread::spawn(move || -> Result<(), FilterError> {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -463,12 +471,13 @@ impl PolicyFilter {
             rt.block_on(async move {
                 match tokio::time::timeout(init_timeout, mgr_for_init.initialize()).await {
                     Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(format!("policy: PolicyEngine::initialize failed: {e}")),
+                    Ok(Err(e)) => Err(engine_error("PolicyEngine::initialize", &config_path, &e)),
                     Err(_) => Err(format!(
                         "policy: PolicyEngine::initialize timed out after {}s \
                          (init_timeout_secs); likely a JWKS / OAuth endpoint is unreachable",
                         init_timeout.as_secs(),
-                    )),
+                    )
+                    .into()),
                 }
             })
         })
@@ -481,7 +490,7 @@ impl PolicyFilter {
                 .unwrap_or_else(|| "<no panic message>".to_owned());
             format!("policy: PolicyEngine::initialize panicked in init thread: {msg}")
         })?;
-        init.map_err(|s: String| -> FilterError { s.into() })?;
+        init?;
 
         // Derive the evaluation shape from the loaded policy so the filter
         // needs no operator-set mode. `has_hooks_for` reports whether a hook
@@ -530,16 +539,14 @@ impl PolicyFilter {
             );
         }
 
-        // Re-parse because the engine does not retain the loaded document.
-        let policy_config =
-            ppe::praxis_policy_core::config::parse_config(&yaml).map_err(|e: Box<PluginError>| -> FilterError {
-                format!(
-                    "policy: the engine accepted {} but praxis could not re-read it for the \
+        let policy_config = parsed.map_err(|e: Box<PluginError>| -> FilterError {
+            format!(
+                "policy: the engine accepted {} but praxis could not re-read it for the \
                      assertions contract: {e}",
-                    cfg.config_path
-                )
-                .into()
-            })?;
+                cfg.config_path
+            )
+            .into()
+        })?;
         let dispatch_timeout = response_dispatch_timeout(policy_config.engine_settings.plugin_timeout);
         ensure_supported_entity_results(&yaml, &policy_config)?;
         if entity_routes {

@@ -157,6 +157,9 @@ zeroize = { workspace = true }
 # The policy tests mint HS256 JWTs through the system OpenSSL rather than
 # jsonwebtoken, whose crypto backend would unify into Policy's own copy.
 openssl = { workspace = true }
+# Backend-free: the FIPS startup tests install a rival provider to prove
+# Policy refuses it.
+jsonwebtoken = { workspace = true }
 # The filter's own tests dial real sockets through the sub-request client, so
 # they need a backend even though the library does not.
 praxis-core = { workspace = true, features = ["pingora"] }
