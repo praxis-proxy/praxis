@@ -94,7 +94,9 @@ impl PingoraServerRuntime {
     ///
     /// [`run_until_shutdown`]: ServerRuntime::run_until_shutdown
     pub fn run(self) -> ! {
-        self.server.run_forever()
+        let args = self.delayed_run_args();
+        self.run_with_args(args);
+        std::process::exit(0)
     }
 
     /// Start all registered services with Pingora's own run arguments.
@@ -520,6 +522,7 @@ mod tests {
     }
 
     #[test]
+    /// Pingora's run loop returns after a shutdown signal.
     fn run_with_args_returns_after_shutdown() {
         let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
         let runtime = PingoraServerRuntime::new(&config);
@@ -529,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    /// The harness shutdown future stops Pingora.
     fn run_with_shutdown_returns_once_the_future_resolves() {
         let config = Config::from_yaml(crate::config::DEFAULT_CONFIG).unwrap();
         let runtime = PingoraServerRuntime::from_config(&config);
@@ -563,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "one test covers every phase the monitor recognises"
     )]
@@ -612,7 +616,7 @@ mod tests {
     }
 
     /// Wait for the monitor thread to publish `expected` without racing it.
-    #[allow(
+    #[expect(
         clippy::disallowed_methods,
         reason = "the monitor runs on its own thread; poll it from this synchronous test"
     )]

@@ -788,6 +788,7 @@ mod tests {
     }
 
     #[test]
+    /// A missing health registry keeps `/ready` ready.
     fn ready_no_registry_returns_200() {
         let svc = PingoraHealthService::new(None, false);
         let (status, body) = svc.ready_response();
@@ -836,6 +837,7 @@ mod tests {
     }
 
     #[test]
+    /// An empty health registry keeps `/ready` ready.
     fn ready_empty_registry_returns_200() {
         let registry: HealthRegistry = Arc::new(HashMap::new());
         let svc = PingoraHealthService::new(Some(registry), false);
@@ -846,6 +848,7 @@ mod tests {
     }
 
     #[test]
+    /// An all-healthy registry reports ready with the aggregate body.
     fn ready_all_healthy_returns_200_aggregate() {
         let mut map = HashMap::new();
         map.insert(Arc::from("backend"), make_health_entry(2));
@@ -866,6 +869,7 @@ mod tests {
     }
 
     #[test]
+    /// Verbose readiness includes per-cluster detail.
     fn ready_all_healthy_verbose_returns_detail() {
         let mut map = HashMap::new();
         map.insert(Arc::from("backend"), make_health_entry(2));
@@ -880,6 +884,7 @@ mod tests {
     }
 
     #[test]
+    /// Serving mode ignores upstream health for readiness.
     fn ready_some_unhealthy_returns_200() {
         let mut map = HashMap::new();
         let entry = make_health_entry(2);
