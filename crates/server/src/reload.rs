@@ -49,9 +49,10 @@ use crate::{
 /// Returns an error if the new config fails validation or pipeline
 /// construction, if it changes the protocol of a listener whose handler
 /// is already bound (that change takes effect only on restart), if its
-/// grouped TCP listeners are inconsistent, or if it changes or removes a
-/// bound TCP listener's startup-captured settings.
-/// The running server is unaffected.
+/// grouped TCP listeners are inconsistent, if it changes or removes a
+/// bound TCP listener's startup-captured settings, or if it changes a
+/// bound listener's `forward_proxy` block or removes a listener that has
+/// one. The running server is unaffected.
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -89,9 +90,18 @@ pub(crate) fn reload_pipelines(
         return Err(err);
     }
 
+    if let Err(err) = reject_forward_proxy_changes(new_config, old_config, live) {
+        error!(error = %err, "config reload failed: listener forward_proxy changed; requires restart");
+        return Err(err);
+    }
+
     let health_registry = build_health_registry(&new_config.clusters);
 
-    let new_ceiling = new_config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
+    let new_ceiling = new_config
+        .body_limits
+        .max_response_bytes
+        .unwrap_or(usize::MAX)
+        .min(new_config.body_limits.max_buffer_bytes.get());
     let updated_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
         subrequest_client.connector().clone(),
         new_ceiling,
@@ -253,6 +263,75 @@ fn reject_tcp_group_changes(
         if tcp_group_key(old) != tcp_group_key(new) {
             return Err(format!("TCP listener '{name}' changed upstream/cluster/timeouts; requires restart").into());
         }
+    }
+    Ok(())
+}
+
+/// Reject reloads that change what a bound HTTP handler captured from its
+/// listener's `forward_proxy` block, or that remove a listener carrying one.
+///
+/// The handler builds its CONNECT runtime (destination matcher, timeouts)
+/// and the CONNECT gate once, when it is bound. The pipeline swap would
+/// still apply the new config's filters, so a warn-only diagnostic would let
+/// a reload that drops the `ip_acl` the open-relay check relied on, while
+/// disabling the block, leave the startup runtime accepting CONNECT with no
+/// egress control.
+///
+/// `old_config` stands in for what the handlers captured. Removing a bound
+/// listener keeps its startup pipeline and runtime, but a later reload
+/// re-adding it would swap in a new pipeline, so removal is rejected while
+/// the listener carries a block. With changes and removals both rejected, a
+/// bound listener absent from `old_config` was removed without a block and
+/// so started without one; it is compared as blockless. Only listeners with
+/// a live pipeline slot are compared; ones new to the config are not bound.
+fn reject_forward_proxy_changes(
+    new_config: &Config,
+    old_config: &Config,
+    live: &ListenerPipelines,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    reject_private_upstreams_flip_with_connect(new_config, old_config, live)?;
+    let old_block = |name: &str| {
+        old_config
+            .listeners
+            .iter()
+            .find(|listener| listener.name == name)
+            .and_then(|listener| listener.forward_proxy.as_ref())
+    };
+    if let Some(changed) = new_config.listeners.iter().find(|listener| {
+        live.get(&listener.name).is_some() && listener.forward_proxy.as_ref() != old_block(&listener.name)
+    }) {
+        let name = &changed.name;
+        return Err(format!("listener '{name}' forward_proxy changed; requires restart").into());
+    }
+    if let Some(removed) = old_config.listeners.iter().find(|old| {
+        old.forward_proxy.is_some()
+            && live.get(&old.name).is_some()
+            && !new_config.listeners.iter().any(|listener| listener.name == old.name)
+    }) {
+        let name = &removed.name;
+        return Err(format!("listener '{name}' with a forward_proxy block removed; requires restart").into());
+    }
+    Ok(())
+}
+
+/// Reject flipping `insecure_options.allow_private_upstreams` while a bound
+/// listener has an enabled `forward_proxy` block: the CONNECT runtime captures
+/// it when bound, as the TCP service does, so turning it off would leave
+/// tunnels dialing private addresses until restart.
+fn reject_private_upstreams_flip_with_connect(
+    new_config: &Config,
+    old_config: &Config,
+    live: &ListenerPipelines,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let bound_connect = old_config.listeners.iter().any(|listener| {
+        live.get(&listener.name).is_some() && listener.forward_proxy.as_ref().is_some_and(|fp| fp.enabled)
+    });
+    let flipped =
+        old_config.insecure_options.allow_private_upstreams != new_config.insecure_options.allow_private_upstreams;
+    if bound_connect && flipped {
+        return Err(
+            "allow_private_upstreams is captured by forward_proxy listeners at startup; requires restart".into(),
+        );
     }
     Ok(())
 }
@@ -802,6 +881,259 @@ filter_chains:
         );
     }
 
+    #[cfg(feature = "forward-proxy")]
+    #[test]
+    fn allow_private_upstreams_flip_with_forward_proxy_listener_rejects_reload() {
+        // The CONNECT runtime captures the flag when the handler is bound, so
+        // turning it off on reload would leave tunnels dialing private and
+        // reserved addresses until restart. No TCP listener is configured.
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(forward_proxy_config_with_private(true, true));
+
+        let new_config = forward_proxy_config_with_private(true, false);
+        let err = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        )
+        .expect_err("allow_private_upstreams is captured by forward_proxy listeners at startup");
+        assert!(err.to_string().contains("allow_private_upstreams"), "{err}");
+    }
+
+    #[cfg(feature = "forward-proxy")]
+    #[test]
+    fn allow_private_upstreams_flip_with_disabled_forward_proxy_reloads() {
+        // An `enabled: false` block builds no CONNECT runtime, so nothing
+        // captured the flag.
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(forward_proxy_config_with_private(false, true));
+
+        let new_config = forward_proxy_config_with_private(false, false);
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn allow_private_upstreams_flip_without_forward_proxy_or_tcp_reloads() {
+        // An HTTP-only config without forward proxying captures nothing.
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+
+        let mut new_config = valid_config();
+        new_config.insecure_options.allow_private_upstreams = !old_config.insecure_options.allow_private_upstreams;
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    /// The open-relay hole a warn-only diagnostic leaves: startup enabled
+    /// CONNECT gated only by `ip_acl`; a reload that disables the block and
+    /// drops the filter validates, but the handler's startup CONNECT runtime
+    /// would keep tunneling under the new, filterless pipeline.
+    #[cfg(feature = "forward-proxy")]
+    #[test]
+    fn forward_proxy_disable_with_egress_filter_removal_rejects_reload() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(forward_proxy_config("enabled: true", true));
+        let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+
+        let new_config = forward_proxy_config("enabled: false", false);
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        let err = result.expect_err("the CONNECT runtime is captured at startup");
+        assert!(
+            err.to_string().contains("forward_proxy"),
+            "error names the field: {err}"
+        );
+        assert_eq!(
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            old_ptr,
+            "the ip_acl pipeline must stay live"
+        );
+    }
+
+    #[cfg(feature = "forward-proxy")]
+    #[test]
+    fn forward_proxy_destination_change_rejects_reload() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(forward_proxy_config(
+                "enabled: true\n      allow_destinations: [{host: a.example.com}]",
+                false,
+            ));
+
+        let new_config = forward_proxy_config(
+            "enabled: true\n      allow_destinations: [{host: b.example.com}]",
+            false,
+        );
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        assert!(result.is_err(), "the destination matcher is built at startup");
+    }
+
+    #[cfg(feature = "forward-proxy")]
+    #[test]
+    fn forward_proxy_added_to_bound_listener_rejects_reload() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+
+        let new_config = forward_proxy_config("enabled: true", true);
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        assert!(result.is_err(), "the CONNECT gate is set when the handler is bound");
+    }
+
+    #[cfg(feature = "forward-proxy")]
+    #[test]
+    fn forward_proxy_listener_removal_rejects_reload() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(forward_proxy_config("enabled: true", true));
+
+        let without_web = Config::from_yaml(
+            r#"
+listeners:
+  - name: other
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+        let result = reload_tcp(
+            &without_web,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        assert!(
+            result.is_err(),
+            "a removed listener keeps its CONNECT runtime; a later re-add could not be compared"
+        );
+    }
+
+    /// A listener removed without a block (accepted) and re-added with one
+    /// must not slip past: its handler was bound without CONNECT.
+    #[cfg(feature = "forward-proxy")]
+    #[test]
+    fn forward_proxy_added_after_remove_and_readd_rejects_reload() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+
+        let without_web = Config::from_yaml(
+            r#"
+listeners:
+  - name: other
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+        reload_tcp(
+            &without_web,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        )
+        .expect("removing a listener without forward_proxy is accepted");
+
+        let readded = forward_proxy_config("enabled: true", true);
+        let result = reload_tcp(
+            &readded,
+            &without_web,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        assert!(
+            result.is_err(),
+            "the re-added listener's handler was bound without CONNECT"
+        );
+    }
+
+    #[cfg(feature = "forward-proxy")]
+    #[test]
+    fn unchanged_forward_proxy_reloads() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) =
+            setup_live_pipelines_from(forward_proxy_config("enabled: true", true));
+        let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+
+        let new_config = forward_proxy_config("enabled: true", true);
+        let result = reload_tcp(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+        );
+
+        assert!(result.is_ok(), "an unchanged block must not block reloads: {result:?}");
+        assert_ne!(
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            old_ptr,
+            "the pipeline is still swapped"
+        );
+    }
+
     /// Removing `web` from the config and adding it back with the other
     /// protocol must not slip past the check: the handler is still bound,
     /// and the previous config no longer mentions the listener at all.
@@ -1061,7 +1393,7 @@ filter_chains:
         // Per-configuration snapshot of what the framework injected into the
         // bound outbound pipeline: whether the KV registry landed, and the
         // identity (pointer) of the session-store registry that reached it.
-        type Injection = (bool, Option<usize>);
+        type Injection = (bool, Option<usize>, usize, Option<usize>);
 
         // A reference chain-binding callout: it binds an outbound chain once and
         // owns the resulting pipeline, delegating `visit_nested_pipelines` so the
@@ -1085,6 +1417,10 @@ filter_chains:
                     let snapshot = (
                         pipeline.kv_stores().is_some(),
                         pipeline.session_stores().map(|stores| Arc::as_ptr(stores).addr()),
+                        pipeline.buffer_cap(),
+                        pipeline
+                            .subrequest_client()
+                            .map(praxis_core::subrequest::SubRequestClient::max_response_bytes),
                     );
                     self.injections.lock().unwrap().push(snapshot);
                 }
@@ -1095,6 +1431,7 @@ filter_chains:
             }
         }
 
+        praxis_tls::provider::install();
         let injections: Arc<Mutex<Vec<Injection>>> = Arc::new(Mutex::new(Vec::new()));
         let mut registry = FilterRegistry::with_builtins();
         let factory_injections = Arc::clone(&injections);
@@ -1122,10 +1459,12 @@ filter_chains:
         let expected_session_ptr = Arc::as_ptr(&session_stores).addr();
         let kv_stores = empty_kv_stores();
         let health_registry: HealthRegistry = Arc::new(HashMap::new());
-        let subrequest_client = empty_subrequest_client();
 
         let old_config = Config::from_yaml(
             r#"
+body_limits:
+  max_buffer_bytes: 4096
+  max_response_bytes: 100000000
 listeners:
   - name: web
     address: "127.0.0.1:8080"
@@ -1142,6 +1481,8 @@ filter_chains:
         )
         .unwrap();
 
+        let subrequest_client = crate::pipelines::build_subrequest_client(&old_config).unwrap();
+
         let live = resolve_pipelines(
             &old_config,
             &registry,
@@ -1155,16 +1496,21 @@ filter_chains:
         let after_build = injections.lock().unwrap().clone();
         let build_count = after_build.len();
         assert!(
-            after_build
-                .iter()
-                .any(|(kv, session)| *kv && *session == Some(expected_session_ptr)),
+            after_build.iter().any(|(kv, session, cap, client)| *kv
+                && *session == Some(expected_session_ptr)
+                && *cap == 4096
+                && *client == Some(4096)),
             "resolve_pipelines must inject KV and session stores into the bound outbound pipeline"
         );
 
-        let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+        let pinned_old = live.get("web").unwrap().load_full();
+        let old_ptr = Arc::as_ptr(&pinned_old);
 
         let new_config = Config::from_yaml(
             r#"
+body_limits:
+  max_buffer_bytes: 67108865
+  max_response_bytes: 100000000
 listeners:
   - name: web
     address: "127.0.0.1:8080"
@@ -1209,6 +1555,9 @@ filter_chains:
 
         let new_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
         assert_ne!(old_ptr, new_ptr, "reload must swap in a rebuilt pipeline");
+        assert_eq!(pinned_old.buffer_cap(), 4096, "in-flight requests keep their old cap");
+        assert_eq!(pinned_old.subrequest_client().unwrap().max_response_bytes(), 4096);
+        assert_eq!(live.get("web").unwrap().load().buffer_cap(), 67_108_865);
 
         let after_reload = injections.lock().unwrap().clone();
         assert!(
@@ -1216,9 +1565,10 @@ filter_chains:
             "reload must re-run configuration over the rebuilt outbound pipeline"
         );
         assert!(
-            after_reload[build_count..]
-                .iter()
-                .any(|(kv, session)| *kv && *session == Some(expected_session_ptr)),
+            after_reload[build_count..].iter().any(|(kv, session, cap, client)| *kv
+                && *session == Some(expected_session_ptr)
+                && *cap == 67_108_865
+                && *client == Some(67_108_865)),
             "reload must re-inject KV and session stores into the rebuilt bound outbound pipeline"
         );
     }
@@ -2304,6 +2654,42 @@ filter_chains:
 "#,
         )
         .unwrap()
+    }
+
+    /// [`valid_config`] with the given `forward_proxy` body on `web`, and an
+    /// `ip_acl` ahead of the static response when `with_ip_acl` is set.
+    #[cfg(feature = "forward-proxy")]
+    fn forward_proxy_config(forward_proxy: &str, with_ip_acl: bool) -> Config {
+        let ip_acl = if with_ip_acl {
+            "      - filter: ip_acl\n        allow: [\"127.0.0.0/8\"]\n"
+        } else {
+            ""
+        };
+        Config::from_yaml(&format!(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+    forward_proxy:
+      {forward_proxy}
+filter_chains:
+  - name: main
+    filters:
+{ip_acl}      - filter: static_response
+        status: 200
+"#
+        ))
+        .unwrap()
+    }
+
+    /// [`forward_proxy_config`] with an `ip_acl`, the block `enabled` or not,
+    /// and `allow_private_upstreams` set as given.
+    #[cfg(feature = "forward-proxy")]
+    fn forward_proxy_config_with_private(enabled: bool, allow_private_upstreams: bool) -> Config {
+        let mut config = forward_proxy_config(&format!("enabled: {enabled}"), true);
+        config.insecure_options.allow_private_upstreams = allow_private_upstreams;
+        config
     }
 
     /// Two grouped TCP listeners `db1`/`db2` with the given chains and cluster.

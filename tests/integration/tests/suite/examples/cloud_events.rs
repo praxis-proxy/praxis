@@ -3,16 +3,21 @@
 
 //! Functional integration tests for the CloudEvents publisher example.
 
+#[cfg(target_os = "linux")]
+mod slow_process;
+
 use std::{
     collections::HashMap,
-    io::{Read as _, Write as _},
-    net::TcpListener,
+    io::{BufRead as _, BufReader, Read as _, Write as _},
+    net::{TcpListener, TcpStream},
     sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
-use praxis_test_utils::{free_port, http_send, parse_status, start_backend, start_full_proxy};
+use praxis_test_utils::{
+    H1Completion, free_port, http_send, parse_status, read_h1_response, start_backend, start_full_proxy, wait_for_tcp,
+};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -133,4 +138,228 @@ fn cloud_events_receiver_failure_does_not_change_client_response() {
         200,
         "receiver failure must not change the client response"
     );
+}
+
+#[test]
+fn cloud_event_waits_for_stream_completion_and_excludes_payload() {
+    let (event_port, events) = bounded_event_receiver();
+    let (backend_port, resume) = paused_sse_backend();
+    let proxy_port = free_port();
+    let mut config = super::load_example_config(
+        "observability/cloud-events.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend_port), ("127.0.0.1:3001", event_port)]),
+    );
+    config.filter_chains[0]
+        .filters
+        .insert(0, serde_yaml::from_str("filter: access_log").unwrap());
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    let mut socket = TcpStream::connect(proxy.addr()).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    socket
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: safe-agent\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut received = Vec::new();
+    let mut resumed = false;
+    let result = read_h1_response(&mut BufReader::new(socket), false, 262_144, |chunk| {
+        received.extend_from_slice(chunk);
+        if !resumed {
+            assert!(b"data: first\n\n".starts_with(&received));
+            if received.len() == b"data: first\n\n".len() {
+                assert!(events.try_recv().is_err(), "response-complete event must wait for EOS");
+                resume.send(()).unwrap();
+                resumed = true;
+            }
+        }
+        Ok(())
+    });
+    assert!(resumed);
+    assert_eq!(result.status, Some(200));
+    assert_eq!(result.completion, Some(H1Completion::Chunked));
+    let mut expected = b"data: first\n\n".to_vec();
+    expected.extend_from_slice(b"data: CANARY_EVENT_BODY_SECRET\n\n");
+    expected.extend(std::iter::repeat_n(b'x', 131_072));
+    assert_eq!(received, expected);
+    let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(event.len() <= 65_536, "event is bounded");
+    assert!(event.contains("\"status\":200"));
+    assert!(!event.contains("CANARY_EVENT_BODY_SECRET"));
+    assert!(
+        events.recv_timeout(Duration::from_millis(500)).is_err(),
+        "one completed response emits one event"
+    );
+}
+
+#[test]
+fn cloud_event_does_not_hide_a_stream_response_limit() {
+    let (event_port, events) = bounded_event_receiver();
+    let (backend_port, resume) = paused_sse_backend();
+    let proxy_port = free_port();
+    let mut config = super::load_example_config(
+        "observability/cloud-events.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend_port), ("127.0.0.1:3001", event_port)]),
+    );
+    config.body_limits.max_response_bytes = Some(16_384);
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    let mut socket = TcpStream::connect(proxy.addr()).unwrap();
+    socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    socket
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut received = Vec::new();
+    let mut resumed = false;
+    let result = read_h1_response(&mut BufReader::new(socket), false, 16_384, |chunk| {
+        received.extend_from_slice(chunk);
+        if !resumed && received.len() >= b"data: first\n\n".len() {
+            resume.send(()).unwrap();
+            resumed = true;
+        }
+        Ok(())
+    });
+    assert!(resumed, "prefix must arrive before the tail");
+    assert_eq!(result.status, Some(200));
+    assert!(
+        result.completion.is_none(),
+        "an over-limit response cannot complete: {result:?}"
+    );
+    assert!(received.starts_with(b"data: first\n\n"));
+    assert_eq!(
+        received
+            .windows(b"data: first\n\n".len())
+            .filter(|window| *window == b"data: first\n\n")
+            .count(),
+        1
+    );
+    assert!(
+        events.recv_timeout(Duration::from_millis(500)).is_err(),
+        "the response-complete example must not emit for an aborted stream"
+    );
+    let probe = http_send(
+        proxy.addr(),
+        "GET /probe HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&probe), 200);
+    assert_eq!(praxis_test_utils::parse_body(&probe), "ok");
+    let event = events.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(event.len() <= 65_536);
+    assert!(!event.contains("CANARY_EVENT_BODY_SECRET"));
+    events.recv_timeout(Duration::from_millis(500)).unwrap_err();
+}
+
+/// Accept events under a strict body bound, and acknowledge each one.
+fn bounded_event_receiver() -> (u16, mpsc::Receiver<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let (sender, events) = mpsc::channel();
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((socket, _)) => {
+                    if sender.send(read_event(socket)).is_err() {
+                        break;
+                    }
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                },
+                Err(error) => panic!("event receiver: {error}"),
+            }
+        }
+    });
+    (port, events)
+}
+
+/// Read and acknowledge one event without retaining unbounded data.
+fn read_event(mut socket: TcpStream) -> String {
+    socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut reader = BufReader::new(&mut socket);
+    let mut headers = String::new();
+    loop {
+        let mut line = String::new();
+        assert_ne!(
+            reader.read_line(&mut line).unwrap(),
+            0,
+            "event headers ended prematurely"
+        );
+        headers.push_str(&line);
+        assert!(headers.len() <= 16_384, "event headers exceeded the observation bound");
+        if line == "\r\n" {
+            break;
+        }
+    }
+    let length: usize = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().unwrap())
+        })
+        .unwrap();
+    assert!(length <= 65_536, "event body exceeded the observation bound");
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
+    socket
+        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    String::from_utf8(body).unwrap()
+}
+
+/// Hold the second event until the client has observed the first one.
+fn paused_sse_backend() -> (u16, mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (resume, wait) = mpsc::channel();
+    thread::spawn(move || {
+        let (mut socket, _) = listener.accept().unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut reader = BufReader::new(&mut socket);
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "SSE request headers ended prematurely"
+            );
+            if line == "\r\n" {
+                break;
+            }
+        }
+        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nd\r\ndata: first\n\n\r\n").unwrap();
+        socket.flush().unwrap();
+        wait.recv_timeout(Duration::from_secs(8)).unwrap();
+        let tail = format!("data: CANARY_EVENT_BODY_SECRET\n\n{}", "x".repeat(131_072));
+        let _sent = write!(socket, "{:x}\r\n{}\r\n0\r\n\r\n", tail.len(), tail);
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((mut probe, _)) => {
+                    let mut reader = BufReader::new(&mut probe);
+                    loop {
+                        let mut line = String::new();
+                        assert_ne!(
+                            reader.read_line(&mut line).unwrap(),
+                            0,
+                            "probe request headers ended prematurely"
+                        );
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    let _sent = probe.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+                    break;
+                },
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                },
+                Err(error) => panic!("probe backend: {error}"),
+            }
+        }
+    });
+    (port, resume)
 }

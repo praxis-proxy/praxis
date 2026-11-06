@@ -28,7 +28,7 @@ all: build ## workspace build (alias for build)
 
 REQUIRED_CMDS := cargo
 RUST_TARGETS := all build release check \
-	test test-unit \
+	test test-unit test-harness test-harness-hyper \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
@@ -41,7 +41,7 @@ RUST_TARGETS := all build release check \
 	run-echo run-debug
 NIGHTLY_FMT_TARGETS  := lint lint-fips lint-hyper fmt
 CMAKE_TARGETS := all build release check \
-	test test-unit \
+	test test-unit test-harness \
 	test-schema test-integration test-conformance \
 	test-integration-hyper \
 	test-security test-security-suite test-resilience \
@@ -58,7 +58,7 @@ endif
 LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 
 .PHONY: all build build-dev release check check-features clean \
-	test test-unit \
+	test test-unit test-harness test-harness-hyper \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
@@ -158,7 +158,7 @@ check-features: ## check each optional feature on its own
 	@for f in policy-engine config-reload admin-api otel basic-auth-filter \
 	          cloud-events-filter upstream-binding iterative-request-router \
 	          router-json-aliases slow-start bound-upstream-request-body chain-binding spiffe \
-	          access-log-syslog hedged-requests tls-health-check; do \
+	          access-log-syslog hedged-requests tls-health-check forward-proxy; do \
 		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f --all-targets =="; \
 		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f" --all-targets || exit 1; \
 	done
@@ -345,7 +345,7 @@ FIPS_CARGO_ARGS         := -p praxis-proxy --no-default-features --features $(FI
 # set (tests/utils names config-reload and admin-api itself). Conformance
 # runs separately because it needs h2spec on PATH.
 FIPS_TEST_SUITES        := -p praxis-tests-schema -p praxis-tests-security \
-	-p praxis-tests-integration -p praxis-tests-resilience
+	-p praxis-tests-integration -p praxis-tests-resilience -p praxis-test-utils
 # A suite names its backend itself (the harness has no backend without
 # defaults), so the FIPS runs, which drop every default, name Pingora.
 FIPS_TEST_SUITE_FEATURES := praxis-tests-schema/pingora,praxis-tests-security/pingora,praxis-tests-integration/pingora,praxis-tests-resilience/pingora
@@ -720,24 +720,36 @@ test-hyper: ## unit tests resolved as the hyper build
 # build, and the tests that spawn the binary get the hyper binary through
 # PRAXIS_BIN.
 # --no-fail-fast: this run is the parity record, so every suite reports.
-test-integration-hyper: build-hyper ## schema, security, resilience and integration suites on hyper
+test-integration-hyper: build-test-proxy-hyper ## schema, security, resilience and integration suites on hyper
 	$(call require-features,$(call hyper-suite-features,$(SUITE_PACKAGES)))
 	$(HYPER_BIN) cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features --no-fail-fast \
-		$(foreach pkg,$(SUITE_PACKAGES),-p $(pkg)) \
+		$(foreach pkg,$(SUITE_PACKAGES),-p $(pkg)) -p praxis-test-utils \
 		--features $(call hyper-suite-features,$(SUITE_PACKAGES)) \
 		$(HYPER_TEST_ARGS)
 
-test-schema-hyper: build-hyper ## config parsing + example validation suite on hyper
+# Subprocess fixtures exercise optional filters as well as the base backend.
+# Build their binary with the same compatible server features as the suites.
+.PHONY: build-test-proxy-hyper
+build-test-proxy-hyper:
+	$(call require-features,$(call hyper-suite-features,praxis-proxy))
+	cargo build -p praxis-proxy --no-default-features --target-dir $(HYPER_TARGET_DIR) \
+		--features $(call hyper-suite-features,praxis-proxy)
+
+test-harness-hyper: ## shared test utility self-checks on hyper
+	cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features \
+		-p praxis-test-utils --features hyper --lib $(_NOCAPTURE)
+
+test-schema-hyper: build-test-proxy-hyper ## config parsing + example validation suite on hyper
 	$(call require-features,$(call hyper-suite-features,praxis-tests-schema))
 	$(HYPER_BIN) cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features \
 		-p praxis-tests-schema --features $(call hyper-suite-features,praxis-tests-schema) $(HYPER_TEST_ARGS)
 
-test-security-hyper: build-hyper ## security suite on hyper
+test-security-hyper: build-test-proxy-hyper ## security suite on hyper
 	$(call require-features,$(call hyper-suite-features,praxis-tests-security))
 	$(HYPER_BIN) cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features \
 		-p praxis-tests-security --features $(call hyper-suite-features,praxis-tests-security) $(HYPER_TEST_ARGS)
 
-test-resilience-hyper: build-hyper ## resilience suite on hyper
+test-resilience-hyper: build-test-proxy-hyper ## resilience suite on hyper
 	$(call require-features,$(call hyper-suite-features,praxis-tests-resilience))
 	$(HYPER_BIN) cargo test --target-dir $(HYPER_TARGET_DIR) --no-default-features \
 		-p praxis-tests-resilience --features $(call hyper-suite-features,praxis-tests-resilience) $(HYPER_TEST_ARGS)
@@ -789,12 +801,16 @@ test: test-unit ## unit tests (alias for test-unit)
 # default recipes below are the Pingora ones.
 ifeq ($(BACKEND),hyper)
 test-unit: test-hyper
+test-harness: test-harness-hyper
 test-schema: test-schema-hyper
 test-integration: test-integration-hyper
 test-conformance: test-conformance-hyper
 test-security-suite: test-security-hyper
 test-resilience: test-resilience-hyper
 else
+test-harness: ## shared test utility self-checks
+	cargo test -p praxis-test-utils --lib $(_NOCAPTURE)
+
 # Everything outside tests/, one pass, every feature on, then the filter and
 # core crates in their lean configs: the full feature set compiles out the
 # tests that only exist without `policy-engine` or `upstream-binding`, so
@@ -819,11 +835,20 @@ test-schema: ## config parsing + example validation suite
 	$(call require-features,$(call package-features,praxis-tests-schema))
 	cargo test --features $(call package-features,praxis-tests-schema) -p praxis-tests-schema $(_NOCAPTURE)
 
+# Pin subprocess tests to a freshly built binary with the suite's optional
+# capabilities; an older default binary may not register a requested filter.
+TEST_PROXY_BIN = $(abspath $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target))/debug/praxis
+.PHONY: build-test-proxy
+build-test-proxy:
+	$(call require-features,$(call package-features,praxis-proxy))
+	cargo build -p praxis-proxy --features $(call package-features,praxis-proxy)
+
 # Everything under tests/ (schema, security, resilience, integration) in a
 # single pass, every feature on. Conformance is separate (test-conformance).
-test-integration: ## schema, security, resilience and integration suites
+test-integration: build-test-proxy ## schema, security, resilience and integration suites
 	$(call require-features,$(call package-features,$(SUITE_PACKAGES)))
-	cargo test --features $(call package-features,$(SUITE_PACKAGES)) \
+	PRAXIS_BIN="$(TEST_PROXY_BIN)" cargo test --features $(call package-features,$(SUITE_PACKAGES)) \
+		-p praxis-test-utils \
 		-p praxis-tests-schema \
 		-p praxis-tests-security \
 		-p praxis-tests-resilience \
@@ -837,9 +862,9 @@ test-security-suite: ## security suite
 	$(call require-features,$(call package-features,praxis-tests-security))
 	cargo test --features $(call package-features,praxis-tests-security) -p praxis-tests-security $(_NOCAPTURE)
 
-test-resilience: ## resilience suite
+test-resilience: build-test-proxy ## resilience suite
 	$(call require-features,$(call package-features,praxis-tests-resilience))
-	cargo test --features $(call package-features,praxis-tests-resilience) -p praxis-tests-resilience $(_NOCAPTURE)
+	PRAXIS_BIN="$(TEST_PROXY_BIN)" cargo test --features $(call package-features,praxis-tests-resilience) -p praxis-tests-resilience $(_NOCAPTURE)
 endif
 
 # Compile the benchmark harness without running it, to catch bench
@@ -854,6 +879,13 @@ test-security: test-security-suite ## security suite (alias for test-security-su
 test-config-validation: test-schema ## alias for test-schema
 
 test-config: test-schema ## alias for test-schema
+
+.PHONY: test-payload-driver test-payload-scheduled
+test-payload-driver: ## verify scheduled payload selection and artifact guards
+	python3 -B -m unittest discover -s tests -p test_payload_scheduled.py
+
+test-payload-scheduled: test-payload-driver ## optimized large-payload and resource tests
+	python3 -B tests/run-payload-scheduled.py --adapter $(BACKEND)
 
 # -------------------------------------------------------------------
 # Test Container

@@ -577,8 +577,8 @@ fn client_default_ceiling_is_absolute_max() {
     let client = super::client::SubRequestClient::new(connector);
     assert_eq!(
         client.max_response_bytes,
-        crate::config::ABSOLUTE_MAX_BODY_BYTES,
-        "default ceiling should be ABSOLUTE_MAX_BODY_BYTES (64 MiB)"
+        crate::config::DEFAULT_MAX_BUFFER_BYTES,
+        "default ceiling should be DEFAULT_MAX_BUFFER_BYTES (64 MiB)"
     );
 }
 

@@ -744,3 +744,510 @@ fn max_retries_zero_forwards_adapted_body_on_single_attempt() {
         "the phase runs exactly once; max_retries: 0 performs no replay"
     );
 }
+
+#[cfg(feature = "pingora")]
+mod payload_retry {
+    use std::{
+        io::{BufRead as _, BufReader, Read as _, Write as _},
+        net::{TcpListener, TcpStream},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc,
+        },
+        thread::{self, JoinHandle},
+        time::Duration,
+    };
+
+    use bytes::Bytes;
+    use praxis_core::config::Config;
+    use praxis_filter::{
+        BodyAccess, BodyMode, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext,
+        SelectedUpstreamBodyOutcome,
+    };
+    use praxis_test_utils::{
+        free_port, http_send, parse_status, read_h1_response, start_full_proxy_with_registry, wait_for_tcp,
+    };
+
+    #[derive(Clone, Copy, Debug)]
+    enum Rewrite {
+        Identity,
+        Append,
+        Shrink,
+    }
+
+    struct Rewriter {
+        rewrite: Rewrite,
+        calls: Arc<AtomicUsize>,
+    }
+
+    /// A streamed writer makes the forwarded representation differ from input.
+    struct StreamWriter {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl HttpFilter for StreamWriter {
+        fn name(&self) -> &'static str {
+            "replay_stream_writer"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn request_body_access(&self) -> BodyAccess {
+            BodyAccess::ReadWrite
+        }
+
+        async fn on_request_body(
+            &self,
+            _ctx: &mut HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+            _end: bool,
+        ) -> Result<FilterAction, FilterError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(chunk) = body {
+                *chunk = Bytes::from(chunk.iter().map(|byte| byte ^ 0x20).collect::<Vec<_>>());
+            }
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HttpFilter for Rewriter {
+        fn name(&self) -> &'static str {
+            "replay_rewriter"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn selected_upstream_request_body_access(&self) -> BodyAccess {
+            BodyAccess::ReadWrite
+        }
+
+        fn request_body_mode(&self) -> BodyMode {
+            BodyMode::StreamBuffer {
+                max_bytes: Some(2_097_152),
+            }
+        }
+
+        async fn on_selected_upstream_request_body(
+            &self,
+            _ctx: &mut HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+        ) -> Result<SelectedUpstreamBodyOutcome, FilterError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut bytes = body.as_ref().map_or_else(Vec::new, |bytes| bytes.to_vec());
+            match self.rewrite {
+                Rewrite::Identity => {},
+                Rewrite::Append => bytes.push(b'!'),
+                Rewrite::Shrink => bytes.truncate(1024),
+            }
+            *body = Some(Bytes::from(bytes));
+            Ok(SelectedUpstreamBodyOutcome::Continue)
+        }
+    }
+
+    struct ObservedBackend {
+        port: u16,
+        accepted: mpsc::Receiver<()>,
+        received: mpsc::Receiver<Vec<u8>>,
+        stop: Arc<AtomicBool>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for ObservedBackend {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Some(worker) = self.worker.take()
+                && let Err(error) = worker.join()
+                && !thread::panicking()
+            {
+                std::panic::resume_unwind(error);
+            }
+        }
+    }
+
+    fn backend(status: u16) -> ObservedBackend {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (accepted_tx, accepted) = mpsc::channel();
+        let (sender, received) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            while !worker_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        accepted_tx.send(()).unwrap();
+                        receive_attempt(stream, status, &sender);
+                        return;
+                    },
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
+                    },
+                    Err(error) => panic!("backend accept: {error}"),
+                }
+            }
+        });
+        ObservedBackend {
+            port,
+            accepted,
+            received,
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    fn receive_attempt(stream: TcpStream, status: u16, sender: &mpsc::Sender<Vec<u8>>) {
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut length = None;
+        loop {
+            let mut line = String::new();
+            assert_ne!(reader.read_line(&mut line).unwrap(), 0, "complete request headers");
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                length = Some(value.trim().parse::<usize>().unwrap());
+            }
+        }
+        let mut body = vec![0; length.expect("adapted request must have a content length")];
+        reader.read_exact(&mut body).unwrap();
+        sender.send(body).unwrap();
+        write!(
+            reader.get_mut(),
+            "HTTP/1.1 {status} result\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+        )
+        .unwrap();
+    }
+
+    fn post(addr: &str, body: &[u8]) -> (Option<u16>, Vec<u8>, bool) {
+        post_with_writer_header(addr, body, false)
+    }
+
+    fn post_with_writer_header(addr: &str, body: &[u8], writer_enabled: bool) -> (Option<u16>, Vec<u8>, bool) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(15))).unwrap();
+        write!(
+            stream,
+            "POST /api/echo HTTP/1.1\r\nHost: localhost\r\nX-Writer: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            if writer_enabled { "yes" } else { "no" }, body.len()
+        )
+        .unwrap();
+        stream.write_all(body).unwrap();
+        let mut bytes = Vec::new();
+        let response = read_h1_response(&mut BufReader::new(stream), false, 1024, |chunk| {
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        });
+        (
+            response.status,
+            bytes,
+            response.completion.is_some() && response.abort.is_none(),
+        )
+    }
+
+    fn check_retry(input_len: usize, rewrite: Rewrite, replay: bool) {
+        let failing = backend(503);
+        let live = backend(200);
+        let proxy_port = free_port();
+        let yaml = super::retry_yaml(proxy_port, failing.port, live.port, "replay_rewriter", 1);
+        let config = Config::from_yaml(&yaml).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&calls);
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "replay_rewriter",
+                FilterFactory::Http(Arc::new(move |_| {
+                    Ok(Box::new(Rewriter {
+                        rewrite,
+                        calls: Arc::clone(&factory_calls),
+                    }))
+                })),
+            )
+            .unwrap();
+        let proxy = start_full_proxy_with_registry(&config, &registry);
+        wait_for_tcp(proxy.addr());
+        let input: Vec<u8> = (0..input_len)
+            .map(|offset| u8::try_from(offset % 251).unwrap())
+            .collect();
+        let mut expected = input.clone();
+        match rewrite {
+            Rewrite::Identity => {},
+            Rewrite::Append => expected.push(b'!'),
+            Rewrite::Shrink => expected.truncate(1024),
+        }
+        let (status, response_body, complete) = post(proxy.addr(), &input);
+        failing.accepted.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert_eq!(
+            status,
+            Some(if replay { 200 } else { 503 }),
+            "input={input_len}, rewrite={rewrite:?}"
+        );
+        assert!(complete, "response framing must complete");
+        assert_eq!(response_body, b"ok", "backend response must arrive intact");
+        assert_eq!(
+            failing.received.recv_timeout(Duration::from_secs(3)).unwrap(),
+            expected,
+            "first attempt must receive the whole adapted body"
+        );
+        if replay {
+            live.accepted.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert_eq!(
+                live.received.recv_timeout(Duration::from_secs(3)).unwrap(),
+                expected,
+                "retry must replay the identical representation"
+            );
+        } else {
+            assert!(
+                matches!(
+                    live.accepted.recv_timeout(Duration::from_millis(200)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ),
+                "an unreplayable body must not connect for a second attempt"
+            );
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "adaptation runs once across attempts");
+        let probe = http_send(
+            proxy.addr(),
+            "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        assert_eq!(parse_status(&probe), 404, "a clean request must still be served");
+    }
+
+    #[test]
+    fn retry_replays_only_complete_bodies_at_cutoff_and_after_rewriting() {
+        for (length, rewrite, replay) in [
+            (65_535, Rewrite::Identity, true),
+            (65_536, Rewrite::Identity, true),
+            (65_537, Rewrite::Identity, false),
+            (2_097_152, Rewrite::Identity, false),
+            (65_535, Rewrite::Append, true),
+            (65_536, Rewrite::Append, false),
+            (65_537, Rewrite::Shrink, false),
+        ] {
+            check_retry(length, rewrite, replay);
+        }
+    }
+
+    #[test]
+    fn streamed_writer_blocks_retry_only_when_its_condition_matches() {
+        for enabled in [false, true] {
+            let failing = backend(503);
+            let live = backend(200);
+            let proxy_port = free_port();
+            let yaml = super::retry_yaml(proxy_port, failing.port, live.port, "replay_stream_writer", 1).replace(
+                "      - filter: replay_stream_writer\n",
+                "      - filter: replay_stream_writer\n        conditions:\n          - when:\n              headers:\n                x-writer: yes\n",
+            );
+            let config = Config::from_yaml(&yaml).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let factory_calls = Arc::clone(&calls);
+            let mut registry = FilterRegistry::with_builtins();
+            registry
+                .register(
+                    "replay_stream_writer",
+                    FilterFactory::Http(Arc::new(move |_| {
+                        Ok(Box::new(StreamWriter {
+                            calls: Arc::clone(&factory_calls),
+                        }))
+                    })),
+                )
+                .unwrap();
+            let proxy = start_full_proxy_with_registry(&config, &registry);
+            wait_for_tcp(proxy.addr());
+            let input = vec![b'a'; 12_345];
+            let (status, response, complete) = post_with_writer_header(proxy.addr(), &input, enabled);
+            assert_eq!(status, Some(if enabled { 503 } else { 200 }));
+            assert!(complete);
+            assert_eq!(response, b"ok");
+            failing.accepted.recv_timeout(Duration::from_secs(3)).unwrap();
+            let first = failing.received.recv_timeout(Duration::from_secs(3)).unwrap();
+            assert_eq!(first, vec![if enabled { b'A' } else { b'a' }; input.len()]);
+            if enabled {
+                assert!(calls.load(Ordering::SeqCst) > 0, "the enabled body writer ran");
+                assert!(
+                    matches!(
+                        live.accepted.recv_timeout(Duration::from_millis(200)),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ),
+                    "unretained output must not be replayed"
+                );
+            } else {
+                assert_eq!(calls.load(Ordering::SeqCst), 0, "the skipped writer never runs");
+                live.accepted.recv_timeout(Duration::from_secs(3)).unwrap();
+                assert_eq!(live.received.recv_timeout(Duration::from_secs(3)).unwrap(), input);
+            }
+            let probe = http_send(
+                proxy.addr(),
+                "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            );
+            assert_eq!(parse_status(&probe), 404);
+        }
+    }
+}
+
+mod payload_output_limits {
+    use std::{
+        io::{BufReader, Write as _},
+        net::TcpStream,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use bytes::Bytes;
+    use praxis_core::config::Config;
+    use praxis_filter::{
+        BodyAccess, BodyMode, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext,
+        SelectedUpstreamBodyOutcome,
+    };
+    use praxis_test_utils::{
+        PayloadSpec, free_port, http_get, read_h1_response, start_counting_backend, start_echo_backend,
+        start_full_proxy_with_registry, wait_for_tcp,
+    };
+
+    struct Resize {
+        length: usize,
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl HttpFilter for Resize {
+        fn name(&self) -> &'static str {
+            "size_selected_output"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn selected_upstream_request_body_access(&self) -> BodyAccess {
+            BodyAccess::ReadWrite
+        }
+
+        fn request_body_mode(&self) -> BodyMode {
+            BodyMode::StreamBuffer { max_bytes: Some(128) }
+        }
+
+        async fn on_selected_upstream_request_body(
+            &self,
+            _ctx: &mut HttpFilterContext<'_>,
+            body: &mut Option<Bytes>,
+        ) -> Result<SelectedUpstreamBodyOutcome, FilterError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut bytes = body.as_ref().map_or_else(Vec::new, |bytes| bytes.to_vec());
+            bytes.resize(self.length, b'x');
+            *body = Some(Bytes::from(bytes));
+            Ok(SelectedUpstreamBodyOutcome::Continue)
+        }
+    }
+
+    fn yaml(proxy: u16, backend: u16, probe: u16) -> String {
+        format!(
+            r#"
+body_limits:
+  max_request_bytes: 64
+insecure_options:
+  allow_private_endpoints: true
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: /api/
+            cluster: target
+          - path_prefix: /
+            cluster: probe
+      - filter: load_balancer
+        clusters:
+          - name: target
+            endpoints: ["127.0.0.1:{backend}"]
+          - name: probe
+            endpoints: ["127.0.0.1:{probe}"]
+      - filter: size_selected_output
+        conditions:
+          - when:
+              headers:
+                x-resize: yes
+"#
+        )
+    }
+
+    fn post(addr: &str, length: usize) -> (Option<u16>, bool) {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(stream, "POST /api/ HTTP/1.1\r\nHost: localhost\r\nX-Resize: yes\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n").unwrap();
+        stream.write_all(&vec![b'x'; length]).unwrap();
+        let response = read_h1_response(&mut BufReader::new(stream), false, 4096, |_| Ok(()));
+        (
+            response.status,
+            response.completion.is_some() && response.abort.is_none(),
+        )
+    }
+
+    #[test]
+    fn selected_growth_shrink_and_empty_respect_global_limit() {
+        for (input, output, expected_status, expected_calls) in [
+            (63, 64, 200, 1),
+            (64, 65, 413, 1),
+            (64, 1, 200, 1),
+            (64, 0, 200, 1),
+            (65, 1, 413, 0),
+        ] {
+            let spec = PayloadSpec::padded(output as u64, b"", b"", b'x').unwrap();
+            let backend = start_counting_backend(spec, "target", 128);
+            let clean = start_echo_backend();
+            let port = free_port();
+            let config = Config::from_yaml(&yaml(port, backend.port, clean.port())).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let factory_calls = Arc::clone(&calls);
+            let mut registry = FilterRegistry::with_builtins();
+            registry
+                .register(
+                    "size_selected_output",
+                    FilterFactory::Http(Arc::new(move |_| {
+                        Ok(Box::new(Resize {
+                            length: output,
+                            calls: Arc::clone(&factory_calls),
+                        }))
+                    })),
+                )
+                .unwrap();
+            let proxy = start_full_proxy_with_registry(&config, &registry);
+            wait_for_tcp(proxy.addr());
+            let (status, complete) = post(proxy.addr(), input);
+            assert_eq!(status, Some(expected_status), "input={input}, output={output}");
+            assert!(complete);
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+            if expected_status == 200 {
+                let receipt = backend.receipt.recv_timeout(Duration::from_secs(3)).unwrap();
+                assert_eq!(receipt.bytes, output as u64);
+                assert_eq!(receipt.verified_bytes, output as u64);
+                assert!(receipt.mismatch.is_none() && receipt.completion.is_some() && receipt.abort.is_none());
+            } else {
+                assert!(
+                    matches!(backend.accepted.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty)),
+                    "rejection must precede upstream transport"
+                );
+            }
+            let (status, body) = http_get(proxy.addr(), "/echo", None);
+            assert_eq!((status, body.as_str()), (200, ""));
+            backend.join();
+        }
+    }
+}

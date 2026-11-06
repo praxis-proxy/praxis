@@ -333,7 +333,7 @@ pub(super) async fn commit(
     let Answer {
         bodyless,
         read_timeout,
-        response,
+        mut response,
         mut session,
         start,
     } = answer;
@@ -341,8 +341,9 @@ pub(super) async fn commit(
     if bodyless {
         let keepalive = session.response_done() && upload.is_settled();
         release(&listener.connector, session, keepalive);
+        let body = bodyless_body(&mut response, flight.version, flight.is_head());
         flight.complete().await;
-        return client_response(response.status, response.headers, ProxyBody::empty());
+        return client_response(response.status, response.headers, body);
     }
 
     let (relay, body) = Relay::new();
@@ -367,6 +368,33 @@ fn spawn_relay(relaying: Relaying) {
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
+
+/// Preserve valid representation length on HTTP/1 304s without sending a body.
+fn bodyless_body(response: &mut praxis_filter::Response, version: Version, is_head: bool) -> ProxyBody {
+    if response.status != StatusCode::NOT_MODIFIED || is_head || !matches!(version, Version::HTTP_10 | Version::HTTP_11)
+    {
+        return ProxyBody::empty();
+    }
+    if single_valid_length(&response.headers) {
+        return ProxyBody::metadata_only();
+    }
+    // Hyper's upstream decoder does not validate lengths on a bodyless 304.
+    // Do not let malformed or duplicate values reach its downstream encoder.
+    let _removed = response.headers.remove(http::header::CONTENT_LENGTH);
+    ProxyBody::empty()
+}
+
+/// Accept only one decimal length representable by Hyper's HTTP/1 encoder.
+fn single_valid_length(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all(http::header::CONTENT_LENGTH).iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    values.next().is_none()
+        && value.to_str().ok().is_some_and(|value| {
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) && value.parse::<u64>().is_ok()
+        })
+}
 
 /// The hyper response for a status, headers and body.
 fn client_response(status: StatusCode, headers: HeaderMap, body: ProxyBody) -> Response<ProxyBody> {
