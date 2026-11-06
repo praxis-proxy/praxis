@@ -22,7 +22,7 @@ and names what it wants:
 
 ```console
 cargo build -p praxis-proxy --release --no-default-features \
-    --features hyper,config-reload,admin-api,policy-engine
+    --features hyper,config-reload,admin-api,policy-builtins
 ```
 
 Because the two cannot be combined, `make lint`, `make doc` and the test

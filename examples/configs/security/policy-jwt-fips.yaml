@@ -1,0 +1,44 @@
+# JWT and DPoP authentication in a FIPS build
+#
+# Authenticates generic HTTP traffic with asymmetric JWTs, verified through the
+# system OpenSSL FIPS provider. The `policy` filter loads a policy whose
+# `identity/jwt` resolver trusts RS256 and ES256 issuers (keys from a JWKS
+# endpoint or a PEM file) and one issuer whose tokens are DPoP-bound, so each
+# request also carries a proof signed by the client's key. A FIPS build refuses
+# HMAC algorithms and shared-secret keys at load and skips unsupported JWKS
+# entries; a missing, expired or mis-addressed token is rejected with HTTP 401.
+#
+# Usage:
+#   make build-fips FIPS_POLICY_PROFILE=jwt
+#   target/fips/debug/praxis -c examples/configs/security/policy-jwt-fips.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # `config_path` points at the policy document, which declares the
+      # `identity/jwt` resolver and a `global` policy that requires an
+      # authenticated caller. A DPoP issuer in it must set
+      # `dpop.external_base_url`, the URL clients address, so a proof's `htu`
+      # never depends on the client-sent Host header.
+      - filter: policy
+        config_path: /etc/praxis/jwt-fips-policy.yaml
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

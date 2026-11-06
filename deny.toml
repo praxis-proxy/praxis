@@ -18,6 +18,10 @@ ignore = [
     # (quixotic-plecostomus-rustls) and rustls-native-certs 0.7. Drop once
     # the fork parses PEM with rustls-pki-types instead.
     "RUSTSEC-2025-0134",
+    # paste 1.0.15: unmaintained proc-macro (compile time only), pulled in by
+    # cel 0.12 through limitador in the Policy rate limiter. Drop once cel
+    # moves off it.
+    "RUSTSEC-2024-0436",
 ]
 
 [licenses]

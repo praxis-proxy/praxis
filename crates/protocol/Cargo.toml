@@ -66,6 +66,23 @@ hedged-requests = []
 # that wants the policy engine enables this (or `praxis-proxy-filter/policy-engine`
 # directly); one that does not simply leaves it off.
 policy-engine = ["praxis-filter/policy-engine"]
+policy-builtins = ["policy-engine", "policy-experimental-ratelimit", "praxis-filter/policy-builtins"]
+policy-jwt = ["policy-engine", "praxis-filter/policy-jwt"]
+policy-jwt-openssl-fips = ["policy-engine", "praxis-filter/policy-jwt-openssl-fips"]
+policy-jwt-fips = ["policy-jwt-openssl-fips", "policy-crypto-fips"]
+policy-api-key = ["policy-engine", "praxis-filter/policy-api-key"]
+policy-crypto-default = ["policy-engine", "praxis-filter/policy-crypto-default"]
+policy-crypto-fips = ["policy-engine", "praxis-filter/policy-crypto-fips"]
+policy-api-key-fips = ["policy-api-key", "policy-crypto-fips"]
+policy-oauth = ["policy-engine", "praxis-filter/policy-oauth"]
+policy-delegator-vault = ["policy-engine", "praxis-filter/policy-delegator-vault"]
+policy-elicitation-ciba = ["policy-engine", "praxis-filter/policy-elicitation-ciba"]
+policy-cedar = ["policy-engine", "praxis-filter/policy-cedar"]
+policy-cel = ["policy-engine", "praxis-filter/policy-cel"]
+policy-opa = ["policy-engine", "praxis-filter/policy-opa"]
+policy-valkey = ["policy-engine", "praxis-filter/policy-valkey"]
+policy-secrets-vault = ["policy-engine", "praxis-filter/policy-secrets-vault"]
+policy-experimental-ratelimit = ["policy-engine", "praxis-filter/policy-experimental-ratelimit"]
 
 [lints]
 workspace = true

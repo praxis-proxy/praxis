@@ -1,0 +1,60 @@
+# Policy fixture for the `security/policy-jwt-fips.yaml` example integration
+# test. The test rewrites the example's `config_path` to a copy of this file,
+# with the placeholders below pointed at a local JWKS server and the key files
+# beside it. Every key here is test-only.
+#
+# Shape: one `identity/jwt` resolver with three issuers, each signing with an
+# algorithm FIPS approves, and a `global` HTTP policy that admits any
+# authenticated caller:
+#
+#   https://rsa.idp.test    RS256, keys from a JWKS that also lists an HMAC and
+#                           an Ed25519 key, which a FIPS build skips
+#   https://ec.idp.test     ES256, one P-256 public key from a PEM file
+#   https://dpop.idp.test   ES256 tokens bound to a client key (DPoP required)
+
+engine_settings:
+  dispatch: policy
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail
+    capabilities: [read_headers, perform_http]
+    config:
+      credential:
+        kind: header
+        name: Authorization
+      trusted_issuers:
+        - issuer: "https://rsa.idp.test"
+          audiences: ["praxis-fips-example"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "JWKS_URL"
+            insecure_http: true
+        - issuer: "https://ec.idp.test"
+          audiences: ["praxis-fips-example"]
+          algorithms: ["ES256"]
+          decoding_key:
+            kind: pem_file
+            path: "EC_PUBLIC_KEY"
+        - issuer: "https://dpop.idp.test"
+          audiences: ["praxis-fips-example"]
+          algorithms: ["ES256"]
+          decoding_key:
+            kind: pem_file
+            path: "EC_PUBLIC_KEY"
+          dpop:
+            mode: required
+            algorithms: ["ES256"]
+            external_base_url: "EXTERNAL_BASE_URL"
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
