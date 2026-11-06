@@ -4364,7 +4364,7 @@ async fn an_asserted_secret_stays_redacted_on_the_response_half() {
     let mut response_ctx = make_filter_context(&forwarded);
     response_ctx.extensions = std::mem::take(&mut ctx.extensions);
 
-    let extensions = PolicyFilter::response_extensions(&response_ctx, HashMap::new(), 200, &filter_config(path));
+    let extensions = PolicyFilter::response_extensions(&response_ctx, HashMap::new(), 200, &filter_config(path), &[]);
     let http = extensions.http.as_deref().expect("the response half carries http");
     let view = serde_json::to_string(http).expect("serialize http extension");
     assert!(!view.contains(&secret), "response view leaks the secret: {view}");

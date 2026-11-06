@@ -249,6 +249,28 @@ async fn a_trusted_proxy_chain_sets_the_client_address() {
     }
 }
 
+/// Without a filter ID the facts are captured per call, still resolving the
+/// client through the trusted proxies.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trusted_proxy_chain_sets_the_client_address_without_a_filter_id() {
+    let rules = "    pre_invocation:\n      - \"require(authenticated)\"\n      - \"http.client_address != '203.0.113.7': deny('other client', 'test.other_client')\"";
+    let (_dir, filter) = api_key_filter_trusting(HEADER_CREDENTIAL, rules, &["10.0.0.0/8"]);
+    let req = request(
+        "/",
+        &[
+            ("x-api-key", TEST_API_KEY),
+            ("x-forwarded-for", "203.0.113.7, 10.0.0.1"),
+        ],
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.client_addr = Some("10.0.0.2".parse().expect("address"));
+    let action = filter.on_request(&mut ctx).await.expect("the filter runs");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the forwarded client must reach policy, got {action:?}"
+    );
+}
+
 /// The response hook evaluates the query the client sent, even after a later
 /// filter rewrote the URL and stripped the credential.
 #[tokio::test(flavor = "multi_thread")]

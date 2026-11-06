@@ -897,12 +897,14 @@ impl PolicyFilter {
 
     /// What a hook invocation sees of the request: the captured facts, the
     /// trusted header overlays, and the secret provenance of applied
-    /// assertions. Without a capture, the client address is the TCP peer.
+    /// assertions. Without a capture, the facts are captured per call.
     fn request_view(
         ctx: &HttpFilterContext<'_>,
         context_headers: &std::collections::HashMap<super::config::ContextField, String>,
+        trusted_proxies: &[CidrRange],
     ) -> RequestView {
-        let facts = Self::stored_request_facts(ctx).unwrap_or_else(|| Arc::new(RequestFacts::capture(ctx, &[])));
+        let facts =
+            Self::stored_request_facts(ctx).unwrap_or_else(|| Arc::new(RequestFacts::capture(ctx, trusted_proxies)));
         let mut headers = facts.headers_with_reserved(&ctx.request.headers);
         Self::overlay_effective_context_headers(ctx, &mut headers, context_headers);
         let secret_headers = ctx
@@ -1051,7 +1053,7 @@ impl PolicyFilter {
         if !self.post_identity_limit_pending(ctx) {
             return Ok(None);
         }
-        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
         let ext = Self::extensions_from_identity(&view, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
         Ok(self.post_identity_limit(ctx, &ext).await?.map(|denied| denied.http()))
     }
@@ -1331,7 +1333,7 @@ impl PolicyFilter {
         &self,
         ctx: &mut HttpFilterContext<'_>,
     ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
-        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
         if let Some(rejection) = self.pre_identity_limit(ctx, &view).await? {
             return Ok(Err(rejection));
         }
@@ -1455,7 +1457,7 @@ impl PolicyFilter {
             return Ok(FilterAction::Reject(llm_deny_rejection(Some(&no_route_violation()))));
         }
 
-        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
         let identity = match self.resolve_identity(ctx, &view, entity_type, &model).await? {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
@@ -1621,7 +1623,7 @@ impl PolicyFilter {
         }
 
         let (entity_type, hook_name) = (ENTITY_LLM, HOOK_CMF_LLM_OUTPUT);
-        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
         let Some(identity) = Self::admitted_identity(ctx) else {
             // Missing request identity would otherwise skip response policy.
             tracing::error!(
@@ -1745,7 +1747,7 @@ impl PolicyFilter {
     /// body phase) because it needs no request body.
     #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
         let identity = match self
             .resolve_identity(ctx, &view, ENTITY_HTTP, ENTITY_NAME_GLOBAL)
             .await?
@@ -1830,7 +1832,7 @@ impl PolicyFilter {
             Ok(identity) => identity,
             Err(rejection) => return Ok(FilterAction::Reject(rejection)),
         };
-        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
         let action = Box::pin(self.authorize_http(ctx, &view, identity)).await?;
         if !matches!(action, FilterAction::Continue) {
             return Ok(action);
@@ -1849,8 +1851,9 @@ impl PolicyFilter {
         response_headers: std::collections::HashMap<String, String>,
         status: u16,
         cfg: &PolicyFilterConfig,
+        trusted_proxies: &[CidrRange],
     ) -> Extensions {
-        let view = Self::request_view(ctx, &cfg.context_headers);
+        let view = Self::request_view(ctx, &cfg.context_headers, trusted_proxies);
         let mut extensions = if let Some(identity) = Self::admitted_identity(ctx) {
             Self::extensions_from_identity(&view, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, cfg)
         } else {
@@ -2319,7 +2322,7 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Reject(missing_protocol_metadata_rejection()));
         };
 
-        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
 
         // Resolve identity once here, then stash it so the response phase
         // can rebuild `Extensions` without re-validating the token.
@@ -2455,6 +2458,7 @@ impl HttpFilter for PolicyFilter {
             snapshot_response_headers(&response.headers),
             response.status.as_u16(),
             &self.cfg,
+            &self.trusted_proxies,
         );
 
         // Awaited on the worker runtime, as the request half is.
@@ -2561,7 +2565,7 @@ impl HttpFilter for PolicyFilter {
             ));
             return Ok(FilterAction::Continue);
         };
-        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
         let extensions = Self::extensions_from_identity(&view, identity, entity_type, &entity_name, &self.cfg);
 
         let content = build_response_content_for_method(&method, &entity_name, &id_str, &parsed);
