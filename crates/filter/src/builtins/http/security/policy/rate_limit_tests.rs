@@ -165,12 +165,17 @@ fn write_policy(yaml: &str) -> (TempDir, String) {
 
 /// A filter over `path`.
 fn filter(path: String) -> PolicyFilter {
+    filter_behind(path, vec![])
+}
+
+/// A filter over `path` that trusts `X-Forwarded-For` from `trusted_proxies`.
+fn filter_behind(path: String, trusted_proxies: Vec<String>) -> PolicyFilter {
     PolicyFilter::new(
         PolicyFilterConfig {
             config_path: path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
-            trusted_proxies: vec![],
+            trusted_proxies,
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -315,6 +320,50 @@ async fn a_pre_identity_denial_stops_before_identity_runs() {
     let denied = rejection(header_phase(&filter, Some("forged"), 9).await);
     assert_eq!(denied.status, 429);
     assert_eq!(plugins(&calls), ["who"], "the resolver never saw the limited request");
+}
+
+/// Run the header phase from trusted proxy `peer` carrying `forwarded`.
+async fn forwarded_phase(filter: &PolicyFilter, peer: u8, forwarded: &str) -> FilterAction {
+    let mut req = request(Some("alice"));
+    req.headers
+        .insert("x-forwarded-for", HeaderValue::from_str(forwarded).unwrap());
+    let mut ctx = context(&req, peer);
+    filter.on_request(&mut ctx).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_malformed_trusted_hop_denies_an_address_limit_instead_of_sharing_a_bucket() {
+    let (_dir, path, calls) = l7_address_limit("test/rl-malformed-hop", 1);
+    let filter = filter_behind(path, vec!["203.0.113.0/24".to_owned()]);
+
+    for forwarded in ["not-an-ip", "198.51.100.7, garbage"] {
+        let denied = rejection(forwarded_phase(&filter, 9, forwarded).await);
+        assert_eq!(
+            denied.status, 400,
+            "{forwarded}: no client address is a denial, not a skip"
+        );
+        assert_eq!(
+            header(&denied, "X-Policy-Violation"),
+            Some("ratelimit.missing_attribute"),
+            "{forwarded}"
+        );
+    }
+    assert!(
+        plugins(&calls).is_empty(),
+        "identity never ran for an unattributable request"
+    );
+
+    // Had the malformed requests fallen back to the proxy's address, they
+    // would have spent its one-request budget; well-formed clients behind the
+    // same proxy each still get their own counter.
+    for client in ["198.51.100.7", "198.51.100.8"] {
+        assert!(
+            matches!(forwarded_phase(&filter, 9, client).await, FilterAction::Continue),
+            "{client} has its own counter behind the proxy"
+        );
+    }
+    let over = rejection(forwarded_phase(&filter, 9, "198.51.100.7").await);
+    assert_eq!(over.status, 429, "the per-client limit still counts");
 }
 
 /// A tool route with a post-identity limiter keyed by subject.

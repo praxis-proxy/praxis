@@ -141,3 +141,59 @@ fn policy_rate_limit_enforces_both_stages_end_to_end() {
 
     assert_eq!(hits.load(Ordering::SeqCst), 3, "no denied request reached the backend");
 }
+
+/// Send `GET /widgets` for alice carrying `forwarded` as `X-Forwarded-For`.
+fn send_forwarded(addr: &str, forwarded: &str) -> String {
+    http_send(
+        addr,
+        &format!(
+            "GET /widgets HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer sk-test-alice\r\nX-Forwarded-For: \
+             {forwarded}\r\nConnection: close\r\n\r\n"
+        ),
+    )
+}
+
+#[test]
+fn a_malformed_hop_from_a_trusted_proxy_is_denied_not_pooled() {
+    let (backend_port, hits) = counting_backend();
+    let policy_dir = tempfile::TempDir::new().expect("create tempdir");
+    let mut config = load_example(&policy_dir, free_port(), backend_port);
+    let policy = config
+        .filter_chains
+        .iter_mut()
+        .flat_map(|chain| chain.filters.iter_mut())
+        .find(|entry| entry.filter_type == "policy")
+        .expect("the example's policy filter");
+    policy.config.as_mapping_mut().expect("policy config mapping").insert(
+        "trusted_proxies".into(),
+        serde_yaml::Value::Sequence(vec!["127.0.0.0/8".into()]),
+    );
+    let proxy = start_proxy(&config);
+
+    for forwarded in ["not-an-ip", "198.51.100.7, garbage"] {
+        let raw = send_forwarded(proxy.addr(), forwarded);
+        assert_eq!(
+            parse_status(&raw),
+            400,
+            "{forwarded}: an unattributable request is denied: {raw}"
+        );
+        assert_eq!(
+            header(&raw, "X-Policy-Violation"),
+            Some("ratelimit.missing_attribute"),
+            "{forwarded}: {raw}"
+        );
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "no unattributable request reached the backend"
+    );
+
+    let raw = send_forwarded(proxy.addr(), "198.51.100.7");
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "a well-formed chain is attributed and admitted: {raw}"
+    );
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
