@@ -1,0 +1,40 @@
+# Filter and Body Resource Metrics
+#
+# Observe active filter hooks and retained body payload bytes while a JSON
+# rewrite buffers a request. These gauges do not require overload protection.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/observability/filter-resource-metrics.yaml
+#
+# Exercise:
+#   curl -X POST http://localhost:8080/ -H 'Content-Type: application/json' -d '{"message":"hello","secret":"remove"}'
+#   curl -s http://localhost:9902/metrics | grep -E 'praxis_filter_active|praxis_body_buffer_bytes'
+
+admin:
+  metrics_address: "127.0.0.1:9902"
+
+insecure_options:
+  allow_private_endpoints: true
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - rewrite
+
+filter_chains:
+  - name: rewrite
+    filters:
+      - filter: json_body
+        request_remove:
+          - /secret
+        on_invalid: reject
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

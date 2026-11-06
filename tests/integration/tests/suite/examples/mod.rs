@@ -38,6 +38,7 @@ mod endpoint_selector;
 mod errors_total;
 #[cfg(target_os = "linux")]
 mod file_descriptor_limits;
+mod filter_resource_metrics;
 mod grpc_access_log;
 mod grpc_condition;
 mod grpc_detection;

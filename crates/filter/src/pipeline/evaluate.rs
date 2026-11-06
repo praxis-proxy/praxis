@@ -211,7 +211,7 @@ async fn execute_branch_filters(
             continue;
         }
         ctx.current_filter_id = Some(pf.filter_id);
-        let result = http_filter.on_request(ctx).await;
+        let result = run_branch_request_hook(http_filter.as_ref(), ctx).await;
         ctx.current_filter_id = None;
         let stop = branch_request_outcome(result, http_filter.name(), pf.failure_mode)?;
         record_executed_branch_filter(&mut ctx.executed_branch_filters, pf.filter_id);
@@ -223,6 +223,15 @@ async fn execute_branch_filters(
         }
     }
     Ok(FilterAction::Continue)
+}
+
+/// Track one branch hook through completion, suspension, or cancellation.
+async fn run_branch_request_hook(
+    filter: &dyn crate::HttpFilter,
+    ctx: &mut HttpFilterContext<'_>,
+) -> Result<FilterAction, FilterError> {
+    let _activity = crate::metrics::FilterActivity::new(filter.name());
+    filter.on_request(ctx).await
 }
 
 /// Initialize correlation only after a branch is selected and its trace filter matches.
@@ -345,6 +354,36 @@ mod tests {
         pipeline::branch::{ResolvedBranchCondition, branch_filter_executed},
         results::FilterResultSet,
     };
+
+    #[test]
+    fn suspended_branch_hooks_are_active_until_cancelled() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let filters = vec![PipelineFilter::new(
+                0,
+                AnyFilter::Http(Box::new(SuspendedBranchFilter)),
+                vec![],
+                vec![],
+            )];
+            let req = crate::test_utils::make_request(Method::GET, "/");
+            let mut ctx = crate::test_utils::make_filter_context(&req);
+            let mut future = Box::pin(execute_branch_filters(&filters, &mut ctx));
+            let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+            assert!(future.as_mut().poll(&mut task).is_pending());
+            assert!(
+                handle
+                    .render()
+                    .contains("praxis_filter_active{filter=\"suspended_branch\"} 1")
+            );
+            drop(future);
+            assert!(
+                handle
+                    .render()
+                    .contains("praxis_filter_active{filter=\"suspended_branch\"} 0")
+            );
+        });
+    }
 
     #[tokio::test]
     async fn opted_in_results_survive_branch_evaluation() {
@@ -1223,6 +1262,20 @@ mod tests {
 
     /// Noop HTTP filter for branch testing.
     struct NoopFilter;
+
+    /// Branch hook that stays suspended until the request future is cancelled.
+    struct SuspendedBranchFilter;
+
+    #[async_trait]
+    impl HttpFilter for SuspendedBranchFilter {
+        fn name(&self) -> &'static str {
+            "suspended_branch"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            std::future::pending().await
+        }
+    }
 
     #[async_trait]
     impl HttpFilter for NoopFilter {

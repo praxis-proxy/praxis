@@ -159,6 +159,28 @@ pub(crate) fn record_cloud_events_skipped(reason: &'static str) {
 }
 
 // -----------------------------------------------------------------------------
+// Filter Activity
+// -----------------------------------------------------------------------------
+
+/// Counts a filter hook while it runs, including time awaiting external work.
+pub(crate) struct FilterActivity(metrics::Gauge);
+
+impl FilterActivity {
+    /// Begin attribution to a registered filter type.
+    pub(crate) fn new(filter: &'static str) -> Self {
+        let gauge = gauge!("praxis_filter_active", "filter" => filter);
+        gauge.increment(1.0);
+        Self(gauge)
+    }
+}
+
+impl Drop for FilterActivity {
+    fn drop(&mut self) {
+        self.0.decrement(1.0);
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -167,6 +189,26 @@ pub(crate) fn record_cloud_events_skipped(reason: &'static str) {
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_activity_is_released_with_its_scope() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let active = FilterActivity::new("overload-test-filter");
+            assert!(
+                handle
+                    .render()
+                    .contains("praxis_filter_active{filter=\"overload-test-filter\"} 1")
+            );
+            drop(active);
+            assert!(
+                handle
+                    .render()
+                    .contains("praxis_filter_active{filter=\"overload-test-filter\"} 0")
+            );
+        });
+    }
 
     #[test]
     fn record_emits_correct_metric_name_and_label_keys() {
