@@ -151,9 +151,9 @@ fn exchanges(profile: Profile, keys: &Keys) -> Result<Vec<Exchange>, String> {
 
 /// The JWT and `DPoP` requests: allow, expired, a fresh proof, its replay.
 fn jwt_exchanges(keys: &Keys) -> Result<Vec<Exchange>, String> {
-    let token = keys.es256(&claims(ISSUER, 300, None))?;
-    let expired = keys.es256(&claims(ISSUER, -600, None))?;
-    let bound = keys.es256(&claims(DPOP_ISSUER, 300, Some(&keys.client_thumbprint()?)))?;
+    let token = keys.es256(&claims(ISSUER, 300, None)?)?;
+    let expired = keys.es256(&claims(ISSUER, -600, None)?)?;
+    let bound = keys.es256(&claims(DPOP_ISSUER, 300, Some(&keys.client_thumbprint()?))?)?;
     let proof = keys.dpop_proof("GET", &format!("{EXTERNAL_BASE_URL}/probe"), &bound)?;
     let dpop = request("/probe", Some(&format!("DPoP {bound}")), Some(&proof));
     Ok(vec![
@@ -181,15 +181,15 @@ fn request(path: &str, authorization: Option<&str>, dpop: Option<&str>) -> Strin
 
 /// Access-token claims for `issuer`, expiring `ttl` seconds from now, bound
 /// to `jkt` when given.
-fn claims(issuer: &str, ttl: i64, jkt: Option<&str>) -> Value {
+fn claims(issuer: &str, ttl: i64, jkt: Option<&str>) -> Result<Value, String> {
     let now = now();
     let mut claims = json!({
-        "iss": issuer, "aud": AUDIENCE, "sub": "alice", "iat": now, "exp": now.saturating_add(ttl), "jti": fresh_jti(),
+        "iss": issuer, "aud": AUDIENCE, "sub": "alice", "iat": now, "exp": now.saturating_add(ttl), "jti": fresh_jti()?,
     });
     if let Some(jkt) = jkt {
         claims["cnf"] = json!({ "jkt": jkt });
     }
-    claims
+    Ok(claims)
 }
 
 // -----------------------------------------------------------------------------
@@ -372,7 +372,7 @@ impl Keys {
     fn dpop_proof(&self, method: &str, url: &str, access_token: &str) -> Result<String, String> {
         let header = json!({ "alg": "ES256", "typ": "dpop+jwt", "jwk": p256_jwk(&self.client)? });
         let ath = URL_SAFE_NO_PAD.encode(hash(MessageDigest::sha256(), access_token.as_bytes()).map_err(ossl)?);
-        let claims = json!({ "htm": method, "htu": url, "iat": now(), "jti": fresh_jti(), "ath": ath });
+        let claims = json!({ "htm": method, "htu": url, "iat": now(), "jti": fresh_jti()?, "ath": ath });
         compact(&header, &claims, &self.client)
     }
 
@@ -427,11 +427,11 @@ fn now() -> i64 {
         .unwrap_or_default()
 }
 
-/// A random `jti`.
-fn fresh_jti() -> String {
+/// A random `jti`; `Err` when OpenSSL's generator fails.
+fn fresh_jti() -> Result<String, String> {
     let mut random = [0_u8; 16];
-    openssl::rand::rand_bytes(&mut random).ok();
-    URL_SAFE_NO_PAD.encode(random)
+    openssl::rand::rand_bytes(&mut random).map_err(ossl)?;
+    Ok(URL_SAFE_NO_PAD.encode(random))
 }
 
 /// Lowercase hex.
@@ -487,7 +487,7 @@ mod tests {
     #[test]
     fn an_es256_token_verifies_against_the_issuer_key() {
         let keys = Keys::generate().expect("keys");
-        let token = keys.es256(&claims(ISSUER, 60, None)).expect("token");
+        let token = keys.es256(&claims(ISSUER, 60, None).expect("claims")).expect("token");
         let mut parts = token.rsplitn(2, '.');
         let signature = URL_SAFE_NO_PAD
             .decode(parts.next().expect("signature"))
