@@ -794,6 +794,7 @@ impl FilterPipeline {
                 continue;
             };
             ctx.current_filter_id = Some(pf.filter_id);
+            let _activity = crate::metrics::FilterActivity::new(http_filter.name());
             let produced = http_filter.on_response_trailers(ctx, trailers);
             ctx.current_filter_id = None;
             if let Some(bytes) = produced? {
