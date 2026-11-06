@@ -1406,7 +1406,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2756,7 +2756,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3271,6 +3271,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "662b03ab6155d6789464d7e9e0b4d2065900cd9d04b370d532f1b18bb1e7006b"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
@@ -3283,6 +3285,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-cmf"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "200333ebf208821f40f17070a27936d32867284605c103657fedaed6c12f504b"
 dependencies = [
  "chrono",
  "praxis-policy-apl-core",
@@ -3293,6 +3297,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-core"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abade295a61836accbfb9c860b3196e5491a34a378ca4769566674779511d1fa"
 dependencies = [
  "async-trait",
  "futures",
@@ -3308,6 +3314,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-runtime"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ce569d880efacc2c4893bdda5c1751095a90b2e9707ee92ff12366a61c91f5d"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3324,6 +3332,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-builtins"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9629f9ab2cd663fb095a3e75feffe90497250af1dda841f70fac3b4ed80f1ed7"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3362,6 +3372,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-core"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55950103a82d4f7d02945998bd9c42ff722b395e97e60dc4f721297467a0a711"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3390,6 +3402,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-orchestration"
 version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b5057ca0a8c242d91f5dd5dc4fdfb779dd7deaebcafb6bff49520cad5ec08c2"
 dependencies = [
  "futures",
  "tokio",
@@ -3821,8 +3835,8 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.5.0",
- "itertools 0.14.0",
+ "heck 0.4.1",
+ "itertools 0.13.0",
  "log",
  "multimap",
  "once_cell",
@@ -3842,7 +3856,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3855,7 +3869,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4043,7 +4057,7 @@ dependencies = [
  "arrayvec 0.7.8",
  "async-channel",
  "flurry",
- "hashbrown 0.17.1",
+ "hashbrown 0.16.1",
  "log",
  "parking_lot",
  "rand 0.10.3",
@@ -4527,7 +4541,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5143,10 +5157,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5155,7 +5169,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6018,7 +6032,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -565,15 +565,11 @@ test-fips-host: fips-toolchain ## every suite as the FIPS build, on a FIPS host 
 # xtask/assets/fips/fips-provider.cnf, does the crypto, but the kernel is not
 # in FIPS mode, so the tests that need a FIPS host take their other branch.
 # Runs the selected FIPS_POLICY_PROFILE; any container engine works.
-# FIPS_POLICY_SOURCE mounts a local Policy checkout where the root Cargo.toml's
-# [patch.crates-io] table expects it (../praxis-policy); development only.
-FIPS_POLICY_SOURCE      ?=
 # The suites run as the invoking user: praxis refuses to start as root.
 _FIPS_RUN_AS = $(if $(findstring podman,$(notdir $(CONTAINER_ENGINE))),--userns=keep-id,--user $(shell id -u):$(shell id -g) -e HOME=/tmp)
 test-fips-provider: | require-container-engine ## FIPS suites on the FIPS module, any host (toolchain image)
 	$(CONTAINER_ENGINE) run --rm --security-opt label=disable $(_FIPS_RUN_AS) \
 		-v $(CURDIR):/src -w /src \
-		$(if $(FIPS_POLICY_SOURCE),-v $(abspath $(FIPS_POLICY_SOURCE)):/praxis-policy:ro) \
 		-v praxis-fips-host-cargo:/cargo \
 		-v praxis-fips-host-target:/target \
 		-e CARGO_TERM_COLOR=always -e CARGO_INCREMENTAL=0 \

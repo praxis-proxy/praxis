@@ -167,17 +167,6 @@ unicase = "2.10.0"
 url = "2.5.8"
 zeroize = "1.9.1"
 
-# Development against the local Policy checkout until PPE 0.6.0 is published.
-# Every consumer crate is patched so registry and local Policy types never mix.
-[patch.crates-io]
-praxis-policy = { path = "../praxis-policy/crates/ppe" }
-praxis-policy-core = { path = "../praxis-policy/crates/ppe-core" }
-praxis-policy-apl-core = { path = "../praxis-policy/crates/ppe-apl-core" }
-praxis-policy-apl-cmf = { path = "../praxis-policy/crates/ppe-apl-cmf" }
-praxis-policy-apl-runtime = { path = "../praxis-policy/crates/ppe-apl-runtime" }
-praxis-policy-builtins = { path = "../praxis-policy/crates/builtins" }
-praxis-policy-orchestration = { path = "../praxis-policy/crates/ppe-orchestration" }
-
 [profile.release]
 codegen-units = 1
 lto = true
