@@ -163,13 +163,18 @@ check-features: ## check each optional feature on its own
 		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f" --all-targets || exit 1; \
 	done
 	# Policy needs exactly one shared crypto backend, so each granular
-	# selection is checked with the ordinary one. The FIPS backend and the
-	# OpenSSL JWT plugin are checked by the FIPS targets.
+	# selection is checked with the ordinary one.
 	@for f in policy-engine policy-api-key policy-jwt policy-oauth policy-delegator-vault \
 	          policy-elicitation-ciba policy-cedar policy-cel policy-opa policy-valkey \
 	          policy-secrets-vault policy-experimental-ratelimit; do \
 		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f,policy-crypto-default --all-targets =="; \
 		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f,policy-crypto-default" --all-targets || exit 1; \
+	done
+	# The supported FIPS Policy selections compile without the FIPS module;
+	# the FIPS targets run them.
+	@for f in policy-engine policy-api-key policy-jwt-openssl-fips policy-api-key,policy-jwt-openssl-fips; do \
+		echo "== cargo check -p praxis-proxy --no-default-features --features pingora,$$f,policy-crypto-fips --all-targets =="; \
+		cargo check -p praxis-proxy --no-default-features --features "pingora,$$f,policy-crypto-fips" --all-targets || exit 1; \
 	done
 	# The other backend, on its own: the loop above always names pingora, and
 	# the two backends refuse to build together.
@@ -510,7 +515,7 @@ test-fips-policy-startup: ## Policy FIPS construction checks, one process per ca
 		-- policy::fips_startup_tests --nocapture
 
 .PHONY: test-integration-fips test-conformance-fips test-fips-host fips-toolchain fips-host-facts test-fips-policy-startup \
-	test-fips-provider
+	test-fips-provider fips-toolchain-present
 
 # The integration suites against the FIPS build. The proxy they start in
 # process is built without default features, and the tests that spawn the
@@ -567,7 +572,15 @@ test-fips-host: fips-toolchain ## every suite as the FIPS build, on a FIPS host 
 # Runs the selected FIPS_POLICY_PROFILE; any container engine works.
 # The suites run as the invoking user: praxis refuses to start as root.
 _FIPS_RUN_AS = $(if $(findstring podman,$(notdir $(CONTAINER_ENGINE))),--userns=keep-id,--user $(shell id -u):$(shell id -g) -e HOME=/tmp)
-test-fips-provider: | require-container-engine ## FIPS suites on the FIPS module, any host (toolchain image)
+# podman builds the toolchain image first (its layers are cached, so a rerun
+# is cheap). docker cannot verify Red Hat's signatures, so under docker the
+# image must already exist: build it with podman and load it.
+_FIPS_TOOLCHAIN_DEP = $(if $(findstring podman,$(notdir $(CONTAINER_ENGINE))),fips-toolchain,fips-toolchain-present)
+fips-toolchain-present: | require-container-engine
+	@$(CONTAINER_ENGINE) image inspect $(FIPS_TOOLCHAIN_IMAGE) >/dev/null 2>&1 || { \
+		echo "$(FIPS_TOOLCHAIN_IMAGE) is missing: run make fips-toolchain with podman, then" \
+			"podman save $(FIPS_TOOLCHAIN_IMAGE) | $(notdir $(CONTAINER_ENGINE)) load"; exit 1; }
+test-fips-provider: $(_FIPS_TOOLCHAIN_DEP) | require-container-engine ## FIPS suites on the FIPS module, any host (toolchain image)
 	@# A freshly created volume is root-owned; hand it to the user the suites run as.
 	$(CONTAINER_ENGINE) run --rm --security-opt label=disable --user 0:0 \
 		-v praxis-fips-host-cargo:/cargo -v praxis-fips-host-target:/target \

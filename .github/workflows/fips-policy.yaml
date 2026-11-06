@@ -67,8 +67,6 @@ jobs:
       - name: Point podman at Red Hat's signature store (Ubuntu's podman has no entry for it)
         run: make fips-signature-store
 
-      - name: Build the toolchain image (Red Hat's toolchain and OpenSSL)
-        run: make fips-toolchain
-
+      # Builds the toolchain image (Red Hat's toolchain and OpenSSL) first.
       - name: Unit and integration suites on the FIPS module
         run: make test-fips-provider FIPS_POLICY_PROFILE=${{ matrix.profile }}
