@@ -36,6 +36,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking:** Rust API: `AdminConfig` has a new public `readiness` field,
+  so struct literals must set it or use `..Default::default()`.
+- **Breaking:** Rust API: `ServerRuntime` implementations must implement
+  `lifecycle` and return the process's shared `LifecycleHandle`.
 - Clarify that the default Pingora shutdown grace period is capped at five
   seconds, including for streaming responses, regardless of a larger
   `shutdown_timeout_secs` value.
