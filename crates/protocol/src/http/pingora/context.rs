@@ -246,6 +246,13 @@ pub struct PingoraRequestCtx {
     /// Accumulated request body bytes seen so far.
     pub request_body_bytes: u64,
 
+    /// The next body callback carries Pingora's already-read retry prefix.
+    pub(crate) request_replay_prefix_pending: bool,
+
+    /// A main-path streaming writer may have changed bytes without retaining
+    /// an authoritative representation for another Pingora attempt.
+    pub(crate) streaming_request_writer_ran: bool,
+
     /// Per-request body delivery mode for the request direction.
     /// Seeded from static pipeline capabilities, then potentially
     /// upgraded by filters during `on_request`.
@@ -650,6 +657,8 @@ impl Default for PingoraRequestCtx {
             adapted_request_body_len: None,
             request_body_buffer: None,
             request_body_bytes: 0,
+            request_replay_prefix_pending: false,
+            streaming_request_writer_ran: false,
             request_body_mode: BodyMode::Stream,
             request_body_released: false,
             request_is_idempotent: false,

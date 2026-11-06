@@ -27,7 +27,9 @@ pub mod filters;
 pub mod fips;
 pub mod load;
 pub mod net;
+pub mod payload;
 pub mod process;
+pub mod process_metrics;
 pub mod proxy;
 pub mod tls_probe;
 
@@ -38,9 +40,11 @@ pub use load::{
     read_raw_responses,
 };
 pub use net::*;
-pub use process::{PraxisProcess, READY_TIMEOUT};
+pub use payload::PayloadSpec;
+pub use process::{PraxisProcess, ProcessLogChunk, ProcessLogCursor, READY_TIMEOUT};
 #[cfg(target_os = "linux")]
 pub use process::{own_open_file_limits, raise_own_open_file_limit};
+pub use process_metrics::{ProcessSample, sample_process};
 pub use proxy::{
     PRAXIS_BIN_ENV, ProxyGuard, ReloadableProxyGuard, build_pipeline, custom_filter_yaml, praxis_bin, registry_with,
     simple_proxy_yaml, start_full_proxy, start_full_proxy_with_kv_stores, start_full_proxy_with_registry, start_proxy,

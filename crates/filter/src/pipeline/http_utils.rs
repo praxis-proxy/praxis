@@ -35,10 +35,10 @@ use crate::{actions::BoundUpstreamBodyOutcome, metrics::PHASE_BOUND_UPSTREAM};
 // Body Filter Utilities
 // -----------------------------------------------------------------------------
 
-/// Add chunk size to accumulator.
+/// Add chunk size to the accumulator, saturating if its range is exhausted.
 pub(super) fn accumulate_body_bytes(counter: &mut u64, body: Option<&Bytes>) {
     if let Some(b) = body {
-        *counter += b.len() as u64;
+        *counter = counter.saturating_add(u64::try_from(b.len()).unwrap_or(u64::MAX));
     }
 }
 
@@ -784,6 +784,16 @@ mod tests {
         accumulate_body_bytes(&mut counter, None);
         accumulate_body_bytes(&mut counter, Some(&Bytes::from_static(b"ij")));
         assert_eq!(counter, 10, "counter should be sum of all Some chunk lengths");
+    }
+
+    #[test]
+    fn accumulate_body_bytes_saturates_without_wrapping() {
+        let mut counter = u64::MAX - 1;
+        accumulate_body_bytes(&mut counter, Some(&Bytes::from_static(b"ab")));
+        assert_eq!(counter, u64::MAX);
+        accumulate_body_bytes(&mut counter, Some(&Bytes::new()));
+        accumulate_body_bytes(&mut counter, None);
+        assert_eq!(counter, u64::MAX);
     }
 
     #[test]

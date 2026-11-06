@@ -35,7 +35,7 @@ The CMF prompt text that APL steps and scanners read is projected from `system`,
 
 `body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also enables `cmf.llm_output` for non-streaming inference responses. APL field mutators do not rewrite inference bodies.
 
-`body_access: read_write` also enables response-phase `tool:`, `prompt:`, and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these rules are skipped and a warning is emitted. A response-only route adds no request-phase route rule; identity checks and `global` policy still apply.
+`body_access: read_write` also enables response-phase `tool:`, `prompt:`, and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these rules are skipped and a warning is emitted. A response-only route adds no request-phase route rule; identity checks and `global` policy still apply. When tool response hooks are configured, a nonempty classified `tools/call` response that is malformed or contains neither a result nor a valid JSON-RPC error produces a filter error instead of silently skipping inspection. The pipeline's `failure_mode` controls that error; valid JSON-RPC error responses continue unchanged.
 
 `result.<field>` projection for `prompt:` and `resource:` routes remains blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330]. A `result:` field pipeline on either entity, including an inherited one, is rejected at load so its controls cannot be silently skipped.
 

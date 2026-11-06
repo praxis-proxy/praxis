@@ -3,7 +3,6 @@
 
 //! Shared request-body limit diagnostics and declared-length admission.
 
-use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
 use praxis_filter::{BodyMode, FilterPipeline, Rejection};
 
 /// The stage that refused a request body.
@@ -80,11 +79,15 @@ pub(in crate::http) fn declared_body_rejection(
 /// Future modes use the absolute ceiling until their admission policy is defined.
 fn input_body_limit(pipeline: &FilterPipeline) -> Option<usize> {
     let mode_limit = match pipeline.body_capabilities().request_body_mode {
-        BodyMode::StreamBuffer { max_bytes } => Some(max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES)),
+        BodyMode::StreamBuffer { max_bytes } => Some(
+            max_bytes
+                .unwrap_or_else(|| pipeline.buffer_cap())
+                .min(pipeline.buffer_cap()),
+        ),
         BodyMode::SizeLimit { max_bytes } => Some(max_bytes),
         BodyMode::Stream => None,
         // BodyMode is non-exhaustive across crates; unknown modes stay bounded.
-        _ => Some(ABSOLUTE_MAX_BODY_BYTES),
+        _ => Some(pipeline.buffer_cap()),
     };
     match (mode_limit, pipeline.request_body_ceiling()) {
         (Some(mode), Some(global)) => Some(mode.min(global)),

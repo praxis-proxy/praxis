@@ -956,6 +956,307 @@ async fn json_too_deep_to_inspect_fails_closed() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+#[tokio::test]
+async fn long_pii_samples_and_equal_length_near_misses_are_selective() {
+    let cases = [
+        (PiiKind::Email, "user@example.com", "user.example.com"),
+        (PiiKind::Ssn, "123-45-6789", "123-45-678x"),
+        (PiiKind::Phone, "555-867-5309", "555-867-530x"),
+        (PiiKind::CreditCard, "4111-1111-1111-1111", "4111-1111-1111-111x"),
+    ];
+    for (kind, positive, negative) in cases {
+        assert_eq!(positive.len(), negative.len());
+        for offset in [0, 15, 16, 31, 32, 63, 64, 524_288, 1_048_000] {
+            for (sample, blocked) in [(positive, true), (negative, false)] {
+                let filter = make_filter(vec![body_pii(&[kind])]);
+                let request = crate::test_utils::make_request(http::Method::POST, "/");
+                let mut ctx = crate::test_utils::make_filter_context(&request);
+                // Spaces keep the ASCII word boundaries of each detector intact.
+                let mut text = vec![b' '; 1_048_576];
+                text[offset..offset + sample.len()].copy_from_slice(sample.as_bytes());
+                let mut body = Some(Bytes::from(text));
+                let original = body.clone();
+                let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+                assert_eq!(
+                    matches!(action, FilterAction::Reject(r) if r.status == 403),
+                    blocked,
+                    "{kind:?} at {offset}: {sample}"
+                );
+                assert_result(&ctx.filter_results, if blocked { "blocked" } else { "passed" });
+                assert_eq!(body, original);
+            }
+        }
+    }
+}
+
+/// An object key is one leaf, and every array string is one further leaf.
+fn wide_json(string_leaves: usize, escaped: bool, sentinel: Option<&str>) -> String {
+    let mut values = vec![if escaped { r#""\u0061""# } else { r#""a""# }; string_leaves];
+    // The array is traversed in reverse; its first element is visited last.
+    if let Some(value) = sentinel {
+        values[0] = value;
+    }
+    format!(r#"{{"key":[{},null,1,true]}}"#, values.join(","))
+}
+
+#[tokio::test]
+async fn decoded_leaf_budget_counts_keys_and_fails_closed_for_both_actions() {
+    for flag in [false, true] {
+        for leaves in [9_999, 10_000, 10_001] {
+            for escaped in [false, true] {
+                let filter = if flag {
+                    make_flag_filter(vec![body_pii(&[PiiKind::Ssn])])
+                } else {
+                    make_filter(vec![body_pii(&[PiiKind::Ssn])])
+                };
+                let request = crate::test_utils::make_request(http::Method::POST, "/");
+                let mut ctx = crate::test_utils::make_filter_context(&request);
+                let mut body = Some(Bytes::from(wide_json(leaves - 1, escaped, None)));
+                let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+                let blocked = escaped && leaves > 10_000;
+                assert_eq!(
+                    matches!(action, FilterAction::Reject(r) if r.status == 403),
+                    blocked && !flag
+                );
+                assert_result(&ctx.filter_results, if blocked { "blocked" } else { "passed" });
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn decoded_depth_failure_sets_blocked_in_reject_and_flag_modes() {
+    let padding = "x".repeat(900_000);
+    for depth in [125, 126, 127, 128, 129] {
+        let text = format!(
+            r#"{{"padding":"{padding}","deep":{}"\u0061"{}}}"#,
+            "[".repeat(depth),
+            "]".repeat(depth)
+        );
+        let parseable = serde_json::from_str::<serde_json::Value>(&text).is_ok();
+        for flag in [false, true] {
+            let filter = if flag {
+                make_flag_filter(vec![body_contains("forbidden")])
+            } else {
+                make_filter(vec![body_contains("forbidden")])
+            };
+            let request = crate::test_utils::make_request(http::Method::POST, "/");
+            let mut ctx = crate::test_utils::make_filter_context(&request);
+            let mut body = Some(Bytes::copy_from_slice(text.as_bytes()));
+            let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+            assert_eq!(
+                matches!(action, FilterAction::Reject(r) if r.status == 403),
+                !parseable && !flag,
+                "depth {depth}"
+            );
+            assert_result(&ctx.filter_results, if parseable { "passed" } else { "blocked" });
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_long_clean_body_cannot_downgrade_a_flagged_header() {
+    let filter = make_flag_filter(vec![header_contains("x-danger", "blocked"), body_contains("forbidden")]);
+    let mut request = crate::test_utils::make_request(http::Method::POST, "/");
+    request.headers.insert("x-danger", "blocked".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert_result(&ctx.filter_results, "blocked");
+    let mut body = Some(Bytes::from(vec![b'x'; 900_000]));
+    assert!(matches!(
+        filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert_result(&ctx.filter_results, "blocked");
+}
+
+#[tokio::test]
+async fn escaped_pii_in_late_visited_values_and_keys_is_inspected() {
+    let filter = make_filter(vec![body_pii(&[PiiKind::Ssn])]);
+    let escaped_ssn = r#""123\u002d45\u002d6789""#;
+    let cases = [
+        wide_json(9_999, true, Some(escaped_ssn)),
+        format!(
+            r#"{{"padding":"{}","nested":[{{"123\u002d45\u002d6789":1}}]}}"#,
+            "x".repeat(900_000)
+        ),
+    ];
+    for text in cases {
+        let request = crate::test_utils::make_request(http::Method::POST, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&request);
+        let mut body = Some(Bytes::from(text));
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(matches!(action, FilterAction::Reject(r) if r.status == 403));
+        assert_result(&ctx.filter_results, "blocked");
+    }
+    // 10,001 leaves must fail closed even when the escaped PII is visited last.
+    let request = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    let mut body = Some(Bytes::from(wide_json(10_000, true, Some(escaped_ssn))));
+    assert!(
+        matches!(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(), FilterAction::Reject(r) if r.status == 403)
+    );
+    assert_result(&ctx.filter_results, "blocked");
+}
+
+#[tokio::test]
+async fn oversized_policy_is_inclusive_and_independent_of_flag_action() {
+    for flag in [false, true] {
+        for reject_oversized in [false, true] {
+            for size in [
+                DEFAULT_MAX_BODY_BYTES - 1,
+                DEFAULT_MAX_BODY_BYTES,
+                DEFAULT_MAX_BODY_BYTES + 1,
+            ] {
+                for contains_pii in [false, true] {
+                    assert_oversized_policy_case(flag, reject_oversized, (size, contains_pii)).await;
+                }
+            }
+        }
+    }
+}
+
+/// Verify both the action and recorded result at one size and policy setting.
+async fn assert_oversized_policy_case(flag: bool, reject_oversized: bool, (size, contains_pii): (usize, bool)) {
+    let mut filter = body_action_filter(flag, body_pii(&[PiiKind::Ssn]));
+    filter.reject_oversized = reject_oversized;
+    let request = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    let mut bytes = vec![b' '; size];
+    if contains_pii {
+        bytes[size - 11..].copy_from_slice(b"123-45-6789");
+    }
+    let mut body = Some(Bytes::from(bytes));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    let over = reject_oversized && size >= DEFAULT_MAX_BODY_BYTES;
+    let expected = match (over, contains_pii, flag) {
+        (true, ..) => Some(413),
+        (false, true, false) => Some(403),
+        _ => None,
+    };
+    let status = match action {
+        FilterAction::Reject(rejection) => Some(rejection.status),
+        _ => None,
+    };
+    assert_eq!(
+        status, expected,
+        "flag={flag} reject_oversized={reject_oversized} size={size} pii={contains_pii}"
+    );
+    assert_result(
+        &ctx.filter_results,
+        if over || contains_pii { "blocked" } else { "passed" },
+    );
+}
+
+#[tokio::test]
+async fn long_raw_decoded_negated_and_invalid_inputs_preserve_actions() {
+    for flag in [false, true] {
+        for (rule, suffix, blocked) in [
+            (body_contains("forbidden"), "forbidden", true),
+            (body_contains("forbidden"), "forbiddeX", false),
+            (body_pattern("forbidden$"), "forbidden", true),
+            (body_pattern("forbidden$"), "forbiddeX", false),
+            (body_not_contains("required"), "required", false),
+            (body_not_contains("required"), "requireX", true),
+        ] {
+            let body = Bytes::from(format!("{}{suffix}", " ".repeat(900_000)));
+            assert_long_body_action(flag, rule, body, blocked).await;
+        }
+        assert_long_body_action(flag, body_contains("forbidden"), Bytes::from(vec![0xFF; 900_000]), true).await;
+    }
+}
+
+/// Check the action and recorded result for long matching or undecodable input.
+async fn assert_long_body_action(flag: bool, rule: CompiledRule, body: Bytes, blocked: bool) {
+    let filter = body_action_filter(flag, rule);
+    let request = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    let action = filter.on_request_body(&mut ctx, &mut Some(body), true).await.unwrap();
+    assert_eq!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        blocked && !flag
+    );
+    assert_result(&ctx.filter_results, if blocked { "blocked" } else { "passed" });
+}
+
+/// Use the requested flag or rejection action with one body rule.
+fn body_action_filter(flag: bool, rule: CompiledRule) -> GuardrailsFilter {
+    if flag {
+        make_flag_filter(vec![rule])
+    } else {
+        make_filter(vec![rule])
+    }
+}
+
+#[tokio::test]
+async fn long_near_matches_and_escape_runs_do_not_hide_tail_matches() {
+    for (rule, prefix, positive, negative) in [
+        (
+            body_contains("forbidden"),
+            "\\".repeat(900_000),
+            " forbidden",
+            " forbiddeX",
+        ),
+        (
+            body_pattern("forbidden$"),
+            ".".repeat(900_000),
+            " forbidden",
+            " forbiddeX",
+        ),
+        (
+            body_pii(&[PiiKind::Ssn]),
+            "9".repeat(900_000),
+            " 123-45-6789",
+            " 123-45-678x",
+        ),
+    ] {
+        let filter = make_filter(vec![rule]);
+        for (tail, blocked) in [(positive, true), (negative, false)] {
+            let request = crate::test_utils::make_request(http::Method::POST, "/");
+            let mut ctx = crate::test_utils::make_filter_context(&request);
+            let mut body = Some(Bytes::from(format!("{prefix}{tail}")));
+            let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+            assert_eq!(matches!(action, FilterAction::Reject(r) if r.status == 403), blocked);
+            assert_result(&ctx.filter_results, if blocked { "blocked" } else { "passed" });
+        }
+    }
+}
+
+#[tokio::test]
+async fn late_decoded_literal_and_regex_matches_honor_actions() {
+    for flag in [false, true] {
+        for is_pattern in [false, true] {
+            for (tail, blocked) in [(r"for\u0062idden", true), (r"for\u0062iddeX", false)] {
+                let rule = if is_pattern {
+                    body_pattern("forbidden")
+                } else {
+                    body_contains("forbidden")
+                };
+                let filter = if flag {
+                    make_flag_filter(vec![rule])
+                } else {
+                    make_filter(vec![rule])
+                };
+                let request = crate::test_utils::make_request(http::Method::POST, "/");
+                let mut ctx = crate::test_utils::make_filter_context(&request);
+                let mut body = Some(Bytes::from(format!(
+                    r#"{{"padding":"{}","value":"{tail}"}}"#,
+                    "x".repeat(900_000)
+                )));
+                let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+                assert_eq!(
+                    matches!(action, FilterAction::Reject(r) if r.status == 403),
+                    blocked && !flag
+                );
+                assert_result(&ctx.filter_results, if blocked { "blocked" } else { "passed" });
+            }
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

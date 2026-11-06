@@ -167,3 +167,267 @@ fn policy_http_missing_authorization_rejects_401() {
         "401 must carry WWW-Authenticate;\n{raw}",
     );
 }
+
+#[test]
+fn policy_http_large_opaque_get_streams_after_authorization() {
+    use std::{
+        io::{BufReader, Write as _},
+        net::TcpStream,
+        time::Duration,
+    };
+
+    use praxis_test_utils::{PayloadSpec, read_h1_response, start_counting_backend, start_full_proxy, wait_for_tcp};
+
+    let spec = PayloadSpec::binary(10_485_760, 27);
+    let backend = start_counting_backend(spec.clone(), "policy-http", spec.len());
+    let proxy_port = free_port();
+    let config = load_example(proxy_port, backend_map(backend.port));
+    let proxy = start_full_proxy(&config);
+    wait_for_tcp(proxy.addr());
+    let token = mint_fixture_jwt("alice");
+    let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_secs(30))).unwrap();
+    write!(stream, "GET /widgets HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", spec.len()).unwrap();
+    let initial = spec.chunk(0, 65_536);
+    stream.write_all(&initial).unwrap();
+    stream.flush().unwrap();
+    backend
+        .first_byte
+        .recv_timeout(Duration::from_secs(10))
+        .expect("authorized stream must reach the backend before the rest is sent");
+    send_payload_tail(&mut stream, &spec, u64::try_from(initial.len()).unwrap());
+    let response = read_h1_response(&mut BufReader::new(stream), false, 0, |_| Ok(()));
+    assert_eq!(response.status, Some(200));
+    assert!(response.completion.is_some(), "response must complete: {response:?}");
+    let receipt = backend.receipt.recv_timeout(Duration::from_secs(30)).unwrap();
+    assert_eq!(receipt.bytes, spec.len());
+    assert_eq!(receipt.verified_bytes, spec.len());
+    assert_eq!(receipt.mismatch, None);
+    assert!(receipt.completion.is_some());
+    assert_eq!(receipt.abort, None);
+    backend.join();
+}
+
+#[test]
+fn policy_http_denies_large_header_only_requests_without_upstream_dispatch() {
+    use std::{
+        io::{BufReader, Write as _},
+        net::TcpStream,
+        sync::mpsc::TryRecvError,
+        time::Duration,
+    };
+
+    use praxis_test_utils::{PayloadSpec, read_h1_response, start_counting_backend, start_full_proxy, wait_for_tcp};
+
+    for (method, credential, expected_status) in [("GET", false, 401), ("POST", true, 403)] {
+        let spec = PayloadSpec::binary(10_485_760, 81);
+        let backend = start_counting_backend(spec, "denied", 10_485_760);
+        let proxy_port = free_port();
+        let config = load_example(proxy_port, backend_map(backend.port));
+        let proxy = start_full_proxy(&config);
+        wait_for_tcp(proxy.addr());
+        let authorization = if credential {
+            format!("Authorization: Bearer {}\r\n", mint_fixture_jwt("alice"))
+        } else {
+            String::new()
+        };
+        let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        write!(stream, "{method} /widgets HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Length: 10485760\r\nConnection: close\r\n\r\n").unwrap();
+        stream.flush().unwrap();
+        let mut body = Vec::new();
+        let response = read_h1_response(&mut BufReader::new(stream), false, 65_536, |chunk| {
+            body.extend_from_slice(chunk);
+            Ok(())
+        });
+        assert_eq!(response.status, Some(expected_status));
+        assert!(
+            response.completion.is_some(),
+            "denial must complete without waiting for body: {response:?}"
+        );
+        if expected_status == 401 {
+            assert!(response.headers.iter().any(|(name, value)| name == "www-authenticate" && value.to_ascii_lowercase().starts_with("bearer")));
+        } else {
+            assert!(
+                body.windows(b"only GET is permitted".len())
+                    .any(|window| window == b"only GET is permitted")
+            );
+        }
+        assert!(matches!(backend.accepted.try_recv(), Err(TryRecvError::Empty)));
+        backend.join();
+    }
+}
+
+#[test]
+fn policy_http_preread_authorizes_on_first_chunk_without_repeating_admission() {
+    use std::{
+        io::{BufReader, Write as _},
+        net::TcpStream,
+        sync::{
+            Arc,
+            mpsc::{self, TryRecvError},
+        },
+        time::Duration,
+    };
+
+    use praxis_filter::{FilterFactory, FilterRegistry};
+    use praxis_test_utils::{
+        PayloadSpec, read_h1_response, start_counting_backend, start_full_proxy_with_registry, wait_for_tcp,
+    };
+
+    let spec = PayloadSpec::binary(1_048_576, 52);
+    let backend = start_counting_backend(spec.clone(), "protected", spec.len());
+    let proxy_port = free_port();
+    let mut config = load_example(proxy_port, backend_map(backend.port));
+    let observer = serde_yaml::from_str("filter: policy_body_probe").unwrap();
+    config.filter_chains[0].filters.insert(1, observer);
+    let (events, observed) = mpsc::channel();
+    let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "policy_body_probe",
+            FilterFactory::Http(Arc::new(move |_| {
+                let filter: Box<dyn praxis_filter::HttpFilter> = Box::new(PolicyBodyProbe { events: events.clone() });
+                Ok(filter)
+            })),
+        )
+        .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+    wait_for_tcp(proxy.addr());
+
+    for (method, credential, expected) in [("GET", false, 401), ("POST", true, 403)] {
+        let auth = if credential {
+            format!("Authorization: Bearer {}\r\n", mint_fixture_jwt("alice"))
+        } else {
+            String::new()
+        };
+        let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        write!(
+            stream,
+            "{method} /widgets HTTP/1.1\r\nHost: localhost\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            spec.len()
+        )
+        .unwrap();
+        stream.write_all(&spec.chunk(0, 1)).unwrap();
+        stream.flush().unwrap();
+        let response = read_h1_response(&mut BufReader::new(stream), false, 65_536, |_| Ok(()));
+        assert_eq!(response.status, Some(expected));
+        assert!(response.completion.is_some());
+        assert!(
+            matches!(observed.try_recv(), Err(TryRecvError::Empty)),
+            "denied requests must not reach the downstream body observer"
+        );
+        assert!(matches!(backend.accepted.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    let token = mint_fixture_jwt("alice");
+    let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_secs(20))).unwrap();
+    write!(stream, "GET /widgets HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", spec.len()).unwrap();
+    stream.write_all(&spec.chunk(0, 1)).unwrap();
+    stream.flush().unwrap();
+    assert_eq!(
+        observed.recv_timeout(Duration::from_secs(10)).unwrap(),
+        PolicyProbeEvent::Body {
+            subject: Some("alice".to_owned()),
+            end_of_stream: false
+        }
+    );
+    assert!(matches!(backend.accepted.try_recv(), Err(TryRecvError::Empty)));
+    send_payload_tail(&mut stream, &spec, 1);
+    let response = read_h1_response(&mut BufReader::new(stream), false, 0, |_| Ok(()));
+    assert_eq!(response.status, Some(200));
+    assert!(response.completion.is_some());
+    assert_eq!(
+        observed.recv_timeout(Duration::from_secs(10)).unwrap(),
+        PolicyProbeEvent::Headers { subject: None },
+        "policy must not re-publish identity during the later header phase"
+    );
+    assert!(
+        matches!(observed.try_recv(), Err(TryRecvError::Empty)),
+        "the body probe should complete once"
+    );
+    let receipt = backend.receipt.recv_timeout(Duration::from_secs(20)).unwrap();
+    assert_eq!(receipt.bytes, spec.len());
+    assert_eq!(receipt.verified_bytes, spec.len());
+    assert_eq!(receipt.mismatch, None);
+    assert!(receipt.completion.is_some());
+    assert_eq!(receipt.abort, None);
+    backend.join();
+}
+
+/// Observer events used to verify body-first identity admission and re-entry.
+#[derive(Debug, Eq, PartialEq)]
+enum PolicyProbeEvent {
+    /// Identity visible to the first body callback.
+    Body {
+        subject: Option<String>,
+        end_of_stream: bool,
+    },
+    /// Identity visible when request headers are subsequently processed.
+    Headers { subject: Option<String> },
+}
+
+/// Forces a pre-read and observes the policy's public identity projection.
+struct PolicyBodyProbe {
+    /// Delivers callback observations to the test.
+    events: std::sync::mpsc::Sender<PolicyProbeEvent>,
+}
+
+#[async_trait::async_trait]
+impl praxis_filter::HttpFilter for PolicyBodyProbe {
+    fn name(&self) -> &'static str {
+        "policy_body_probe"
+    }
+
+    fn request_body_access(&self) -> praxis_filter::BodyAccess {
+        praxis_filter::BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> praxis_filter::BodyMode {
+        praxis_filter::BodyMode::StreamBuffer {
+            max_bytes: Some(2_097_152),
+        }
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut praxis_filter::HttpFilterContext<'_>,
+    ) -> Result<praxis_filter::FilterAction, praxis_filter::FilterError> {
+        let subject = ctx
+            .extensions
+            .get::<praxis_filter::AuthenticatedIdentity>()
+            .map(|identity| identity.subject_id().to_owned());
+        self.events.send(PolicyProbeEvent::Headers { subject }).unwrap();
+        Ok(praxis_filter::FilterAction::Continue)
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> Result<praxis_filter::FilterAction, praxis_filter::FilterError> {
+        let subject = ctx
+            .extensions
+            .remove::<praxis_filter::AuthenticatedIdentity>()
+            .map(|identity| identity.subject_id().to_owned());
+        self.events
+            .send(PolicyProbeEvent::Body { subject, end_of_stream })
+            .unwrap();
+        Ok(praxis_filter::FilterAction::BodyDone)
+    }
+}
+
+/// Write the remaining generated request bytes after an explicitly sent prefix.
+fn send_payload_tail(stream: &mut std::net::TcpStream, spec: &praxis_test_utils::PayloadSpec, mut offset: u64) {
+    use std::io::Write as _;
+    while offset < spec.len() {
+        let chunk = spec.chunk(offset, 65_536);
+        stream.write_all(&chunk).unwrap();
+        offset += u64::try_from(chunk.len()).unwrap();
+    }
+}

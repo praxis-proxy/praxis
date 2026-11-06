@@ -138,6 +138,11 @@ pub(super) fn rewrite_document(
     op_set: &CompiledOpSet,
     store: Option<&mut dyn JsonOpStore>,
 ) -> Result<RewriteOutcome, JsonError> {
+    // Skipped string spans are not otherwise decoded, so validate their raw
+    // bytes before committing any captures or mutations.
+    if std::str::from_utf8(input).is_err() {
+        return Err(JsonError::InvalidJson);
+    }
     let mut session = RewriteSession::new(op_set);
     if let Some(store) = store.as_deref() {
         preload_context_sources(op_set, store, &mut session);

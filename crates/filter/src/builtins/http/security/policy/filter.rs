@@ -204,6 +204,11 @@ enum GatedIdentity {
 /// and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these
 /// rules are skipped and a warning is emitted. A response-only route adds no
 /// request-phase route rule; identity checks and `global` policy still apply.
+/// When tool response hooks are configured, a nonempty classified `tools/call`
+/// response that is malformed or contains neither a result nor a valid
+/// JSON-RPC error produces a filter error instead of silently skipping
+/// inspection. The pipeline's `failure_mode` controls that error; valid
+/// JSON-RPC error responses continue unchanged.
 ///
 /// `result.<field>` projection for `prompt:` and `resource:` routes remains
 /// blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330].
@@ -285,6 +290,8 @@ pub struct PolicyFilter {
     entity_routes: bool,
     /// Whether the policy declares MCP entity routes.
     mcp_routes: bool,
+    /// Whether a tool response hook can inspect classified tool responses.
+    mcp_post_tool: bool,
     /// Whether the policy declares inference routes.
     llm_routes: bool,
     /// Whether the policy declares inference response hooks.
@@ -337,30 +344,27 @@ impl PolicyFilter {
         cfg.validate_context_headers()
             .map_err(|e| -> FilterError { format!("policy: {e}").into() })?;
 
-        // Bound the per-request ReadWrite buffer ceiling: 0 makes every
-        // non-empty body fail, and an unbounded value multiplies per-request
-        // memory by concurrency. The pipeline's unbounded-buffer startup check
-        // never fires here because this filter always passes a concrete
-        // Some(max_buffer_bytes), so validate it directly.
+        // Validate addressable, nonzero limits. The pipeline additionally clamps
+        // accumulation to body_limits.max_buffer_bytes before invoking this filter.
         if cfg.max_buffer_bytes == 0 {
             return Err("policy: max_buffer_bytes must be > 0".into());
         }
-        if cfg.max_buffer_bytes > praxis_core::config::ABSOLUTE_MAX_BODY_BYTES {
+        if cfg.max_buffer_bytes > praxis_core::config::MAX_BUFFER_BYTES {
             return Err(format!(
                 "policy: max_buffer_bytes ({}) exceeds the maximum ({})",
                 cfg.max_buffer_bytes,
-                praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+                praxis_core::config::MAX_BUFFER_BYTES
             )
             .into());
         }
         if cfg.llm.max_request_bytes == 0 {
             return Err("policy: llm.max_request_bytes must be > 0".into());
         }
-        if cfg.llm.max_request_bytes > praxis_core::config::ABSOLUTE_MAX_BODY_BYTES {
+        if cfg.llm.max_request_bytes > praxis_core::config::MAX_BUFFER_BYTES {
             return Err(format!(
                 "policy: llm.max_request_bytes ({}) exceeds the maximum ({})",
                 cfg.llm.max_request_bytes,
-                praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+                praxis_core::config::MAX_BUFFER_BYTES
             )
             .into());
         }
@@ -577,6 +581,7 @@ impl PolicyFilter {
             http_global,
             entity_routes,
             mcp_routes,
+            mcp_post_tool,
             llm_routes,
             llm_post,
             request_assertions,
@@ -2358,7 +2363,12 @@ impl HttpFilter for PolicyFilter {
         let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
         // Parse once for this phase; the id string, the deny-path id
         // echoes, and the typed content all read the same DOM.
-        let parsed = ParsedEnvelope::parse(&body_bytes);
+        let parsed = if self.mcp_post_tool && method == "tools/call" && !body_bytes.is_empty() {
+            ParsedEnvelope::try_parse(&body_bytes)
+                .map_err(|_error| -> FilterError { "policy: malformed JSON-RPC response cannot be inspected".into() })?
+        } else {
+            ParsedEnvelope::parse(&body_bytes)
+        };
         let id_str = parsed.id_string();
 
         // Rebuild `Extensions` from the identity resolved in the request
@@ -2397,13 +2407,16 @@ impl HttpFilter for PolicyFilter {
         let extensions = Self::extensions_from_identity(&headers, identity, entity_type, &entity_name, &self.cfg);
 
         let content = build_response_content_for_method(&method, &entity_name, &id_str, &parsed);
-        // For tools/call, empty content means the upstream returned an error
-        // response (no `result` field), and dispatching the post hook against
-        // that is a behavior change we do not want here. For prompts and
+        // A valid tools/call error has no result to inspect. Unknown shapes
+        // are not equivalent: treating them as errors would skip an active
+        // tool response policy without checking the upstream data. For prompts and
         // resources, content projection is not yet implemented (tools/call
         // only), so content is always empty, but attribute-only post rules
         // (identity, CEL predicates over subject/meta) are still valid.
         if content.is_empty() && method == "tools/call" {
+            if self.mcp_post_tool && !body_bytes.is_empty() && !parsed.is_json_rpc_error() {
+                return Err("policy: JSON-RPC tool response has no inspectable result or valid error".into());
+            }
             return Ok(FilterAction::Continue);
         }
         let payload = MessagePayload {

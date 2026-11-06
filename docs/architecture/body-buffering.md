@@ -169,21 +169,32 @@ but requires `insecure_options.allow_unbounded_body:
 true` in the config, otherwise the proxy refuses to
 start.
 
-## Absolute Hard Ceiling
+## Configured Buffering Cap
 
-Even with `allow_unbounded_body`, an absolute hard
-ceiling of 64 MiB (`ABSOLUTE_MAX_BODY_BYTES`) is
-enforced. When `StreamBuffer { max_bytes: None }`
-survives to the unbounded check,
-`check_unbounded_stream_buffer` clamps it to 64 MiB
-and emits a warning. This prevents a misconfigured
-pipeline from consuming unbounded memory.
+`body_limits.max_buffer_bytes` defaults to 64 MiB
+(`DEFAULT_MAX_BUFFER_BYTES`). It limits each accumulated body,
+including finite filter declarations, runtime mode changes, nested
+pipelines, buffered subrequest responses, and iterative-router state.
+The shared buffer checks its effective limit before copying a chunk.
 
-Filter-local constants follow the same pattern:
-`DEFAULT_JSON_BODY_MAX_BYTES` (10 MiB) and
-`MAX_JSON_BODY_BYTES` (64 MiB) bound JSON body
-inspection buffers independently of the global
-config.
+The cap is a positive integer byte count. It cannot be zero, null,
+or larger than an addressable byte allocation. Operators can raise it
+without patching Praxis. Raising it does not raise the global request
+or response transfer limits (10 MiB by default), or a filter's own
+inspection limit. All applicable limits must accommodate the body.
+
+`allow_unbounded_body` permits null cumulative transfer limits for
+incremental streams. It never removes the buffering cap. Transfer
+limits may exceed the buffering cap because incremental streams do
+not retain the complete body. Reloads apply the new cap to new
+pipelines and their subrequest clients; in-flight requests keep their
+pinned pipeline's limits.
+
+This limits accumulated payload bytes, not total process memory.
+Concurrent bodies, rewritten output, parsed metadata, and transport
+allocations need separate capacity planning. Generic JSON filters
+default to `DEFAULT_JSON_BODY_MAX_BYTES` (10 MiB); explicit larger
+limits are still constrained by the pipeline's buffering cap.
 
 ## Limit Layering Summary
 
@@ -193,7 +204,7 @@ From most specific to broadest:
 Filter max_bytes (StreamBuffer { max_bytes: Some(N) })
   -> Pipeline merge (largest filter limit wins)
     -> Global body_limits (clamp down)
-      -> Absolute ceiling (64 MiB hard cap)
+      -> Configured max_buffer_bytes (64 MiB default)
 ```
 
 A filter requesting `StreamBuffer { max_bytes:

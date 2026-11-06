@@ -13,6 +13,8 @@ default = ["pingora", "policy-engine"]
 pingora = ["praxis-test-utils/pingora", "praxis/pingora"]
 hyper = ["praxis-test-utils/hyper", "praxis/hyper"]
 policy-engine = ["praxis/policy-engine", "praxis-filter/policy-engine"]
+hedged-requests = ["praxis/hedged-requests"]
+iterative-request-router = ["praxis/iterative-request-router"]
 
 [lints]
 workspace = true

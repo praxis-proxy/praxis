@@ -547,6 +547,11 @@ impl HttpFilter for IterativeRequestRouterFilter {
         }
     }
 
+    fn apply_buffer_cap(&mut self, max_bytes: usize) {
+        self.max_response_bytes = self.max_response_bytes.min(max_bytes);
+        self.max_state_bytes = self.max_state_bytes.min(max_bytes);
+    }
+
     fn visit_nested_pipelines(&mut self, visitor: &mut dyn FnMut(&mut FilterPipeline)) {
         for pipeline in self.step_pipelines.values_mut() {
             if let Some(pipeline) = Arc::get_mut(pipeline) {

@@ -4,6 +4,7 @@
 //! Body chunk accumulation and overflow handling.
 
 use bytes::Bytes;
+use praxis_core::config::MAX_BUFFER_BYTES;
 
 // -----------------------------------------------------------------------------
 // BodyBuffer
@@ -32,12 +33,13 @@ pub struct BodyBuffer {
 }
 
 impl BodyBuffer {
-    /// Create a new buffer with the given size limit.
+    /// Create a buffer with an explicit limit and no eager allocation.
+    /// Callers supply a limit already clamped to the configured buffering cap.
     #[must_use]
     pub fn new(max_bytes: usize) -> Self {
         Self {
             bytes: Vec::new(),
-            max_bytes,
+            max_bytes: max_bytes.min(MAX_BUFFER_BYTES),
         }
     }
 
@@ -138,6 +140,19 @@ mod tests {
     const PAYLOAD_BYTES: usize = 65_536; // 64 KiB
 
     #[test]
+    fn explicit_buffer_limits_allow_overrides_without_eager_allocation() {
+        for requested in [0, 1, 67_108_864, 67_108_865, MAX_BUFFER_BYTES, usize::MAX] {
+            let buffer = BodyBuffer::new(requested);
+            assert_eq!(buffer.max_bytes, requested.min(MAX_BUFFER_BYTES));
+            assert_eq!(
+                buffer.bytes.capacity(),
+                0,
+                "constructing a large limit must not allocate it"
+            );
+        }
+    }
+
+    #[test]
     fn buffer_empty_freeze_returns_empty_bytes() {
         let buf = BodyBuffer::new(1024);
 
@@ -205,20 +220,21 @@ mod tests {
 
     #[test]
     fn fixed_payload_storage_is_bounded_across_chunk_counts() {
-        let payload = vec![b'x'; PAYLOAD_BYTES];
-
-        for chunk_bytes in [PAYLOAD_BYTES, 1024, 64, 1] {
-            let mut buf = BodyBuffer::new(BUFFER_LIMIT_BYTES);
-            for chunk in payload.chunks(chunk_bytes) {
-                buf.push(Bytes::copy_from_slice(chunk)).unwrap();
+        for size in [1, 31, 1023, PAYLOAD_BYTES - 1, PAYLOAD_BYTES] {
+            let payload: Vec<u8> = (0..size).map(|index| u8::try_from(index % 251).unwrap()).collect();
+            for chunk_bytes in [PAYLOAD_BYTES, 1024, 67, 1] {
+                let mut buf = BodyBuffer::new(BUFFER_LIMIT_BYTES);
+                for chunk in payload.chunks(chunk_bytes) {
+                    buf.push(Bytes::new()).unwrap();
+                    buf.push(Bytes::copy_from_slice(chunk)).unwrap();
+                }
+                assert_eq!(buf.total_bytes(), size);
+                assert!(
+                    buf.bytes.capacity() <= size.saturating_mul(2),
+                    "{size} bytes in {chunk_bytes}-byte chunks must stay proportional"
+                );
+                assert_eq!(buf.freeze(), Bytes::copy_from_slice(&payload));
             }
-
-            assert_eq!(buf.total_bytes(), PAYLOAD_BYTES);
-            assert!(
-                buf.bytes.capacity() <= PAYLOAD_BYTES.saturating_mul(2),
-                "{chunk_bytes}-byte chunks must keep storage proportional to payload"
-            );
-            assert_eq!(buf.freeze(), Bytes::copy_from_slice(&payload));
         }
     }
 
@@ -239,6 +255,31 @@ mod tests {
             "source backing must be released after push"
         );
         assert_eq!(buf.freeze(), Bytes::from_static(b"x"));
+    }
+
+    #[test]
+    fn accepted_and_rejected_slices_release_every_owner() {
+        let first: Arc<[u8]> = vec![b'a'; 16_384].into();
+        let second: Arc<[u8]> = vec![b'b'; 16_384].into();
+        let rejected: Arc<[u8]> = vec![b'c'; 16_384].into();
+        let mut buffer = BodyBuffer::new(2);
+        for owner in [&first, &second] {
+            let bytes = Bytes::from_owner(Arc::clone(owner));
+            buffer.push(bytes.slice(0..1)).unwrap();
+            drop(bytes);
+            assert_eq!(Arc::strong_count(owner), 1, "accepted input is copied");
+        }
+        let bytes = Bytes::from_owner(Arc::clone(&rejected));
+        let overflow = buffer.push(bytes.slice(0..1)).unwrap_err();
+        drop(bytes);
+        assert_eq!((overflow.attempted, overflow.limit), (3, 2));
+        assert_eq!(Arc::strong_count(&rejected), 1, "rejected input is dropped");
+        let frozen = buffer.freeze();
+        assert_eq!(frozen, Bytes::from_static(b"ab"));
+        assert_eq!(Arc::strong_count(&first), 1);
+        assert_eq!(Arc::strong_count(&second), 1);
+        drop(frozen);
+        assert_eq!(Arc::strong_count(&first), 1);
     }
 
     #[test]
