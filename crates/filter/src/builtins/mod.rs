@@ -26,5 +26,7 @@ pub use http::{
     normalize_rewritten_path, shutdown_access_log_sinks,
 };
 #[cfg(feature = "policy-engine")]
-pub use http::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use http::{
+    PolicyFilter, PolicyPluginFactoryFn, PolicyResponseContext, PolicyResponseOutput, register_policy_plugin_factory,
+};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

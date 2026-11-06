@@ -36,6 +36,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- The `policy` filter accepts trusted metadata-only inference response context
+  from host filters and dispatches it through `cmf.llm_output` at end of stream.
+  With `body_access: read_only`, or for SSE responses, response content is not
+  buffered. Non-SSE responses under `body_access: read_write` stay buffered and
+  are evaluated as content. Plugin-written custom values reach downstream
+  response filters.
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
   filled in from the declaration at validation time, keeping the routed
@@ -66,7 +72,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `forward_proxy` block, removes a listener that has one, or changes
   `insecure_options.allow_private_upstreams` while a bound listener has
   an enabled block, is rejected. The CONNECT runtime is a follow-up
-  change; the block is inert until it lands.
+ change; the block is inert until it lands.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
