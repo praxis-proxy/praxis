@@ -42,15 +42,9 @@ const FAST_SHUTDOWN_BOUND: Duration = Duration::from_secs(1); // 1 s
 const RUNTIME_DROP_TIMEOUT: Duration = Duration::from_secs(1); // 1 s
 
 /// How long an aborted service gets to finish before shutdown proceeds.
-const ABORT_JOIN_BOUND: Duration = Duration::from_secs(1); // 1 s
-
+const ABORT_JOIN_BOUND: Duration = Duration::from_secs(1);
 /// How long required services get to report readiness before startup fails.
-///
-/// A required service signals readiness on its first suspension, so this bound
-/// only elapses when one blocks before it can accept work; failing startup
-/// beats waiting forever.
-const REQUIRED_READY_BOUND: Duration = Duration::from_secs(30); // 30 s
-
+const REQUIRED_READY_BOUND: Duration = Duration::from_secs(30);
 /// Name of every tokio worker thread.
 const WORKER_THREAD_NAME: &str = "praxis-worker";
 
@@ -108,8 +102,6 @@ pub struct HyperRuntime {
 
     /// Trust anchors loaded from `runtime.upstream_ca_file`.
     trust_anchors: Option<Arc<CachedCaCerts>>,
-
-    /// Shared lifecycle state for management services and handlers.
     lifecycle: LifecycleHandle,
 }
 
@@ -181,9 +173,7 @@ impl HyperRuntime {
 
     /// Register a listener that must run until shutdown.
     ///
-    /// An early return, a panic, or a service that never starts accepting work
-    /// shuts down every service, then fails the runtime so another listener
-    /// cannot mask the outage with healthy probes.
+    /// Early exit or missing readiness fails the runtime.
     pub fn add_required_service<F, Fut>(&mut self, name: &str, service: F)
     where
         F: FnOnce(ShutdownWatch) -> Fut + Send + 'static,
@@ -228,14 +218,7 @@ impl HyperRuntime {
     /// starts, so a stop condition that installs signal handlers has them
     /// in place before a listener accepts its first connection.
     ///
-    /// A tokio runtime that cannot be built is fatal after the error is
-    /// logged, as it is on Pingora: returning would let the server report a
-    /// clean shutdown with nothing ever served.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the tokio runtime cannot be built or a required service
-    /// exits or never becomes ready before startup completes.
+    /// A runtime that cannot start, or a required service that fails, is fatal.
     fn run<Stop, MakeStop>(self, make_stop: MakeStop)
     where
         Stop: Future<Output = ShutdownMode> + Send,
@@ -275,11 +258,6 @@ impl HyperRuntime {
     }
 
     /// Build the service runtime, failing the process when it cannot start.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the tokio runtime cannot be built; returning would let the
-    /// server report a clean shutdown with nothing ever served.
     #[expect(
         clippy::panic,
         reason = "a proxy without a runtime must not look like a clean shutdown"
@@ -347,12 +325,7 @@ type ServiceFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// Turns a service's shutdown watch into the future to spawn.
 type ServiceStart = Box<dyn FnOnce(ShutdownWatch, oneshot::Sender<()>) -> ServiceFuture + Send>;
-
-/// Poll the service once so synchronous listener setup runs before readiness
-/// is reported.
-///
-/// A required service that finishes on its first poll never signals readiness,
-/// so the runtime treats its early exit as a startup failure.
+/// Poll the service once before reporting readiness.
 fn start_and_signal_ready(
     running: impl Future<Output = ()> + Send + 'static,
     ready: oneshot::Sender<()>,
@@ -405,14 +378,11 @@ struct ServiceSet {
 
     /// The service tasks.
     tasks: JoinSet<()>,
-
-    /// Readiness signals for required services.
     ready: Vec<oneshot::Receiver<()>>,
 }
 
 impl ServiceSet {
-    /// Abort every service still running and return how many outlived the
-    /// abort join bound.
+    /// Abort every service still running and return how many outlived the bound.
     async fn abort_remaining(&mut self) -> usize {
         while let Some(joined) = self.tasks.try_join_next_with_id() {
             self.record(&joined);
@@ -422,8 +392,6 @@ impl ServiceSet {
         if tokio::time::timeout(ABORT_JOIN_BOUND, self.join_all()).await.is_err() {
             warn!("aborted services did not finish before the abort join bound");
         }
-        // `join_all` forgets the services that finished, so what is left is
-        // exactly the set that outlived the bound.
         let lingering = self.names.iter().map(|(_, name)| name.clone()).collect::<Vec<_>>();
         if !lingering.is_empty() {
             warn!(aborted = lingering.len(), services = ?lingering, "aborted services that outlived the shutdown bound");
@@ -432,10 +400,6 @@ impl ServiceSet {
     }
 
     /// Wait until every required service has started accepting work.
-    ///
-    /// Readiness is observed together with service completion and bounded by
-    /// [`REQUIRED_READY_BOUND`], so a required service that exits or blocks
-    /// before signalling readiness fails startup instead of hanging it.
     async fn wait_for_required_ready(&mut self) -> bool {
         let mut signals = std::mem::take(&mut self.ready);
         let all_ready = async {
@@ -448,7 +412,6 @@ impl ServiceSet {
         };
         let bound = tokio::time::sleep(REQUIRED_READY_BOUND);
         tokio::pin!(all_ready, bound);
-
         loop {
             tokio::select! {
                 ready = &mut all_ready => return ready,
@@ -540,9 +503,7 @@ impl ServiceSet {
         set
     }
 
-    /// Flip the shutdown watch, wait up to `bound` for every service to
-    /// finish, then abort the rest. Returns how many outlived the abort join
-    /// bound.
+    /// Flip the shutdown watch, wait up to `bound`, then abort the rest.
     async fn stop(&mut self, shutdown: &watch::Sender<bool>, bound: Duration) -> usize {
         self.stopping = true;
         shutdown.send_modify(|stopping| *stopping = true);
@@ -867,7 +828,6 @@ mod tests {
             "runtime must be stopped after return"
         );
     }
-
     #[test]
     fn service_that_ignores_the_watch_is_aborted_within_the_fast_bound() {
         let dropped = Arc::new(AtomicBool::new(false));
@@ -1012,16 +972,13 @@ mod tests {
             }],
             &receiver,
         );
-
         let ready = tokio::time::timeout(Duration::from_secs(120), services.wait_for_required_ready()).await;
-
         assert_eq!(
             ready,
             Ok(false),
             "a required service that never signals readiness must fail startup"
         );
     }
-
     #[tokio::test]
     #[expect(clippy::panic, reason = "exercise required-service panic supervision")]
     async fn required_service_panic_stops_supervision() {

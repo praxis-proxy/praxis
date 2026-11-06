@@ -5,10 +5,6 @@
 
 use serde::Deserialize;
 
-// -----------------------------------------------------------------------------
-// ReadinessMode
-// -----------------------------------------------------------------------------
-
 /// Selects whether upstream health affects `/ready` status.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -19,7 +15,6 @@ pub enum ReadinessMode {
     /// Report the replica unready when any checked cluster is degraded.
     Upstreams,
 }
-
 // -----------------------------------------------------------------------------
 // AdminConfig
 // -----------------------------------------------------------------------------
@@ -69,7 +64,6 @@ pub struct AdminConfig {
 
     /// Include per-cluster detail in `/ready` response.
     pub verbose: bool,
-
     /// Whether `/ready` follows replica serving state or upstream health.
     pub readiness: ReadinessMode,
 }

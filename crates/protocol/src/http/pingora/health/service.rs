@@ -107,10 +107,8 @@ pub struct PingoraHealthService {
 
     /// When `true`, reject requests whose `Host` is not loopback.
     require_loopback_host: bool,
-
     /// Lifecycle gate shared by the runtime and management service.
     lifecycle: Option<LifecycleHandle>,
-
     /// Policy controlling whether upstream health affects readiness status.
     readiness: ReadinessMode,
 }
@@ -208,7 +206,6 @@ impl PingoraHealthService {
             },
             Some(praxis_core::server::LifecyclePhase::Serving) | None => {},
         }
-
         // Resolve the health registry from the live pipelines (post-reload)
         // rather than the startup snapshot, exactly as /api/stats does, so
         // /ready reflects current endpoint health after a config reload
@@ -791,25 +788,20 @@ mod tests {
     fn ready_follows_lifecycle_before_upstream_policy() {
         let lifecycle = LifecycleHandle::new();
         let svc = PingoraHealthService::new(None, false).with_lifecycle(lifecycle.clone());
-
         assert_eq!(svc.ready_response(), (503, r#"{"status":"initializing"}"#.to_owned()));
         lifecycle.mark_serving().unwrap();
         assert_eq!(svc.ready_response(), (200, r#"{"status":"ok"}"#.to_owned()));
         assert!(lifecycle.begin_drain());
         assert_eq!(svc.ready_response(), (503, r#"{"status":"draining"}"#.to_owned()));
     }
-
     #[test]
     fn ready_reports_stopped_lifecycle_distinctly() {
         let lifecycle = LifecycleHandle::new();
         let svc = PingoraHealthService::new(None, false).with_lifecycle(lifecycle.clone());
-
         assert!(lifecycle.begin_drain());
         lifecycle.mark_stopped();
-
         assert_eq!(svc.ready_response(), (503, r#"{"status":"stopped"}"#.to_owned()));
     }
-
     #[test]
     fn ready_serving_lifecycle_still_applies_the_upstream_policy() {
         let lifecycle = LifecycleHandle::new();
@@ -822,9 +814,7 @@ mod tests {
         let svc = PingoraHealthService::new(Some(registry), false)
             .with_readiness(ReadinessMode::Upstreams)
             .with_lifecycle(lifecycle);
-
         let (status, body) = svc.ready_response();
-
         assert_eq!(
             status, 503,
             "serving only lifts the lifecycle gate; upstream readiness must still fail"
@@ -834,7 +824,6 @@ mod tests {
             "status should be degraded: {body}"
         );
     }
-
     #[test]
     fn ready_empty_registry_returns_200() {
         let registry: HealthRegistry = Arc::new(HashMap::new());

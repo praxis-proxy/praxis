@@ -30,9 +30,6 @@ impl ServerRuntime for UnavailableRuntime {
     }
 
     /// Drop `shutdown`, log that nothing can be served, and stop.
-    ///
-    /// The lifecycle still ends in `Stopped` so management code waiting for a
-    /// terminal phase is released rather than blocked on `Initializing`.
     fn run_with_shutdown(self, shutdown: ShutdownFuture) {
         drop(shutdown);
         tracing::error!("no network backend is compiled into this build; nothing to serve");
@@ -45,19 +42,15 @@ impl ServerRuntime for UnavailableRuntime {
         self.lifecycle.clone()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::server::LifecyclePhase;
-
     #[test]
     fn running_without_a_backend_stops_the_lifecycle() {
         let runtime = UnavailableRuntime::default();
         let lifecycle = runtime.lifecycle();
-
         runtime.run_until_shutdown();
-
         assert_eq!(
             lifecycle.phase(),
             LifecyclePhase::Stopped,

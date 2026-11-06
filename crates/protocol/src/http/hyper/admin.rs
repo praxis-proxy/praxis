@@ -144,7 +144,6 @@ pub fn add_health_endpoint_with_pipelines(
         None,
     );
 }
-
 /// Add health and metrics endpoints with readiness policy and lifecycle state.
 #[expect(clippy::too_many_arguments, reason = "endpoint wiring mirrors its configuration")]
 pub fn add_health_endpoint_with_pipelines_and_policy(
@@ -503,7 +502,6 @@ mod tests {
             Some(lifecycle.clone()),
         );
         let _running = start(runtime);
-
         let initializing = get(&addr, "/ready");
         lifecycle.mark_serving().unwrap();
         let serving = get(&addr, "/ready");
@@ -511,7 +509,6 @@ mod tests {
         let draining = get(&addr, "/ready");
         lifecycle.mark_stopped();
         let stopped = get(&addr, "/ready");
-
         assert_eq!(initializing.status, 503, "an initializing server must not report ready");
         assert_eq!(initializing.body, br#"{"status":"initializing"}"#);
         assert_eq!(serving.status, 200, "a serving server must report ready");
@@ -521,7 +518,6 @@ mod tests {
         assert_eq!(stopped.status, 503, "a stopped server must not report ready");
         assert_eq!(stopped.body, br#"{"status":"stopped"}"#);
     }
-
     #[test]
     fn health_endpoint_installs_the_recorder_and_serves_metrics() {
         let addr = free_addr();
