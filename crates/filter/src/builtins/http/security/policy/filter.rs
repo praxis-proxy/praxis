@@ -1475,7 +1475,12 @@ impl PolicyFilter {
         }));
 
         let promoted = parsed.promoted_params(&self.cfg.llm.promote_params);
-        ext.llm_request = Some(LlmRequestDocument::new(parsed.into_value()));
+        let parts = parsed.parts();
+        let document = LlmRequestDocument::new(parsed.into_value());
+        ext.llm_request = Some(match parts {
+            Some(parts) => document.with_parts(parts),
+            None => document,
+        });
         if promoted.is_empty() {
             return;
         }

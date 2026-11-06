@@ -1,0 +1,33 @@
+# Policy fixture for the inference input example.
+# Production deployments should replace the shared secret with RS256 and JWKS.
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["praxis-policy-example"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+
+routes:
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+        # Refuse a request the proxy could not fully account for.
+        - "!exists(llm.input.offered_tools): deny"
+        - "llm.input.offered_tools contains 'transfer_funds': deny"
+        - "llm.input.max_tokens > 4096: deny"

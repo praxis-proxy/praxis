@@ -106,6 +106,8 @@ mod policy_jwt_fips;
 #[cfg(feature = "policy-builtins")]
 mod policy_llm;
 #[cfg(feature = "policy-builtins")]
+mod policy_llm_input;
+#[cfg(feature = "policy-builtins")]
 mod policy_llm_request;
 #[cfg(feature = "policy-builtins")]
 mod policy_query_credential;
