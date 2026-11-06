@@ -37,7 +37,6 @@ pub(super) struct RequestState {
     /// Whether this instance admitted the request.
     pub(super) admitted: bool,
     /// Which rate-limit stages have run.
-    #[expect(dead_code, reason = "the limiter stages set and read it")]
     pub(super) limits: LimitStages,
     /// The context table between hook invocations.
     table: TableSlot,
@@ -45,7 +44,6 @@ pub(super) struct RequestState {
 
 /// The rate-limit stages that have run for this instance, each at most once.
 #[derive(Default)]
-#[expect(dead_code, reason = "the limiter stages set and read it")]
 pub(super) struct LimitStages {
     /// `ratelimit.pre_identity` ran.
     pub(super) pre_identity: bool,

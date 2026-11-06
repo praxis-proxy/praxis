@@ -50,6 +50,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Policy rate limiting (experimental): the policy filter runs a policy's
+  `rate_limits:` before identity resolution, keyed on the client address,
+  and after it, keyed on the resolved identity, each once per request. A
+  denial returns 429 with `Retry-After` (or 400, 401 or 503), fixed text and
+  only the limit counters, never the limiter's own message, and does not
+  reach the upstream. Counters are per replica and reset on reload. See the
+  example `security/policy-rate-limit.yaml`.
 - Query-parameter credentials for the policy filter
   (`credential: { kind: query_param, name: ... }` with `read_query`), with
   the example `security/policy-query-credential.yaml`. A repeated or

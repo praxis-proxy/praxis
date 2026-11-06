@@ -30,6 +30,7 @@ use ppe::praxis_policy_core::{
     hooks::{Extensions, HookTypeDef},
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
+    ratelimit_hook::{HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY},
     secrets::backends::EnvSecretProviderFactory,
 };
 use praxis_core::{connectivity::CidrRange, subrequest::SubRequestConnector};
@@ -47,7 +48,7 @@ use super::{
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
-        llm_deny_rejection, llm_error_envelope_bytes_within,
+        llm_deny_rejection, llm_error_envelope_bytes_within, rate_limit_json_rpc_rejection, rate_limit_rejection,
     },
     json_rpc::{
         ParsedEnvelope, build_content_for_method, build_response_content_for_method, reserialize_json_rpc_body,
@@ -159,6 +160,21 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// the client are ignored; a malformed hop reached before it leaves no client
 /// address. RFC 7239 `Forwarded` is not supported. Only
 /// policy input changes: `ip_acl` and `forwarded_headers` still see the peer.
+///
+/// A policy with `rate_limits:` runs `ratelimit.pre_identity` once per
+/// request before the first identity resolution, on the HTTP coordinates
+/// (`http`, `*`) and the request as first received, and
+/// `ratelimit.post_identity` once after the last, on the final route and the
+/// resolved identity, before authorization and forwarding. Two `policy`
+/// filters in one chain each run both stages. A denial ends the request with
+/// its declared status (429, 400, 401 or 503), fixed text per code, and only
+/// the `limit`, `remaining`, `retry_after_seconds` and `window_seconds`
+/// details; a positive `retry_after_seconds` sets `Retry-After`. The
+/// plugin's reason is never sent. On a classified JSON-RPC call the body is a
+/// JSON-RPC error carrying the request `id`, under the same status. Counters
+/// belong to each limiter instance: they are not shared between replicas and
+/// reset when the configuration reloads. Each IPv6 /64 is one address key,
+/// so pair a per-address limit with a coarser one.
 ///
 /// Policy can read a credential from a query parameter
 /// (`credential: { kind: query_param, name: ... }`, with the `read_query`
@@ -308,6 +324,10 @@ pub struct PolicyFilter {
     llm_routes: bool,
     /// Whether the policy declares inference response hooks.
     llm_post: bool,
+    /// Whether a limiter runs at `ratelimit.pre_identity`.
+    limit_pre: bool,
+    /// Whether a limiter runs at `ratelimit.post_identity`.
+    limit_post: bool,
     /// Header names governed by request assertions.
     request_assertions: GovernedNames,
     /// Header names governed by response assertions.
@@ -597,6 +617,8 @@ impl PolicyFilter {
             (mgr.has_hooks_for(HOOK_HTTP_RESPONSE) || !response_assertions.is_empty()).then_some(HOOK_HTTP_RESPONSE);
 
         let llm_route_table = llm_routes.then(|| Arc::new(policy_config));
+        let limit_pre = mgr.has_hooks_for(HOOK_RATELIMIT_PRE_IDENTITY);
+        let limit_post = mgr.has_hooks_for(HOOK_RATELIMIT_POST_IDENTITY);
 
         Ok(Self {
             cfg,
@@ -607,6 +629,8 @@ impl PolicyFilter {
             mcp_post_tool,
             llm_routes,
             llm_post,
+            limit_pre,
+            limit_post,
             request_assertions,
             response_assertions,
             response_hook,
@@ -637,6 +661,12 @@ impl PolicyFilter {
     #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn derived_shape(&self) -> (bool, bool) {
         (self.http_global, self.entity_routes)
+    }
+
+    /// Return `(limit_pre, limit_post)` for tests.
+    #[cfg(all(test, feature = "policy-builtins"))]
+    pub(super) fn limit_stages(&self) -> (bool, bool) {
+        (self.limit_pre, self.limit_post)
     }
 
     /// Return `(llm_routes, llm_post)` for tests.
@@ -952,6 +982,87 @@ impl PolicyFilter {
         }
     }
 
+    /// Run `ratelimit.pre_identity` once per request, on the HTTP coordinates
+    /// and the request as first captured, before any identity resolution.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the context table.
+    async fn pre_identity_limit(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        view: &RequestView,
+    ) -> Result<Option<Rejection>, FilterError> {
+        if !self.limit_pre || state(ctx).is_some_and(|state| state.limits.pre_identity) {
+            return Ok(None);
+        }
+        state_mut(ctx).limits.pre_identity = true;
+        let ext = Self::identity_extensions(
+            view,
+            ENTITY_HTTP,
+            ENTITY_NAME_GLOBAL,
+            self.cfg.context_meta.scope.as_deref(),
+        );
+        let result = self
+            .invoke::<HttpHook>(ctx, HOOK_RATELIMIT_PRE_IDENTITY, HttpPayload, ext)
+            .await?;
+        if result.continue_processing {
+            return Ok(None);
+        }
+        tracing::debug!(target: "policy.filter", "rate limit deny (pre-identity)");
+        Ok(Some(rate_limit_rejection(result.violation.as_ref())))
+    }
+
+    /// Whether `ratelimit.post_identity` still has to run for this request.
+    fn post_identity_limit_pending(&self, ctx: &HttpFilterContext<'_>) -> bool {
+        self.limit_post && !state(ctx).is_some_and(|state| state.limits.post_identity)
+    }
+
+    /// Run `ratelimit.post_identity` once per request, after the final
+    /// identity resolution and before authorization, on `extensions`: the
+    /// final route coordinates and the resolved identity.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the context table.
+    async fn post_identity_limit(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        extensions: &Extensions,
+    ) -> Result<Option<LimitDenied>, FilterError> {
+        if !self.post_identity_limit_pending(ctx) {
+            return Ok(None);
+        }
+        state_mut(ctx).limits.post_identity = true;
+        let result = self
+            .invoke::<HttpHook>(ctx, HOOK_RATELIMIT_POST_IDENTITY, HttpPayload, extensions.clone())
+            .await?;
+        if result.continue_processing {
+            return Ok(None);
+        }
+        tracing::debug!(target: "policy.filter", "rate limit deny (post-identity)");
+        Ok(Some(LimitDenied(result.violation)))
+    }
+
+    /// [`Self::post_identity_limit`] on the entity-less HTTP coordinates, for
+    /// admissions that end at identity.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the context table.
+    async fn post_identity_limit_http(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        identity: &IdentityPayload,
+    ) -> Result<Option<Rejection>, FilterError> {
+        if !self.post_identity_limit_pending(ctx) {
+            return Ok(None);
+        }
+        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let ext = Self::extensions_from_identity(&view, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
+        Ok(self.post_identity_limit(ctx, &ext).await?.map(|denied| denied.http()))
+    }
+
     /// Resolve identity by invoking the identity hook chain. Returns the
     /// resolved [`IdentityPayload`] (subject / client / workload / raw
     /// credentials / delegation) or a rejection when no identity
@@ -964,6 +1075,9 @@ impl PolicyFilter {
         entity_type: &str,
         entity_name: &str,
     ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
+        if let Some(rejection) = self.pre_identity_limit(ctx, view).await? {
+            return Ok(Err(rejection));
+        }
         let route_ext =
             Self::identity_extensions(view, entity_type, entity_name, self.cfg.context_meta.scope.as_deref());
         let payload = Self::identity_payload(view.headers().clone());
@@ -1225,6 +1339,9 @@ impl PolicyFilter {
         ctx: &mut HttpFilterContext<'_>,
     ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
         let view = Self::request_view(ctx, &self.cfg.context_headers);
+        if let Some(rejection) = self.pre_identity_limit(ctx, &view).await? {
+            return Ok(Err(rejection));
+        }
         let gate_ext = Self::identity_extensions(
             &view,
             ENTITY_HTTP,
@@ -1252,6 +1369,9 @@ impl PolicyFilter {
                 Err(rejection) => return Ok(FilterAction::Reject(rejection)),
             },
         };
+        if let Some(rejection) = self.post_identity_limit_http(ctx, &identity).await? {
+            return Ok(FilterAction::Reject(rejection));
+        }
         Self::publish_authenticated_identity(ctx, &identity);
         Self::store_identity(ctx, identity);
         Self::mark_admission_complete(ctx);
@@ -1293,6 +1413,9 @@ impl PolicyFilter {
         if self.entity_routes {
             state_mut(ctx).gated = Some(identity);
         } else {
+            if let Some(rejection) = self.post_identity_limit_http(ctx, &identity).await? {
+                return Ok(FilterAction::Reject(rejection));
+            }
             Self::publish_authenticated_identity(ctx, &identity);
             Self::store_identity(ctx, identity);
         }
@@ -1340,6 +1463,9 @@ impl PolicyFilter {
         let streaming = parsed.is_streaming();
 
         let mut extensions = Self::extensions_from_identity(&view, &identity, entity_type, &model, &self.cfg);
+        if let Some(denied) = self.post_identity_limit(ctx, &extensions).await? {
+            return Ok(FilterAction::Reject(denied.http()));
+        }
         self.attach_llm_attributes(&mut extensions, parsed, &model);
         Self::store_identity(ctx, identity);
         state_mut(ctx).inference_model = Some(model.clone());
@@ -1627,6 +1753,9 @@ impl PolicyFilter {
         };
         Self::publish_authenticated_identity(ctx, &identity);
         let extensions = Self::extensions_from_identity(&view, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
+        if let Some(denied) = self.post_identity_limit(ctx, &extensions).await? {
+            return Ok(FilterAction::Reject(denied.http()));
+        }
 
         // Awaited on the worker runtime on purpose. The engine runs every
         // handler in a task it spawns onto the current runtime, so the
@@ -1782,6 +1911,21 @@ fn selector_lists_any_model_literal(selector: &ppe::praxis_policy_core::config::
         ppe::praxis_policy_core::config::StringOrList::List(patterns)
             if patterns.iter().any(|pattern| pattern.as_str() == "*")
     )
+}
+
+/// A limiter denial, mapped to the wire by the path that hit it.
+struct LimitDenied(Option<PluginViolation>);
+
+impl LimitDenied {
+    /// The plain HTTP rejection.
+    fn http(&self) -> Rejection {
+        rate_limit_rejection(self.0.as_ref())
+    }
+
+    /// The JSON-RPC rejection keeping `request_id`.
+    fn json_rpc(&self, request_id: &serde_json::Value) -> Rejection {
+        rate_limit_json_rpc_rejection(self.0.as_ref(), request_id)
+    }
 }
 
 /// The identity a resolution produced, or the rejection it ended in.
@@ -2152,6 +2296,11 @@ impl HttpFilter for PolicyFilter {
         // The engine grants entity route handlers `read_headers` and
         // `read_query`, so one policy can combine `args.*` with `http.*`.
         let extensions = Self::extensions_from_identity(&view, &identity, entity_type, &entity_name, &self.cfg);
+        let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
+        let parsed = ParsedEnvelope::parse(&body_bytes);
+        if let Some(denied) = self.post_identity_limit(ctx, &extensions).await? {
+            return Ok(FilterAction::Reject(denied.json_rpc(&parsed.id_value())));
+        }
         Self::store_identity(ctx, identity);
 
         // Parse the JSON-RPC body to build the typed CMF content part.
@@ -2160,10 +2309,8 @@ impl HttpFilter for PolicyFilter {
         // that APL `args.*` predicates need. We re-parse here. The
         // body is already in memory; the duplicate parse is
         // microseconds.
-        let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
-        // Parse once for this phase: the id, the typed content, and the
-        // deny-path id echo all read the same DOM.
-        let parsed = ParsedEnvelope::parse(&body_bytes);
+        // Parsed once above: the id, the typed content, and the deny-path id
+        // echo all read the same DOM.
         let id = parsed.id_string();
         let content = build_content_for_method(&method, &entity_name, &id, &parsed);
 

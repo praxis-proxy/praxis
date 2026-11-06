@@ -113,6 +113,8 @@ mod policy_llm_input;
 mod policy_llm_request;
 #[cfg(feature = "policy-builtins")]
 mod policy_query_credential;
+#[cfg(feature = "policy-builtins")]
+mod policy_rate_limit;
 mod priority_lb;
 mod process_logging;
 mod protocol_examples;

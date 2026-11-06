@@ -268,6 +268,11 @@ mod request_input_tests;
 )]
 mod state_tests;
 
+#[cfg(test)]
+#[cfg(feature = "policy-builtins")]
+#[expect(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing, reason = "tests")]
+mod rate_limit_tests;
+
 #[cfg(all(test, feature = "policy-crypto-fips"))]
 #[expect(clippy::expect_used, clippy::panic, reason = "tests")]
 mod fips_startup_tests;
