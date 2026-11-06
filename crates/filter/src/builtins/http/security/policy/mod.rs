@@ -188,6 +188,7 @@ mod filter;
 mod host_plugins;
 mod json_rpc;
 mod llm;
+mod request_facts;
 mod response_rules;
 mod transport;
 
@@ -251,6 +252,10 @@ mod crypto_capabilities;
 ))]
 #[expect(clippy::expect_used, clippy::panic, reason = "tests")]
 mod api_key_tests;
+
+#[cfg(all(test, feature = "policy-builtins"))]
+#[expect(clippy::expect_used, clippy::panic, clippy::indexing_slicing, reason = "tests")]
+mod request_input_tests;
 
 #[cfg(all(test, feature = "policy-crypto-fips"))]
 #[expect(clippy::expect_used, clippy::panic, reason = "tests")]

@@ -2,11 +2,13 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Construction-time refusals for the `policy` filter: `DPoP` issuers without
-//! a fixed external URL, and crypto backend failures.
+//! a fixed external URL, query credentials beside delegation, and crypto
+//! backend failures.
 
 use ppe::praxis_policy_core::{
     CRYPTO_FAILED_CODE,
     config::{PolicyConfig, PolicyGroup},
+    delegation::HOOK_TOKEN_DELEGATE,
     error::PluginError,
     identity::RouteIdentityConfig,
 };
@@ -19,6 +21,12 @@ use crate::FilterError;
 
 /// The plugin kind whose trusted issuers can enable `DPoP`.
 const JWT_KIND: &str = "identity/jwt";
+
+/// Kind prefix of the bundled delegators.
+const DELEGATOR_KIND_PREFIX: &str = "delegator/";
+
+/// `credential.kind` of a query-parameter credential.
+const QUERY_CREDENTIAL_KIND: &str = "query_param";
 
 // -----------------------------------------------------------------------------
 // Crypto failures
@@ -129,6 +137,57 @@ fn has_external_base_url(issuer: &serde_json::Value) -> bool {
         .and_then(|dpop| dpop.get("external_base_url"))
         .and_then(serde_json::Value::as_str)
         .is_some_and(|base| !base.is_empty())
+}
+
+// -----------------------------------------------------------------------------
+// Query credentials and delegation
+// -----------------------------------------------------------------------------
+
+/// Refuse a policy that reads a credential from the query string and also
+/// delegates.
+///
+/// A delegated token replaces the inbound credential upstream, but the filter
+/// does not rewrite the URL, so the caller's query credential would be
+/// forwarded beside it. Checks each plugin's `config:` and every
+/// `authentication:` step override.
+///
+/// # Errors
+///
+/// Returns a [`FilterError`] naming the query-credential plugin.
+pub(super) fn refuse_query_credentials_with_delegation(policy: &PolicyConfig) -> Result<(), FilterError> {
+    let delegates = policy.plugins.iter().any(|plugin| {
+        plugin.kind.starts_with(DELEGATOR_KIND_PREFIX) || plugin.hooks.iter().any(|hook| hook == HOOK_TOKEN_DELEGATE)
+    });
+    if !delegates {
+        return Ok(());
+    }
+    let overrides = authentication_blocks(policy)
+        .flat_map(|block| block.steps.iter())
+        .map(|step| (step.name.as_str(), step.config_override.as_ref()));
+    let reader = policy
+        .plugins
+        .iter()
+        .map(|plugin| (plugin.name.as_str(), plugin.config.as_ref()))
+        .chain(overrides)
+        .find(|(_, config)| reads_query_credential(*config));
+    match reader {
+        Some((plugin, _)) => Err(format!(
+            "policy: plugin '{plugin}' reads its credential from a query parameter and the policy \
+             delegates; a delegated token cannot be forwarded while the caller's query credential \
+             stays in the upstream URL. Use a header or cookie credential, or drop the delegation"
+        )
+        .into()),
+        None => Ok(()),
+    }
+}
+
+/// Whether a plugin config names a `query_param` credential.
+fn reads_query_credential(config: Option<&serde_json::Value>) -> bool {
+    config
+        .and_then(|config| config.get("credential"))
+        .and_then(|credential| credential.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        == Some(QUERY_CREDENTIAL_KIND)
 }
 
 // -----------------------------------------------------------------------------

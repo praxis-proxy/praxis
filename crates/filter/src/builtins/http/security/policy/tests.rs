@@ -3388,7 +3388,7 @@ fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    let count = attach_delegated_tokens(&mut ctx, Some(&ext));
+    let count = attach_delegated_tokens(&mut ctx, Some(&ext)).expect("header credentials attach");
 
     assert_eq!(count, 1, "exactly one token attaches for a colliding header");
     assert_eq!(ctx.request_headers_to_set.len(), 1, "exactly one header push");
@@ -3432,7 +3432,7 @@ fn attach_delegated_tokens_uses_each_tokens_outbound_prefix() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    assert_eq!(attach_delegated_tokens(&mut ctx, Some(&ext)), 2);
+    assert_eq!(attach_delegated_tokens(&mut ctx, Some(&ext)).expect("tokens attach"), 2);
 
     let attached: HashMap<&str, &str> = ctx
         .request_headers_to_set
@@ -3478,7 +3478,7 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    let count = attach_delegated_tokens(&mut ctx, Some(&ext));
+    let count = attach_delegated_tokens(&mut ctx, Some(&ext)).expect("header credentials attach");
 
     assert_eq!(count, 2, "two distinct headers must both attach");
     assert_eq!(ctx.request_headers_to_set.len(), 2);

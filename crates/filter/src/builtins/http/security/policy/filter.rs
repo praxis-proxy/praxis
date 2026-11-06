@@ -40,7 +40,7 @@ use super::{
     },
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
-    construction::{engine_error, require_dpop_external_base_url},
+    construction::{engine_error, refuse_query_credentials_with_delegation, require_dpop_external_base_url},
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
@@ -51,6 +51,7 @@ use super::{
         reserialize_json_rpc_response_body,
     },
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
+    request_facts::{RequestFacts, RequestView},
     response_rules::ensure_supported_entity_results,
     transport::PolicyHttpTransport,
 };
@@ -81,6 +82,8 @@ struct AdmissionState {
     complete: bool,
     /// Sanitized result retained from the unscoped early gate.
     gated_identity: GatedIdentity,
+    /// The request as this instance's first callback saw it.
+    facts: Option<Arc<RequestFacts>>,
 }
 
 /// Three-state result for an early identity gate.
@@ -161,6 +164,25 @@ enum GatedIdentity {
 /// points rather than bytes, and `exists()` returns true when one element
 /// matches even if another errors, so some requests that were denied may now
 /// be allowed. See the [PPE 0.5.0 changelog].
+///
+/// Every hook sees the downstream request as this filter first received
+/// it: method, path, raw query, the validated authority, the TCP peer
+/// address, and headers. The scheme is `https` only when the downstream
+/// connection is TLS; `X-Forwarded-Proto` is never trusted. Place `policy`
+/// before `path_rewrite`, `url_rewrite` and header-rewriting filters so the
+/// request it authorizes is the one the client sent. A `DPoP` issuer must set
+/// `dpop.external_base_url`, so a proof's `htu` is never checked against the
+/// client-sent `Host`.
+///
+/// Policy can read a credential from a query parameter
+/// (`credential: { kind: query_param, name: ... }`, with the `read_query`
+/// capability). The filter does not rewrite the URL, so the parameter
+/// reaches the upstream, and access logs, CDN logs and browser history
+/// outside Policy can record it. A policy that combines a query credential
+/// with `delegate(...)` fails to load. At request time, a delegated token is
+/// never forwarded while an inbound credential sits where the filter cannot
+/// strip it; that request receives HTTP 500
+/// (`policy.unstrippable_credential`).
 ///
 /// The filter registers only the `env` secret provider. A `secrets:` block
 /// naming any other provider kind, including `file`, fails to load. Secret
@@ -441,6 +463,7 @@ impl PolicyFilter {
         let parsed = ppe::praxis_policy_core::config::parse_config(&yaml);
         if let Ok(document) = &parsed {
             require_dpop_external_base_url(document)?;
+            refuse_query_credentials_with_delegation(document)?;
         }
         mgr.load_config_yaml(&yaml)
             .map_err(|e: Box<PluginError>| engine_error("load_config_yaml", &cfg.config_path, &e))?;
@@ -816,32 +839,53 @@ impl PolicyFilter {
         Self::new(cfg, subrequest_connector)
     }
 
-    /// Snapshot the request's HTTP headers into a case-normalized
-    /// map. Each registered identity plugin reads its own configured
-    /// header from this map.
-    ///
-    /// Keys are normalized to ASCII lowercase. HTTP header names are
-    /// case-insensitive (RFC 7230 §3.2) but the `HashMap` lookup is
-    /// case-sensitive; plugins lowercase their configured header
-    /// before lookup to match. Duplicate field-lines of the same header
-    /// are comma-joined (RFC 7230 §3.2.2), not collapsed to the last value.
+    /// The current request's headers, lowercased, duplicate field lines
+    /// comma-joined. Identity and policy input read [`RequestFacts`] instead;
+    /// this is for comparing against what the upstream will receive.
     pub(super) fn snapshot_headers(ctx: &HttpFilterContext<'_>) -> std::collections::HashMap<String, String> {
-        // Duplicate field-lines of the same header are comma-joined
-        // (RFC 7230 §3.2.2) instead of collapsed to the last value, so
-        // the authorization view matches what a spec-compliant recipient
-        // sees and a spoofed extra line cannot silently outrank the
-        // proxy's own value.
-        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for (name, value) in &ctx.request.headers {
-            let Ok(text) = value.to_str() else { continue };
-            map.entry(name.as_str().to_ascii_lowercase())
-                .and_modify(|acc| {
-                    acc.push_str(", ");
-                    acc.push_str(text);
-                })
-                .or_insert_with(|| text.to_owned());
+        super::request_facts::snapshot_headers(&ctx.request.headers)
+    }
+
+    /// Capture this instance's [`RequestFacts`] at its first callback.
+    ///
+    /// Direct unit-test calls have no filter ID and capture per call instead.
+    fn capture_request_facts(ctx: &mut HttpFilterContext<'_>) {
+        if ctx.current_filter_id.is_none() || Self::stored_request_facts(ctx).is_some() {
+            return;
         }
-        map
+        let facts = Some(Arc::new(RequestFacts::capture(ctx)));
+        if let Some(state) = ctx.get_filter_state_mut::<AdmissionState>() {
+            state.facts = facts;
+        } else {
+            ctx.insert_filter_state(AdmissionState {
+                facts,
+                ..Default::default()
+            });
+        }
+    }
+
+    /// The facts this instance captured, if any.
+    fn stored_request_facts(ctx: &HttpFilterContext<'_>) -> Option<Arc<RequestFacts>> {
+        ctx.get_filter_state::<AdmissionState>()
+            .and_then(|state| state.facts.clone())
+    }
+
+    /// What a hook invocation sees of the request: the captured facts, the
+    /// trusted header overlays, and the secret provenance of applied
+    /// assertions.
+    fn request_view(
+        ctx: &HttpFilterContext<'_>,
+        context_headers: &std::collections::HashMap<super::config::ContextField, String>,
+    ) -> RequestView {
+        let facts = Self::stored_request_facts(ctx).unwrap_or_else(|| Arc::new(RequestFacts::capture(ctx)));
+        let mut headers = facts.headers_with_reserved(&ctx.request.headers);
+        Self::overlay_effective_context_headers(ctx, &mut headers, context_headers);
+        let secret_headers = ctx
+            .extensions
+            .get::<AssertedSecretHeaders>()
+            .map(|asserted| asserted.0.clone())
+            .unwrap_or_default();
+        RequestView::new(facts, headers, secret_headers)
     }
 
     /// Overlay effective header values for `context_headers` targets onto
@@ -889,23 +933,21 @@ impl PolicyFilter {
     /// Both are required to select route-scoped authentication; omitting the
     /// request line could silently fall back to the global authenticator.
     fn identity_extensions(
-        ctx: &HttpFilterContext<'_>,
-        headers: std::collections::HashMap<String, String>,
+        view: &RequestView,
         entity_type: &str,
         entity_name: &str,
         scope: Option<&str>,
     ) -> Extensions {
-        let mut ext = Extensions {
+        Extensions {
             meta: Some(Arc::new(MetaExtension {
                 entity_type: Some(entity_type.to_owned()),
                 entity_name: Some(entity_name.to_owned()),
                 scope: scope.map(ToOwned::to_owned),
                 ..Default::default()
             })),
+            http: Some(Arc::new(view.http_extension())),
             ..Default::default()
-        };
-        Self::attach_http_attributes(ctx, &mut ext, headers);
-        ext
+        }
     }
 
     /// Resolve identity by invoking the identity hook chain. Returns the
@@ -919,22 +961,16 @@ impl PolicyFilter {
     )]
     async fn resolve_identity(
         &self,
-        ctx: &HttpFilterContext<'_>,
-        headers: std::collections::HashMap<String, String>,
+        view: &RequestView,
         entity_type: &str,
         entity_name: &str,
     ) -> Result<IdentityPayload, Rejection> {
-        let route_ext = Self::identity_extensions(
-            ctx,
-            headers.clone(),
-            entity_type,
-            entity_name,
-            self.cfg.context_meta.scope.as_deref(),
-        );
-
+        let route_ext =
+            Self::identity_extensions(view, entity_type, entity_name, self.cfg.context_meta.scope.as_deref());
+        let payload = Self::identity_payload(view.headers().clone());
         let (id_result, _bg) = self
             .mgr
-            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, Self::identity_payload(headers), route_ext, None)
+            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, route_ext, None)
             .await;
         if !id_result.continue_processing {
             return Err(auth_rejection(id_result.violation.as_ref()));
@@ -956,13 +992,17 @@ impl PolicyFilter {
     /// identity hook: a token that expires between the request and the
     /// (already-served) response must not turn into a false deny.
     fn extensions_from_identity(
-        headers: &std::collections::HashMap<String, String>,
+        view: &RequestView,
         identity: &IdentityPayload,
         entity_type: &str,
         entity_name: &str,
         cfg: &PolicyFilterConfig,
     ) -> Extensions {
-        let mut ext = identity.apply_to_extensions(Extensions::default());
+        let headers = view.headers();
+        let mut ext = identity.apply_to_extensions(Extensions {
+            http: Some(Arc::new(view.http_extension())),
+            ..Default::default()
+        });
 
         // -- meta: entity identity (from protocol classifier) + operator config --
         let mut meta = ext.meta.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
@@ -1219,17 +1259,17 @@ impl PolicyFilter {
         &self,
         ctx: &HttpFilterContext<'_>,
     ) -> Result<Option<AuthenticatedIdentity>, Rejection> {
-        let headers = Self::snapshot_headers(ctx);
+        let view = Self::request_view(ctx, &self.cfg.context_headers);
         let gate_ext = Self::identity_extensions(
-            ctx,
-            headers.clone(),
+            &view,
             ENTITY_HTTP,
             ENTITY_NAME_GLOBAL,
             self.cfg.context_meta.scope.as_deref(),
         );
+        let payload = Self::identity_payload(view.headers().clone());
         let (result, _bg) = self
             .mgr
-            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, Self::identity_payload(headers), gate_ext, None)
+            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, gate_ext, None)
             .await;
 
         if !result.continue_processing {
@@ -1331,10 +1371,8 @@ impl PolicyFilter {
             return Ok(FilterAction::Reject(llm_deny_rejection(Some(&no_route_violation()))));
         }
 
-        let mut headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
-
-        let identity = match self.resolve_identity(ctx, headers.clone(), entity_type, &model).await {
+        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let identity = match self.resolve_identity(&view, entity_type, &model).await {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
@@ -1347,8 +1385,7 @@ impl PolicyFilter {
         };
         let streaming = parsed.is_streaming();
 
-        let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &model, &self.cfg);
-        Self::attach_http_attributes(ctx, &mut extensions, headers);
+        let mut extensions = Self::extensions_from_identity(&view, &identity, entity_type, &model, &self.cfg);
         self.attach_llm_attributes(&mut extensions, parsed, &model);
         ctx.extensions.insert(ResolvedIdentity(identity));
         ctx.extensions.insert(InferenceRequest { model: model.clone() });
@@ -1363,7 +1400,10 @@ impl PolicyFilter {
             return Ok(FilterAction::Reject(llm_deny_rejection(cmf_result.violation.as_ref())));
         }
 
-        let attached = attach_delegated_tokens(ctx, cmf_result.modified_extensions.as_ref());
+        let attached = match attach_delegated_tokens(ctx, cmf_result.modified_extensions.as_ref()) {
+            Ok(attached) => attached,
+            Err(rejection) => return Ok(FilterAction::Reject(rejection)),
+        };
         if attached > 0 {
             tracing::debug!(
                 target: "policy.filter",
@@ -1493,8 +1533,7 @@ impl PolicyFilter {
         }
 
         let (entity_type, hook_name) = (ENTITY_LLM, HOOK_CMF_LLM_OUTPUT);
-        let mut headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers);
         let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
             // Missing request identity would otherwise skip response policy.
             tracing::error!(
@@ -1512,7 +1551,7 @@ impl PolicyFilter {
             return Ok(FilterAction::Continue);
         };
 
-        let mut extensions = Self::extensions_from_identity(&headers, identity, entity_type, &model, &self.cfg);
+        let mut extensions = Self::extensions_from_identity(&view, identity, entity_type, &model, &self.cfg);
         extensions.llm = Some(Arc::new(LLMExtension {
             model_id: Some(model.clone()),
             provider: self.cfg.llm.provider.clone(),
@@ -1621,19 +1660,13 @@ impl PolicyFilter {
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
     )]
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let mut headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
-        let identity = match self
-            .resolve_identity(ctx, headers.clone(), ENTITY_HTTP, ENTITY_NAME_GLOBAL)
-            .await
-        {
+        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let identity = match self.resolve_identity(&view, ENTITY_HTTP, ENTITY_NAME_GLOBAL).await {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
         Self::publish_authenticated_identity(ctx, &identity);
-        let mut extensions =
-            Self::extensions_from_identity(&headers, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
-        Self::attach_http_attributes(ctx, &mut extensions, headers);
+        let extensions = Self::extensions_from_identity(&view, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
 
         // Awaited on the worker runtime on purpose. The engine runs every
         // handler in a task it spawns onto the current runtime, so the
@@ -1655,7 +1688,10 @@ impl PolicyFilter {
         // Allow path. If the `global` policy ran `delegate(...)` steps, attach
         // the minted tokens to the upstream request (mirrors the entity path in
         // `on_request_body`); a no-op when the policy declares no delegation.
-        let attached = attach_delegated_tokens(ctx, result.modified_extensions.as_ref());
+        let attached = match attach_delegated_tokens(ctx, result.modified_extensions.as_ref()) {
+            Ok(attached) => attached,
+            Err(rejection) => return Ok(FilterAction::Reject(rejection)),
+        };
         if attached > 0 {
             tracing::debug!(
                 target: "policy.filter",
@@ -1690,10 +1726,9 @@ impl PolicyFilter {
         status: u16,
         cfg: &PolicyFilterConfig,
     ) -> Extensions {
-        let mut request_headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut request_headers, &cfg.context_headers);
+        let view = Self::request_view(ctx, &cfg.context_headers);
         let mut extensions = if let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() {
-            Self::extensions_from_identity(&request_headers, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, cfg)
+            Self::extensions_from_identity(&view, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, cfg)
         } else {
             tracing::debug!(
                 target: "policy.filter",
@@ -1710,8 +1745,7 @@ impl PolicyFilter {
         };
         // Keep the request line, so a response contract resolves the same route
         // the request half did.
-        Self::attach_http_attributes(ctx, &mut extensions, request_headers);
-        let mut http = extensions.http.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
+        let mut http = view.http_extension();
         http.response_headers = response_headers;
         http.status = Some(status);
         extensions.http = Some(Arc::new(http));
@@ -1784,41 +1818,6 @@ impl PolicyFilter {
                 "applied response assertions to the downstream response",
             );
         }
-    }
-
-    /// Populate `ext.http` with the request line + headers so CEL/APL
-    /// predicates over `http.method` / `http.path` / `http.host` /
-    /// `http.request_headers.*` evaluate. `host` is sourced from the parsed
-    /// request authority (Praxis validates Host upstream — see the Pingora
-    /// boundary docs), never a raw unvalidated header.
-    fn attach_http_attributes(
-        ctx: &HttpFilterContext<'_>,
-        ext: &mut Extensions,
-        request_headers: std::collections::HashMap<String, String>,
-    ) {
-        use ppe::praxis_policy_core::extensions::HttpExtension;
-
-        let req = ctx.request;
-        let host = req.uri.authority().map(|a| a.host().to_owned()).or_else(|| {
-            req.headers
-                .get(http::header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-        });
-        let http = HttpExtension {
-            method: Some(req.method.as_str().to_owned()),
-            path: Some(req.uri.path().to_owned()),
-            host,
-            scheme: req.uri.scheme_str().map(str::to_owned),
-            request_headers,
-            secret_headers: ctx
-                .extensions
-                .get::<AssertedSecretHeaders>()
-                .map(|asserted| asserted.0.clone())
-                .unwrap_or_default(),
-            ..Default::default()
-        };
-        ext.http = Some(Arc::new(http));
     }
 }
 
@@ -2009,6 +2008,7 @@ impl HttpFilter for PolicyFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Self::capture_request_facts(ctx);
         // A StreamBuffer filter can force the body phase to run before this
         // header phase. In that case admission already ran in on_request_body,
         // and re-running it could fail after credential-stripping mutations.
@@ -2055,6 +2055,7 @@ impl HttpFilter for PolicyFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
+        Self::capture_request_facts(ctx);
         // A downstream StreamBuffer filter makes this body hook run before
         // on_request. Pure-L7 and identity-only admission needs no body, so run
         // it on the first chunk before any later body filter can act. In the
@@ -2195,28 +2196,19 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Reject(missing_protocol_metadata_rejection()));
         };
 
-        // Snapshot headers once for both identity resolution and
-        // extensions building (avoids iterating the header map twice).
-        let mut headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers);
 
         // Resolve identity once here, then stash it so the response phase
         // can rebuild `Extensions` without re-validating the token.
-        let identity = match self
-            .resolve_identity(ctx, headers.clone(), entity_type, &entity_name)
-            .await
-        {
+        let identity = match self.resolve_identity(&view, entity_type, &entity_name).await {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
         Self::take_gated_identity(ctx);
         Self::publish_authenticated_identity(ctx, &identity);
-        let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &entity_name, &self.cfg);
-        // Attach the HTTP request line + headers so a single policy can combine
-        // entity/`args.*` checks with `http.*` predicates in one evaluation.
-        // The engine grants entity route handlers the `read_headers` capability, so
-        // these `http.*` attributes reach the CEL/APL bag at the entity phase.
-        Self::attach_http_attributes(ctx, &mut extensions, headers);
+        // The engine grants entity route handlers `read_headers` and
+        // `read_query`, so one policy can combine `args.*` with `http.*`.
+        let extensions = Self::extensions_from_identity(&view, &identity, entity_type, &entity_name, &self.cfg);
         ctx.extensions.insert(ResolvedIdentity(identity));
 
         // Parse the JSON-RPC body to build the typed CMF content part.
@@ -2268,7 +2260,10 @@ impl HttpFilter for PolicyFilter {
         // `modified_extensions.raw_credentials.delegated_tokens`.
         // Attach each one to the upstream request as the configured
         // header.
-        let attached = attach_delegated_tokens(ctx, cmf_result.modified_extensions.as_ref());
+        let attached = match attach_delegated_tokens(ctx, cmf_result.modified_extensions.as_ref()) {
+            Ok(attached) => attached,
+            Err(rejection) => return Ok(FilterAction::Reject(rejection)),
+        };
         if attached > 0 {
             tracing::debug!(
                 target: "policy.filter",
@@ -2448,9 +2443,8 @@ impl HttpFilter for PolicyFilter {
             ));
             return Ok(FilterAction::Continue);
         };
-        let mut headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
-        let extensions = Self::extensions_from_identity(&headers, identity, entity_type, &entity_name, &self.cfg);
+        let view = Self::request_view(ctx, &self.cfg.context_headers);
+        let extensions = Self::extensions_from_identity(&view, identity, entity_type, &entity_name, &self.cfg);
 
         let content = build_response_content_for_method(&method, &entity_name, &id_str, &parsed);
         // A valid tools/call error has no result to inspect. Unknown shapes
@@ -2614,41 +2608,61 @@ fn missing_protocol_metadata_rejection() -> Rejection {
 // attach_delegated_tokens
 // -----------------------------------------------------------------------------
 
-/// Walk the minted delegated tokens on the resolved `Extensions` and
-/// push them as upstream request headers. Returns the count attached
-/// (0 when no delegation ran or no extensions were returned). Each
-/// token's `outbound_header` field decides where it goes; the value
-/// is its `outbound_prefix` followed by the token. OAuth delegates
-/// default the prefix to `Bearer ` (RFC 6750); a Vault API key without a
-/// `scheme_prefix` has none. Uses `request_headers_to_set` rather than
-/// `extra_request_headers` because authorization tokens are
-/// overwrites, not appends.
+/// Push the minted delegated tokens on the resolved `Extensions` as upstream
+/// request headers and strip the inbound credentials they replace. Returns
+/// the count attached (0 when no delegation ran). Each token's
+/// `outbound_header` decides where it goes; the value is its
+/// `outbound_prefix` followed by the token. Tokens are overwrites, so they go
+/// through `request_headers_to_set`.
 ///
-/// Multiple tokens targeting the same outbound header are a
-/// configuration ambiguity — praxis's `request_headers_to_set`
-/// would otherwise let the last writer silently win, with order
-/// determined by `HashMap` iteration. Apply first-writer-wins keyed
-/// on `(outbound_header_lc, audience)`, log a warn on each skip so
-/// the operator can fix the overlapping delegators.
-#[expect(
-    clippy::too_many_lines,
-    reason = "single linear pass attaching delegated tokens with first-writer-wins dedupe"
-)]
-pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extensions: Option<&Extensions>) -> usize {
-    let Some(ext) = extensions else {
-        return 0;
+/// # Errors
+///
+/// Returns a rejection, attaching nothing, when a token would be forwarded
+/// while an inbound credential sits where it cannot be stripped (a query
+/// parameter, or a location this build does not know): the upstream would
+/// receive the caller's credential beside the delegated one.
+pub(super) fn attach_delegated_tokens(
+    ctx: &mut HttpFilterContext<'_>,
+    extensions: Option<&Extensions>,
+) -> Result<usize, Rejection> {
+    let Some(raw) = extensions.and_then(|ext| ext.raw_credentials.as_ref()) else {
+        return Ok(0);
     };
-    let Some(raw) = ext.raw_credentials.as_ref() else {
-        return 0;
-    };
+    let outbound = delegated_headers(raw);
+    if outbound.is_empty() {
+        return Ok(0);
+    }
+    if let Some(inbound) = raw
+        .inbound_tokens
+        .values()
+        .find(|inbound| inbound_source_header(&inbound.source).is_none())
+    {
+        tracing::warn!(
+            target: "policy.filter",
+            source = %inbound.source,
+            "refusing to forward a delegated token: the inbound credential cannot be stripped \
+             from the upstream request",
+        );
+        return Err(unstrippable_credential_rejection());
+    }
+    let attached: std::collections::HashSet<http::header::HeaderName> =
+        outbound.iter().map(|(name, _)| name.clone()).collect();
+    let count = outbound.len();
+    ctx.request_headers_to_set.extend(outbound);
+    for inbound in raw.inbound_tokens.values() {
+        strip_inbound_header(ctx, &inbound.source, &attached);
+    }
+    Ok(count)
+}
 
-    // Stable-order the tokens before we attach. `delegated_tokens` is
-    // a `HashMap`, so iteration order is non-deterministic — two
-    // tokens targeting the same outbound header would otherwise
-    // produce order-dependent results (praxis's
-    // `request_headers_to_set` is overwrite semantics). Sorting by
-    // `(outbound_header_lc, audience)` gives first-writer-wins where
-    // "first" is alphabetically lowest audience for that header.
+/// The `(header, value)` pairs for the delegated tokens in `raw`.
+///
+/// `delegated_tokens` is a `HashMap`, so tokens are sorted by
+/// `(outbound_header_lc, audience)` and the first per header wins; a
+/// skipped token is logged so overlapping delegators can be fixed.
+fn delegated_headers(
+    raw: &ppe::praxis_policy_core::extensions::raw_credentials::RawCredentialsExtension,
+) -> Vec<(http::header::HeaderName, http::header::HeaderValue)> {
     let mut sorted: Vec<&_> = raw.delegated_tokens.values().collect();
     sorted.sort_by(|a, b| {
         a.outbound_header
@@ -2656,17 +2670,12 @@ pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extension
             .cmp(&b.outbound_header.to_ascii_lowercase())
             .then_with(|| a.audience.cmp(&b.audience))
     });
-
-    let mut attached_outbound: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut count = 0;
+    let mut out: Vec<(http::header::HeaderName, http::header::HeaderValue)> = Vec::new();
     for tok in sorted {
-        let outbound_lc = tok.outbound_header.to_ascii_lowercase();
-        if !attached_outbound.insert(outbound_lc.clone()) {
-            // A token for this outbound header was already attached
-            // earlier in the sorted pass — refuse to overwrite. Warn
-            // loudly so an operator notices the policy ambiguity
-            // (two delegators racing for the same header is almost
-            // always a mistake in route/global config layering).
+        let Some((name, value)) = delegated_header(tok) else {
+            continue;
+        };
+        if out.iter().any(|(attached, _)| *attached == name) {
             tracing::warn!(
                 target: "policy.filter",
                 outbound_header = %tok.outbound_header,
@@ -2676,64 +2685,69 @@ pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extension
             );
             continue;
         }
-        let Ok(name) = http::header::HeaderName::try_from(tok.outbound_header.as_str()) else {
-            tracing::warn!(
-                target: "policy.filter",
-                header = %tok.outbound_header,
-                "delegated token outbound_header is not a valid HTTP header name; skipping",
-            );
-            attached_outbound.remove(&outbound_lc);
-            continue;
-        };
-        // `tok.token` is already `Zeroizing`; keep the prefixed plaintext
-        // in a `Zeroizing` buffer too so it is wiped as soon as the
-        // `HeaderValue` has copied its bytes, rather than lingering on the
-        // heap until the allocator reuses the page.
-        let credential = zeroize::Zeroizing::new(format!("{}{}", tok.outbound_prefix, tok.token.as_str()));
-        let Ok(value) = http::header::HeaderValue::try_from(credential.as_str()) else {
-            tracing::warn!(
-                target: "policy.filter",
-                audience = %tok.audience,
-                "minted token bytes are not a valid HTTP header value; skipping",
-            );
-            attached_outbound.remove(&outbound_lc);
-            continue;
-        };
-        ctx.request_headers_to_set.push((name, value));
-        count += 1;
+        out.push((name, value));
     }
+    out
+}
 
-    // Strip the inbound credential headers — but only when we
-    // actually attached delegated tokens, and only headers that are
-    // NOT also being set by an outbound (collision case —
-    // `request_headers_to_set` overwrites, no remove needed).
-    if count > 0 {
-        for inbound in raw.inbound_tokens.values() {
-            let Some(source_header) = inbound_source_header(&inbound.source) else {
-                tracing::warn!(
-                    target: "policy.filter",
-                    source = %inbound.source,
-                    "inbound credential location cannot be stripped from request headers",
-                );
-                continue;
-            };
-            let normalized = source_header.to_ascii_lowercase();
-            if attached_outbound.contains(&normalized) {
-                continue;
-            }
-            if let Ok(header_name) = http::header::HeaderName::try_from(source_header) {
-                ctx.request_headers_to_remove.push(header_name);
-            } else {
-                tracing::warn!(
-                    target: "policy.filter",
-                    header = source_header,
-                    "inbound credential source is not a valid HTTP header name; cannot strip",
-                );
-            }
-        }
+/// The upstream header for one delegated token, or `None` (logged) when its
+/// name or value is not valid HTTP.
+fn delegated_header(
+    tok: &ppe::praxis_policy_core::extensions::raw_credentials::RawDelegatedToken,
+) -> Option<(http::header::HeaderName, http::header::HeaderValue)> {
+    let Ok(name) = http::header::HeaderName::try_from(tok.outbound_header.as_str()) else {
+        tracing::warn!(
+            target: "policy.filter",
+            header = %tok.outbound_header,
+            "delegated token outbound_header is not a valid HTTP header name; skipping",
+        );
+        return None;
+    };
+    // Zeroized so the prefixed plaintext is wiped once the value copies it.
+    let credential = zeroize::Zeroizing::new(format!("{}{}", tok.outbound_prefix, tok.token.as_str()));
+    let Ok(value) = http::header::HeaderValue::try_from(credential.as_str()) else {
+        tracing::warn!(
+            target: "policy.filter",
+            audience = %tok.audience,
+            "minted token bytes are not a valid HTTP header value; skipping",
+        );
+        return None;
+    };
+    Some((name, value))
+}
+
+/// Remove the header carrying an inbound credential, unless a delegated token
+/// overwrites it.
+fn strip_inbound_header(
+    ctx: &mut HttpFilterContext<'_>,
+    source: &Credential,
+    attached: &std::collections::HashSet<http::header::HeaderName>,
+) {
+    let Some(source_header) = inbound_source_header(source) else {
+        return;
+    };
+    match http::header::HeaderName::try_from(source_header) {
+        Ok(name) if attached.contains(&name) => {},
+        Ok(name) => ctx.request_headers_to_remove.push(name),
+        Err(_) => tracing::warn!(
+            target: "policy.filter",
+            header = source_header,
+            "inbound credential source is not a valid HTTP header name; cannot strip",
+        ),
     }
+}
 
-    count
+/// Rejection for a delegated token that would travel beside an inbound
+/// credential the filter cannot strip. HTTP 500: the policy is
+/// misconfigured, and the body names no credential.
+fn unstrippable_credential_rejection() -> Rejection {
+    Rejection::status(500)
+        .with_header("Content-Type", "text/plain")
+        .with_header(VIOLATION_HEADER, "policy.unstrippable_credential")
+        .with_body(Bytes::from_static(
+            b"policy: a delegated token cannot be forwarded while the inbound credential \
+              sits in a location the filter cannot strip from the upstream request",
+        ))
 }
 
 /// Warn when the loaded policy declares `rate_limits:`, which runs the

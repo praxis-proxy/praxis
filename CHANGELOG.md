@@ -19,6 +19,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- The policy filter no longer forwards a delegated token while the caller's
+  credential sits where it cannot be stripped from the upstream request,
+  such as a query parameter. That request now receives HTTP 500
+  (`policy.unstrippable_credential`) instead of reaching the upstream with
+  both credentials. A policy that reads a query credential and also
+  delegates fails to load.
+- Every policy hook now sees the request as the client sent it: the raw
+  query, the TCP peer as `http.client_address`, the validated authority
+  with its port, and a scheme taken from the downstream TLS state, never
+  from `X-Forwarded-Proto`. Before, response and body-phase hooks rebuilt
+  this from a request that earlier phases could already have changed, and
+  the scheme was usually missing. Place `policy` before `path_rewrite`,
+  `url_rewrite` and header-rewriting filters.
+
 - Apply the policy filter's configured failure mode when a classified tool
   response is malformed JSON or lacks both a result and a valid JSON-RPC error.
   Policies with tool response hooks no longer silently skip those inputs;
@@ -35,6 +49,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   retain resumption.
 
 ### Added
+
+- Query-parameter credentials for the policy filter
+  (`credential: { kind: query_param, name: ... }` with `read_query`), with
+  the example `security/policy-query-credential.yaml`. A repeated or
+  percent-encoded repeated parameter is denied as ambiguous. Query strings
+  can appear in access logs outside Policy; prefer a header where the client
+  can send one.
 
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
