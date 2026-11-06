@@ -663,6 +663,7 @@ fn build_and_load_images(build: &ImageBuild<'_>) -> Result<(String, String), Str
     let (run_image, next_image) = unique_images(build.image)?;
     if !build.skip_build {
         run_command(Command::new(build.engine).args(["build", "-t", &run_image, "-f", "Containerfile", "."]))?;
+        run_command(Command::new(build.engine).args(["tag", &run_image, build.image]))?;
         run_command(Command::new(build.engine).args([
             "build",
             "-t",
