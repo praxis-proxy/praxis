@@ -128,9 +128,12 @@ enum HostMode {
 impl HostMode {
     /// Require the selected environment to agree with the actual kernel flag.
     fn required() -> Self {
-        let mode = std::env::var("PRAXIS_POLICY_FIPS_TEST_MODE").expect(
-            "PRAXIS_POLICY_FIPS_TEST_MODE must be configurable-provider or kernel-fips; use the Makefile FIPS targets",
-        );
+        let mode = std::env::var("PRAXIS_POLICY_FIPS_TEST_MODE")
+            .ok()
+            .filter(|mode| !mode.is_empty())
+            .expect(
+                "PRAXIS_POLICY_FIPS_TEST_MODE must be configurable-provider or kernel-fips; use the Makefile FIPS targets",
+            );
         let kernel_fips = match std::fs::read_to_string("/proc/sys/crypto/fips_enabled") {
             Ok(flag) => match flag.trim() {
                 "0" => false,
