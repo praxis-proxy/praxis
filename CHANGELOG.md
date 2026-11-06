@@ -286,6 +286,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- `trusted_proxies` in the policy and `forwarded_headers` filters matches a
+  proxy range only within its address family. `0.0.0.0/0` no longer trusts
+  IPv6 peers (nor `::/0` IPv4 ones), so on a dual-stack listener a direct
+  client of the other family cannot set `X-Forwarded-For` to choose its
+  client address.
 - Updated `ctutils` to address `RUSTSEC-2026-0385`.
 - The policy filter no longer forwards a delegated token while the caller's
   credential sits where it cannot be stripped from the upstream request,
