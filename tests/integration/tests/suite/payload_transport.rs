@@ -1358,6 +1358,13 @@ fn sse_events_arrive_incrementally_and_finite_streams_stop_at_limit() {
 
 #[test]
 fn chunk_extensions_and_reserved_trailers_do_not_change_body_budget_or_route() {
+    for reserved_trailers in [false, true] {
+        chunk_extensions_at_body_limit(reserved_trailers);
+    }
+}
+
+/// The successful control rules out a framing rejection before the reserved trailer.
+fn chunk_extensions_at_body_limit(reserved_trailers: bool) {
     let spec = PayloadSpec::padded(32_768, b"binary\0\xff\r\n0\r\n\r\n", b"end", b'x').unwrap();
     let selected = start_counting_backend(spec.clone(), "selected", spec.len());
     let other = start_counting_backend(spec.clone(), "other", spec.len());
@@ -1371,7 +1378,10 @@ fn chunk_extensions_and_reserved_trailers_do_not_change_body_budget_or_route() {
     let proxy = start_transport(&config);
     let mut stream = connect(proxy.addr());
     stream.write_all(b"POST /trailer HTTP/1.1\r\nHost: localhost\r\nTransfer-Encoding: chunked\r\nTrailer: X-Praxis-Model\r\nConnection: close\r\n\r\n").unwrap();
-    let extension = "x".repeat(2048);
+    // Hyper caps cumulative chunk-extension bytes at 16 KiB. Eight 1 KiB
+    // extensions leave room for their names while still exceeding the body limit
+    // if the proxy mistakenly counts framing as content.
+    let extension = "x".repeat(1024);
     let mut offset = 0;
     while offset < spec.len() {
         let chunk = spec.chunk(offset, 4096);
@@ -1380,10 +1390,17 @@ fn chunk_extensions_and_reserved_trailers_do_not_change_body_budget_or_route() {
         stream.write_all(b"\r\n").unwrap();
         offset += chunk.len() as u64;
     }
-    stream
-        .write_all(b"0\r\nX-Praxis-Model: trusted\r\nX-Ordinary: done\r\n\r\n")
-        .unwrap();
+    let ending = if reserved_trailers {
+        b"0\r\nX-Praxis-Model: trusted\r\nX-Ordinary: done\r\n\r\n".as_slice()
+    } else {
+        b"0\r\n\r\n".as_slice()
+    };
+    stream.write_all(ending).unwrap();
     let result = response(stream);
+    assert!(
+        result.completion.is_some() && result.abort.is_none(),
+        "response must complete: {result:?}"
+    );
     #[cfg(feature = "pingora")]
     {
         assert_eq!(result.status, Some(200), "{result:?}");
@@ -1397,14 +1414,14 @@ fn chunk_extensions_and_reserved_trailers_do_not_change_body_budget_or_route() {
     {
         assert_eq!(
             result.status,
-            Some(400),
-            "reserved request trailers must be rejected: {result:?}"
+            Some(if reserved_trailers { 400 } else { 200 }),
+            "only the reserved trailer must cause rejection: {result:?}"
         );
-        assert!(
-            result.completion.is_some() && result.abort.is_none(),
-            "rejection must complete: {result:?}"
-        );
-        assert_aborted_trailer_upload(&selected, &spec, false);
+        if reserved_trailers {
+            assert_aborted_trailer_upload(&selected, &spec, false);
+        } else {
+            assert_receipt(&selected, &spec);
+        }
     }
     assert!(
         matches!(
