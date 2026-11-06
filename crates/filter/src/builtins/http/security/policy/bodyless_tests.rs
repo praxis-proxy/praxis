@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Bodyless requests on inference policies: HTTP authorization, delegation
-//! and request assertions before admission.
+//! Bodyless requests on inference policies, and entity-less assertions-only
+//! policies: HTTP authorization, delegation and request assertions before
+//! admission.
 
 use std::{
     collections::HashMap,
@@ -307,6 +308,50 @@ routes:
         removed.contains(&"authorization") && removed.contains(&"x-api-key"),
         "{removed:?}"
     );
+}
+
+/// Request assertions alone, with no entity routes.
+const L7_ASSERTIONS: &str = "  assertions:
+    request:
+      headers:
+        - name: x-auth-user-id
+          from: subject.id
+      strip:
+        - authorization
+";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_assertions_only_l7_policy_applies_its_contract_in_both_phases() {
+    let (_dir, path, _count) = policy("test/l7-assertions", L7_ASSERTIONS);
+    let filter = filter(path);
+    assert_eq!(filter.derived_shape(), (true, false));
+    let mut req = request(Method::GET, "/anything", "alice");
+    req.headers
+        .insert("authorization", HeaderValue::from_static("Bearer inbound"));
+    for header_first in [true, false] {
+        let mut ctx = context(&req);
+        let action = if header_first {
+            filter.on_request(&mut ctx).await.unwrap()
+        } else {
+            body_phase(&filter, &mut ctx).await
+        };
+        assert!(
+            matches!(action, FilterAction::Continue | FilterAction::BodyDone),
+            "header first: {header_first}, got {action:?}"
+        );
+        assert!(
+            ctx.request_headers_to_remove
+                .iter()
+                .any(|name| name.as_str() == "authorization"),
+            "header first: {header_first}: the inbound credential is stripped"
+        );
+        assert!(
+            ctx.request_headers_to_set
+                .iter()
+                .any(|(name, value)| name.as_str() == "x-auth-user-id" && value == "alice"),
+            "header first: {header_first}: the subject header is set"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

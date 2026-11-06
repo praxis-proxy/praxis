@@ -319,11 +319,6 @@ pub struct PolicyFilter {
     /// dispatches hook chains. Wrapped in `Arc` so offloaded hook
     /// dispatches can hold their own handle without borrowing `&self`.
     mgr: Arc<PolicyEngine>,
-    /// Derived from the loaded policy at construction: the `global` policy
-    /// wired the entity-less HTTP path (`http.request`). When true and
-    /// `entity_routes` is false, the filter is a pure L7 policy evaluated at
-    /// `on_request` over `http.*` + identity — no classifier, no body.
-    http_global: bool,
     /// Derived from the loaded policy: it declares per-entity routes
     /// (tool/prompt/resource/llm). When true, authorization runs at the
     /// body phase, once the request is attributed to an entity.
@@ -341,7 +336,8 @@ pub struct PolicyFilter {
     /// Whether a limiter runs at `ratelimit.post_identity`.
     limit_post: bool,
     /// Whether `http.request` has work: a handler or request assertions.
-    /// Bodyless requests on inference policies are authorized there.
+    /// Without entity routes, the filter is a pure L7 policy authorized at
+    /// `on_request`; bodyless inference requests are authorized there too.
     http_request_policy: bool,
     /// Header names governed by request assertions.
     request_assertions: GovernedNames,
@@ -625,7 +621,6 @@ impl PolicyFilter {
         Ok(Self {
             cfg,
             mgr,
-            http_global,
             entity_routes,
             mcp_routes,
             mcp_post_tool,
@@ -660,10 +655,10 @@ impl PolicyFilter {
     }
 
     /// Test accessor for the shape derived from the loaded policy:
-    /// `(http_global, entity_routes)`.
+    /// `(http_request_policy, entity_routes)`.
     #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn derived_shape(&self) -> (bool, bool) {
-        (self.http_global, self.entity_routes)
+        (self.http_request_policy, self.entity_routes)
     }
 
     /// Return `(limit_pre, limit_post)` for tests.
@@ -2146,11 +2141,11 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Continue);
         }
 
-        // Pure L7 policy (a `global` HTTP policy, no entity routes): authorize
+        // Pure L7 policy (`global` HTTP rules or assertions, no entity routes): authorize
         // here over `http.*` + identity. Authorization is an admission check
         // with no body, and no classifier is involved, so this is the
         // efficient path for Praxis as an L7 HTTP proxy.
-        if self.http_global && !self.entity_routes {
+        if self.http_request_policy && !self.entity_routes {
             // Box the (large CMF-typed) future so it lives on the heap
             // rather than inflating this method's stack frame.
             let action = Box::pin(self.on_request_http_authz(ctx)).await?;
@@ -2193,7 +2188,7 @@ impl HttpFilter for PolicyFilter {
             if Self::admission_complete(ctx) {
                 return Ok(FilterAction::BodyDone);
             }
-            let action = if self.http_global {
+            let action = if self.http_request_policy {
                 Box::pin(self.on_request_http_authz(ctx)).await?
             } else {
                 self.identity_gate(ctx).await?
