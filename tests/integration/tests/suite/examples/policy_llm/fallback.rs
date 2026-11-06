@@ -84,6 +84,99 @@ fn fallback_assertions_survive_ordered_body_mutations() {
     }
 }
 
+#[test]
+fn ordered_delegation_reaches_the_backend_only_as_assertions_permit() {
+    let (issuer, exchanges) = start_request_counting_backend(
+        r#"{"access_token":"delegated-secret","token_type":"Bearer","issued_token_type":"urn:ietf:params:oauth:token-type:access_token","expires_in":300}"#,
+    );
+    let (_dir, path) = delegation_policy(issuer.port());
+    let original: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let backend = start_header_echo_backend();
+    let token = mint_fixture_jwt("research-bot", &["research"]);
+    for (index, (strip, replace, expected)) in [
+        (false, false, Some("Bearer delegated-secret")),
+        (true, false, None),
+        (false, true, Some("research-bot")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut policy = original.clone();
+        let contract = &mut policy["global"]["assertions"]["request"];
+        if !strip {
+            contract["strip"]
+                .as_sequence_mut()
+                .unwrap()
+                .retain(|name| name.as_str() != Some("authorization"));
+        }
+        if replace {
+            contract["headers"]
+                .as_sequence_mut()
+                .unwrap()
+                .push(serde_yaml::from_str("name: authorization\nfrom: subject.id").unwrap());
+        }
+        std::fs::write(&path, serde_yaml::to_string(&policy).unwrap()).unwrap();
+        let mut config = config(backend.port(), &path);
+        config.filter_chains[0].filters[0].config["allow_private_idp"] = serde_yaml::Value::Bool(true);
+        config.filter_chains[0]
+            .filters
+            .insert(0, serde_yaml::from_str("filter: ordered_headers").unwrap());
+        let registry = registry_with("ordered_headers", || Box::new(OrderedHeaders { governed: true }));
+        let proxy = start_proxy_with_registry(&config, &registry);
+        let raw = http_send(proxy.addr(), &request("GET", "{}", &token));
+        assert_eq!(parse_status(&raw), 200, "strip={strip}, replace={replace}: {raw}");
+        let body = parse_body(&raw);
+        let headers = upstream_headers(&body);
+        assert_eq!(
+            headers.get("authorization").map(Vec::as_slice),
+            expected.as_ref().map(std::slice::from_ref),
+            "{raw}"
+        );
+        assert!(
+            !headers.contains_key("x-api-key") && !headers.contains_key("x-secret-pending"),
+            "{raw}"
+        );
+        assert_eq!(headers.get("x-auth-user-id"), Some(&vec!["research-bot"]), "{raw}");
+        assert_eq!(headers.get("x-ordered-note"), Some(&vec!["present"]), "{raw}");
+        assert!(!raw.contains(&token), "the inbound token must not reach the backend");
+        assert_eq!(
+            exchanges.load(Ordering::SeqCst),
+            index + 1,
+            "one exchange per admitted request"
+        );
+    }
+}
+
+/// Add a real OAuth delegator with access to the credential it exchanges.
+fn delegation_policy(port: u16) -> (tempfile::TempDir, String) {
+    let (dir, path) = fixture_with_global(CONTRACT);
+    let mut policy: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    policy["plugins"].as_sequence_mut().unwrap().push(
+        serde_yaml::from_str(&format!(
+            r#"name: exchange
+kind: delegator/oauth
+hooks: [token.delegate]
+on_error: fail
+capabilities: [perform_http, read_inbound_credentials]
+config:
+  token_endpoint: http://127.0.0.1:{port}/token
+  client_id: test-gateway
+  client_secret_source: {{kind: literal, secret: test-secret}}
+  insecure_http: true
+"#
+        ))
+        .unwrap(),
+    );
+    policy["global"]["authorization"]["pre_invocation"]
+        .as_sequence_mut()
+        .unwrap()
+        .push(serde_yaml::Value::String(
+            "delegate(exchange, target: upstream, audience: upstream)".to_owned(),
+        ));
+    std::fs::write(&path, serde_yaml::to_string(&policy).unwrap()).unwrap();
+    (dir, path)
+}
+
 #[tokio::test]
 async fn http2_header_only_discovery_enforces_policy_and_ordered_assertions() {
     let (_dir, path) = fixture_with_global(CONTRACT);
@@ -146,12 +239,7 @@ fn request(method: &str, body: &str, token: &str) -> String {
 
 /// Assert the headers recorded by the upstream, including duplicate fields.
 fn assert_headers(raw: &str) {
-    let mut seen: HashMap<String, Vec<&str>> = HashMap::new();
-    for (name, value) in raw.lines().filter_map(|line| line.split_once(':')) {
-        seen.entry(name.trim().to_ascii_lowercase())
-            .or_default()
-            .push(value.trim());
-    }
+    let seen = upstream_headers(raw);
     for name in ["authorization", "x-api-key", "x-secret-pending"] {
         assert!(!seen.contains_key(name), "{name} must not reach the backend: {raw}");
     }
@@ -161,6 +249,17 @@ fn assert_headers(raw: &str) {
         Some(&vec!["present"]),
         "no lost or duplicate add: {raw}"
     );
+}
+
+/// Keep every field line the echo backend observed.
+fn upstream_headers(raw: &str) -> HashMap<String, Vec<&str>> {
+    let mut seen: HashMap<String, Vec<&str>> = HashMap::new();
+    for (name, value) in raw.lines().filter_map(|line| line.split_once(':')) {
+        seen.entry(name.trim().to_ascii_lowercase())
+            .or_default()
+            .push(value.trim());
+    }
+    seen
 }
 
 /// Model the downstream ext-proc producer's ordered mutation contract.
