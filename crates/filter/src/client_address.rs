@@ -65,9 +65,9 @@ pub(crate) fn resolve_client_address(
     })
 }
 
-/// Whether `ip` is in any of `trusted`.
+/// Whether `ip` is in any of `trusted`, within each range's family.
 fn is_trusted(ip: IpAddr, trusted: &[CidrRange]) -> bool {
-    trusted.iter().any(|range| range.contains(&ip))
+    trusted.iter().any(|range| range.contains_same_family(&ip))
 }
 
 /// The client `X-Forwarded-For` names, walking hops right to left and
@@ -159,6 +159,25 @@ mod tests {
     #[test]
     fn an_untrusted_peer_cannot_spoof_the_client() {
         assert_eq!(resolve(&["198.51.100.1"], Some("203.0.113.7")), peer("203.0.113.7"));
+    }
+
+    #[test]
+    fn a_wildcard_trusts_only_its_own_family() {
+        let all_v4 = [CidrRange::parse("0.0.0.0/0").expect("cidr")];
+        assert_eq!(
+            resolve_client_address(&xff(&["198.51.100.1"]), Some(ip("2001:db8::7")), &all_v4),
+            peer("2001:db8::7"),
+            "an IPv6 client cannot choose its address under an IPv4 wildcard"
+        );
+        assert_eq!(
+            resolve_client_address(&xff(&["198.51.100.1"]), Some(ip("203.0.113.9")), &all_v4),
+            forwarded("198.51.100.1")
+        );
+        let all_v6 = [CidrRange::parse("::/0").expect("cidr")];
+        assert_eq!(
+            resolve_client_address(&xff(&["2001:db8::1"]), Some(ip("203.0.113.9")), &all_v6),
+            peer("203.0.113.9")
+        );
     }
 
     #[test]
