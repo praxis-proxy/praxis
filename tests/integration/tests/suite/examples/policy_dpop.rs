@@ -21,14 +21,25 @@ use serde_json::json;
 
 use super::jwt;
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
 /// The DPoP issuer in the fixture.
 const ISSUER: &str = "https://dpop.idp.test";
+
 /// The audience the fixture expects.
 const AUDIENCE: &str = "praxis-fips-example";
+
 /// The URL DPoP clients address, `dpop.external_base_url` in the fixture.
 const EXTERNAL_BASE_URL: &str = "https://api.praxis.test";
+
 /// The MCP endpoint the request targets.
 const PATH: &str = "/mcp";
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[test]
 fn a_dpop_proof_survives_both_identity_resolutions_and_cannot_be_replayed() {
@@ -61,6 +72,10 @@ fn a_dpop_proof_survives_both_identity_resolutions_and_cannot_be_replayed() {
         "got:\n{replay}"
     );
 }
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
 
 /// Stands in for the protocol classifier at the header phase, so `policy`
 /// runs its early gate before the body phase resolves the tool route.

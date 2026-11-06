@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! The downstream request as the `policy` filter first saw it, and the one
-//! builder that turns it into a Policy `HttpExtension`.
+//! Captured downstream request facts for Policy hook input.
 
 use std::{collections::HashMap, net::IpAddr, sync::Arc};
 
@@ -16,13 +15,11 @@ use crate::{Request, client_address::resolve_client_address, filter::HttpFilterC
 // RequestFacts
 // -----------------------------------------------------------------------------
 
-/// Request facts captured at the filter's first callback, before Praxis
-/// mutates the request.
+/// Request facts as this filter first receives the downstream request.
 ///
-/// A body-first pre-read can run the body hook before the header hook, and an
-/// earlier phase can strip credentials, so every hook builds its extensions
-/// from this capture rather than from the request it is handed. No `Debug`:
-/// the headers and query can carry credentials.
+/// Later hooks retain these facts even after credentials are stripped or
+/// the request is rewritten. Headers and queries may contain credentials.
+// Deliberately omit Debug: captured headers and queries may contain credentials.
 #[derive(Clone)]
 pub(super) struct RequestFacts {
     /// Request method.
@@ -113,8 +110,8 @@ impl RequestView {
         &self.headers
     }
 
-    /// The one `HttpExtension` builder: every hook's request line, query,
-    /// authority, scheme, client address, headers and secret provenance.
+    /// Policy HTTP input with the captured request line, query, bare host,
+    /// scheme, effective client address, headers and secret provenance.
     pub(super) fn http_extension(&self) -> HttpExtension {
         let facts = &self.facts;
         let mut http = HttpExtension {
@@ -188,25 +185,6 @@ mod tests {
     use super::{RequestFacts, RequestView, SecretHeaderProvenance};
     use crate::test_utils::{make_filter_context, make_request};
 
-    /// The extension a hook would receive for `uri`, with the connection's
-    /// TLS state set to `tls`.
-    fn extension_for(
-        uri: &str,
-        tls: bool,
-        headers: &[(&'static str, &str)],
-    ) -> ppe::praxis_policy_core::extensions::HttpExtension {
-        let mut req = make_request(Method::GET, uri);
-        for (name, value) in headers {
-            req.headers.insert(*name, value.parse().expect("header value"));
-        }
-        let mut ctx = make_filter_context(&req);
-        ctx.downstream_tls = tls;
-        ctx.client_addr = Some("203.0.113.7".parse().expect("address"));
-        let facts = Arc::new(RequestFacts::capture(&ctx, &[]));
-        let headers = facts.headers_with_reserved(&ctx.request.headers);
-        RequestView::new(facts, headers, SecretHeaderProvenance::default()).http_extension()
-    }
-
     #[test]
     fn an_absent_query_and_a_bare_question_mark_stay_distinct() {
         assert_eq!(extension_for("/a", false, &[]).query, None, "no `?` means no query");
@@ -268,5 +246,28 @@ mod tests {
             Some("acme"),
             "a header a trusted filter set later is visible"
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// The extension a hook would receive for `uri`, with the connection's
+    /// TLS state set to `tls`.
+    fn extension_for(
+        uri: &str,
+        tls: bool,
+        headers: &[(&'static str, &str)],
+    ) -> ppe::praxis_policy_core::extensions::HttpExtension {
+        let mut req = make_request(Method::GET, uri);
+        for (name, value) in headers {
+            req.headers.insert(*name, value.parse().expect("header value"));
+        }
+        let mut ctx = make_filter_context(&req);
+        ctx.downstream_tls = tls;
+        ctx.client_addr = Some("203.0.113.7".parse().expect("address"));
+        let facts = Arc::new(RequestFacts::capture(&ctx, &[]));
+        let headers = facts.headers_with_reserved(&ctx.request.headers);
+        RequestView::new(facts, headers, SecretHeaderProvenance::default()).http_extension()
     }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! JWTs and DPoP proofs for the policy example tests, signed through the
+//! Test utilities for JWTs and DPoP proofs signed through the
 //! system OpenSSL.
 //!
 //! The policy engine verifies tokens with `jsonwebtoken`, and its ordinary
@@ -31,6 +31,13 @@ use openssl::{
     sign::Signer,
 };
 use serde_json::{Value, json};
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Sequence number distinguishing tokens and proofs in this process.
+static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A compact-serialized HS256 JWT over `claims`, with `kid` in the header when
 /// given, signed with `secret`.
@@ -153,7 +160,6 @@ fn p256_jwk(key: &PKey<Private>) -> Value {
 
 /// A `jti` no other token or proof in this process carries.
 pub(super) fn fresh_jti() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let mut random = [0_u8; 16];
     openssl::rand::rand_bytes(&mut random).expect("random bytes");
     format!(

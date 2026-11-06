@@ -39,6 +39,341 @@ use crate::{
     test_utils::{make_filter_context, make_request},
 };
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// A tool route with a post-identity limiter keyed by subject.
+const TOOL_SUBJECT_LIMIT: &str = "plugins:
+  - name: who
+    kind: {kind}
+    hooks: [identity.resolve]
+    capabilities: [read_headers]
+  - name: per-user
+    kind: ratelimit/limitador
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_subject, read_headers]
+    config:
+      namespace: per-user
+      bindings:
+        subject_id: subject.id
+      limits:
+        - max: 1
+          seconds: 60
+          variables: [subject_id]
+global:
+  authentication: [who]
+routes:
+  - tool: echo
+    rate_limits: [per-user]
+    authorization:
+      pre_invocation:
+        - \"require(authenticated)\"
+";
+
+/// An inference route with a post-identity limiter keyed by model.
+const MODEL_LIMIT: &str = "plugins:
+  - name: who
+    kind: {kind}
+    hooks: [identity.resolve]
+    capabilities: [read_headers]
+  - name: per-model
+    kind: ratelimit/limitador
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_subject]
+    config:
+      namespace: per-model
+      bindings:
+        model: llm.model_id
+      limits:
+        - max: 1
+          seconds: 60
+          variables: [model]
+global:
+  authentication: [who]
+routes:
+  - llm: \"*\"
+    rate_limits: [per-model]
+    authorization:
+      pre_invocation:
+        - \"require(authenticated)\"
+";
+
+/// Pre- and post-identity host limiters around a host resolver; `{deny}` is
+/// the pre limiter's extra config.
+const HOST_LIMITERS: &str = "plugins:
+  - name: who
+    kind: {kind}
+    hooks: [identity.resolve]
+    capabilities: [read_headers]
+  - name: pre
+    kind: {kind}
+    hooks: [ratelimit.pre_identity]
+    capabilities: [read_headers]
+    config: {deny}
+  - name: post
+    kind: {kind}
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_headers, read_subject]
+global:
+  authentication: [who]
+  rate_limits: [pre, post]
+";
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "one request sequence")]
+async fn over_the_address_limit_is_429_with_retry_after_and_allowlisted_fields() {
+    let (_dir, path, _calls) = l7_address_limit("test/rl-l7", 2);
+    let filter = filter(path);
+    assert_eq!(filter.limit_stages(), (true, false));
+    for _ in 0..2 {
+        assert!(matches!(
+            header_phase(&filter, Some("alice"), 1).await,
+            FilterAction::Continue
+        ));
+    }
+    let denied = rejection(header_phase(&filter, Some("alice"), 1).await);
+    assert_eq!(denied.status, 429);
+    let retry: u64 = header(&denied, "Retry-After").unwrap().parse().unwrap();
+    assert!(retry >= 1);
+    let json = body(&denied);
+    let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "code",
+            "limit",
+            "message",
+            "remaining",
+            "retry_after_seconds",
+            "window_seconds"
+        ]
+    );
+    assert_eq!(json["limit"], 2);
+    assert!(
+        matches!(header_phase(&filter, Some("alice"), 2).await, FilterAction::Continue),
+        "another address has its own counter"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pre_identity_denial_stops_before_identity_runs() {
+    let (_dir, path, calls) = l7_address_limit("test/rl-before-identity", 1);
+    let filter = filter(path);
+    let _admitted = header_phase(&filter, Some("forged"), 9).await;
+    assert_eq!(plugins(&calls), ["who"]);
+    let denied = rejection(header_phase(&filter, Some("forged"), 9).await);
+    assert_eq!(denied.status, 429);
+    assert_eq!(plugins(&calls), ["who"], "the resolver never saw the limited request");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_malformed_trusted_hop_denies_an_address_limit_instead_of_sharing_a_bucket() {
+    let (_dir, path, calls) = l7_address_limit("test/rl-malformed-hop", 1);
+    let filter = filter_behind(path, vec!["203.0.113.0/24".to_owned()]);
+
+    for forwarded in ["not-an-ip", "198.51.100.7, garbage"] {
+        let denied = rejection(forwarded_phase(&filter, 9, forwarded).await);
+        assert_eq!(
+            denied.status, 400,
+            "{forwarded}: no client address is a denial, not a skip"
+        );
+        assert_eq!(
+            header(&denied, "X-Policy-Violation"),
+            Some("ratelimit.missing_attribute"),
+            "{forwarded}"
+        );
+    }
+    assert!(
+        plugins(&calls).is_empty(),
+        "identity never ran for an unattributable request"
+    );
+    assert!(
+        matches!(header_phase(&filter, Some("alice"), 9).await, FilterAction::Continue),
+        "the proxy's own one-request budget was not spent by the malformed requests"
+    );
+
+    for client in ["198.51.100.7", "198.51.100.8"] {
+        assert!(
+            matches!(forwarded_phase(&filter, 9, client).await, FilterAction::Continue),
+            "{client} has its own counter behind the proxy"
+        );
+    }
+    let over = rejection(forwarded_phase(&filter, 9, "198.51.100.7").await);
+    assert_eq!(over.status, 429, "the per-client limit still counts");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_route_counts_each_subject_separately_and_keeps_the_json_rpc_id() {
+    let (_dir, path, _calls) = recorded_policy("test/rl-tool", TOOL_SUBJECT_LIMIT);
+    let filter = filter(path);
+    assert!(matches!(tool_call(&filter, "alice").await, FilterAction::BodyDone));
+    let denied = rejection(tool_call(&filter, "alice").await);
+    assert_eq!(denied.status, 429, "a JSON-RPC limit denial keeps its real status");
+    let json = body(&denied);
+    assert_eq!(json["id"], "call-7");
+    assert_eq!(json["error"]["data"]["violation"], "ratelimit.exceeded");
+    assert!(matches!(tool_call(&filter, "bob").await, FilterAction::BodyDone));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_identity_limit_binds_the_inference_model() {
+    let (_dir, path, _calls) = recorded_policy("test/rl-model", MODEL_LIMIT);
+    let filter = filter(path);
+    assert!(matches!(inference_call(&filter, "m1").await, FilterAction::BodyDone));
+    let denied = rejection(inference_call(&filter, "m1").await);
+    assert_eq!(denied.status, 429, "the second call on one model is over the limit");
+    assert!(
+        matches!(inference_call(&filter, "m2").await, FilterAction::BodyDone),
+        "another model has its own counter"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stages_wrap_identity_on_http_coordinates_with_the_resolved_subject() {
+    let (_dir, path, calls) = recorded_policy("test/rl-order", &HOST_LIMITERS.replace("{deny}", "{}"));
+    let filter = filter(path);
+    assert!(matches!(
+        header_phase(&filter, Some("alice"), 1).await,
+        FilterAction::Continue
+    ));
+    let seen = calls.lock().unwrap().clone();
+    let expected: Vec<(String, String, String)> =
+        [("pre", "http", ""), ("who", "http", "alice"), ("post", "http", "alice")]
+            .iter()
+            .map(|(a, b, c)| ((*a).to_owned(), (*b).to_owned(), (*c).to_owned()))
+            .collect();
+    assert_eq!(seen, expected);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_limiter_denial_never_echoes_its_reason_or_details() {
+    let deny = "{deny: ratelimit.exceeded}";
+    let (_dir, path, calls) = recorded_policy("test/rl-sentinel", &HOST_LIMITERS.replace("{deny}", deny));
+    let filter = filter(path);
+    let denied = rejection(header_phase(&filter, Some("alice"), 1).await);
+    assert_eq!(denied.status, 429, "an unlisted status falls back to the code's");
+    assert_eq!(header(&denied, "Retry-After"), Some("5"));
+    let wire = format!("{:?} {}", denied.headers, body(&denied));
+    assert!(!wire.contains("SENTINEL"), "plugin text leaked: {wire}");
+    assert_eq!(plugins(&calls), ["pre"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_host_limiter_code_gets_a_generic_503() {
+    let deny = "{deny: SENTINEL-CODE}";
+    let (_dir, path, _calls) = recorded_policy("test/rl-unknown", &HOST_LIMITERS.replace("{deny}", deny));
+    let denied = rejection(header_phase(&filter(path), Some("alice"), 1).await);
+    assert_eq!(denied.status, 503);
+    assert_eq!(header(&denied, "X-Policy-Violation"), Some("ratelimit.denied"));
+    assert!(!format!("{:?} {:?}", denied.headers, denied.body).contains("SENTINEL"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subject_keyed_limit_without_a_subject_is_401() {
+    let yaml = TOOL_SUBJECT_LIMIT.replace(
+        "routes:\n  - tool: echo\n    rate_limits: [per-user]\n",
+        "  rate_limits: [per-user]\nroutes:\n  - tool: echo\n",
+    );
+    let (_dir, path, _calls) = recorded_policy("test/rl-anonymous", &yaml);
+    let filter = filter(path);
+    let req = request(None);
+    let mut ctx = context(&req, 1);
+    let _admitted = filter.on_request(&mut ctx).await.unwrap();
+    let mut body = Some(Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#));
+    ctx.set_metadata("mcp.method", "ping");
+    let denied = rejection(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+    assert_eq!(denied.status, 401);
+    assert_eq!(header(&denied, "X-Policy-Violation"), Some("ratelimit.no_identity"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_without_rate_limits_runs_no_stage() {
+    let (_dir, path, calls) = recorded_policy(
+        "test/rl-none",
+        "plugins:
+  - name: who
+    kind: {kind}
+    hooks: [identity.resolve]
+    capabilities: [read_headers]
+global:
+  authentication: [who]
+",
+    );
+    let filter = filter(path);
+    assert_eq!(filter.limit_stages(), (false, false));
+    let _admitted = header_phase(&filter, Some("alice"), 1).await;
+    assert_eq!(plugins(&calls), ["who"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn body_first_runs_each_stage_once() {
+    let (_dir, path, calls) = recorded_policy("test/rl-body-first", &HOST_LIMITERS.replace("{deny}", "{}"));
+    let filter = filter(path);
+    let req = request(Some("alice"));
+    let mut ctx = context(&req, 1);
+    let mut body = Some(Bytes::from_static(b"{}"));
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+    assert!(matches!(action, FilterAction::BodyDone), "got {action:?}");
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(plugins(&calls), ["pre", "who", "post"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_instances_each_run_both_stages_once() {
+    let (_dir, path, calls) = recorded_policy("test/rl-two-a", &HOST_LIMITERS.replace("{deny}", "{}"));
+    let (_other_dir, other_path, other_calls) =
+        recorded_policy("test/rl-two-b", &HOST_LIMITERS.replace("{deny}", "{}"));
+    let yaml = format!("- filter: policy\n  config_path: {path}\n- filter: policy\n  config_path: {other_path}\n");
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+    let pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
+    let req = request(Some("alice"));
+    let mut ctx = make_filter_context(&req);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "got {action:?}");
+    assert_eq!(plugins(&calls), ["pre", "who", "post"]);
+    assert_eq!(plugins(&other_calls), ["pre", "who", "post"]);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn threading_the_table_raises_no_skipped_stage_alarm() {
+    let (_dir, path, _calls) = l7_address_limit("test/rl-no-alarm", 10);
+    let filter = filter(path);
+    let sink = Sink::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(sink.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    let _admitted = header_phase(&filter, Some("alice"), 1).await;
+    let threaded = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+
+    let req = request(Some("alice"));
+    let mut ctx = context(&req, 2);
+    state_mut(&mut ctx).limits.pre_identity = true;
+    let _admitted = filter.on_request(&mut ctx).await.unwrap();
+    drop(guard);
+    let skipped = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+    assert!(!threaded.contains("rate_limit_stage_skipped"), "{threaded}");
+    assert!(
+        skipped.contains("rate_limit_stage_skipped"),
+        "the capture sees the alarm: {skipped}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
 /// What the host plugins saw: `(plugin, entity_type, subject)` per call.
 type Calls = Arc<Mutex<Vec<(String, String, String)>>>;
 
@@ -123,6 +458,8 @@ impl HookHandler<HttpHook> for Recorder {
 }
 
 /// Builds [`Recorder`]s sharing one record.
+///
+/// [`Recorder`]: Recorder
 struct RecorderFactory(Calls);
 
 impl PluginFactory for RecorderFactory {
@@ -274,54 +611,6 @@ global:
     )
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[expect(clippy::too_many_lines, reason = "one request sequence")]
-async fn over_the_address_limit_is_429_with_retry_after_and_allowlisted_fields() {
-    let (_dir, path, _calls) = l7_address_limit("test/rl-l7", 2);
-    let filter = filter(path);
-    assert_eq!(filter.limit_stages(), (true, false));
-    for _ in 0..2 {
-        assert!(matches!(
-            header_phase(&filter, Some("alice"), 1).await,
-            FilterAction::Continue
-        ));
-    }
-    let denied = rejection(header_phase(&filter, Some("alice"), 1).await);
-    assert_eq!(denied.status, 429);
-    let retry: u64 = header(&denied, "Retry-After").unwrap().parse().unwrap();
-    assert!(retry >= 1);
-    let json = body(&denied);
-    let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
-    keys.sort();
-    assert_eq!(
-        keys,
-        [
-            "code",
-            "limit",
-            "message",
-            "remaining",
-            "retry_after_seconds",
-            "window_seconds"
-        ]
-    );
-    assert_eq!(json["limit"], 2);
-    assert!(
-        matches!(header_phase(&filter, Some("alice"), 2).await, FilterAction::Continue),
-        "another address has its own counter"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_pre_identity_denial_stops_before_identity_runs() {
-    let (_dir, path, calls) = l7_address_limit("test/rl-before-identity", 1);
-    let filter = filter(path);
-    let _admitted = header_phase(&filter, Some("forged"), 9).await;
-    assert_eq!(plugins(&calls), ["who"]);
-    let denied = rejection(header_phase(&filter, Some("forged"), 9).await);
-    assert_eq!(denied.status, 429);
-    assert_eq!(plugins(&calls), ["who"], "the resolver never saw the limited request");
-}
-
 /// Run the header phase from trusted proxy `peer` carrying `forwarded`.
 async fn forwarded_phase(filter: &PolicyFilter, peer: u8, forwarded: &str) -> FilterAction {
     let mut req = request(Some("alice"));
@@ -330,73 +619,6 @@ async fn forwarded_phase(filter: &PolicyFilter, peer: u8, forwarded: &str) -> Fi
     let mut ctx = context(&req, peer);
     filter.on_request(&mut ctx).await.unwrap()
 }
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_malformed_trusted_hop_denies_an_address_limit_instead_of_sharing_a_bucket() {
-    let (_dir, path, calls) = l7_address_limit("test/rl-malformed-hop", 1);
-    let filter = filter_behind(path, vec!["203.0.113.0/24".to_owned()]);
-
-    for forwarded in ["not-an-ip", "198.51.100.7, garbage"] {
-        let denied = rejection(forwarded_phase(&filter, 9, forwarded).await);
-        assert_eq!(
-            denied.status, 400,
-            "{forwarded}: no client address is a denial, not a skip"
-        );
-        assert_eq!(
-            header(&denied, "X-Policy-Violation"),
-            Some("ratelimit.missing_attribute"),
-            "{forwarded}"
-        );
-    }
-    assert!(
-        plugins(&calls).is_empty(),
-        "identity never ran for an unattributable request"
-    );
-    assert!(
-        matches!(header_phase(&filter, Some("alice"), 9).await, FilterAction::Continue),
-        "the proxy's own one-request budget was not spent by the malformed requests"
-    );
-
-    // Had the malformed requests fallen back to the proxy's address, they
-    // would have spent its one-request budget; well-formed clients behind the
-    // same proxy each still get their own counter.
-    for client in ["198.51.100.7", "198.51.100.8"] {
-        assert!(
-            matches!(forwarded_phase(&filter, 9, client).await, FilterAction::Continue),
-            "{client} has its own counter behind the proxy"
-        );
-    }
-    let over = rejection(forwarded_phase(&filter, 9, "198.51.100.7").await);
-    assert_eq!(over.status, 429, "the per-client limit still counts");
-}
-
-/// A tool route with a post-identity limiter keyed by subject.
-const TOOL_SUBJECT_LIMIT: &str = "plugins:
-  - name: who
-    kind: {kind}
-    hooks: [identity.resolve]
-    capabilities: [read_headers]
-  - name: per-user
-    kind: ratelimit/limitador
-    hooks: [ratelimit.post_identity]
-    capabilities: [read_subject, read_headers]
-    config:
-      namespace: per-user
-      bindings:
-        subject_id: subject.id
-      limits:
-        - max: 1
-          seconds: 60
-          variables: [subject_id]
-global:
-  authentication: [who]
-routes:
-  - tool: echo
-    rate_limits: [per-user]
-    authorization:
-      pre_invocation:
-        - \"require(authenticated)\"
-";
 
 /// Run a classified `tools/call` for `user` through both phases.
 async fn tool_call(filter: &PolicyFilter, user: &str) -> FilterAction {
@@ -412,47 +634,6 @@ async fn tool_call(filter: &PolicyFilter, user: &str) -> FilterAction {
     filter.on_request_body(&mut ctx, &mut body, true).await.unwrap()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn a_tool_route_counts_each_subject_separately_and_keeps_the_json_rpc_id() {
-    let (_dir, path, _calls) = recorded_policy("test/rl-tool", TOOL_SUBJECT_LIMIT);
-    let filter = filter(path);
-    assert!(matches!(tool_call(&filter, "alice").await, FilterAction::BodyDone));
-    let denied = rejection(tool_call(&filter, "alice").await);
-    assert_eq!(denied.status, 429, "a JSON-RPC limit denial keeps its real status");
-    let json = body(&denied);
-    assert_eq!(json["id"], "call-7");
-    assert_eq!(json["error"]["data"]["violation"], "ratelimit.exceeded");
-    assert!(matches!(tool_call(&filter, "bob").await, FilterAction::BodyDone));
-}
-
-/// An inference route with a post-identity limiter keyed by model.
-const MODEL_LIMIT: &str = "plugins:
-  - name: who
-    kind: {kind}
-    hooks: [identity.resolve]
-    capabilities: [read_headers]
-  - name: per-model
-    kind: ratelimit/limitador
-    hooks: [ratelimit.post_identity]
-    capabilities: [read_subject]
-    config:
-      namespace: per-model
-      bindings:
-        model: llm.model_id
-      limits:
-        - max: 1
-          seconds: 60
-          variables: [model]
-global:
-  authentication: [who]
-routes:
-  - llm: \"*\"
-    rate_limits: [per-model]
-    authorization:
-      pre_invocation:
-        - \"require(authenticated)\"
-";
-
 /// Run an inference request for `model` through both phases.
 async fn inference_call(filter: &PolicyFilter, model: &str) -> FilterAction {
     let mut req = request(Some("alice"));
@@ -462,149 +643,6 @@ async fn inference_call(filter: &PolicyFilter, model: &str) -> FilterAction {
     assert!(matches!(action, FilterAction::Continue), "gate: {action:?}");
     let mut body = Some(Bytes::from(format!(r#"{{"model":"{model}","messages":[]}}"#)));
     filter.on_request_body(&mut ctx, &mut body, true).await.unwrap()
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_post_identity_limit_binds_the_inference_model() {
-    let (_dir, path, _calls) = recorded_policy("test/rl-model", MODEL_LIMIT);
-    let filter = filter(path);
-    assert!(matches!(inference_call(&filter, "m1").await, FilterAction::BodyDone));
-    let denied = rejection(inference_call(&filter, "m1").await);
-    assert_eq!(denied.status, 429, "the second call on one model is over the limit");
-    assert!(
-        matches!(inference_call(&filter, "m2").await, FilterAction::BodyDone),
-        "another model has its own counter"
-    );
-}
-
-/// Pre- and post-identity host limiters around a host resolver; `{deny}` is
-/// the pre limiter's extra config.
-const HOST_LIMITERS: &str = "plugins:
-  - name: who
-    kind: {kind}
-    hooks: [identity.resolve]
-    capabilities: [read_headers]
-  - name: pre
-    kind: {kind}
-    hooks: [ratelimit.pre_identity]
-    capabilities: [read_headers]
-    config: {deny}
-  - name: post
-    kind: {kind}
-    hooks: [ratelimit.post_identity]
-    capabilities: [read_headers, read_subject]
-global:
-  authentication: [who]
-  rate_limits: [pre, post]
-";
-
-#[tokio::test(flavor = "multi_thread")]
-async fn stages_wrap_identity_on_http_coordinates_with_the_resolved_subject() {
-    let (_dir, path, calls) = recorded_policy("test/rl-order", &HOST_LIMITERS.replace("{deny}", "{}"));
-    let filter = filter(path);
-    assert!(matches!(
-        header_phase(&filter, Some("alice"), 1).await,
-        FilterAction::Continue
-    ));
-    let seen = calls.lock().unwrap().clone();
-    let expected: Vec<(String, String, String)> =
-        [("pre", "http", ""), ("who", "http", "alice"), ("post", "http", "alice")]
-            .iter()
-            .map(|(a, b, c)| ((*a).to_owned(), (*b).to_owned(), (*c).to_owned()))
-            .collect();
-    assert_eq!(seen, expected);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_host_limiter_denial_never_echoes_its_reason_or_details() {
-    let deny = "{deny: ratelimit.exceeded}";
-    let (_dir, path, calls) = recorded_policy("test/rl-sentinel", &HOST_LIMITERS.replace("{deny}", deny));
-    let filter = filter(path);
-    let denied = rejection(header_phase(&filter, Some("alice"), 1).await);
-    assert_eq!(denied.status, 429, "an unlisted status falls back to the code's");
-    assert_eq!(header(&denied, "Retry-After"), Some("5"));
-    let wire = format!("{:?} {}", denied.headers, body(&denied));
-    assert!(!wire.contains("SENTINEL"), "plugin text leaked: {wire}");
-    assert_eq!(plugins(&calls), ["pre"]);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_unknown_host_limiter_code_gets_a_generic_503() {
-    let deny = "{deny: SENTINEL-CODE}";
-    let (_dir, path, _calls) = recorded_policy("test/rl-unknown", &HOST_LIMITERS.replace("{deny}", deny));
-    let denied = rejection(header_phase(&filter(path), Some("alice"), 1).await);
-    assert_eq!(denied.status, 503);
-    assert_eq!(header(&denied, "X-Policy-Violation"), Some("ratelimit.denied"));
-    assert!(!format!("{:?} {:?}", denied.headers, denied.body).contains("SENTINEL"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_subject_keyed_limit_without_a_subject_is_401() {
-    let yaml = TOOL_SUBJECT_LIMIT.replace(
-        "routes:\n  - tool: echo\n    rate_limits: [per-user]\n",
-        "  rate_limits: [per-user]\nroutes:\n  - tool: echo\n",
-    );
-    let (_dir, path, _calls) = recorded_policy("test/rl-anonymous", &yaml);
-    let filter = filter(path);
-    let req = request(None);
-    let mut ctx = context(&req, 1);
-    let _admitted = filter.on_request(&mut ctx).await.unwrap();
-    let mut body = Some(Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#));
-    ctx.set_metadata("mcp.method", "ping");
-    let denied = rejection(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
-    assert_eq!(denied.status, 401);
-    assert_eq!(header(&denied, "X-Policy-Violation"), Some("ratelimit.no_identity"));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_policy_without_rate_limits_runs_no_stage() {
-    let (_dir, path, calls) = recorded_policy(
-        "test/rl-none",
-        "plugins:
-  - name: who
-    kind: {kind}
-    hooks: [identity.resolve]
-    capabilities: [read_headers]
-global:
-  authentication: [who]
-",
-    );
-    let filter = filter(path);
-    assert_eq!(filter.limit_stages(), (false, false));
-    let _admitted = header_phase(&filter, Some("alice"), 1).await;
-    assert_eq!(plugins(&calls), ["who"]);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn body_first_runs_each_stage_once() {
-    let (_dir, path, calls) = recorded_policy("test/rl-body-first", &HOST_LIMITERS.replace("{deny}", "{}"));
-    let filter = filter(path);
-    let req = request(Some("alice"));
-    let mut ctx = context(&req, 1);
-    let mut body = Some(Bytes::from_static(b"{}"));
-    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
-    assert!(matches!(action, FilterAction::BodyDone), "got {action:?}");
-    assert!(matches!(
-        filter.on_request(&mut ctx).await.unwrap(),
-        FilterAction::Continue
-    ));
-    assert_eq!(plugins(&calls), ["pre", "who", "post"]);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn two_instances_each_run_both_stages_once() {
-    let (_dir, path, calls) = recorded_policy("test/rl-two-a", &HOST_LIMITERS.replace("{deny}", "{}"));
-    let (_other_dir, other_path, other_calls) =
-        recorded_policy("test/rl-two-b", &HOST_LIMITERS.replace("{deny}", "{}"));
-    let yaml = format!("- filter: policy\n  config_path: {path}\n- filter: policy\n  config_path: {other_path}\n");
-    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
-    let pipeline = FilterPipeline::build(&mut entries, &FilterRegistry::with_builtins()).unwrap();
-    let req = request(Some("alice"));
-    let mut ctx = make_filter_context(&req);
-    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
-    assert!(matches!(action, FilterAction::Continue), "got {action:?}");
-    assert_eq!(plugins(&calls), ["pre", "who", "post"]);
-    assert_eq!(plugins(&other_calls), ["pre", "who", "post"]);
 }
 
 /// Collects formatted log output.
@@ -628,32 +666,4 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
     }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn threading_the_table_raises_no_skipped_stage_alarm() {
-    let (_dir, path, _calls) = l7_address_limit("test/rl-no-alarm", 10);
-    let filter = filter(path);
-    let sink = Sink::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(sink.clone())
-        .with_max_level(tracing::Level::TRACE)
-        .with_ansi(false)
-        .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
-    let _admitted = header_phase(&filter, Some("alice"), 1).await;
-    let threaded = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
-
-    // Control: identity without the pre stage must raise it.
-    let req = request(Some("alice"));
-    let mut ctx = context(&req, 2);
-    state_mut(&mut ctx).limits.pre_identity = true;
-    let _admitted = filter.on_request(&mut ctx).await.unwrap();
-    drop(guard);
-    let skipped = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
-    assert!(!threaded.contains("rate_limit_stage_skipped"), "{threaded}");
-    assert!(
-        skipped.contains("rate_limit_stage_skipped"),
-        "the capture sees the alarm: {skipped}"
-    );
 }

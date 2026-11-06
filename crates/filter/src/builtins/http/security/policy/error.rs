@@ -513,6 +513,8 @@ pub(super) fn rate_limit_rejection(violation: Option<&PluginViolation>) -> Rejec
 
 /// [`rate_limit_rejection`] as a JSON-RPC error envelope that keeps the
 /// request `id`, still under the denial's real HTTP status.
+///
+/// [`rate_limit_rejection`]: rate_limit_rejection
 pub(super) fn rate_limit_json_rpc_rejection(
     violation: Option<&PluginViolation>,
     request_id: &serde_json::Value,

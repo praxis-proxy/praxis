@@ -34,11 +34,96 @@ use crate::{
     test_utils::{make_filter_context, make_request},
 };
 
-/// `(marker, count after the hook)` for each counter invocation.
-type Seen = Arc<Mutex<Vec<(String, u64)>>>;
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
 
 /// The `global_state` key the counter increments.
 const COUNT: &str = "test/count";
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn one_table_carries_state_from_identity_to_the_response_hook() {
+    let (_dir, path, seen) = counter_policy("test/state-counter");
+    let pipeline = pipeline(&[&path]);
+    round_trip(&pipeline, "first").await;
+    round_trip(&pipeline, "second").await;
+    assert_eq!(
+        counts(&seen, "first"),
+        [1, 2, 3],
+        "identity, request and response hooks share one table"
+    );
+    assert_eq!(counts(&seen, "second"), [1, 2, 3], "a new request starts a fresh table");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_requests_keep_their_own_tables() {
+    let (_dir, path, seen) = counter_policy("test/state-counter-concurrent");
+    let pipeline = Arc::new(pipeline(&[&path]));
+    let markers: Vec<String> = (0..16).map(|index| format!("request-{index}")).collect();
+    let tasks: Vec<_> = markers
+        .iter()
+        .cloned()
+        .map(|marker| {
+            let pipeline = Arc::clone(&pipeline);
+            tokio::spawn(async move { round_trip(&pipeline, &marker).await })
+        })
+        .collect();
+    for task in tasks {
+        task.await.unwrap();
+    }
+    for marker in &markers {
+        assert_eq!(counts(&seen, marker), [1, 2, 3], "{marker} saw another request's table");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_policy_instances_keep_separate_tables_and_admission() {
+    let (_dir, path, seen) = counter_policy("test/state-counter-two");
+    let (_other_dir, other_path, other_seen) = counter_policy("test/state-counter-two-b");
+    let pipeline = pipeline(&[&path, &other_path]);
+    round_trip(&pipeline, "both").await;
+    assert_eq!(counts(&seen, "both"), [1, 2, 3], "the first instance");
+    assert_eq!(
+        counts(&other_seen, "both"),
+        [1, 2, 3],
+        "the second instance runs every hook on its own table, not skipping because the first admitted"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_lost_table_fails_later_hooks_instead_of_starting_fresh() {
+    let (_dir, path, seen) = counter_policy("test/state-counter-lost");
+    let filter = PolicyFilter::new(config(path), None).unwrap();
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert("x-marker", HeaderValue::from_static("lost"));
+    let mut ctx = make_filter_context(&req);
+    ctx.current_filter_id = Some(0);
+    assert!(matches!(
+        filter.on_request(&mut ctx).await.unwrap(),
+        FilterAction::Continue
+    ));
+
+    state_mut(&mut ctx).take_table().unwrap();
+    let mut response = crate::test_utils::make_response();
+    ctx.response_header = Some(&mut response);
+    let error = filter
+        .on_response(&mut ctx)
+        .await
+        .expect_err("the response must fail under failure_mode");
+    assert!(error.to_string().contains("context table was lost"), "got {error}");
+    assert_eq!(counts(&seen, "lost"), [1, 2], "no response hook ran with a fresh table");
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// `(marker, count after the hook)` for each counter invocation.
+type Seen = Arc<Mutex<Vec<(String, u64)>>>;
 
 /// Counts invocations in the context table's `global_state` and records each
 /// value it saw, tagged with the request's marker header.
@@ -95,6 +180,8 @@ impl HookHandler<HttpHook> for Counter {
 }
 
 /// Builds [`Counter`]s sharing one record.
+///
+/// [`Counter`]: Counter
 struct CounterFactory(Seen);
 
 impl PluginFactory for CounterFactory {
@@ -185,78 +272,4 @@ fn counts(seen: &Mutex<Vec<(String, u64)>>, marker: &str) -> Vec<u64> {
         .filter(|(seen, _)| seen == marker)
         .map(|(_, count)| *count)
         .collect()
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn one_table_carries_state_from_identity_to_the_response_hook() {
-    let (_dir, path, seen) = counter_policy("test/state-counter");
-    let pipeline = pipeline(&[&path]);
-    round_trip(&pipeline, "first").await;
-    round_trip(&pipeline, "second").await;
-    assert_eq!(
-        counts(&seen, "first"),
-        [1, 2, 3],
-        "identity, request and response hooks share one table"
-    );
-    assert_eq!(counts(&seen, "second"), [1, 2, 3], "a new request starts a fresh table");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn concurrent_requests_keep_their_own_tables() {
-    let (_dir, path, seen) = counter_policy("test/state-counter-concurrent");
-    let pipeline = Arc::new(pipeline(&[&path]));
-    let markers: Vec<String> = (0..16).map(|index| format!("request-{index}")).collect();
-    let tasks: Vec<_> = markers
-        .iter()
-        .cloned()
-        .map(|marker| {
-            let pipeline = Arc::clone(&pipeline);
-            tokio::spawn(async move { round_trip(&pipeline, &marker).await })
-        })
-        .collect();
-    for task in tasks {
-        task.await.unwrap();
-    }
-    for marker in &markers {
-        assert_eq!(counts(&seen, marker), [1, 2, 3], "{marker} saw another request's table");
-    }
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn two_policy_instances_keep_separate_tables_and_admission() {
-    let (_dir, path, seen) = counter_policy("test/state-counter-two");
-    let (_other_dir, other_path, other_seen) = counter_policy("test/state-counter-two-b");
-    let pipeline = pipeline(&[&path, &other_path]);
-    round_trip(&pipeline, "both").await;
-    assert_eq!(counts(&seen, "both"), [1, 2, 3], "the first instance");
-    assert_eq!(
-        counts(&other_seen, "both"),
-        [1, 2, 3],
-        "the second instance runs every hook on its own table, not skipping because the first admitted"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_lost_table_fails_later_hooks_instead_of_starting_fresh() {
-    let (_dir, path, seen) = counter_policy("test/state-counter-lost");
-    let filter = PolicyFilter::new(config(path), None).unwrap();
-    let mut req = make_request(Method::GET, "/");
-    req.headers.insert("x-marker", HeaderValue::from_static("lost"));
-    let mut ctx = make_filter_context(&req);
-    ctx.current_filter_id = Some(0);
-    assert!(matches!(
-        filter.on_request(&mut ctx).await.unwrap(),
-        FilterAction::Continue
-    ));
-
-    // What a timed-out response dispatch leaves behind.
-    state_mut(&mut ctx).take_table().unwrap();
-    let mut response = crate::test_utils::make_response();
-    ctx.response_header = Some(&mut response);
-    let error = filter
-        .on_response(&mut ctx)
-        .await
-        .expect_err("the response must fail under failure_mode");
-    assert!(error.to_string().contains("context table was lost"), "got {error}");
-    assert_eq!(counts(&seen, "lost"), [1, 2], "no response hook ran with a fresh table");
 }

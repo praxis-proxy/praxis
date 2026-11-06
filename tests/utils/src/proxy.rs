@@ -92,6 +92,8 @@ pub const PRAXIS_BIN_ENV: &str = "PRAXIS_BIN";
 /// `--version` reports a different network backend or Policy selection than
 /// this harness was built with, or if `cargo build` for the `praxis` binary fails or the binary
 /// is still missing or mismatched afterward.
+///
+/// [`PRAXIS_BIN_ENV`]: PRAXIS_BIN_ENV
 pub fn praxis_bin() -> PathBuf {
     if let Some(explicit) = std::env::var_os(PRAXIS_BIN_ENV) {
         let path = PathBuf::from(explicit);
@@ -138,10 +140,7 @@ fn resolve_praxis_bin_path() -> PathBuf {
     )
 }
 
-/// The target directory the fallback build uses: cargo's, with a `hyper`
-/// subdirectory when this harness tests the hyper backend and a `policy`
-/// subdirectory below that for a Policy selection other than the default
-/// bundle, so no build's binary overwrites another's.
+/// Target directory for fallback builds, isolated by backend and Policy profile.
 fn build_target_dir() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
@@ -157,9 +156,7 @@ fn build_target_dir() -> PathBuf {
     if default_bundle { target } else { target.join("policy") }
 }
 
-/// The Policy features this harness was built with. Each one forwards the
-/// server feature of the same name, so this is the selection a subprocess
-/// proxy must carry. An alias appears with what it implies.
+/// Policy features this harness and its subprocess proxies must carry.
 const POLICY_FEATURES: &[(&str, bool)] = &[
     ("policy-api-key", cfg!(feature = "policy-api-key")),
     ("policy-api-key-fips", cfg!(feature = "policy-api-key-fips")),
@@ -222,11 +219,7 @@ fn effective_policy_features<'name>(names: &[&'name str]) -> std::collections::B
     effective
 }
 
-/// The `cargo build` arguments for the subprocess proxy. The pingora build of
-/// the default bundle is the binary's default build; anything else starts
-/// from no defaults and names the backend, the standard non-Policy features
-/// and exactly this harness's Policy selection, so a lean or FIPS selection
-/// never falls back to the default bundle.
+/// Build arguments matching this harness's backend and Policy feature selection.
 fn backend_build_args() -> Vec<String> {
     let policy = selected_policy_features();
     let is_default_bundle = effective_policy_features(&policy) == effective_policy_features(&["policy-builtins"]);

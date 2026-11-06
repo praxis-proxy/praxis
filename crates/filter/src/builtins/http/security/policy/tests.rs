@@ -1794,15 +1794,6 @@ async fn request_without_auth_header_rejects_401() {
     }
 }
 
-/// When a downstream pre-read ran `on_request_body` first and kept the
-/// admitted identity (having stripped the inbound credential for the
-/// upstream), the early `identity_gate` must skip rather than re-resolve
-/// against the now-missing headers. A credential-less request that would
-/// normally 401 here passes because the body phase is authoritative.
-///
-/// The routes-only config is what puts `on_request` on the `identity_gate`
-/// path, and the kept identity is what a body phase that already
-/// resolved and enforced identity leaves behind.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_skips_when_body_phase_already_resolved() {
     use ppe::praxis_policy_core::identity::{IdentityPayload, TokenSource};
@@ -1822,10 +1813,6 @@ async fn identity_gate_skips_when_body_phase_already_resolved() {
     );
 }
 
-/// Control for `identity_gate_skips_when_body_phase_already_resolved`: the
-/// same credential-less request with no admitted identity must run
-/// the gate and reject — proving the skip (not something else) is what flips
-/// the outcome to `Continue`.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_rejects_when_identity_not_yet_resolved() {
     let (_dir, path) = write_cel_policy_config();
@@ -2078,8 +2065,6 @@ async fn dotted_role_does_not_satisfy_its_prefix() {
     );
 }
 
-/// An operand that settles `&` or `|` decides the rule even when the other
-/// operand is unorderable (a string subject compared with a number).
 #[tokio::test(flavor = "multi_thread")]
 async fn apl_settled_operand_decides_past_an_unorderable_one() {
     for rule in [
@@ -2096,11 +2081,9 @@ async fn apl_settled_operand_decides_past_an_unorderable_one() {
     }
 }
 
-/// With no settling operand an unorderable comparison still fails closed.
 #[tokio::test(flavor = "multi_thread")]
 async fn apl_unsettled_unorderable_operand_fails_closed() {
     for rule in [
-        // Both deny only when the comparison is unorderable, not a boolean.
         r#""subject.id > 10: deny('blocked', 'blocked')""#,
         r#""subject.id <= 10: deny('blocked', 'blocked')""#,
         r#""require(subject.id <= 10 | role.guest)""#,
@@ -7306,53 +7289,6 @@ async fn cancelling_suspended_policy_releases_payload_and_next_request_is_clean(
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
-/// A host plugin whose policy hook fails with a crypto backend error.
-struct CryptoFailingPlugin {
-    cfg: PluginConfig,
-}
-
-impl Plugin for CryptoFailingPlugin {
-    fn config(&self) -> &PluginConfig {
-        &self.cfg
-    }
-}
-
-/// Type-erased handler that reports a crypto failure instead of a decision.
-struct CryptoFailingHandler;
-
-#[async_trait::async_trait]
-impl AnyHookHandler for CryptoFailingHandler {
-    async fn invoke(
-        &self,
-        _payload: &dyn ppe::prelude::PluginPayload,
-        _extensions: &Extensions,
-        _ctx: &mut PluginContext,
-    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
-        Err(PluginError::Crypto {
-            source: ppe::CryptoError::DigestLength,
-        }
-        .boxed())
-    }
-
-    fn hook_type_name(&self) -> &'static str {
-        <CmfHook as ppe::prelude::HookTypeDef>::NAME
-    }
-}
-
-/// Factory for [`CryptoFailingPlugin`].
-struct CryptoFailingFactory;
-
-impl PluginFactory for CryptoFailingFactory {
-    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
-        let plugin = Arc::new(CryptoFailingPlugin { cfg: config.clone() });
-        let adapter: Arc<dyn AnyHookHandler> = Arc::new(CryptoFailingHandler);
-        Ok(PluginInstance {
-            plugin,
-            handlers: vec![("cmf.tool_pre_invoke", adapter)],
-        })
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_crypto_failure_in_a_policy_hook_denies_the_request() {
     register_policy_plugin_factory("test/crypto-failing", Arc::new(|| Box::new(CryptoFailingFactory)));
@@ -8057,4 +7993,58 @@ context_headers:
         Some("x-ext-agent-id")
     );
     cfg.validate_context_headers().unwrap();
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// A host plugin whose policy hook fails with a crypto backend error.
+struct CryptoFailingPlugin {
+    /// Configuration of the failing test plugin.
+    cfg: PluginConfig,
+}
+
+impl Plugin for CryptoFailingPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+/// Type-erased handler that reports a crypto failure instead of a decision.
+struct CryptoFailingHandler;
+
+#[async_trait::async_trait]
+impl AnyHookHandler for CryptoFailingHandler {
+    async fn invoke(
+        &self,
+        _payload: &dyn ppe::prelude::PluginPayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+        Err(PluginError::Crypto {
+            source: ppe::CryptoError::DigestLength,
+        }
+        .boxed())
+    }
+
+    fn hook_type_name(&self) -> &'static str {
+        <CmfHook as ppe::prelude::HookTypeDef>::NAME
+    }
+}
+
+/// Factory for [`CryptoFailingPlugin`].
+///
+/// [`CryptoFailingPlugin`]: CryptoFailingPlugin
+struct CryptoFailingFactory;
+
+impl PluginFactory for CryptoFailingFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(CryptoFailingPlugin { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(CryptoFailingHandler);
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_pre_invoke", adapter)],
+        })
+    }
 }

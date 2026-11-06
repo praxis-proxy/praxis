@@ -39,7 +39,7 @@ use crate::{
 };
 
 // -----------------------------------------------------------------------------
-// Fixtures
+// Constants
 // -----------------------------------------------------------------------------
 
 /// The key the fixture directory knows; also the secret the log and body
@@ -47,6 +47,8 @@ use crate::{
 const TEST_API_KEY: &str = "sk-test-alice";
 
 /// SHA-256 of [`TEST_API_KEY`].
+///
+/// [`TEST_API_KEY`]: TEST_API_KEY
 const TEST_API_KEY_DIGEST: &str = "sha256:4d692786b022a5d5a48381dcaf1e5e346366feb5579a1d699de2991d153b05f9";
 
 /// A pure-L7 policy authenticating with an API key at `{credential}` and
@@ -82,70 +84,21 @@ const HEADER_CREDENTIAL: &str = "{ kind: header, name: X-Api-Key }";
 /// Rules admitting any authenticated caller.
 const AUTHENTICATED: &str = "    pre_invocation:\n      - \"require(authenticated)\"";
 
-/// A filter over [`API_KEY_POLICY`] with `credential` and `rules`; the
-/// returned directory holds the policy and key file.
-fn api_key_filter(credential: &str, rules: &str) -> (TempDir, PolicyFilter) {
-    api_key_filter_trusting(credential, rules, &[])
-}
+/// A delegator plugin naming the `token.delegate` hook, enough to parse.
+const DELEGATOR: &str = "  - name: exchange
+    kind: delegator/oauth
+    hooks: [token.delegate]
+    config: {}
+";
 
-/// [`api_key_filter`] trusting `trusted_proxies` to report the client.
-fn api_key_filter_trusting(credential: &str, rules: &str, trusted_proxies: &[&str]) -> (TempDir, PolicyFilter) {
-    let dir = TempDir::new().expect("create tempdir");
-    let keys = dir.path().join("keys.yaml");
-    std::fs::write(
-        &keys,
-        format!("keys:\n  - hash: \"{TEST_API_KEY_DIGEST}\"\n    user: alice\n"),
-    )
-    .expect("write keys.yaml");
-    let yaml = API_KEY_POLICY
-        .replace("{credential}", credential)
-        .replace("{rules}", rules)
-        .replace("{keys}", keys.to_str().expect("a UTF-8 tempdir path"));
-    let path = dir.path().join("policy.yaml");
-    std::fs::write(&path, yaml).expect("write policy.yaml");
-    let mut cfg = filter_config(path.to_str().expect("utf8").to_owned());
-    cfg.trusted_proxies = trusted_proxies.iter().map(|cidr| (*cidr).to_owned()).collect();
-    let filter = PolicyFilter::new(cfg, None).expect("the API-key policy builds");
-    (dir, filter)
-}
+/// The issuer of the `DPoP`-bound fixture tokens.
+const DPOP_ISSUER: &str = "https://dpop.idp.test";
 
-/// A `GET uri` request carrying `headers`.
-fn request(uri: &str, headers: &[(&'static str, &str)]) -> crate::Request {
-    let mut req = make_request(Method::GET, uri);
-    for (name, value) in headers {
-        req.headers
-            .insert(*name, HeaderValue::from_str(value).expect("header value"));
-    }
-    req
-}
-
-/// Run `on_request` over `req` and return the rejection, if any.
-async fn header_phase(filter: &PolicyFilter, req: &crate::Request, tls: bool) -> Option<Rejection> {
-    let mut ctx = make_filter_context(req);
-    ctx.downstream_tls = tls;
-    match filter.on_request(&mut ctx).await.expect("the filter runs") {
-        FilterAction::Continue => None,
-        FilterAction::Reject(rejection) => Some(rejection),
-        other => panic!("the header phase must Continue or Reject, got {other:?}"),
-    }
-}
-
-/// The `X-Policy-Violation` code on `rejection`.
-fn violation(rejection: &Rejection) -> Option<&str> {
-    rejection
-        .headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("X-Policy-Violation"))
-        .map(|(_, value)| value.as_str())
-}
-
-/// The rejection body as text.
-fn body_text(rejection: &Rejection) -> String {
-    String::from_utf8_lossy(rejection.body.as_deref().unwrap_or_default()).into_owned()
-}
+/// The URL `DPoP` clients address.
+const EXTERNAL_BASE_URL: &str = "https://api.praxis.test";
 
 // -----------------------------------------------------------------------------
-// Query credentials
+// Tests
 // -----------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
@@ -220,8 +173,6 @@ async fn the_scheme_comes_from_downstream_tls() {
     assert_eq!(violation(&rejection), Some("test.plaintext"));
 }
 
-/// A trusted proxy chain reports the client to policy; an untrusted peer
-/// cannot.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trusted_proxy_chain_sets_the_client_address() {
     let rules = "    pre_invocation:\n      - \"require(authenticated)\"\n      - \"http.client_address != '203.0.113.7': deny('other client', 'test.other_client')\"";
@@ -249,8 +200,6 @@ async fn a_trusted_proxy_chain_sets_the_client_address() {
     }
 }
 
-/// Without a filter ID the facts are captured per call, still resolving the
-/// client through the trusted proxies.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trusted_proxy_chain_sets_the_client_address_without_a_filter_id() {
     let rules = "    pre_invocation:\n      - \"require(authenticated)\"\n      - \"http.client_address != '203.0.113.7': deny('other client', 'test.other_client')\"";
@@ -271,8 +220,6 @@ async fn a_trusted_proxy_chain_sets_the_client_address_without_a_filter_id() {
     );
 }
 
-/// The response hook evaluates the query the client sent, even after a later
-/// filter rewrote the URL and stripped the credential.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_original_query_reaches_the_response_hook() {
     let query = format!("api_key={TEST_API_KEY}&view=full");
@@ -305,8 +252,6 @@ async fn the_original_query_reaches_the_response_hook() {
     assert_eq!(violation(&rejection), Some("test.query_seen"));
 }
 
-/// The body-phase CMF hook of an entity route evaluates the query the header
-/// phase first saw.
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "linear header-then-body lifecycle")]
 async fn the_original_query_reaches_a_later_cmf_hook() {
@@ -350,49 +295,6 @@ async fn the_original_query_reaches_a_later_cmf_hook() {
         panic!("the tool rule must see the original query, got {action:?}");
     };
     assert_eq!(violation(&rejection), Some("test.query_seen"));
-}
-
-// -----------------------------------------------------------------------------
-// Delegation beside an unstrippable credential
-// -----------------------------------------------------------------------------
-
-/// Extensions carrying an inbound credential at `source` and one delegated
-/// token for `Authorization`.
-fn delegation_extensions(source: ppe::praxis_policy_core::extensions::Credential) -> ppe::prelude::Extensions {
-    delegation_extensions_to(source, "Authorization")
-}
-
-/// Extensions carrying an inbound credential at `source` and one delegated
-/// token for `outbound_header`.
-fn delegation_extensions_to(
-    source: ppe::praxis_policy_core::extensions::Credential,
-    outbound_header: &str,
-) -> ppe::prelude::Extensions {
-    use chrono::{Duration, Utc};
-    use ppe::praxis_policy_core::extensions::raw_credentials::{
-        DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind,
-        TokenRole,
-    };
-
-    let mut creds = RawCredentialsExtension::default();
-    creds.inbound_tokens.insert(
-        TokenRole::User,
-        RawInboundToken::new(TEST_API_KEY, source, TokenKind::Opaque),
-    );
-    creds.delegated_tokens.insert(
-        DelegationKey::new(DelegationMode::OnBehalfOfUser, "api", Vec::new()).with_subject_id("alice"),
-        RawDelegatedToken::new(
-            "delegated-secret",
-            outbound_header,
-            "api",
-            Vec::<String>::new(),
-            Utc::now() + Duration::hours(1),
-        ),
-    );
-    ppe::prelude::Extensions {
-        raw_credentials: Some(Arc::new(creds)),
-        ..Default::default()
-    }
 }
 
 #[test]
@@ -480,13 +382,6 @@ fn delegation_beside_a_header_credential_strips_it() {
     );
 }
 
-/// A delegator plugin naming the `token.delegate` hook, enough to parse.
-const DELEGATOR: &str = "  - name: exchange
-    kind: delegator/oauth
-    hooks: [token.delegate]
-    config: {}
-";
-
 #[test]
 fn a_query_credential_beside_delegation_is_refused_at_construction() {
     let yaml = API_KEY_POLICY
@@ -517,18 +412,6 @@ fn a_query_credential_beside_delegation_is_refused_at_construction() {
     );
 }
 
-// -----------------------------------------------------------------------------
-// DPoP URL binding
-// -----------------------------------------------------------------------------
-
-/// The issuer of the `DPoP`-bound fixture tokens.
-const DPOP_ISSUER: &str = "https://dpop.idp.test";
-
-/// The URL `DPoP` clients address.
-const EXTERNAL_BASE_URL: &str = "https://api.praxis.test";
-
-/// A proof whose `htu` names another host, sent with a `Host` that matches it,
-/// is denied: the URL is checked against `external_base_url`, never `Host`.
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
 async fn a_dpop_proof_for_a_spoofed_host_is_denied() {
@@ -585,6 +468,115 @@ global:
         header_phase(&filter, &bound, true).await.is_none(),
         "a proof for the external base URL verifies whatever Host says"
     );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// A filter over [`API_KEY_POLICY`] with `credential` and `rules`; the
+/// returned directory holds the policy and key file.
+///
+/// [`API_KEY_POLICY`]: API_KEY_POLICY
+fn api_key_filter(credential: &str, rules: &str) -> (TempDir, PolicyFilter) {
+    api_key_filter_trusting(credential, rules, &[])
+}
+
+/// [`api_key_filter`] trusting `trusted_proxies` to report the client.
+///
+/// [`api_key_filter`]: api_key_filter
+fn api_key_filter_trusting(credential: &str, rules: &str, trusted_proxies: &[&str]) -> (TempDir, PolicyFilter) {
+    let dir = TempDir::new().expect("create tempdir");
+    let keys = dir.path().join("keys.yaml");
+    std::fs::write(
+        &keys,
+        format!("keys:\n  - hash: \"{TEST_API_KEY_DIGEST}\"\n    user: alice\n"),
+    )
+    .expect("write keys.yaml");
+    let yaml = API_KEY_POLICY
+        .replace("{credential}", credential)
+        .replace("{rules}", rules)
+        .replace("{keys}", keys.to_str().expect("a UTF-8 tempdir path"));
+    let path = dir.path().join("policy.yaml");
+    std::fs::write(&path, yaml).expect("write policy.yaml");
+    let mut cfg = filter_config(path.to_str().expect("utf8").to_owned());
+    cfg.trusted_proxies = trusted_proxies.iter().map(|cidr| (*cidr).to_owned()).collect();
+    let filter = PolicyFilter::new(cfg, None).expect("the API-key policy builds");
+    (dir, filter)
+}
+
+/// A `GET uri` request carrying `headers`.
+fn request(uri: &str, headers: &[(&'static str, &str)]) -> crate::Request {
+    let mut req = make_request(Method::GET, uri);
+    for (name, value) in headers {
+        req.headers
+            .insert(*name, HeaderValue::from_str(value).expect("header value"));
+    }
+    req
+}
+
+/// Run `on_request` over `req` and return the rejection, if any.
+async fn header_phase(filter: &PolicyFilter, req: &crate::Request, tls: bool) -> Option<Rejection> {
+    let mut ctx = make_filter_context(req);
+    ctx.downstream_tls = tls;
+    match filter.on_request(&mut ctx).await.expect("the filter runs") {
+        FilterAction::Continue => None,
+        FilterAction::Reject(rejection) => Some(rejection),
+        other => panic!("the header phase must Continue or Reject, got {other:?}"),
+    }
+}
+
+/// The `X-Policy-Violation` code on `rejection`.
+fn violation(rejection: &Rejection) -> Option<&str> {
+    rejection
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("X-Policy-Violation"))
+        .map(|(_, value)| value.as_str())
+}
+
+/// The rejection body as text.
+fn body_text(rejection: &Rejection) -> String {
+    String::from_utf8_lossy(rejection.body.as_deref().unwrap_or_default()).into_owned()
+}
+
+/// Extensions carrying an inbound credential at `source` and one delegated
+/// token for `Authorization`.
+fn delegation_extensions(source: ppe::praxis_policy_core::extensions::Credential) -> ppe::prelude::Extensions {
+    delegation_extensions_to(source, "Authorization")
+}
+
+/// Extensions carrying an inbound credential at `source` and one delegated
+/// token for `outbound_header`.
+fn delegation_extensions_to(
+    source: ppe::praxis_policy_core::extensions::Credential,
+    outbound_header: &str,
+) -> ppe::prelude::Extensions {
+    use chrono::{Duration, Utc};
+    use ppe::praxis_policy_core::extensions::raw_credentials::{
+        DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken, RawInboundToken, TokenKind,
+        TokenRole,
+    };
+
+    let mut creds = RawCredentialsExtension::default();
+    creds.inbound_tokens.insert(
+        TokenRole::User,
+        RawInboundToken::new(TEST_API_KEY, source, TokenKind::Opaque),
+    );
+    creds.delegated_tokens.insert(
+        DelegationKey::new(DelegationMode::OnBehalfOfUser, "api", Vec::new()).with_subject_id("alice"),
+        RawDelegatedToken::new(
+            "delegated-secret",
+            outbound_header,
+            "api",
+            Vec::<String>::new(),
+            Utc::now() + Duration::hours(1),
+        ),
+    );
+    ppe::prelude::Extensions {
+        raw_credentials: Some(Arc::new(creds)),
+        ..Default::default()
+    }
 }
 
 /// Access-token claims bound to `client`.
@@ -665,13 +657,10 @@ fn fresh_jti() -> String {
     URL_SAFE_NO_PAD.encode(random)
 }
 
-// -----------------------------------------------------------------------------
-// Log capture
-// -----------------------------------------------------------------------------
-
 /// Run `run` with every event on this thread, at every level, formatted into
 /// the returned string.
 fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+    /// Test log capture buffer.
     #[derive(Clone, Default)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
 

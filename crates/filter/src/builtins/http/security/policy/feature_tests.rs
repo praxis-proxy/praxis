@@ -13,6 +13,10 @@ use super::{
     filter::{PolicyFilter, declares_rate_limits},
 };
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
 /// A JWT identity policy; its key, RFC 7515 appendix A.3's P-256 public
 /// key, never verifies anything here. ES256 loads on every JWT backend.
 const JWT_POLICY: &str = r#"plugins:
@@ -82,6 +86,10 @@ const LIMITER_PLUGIN: &str =
 
 /// A policy with no plugin at all, which every selection can load.
 const EMPTY_POLICY: &str = "plugins: []\n";
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[test]
 fn every_selection_loads_a_policy_without_plugins() {
@@ -224,6 +232,8 @@ pub(super) fn write_policy(yaml: &str) -> (TempDir, String) {
 }
 
 /// Write [`API_KEY_POLICY`] beside an empty key file.
+///
+/// [`API_KEY_POLICY`]: API_KEY_POLICY
 fn write_api_key_policy() -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let keys = dir.path().join("keys.yaml");

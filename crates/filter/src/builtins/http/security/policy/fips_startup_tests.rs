@@ -69,7 +69,7 @@ global:
 "#;
 
 // -----------------------------------------------------------------------------
-// Parent tests
+// Tests
 // -----------------------------------------------------------------------------
 
 #[test]
@@ -88,9 +88,6 @@ fn jwt_without_fips_default_properties_fails_to_load() {
     };
     let dir = tempfile::TempDir::new().expect("create tempdir");
     let conf = dir.path().join("fips-without-defaults.cnf");
-    // FIPS loaded beside an active `default` provider, with no
-    // `default_properties`: SHA-256 works, but unqualified fetches can leave
-    // the FIPS module.
     let text = std::fs::read_to_string(&fips_conf).expect("read the FIPS provider config");
     let relaxed: String = text
         .lines()
@@ -122,11 +119,6 @@ fn reloading_a_fips_jwt_policy_twice_does_not_conflict() {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Child entry point
-// -----------------------------------------------------------------------------
-
-/// The scenario body, run only inside a child spawned by [`run_child`].
 #[test]
 fn policy_fips_child() {
     let Ok(scenario) = std::env::var(CHILD_ENV) else {
@@ -145,6 +137,10 @@ fn policy_fips_child() {
         other => panic!("unknown FIPS child scenario {other}"),
     }
 }
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
 
 /// Engine initialization refuses a backend with no SHA-256.
 fn child_no_provider() {
@@ -185,10 +181,6 @@ fn child_double_reload() {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Test Utilities
-// -----------------------------------------------------------------------------
-
 /// The FIPS provider config, or `None` after printing a counted skip.
 #[cfg(feature = "policy-jwt-openssl-fips")]
 #[expect(clippy::print_stdout, reason = "the skip line is how a run counts what it skipped")]
@@ -217,6 +209,8 @@ fn fips_host_declared() -> bool {
 }
 
 /// Run [`policy_fips_child`] for `scenario` under `openssl_conf`.
+///
+/// [`policy_fips_child`]: policy_fips_child
 #[expect(clippy::print_stdout, reason = "the ran line is how a run counts what it ran")]
 fn run_child(scenario: &str, openssl_conf: &Path) {
     let output = Command::new(std::env::current_exe().expect("test executable path"))
@@ -248,6 +242,8 @@ fn construction_error(config_path: String) -> String {
 
 /// Write [`JWT_POLICY`] beside a fresh RSA-2048 public key; the returned
 /// directories must outlive construction.
+///
+/// [`JWT_POLICY`]: JWT_POLICY
 #[cfg(feature = "policy-jwt-openssl-fips")]
 fn write_jwt_policy() -> ([tempfile::TempDir; 2], String) {
     let keys = tempfile::TempDir::new().expect("create tempdir");
@@ -259,7 +255,7 @@ fn write_jwt_policy() -> ([tempfile::TempDir; 2], String) {
     ([keys, policy], path)
 }
 
-/// A `jsonwebtoken` provider that is not Policy's.
+/// Test utilities for installing a rival `jsonwebtoken` provider.
 #[cfg(feature = "policy-jwt-openssl-fips")]
 mod rival {
     use jsonwebtoken::{
@@ -276,6 +272,8 @@ mod rival {
     };
 
     /// Install [`RIVAL`] as the process default.
+    ///
+    /// [`RIVAL`]: RIVAL
     pub(super) fn install() {
         assert!(RIVAL.install_default().is_ok(), "the rival provider must install first");
     }

@@ -7,6 +7,10 @@
 
 use super::{assess_fips, fips_crypto_blocker};
 
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
 #[test]
 fn an_unsafe_policy_report_blocks_fips() {
     let report = ppe::crypto_capability_report();

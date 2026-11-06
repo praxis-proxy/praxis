@@ -34,57 +34,9 @@ use crate::{
     test_utils::{make_filter_context, make_request},
 };
 
-/// Number of identity resolutions.
-type Resolutions = Arc<Mutex<usize>>;
-
-/// A host identity resolver taking the subject from `x-user`.
-struct Who {
-    /// Plugin config.
-    cfg: PluginConfig,
-    /// Shared resolution count.
-    resolutions: Resolutions,
-}
-
-impl Plugin for Who {
-    fn config(&self) -> &PluginConfig {
-        &self.cfg
-    }
-}
-
-impl HookHandler<IdentityHook> for Who {
-    async fn handle(
-        &self,
-        payload: &IdentityPayload,
-        _extensions: &Extensions,
-        _ctx: &mut PluginContext,
-    ) -> PluginResult<IdentityPayload> {
-        *self.resolutions.lock().unwrap() += 1;
-        let mut resolved = payload.clone();
-        resolved.subject = payload.headers().get("x-user").map(|id| SubjectExtension {
-            id: Some(id.clone()),
-            ..Default::default()
-        });
-        PluginResult::modify_payload(resolved)
-    }
-}
-
-/// Builds [`Who`]s sharing one count.
-struct WhoFactory(Resolutions);
-
-impl PluginFactory for WhoFactory {
-    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
-        let plugin = Arc::new(Who {
-            cfg: config.clone(),
-            resolutions: Arc::clone(&self.0),
-        });
-        let identity: Arc<dyn AnyHookHandler> =
-            Arc::new(TypedHandlerAdapter::<IdentityHook, _>::new(Arc::clone(&plugin)));
-        Ok(PluginInstance {
-            plugin,
-            handlers: vec![(HOOK_IDENTITY_RESOLVE, identity)],
-        })
-    }
-}
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
 
 /// The identity plugin every policy here authenticates with.
 const WHO: &str = "plugins:
@@ -96,71 +48,6 @@ global:
   authentication: [who]
 ";
 
-/// A policy of [`WHO`] plus `rest`, with a fresh `kind`, and its count.
-fn policy(kind: &'static str, rest: &str) -> (TempDir, String, Resolutions) {
-    let resolutions: Resolutions = Arc::new(Mutex::new(0));
-    let count = Arc::clone(&resolutions);
-    register_policy_plugin_factory(kind, Arc::new(move || Box::new(WhoFactory(Arc::clone(&count)))));
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("policy.yaml");
-    std::fs::write(&path, format!("{}{rest}", WHO.replace("{kind}", kind))).unwrap();
-    (dir, path.to_str().unwrap().to_owned(), resolutions)
-}
-
-/// A filter over `path` with `llm` options.
-fn filter_with(path: String, llm: LlmOptions) -> PolicyFilter {
-    PolicyFilter::new(
-        PolicyFilterConfig {
-            config_path: path,
-            allow_private_idp: false,
-            trusted_private_endpoints: vec![],
-            trusted_proxies: vec![],
-            body_access: BodyAccessMode::ReadOnly,
-            require_protocol_metadata: true,
-            init_timeout_secs: 30,
-            max_buffer_bytes: 10_485_760,
-            llm,
-            context_headers: HashMap::default(),
-            context_meta: ContextMetaConfig::default(),
-        },
-        None,
-    )
-    .unwrap()
-}
-
-/// A filter over `path` with default options.
-fn filter(path: String) -> PolicyFilter {
-    filter_with(path, LlmOptions::default())
-}
-
-/// A `method` request to `path` as `user`.
-fn request(method: Method, path: &str, user: &str) -> crate::Request {
-    let mut req = make_request(method, path);
-    req.headers.insert("x-user", HeaderValue::from_str(user).unwrap());
-    req
-}
-
-/// A context for `req` as filter instance 0.
-fn context(req: &crate::Request) -> HttpFilterContext<'_> {
-    let mut ctx = make_filter_context(req);
-    ctx.current_filter_id = Some(0);
-    ctx
-}
-
-/// Run the bodyless body phase.
-async fn body_phase(filter: &PolicyFilter, ctx: &mut HttpFilterContext<'_>) -> FilterAction {
-    filter.on_request_body(ctx, &mut None, true).await.unwrap()
-}
-
-/// The status of a rejection, or `None` when admitted.
-fn status(action: &FilterAction) -> Option<u16> {
-    match action {
-        FilterAction::Reject(rejection) => Some(rejection.status),
-        FilterAction::BodyDone => None,
-        other => panic!("unexpected action {other:?}"),
-    }
-}
-
 /// Global rule admitting only `alice`, beside an inference route.
 const ALICE_ONLY: &str = "  authorization:
     pre_invocation:
@@ -171,6 +58,20 @@ routes:
       pre_invocation:
         - \"allow\"
 ";
+
+/// Request assertions alone, with no entity routes.
+const L7_ASSERTIONS: &str = "  assertions:
+    request:
+      headers:
+        - name: x-auth-user-id
+          from: subject.id
+      strip:
+        - authorization
+";
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_bodyless_method_runs_the_global_http_rules() {
@@ -310,16 +211,6 @@ routes:
     );
 }
 
-/// Request assertions alone, with no entity routes.
-const L7_ASSERTIONS: &str = "  assertions:
-    request:
-      headers:
-        - name: x-auth-user-id
-          from: subject.id
-      strip:
-        - authorization
-";
-
 #[tokio::test(flavor = "multi_thread")]
 async fn an_assertions_only_l7_policy_applies_its_contract_in_both_phases() {
     let (_dir, path, _count) = policy("test/l7-assertions", L7_ASSERTIONS);
@@ -453,4 +344,129 @@ fn identity_only_fallbacks_beside_http_rules_warn_at_startup() {
         "{warned:?}"
     );
     assert!(identity_only_fallback_warnings(&unclassified, false, true).is_empty());
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// Number of identity resolutions.
+type Resolutions = Arc<Mutex<usize>>;
+
+/// A host identity resolver taking the subject from `x-user`.
+struct Who {
+    /// Plugin config.
+    cfg: PluginConfig,
+    /// Shared resolution count.
+    resolutions: Resolutions,
+}
+
+impl Plugin for Who {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<IdentityHook> for Who {
+    async fn handle(
+        &self,
+        payload: &IdentityPayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<IdentityPayload> {
+        *self.resolutions.lock().unwrap() += 1;
+        let mut resolved = payload.clone();
+        resolved.subject = payload.headers().get("x-user").map(|id| SubjectExtension {
+            id: Some(id.clone()),
+            ..Default::default()
+        });
+        PluginResult::modify_payload(resolved)
+    }
+}
+
+/// Builds [`Who`]s sharing one count.
+///
+/// [`Who`]: Who
+struct WhoFactory(Resolutions);
+
+impl PluginFactory for WhoFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(Who {
+            cfg: config.clone(),
+            resolutions: Arc::clone(&self.0),
+        });
+        let identity: Arc<dyn AnyHookHandler> =
+            Arc::new(TypedHandlerAdapter::<IdentityHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![(HOOK_IDENTITY_RESOLVE, identity)],
+        })
+    }
+}
+
+/// A policy of [`WHO`] plus `rest`, with a fresh `kind`, and its count.
+///
+/// [`WHO`]: WHO
+fn policy(kind: &'static str, rest: &str) -> (TempDir, String, Resolutions) {
+    let resolutions: Resolutions = Arc::new(Mutex::new(0));
+    let count = Arc::clone(&resolutions);
+    register_policy_plugin_factory(kind, Arc::new(move || Box::new(WhoFactory(Arc::clone(&count)))));
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("policy.yaml");
+    std::fs::write(&path, format!("{}{rest}", WHO.replace("{kind}", kind))).unwrap();
+    (dir, path.to_str().unwrap().to_owned(), resolutions)
+}
+
+/// A filter over `path` with `llm` options.
+fn filter_with(path: String, llm: LlmOptions) -> PolicyFilter {
+    PolicyFilter::new(
+        PolicyFilterConfig {
+            config_path: path,
+            allow_private_idp: false,
+            trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
+            body_access: BodyAccessMode::ReadOnly,
+            require_protocol_metadata: true,
+            init_timeout_secs: 30,
+            max_buffer_bytes: 10_485_760,
+            llm,
+            context_headers: HashMap::default(),
+            context_meta: ContextMetaConfig::default(),
+        },
+        None,
+    )
+    .unwrap()
+}
+
+/// A filter over `path` with default options.
+fn filter(path: String) -> PolicyFilter {
+    filter_with(path, LlmOptions::default())
+}
+
+/// A `method` request to `path` as `user`.
+fn request(method: Method, path: &str, user: &str) -> crate::Request {
+    let mut req = make_request(method, path);
+    req.headers.insert("x-user", HeaderValue::from_str(user).unwrap());
+    req
+}
+
+/// A context for `req` as filter instance 0.
+fn context(req: &crate::Request) -> HttpFilterContext<'_> {
+    let mut ctx = make_filter_context(req);
+    ctx.current_filter_id = Some(0);
+    ctx
+}
+
+/// Run the bodyless body phase.
+async fn body_phase(filter: &PolicyFilter, ctx: &mut HttpFilterContext<'_>) -> FilterAction {
+    filter.on_request_body(ctx, &mut None, true).await.unwrap()
+}
+
+/// The status of a rejection, or `None` when admitted.
+fn status(action: &FilterAction) -> Option<u16> {
+    match action {
+        FilterAction::Reject(rejection) => Some(rejection.status),
+        FilterAction::BodyDone => None,
+        other => panic!("unexpected action {other:?}"),
+    }
 }

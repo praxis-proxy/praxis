@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! What one `policy` filter instance knows about the request in flight: the
-//! captured request, how far admission got, the identity it resolved, and the
-//! Policy context table every hook invocation threads.
+//! Isolated admission and hook state for each request and policy filter.
 
 use std::sync::Arc;
 
@@ -18,10 +16,8 @@ use crate::filter::HttpFilterContext;
 
 /// Per-request state of one `policy` filter instance.
 ///
-/// Stored under the instance's filter ID, so two `policy` filters in one chain
-/// never share admission, identity or context table. A direct call outside a
-/// pipeline (no filter ID) keeps it in the request extensions instead. It
-/// dies with the request, so a new or child request starts fresh.
+/// Policy filters in one pipeline have independent admission, identity and
+/// context tables. New and child requests start with fresh state.
 #[derive(Default)]
 pub(super) struct RequestState {
     /// The request as this instance's first callback saw it.
@@ -76,6 +72,9 @@ impl RequestState {
     /// # Errors
     ///
     /// [`TableLost`] when an earlier invocation never returned it.
+    ///
+    /// [`Self::restore_table`]: Self::restore_table
+    /// [`TableLost`]: TableLost
     pub(super) fn take_table(&mut self) -> Result<Option<PluginContextTable>, TableLost> {
         match std::mem::replace(&mut self.table, TableSlot::Lost) {
             TableSlot::Fresh => Ok(None),

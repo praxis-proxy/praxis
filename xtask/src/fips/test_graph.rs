@@ -16,6 +16,9 @@
 //! 2. `aws-lc-rs` and `aws-lc-sys` are never in the test graph, whatever the reason;
 //! 3. any other denied crate there must be classified in [`TEST_ONLY`] with the reason it cannot reach the code under
 //!    test.
+//!
+//! [`TEST_ONLY`]: TEST_ONLY
+//! [`UNIFICATION_WATCHED`]: UNIFICATION_WATCHED
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -59,8 +62,7 @@ const UNIFICATION_WATCHED: &[&str] = &[
 const NEVER_IN_TESTS: &[&str] = &["aws-lc-rs", "aws-lc-sys"];
 
 /// Denied crates the unit-test graph may carry, each with why it cannot reach
-/// the code under test. A new entry needs a reason; the tests below refuse an
-/// empty one.
+/// the code under test. Every entry requires a non-empty isolation reason.
 const TEST_ONLY: &[(&str, &str)] = &[(
     "ring",
     "rcgen, a dev-dependency that generates test certificates; it signs with its own ring and is never installed \
@@ -105,6 +107,8 @@ pub(crate) fn section(report: &mut Report, context: &Context) {
 }
 
 /// The `-p` arguments for [`UNIT_TEST_PACKAGES`].
+///
+/// [`UNIT_TEST_PACKAGES`]: UNIT_TEST_PACKAGES
 fn unit_test_packages() -> Vec<&'static str> {
     UNIT_TEST_PACKAGES.iter().flat_map(|package| ["-p", package]).collect()
 }
@@ -250,19 +254,6 @@ fn denied_in_tests(name: &str) -> Option<Finding> {
 mod tests {
     use super::*;
 
-    /// A listing from `(name, features)` pairs.
-    fn of(entries: &[(&str, &[&str])]) -> Listing {
-        entries
-            .iter()
-            .map(|(name, features)| {
-                (
-                    (*name).to_owned(),
-                    features.iter().map(|feature| (*feature).to_owned()).collect(),
-                )
-            })
-            .collect()
-    }
-
     #[test]
     fn listings_parse_names_and_merge_features() {
         let text = "jsonwebtoken v11.1.0|default,use_pem\npraxis-policy v0.6.0 (/p)|fips\njsonwebtoken v11.1.0|use_pem \
@@ -355,5 +346,22 @@ mod tests {
             ],
             "each feature names the binary"
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// A listing from `(name, features)` pairs.
+    fn of(entries: &[(&str, &[&str])]) -> Listing {
+        entries
+            .iter()
+            .map(|(name, features)| {
+                (
+                    (*name).to_owned(),
+                    features.iter().map(|feature| (*feature).to_owned()).collect(),
+                )
+            })
+            .collect()
     }
 }

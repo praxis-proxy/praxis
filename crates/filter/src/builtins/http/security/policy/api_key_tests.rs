@@ -22,10 +22,16 @@ use crate::{
     test_utils::{make_filter_context, make_request},
 };
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
 /// The key the fixture's directory knows.
 const TEST_API_KEY: &str = "sk-test-alice";
 
 /// SHA-256 of [`TEST_API_KEY`].
+///
+/// [`TEST_API_KEY`]: TEST_API_KEY
 const TEST_API_KEY_DIGEST: &str = "sha256:4d692786b022a5d5a48381dcaf1e5e346366feb5579a1d699de2991d153b05f9";
 
 /// A policy whose only identity resolver is `identity/api-key`, requiring an
@@ -53,6 +59,39 @@ global:
     pre_invocation:
       - "require(authenticated)"
 "#;
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_known_api_key_resolves_identity() {
+    let (status, subject) = dispatch_api_key(Some(&format!("Bearer {TEST_API_KEY}"))).await;
+    assert_eq!(status, None, "a known key must Continue");
+    assert_eq!(
+        subject.as_deref(),
+        Some("alice"),
+        "a known key must publish its subject"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_api_key_is_rejected() {
+    let (status, subject) = dispatch_api_key(Some("Bearer sk-test-mallory")).await;
+    assert_eq!(status, Some(401), "an unknown key must be rejected 401");
+    assert_eq!(subject, None, "no identity is published on a rejection");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_api_key_is_rejected() {
+    let (status, subject) = dispatch_api_key(None).await;
+    assert_eq!(status, Some(401), "a request with no key must be rejected 401");
+    assert_eq!(subject, None, "no identity is published on a rejection");
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
 
 /// Dispatch one request and return its rejection status and resolved subject.
 async fn dispatch_api_key(authorization: Option<&str>) -> (Option<u16>, Option<String>) {
@@ -83,29 +122,4 @@ async fn dispatch_api_key(authorization: Option<&str>) -> (Option<u16>, Option<S
         .get::<AuthenticatedIdentity>()
         .map(|identity| identity.subject_id().to_owned());
     (status, subject)
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_known_api_key_resolves_identity() {
-    let (status, subject) = dispatch_api_key(Some(&format!("Bearer {TEST_API_KEY}"))).await;
-    assert_eq!(status, None, "a known key must Continue");
-    assert_eq!(
-        subject.as_deref(),
-        Some("alice"),
-        "a known key must publish its subject"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn an_unknown_api_key_is_rejected() {
-    let (status, subject) = dispatch_api_key(Some("Bearer sk-test-mallory")).await;
-    assert_eq!(status, Some(401), "an unknown key must be rejected 401");
-    assert_eq!(subject, None, "no identity is published on a rejection");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_missing_api_key_is_rejected() {
-    let (status, subject) = dispatch_api_key(None).await;
-    assert_eq!(status, Some(401), "a request with no key must be rejected 401");
-    assert_eq!(subject, None, "no identity is published on a rejection");
 }

@@ -137,49 +137,6 @@ mod tests {
 
     use super::{AddressSource, ClientAddress, resolve_client_address};
 
-    /// `text` as an address.
-    fn ip(text: &str) -> IpAddr {
-        text.parse().expect("address")
-    }
-
-    /// Headers with one `X-Forwarded-For` field line per entry of `lines`.
-    fn xff(lines: &[&str]) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        for line in lines {
-            headers.append("x-forwarded-for", line.parse().expect("header value"));
-        }
-        headers
-    }
-
-    /// The proxies the tests trust.
-    fn trusted() -> Vec<CidrRange> {
-        ["10.0.0.0/8", "fd00::/8"]
-            .into_iter()
-            .map(|cidr| CidrRange::parse(cidr).expect("cidr"))
-            .collect()
-    }
-
-    /// Resolve with [`trusted`] proxies.
-    fn resolve(lines: &[&str], peer: Option<&str>) -> Option<ClientAddress> {
-        resolve_client_address(&xff(lines), peer.map(ip), &trusted())
-    }
-
-    /// A peer-sourced address.
-    fn peer(text: &str) -> Option<ClientAddress> {
-        address(text, AddressSource::Peer)
-    }
-
-    /// A forwarded address.
-    fn forwarded(text: &str) -> Option<ClientAddress> {
-        address(text, AddressSource::Forwarded)
-    }
-
-    /// A resolved address, as the resolver returns it.
-    #[expect(clippy::unnecessary_wraps, reason = "compared with resolver output")]
-    fn address(text: &str, source: AddressSource) -> Option<ClientAddress> {
-        Some(ClientAddress { ip: ip(text), source })
-    }
-
     #[test]
     fn a_direct_peer_is_the_client() {
         assert_eq!(resolve(&[], Some("203.0.113.7")), peer("203.0.113.7"));
@@ -305,5 +262,54 @@ mod tests {
     #[test]
     fn no_peer_means_no_address() {
         assert_eq!(resolve(&["203.0.113.7"], None), None);
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// `text` as an address.
+    fn ip(text: &str) -> IpAddr {
+        text.parse().expect("address")
+    }
+
+    /// Headers with one `X-Forwarded-For` field line per entry of `lines`.
+    fn xff(lines: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for line in lines {
+            headers.append("x-forwarded-for", line.parse().expect("header value"));
+        }
+        headers
+    }
+
+    /// The proxies the tests trust.
+    fn trusted() -> Vec<CidrRange> {
+        ["10.0.0.0/8", "fd00::/8"]
+            .into_iter()
+            .map(|cidr| CidrRange::parse(cidr).expect("cidr"))
+            .collect()
+    }
+
+    /// Resolve with [`trusted`] proxies.
+    ///
+    /// [`trusted`]: trusted
+    fn resolve(lines: &[&str], peer: Option<&str>) -> Option<ClientAddress> {
+        resolve_client_address(&xff(lines), peer.map(ip), &trusted())
+    }
+
+    /// A peer-sourced address.
+    fn peer(text: &str) -> Option<ClientAddress> {
+        address(text, AddressSource::Peer)
+    }
+
+    /// A forwarded address.
+    fn forwarded(text: &str) -> Option<ClientAddress> {
+        address(text, AddressSource::Forwarded)
+    }
+
+    /// A resolved address, as the resolver returns it.
+    #[expect(clippy::unnecessary_wraps, reason = "compared with resolver output")]
+    fn address(text: &str, source: AddressSource) -> Option<ClientAddress> {
+        Some(ClientAddress { ip: ip(text), source })
     }
 }

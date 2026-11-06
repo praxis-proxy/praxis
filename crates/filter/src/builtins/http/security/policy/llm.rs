@@ -67,6 +67,8 @@ const CHAT_REQUEST_KEYS: &[&str] = &[
 ];
 
 /// Top-level Anthropic Messages keys, on the terms of [`CHAT_REQUEST_KEYS`].
+///
+/// [`CHAT_REQUEST_KEYS`]: CHAT_REQUEST_KEYS
 const MESSAGES_REQUEST_KEYS: &[&str] = &[
     "model",
     "messages",
@@ -1615,10 +1617,6 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Normalized request parts
-    // -----------------------------------------------------------------------
-
     #[test]
     #[expect(clippy::too_many_lines, reason = "one request covering every normalized field")]
     fn chat_request_parts_are_normalized() {
@@ -1761,16 +1759,13 @@ mod tests {
     #[test]
     fn unknown_or_malformed_shapes_leave_parts_absent() {
         for body in [
-            // Unknown tool types and shapes.
             r#"{"model":"m","messages":[],"tools":[{"type":"web_search_preview"}]}"#,
             r#"{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"a"}},{"type":"mcp"}]}"#,
             r#"{"model":"m","messages":[],"tools":[{"type":"function"}]}"#,
             r#"{"model":"m","messages":[],"tools":"search"}"#,
-            // Instructions the normalizer cannot read whole.
             r#"{"model":"m","messages":[{"role":"system","content":[{"type":"image_url"}]}]}"#,
             r#"{"model":"m","messages":[{"role":"system"}]}"#,
             r#"{"model":"m","messages":[{"content":"no role"}]}"#,
-            // Malformed limits.
             r#"{"model":"m","messages":[],"max_tokens":-1}"#,
             r#"{"model":"m","messages":[],"max_completion_tokens":"512"}"#,
             r#"{"model":"m","messages":[],"max_tokens":5000000000}"#,
@@ -1780,7 +1775,6 @@ mod tests {
             r#"{"model":"m","messages":[],"stream":"yes"}"#,
             r#"{"model":"m","messages":[],"tool_choice":"sometimes"}"#,
             r#"{"model":"m","messages":[],"tool_choice":"auto","function_call":"none"}"#,
-            // Shapes not normalized at all.
             r#"{"model":"m","input":"hi"}"#,
             r#"{"model":"m","messages":[],"instructions":"x"}"#,
             r#"{"model":"m","prompt":"hi"}"#,
@@ -1830,15 +1824,12 @@ mod tests {
     #[test]
     fn unrecognized_keys_leave_parts_absent() {
         for body in [
-            // Top-level keys the normalizer cannot vouch for.
             r#"{"model":"m","messages":[],"future_tool_list":[{"name":"transfer_funds"}]}"#,
             r#"{"model":"m","messages":[],"mcp_servers":[{"type":"url","url":"https://x","name":"x"}]}"#,
             r#"{"model":"m","messages":[],"web_search_options":{}}"#,
             r#"{"model":"m","messages":[],"Tools":[{"name":"transfer_funds"}]}"#,
             r#"{"model":"m","messages":[],"Max_Tokens":100000}"#,
-            // Chat-only and Anthropic-only keys mixed in one body.
             r#"{"model":"m","messages":[],"system":"s","functions":[{"name":"a"}]}"#,
-            // Message and tool entry keys outside their shape.
             r#"{"model":"m","messages":[{"Role":"system","content":"x"}]}"#,
             r#"{"model":"m","messages":[{"role":"user","Content":"x"}]}"#,
             r#"{"model":"m","messages":[],"tools":[{"name":"a","Type":"mcp"}]}"#,
@@ -1850,9 +1841,9 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     fn request(json: &str) -> ParsedLlmRequest {
         try_request(json).unwrap()

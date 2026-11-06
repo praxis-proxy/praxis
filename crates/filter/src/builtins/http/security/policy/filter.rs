@@ -124,6 +124,12 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// For rule syntax, engine types, and absent-value behavior, see
 /// [Structured request input] in the policy engine docs.
 ///
+/// Chat Completions and Anthropic Messages requests also expose normalized
+/// `llm.input.*` facts for instructions, offered tools, tool choice, completion
+/// limits, sampling and stop sequences. Unsupported shapes, unknown fields
+/// and malformed values leave these facts absent; rules that require them
+/// should deny their absence. See the [normalized LLM input example].
+///
 /// PPE 0.4.1 changes OPA and CEL `args` on `tool:` routes to native JSON.
 /// Before upgrading, review rules that read `args`: for example, a numeric
 /// ID in `args.ids` must be compared with `13`, not `"13"`. A schema-backed
@@ -147,9 +153,11 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// be allowed. See the [PPE 0.5.0 changelog].
 ///
 /// Every hook sees the downstream request as this filter first received
-/// it: method, path, raw query, the validated authority, the TCP peer
-/// address, and headers. The scheme is `https` only when the downstream
-/// connection is TLS; `X-Forwarded-Proto` is never trusted. Place `policy`
+/// it: method, path, raw query, the validated host lowercased without a port,
+/// the effective client address, and headers. Trusted reserved-prefix and
+/// `context_headers` updates remain visible to later hooks. The scheme is
+/// `https` only when the downstream connection is TLS; `X-Forwarded-Proto`
+/// is never trusted. Place `policy`
 /// before `path_rewrite`, `url_rewrite` and header-rewriting filters so the
 /// request it authorizes is the one the client sent. A `DPoP` issuer must set
 /// `dpop.external_base_url`, so a proof's `htu` is never checked against the
@@ -289,6 +297,7 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// [PPE 0.4.1 changelog]: https://github.com/praxis-proxy/policy/blob/v0.4.1/CHANGELOG.md#041---2026-10-05
 /// [PPE 0.5.0 changelog]: https://github.com/praxis-proxy/policy/blob/v0.5.0/CHANGELOG.md#050---2026-10-13
 /// [args migration guidance]: https://github.com/praxis-proxy/policy/blob/v0.4.1/docs/content/apl/pdp.md#migrating-args-policies
+/// [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml
 ///
 /// # YAML configuration
 ///
@@ -381,6 +390,8 @@ impl PolicyFilter {
     /// Returns [`FilterError`] if the referenced YAML cannot be read,
     /// the policy document fails to parse, or plugin initialization
     /// fails (e.g., a JWKS endpoint is unreachable).
+    ///
+    /// [`FilterError`]: FilterError
     #[expect(
         clippy::too_many_lines,
         reason = "linear construction + init steps; splitting obscures the startup flow"
@@ -831,6 +842,7 @@ impl PolicyFilter {
     ///
     /// [`FilterRegistry`]: crate::FilterRegistry
     /// [`FilterRegistry::set_policy_connector`]: crate::FilterRegistry::set_policy_connector
+    /// [`FilterError`]: FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: PolicyFilterConfig = parse_filter_config("policy", config)?;
         Ok(Box::new(Self::new(cfg, None)?))
@@ -843,6 +855,8 @@ impl PolicyFilter {
     ///
     /// Returns [`FilterError`] if the config block fails to parse
     /// as a `PolicyFilterConfig` or filter construction fails.
+    ///
+    /// [`FilterError`]: FilterError
     pub(crate) fn from_config_with_connector(
         config: &serde_yaml::Value,
         subrequest_connector: Option<SubRequestConnector>,
@@ -854,13 +868,15 @@ impl PolicyFilter {
     /// The current request's headers, lowercased, duplicate field lines
     /// comma-joined. Identity and policy input read [`RequestFacts`] instead;
     /// this is for comparing against what the upstream will receive.
+    ///
+    /// [`RequestFacts`]: RequestFacts
     pub(super) fn snapshot_headers(ctx: &HttpFilterContext<'_>) -> std::collections::HashMap<String, String> {
         super::request_facts::snapshot_headers(&ctx.request.headers)
     }
 
-    /// Capture this instance's [`RequestFacts`] at its first callback.
+    /// Capture this pipeline instance's [`RequestFacts`] at its first callback.
     ///
-    /// Direct unit-test calls have no filter ID and capture per call instead.
+    /// [`RequestFacts`]: RequestFacts
     fn capture_request_facts(&self, ctx: &mut HttpFilterContext<'_>) {
         if ctx.current_filter_id.is_some() && Self::stored_request_facts(ctx).is_none() {
             let facts = Arc::new(RequestFacts::capture(ctx, &self.trusted_proxies));
@@ -875,9 +891,6 @@ impl PolicyFilter {
 
     /// Invoke `hook`, threading this instance's context table through it.
     ///
-    /// Returned background tasks are dropped: the engine already spawned them
-    /// on its own tracker, so they run once and the request never waits.
-    ///
     /// # Errors
     ///
     /// Fails when an earlier dispatch lost the table.
@@ -889,6 +902,7 @@ impl PolicyFilter {
         extensions: Extensions,
     ) -> Result<PipelineResult, FilterError> {
         let table = state_mut(ctx).take_table()?;
+        // The engine owns these tasks; awaiting their handles would delay the request.
         let (mut result, _background) = Box::pin(self.mgr.invoke_named::<H>(hook, payload, extensions, table)).await;
         state_mut(ctx).restore_table(std::mem::take(&mut result.context_table));
         Ok(result)
@@ -1044,6 +1058,8 @@ impl PolicyFilter {
     /// # Errors
     ///
     /// Fails when an earlier dispatch lost the context table.
+    ///
+    /// [`Self::post_identity_limit`]: Self::post_identity_limit
     async fn post_identity_limit_http(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -1204,10 +1220,8 @@ impl PolicyFilter {
 
     /// Register the compiled builtin factories and the APL visitor on `mgr`.
     ///
-    /// PPE exposes `install_builtins` only when at least one by-kind builtin is
-    /// compiled; an engine-only build installs the bare APL visitor so a policy
-    /// naming a builtin `kind:` fails to load instead of being skipped.
-    /// `secrets-vault` is not a by-kind builtin and does not count.
+    /// An engine-only build supports APL but refuses policies naming builtin
+    /// plugin kinds.
     fn install_plugins(mgr: &Arc<PolicyEngine>) {
         #[cfg(any(
             feature = "policy-builtins",
@@ -1776,8 +1790,6 @@ impl PolicyFilter {
         if let Some(denied) = self.post_identity_limit(ctx, &extensions).await? {
             return Ok(FilterAction::Reject(denied.http()));
         }
-        // Awaited on the worker runtime: the engine spawns each handler onto
-        // the current runtime anyway.
         let result = self
             .invoke::<HttpHook>(ctx, HOOK_HTTP_REQUEST, HttpPayload, extensions)
             .await?;
@@ -1899,6 +1911,8 @@ impl PolicyFilter {
     /// Returns [`FilterError`] when the hook times out or yields no result,
     /// so the response fails under the filter's `failure_mode`. The context
     /// table moved into the hook is then lost, and later hooks refuse to run.
+    ///
+    /// [`FilterError`]: FilterError
     fn dispatch_response_cmf(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -2347,8 +2361,6 @@ impl HttpFilter for PolicyFilter {
         // that APL `args.*` predicates need. We re-parse here. The
         // body is already in memory; the duplicate parse is
         // microseconds.
-        // Parsed once above: the id, the typed content, and the deny-path id
-        // echo all read the same DOM.
         let id = parsed.id_string();
         let content = build_content_for_method(&method, &entity_name, &id, &parsed);
 
@@ -2461,7 +2473,6 @@ impl HttpFilter for PolicyFilter {
             &self.trusted_proxies,
         );
 
-        // Awaited on the worker runtime, as the request half is.
         let result = self.invoke::<HttpHook>(ctx, hook, HttpPayload, extensions).await?;
         if !result.continue_processing {
             tracing::warn!(
@@ -2734,8 +2745,8 @@ fn missing_protocol_metadata_rejection() -> Rejection {
 /// request headers and strip the inbound credentials they replace. Returns
 /// the count attached (0 when no delegation ran). Each token's
 /// `outbound_header` decides where it goes; the value is its
-/// `outbound_prefix` followed by the token. Tokens are overwrites, so they go
-/// through `request_headers_to_set`.
+/// `outbound_prefix` followed by the token. Delegated headers replace existing
+/// values.
 ///
 /// # Errors
 ///
@@ -2781,6 +2792,8 @@ pub(super) fn attach_delegated_tokens(
 /// # Errors
 ///
 /// Returns [`unstrippable_credential_rejection`] for such a credential.
+///
+/// [`unstrippable_credential_rejection`]: unstrippable_credential_rejection
 fn refuse_unstrippable_inbound(
     raw: &ppe::praxis_policy_core::extensions::raw_credentials::RawCredentialsExtension,
 ) -> Result<(), Rejection> {
@@ -2802,9 +2815,8 @@ fn refuse_unstrippable_inbound(
 
 /// The `(header, value)` pairs for the delegated tokens in `raw`.
 ///
-/// `delegated_tokens` is a `HashMap`, so tokens are sorted by
-/// `(outbound_header_lc, audience)` and the first per header wins; a
-/// skipped token is logged so overlapping delegators can be fixed.
+/// Returns one token per header, choosing the first valid token by audience
+/// in ascending order when delegators target the same header.
 fn delegated_headers(
     raw: &ppe::praxis_policy_core::extensions::raw_credentials::RawCredentialsExtension,
 ) -> Vec<(http::header::HeaderName, http::header::HeaderValue)> {

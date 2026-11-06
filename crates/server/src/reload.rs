@@ -1613,32 +1613,6 @@ filter_chains:
         assert_eq!(old_ptr, current_ptr, "pipeline should be untouched after failure");
     }
 
-    /// A policy-filter config whose policy document is `policy_path`.
-    #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
-    fn policy_config(policy_path: &std::path::Path) -> Config {
-        Config::from_yaml(&format!(
-            r#"
-listeners:
-  - name: web
-    address: "127.0.0.1:8080"
-    filter_chains: [main]
-filter_chains:
-  - name: main
-    filters:
-      - filter: policy
-        config_path: "{}"
-      - filter: static_response
-        status: 200
-"#,
-            policy_path.display()
-        ))
-        .unwrap()
-    }
-
-    /// A reload whose policy document fails filter construction keeps the
-    /// policy that was serving; a valid document reloaded twice swaps both
-    /// times. On the ordinary backend: a FIPS build needs a provider to build
-    /// even the first policy.
     #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
     #[test]
     fn a_policy_that_fails_construction_keeps_the_previous_policy_serving() {
@@ -1647,7 +1621,6 @@ filter_chains:
         std::fs::write(&good, "plugins: []\n").unwrap();
         let (live, old_config, registry, shutdown, meta, cluster_meta) =
             setup_live_pipelines_from(policy_config(&good));
-        // Hold the serving pipeline so its address cannot be reused by a later swap.
         let serving = live.get("web").unwrap().load_full();
 
         let bad = dir.path().join("bad.yaml");
@@ -2695,9 +2668,31 @@ filter_chains:
         );
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Test Utilities
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
+
+    /// A policy-filter config whose policy document is `policy_path`.
+    #[cfg(any(feature = "policy-builtins", feature = "policy-crypto-default"))]
+    fn policy_config(policy_path: &std::path::Path) -> Config {
+        Config::from_yaml(&format!(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: policy
+        config_path: "{}"
+      - filter: static_response
+        status: 200
+"#,
+            policy_path.display()
+        ))
+        .unwrap()
+    }
 
     /// Minimal valid config for reload tests.
     fn valid_config() -> Config {

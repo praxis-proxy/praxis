@@ -32,23 +32,30 @@ use super::jwt;
 
 /// The audience every fixture issuer expects.
 const AUDIENCE: &str = "praxis-fips-example";
+
 /// Issuer whose RS256 keys come from the JWKS.
 const RSA_ISSUER: &str = "https://rsa.idp.test";
+
 /// Issuer whose ES256 key comes from a PEM file.
 const EC_ISSUER: &str = "https://ec.idp.test";
+
 /// Issuer whose ES256 tokens are DPoP-bound.
 const DPOP_ISSUER: &str = "https://dpop.idp.test";
+
 /// The URL DPoP clients address, `dpop.external_base_url` in the fixture.
 const EXTERNAL_BASE_URL: &str = "https://api.praxis.test";
+
 /// The RSA key's id in the JWKS.
 const RSA_KID: &str = "praxis-fips-test-rsa";
+
 /// The HMAC key's id in the JWKS, which a FIPS build skips.
 const HMAC_KID: &str = "praxis-fips-test-hmac";
+
 /// The HMAC key's secret, as the JWKS publishes it.
 const HMAC_SECRET: &[u8] = b"praxis-fips-test-hmac-secret-not-for-production";
 
 // -----------------------------------------------------------------------------
-// Tests: API traffic
+// Tests
 // -----------------------------------------------------------------------------
 
 #[test]
@@ -138,10 +145,6 @@ fn the_mixed_jwks_keeps_only_the_keys_fips_supports() {
     );
 }
 
-// -----------------------------------------------------------------------------
-// Tests: DPoP
-// -----------------------------------------------------------------------------
-
 #[test]
 fn a_dpop_bound_token_with_a_valid_proof_reaches_the_backend_once() {
     let Some(proxy) = Proxy::start() else { return };
@@ -206,10 +209,6 @@ fn a_dpop_proof_for_another_method_url_token_or_key_is_rejected() {
         );
     }
 }
-
-// -----------------------------------------------------------------------------
-// Tests: load-time refusals
-// -----------------------------------------------------------------------------
 
 #[test]
 fn hmac_algorithms_and_shared_secret_keys_are_refused_at_load() {

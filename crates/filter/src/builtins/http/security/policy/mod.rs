@@ -217,6 +217,8 @@ pub fn fips_crypto_blocker() -> Option<String> {
 }
 
 /// [`fips_crypto_blocker`] for a given host plugin count and capability report.
+///
+/// [`fips_crypto_blocker`]: fips_crypto_blocker
 fn assess_fips(host_plugins: usize, report: &ppe::CryptoCapabilityReport) -> Option<String> {
     if host_plugins > 0 {
         return Some(format!(

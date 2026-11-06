@@ -5,6 +5,8 @@
 //! not be in the shipped binary's normal or build dependency graph, for the
 //! feature set (and so the Policy profile) under assessment. Test edges are
 //! checked separately by [`super::test_graph`].
+//!
+//! [`super::test_graph`]: super::test_graph
 
 use std::process::Command;
 

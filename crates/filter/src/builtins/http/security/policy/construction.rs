@@ -47,9 +47,11 @@ pub(super) fn parse_trusted_proxies(entries: &[String]) -> Result<Vec<CidrRange>
 // -----------------------------------------------------------------------------
 
 /// Refuse construction when FIPS is `required` and [`super::fips_crypto_blocker`]
-/// names a blocker. Startup checks the same, but a host plugin factory
-/// registered later would otherwise be built on reload.
+/// names a blocker.
+///
+/// [`super::fips_crypto_blocker`]: super::fips_crypto_blocker
 pub(super) fn refuse_fips_blockers(required: bool) -> Result<(), FilterError> {
+    // Startup cannot cover host plugin factories registered before a later reload.
     let Some(reason) = required.then(super::fips_crypto_blocker).flatten() else {
         return Ok(());
     };
@@ -96,6 +98,8 @@ pub(super) fn engine_error(stage: &str, config_path: &str, error: &PluginError) 
 /// # Errors
 ///
 /// Returns a [`FilterError`] naming the plugin and the issuer.
+///
+/// [`FilterError`]: FilterError
 pub(super) fn require_dpop_external_base_url(policy: &PolicyConfig) -> Result<(), FilterError> {
     let jwt_plugins: Vec<&str> = policy
         .plugins
@@ -186,6 +190,8 @@ fn has_external_base_url(issuer: &serde_json::Value) -> bool {
 /// # Errors
 ///
 /// Returns a [`FilterError`] naming the query-credential plugin.
+///
+/// [`FilterError`]: FilterError
 pub(super) fn refuse_query_credentials_with_delegation(policy: &PolicyConfig) -> Result<(), FilterError> {
     let delegates = policy.plugins.iter().any(|plugin| {
         plugin.kind.starts_with(DELEGATOR_KIND_PREFIX) || plugin.hooks.iter().any(|hook| hook == HOOK_TOKEN_DELEGATE)
@@ -239,32 +245,6 @@ mod tests {
         },
         refuse_fips_blockers, require_dpop_external_base_url,
     };
-
-    /// A JWT plugin whose one issuer carries `dpop`.
-    fn policy(dpop: &str, extra: &str) -> String {
-        format!(
-            "plugins:
-  - name: jwt-user
-    kind: identity/jwt
-    hooks: [identity.resolve]
-    config:
-      trusted_issuers:
-        - issuer: https://idp.test.local
-          audiences: [api]
-          algorithms: [RS256]
-          decoding_key: {{ kind: pem_file, path: /unused.pem }}
-          {dpop}
-{extra}"
-        )
-    }
-
-    /// The refusal for `yaml`, if any.
-    fn refusal(yaml: &str) -> Option<String> {
-        let parsed = ppe::praxis_policy_core::config::parse_config(yaml).expect("the fixture parses");
-        require_dpop_external_base_url(&parsed)
-            .err()
-            .map(|error| error.to_string())
-    }
 
     #[test]
     fn a_dpop_issuer_without_an_external_base_url_is_refused_by_name() {
@@ -333,13 +313,6 @@ mod tests {
         );
     }
 
-    /// Whether this process requires FIPS. A host factory registered here
-    /// would make every later construction in the process refuse, so the
-    /// tests that register one skip.
-    fn fips_required() -> bool {
-        praxis_tls::provider::required()
-    }
-
     #[test]
     fn a_crypto_failure_while_loading_fails_construction_with_the_crypto_code() {
         if fips_required() {
@@ -382,6 +355,43 @@ mod tests {
             refuse_fips_blockers(false).is_ok(),
             "without the requirement nothing is refused"
         );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------------
+
+    /// A JWT plugin whose one issuer carries `dpop`.
+    fn policy(dpop: &str, extra: &str) -> String {
+        format!(
+            "plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    config:
+      trusted_issuers:
+        - issuer: https://idp.test.local
+          audiences: [api]
+          algorithms: [RS256]
+          decoding_key: {{ kind: pem_file, path: /unused.pem }}
+          {dpop}
+{extra}"
+        )
+    }
+
+    /// The refusal for `yaml`, if any.
+    fn refusal(yaml: &str) -> Option<String> {
+        let parsed = ppe::praxis_policy_core::config::parse_config(yaml).expect("the fixture parses");
+        require_dpop_external_base_url(&parsed)
+            .err()
+            .map(|error| error.to_string())
+    }
+
+    /// Whether this process requires FIPS. A host factory registered here
+    /// would make every later construction in the process refuse, so the
+    /// tests that register one skip.
+    fn fips_required() -> bool {
+        praxis_tls::provider::required()
     }
 
     /// A host factory whose construction fails the way a missing crypto
