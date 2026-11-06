@@ -49,7 +49,7 @@ fn load_example(policy_dir: &tempfile::TempDir, proxy_port: u16, backend_port: u
 /// Whether this build can load the policy: always, except a FIPS build
 /// without a FIPS provider.
 fn provider_ready() -> bool {
-    !cfg!(feature = "policy-crypto-fips") || praxis_test_utils::approved_mode()
+    !cfg!(feature = "policy-crypto-fips") || praxis_test_utils::expect_approved_mode()
 }
 
 /// Send `GET /widgets` through a proxy built from the example, with

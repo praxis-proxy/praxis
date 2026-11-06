@@ -352,6 +352,10 @@ async fn a_malformed_trusted_hop_denies_an_address_limit_instead_of_sharing_a_bu
         plugins(&calls).is_empty(),
         "identity never ran for an unattributable request"
     );
+    assert!(
+        matches!(header_phase(&filter, Some("alice"), 9).await, FilterAction::Continue),
+        "the proxy's own one-request budget was not spent by the malformed requests"
+    );
 
     // Had the malformed requests fallen back to the proxy's address, they
     // would have spent its one-request budget; well-formed clients behind the

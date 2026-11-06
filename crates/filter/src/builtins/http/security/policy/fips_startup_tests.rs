@@ -196,12 +196,24 @@ fn provider_conf(scenario: &str) -> Option<std::path::PathBuf> {
     let conf = std::env::var_os(PROVIDER_CONF_ENV).map(std::path::PathBuf::from);
     if conf.is_none() {
         assert!(
-            std::env::var_os("PRAXIS_FIPS_HOST").is_none(),
+            !fips_host_declared(),
             "PRAXIS_FIPS_HOST is set, so {PROVIDER_CONF_ENV} must name the FIPS provider config"
         );
         println!("fips-startup: skipped {scenario} ({PROVIDER_CONF_ENV} is not set)");
     }
     conf
+}
+
+/// Whether `PRAXIS_FIPS_HOST` declares a FIPS host. An empty value, `0`,
+/// `false`, `no` or `off` leave it undeclared, as in the test harness.
+#[cfg(feature = "policy-jwt-openssl-fips")]
+fn fips_host_declared() -> bool {
+    std::env::var("PRAXIS_FIPS_HOST").is_ok_and(|value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
+    })
 }
 
 /// Run [`policy_fips_child`] for `scenario` under `openssl_conf`.

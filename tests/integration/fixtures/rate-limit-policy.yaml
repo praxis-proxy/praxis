@@ -28,7 +28,8 @@ plugins:
           id: user
 
   # Runs before the key is checked. Each IPv6 /64 is one address key, so the
-  # rule without `variables` bounds what rotating addresses can reach.
+  # rule without `variables` bounds what rotating addresses can reach. The
+  # address limit leaves room for the harness's readiness probes.
   - name: edge-limits
     kind: ratelimit/limitador
     hooks: [ratelimit.pre_identity]
@@ -38,7 +39,7 @@ plugins:
       bindings:
         client: http.client_address
       limits:
-        - max: 6
+        - max: 20
           seconds: 60
           variables: [client]
         - max: 1000

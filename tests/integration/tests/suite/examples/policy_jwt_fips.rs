@@ -15,17 +15,12 @@
 //! which `a_fips_build_without_a_fips_provider_refuses_the_policy` checks.
 //! `make test-fips-provider` and `make test-fips-host` supply one.
 
-use std::{
-    collections::HashMap,
-    io::{Read as _, Write as _},
-    net::{SocketAddr, TcpListener},
-    sync::Arc,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    ProxyGuard, approved_mode, example_config_path, free_port, http_send, parse_status, patch_yaml,
-    start_backend_with_shutdown, start_proxy,
+    Backend, BackendGuard, ProxyGuard, example_config_path, expect_approved_mode, free_port, http_send, parse_status,
+    patch_yaml, start_backend_with_shutdown, start_proxy,
 };
 use serde_json::{Value, json};
 
@@ -125,6 +120,11 @@ fn the_mixed_jwks_keeps_only_the_keys_fips_supports() {
         401,
         "a token for the skipped HMAC key is rejected; got:\n{raw}"
     );
+    assert!(
+        raw.to_ascii_lowercase()
+            .contains("x-policy-violation: auth.unknown_kid"),
+        "the HMAC key was dropped from the set, so its kid is unknown; got:\n{raw}"
+    );
     let rsa = jwt::rs256(
         &claims(RSA_ISSUER, AUDIENCE, 300),
         Some(RSA_KID),
@@ -213,7 +213,7 @@ fn a_dpop_proof_for_another_method_url_token_or_key_is_rejected() {
 
 #[test]
 fn hmac_algorithms_and_shared_secret_keys_are_refused_at_load() {
-    if !approved_mode() {
+    if !expect_approved_mode() {
         return;
     }
     for (decoding_key, algorithm, needle) in [
@@ -243,7 +243,7 @@ fn hmac_algorithms_and_shared_secret_keys_are_refused_at_load() {
 
 #[test]
 fn a_fips_build_without_a_fips_provider_refuses_the_policy() {
-    if approved_mode() {
+    if expect_approved_mode() {
         return;
     }
     let jwks = JwksEndpoint::start();
@@ -265,7 +265,7 @@ struct Proxy {
     /// The running proxy.
     proxy: ProxyGuard,
     /// Kept alive for the proxy's lifetime.
-    _backend: praxis_test_utils::BackendGuard,
+    _backend: BackendGuard,
     /// Kept alive for the proxy's lifetime.
     _jwks: JwksEndpoint,
     /// Holds the rewritten policy document.
@@ -276,7 +276,7 @@ impl Proxy {
     /// Start the example, or `None` without a FIPS provider (the policy
     /// cannot load there; the refusal has its own test).
     fn start() -> Option<Self> {
-        if !approved_mode() {
+        if !expect_approved_mode() {
             eprintln!("policy_jwt_fips: skipped, no FIPS provider (run make test-fips-provider)");
             return None;
         }
@@ -379,36 +379,23 @@ fn resolve(config: &Config) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
-/// A local server answering every request with the fixture JWKS.
+/// A local server answering every request with the fixture JWKS; dropping it
+/// closes the listener.
 struct JwksEndpoint {
     /// Listening address.
     address: SocketAddr,
+    /// Stops the listener on drop.
+    _guard: BackendGuard,
 }
 
 impl JwksEndpoint {
     /// Start serving `fixtures/policy-fips/jwks.json`.
     fn start() -> Self {
         let document = String::from_utf8(fixture("jwks.json")).expect("utf8 JWKS");
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{document}",
-            document.len()
-        );
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind JWKS listener");
-        let address = listener.local_addr().expect("JWKS listener address");
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { return };
-                let mut head = Vec::new();
-                let mut byte = [0_u8; 1];
-                while !head.ends_with(b"\r\n\r\n") {
-                    match stream.read(&mut byte) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => head.extend_from_slice(&byte),
-                    }
-                }
-                let _ignored = stream.write_all(response.as_bytes());
-            }
-        });
-        Self { address }
+        let guard = Backend::fixed(&document)
+            .header("Content-Type", "application/json")
+            .start_with_shutdown();
+        let address = SocketAddr::from(([127, 0, 0, 1], guard.port()));
+        Self { address, _guard: guard }
     }
 }

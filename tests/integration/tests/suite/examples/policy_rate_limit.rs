@@ -9,18 +9,12 @@
 //! (which stops a bad key before it is checked), and the 429 wire form. A
 //! counting backend proves no denied request reaches it.
 
-use std::{
-    collections::HashMap,
-    io::{Read as _, Write as _},
-    net::TcpListener,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-};
+use std::{collections::HashMap, sync::atomic::Ordering};
 
 use praxis_core::config::Config;
-use praxis_test_utils::{example_config_path, free_port, http_send, parse_status, patch_yaml, start_proxy};
+use praxis_test_utils::{
+    example_config_path, free_port, http_send, parse_status, patch_yaml, start_proxy, start_request_counting_backend,
+};
 
 /// Load the example with its policy pointed at a copy of the fixture whose key
 /// directory points at the fixture key file.
@@ -45,23 +39,6 @@ fn load_example(policy_dir: &tempfile::TempDir, proxy_port: u16, backend_port: u
     Config::from_yaml(&patched).unwrap_or_else(|e| panic!("parse security/policy-rate-limit.yaml: {e}"))
 }
 
-/// Start a backend answering `ok` that counts the requests it receives.
-fn counting_backend() -> (u16, Arc<AtomicUsize>) {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind backend");
-    let port = listener.local_addr().expect("backend addr").port();
-    let hits = Arc::new(AtomicUsize::new(0));
-    let counter = Arc::clone(&hits);
-    std::thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            let mut buf = [0_u8; 4096];
-            let _read = stream.read(&mut buf);
-            counter.fetch_add(1, Ordering::SeqCst);
-            let _sent = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
-        }
-    });
-    (port, hits)
-}
-
 /// Send `GET /widgets` with `key` as the bearer key.
 fn send(addr: &str, key: &str) -> String {
     http_send(
@@ -82,9 +59,9 @@ fn header<'r>(raw: &'r str, name: &str) -> Option<&'r str> {
 
 #[test]
 fn policy_rate_limit_enforces_both_stages_end_to_end() {
-    let (backend_port, hits) = counting_backend();
+    let (backend, hits) = start_request_counting_backend("ok");
     let policy_dir = tempfile::TempDir::new().expect("create tempdir");
-    let config = load_example(&policy_dir, free_port(), backend_port);
+    let config = load_example(&policy_dir, free_port(), backend.port());
     let proxy = start_proxy(&config);
 
     // Post-identity: alice gets three requests a minute.
@@ -116,12 +93,14 @@ fn policy_rate_limit_enforces_both_stages_end_to_end() {
     );
     assert!(!denied.contains("per-user"), "the namespace never reaches the client");
 
-    // Pre-identity: the address has six requests a minute (the harness's
-    // readiness probe may spend one). An unknown key is refused by identity
-    // until the address runs out, then stopped before the key is checked.
-    let statuses: Vec<u16> = (0..3)
-        .map(|_| parse_status(&send(proxy.addr(), "sk-test-mallory")))
-        .collect();
+    // Pre-identity: the address has twenty requests a minute, some already
+    // spent by readiness probes and alice. An unknown key is refused by
+    // identity until the address runs out, then stopped before the key is
+    // checked.
+    let mut statuses = Vec::new();
+    while statuses.last() != Some(&429) && statuses.len() < 20 {
+        statuses.push(parse_status(&send(proxy.addr(), "sk-test-mallory")));
+    }
     assert_eq!(
         statuses.first(),
         Some(&401),
@@ -130,7 +109,11 @@ fn policy_rate_limit_enforces_both_stages_end_to_end() {
     assert_eq!(
         statuses.last(),
         Some(&429),
-        "the address is over its limit: {statuses:?}"
+        "the address runs out within its limit: {statuses:?}"
+    );
+    assert!(
+        statuses.iter().rev().skip(1).all(|status| *status == 401),
+        "every request under the limit reaches identity: {statuses:?}"
     );
     let edge = send(proxy.addr(), "sk-test-mallory");
     assert_eq!(
@@ -155,9 +138,9 @@ fn send_forwarded(addr: &str, forwarded: &str) -> String {
 
 #[test]
 fn a_malformed_hop_from_a_trusted_proxy_is_denied_not_pooled() {
-    let (backend_port, hits) = counting_backend();
+    let (backend, hits) = start_request_counting_backend("ok");
     let policy_dir = tempfile::TempDir::new().expect("create tempdir");
-    let mut config = load_example(&policy_dir, free_port(), backend_port);
+    let mut config = load_example(&policy_dir, free_port(), backend.port());
     let policy = config
         .filter_chains
         .iter_mut()
