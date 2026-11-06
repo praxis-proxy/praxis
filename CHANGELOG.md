@@ -138,6 +138,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Poll TLS certificate, CA, and CRL files as a fallback when a projected
+  Kubernetes Secret update produces no usable filesystem notification.
+  The polling interval only reloads files whose contents changed, so a
+  successful notification reload is not repeated.
+
 - Remove forbidden `Content-Length` and `Transfer-Encoding` headers from
   204 responses after response filters run, preserving valid downstream
   framing for the following response.
