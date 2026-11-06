@@ -1,0 +1,72 @@
+name: FIPS Policy profiles
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+#
+# The default FIPS build leaves Policy out, and the FIPS workflow proves that
+# build. The Policy FIPS profiles (FIPS_POLICY_PROFILE in the Makefile) are
+# opt-in, so this workflow is too: it runs nightly and on dispatch, never on
+# pull requests, and the other workflows do not depend on it.
+#
+# Each profile gets its dependency graph check, clippy, and its unit and
+# integration suites inside the UBI 9 toolchain image with Red Hat's FIPS
+# module activated (make test-fips-provider). The runner's kernel is not in
+# FIPS mode, so this proves the profiles build and verify through the module;
+# the FIPS-host proof stays on the self-hosted runner (make test-fips-host).
+
+on:
+  schedule:
+    # Clear of the other nightly schedules.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: "Enable verbose test output (V=1)"
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  V: ${{ inputs.debug && '1' || '' }}
+
+jobs:
+  profile:
+    name: FIPS Policy (${{ matrix.profile }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [engine, api-key, jwt, both]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust (stable + nightly fmt)
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@f671c1215f89562d286310a6cabdcbaa5da9605c # v0.4.0
+        with:
+          cache-suffix: fips-policy-${{ matrix.profile }}
+
+      - name: Dependency graph for the profile
+        run: make fips-deps FIPS_POLICY_PROFILE=${{ matrix.profile }}
+
+      - name: Lint the profile
+        run: make lint-fips FIPS_POLICY_PROFILE=${{ matrix.profile }}
+
+      - name: Point podman at Red Hat's signature store (Ubuntu's podman has no entry for it)
+        run: make fips-signature-store
+
+      # Builds the toolchain image (Red Hat's toolchain and OpenSSL) first.
+      - name: Unit and integration suites on the FIPS module
+        run: make test-fips-provider FIPS_POLICY_PROFILE=${{ matrix.profile }}
