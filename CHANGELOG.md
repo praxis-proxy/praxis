@@ -34,6 +34,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   full certificate verification; static mTLS and non-mTLS listeners
   retain resumption.
 
+### Changed
+
+- Clarify that the default Pingora shutdown grace period is capped at five
+  seconds, including for streaming responses, regardless of a larger
+  `shutdown_timeout_secs` value.
+
 ### Added
 
 - Implicit cluster references: an inline load-balancer cluster that shares
