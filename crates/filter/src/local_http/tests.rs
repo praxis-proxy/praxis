@@ -87,12 +87,13 @@ fn response_replacement_retains_explicit_unchanged_writes_and_absent_removals() 
     let mut original = http::HeaderMap::new();
     original.insert("x-frame-options", http::HeaderValue::from_static("DENY"));
     original.insert("x-service-secret", http::HeaderValue::from_static("private"));
-    let touched = [
-        http::header::HeaderName::from_static("x-frame-options"),
-        http::header::SET_COOKIE,
-    ];
+    let mut extensions = crate::RequestExtensions::new();
+    extensions.insert(headers::PolicyHeaders::default());
+    record_response_header_effects(&mut extensions, [http::header::X_FRAME_OPTIONS]);
+    record_response_header_effects(&mut extensions, [http::header::SET_COOKIE]);
+    let explicit = extensions.remove::<headers::PolicyHeaders>().unwrap();
     let mut edits = headers::HeaderEdits::default();
-    edits.record(&original, &original, &touched);
+    edits.record(&original, &original, &explicit.touched);
     let mut replacement = http::HeaderMap::new();
     replacement.insert("x-frame-options", http::HeaderValue::from_static("SAMEORIGIN"));
     replacement.insert("set-cookie", http::HeaderValue::from_static("denial=value"));
@@ -100,6 +101,13 @@ fn response_replacement_retains_explicit_unchanged_writes_and_absent_removals() 
     assert_eq!(replacement.get("x-frame-options").unwrap(), "DENY");
     assert!(!replacement.contains_key("set-cookie"));
     assert!(!replacement.contains_key("x-service-secret"));
+}
+
+#[test]
+fn recording_header_effects_outside_local_response_hooks_does_not_create_state() {
+    let mut extensions = crate::RequestExtensions::new();
+    record_response_header_effects(&mut extensions, [http::header::SET_COOKIE]);
+    assert!(extensions.get::<headers::PolicyHeaders>().is_none());
 }
 
 /// Even upstream-bound readers must leave exclusive request streams untouched.

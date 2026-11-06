@@ -5,6 +5,49 @@
 
 use http::{HeaderMap, header::HeaderName};
 
+use crate::RequestExtensions;
+
+/// Preserve explicit response-header writes and removals across local replacements.
+///
+/// Call from a local [`Policy`]'s [`on_response`] hook after editing the response.
+/// For each named field, its final values at hook completion (or its absence)
+/// survive later policy denials and precommit error replacements. All values of
+/// a named field are preserved together; later policies can still override them.
+///
+/// Changed fields are detected automatically. Record unchanged writes and
+/// removals of absent fields here, since those effects have no value difference.
+/// This only records effects; callers must edit the response headers themselves.
+/// Calls outside a local response-header hook have no effect.
+///
+/// ```
+/// use http::{
+///     HeaderValue,
+///     header::{SET_COOKIE, X_FRAME_OPTIONS},
+/// };
+/// use praxis_filter::{HttpFilterContext, local_http::record_response_header_effects};
+///
+/// fn secure_response(ctx: &mut HttpFilterContext<'_>) {
+///     let Some(head) = ctx.response_header.as_deref_mut() else {
+///         return;
+///     };
+///     head.headers
+///         .insert(X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+///     head.headers.remove(SET_COOKIE);
+///     record_response_header_effects(&mut ctx.extensions, [X_FRAME_OPTIONS, SET_COOKIE]);
+/// }
+/// ```
+///
+/// [`Policy`]: super::LocalCompatibility::Policy
+/// [`on_response`]: crate::HttpFilter::on_response
+pub fn record_response_header_effects<Names>(extensions: &mut RequestExtensions, names: Names)
+where
+    Names: IntoIterator<Item = HeaderName>,
+{
+    if let Some(explicit) = extensions.get_mut::<PolicyHeaders>() {
+        explicit.touched.extend(names);
+    }
+}
+
 /// Only policy edits survive replacement; handler-originated headers do not.
 #[derive(Default)]
 pub(crate) struct HeaderEdits {

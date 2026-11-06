@@ -58,6 +58,15 @@ replacement; untouched handler headers do not. Handler failures and request-limi
 this same response path. The configured `cors` and `headers` filters can
 therefore apply CORS and security headers to local outcomes.
 
+External `Policy` filters use
+`praxis_filter::local_http::record_response_header_effects` from
+`on_response` after editing the response to record unchanged writes and
+removals of absent headers. Pass `&mut ctx.extensions` and the affected
+`HeaderName`s. Their final values at hook completion, including all values
+of repeated fields or the field's absence, survive later replacements.
+Changed fields are detected automatically. Recording has no effect outside
+a local response-header hook; later policies can still override the fields.
+
 The coordinator preflights one filtered response chunk before committing.
 A precommit source/filter/limit failure becomes an empty 500, retaining
 already-applied header policies. After a commitment attempt, errors abort

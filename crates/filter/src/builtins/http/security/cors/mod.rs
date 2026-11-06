@@ -248,6 +248,27 @@ impl CorsFilter {
             .all(|h| self.headers_header.split(", ").any(|a| a.eq_ignore_ascii_case(h)))
     }
 
+    /// Apply authoritative CORS response headers, reporting any mutations.
+    fn apply_response_headers(&self, origin: &str, resp: &mut crate::context::Response) -> bool {
+        let mut modified = strip_upstream_cors_headers(resp);
+        if modified {
+            trace!("stripped upstream CORS response headers");
+        }
+
+        if self.resolve_origin(origin).is_none() {
+            trace!(origin = %origin, "disallowed origin; omitting CORS headers");
+            if self.policy.needs_vary() {
+                self.append_vary(resp);
+                modified = true;
+            }
+            return modified;
+        }
+
+        debug!(origin = %origin, "injecting CORS response headers");
+        inject_response_headers(self, origin, resp);
+        true
+    }
+
     /// Append `Vary: Origin` to response headers.
     fn append_vary(&self, resp: &mut crate::context::Response) {
         resp.headers.append("vary", self.vary_origin.clone());
@@ -370,23 +391,7 @@ impl HttpFilter for CorsFilter {
             return Ok(FilterAction::Continue);
         }
 
-        if strip_upstream_cors_headers(resp) {
-            trace!("stripped upstream CORS response headers");
-            ctx.response_headers_modified = true;
-        }
-
-        if self.resolve_origin(origin).is_none() {
-            trace!(origin = %origin, "disallowed origin; omitting CORS headers");
-            if self.policy.needs_vary() {
-                self.append_vary(resp);
-                ctx.response_headers_modified = true;
-            }
-            return Ok(FilterAction::Continue);
-        }
-
-        debug!(origin = %origin, "injecting CORS response headers");
-        inject_response_headers(self, origin, resp);
-        ctx.response_headers_modified = true;
+        ctx.response_headers_modified |= self.apply_response_headers(origin, resp);
         Ok(FilterAction::Continue)
     }
 }
@@ -398,11 +403,10 @@ impl HttpFilter for CorsFilter {
 /// Preserve authoritative CORS writes and removals across local replacements.
 #[cfg(feature = "local-http")]
 fn record_local_cors_headers(extensions: &mut crate::extensions::RequestExtensions) {
-    if let Some(explicit) = extensions.get_mut::<crate::local_http::headers::PolicyHeaders>() {
-        explicit
-            .touched
-            .extend(UPSTREAM_CORS_HEADERS.map(http::header::HeaderName::from_static));
-    }
+    crate::local_http::record_response_header_effects(
+        extensions,
+        UPSTREAM_CORS_HEADERS.map(http::header::HeaderName::from_static),
+    );
 }
 
 /// Identify a local preflight request before borrowing the response slot.

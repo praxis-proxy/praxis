@@ -65,6 +65,7 @@ pub(super) enum Behavior {
     ErrorRequest,
     TerminalRequest,
     RejectResponse,
+    RecordResponseHeaders,
     ExpandBody,
     DropBody,
     TerminalBody,
@@ -94,6 +95,7 @@ pub(super) struct Fixture {
     pub(super) state: State,
     pub(super) behavior: Behavior,
     pub(super) handler: HandlerKind,
+    pub(super) rejection_headers: http::HeaderMap,
     pub(super) response_bytes: u64,
     pub(super) response_status: u16,
     pub(super) response_headers: http::HeaderMap,
@@ -110,6 +112,7 @@ impl Fixture {
             state,
             behavior: Behavior::Pass,
             handler: HandlerKind::Consume,
+            rejection_headers: http::HeaderMap::new(),
             response_bytes: 4,
             response_status: 200,
             response_headers: http::HeaderMap::new(),
@@ -222,6 +225,7 @@ impl HttpFilter for Fixture {
             Behavior::Pass
             | Behavior::RejectHead
             | Behavior::RejectResponse
+            | Behavior::RecordResponseHeaders
             | Behavior::ExpandBody
             | Behavior::DropBody
             | Behavior::TerminalBody
@@ -241,9 +245,24 @@ impl HttpFilter for Fixture {
                 http::header::HeaderName::try_from(format!("x-{}", self.name)).unwrap(),
                 http::HeaderValue::from_static("yes"),
             );
+            if matches!(self.behavior, Behavior::RecordResponseHeaders) {
+                for name in self.response_headers.keys() {
+                    head.headers.remove(name);
+                    for value in self.response_headers.get_all(name) {
+                        head.headers.append(name.clone(), value.clone());
+                    }
+                }
+                head.headers.remove(http::header::SET_COOKIE);
+                record_response_header_effects(
+                    &mut ctx.extensions,
+                    self.response_headers.keys().cloned().chain([http::header::SET_COOKIE]),
+                );
+            }
         }
         Ok(if matches!(self.behavior, Behavior::RejectResponse) {
-            FilterAction::Reject(praxis_filter::Rejection::status(451))
+            let mut rejection = praxis_filter::Rejection::status(451);
+            rejection.header_map = Some(Box::new(self.rejection_headers.clone()));
+            FilterAction::Reject(rejection)
         } else {
             FilterAction::Continue
         })

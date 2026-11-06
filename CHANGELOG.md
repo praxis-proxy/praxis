@@ -45,7 +45,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Experimental, off-by-default `local-http` handler contracts, mandatory
   route/pipeline validation, and a fail-closed lifecycle coordinator tested
   with bounded fake I/O. Live adapters reject these pipelines until local
-  transport serving lands. See `docs/architecture/local-http.md`.
+  transport serving lands. External policies can preserve explicit unchanged
+  response-header writes and absent removals across replacements through
+  `local_http::record_response_header_effects`. See
+  `docs/architecture/local-http.md`.
 
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are

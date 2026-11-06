@@ -261,15 +261,15 @@ impl HttpFilter for HeaderFilter {
         set_headers(&mut resp.headers, &self.response_set);
 
         #[cfg(feature = "local-http")]
-        if let Some(explicit) = ctx.extensions.get_mut::<crate::local_http::headers::PolicyHeaders>() {
-            explicit.touched.extend(self.response_remove.iter().cloned());
-            explicit.touched.extend(
+        crate::local_http::record_response_header_effects(
+            &mut ctx.extensions,
+            self.response_remove.iter().cloned().chain(
                 self.response_add
                     .iter()
                     .chain(&self.response_set)
                     .map(|(name, _)| name.clone()),
-            );
-        }
+            ),
+        );
 
         Ok(FilterAction::Continue)
     }

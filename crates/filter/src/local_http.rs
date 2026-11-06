@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 pub use claim::LocalClaim;
 pub use counter::LocalByteCounter;
+pub use headers::record_response_header_effects;
 pub use response::LocalResponse;
 pub use route::{LocalBodyOwnership, LocalMethods, LocalPath, LocalRoute};
 
@@ -27,6 +28,10 @@ use crate::{FilterError, HttpFilterContext};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalCompatibility {
     /// Head, response, and streaming response-body hooks support local traffic.
+    /// Record unchanged header writes and absent removals with
+    /// [`record_response_header_effects`].
+    ///
+    /// [`record_response_header_effects`]: self::record_response_header_effects
     Policy,
     /// Upstream selection only; no hooks execute for a local claim.
     UpstreamRoutingOnly,

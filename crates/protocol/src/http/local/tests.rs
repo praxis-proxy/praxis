@@ -226,6 +226,69 @@ async fn response_rejection_replaces_without_restarting_or_losing_earlier_header
 }
 
 #[tokio::test]
+async fn external_policy_header_effects_survive_denial_and_precommit_replacements() {
+    for kind in [HandlerKind::Consume, HandlerKind::SourceErrorBefore] {
+        let state = State::default();
+        let mut policy = Fixture::policy("security", state.clone());
+        policy.behavior = Behavior::RecordResponseHeaders;
+        policy
+            .response_headers
+            .insert(http::header::X_FRAME_OPTIONS, http::HeaderValue::from_static("DENY"));
+        for value in ["one", "two"] {
+            policy
+                .response_headers
+                .append("x-policy", http::HeaderValue::from_static(value));
+        }
+        let mut owner = Fixture::owner(state.clone());
+        owner.handler = kind;
+        owner.response_headers = policy.response_headers.clone();
+        owner
+            .response_headers
+            .insert("x-service-secret", http::HeaderValue::from_static("private"));
+        let mut fixtures = vec![owner, policy];
+        if kind == HandlerKind::Consume {
+            let mut denial = Fixture::policy("denial", state.clone());
+            denial.behavior = Behavior::RejectResponse;
+            for (name, value) in [
+                ("x-frame-options", "SAMEORIGIN"),
+                ("set-cookie", "denial=value"),
+                ("x-policy", "denial"),
+            ] {
+                denial.rejection_headers.insert(
+                    http::header::HeaderName::from_static(name),
+                    http::HeaderValue::from_static(value),
+                );
+            }
+            fixtures.insert(0, denial);
+        }
+        let pipeline = pipeline(fixtures);
+        let result = run(&pipeline, &state, Input::bytes(1), "/files", http::Method::POST).await;
+        assert_eq!(result.status, if kind == HandlerKind::Consume { 451 } else { 500 });
+        let observed = state.inner.lock().unwrap();
+        let (_, headers) = observed.head.as_ref().unwrap();
+        assert_eq!(headers.get(http::header::X_FRAME_OPTIONS).unwrap(), "DENY");
+        assert!(!headers.contains_key(http::header::SET_COOKIE));
+        assert!(!headers.contains_key("x-service-secret"));
+        assert_eq!(
+            headers.get_all("x-policy").iter().collect::<Vec<_>>(),
+            ["one", "two"],
+            "all values of an explicitly written field must survive together"
+        );
+        drop(observed);
+        assert_eq!(
+            state
+                .events()
+                .iter()
+                .filter(|event| *event == "response:security")
+                .count(),
+            1,
+            "replacement must not rerun the policy"
+        );
+        assert_complete(&state, 1);
+    }
+}
+
+#[tokio::test]
 async fn generated_512_mib_stream_is_bounded_and_ignores_global_buffer_ceilings() {
     let state = State::default();
     let mut owner = Fixture::owner(state.clone());
