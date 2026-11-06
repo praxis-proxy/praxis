@@ -17,6 +17,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Poll TLS certificate, CA, and CRL files as a fallback when a projected
+  Kubernetes Secret update produces no usable filesystem notification.
+  The polling interval only reloads files whose contents changed, so a
+  successful notification reload is not repeated.
+
 ### Security
 
 - LLM policies now apply HTTP authorization, delegation and request assertions

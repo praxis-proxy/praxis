@@ -156,6 +156,14 @@ pub struct ReloadableServerConfig {
 
     /// Handle to swap the client verifier atomically (mTLS only).
     pub verifier_handle: Option<Arc<arc_swap::ArcSwap<crate::reload::VerifierState>>>,
+
+    /// Digests of the watched files, captured before the startup load.
+    ///
+    /// The watcher seeds its polling baseline with these. A file that changes
+    /// during or after the load therefore differs from the baseline and is
+    /// reloaded on the first poll, instead of being recorded as already
+    /// loaded while the served state is stale.
+    pub startup_hashes: Vec<Option<[u8; 32]>>,
 }
 
 /// Build a `rustls::ServerConfig` that uses a
@@ -184,6 +192,8 @@ pub fn build_reloadable_server_config(
     tls: &ListenerTls,
     advertise_http_alpn: bool,
 ) -> Result<ReloadableServerConfig, TlsError> {
+    // Snapshot before the load so a rotation during it still differs from the baseline.
+    let startup_hashes = startup_file_hashes(tls);
     let builder = build_config_builder(tls)?;
 
     let (builder, verifier_handle) = if tls.client_cert_mode == ClientCertMode::None {
@@ -208,19 +218,49 @@ pub fn build_reloadable_server_config(
 
     let config = builder.with_cert_resolver(Arc::new(resolver));
     let mut config = finish_server_config(config, advertise_http_alpn, tls.cipher_suites.is_some())?;
-    if verifier_handle.is_some() {
-        // A handshake authenticated before reload can finish afterward. Cache
-        // invalidation alone lets it insert stale authentication into the new
-        // cache. The builder also leaves stateless ticket production disabled.
-        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
-        config.send_tls13_tickets = 0;
-    }
+    disable_resumption(&mut config, verifier_handle.is_some());
 
     Ok(ReloadableServerConfig {
         config: Arc::new(config),
         cert_handle,
         verifier_handle,
+        startup_hashes,
     })
+}
+
+/// Disable session resumption when client authentication is configured.
+///
+/// A handshake authenticated before a reload can finish afterward. Cache
+/// invalidation alone lets it insert stale authentication into the new cache.
+/// The builder also leaves stateless ticket production disabled.
+#[cfg(feature = "config-reload")]
+fn disable_resumption(config: &mut ServerConfig, client_auth: bool) {
+    if client_auth {
+        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+        config.send_tls13_tickets = 0;
+    }
+}
+
+/// Digest the files the startup load is about to read.
+///
+/// Mirrors the watcher's path order (primary certificate, key, then CA and CRL
+/// files) so the returned baseline lines up with what polling compares.
+#[cfg(feature = "config-reload")]
+fn startup_file_hashes(tls: &ListenerTls) -> Vec<Option<[u8; 32]>> {
+    let Some(primary) = tls.certificates.first() else {
+        return Vec::new();
+    };
+    let ca_cfg = (tls.client_cert_mode != ClientCertMode::None)
+        .then_some(tls.client_ca.as_ref())
+        .flatten();
+    crate::watcher::watched_paths(
+        primary,
+        ca_cfg.map(|ca| ca.ca_path.as_str()),
+        ca_cfg.map_or(&[], |ca| ca.crl_paths.as_slice()),
+    )
+    .iter()
+    .map(|path| crate::watcher::file_digest(path))
+    .collect()
 }
 
 // -----------------------------------------------------------------------------
@@ -941,6 +981,66 @@ mod tests {
                 "no client-requested TLS 1.3 tickets"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "config-reload")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one fixture walks the no-mTLS, mTLS and CRL baseline cases"
+    )]
+    fn startup_file_hashes_follow_the_configured_client_auth_files() -> Result<(), Box<dyn std::error::Error>> {
+        let certs = gen_test_certs();
+        let mut tls = ListenerTls::new_validated(
+            certs.cert_path.to_str().ok_or("cert path is not UTF-8")?,
+            certs.key_path.to_str().ok_or("key path is not UTF-8")?,
+        )?;
+        let cert = crate::watcher::file_digest(&tls.certificates[0].cert_path);
+        let key = crate::watcher::file_digest(&tls.certificates[0].key_path);
+        assert_eq!(
+            startup_file_hashes(&tls),
+            vec![cert, key],
+            "no client auth watches only the certificate and key"
+        );
+
+        let ca_path = certs.ca_cert_path.to_str().ok_or("CA path is not UTF-8")?.to_owned();
+        let ca = crate::watcher::file_digest(&ca_path);
+        tls.client_ca = Some(CaConfig {
+            ca_path: ca_path.clone(),
+            crl_paths: Vec::new(),
+        });
+        tls.client_cert_mode = ClientCertMode::Require;
+        assert_eq!(
+            startup_file_hashes(&tls),
+            vec![cert, key, ca],
+            "mTLS adds the client CA and no CRL paths"
+        );
+
+        let crl_one = tempfile::NamedTempFile::new()?;
+        let crl_two = tempfile::NamedTempFile::new()?;
+        // Distinct contents keep the two digests distinct, so a reversed CRL
+        // order fails instead of comparing identical empty files.
+        std::fs::write(crl_one.path(), b"first CRL")?;
+        std::fs::write(crl_two.path(), b"second CRL, different length")?;
+        let crl_one_path = crl_one.path().to_str().ok_or("CRL path is not UTF-8")?.to_owned();
+        let crl_two_path = crl_two.path().to_str().ok_or("CRL path is not UTF-8")?.to_owned();
+        let expected = vec![
+            cert,
+            key,
+            ca,
+            crate::watcher::file_digest(&crl_one_path),
+            crate::watcher::file_digest(&crl_two_path),
+        ];
+        tls.client_ca = Some(CaConfig {
+            ca_path,
+            crl_paths: vec![crl_one_path, crl_two_path],
+        });
+        assert_eq!(
+            startup_file_hashes(&tls),
+            expected,
+            "mTLS covers every configured CRL in order"
+        );
         Ok(())
     }
 
