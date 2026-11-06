@@ -1794,20 +1794,18 @@ async fn request_without_auth_header_rejects_401() {
     }
 }
 
-/// When a downstream pre-read ran `on_request_body` first and stashed
-/// `ResolvedIdentity` (having stripped the inbound credential for the
+/// When a downstream pre-read ran `on_request_body` first and kept the
+/// admitted identity (having stripped the inbound credential for the
 /// upstream), the early `identity_gate` must skip rather than re-resolve
 /// against the now-missing headers. A credential-less request that would
 /// normally 401 here passes because the body phase is authoritative.
 ///
 /// The routes-only config is what puts `on_request` on the `identity_gate`
-/// path, and stashing `ResolvedIdentity` is what a body phase that already
+/// path, and the kept identity is what a body phase that already
 /// resolved and enforced identity leaves behind.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_skips_when_body_phase_already_resolved() {
     use ppe::praxis_policy_core::identity::{IdentityPayload, TokenSource};
-
-    use super::filter::ResolvedIdentity;
 
     let (_dir, path) = write_cel_policy_config();
     let filter = build_filter(path);
@@ -1815,20 +1813,17 @@ async fn identity_gate_skips_when_body_phase_already_resolved() {
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
 
-    ctx.extensions.insert(ResolvedIdentity(IdentityPayload::new(
-        String::new(),
-        TokenSource::Bearer,
-    )));
+    super::request_state::state_mut(&mut ctx).identity = Some(IdentityPayload::new(String::new(), TokenSource::Bearer));
 
     let action = filter.on_request(&mut ctx).await.expect("on_request ran");
     assert!(
         matches!(action, FilterAction::Continue),
-        "gate must be skipped when ResolvedIdentity is already stashed; got {action:?}",
+        "gate must be skipped when this instance already admitted an identity; got {action:?}",
     );
 }
 
 /// Control for `identity_gate_skips_when_body_phase_already_resolved`: the
-/// same credential-less request with no `ResolvedIdentity` stashed must run
+/// same credential-less request with no admitted identity must run
 /// the gate and reject — proving the skip (not something else) is what flips
 /// the outcome to `Continue`.
 #[tokio::test(flavor = "multi_thread")]

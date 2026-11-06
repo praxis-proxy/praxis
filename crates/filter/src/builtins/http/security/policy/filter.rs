@@ -25,8 +25,9 @@ use ppe::praxis_policy_core::{
     },
     engine::PolicyEngine,
     error::{PluginError, PluginViolation},
+    executor::PipelineResult,
     extensions::{Credential, LLMExtension, LlmRequestDocument, MetaExtension, http::SecretHeaderProvenance},
-    hooks::Extensions,
+    hooks::{Extensions, HookTypeDef},
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
     secrets::backends::EnvSecretProviderFactory,
@@ -54,6 +55,7 @@ use super::{
     },
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
     request_facts::{RequestFacts, RequestView},
+    request_state::{state, state_mut},
     response_rules::ensure_supported_entity_results,
     transport::PolicyHttpTransport,
 };
@@ -74,31 +76,6 @@ static EMPTY_BODY: Bytes = Bytes::new();
 // -----------------------------------------------------------------------------
 // PolicyFilter
 // -----------------------------------------------------------------------------
-
-/// Per-filter admission state shared across lifecycle phases. Both fields live
-/// here so multiple policy instances cannot overwrite one another's temporary
-/// identity projection or completion marker.
-#[derive(Default)]
-struct AdmissionState {
-    /// Whether this instance has already admitted the request.
-    complete: bool,
-    /// Sanitized result retained from the unscoped early gate.
-    gated_identity: GatedIdentity,
-    /// The request as this instance's first callback saw it.
-    facts: Option<Arc<RequestFacts>>,
-}
-
-/// Three-state result for an early identity gate.
-#[derive(Default)]
-enum GatedIdentity {
-    /// The gate has not run for this policy instance.
-    #[default]
-    NotRun,
-    /// Validation succeeded without producing a user subject.
-    NoSubject,
-    /// Validation succeeded and produced a raw-credential-free subject.
-    Subject(AuthenticatedIdentity),
-}
 
 /// Embeds the Praxis Policy Engine in-process to enforce multi-source
 /// identity, APL route policy, RFC 8693 token exchange, field redaction,
@@ -178,8 +155,9 @@ enum GatedIdentity {
 ///
 /// `http.client_address` is the TCP peer, without a port. When the peer is in
 /// `trusted_proxies`, it is the rightmost `X-Forwarded-For` hop outside those
-/// ranges instead, or the leftmost hop when every hop is trusted; a malformed
-/// hop falls back to the peer. RFC 7239 `Forwarded` is not supported. Only
+/// ranges instead, or the leftmost hop when every hop is trusted; hops left of
+/// the client are ignored; a malformed hop reached before it leaves no client
+/// address. RFC 7239 `Forwarded` is not supported. Only
 /// policy input changes: `ip_acl` and `forwarded_headers` still see the peer.
 ///
 /// Policy can read a credential from a query parameter
@@ -862,24 +840,36 @@ impl PolicyFilter {
     ///
     /// Direct unit-test calls have no filter ID and capture per call instead.
     fn capture_request_facts(&self, ctx: &mut HttpFilterContext<'_>) {
-        if ctx.current_filter_id.is_none() || Self::stored_request_facts(ctx).is_some() {
-            return;
-        }
-        let facts = Some(Arc::new(RequestFacts::capture(ctx, &self.trusted_proxies)));
-        if let Some(state) = ctx.get_filter_state_mut::<AdmissionState>() {
-            state.facts = facts;
-        } else {
-            ctx.insert_filter_state(AdmissionState {
-                facts,
-                ..Default::default()
-            });
+        if ctx.current_filter_id.is_some() && Self::stored_request_facts(ctx).is_none() {
+            let facts = Arc::new(RequestFacts::capture(ctx, &self.trusted_proxies));
+            state_mut(ctx).facts = Some(facts);
         }
     }
 
     /// The facts this instance captured, if any.
     fn stored_request_facts(ctx: &HttpFilterContext<'_>) -> Option<Arc<RequestFacts>> {
-        ctx.get_filter_state::<AdmissionState>()
-            .and_then(|state| state.facts.clone())
+        state(ctx).and_then(|state| state.facts.clone())
+    }
+
+    /// Invoke `hook`, threading this instance's context table through it.
+    ///
+    /// Returned background tasks are dropped: the engine already spawned them
+    /// on its own tracker, so they run once and the request never waits.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the table.
+    async fn invoke<H: HookTypeDef>(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        hook: &'static str,
+        payload: H::Payload,
+        extensions: Extensions,
+    ) -> Result<PipelineResult, FilterError> {
+        let table = state_mut(ctx).take_table()?;
+        let (mut result, _background) = Box::pin(self.mgr.invoke_named::<H>(hook, payload, extensions, table)).await;
+        state_mut(ctx).restore_table(std::mem::take(&mut result.context_table));
+        Ok(result)
     }
 
     /// What a hook invocation sees of the request: the captured facts, the
@@ -966,30 +956,21 @@ impl PolicyFilter {
     /// resolved [`IdentityPayload`] (subject / client / workload / raw
     /// credentials / delegation) or a rejection when no identity
     /// continues.
-    #[expect(
-        clippy::large_futures,
-        clippy::large_stack_frames,
-        reason = "async handler over large CMF/pipeline types"
-    )]
+    #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
     async fn resolve_identity(
         &self,
+        ctx: &mut HttpFilterContext<'_>,
         view: &RequestView,
         entity_type: &str,
         entity_name: &str,
-    ) -> Result<IdentityPayload, Rejection> {
+    ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
         let route_ext =
             Self::identity_extensions(view, entity_type, entity_name, self.cfg.context_meta.scope.as_deref());
         let payload = Self::identity_payload(view.headers().clone());
-        let (id_result, _bg) = self
-            .mgr
-            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, route_ext, None)
-            .await;
-        if !id_result.continue_processing {
-            return Err(auth_rejection(id_result.violation.as_ref()));
-        }
-        IdentityPayload::from_pipeline_result(&id_result).ok_or_else(|| {
-            Rejection::status(500).with_body(Bytes::from_static(b"policy: identity result missing modified payload"))
-        })
+        let id_result = self
+            .invoke::<IdentityHook>(ctx, HOOK_IDENTITY_RESOLVE, payload, route_ext)
+            .await?;
+        Ok(identity_from_result(&id_result))
     }
 
     /// Build the CMF `Extensions` from an already-resolved identity,
@@ -1214,63 +1195,35 @@ impl PolicyFilter {
     /// Whether this policy instance already completed admission in an earlier
     /// lifecycle phase.
     fn admission_complete(ctx: &HttpFilterContext<'_>) -> bool {
-        ctx.get_filter_state::<AdmissionState>()
-            .is_some_and(|state| state.complete)
+        state(ctx).is_some_and(|state| state.admitted)
     }
 
-    /// Record successful admission when executing through a pipeline. Direct
-    /// unit-test calls have no current filter ID and intentionally skip the
-    /// marker rather than emitting the context utility's warning.
+    /// Record that this instance admitted the request.
     fn mark_admission_complete(ctx: &mut HttpFilterContext<'_>) {
-        if ctx.current_filter_id.is_none() {
-            return;
-        }
-        if let Some(state) = ctx.get_filter_state_mut::<AdmissionState>() {
-            state.complete = true;
-        } else {
-            ctx.insert_filter_state(AdmissionState {
-                complete: true,
-                ..Default::default()
-            });
-        }
+        state_mut(ctx).admitted = true;
     }
 
-    /// Preserve an unscoped gate result in state owned by this policy filter
-    /// instance until classification proves that no entity route applies.
-    fn store_gated_identity(ctx: &mut HttpFilterContext<'_>, authenticated: Option<AuthenticatedIdentity>) {
-        if ctx.current_filter_id.is_none() {
-            return;
-        }
-        let gated_identity = authenticated.map_or(GatedIdentity::NoSubject, GatedIdentity::Subject);
-        if let Some(state) = ctx.get_filter_state_mut::<AdmissionState>() {
-            state.gated_identity = gated_identity;
-        } else {
-            ctx.insert_filter_state(AdmissionState {
-                gated_identity,
-                ..Default::default()
-            });
-        }
+    /// Keep the full identity this instance admitted, for its later hooks.
+    fn store_identity(ctx: &mut HttpFilterContext<'_>, identity: IdentityPayload) {
+        let state = state_mut(ctx);
+        state.gated = None;
+        state.identity = Some(identity);
     }
 
-    /// Remove and return this policy instance's temporary early-gate result.
-    fn take_gated_identity(ctx: &mut HttpFilterContext<'_>) -> GatedIdentity {
-        ctx.get_filter_state_mut::<AdmissionState>()
-            .map_or(GatedIdentity::NotRun, |state| std::mem::take(&mut state.gated_identity))
+    /// The full identity this instance admitted, if any.
+    fn admitted_identity<'c>(ctx: &'c HttpFilterContext<'_>) -> Option<&'c IdentityPayload> {
+        state(ctx).and_then(|state| state.identity.as_ref())
     }
 
     /// Resolve the global identity gate without publishing route-scoped state.
     ///
     /// Reserved entity-less coordinates select global authentication; absent
     /// coordinates would be rejected as an unidentified request.
-    #[expect(
-        clippy::large_futures,
-        clippy::large_stack_frames,
-        reason = "async PPE identity payload"
-    )]
+    #[expect(clippy::large_stack_frames, reason = "async PPE identity payload")]
     async fn resolve_gated_identity(
         &self,
-        ctx: &HttpFilterContext<'_>,
-    ) -> Result<Option<AuthenticatedIdentity>, Rejection> {
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
         let view = Self::request_view(ctx, &self.cfg.context_headers);
         let gate_ext = Self::identity_extensions(
             &view,
@@ -1279,37 +1232,28 @@ impl PolicyFilter {
             self.cfg.context_meta.scope.as_deref(),
         );
         let payload = Self::identity_payload(view.headers().clone());
-        let (result, _bg) = self
-            .mgr
-            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, payload, gate_ext, None)
-            .await;
-
-        if !result.continue_processing {
-            return Err(auth_rejection(result.violation.as_ref()));
-        }
-        let identity = IdentityPayload::from_pipeline_result(&result).ok_or_else(|| {
-            Rejection::status(500).with_body(Bytes::from_static(b"policy: identity result missing modified payload"))
-        })?;
-        Ok(Self::authenticated_identity(&identity))
+        let result = self
+            .invoke::<IdentityHook>(ctx, HOOK_IDENTITY_RESOLVE, payload, gate_ext)
+            .await?;
+        Ok(identity_from_result(&result))
     }
 
     /// Finish an identity-only admission after classification establishes that
     /// no entity-specific resolver can apply.
     #[expect(
-        clippy::large_futures,
         clippy::large_stack_frames,
         reason = "PPE identity resolution carries large async payloads"
     )]
     async fn complete_gated_admission(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let authenticated = match Self::take_gated_identity(ctx) {
-            GatedIdentity::Subject(authenticated) => Some(authenticated),
-            GatedIdentity::NoSubject => None,
-            GatedIdentity::NotRun => match self.resolve_gated_identity(ctx).await {
-                Ok(authenticated) => authenticated,
+        let identity = match state_mut(ctx).gated.take() {
+            Some(identity) => identity,
+            None => match self.resolve_gated_identity(ctx).await? {
+                Ok(identity) => identity,
                 Err(rejection) => return Ok(FilterAction::Reject(rejection)),
             },
         };
-        Self::publish_identity_projection(ctx, authenticated);
+        Self::publish_authenticated_identity(ctx, &identity);
+        Self::store_identity(ctx, identity);
         Self::mark_admission_complete(ctx);
         Ok(FilterAction::BodyDone)
     }
@@ -1319,7 +1263,6 @@ impl PolicyFilter {
     /// paid. For entity-aware policies, authorization runs later, in
     /// `on_request_body`, once the request is classified.
     #[expect(
-        clippy::large_futures,
         clippy::large_stack_frames,
         reason = "PPE identity resolution carries large async payloads"
     )]
@@ -1327,18 +1270,18 @@ impl PolicyFilter {
         // When a downstream body-buffering filter (e.g. the protocol
         // classifier) forces a pre-read, praxis runs `on_request_body` BEFORE
         // this header phase. That body phase already resolved and enforced
-        // identity (stashing `ResolvedIdentity`) and may have stripped the
+        // identity (keeping it in this instance's state) and may have stripped the
         // inbound identity headers (`X-User-Token`, `Authorization`) for the
         // upstream. Re-resolving here would fail on the now-stripped headers
         // and spuriously reject an already-authorized request. The body phase
         // is authoritative — skip the early gate when it already ran.
-        if ctx.extensions.get::<ResolvedIdentity>().is_some() {
+        if Self::admitted_identity(ctx).is_some() {
             tracing::trace!(target: "policy.filter", "identity already resolved in body phase; skipping early gate");
             return Ok(FilterAction::Continue);
         }
 
-        let authenticated = match self.resolve_gated_identity(ctx).await {
-            Ok(authenticated) => authenticated,
+        let identity = match self.resolve_gated_identity(ctx).await? {
+            Ok(identity) => identity,
             Err(rejection) => {
                 tracing::debug!(target: "policy.filter", "identity deny (on_request)");
                 return Ok(FilterAction::Reject(rejection));
@@ -1348,9 +1291,10 @@ impl PolicyFilter {
         // PPE the authoritative route coordinates. Publishing this unscoped
         // gate result could expose a principal from the wrong route resolver.
         if self.entity_routes {
-            Self::store_gated_identity(ctx, authenticated);
+            state_mut(ctx).gated = Some(identity);
         } else {
-            Self::publish_identity_projection(ctx, authenticated);
+            Self::publish_authenticated_identity(ctx, &identity);
+            Self::store_identity(ctx, identity);
         }
         tracing::trace!(target: "policy.filter", "identity allow (on_request)");
         Ok(FilterAction::Continue)
@@ -1358,7 +1302,6 @@ impl PolicyFilter {
 
     /// Authorize an inference request through `cmf.llm_input`.
     #[expect(
-        clippy::large_futures,
         clippy::large_stack_frames,
         clippy::too_many_lines,
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
@@ -1384,11 +1327,10 @@ impl PolicyFilter {
         }
 
         let view = Self::request_view(ctx, &self.cfg.context_headers);
-        let identity = match self.resolve_identity(&view, entity_type, &model).await {
+        let identity = match self.resolve_identity(ctx, &view, entity_type, &model).await? {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
-        Self::take_gated_identity(ctx);
         Self::publish_authenticated_identity(ctx, &identity);
 
         // Read what the handler needs before the document moves into the extensions.
@@ -1399,13 +1341,10 @@ impl PolicyFilter {
 
         let mut extensions = Self::extensions_from_identity(&view, &identity, entity_type, &model, &self.cfg);
         self.attach_llm_attributes(&mut extensions, parsed, &model);
-        ctx.extensions.insert(ResolvedIdentity(identity));
-        ctx.extensions.insert(InferenceRequest { model: model.clone() });
+        Self::store_identity(ctx, identity);
+        state_mut(ctx).inference_model = Some(model.clone());
 
-        let (cmf_result, _bg) = self
-            .mgr
-            .invoke_named::<CmfHook>(hook_name, payload, extensions, None)
-            .await;
+        let cmf_result = self.invoke::<CmfHook>(ctx, hook_name, payload, extensions).await?;
 
         if !cmf_result.continue_processing {
             tracing::debug!(target: "policy.filter", model = %model, "inference deny");
@@ -1509,7 +1448,7 @@ impl PolicyFilter {
     )]
     fn dispatch_llm_response(
         &self,
-        ctx: &HttpFilterContext<'_>,
+        ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
     ) -> Result<FilterAction, FilterError> {
         let Some(model) = Self::llm_response_model(ctx) else {
@@ -1551,7 +1490,7 @@ impl PolicyFilter {
 
         let (entity_type, hook_name) = (ENTITY_LLM, HOOK_CMF_LLM_OUTPUT);
         let view = Self::request_view(ctx, &self.cfg.context_headers);
-        let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
+        let Some(identity) = Self::admitted_identity(ctx) else {
             // Missing request identity would otherwise skip response policy.
             tracing::error!(
                 target: "policy.filter",
@@ -1579,7 +1518,7 @@ impl PolicyFilter {
         let payload = MessagePayload {
             message: response_message(&parsed),
         };
-        let cmf_result = self.dispatch_response_cmf(hook_name, payload, extensions, "inference response-phase")?;
+        let cmf_result = self.dispatch_response_cmf(ctx, hook_name, payload, extensions)?;
 
         if !cmf_result.continue_processing {
             tracing::warn!(
@@ -1611,21 +1550,23 @@ impl PolicyFilter {
 
     /// Return the request model for a non-streaming inference response.
     fn llm_response_model(ctx: &HttpFilterContext<'_>) -> Option<String> {
-        let inference = ctx.extensions.get::<InferenceRequest>()?;
+        let model = state(ctx)?.inference_model.as_ref()?;
         if Self::response_is_event_stream(ctx) {
             tracing::debug!(
                 target: "policy.filter",
-                model = %inference.model,
+                model = %model,
                 "streamed inference response; skipping the response-phase policy",
             );
             return None;
         }
-        Some(inference.model.clone())
+        Some(model.clone())
     }
 
     /// Whether inference response evaluation will skip this stream.
     fn inference_response_is_streamed(&self, ctx: &HttpFilterContext<'_>) -> bool {
-        self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() && Self::response_is_event_stream(ctx)
+        self.llm_post
+            && state(ctx).is_some_and(|state| state.inference_model.is_some())
+            && Self::response_is_event_stream(ctx)
     }
 
     /// Whether the upstream is streaming this response as server-sent events.
@@ -1671,14 +1612,16 @@ impl PolicyFilter {
     /// identity failure is the usual 401. Authorization runs here (not the
     /// body phase) because it needs no request body.
     #[expect(
-        clippy::large_futures,
         clippy::large_stack_frames,
         clippy::too_many_lines,
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
     )]
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let view = Self::request_view(ctx, &self.cfg.context_headers);
-        let identity = match self.resolve_identity(&view, ENTITY_HTTP, ENTITY_NAME_GLOBAL).await {
+        let identity = match self
+            .resolve_identity(ctx, &view, ENTITY_HTTP, ENTITY_NAME_GLOBAL)
+            .await?
+        {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
@@ -1691,10 +1634,9 @@ impl PolicyFilter {
         // blocking-pool hop would only park a pool thread on the join handle.
         // Generic HTTP handlers read request data from extensions, not a body
         // payload.
-        let (result, _bg) = self
-            .mgr
-            .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, extensions, None)
-            .await;
+        let result = self
+            .invoke::<HttpHook>(ctx, HOOK_HTTP_REQUEST, HttpPayload, extensions)
+            .await?;
 
         if !result.continue_processing {
             tracing::debug!(target: "policy.filter", "http authz deny (on_request)");
@@ -1727,7 +1669,7 @@ impl PolicyFilter {
             );
         }
         // Reuse the admitted identity so mid-exchange token expiry cannot cause a late deny.
-        ctx.extensions.insert(ResolvedIdentity(identity));
+        Self::store_identity(ctx, identity);
         tracing::trace!(target: "policy.filter", "http authz allow (on_request)");
         Ok(FilterAction::Continue)
     }
@@ -1744,7 +1686,7 @@ impl PolicyFilter {
         cfg: &PolicyFilterConfig,
     ) -> Extensions {
         let view = Self::request_view(ctx, &cfg.context_headers);
-        let mut extensions = if let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() {
+        let mut extensions = if let Some(identity) = Self::admitted_identity(ctx) {
             Self::extensions_from_identity(&view, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, cfg)
         } else {
             tracing::debug!(
@@ -1781,44 +1723,31 @@ impl PolicyFilter {
         }
     }
 
-    /// Await the response hook on the worker runtime, as the request half does.
-    #[expect(
-        clippy::large_stack_frames,
-        reason = "PPE response dispatch carries large async payloads"
-    )]
-    async fn dispatch_response_hook(
-        &self,
-        hook: &'static str,
-        extensions: Extensions,
-    ) -> ppe::praxis_policy_core::executor::PipelineResult {
-        let (result, _bg) = self
-            .mgr
-            .invoke_named::<HttpHook>(hook, HttpPayload, extensions, None)
-            .await;
-        result
-    }
-
     /// Dispatch a CMF hook from the synchronous response-body phase, blocking
     /// for at most the filter's response dispatch bound.
     ///
     /// # Errors
     ///
     /// Returns [`FilterError`] when the hook times out or yields no result,
-    /// so the response fails under the filter's `failure_mode`.
+    /// so the response fails under the filter's `failure_mode`. The context
+    /// table moved into the hook is then lost, and later hooks refuse to run.
     fn dispatch_response_cmf(
         &self,
+        ctx: &mut HttpFilterContext<'_>,
         hook: &'static str,
         payload: MessagePayload,
         extensions: Extensions,
-        phase: &str,
-    ) -> Result<ppe::praxis_policy_core::executor::PipelineResult, FilterError> {
+    ) -> Result<PipelineResult, FilterError> {
+        let table = state_mut(ctx).take_table()?;
         let mgr = Arc::clone(&self.mgr);
         let invoke = async move {
-            let (r, _bg) = Box::pin(mgr.invoke_named::<CmfHook>(hook, payload, extensions, None)).await;
-            r
+            let (result, _background) = Box::pin(mgr.invoke_named::<CmfHook>(hook, payload, extensions, table)).await;
+            result
         };
-        block_on_bounded(invoke, self.response_dispatch_timeout)
-            .map_err(|e| -> FilterError { format!("policy: {phase} dispatch failed: {e}").into() })
+        let mut result = block_on_bounded(invoke, self.response_dispatch_timeout)
+            .map_err(|e| -> FilterError { format!("policy: {hook} dispatch failed: {e}").into() })?;
+        state_mut(ctx).restore_table(std::mem::take(&mut result.context_table));
+        Ok(result)
     }
 
     /// Put the rendered response contract on the response the client receives.
@@ -1855,17 +1784,22 @@ fn selector_lists_any_model_literal(selector: &ppe::praxis_policy_core::config::
     )
 }
 
+/// The identity a resolution produced, or the rejection it ended in.
+fn identity_from_result(result: &PipelineResult) -> Result<IdentityPayload, Rejection> {
+    if !result.continue_processing {
+        return Err(auth_rejection(result.violation.as_ref()));
+    }
+    IdentityPayload::from_pipeline_result(result).ok_or_else(|| {
+        Rejection::status(500).with_body(Bytes::from_static(b"policy: identity result missing modified payload"))
+    })
+}
+
 /// Render a validated claim into the identity projection's string format.
 ///
 /// Strings remain unquoted; other values use compact JSON.
 fn flatten_claim(value: &serde_json::Value) -> String {
     value.as_str().map_or_else(|| value.to_string(), str::to_owned)
 }
-
-/// Request-scoped identity reused during response processing.
-///
-/// Typed storage avoids serializing credentials and revalidating expired tokens.
-pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
 
 /// Engine provenance for secret assertion headers applied to the request.
 ///
@@ -1874,12 +1808,6 @@ pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
 /// Without them, plugins and PDPs on those phases receive the credential
 /// instead of its redaction marker.
 pub(super) struct AssertedSecretHeaders(pub(super) SecretHeaderProvenance);
-
-/// Inference request state retained for response policy evaluation.
-struct InferenceRequest {
-    /// The model parsed from the request body.
-    model: String,
-}
 
 /// Build an inference denial body that fits the committed response size.
 fn llm_deny_body(violation: Option<&PluginViolation>, original_len: usize, reason: &str) -> Bytes {
@@ -2061,7 +1989,6 @@ impl HttpFilter for PolicyFilter {
     }
 
     #[expect(
-        clippy::large_futures,
         clippy::large_stack_frames,
         clippy::too_many_lines,
         reason = "async handler with multiple await points over large CMF types; linear phase flow"
@@ -2217,16 +2144,15 @@ impl HttpFilter for PolicyFilter {
 
         // Resolve identity once here, then stash it so the response phase
         // can rebuild `Extensions` without re-validating the token.
-        let identity = match self.resolve_identity(&view, entity_type, &entity_name).await {
+        let identity = match self.resolve_identity(ctx, &view, entity_type, &entity_name).await? {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
-        Self::take_gated_identity(ctx);
         Self::publish_authenticated_identity(ctx, &identity);
         // The engine grants entity route handlers `read_headers` and
         // `read_query`, so one policy can combine `args.*` with `http.*`.
         let extensions = Self::extensions_from_identity(&view, &identity, entity_type, &entity_name, &self.cfg);
-        ctx.extensions.insert(ResolvedIdentity(identity));
+        Self::store_identity(ctx, identity);
 
         // Parse the JSON-RPC body to build the typed CMF content part.
         // The protocol classifier filter already parsed once but only stashed
@@ -2253,10 +2179,7 @@ impl HttpFilter for PolicyFilter {
         let payload = MessagePayload {
             message: Message::with_content(Role::User, content),
         };
-        let (cmf_result, _bg) = self
-            .mgr
-            .invoke_named::<CmfHook>(hook_name, payload, extensions, None)
-            .await;
+        let cmf_result = self.invoke::<CmfHook>(ctx, hook_name, payload, extensions).await?;
 
         if !cmf_result.continue_processing {
             let request_id = parsed.id_value();
@@ -2338,11 +2261,6 @@ impl HttpFilter for PolicyFilter {
         Ok(FilterAction::BodyDone)
     }
 
-    #[expect(
-        clippy::large_futures,
-        clippy::large_stack_frames,
-        reason = "PPE response dispatch carries large async payloads"
-    )]
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(hook) = self.response_hook else {
             return Ok(FilterAction::Continue);
@@ -2357,7 +2275,8 @@ impl HttpFilter for PolicyFilter {
             &self.cfg,
         );
 
-        let result = self.dispatch_response_hook(hook, extensions).await;
+        // Awaited on the worker runtime, as the request half is.
+        let result = self.invoke::<HttpHook>(ctx, hook, HttpPayload, extensions).await?;
         if !result.continue_processing {
             tracing::warn!(
                 target: "policy.filter",
@@ -2400,7 +2319,7 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Continue);
         }
 
-        if self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() {
+        if self.llm_post && state(ctx).is_some_and(|state| state.inference_model.is_some()) {
             return self.dispatch_llm_response(ctx, body);
         }
 
@@ -2435,7 +2354,7 @@ impl HttpFilter for PolicyFilter {
         // no token re-validation — so a token that expired between the
         // request and this (already-served) response can't produce a
         // false deny on a request that was authorized.
-        let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
+        let Some(identity) = Self::admitted_identity(ctx) else {
             // Fail closed: a response we can no longer attribute to a
             // request-phase identity must be denied rather than passed
             // through, which would skip configured response-side
@@ -2479,7 +2398,7 @@ impl HttpFilter for PolicyFilter {
         let payload = MessagePayload {
             message: Message::with_content(Role::Assistant, content),
         };
-        let cmf_result = self.dispatch_response_cmf(hook_name, payload, extensions, "response-phase CMF")?;
+        let cmf_result = self.dispatch_response_cmf(ctx, hook_name, payload, extensions)?;
 
         // Post-phase deny — the upstream's response carries something
         // the operator wants suppressed (output PII, late policy

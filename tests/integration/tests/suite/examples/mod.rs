@@ -98,6 +98,8 @@ mod policy_assertions;
 #[cfg(feature = "policy-builtins")]
 mod policy_context;
 #[cfg(feature = "policy-builtins")]
+mod policy_dpop;
+#[cfg(feature = "policy-builtins")]
 mod policy_http;
 #[cfg(feature = "policy-builtins")]
 mod policy_jwks;
