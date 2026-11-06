@@ -57,6 +57,7 @@ use super::{
     },
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
     request_facts::{RequestFacts, RequestView},
+    request_headers,
     request_state::{state, state_mut},
     response_rules::ensure_supported_entity_results,
     transport::PolicyHttpTransport,
@@ -214,10 +215,12 @@ static EMPTY_BODY: Bytes = Bytes::new();
 /// otherwise. It carries no inference request, so a global rule that reads
 /// `llm.request` denies it; keep such rules in `llm:` routes or
 /// `global.defaults.llm`. A policy with neither HTTP rules nor request
-/// assertions admits it on identity. Two fallbacks still admit on identity
-/// alone, with a startup warning when HTTP rules or request assertions exist:
-/// a body with no usable `model` under `llm.require_model: false`, and an
-/// unclassified request under `require_protocol_metadata: false`.
+/// assertions admits it on identity. A body with no usable `model` under
+/// `llm.require_model: false` runs the same HTTP admission after parsing and
+/// classification checks. MCP-only policies with `require_protocol_metadata:
+/// false` still admit unclassified requests on identity alone and warn when
+/// HTTP rules or request assertions exist. Classified non-entity MCP methods
+/// also retain their identity-only admission.
 ///
 /// On a policy with `llm:` routes, any request body without `mcp.method`
 /// metadata that repeats a key within one JSON object, at any depth,
@@ -349,7 +352,8 @@ pub struct PolicyFilter {
     limit_post: bool,
     /// Whether `http.request` has work: a handler or request assertions.
     /// Without entity routes, the filter is a pure L7 policy authorized at
-    /// `on_request`; bodyless inference requests are authorized there too.
+    /// `on_request`; unclassified inference fallbacks use the same rules in
+    /// the body phase.
     http_request_policy: bool,
     /// Header names governed by request assertions.
     request_assertions: GovernedNames,
@@ -1757,8 +1761,8 @@ impl PolicyFilter {
     /// HTTP request line + headers into the attribute bag, and evaluate the
     /// `global` policy via the `http.request` hook. A deny maps to a
     /// plain HTTP response ([`super::error::http_authz_rejection`]); an
-    /// identity failure is the usual 401. Authorization runs here (not the
-    /// body phase) because it needs no request body.
+    /// identity failure is the usual 401. Both request-phase and pre-read
+    /// admission use this body-independent policy boundary.
     #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
@@ -1825,7 +1829,7 @@ impl PolicyFilter {
         None
     }
 
-    /// Admit a bodyless request on an inference policy: the gate's identity,
+    /// Admit an unclassified HTTP fallback on an inference policy: the gate's identity,
     /// then HTTP authorization, delegation and assertions when the policy
     /// installs any; identity alone otherwise.
     ///
@@ -1833,7 +1837,7 @@ impl PolicyFilter {
     ///
     /// Fails when an earlier dispatch lost the context table.
     #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
-    async fn admit_bodyless(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+    async fn admit_http_fallback(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if Self::admission_complete(ctx) {
             return Ok(FilterAction::BodyDone);
         }
@@ -2236,7 +2240,7 @@ impl HttpFilter for PolicyFilter {
                     target: "policy.filter",
                     "request carries no body; no inference dispatch",
                 );
-                return Box::pin(self.admit_bodyless(ctx)).await;
+                return Box::pin(self.admit_http_fallback(ctx)).await;
             }
 
             // A repeated key makes the body mean different things to
@@ -2300,6 +2304,9 @@ impl HttpFilter for PolicyFilter {
                 ))));
             }
             tracing::trace!(target: "policy.filter", "request carries no entity coordinates; no CMF dispatch");
+            if self.llm_routes {
+                return Box::pin(self.admit_http_fallback(ctx)).await;
+            }
             return self.complete_gated_admission(ctx).await;
         };
 
@@ -2779,7 +2786,9 @@ pub(super) fn attach_delegated_tokens(
     let attached: std::collections::HashSet<http::header::HeaderName> =
         outbound.iter().map(|(name, _)| name.clone()).collect();
     let count = outbound.len();
-    ctx.request_headers_to_set.extend(outbound);
+    for (name, value) in outbound {
+        request_headers::set(ctx, name, value);
+    }
     for inbound in raw.inbound_tokens.values() {
         strip_inbound_header(ctx, &inbound.source, &attached);
     }
@@ -2885,7 +2894,7 @@ fn strip_inbound_header(
     };
     match http::header::HeaderName::try_from(source_header) {
         Ok(name) if attached.contains(&name) => {},
-        Ok(name) => ctx.request_headers_to_remove.push(name),
+        Ok(name) => request_headers::remove(ctx, name),
         Err(_) => tracing::warn!(
             target: "policy.filter",
             header = source_header,
@@ -2925,17 +2934,12 @@ pub(super) fn identity_only_fallback_warnings(
     mcp_routes: bool,
     llm_routes: bool,
 ) -> Vec<&'static str> {
-    let no_model = (llm_routes && !cfg.llm.require_model).then_some(
-        "policy declares HTTP rules or request assertions alongside `llm.require_model: false`: a \
-         request body with no usable `model` is admitted on identity alone, without HTTP \
-         authorization, delegation or request assertions",
-    );
-    let unclassified = (mcp_routes && !cfg.require_protocol_metadata).then_some(
+    let unclassified = (mcp_routes && !llm_routes && !cfg.require_protocol_metadata).then_some(
         "policy declares HTTP rules or request assertions alongside `require_protocol_metadata: \
          false`: an unclassified request is admitted on identity alone, without HTTP \
          authorization, delegation or request assertions",
     );
-    no_model.into_iter().chain(unclassified).collect()
+    unclassified.into_iter().collect()
 }
 
 /// Warn when the loaded policy declares `rate_limits:`, which runs the

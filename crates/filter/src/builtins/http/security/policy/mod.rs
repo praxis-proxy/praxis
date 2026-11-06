@@ -63,8 +63,10 @@
 //! `cmf.llm_input`; no protocol classifier is required. Missing and unlisted
 //! models fail closed by default, conflicting JSON-RPC and inference
 //! coordinates are denied, and `llm.max_request_bytes` bounds buffering.
-//! Bodyless requests remain subject to identity policy but skip inference
-//! routing. APIs that identify the model only in the URL are unsupported.
+//! Bodyless requests skip inference routing and run HTTP admission, including
+//! global authorization and request assertions. With `llm.require_model: false`,
+//! accepted unclassified bodies without a model run the same HTTP admission.
+//! APIs that identify the model only in the URL are unsupported.
 //!
 //! OPA, CEL, and Cedar `pre_invocation` steps on `llm:` routes also read the
 //! parsed body as `llm.request`; `post_invocation` steps do not receive it.
@@ -189,6 +191,7 @@ mod host_plugins;
 mod json_rpc;
 mod llm;
 mod request_facts;
+mod request_headers;
 mod request_state;
 mod response_rules;
 mod transport;

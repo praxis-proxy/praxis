@@ -334,8 +334,9 @@ pub(crate) struct LlmOptions {
 
     /// Deny a request whose body carries no usable top-level `model`.
     ///
-    /// Enabled by default. When disabled, the request falls through to
-    /// other policy paths.
+    /// Enabled by default. When disabled, an accepted unclassified request
+    /// without a model runs HTTP authorization, delegation and assertions.
+    /// Parsing and MCP classification checks still apply.
     #[serde(default = "default_true")]
     pub require_model: bool,
 

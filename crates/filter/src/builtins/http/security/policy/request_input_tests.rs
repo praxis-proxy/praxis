@@ -383,6 +383,62 @@ fn delegation_beside_a_header_credential_strips_it() {
 }
 
 #[test]
+#[expect(clippy::too_many_lines, reason = "delegation and assertion ordering regression")]
+fn ordered_delegation_strips_inbound_and_yields_to_assertions() {
+    use http::HeaderName;
+    use ppe::praxis_policy_core::{
+        assertions::Direction,
+        extensions::{Credential, HttpExtension},
+    };
+
+    use super::assertions::{GovernedNames, apply_request_assertions};
+    use crate::TrustedHeaderMutation;
+
+    let ext = delegation_extensions(Credential::Header {
+        name: "X-Api-Key".to_owned(),
+    });
+    let req = make_request(Method::GET, "/widgets");
+    let mut ctx = make_filter_context(&req);
+    ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+        HeaderName::from_static("x-api-key"),
+        "pending-key".to_owned(),
+    ));
+    ctx.extra_request_headers
+        .push(("Authorization".into(), "pending-token".to_owned()));
+    assert_eq!(
+        attach_delegated_tokens(&mut ctx, Some(&ext)).expect("delegation attaches"),
+        1
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "a grouped add cannot revive the old credential"
+    );
+    assert!(
+        matches!(&ctx.pre_read_mutations[1], TrustedHeaderMutation::Set(name, value)
+        if name == "authorization" && value == "Bearer delegated-secret")
+    );
+    assert!(matches!(&ctx.pre_read_mutations[2], TrustedHeaderMutation::Remove(name) if name == "x-api-key"));
+
+    let config = ppe::praxis_policy_core::config::parse_config(
+        "global:\n  assertions:\n    request:\n      strip: [authorization]\n",
+    )
+    .expect("assertion contract");
+    let governed = GovernedNames::from_config(&config, Direction::Request);
+    let rendered = ppe::prelude::Extensions {
+        http: Some(Arc::new(HttpExtension::default())),
+        ..Default::default()
+    };
+    apply_request_assertions(&mut ctx, Some(&rendered), &governed);
+    assert!(
+        ctx.request_headers_to_set.is_empty(),
+        "assertions govern delegated headers"
+    );
+    assert!(
+        matches!(ctx.pre_read_mutations.last(), Some(TrustedHeaderMutation::Remove(name)) if name == "authorization")
+    );
+}
+
+#[test]
 fn a_query_credential_beside_delegation_is_refused_at_construction() {
     let yaml = API_KEY_POLICY
         .replace("{credential}", QUERY_CREDENTIAL)
@@ -470,9 +526,104 @@ global:
     );
 }
 
+#[test]
+fn assertion_removal_does_not_repeat_remove_only_mutations() {
+    let (governed, rendered) = removal_assertion_contract(None);
+    let name = http::HeaderName::from_static("x-secret-token");
+    let req = make_request(Method::GET, "/widgets");
+    for prior in [false, true] {
+        let mut ctx = make_filter_context(&req);
+        let log = if prior {
+            &mut ctx.prior_pre_read_mutations
+        } else {
+            &mut ctx.pre_read_mutations
+        };
+        log.push(crate::TrustedHeaderMutation::Remove(name.clone()));
+        let counts = super::assertions::apply_request_assertions(&mut ctx, Some(&rendered), &governed);
+        assert_eq!(counts, (0, 0), "an existing removal alone needs no policy operation");
+        assert!(ctx.request_headers_to_remove.is_empty(), "no redundant grouped removal");
+        assert_eq!(ctx.resolve_trusted_header(&name).expect("valid header"), None);
+    }
+}
+
+#[test]
+fn assertion_removal_strips_values_reintroduced_after_a_prior_removal() {
+    let (governed, rendered) = removal_assertion_contract(None);
+    let name = http::HeaderName::from_static("x-secret-token");
+    let req = make_request(Method::GET, "/widgets");
+    for mutation in [
+        crate::TrustedHeaderMutation::Set(name.clone(), HeaderValue::from_static("secret")),
+        crate::TrustedHeaderMutation::Add(name.clone(), "secret".to_owned()),
+    ] {
+        let mut ctx = make_filter_context(&req);
+        ctx.prior_pre_read_mutations
+            .push(crate::TrustedHeaderMutation::Remove(name.clone()));
+        ctx.pre_read_mutations.push(mutation);
+        let counts = super::assertions::apply_request_assertions(&mut ctx, Some(&rendered), &governed);
+        assert_eq!(counts, (0, 1), "the reintroduced value needs a policy removal");
+        assert_eq!(
+            ctx.resolve_trusted_header(&name).expect("valid header"),
+            None,
+            "ordered replay must not revive the credential"
+        );
+    }
+}
+
+#[test]
+fn assertion_removal_still_governs_original_headers_after_a_prior_removal() {
+    let (governed, rendered) = removal_assertion_contract(None);
+    let name = http::HeaderName::from_static("x-secret-token");
+    let mut req = make_request(Method::GET, "/widgets");
+    req.headers.insert(name.clone(), HeaderValue::from_static("inbound"));
+    let mut ctx = make_filter_context(&req);
+    ctx.prior_pre_read_mutations
+        .push(crate::TrustedHeaderMutation::Remove(name.clone()));
+    let counts = super::assertions::apply_request_assertions(&mut ctx, Some(&rendered), &governed);
+    assert_eq!(counts, (0, 1), "the original header remains governed");
+    assert_eq!(ctx.request_headers_to_remove, vec![name.clone()]);
+    assert_eq!(ctx.resolve_trusted_header(&name).expect("valid header"), None);
+}
+
+#[test]
+fn assertion_removal_does_not_suppress_a_rendered_replacement() {
+    let (governed, rendered) = removal_assertion_contract(Some("asserted"));
+    let name = http::HeaderName::from_static("x-secret-token");
+    let req = make_request(Method::GET, "/widgets");
+    let mut ctx = make_filter_context(&req);
+    ctx.pre_read_mutations
+        .push(crate::TrustedHeaderMutation::Remove(name.clone()));
+    let counts = super::assertions::apply_request_assertions(&mut ctx, Some(&rendered), &governed);
+    assert_eq!(counts, (1, 0), "rendered assertions still replace earlier removals");
+    assert_eq!(
+        ctx.resolve_trusted_header(&name).expect("valid header").as_deref(),
+        Some("asserted")
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// A wildcard strip contract and the engine's rendered request headers.
+fn removal_assertion_contract(value: Option<&str>) -> (super::assertions::GovernedNames, ppe::prelude::Extensions) {
+    use ppe::praxis_policy_core::{assertions::Direction, extensions::HttpExtension};
+
+    let config = ppe::praxis_policy_core::config::parse_config(
+        "global:\n  assertions:\n    request:\n      strip: ['x-secret-*']\n",
+    )
+    .expect("assertion contract");
+    let governed = super::assertions::GovernedNames::from_config(&config, Direction::Request);
+    let mut http = HttpExtension::default();
+    if let Some(value) = value {
+        http.request_headers
+            .insert("x-secret-token".to_owned(), value.to_owned());
+    }
+    let rendered = ppe::prelude::Extensions {
+        http: Some(Arc::new(http)),
+        ..Default::default()
+    };
+    (governed, rendered)
+}
 
 /// A filter over [`API_KEY_POLICY`] with `credential` and `rules`; the
 /// returned directory holds the policy and key file.
