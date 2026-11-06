@@ -6,7 +6,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io::{BufReader, Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -603,8 +603,7 @@ impl LargeBackend {
             length >= 65_536 + CANARY.len(),
             "response must contain a full prefix and canary"
         );
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let (listener, port) = praxis_test_utils::bind_unique_port();
         listener.set_nonblocking(true).unwrap();
         let (prefix_tx, prefix) = mpsc::channel();
         let (resume, resume_rx) = mpsc::channel();
@@ -854,8 +853,7 @@ struct SlowEvents {
 impl SlowEvents {
     /// Start an event receiver with a strict cap on retained sockets and bytes.
     fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
+        let (listener, port) = praxis_test_utils::bind_unique_port();
         listener.set_nonblocking(true).unwrap();
         let observed = Arc::new(Mutex::new(Vec::new()));
         let held = Arc::new(AtomicUsize::new(0));

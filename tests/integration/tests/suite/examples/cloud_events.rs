@@ -9,7 +9,7 @@ mod slow_process;
 use std::{
     collections::HashMap,
     io::{BufRead as _, BufReader, Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -25,8 +25,7 @@ use praxis_test_utils::{
 
 #[test]
 fn cloud_events_example_publishes_after_response_completion() {
-    let receiver = TcpListener::bind("127.0.0.1:0").unwrap();
-    let receiver_port = receiver.local_addr().unwrap().port();
+    let (receiver, receiver_port) = praxis_test_utils::bind_unique_port();
     let (sender, received) = mpsc::channel();
     let receiver_thread = thread::spawn(move || {
         let (mut stream, _) = receiver.accept().unwrap();
@@ -251,8 +250,7 @@ fn cloud_event_does_not_hide_a_stream_response_limit() {
 
 /// Accept events under a strict body bound, and acknowledge each one.
 fn bounded_event_receiver() -> (u16, mpsc::Receiver<String>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     listener.set_nonblocking(true).unwrap();
     let (sender, events) = mpsc::channel();
     thread::spawn(move || {
@@ -311,8 +309,7 @@ fn read_event(mut socket: TcpStream) -> String {
 
 /// Hold the second event until the client has observed the first one.
 fn paused_sse_backend() -> (u16, mpsc::Sender<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let (resume, wait) = mpsc::channel();
     thread::spawn(move || {
         let (mut socket, _) = listener.accept().unwrap();

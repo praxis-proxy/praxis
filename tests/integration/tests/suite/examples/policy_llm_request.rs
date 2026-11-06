@@ -6,7 +6,7 @@
 use std::{
     collections::HashMap,
     io::{BufRead as _, BufReader, Read as _, Write as _},
-    net::{Shutdown, TcpListener, TcpStream},
+    net::{Shutdown, TcpStream},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -572,8 +572,7 @@ fn large_policy_mutations_preserve_http_framing_and_redact_both_directions() {
     for chunked in [false, true] {
         let directory = tempfile::TempDir::new().unwrap();
         let policy = payload_mutation_policy(&directory);
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let backend_port = listener.local_addr().unwrap().port();
+        let (listener, backend_port) = praxis_test_utils::bind_unique_port();
         let (accepted_tx, accepted_rx) = mpsc::channel();
         let (observed_tx, observed_rx) = mpsc::channel();
         let backend = std::thread::spawn(move || {
@@ -862,8 +861,7 @@ type ResizeBackend = (
 
 /// Capture a complete Content-Length request before returning a small response.
 fn resize_backend() -> ResizeBackend {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let (accepted_tx, accepted_rx) = mpsc::channel();
     let (body_tx, body_rx) = mpsc::channel();
     let handle = std::thread::spawn(move || {
@@ -1001,8 +999,7 @@ fn policy_response_call(addr: &str) -> (praxis_test_utils::H1Response, Vec<u8>) 
 fn response_rewrite_growth_fails_closed_then_clean_response_completes() {
     let directory = tempfile::TempDir::new().unwrap();
     let policy = resize_policy(&directory, "redact");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let (length_tx, lengths) = mpsc::channel();
     let backend = std::thread::spawn(move || {
         for secret in ["s", "long synthetic secret"] {
@@ -1051,8 +1048,7 @@ fn response_rewrite_growth_fails_closed_then_clean_response_completes() {
 fn invalid_or_uninspectable_tool_responses_do_not_escape_closed_policy() {
     let directory = tempfile::TempDir::new().unwrap();
     let policy = resize_policy(&directory, "redact");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let valid = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"padding":"x".repeat(900_000),"secret":"confidential-marker"}}}).to_string();
     let mut truncated = valid.as_bytes().to_vec();
     truncated.pop();
@@ -1128,8 +1124,7 @@ fn invalid_or_uninspectable_tool_responses_do_not_escape_closed_policy() {
 fn malformed_tool_response_passes_only_when_policy_failure_mode_is_open() {
     let directory = tempfile::TempDir::new().unwrap();
     let policy = resize_policy(&directory, "redact");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let malformed = format!(
         r#"{{"jsonrpc":"2.0","id":1,"result":{{"structuredContent":{{"padding":"{}","secret":"synthetic-marker"}}}}"#,
         "x".repeat(900_000)
