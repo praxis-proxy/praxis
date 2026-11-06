@@ -446,6 +446,10 @@ fn build_static_response_filter(entry: &RoutedEntry) -> FilterEntry {
 }
 
 /// Assemble a [`Config`] from parts.
+#[expect(
+    clippy::too_many_lines,
+    reason = "a struct literal with every config section stays readable together"
+)]
 fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>) -> Config {
     Config {
         admin: AdminConfig::default(),

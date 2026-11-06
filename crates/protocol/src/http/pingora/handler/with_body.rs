@@ -111,6 +111,10 @@ pub struct PingoraHttpHandler {
 
 impl PingoraHttpHandler {
     /// Create a handler with body filter support.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the handler carries every listener-scoped limit plus the shared lifecycle"
+    )]
     pub(super) fn new(
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,

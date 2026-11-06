@@ -165,6 +165,10 @@ pub fn load_http_handler(
 }
 
 /// Load an HTTP handler with the process lifecycle shared by readiness and responses.
+///
+/// # Errors
+///
+/// Returns the listener wiring error when the handler cannot be registered.
 #[cfg(feature = "pingora")]
 pub fn load_http_handler_with_lifecycle(
     server: &mut Server,
