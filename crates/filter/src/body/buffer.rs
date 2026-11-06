@@ -28,9 +28,6 @@ pub struct BodyBuffer {
     /// Accumulated body bytes.
     bytes: Vec<u8>,
 
-    /// Recorder handle retained across buffer ownership transfers.
-    accounting: metrics::Gauge,
-
     /// Maximum allowed bytes.
     max_bytes: usize,
 }
@@ -42,7 +39,6 @@ impl BodyBuffer {
     pub fn new(max_bytes: usize) -> Self {
         Self {
             bytes: Vec::new(),
-            accounting: metrics::gauge!("praxis_body_buffer_bytes"),
             max_bytes: max_bytes.min(MAX_BUFFER_BYTES),
         }
     }
@@ -73,7 +69,6 @@ impl BodyBuffer {
                 .min(self.max_bytes);
             self.bytes.reserve_exact(capacity.saturating_sub(self.bytes.len()));
         }
-        self.accounting.increment(metric_bytes(chunk.len()));
         self.bytes.extend_from_slice(&chunk);
         drop(chunk);
 
@@ -86,44 +81,8 @@ impl BodyBuffer {
     }
 
     /// Consume the buffer and return the complete body.
-    pub fn freeze(mut self) -> Bytes {
-        Bytes::from_owner(BufferedBody {
-            bytes: std::mem::take(&mut self.bytes).into_boxed_slice(),
-            accounting: self.accounting.clone(),
-        })
-    }
-}
-
-/// Memory sizes in a proxy process remain far below f64's exact integer range.
-#[expect(clippy::cast_precision_loss, reason = "in-memory byte counts are far below 2^53")]
-fn metric_bytes(bytes: usize) -> f64 {
-    bytes as f64
-}
-
-impl Drop for BodyBuffer {
-    fn drop(&mut self) {
-        self.accounting.decrement(metric_bytes(self.bytes.len()));
-    }
-}
-
-/// Frozen body owner; the gauge remains live until the final Bytes clone drops.
-struct BufferedBody {
-    /// Payload storage retained by the zero-copy Bytes owner.
-    bytes: Box<[u8]>,
-
-    /// The same recorder handle used while accumulating the payload.
-    accounting: metrics::Gauge,
-}
-
-impl AsRef<[u8]> for BufferedBody {
-    fn as_ref(&self) -> &[u8] {
-        &self.bytes
-    }
-}
-
-impl Drop for BufferedBody {
-    fn drop(&mut self) {
-        self.accounting.decrement(metric_bytes(self.bytes.len()));
+    pub fn freeze(self) -> Bytes {
+        Bytes::from(self.bytes.into_boxed_slice())
     }
 }
 
@@ -191,27 +150,6 @@ mod tests {
                 "constructing a large limit must not allocate it"
             );
         }
-    }
-
-    #[test]
-    fn buffer_accounting_survives_freeze_and_clones_and_releases_on_drop() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, || {
-            let mut buffer = BodyBuffer::new(16);
-            buffer.push(Bytes::from_static(b"hello")).unwrap();
-            assert!(handle.render().contains("praxis_body_buffer_bytes 5"));
-            let frozen = buffer.freeze();
-            let clone = frozen.clone();
-            drop(frozen);
-            assert!(handle.render().contains("praxis_body_buffer_bytes 5"));
-            drop(clone);
-            assert!(handle.render().contains("praxis_body_buffer_bytes 0"));
-            let mut aborted = BodyBuffer::new(16);
-            aborted.push(Bytes::from_static(b"discard")).unwrap();
-            drop(aborted);
-            assert!(handle.render().contains("praxis_body_buffer_bytes 0"));
-        });
     }
 
     #[test]

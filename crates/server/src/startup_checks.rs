@@ -428,6 +428,7 @@ const EXPERIMENTAL_FEATURES: &[(&str, bool)] = &[
     ("hyper", cfg!(feature = "hyper")),
     ("iterative-request-router", cfg!(feature = "iterative-request-router")),
     ("jobs-config", cfg!(feature = "jobs-config")),
+    ("overload-actions", cfg!(feature = "overload-actions")),
     (
         "policy-experimental-ratelimit",
         cfg!(feature = "policy-experimental-ratelimit"),
