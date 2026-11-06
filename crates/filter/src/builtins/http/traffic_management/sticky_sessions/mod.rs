@@ -7,6 +7,9 @@
 //! a shared session-to-endpoint mapping. Supports graceful failover
 //! when pinned endpoints become unhealthy.
 //!
+//! Each cluster must state where its bindings live via `storage`. The only
+//! store today is `local`: an in-memory map private to this process.
+//!
 //! # YAML configuration
 //!
 //! ```yaml
@@ -24,6 +27,7 @@
 //!     failover: true
 //!     max_entries: 100000
 //!     eviction: lru
+//!     storage: local
 //! ```
 
 pub(crate) mod config;
@@ -35,7 +39,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use async_trait::async_trait;
 use tracing::{debug, warn};
 
-use self::config::{ClusterSessionConfig, CookieAttributes, PersistenceConfig, StickySessionsConfig};
+use self::config::{ClusterSessionConfig, CookieAttributes, PersistenceConfig, StickySessionsConfig, StorageConfig};
 pub use self::store::{SessionStore, SessionStoreRegistry};
 use crate::{
     FilterError,
@@ -101,14 +105,38 @@ impl StickySessionsFilter {
     fn build_stores(configs: &HashMap<Arc<str>, Arc<ClusterSessionConfig>>) -> SessionStoreRegistry {
         let registry = SessionStoreRegistry::new();
         for (name, cfg) in configs {
-            let store = Arc::new(SessionStore::new(
-                cfg.max_entries.get(),
-                Duration::from_secs(cfg.ttl_secs),
-                cfg.eviction,
-            ));
+            let store = match cfg.storage {
+                StorageConfig::Local => Arc::new(SessionStore::new(
+                    cfg.max_entries.get(),
+                    Duration::from_secs(cfg.ttl_secs),
+                    cfg.eviction,
+                )),
+            };
             registry.insert(Arc::clone(name), store);
         }
         registry
+    }
+
+    /// Resolve the session store for `cluster_name`, creating it on first use.
+    ///
+    /// Prefers the pipeline-wide registry, which the server preserves across
+    /// config reloads, and falls back to the filter's own registry when an
+    /// embedding application has not called `FilterPipeline::set_session_stores`.
+    fn session_store(
+        &self,
+        ctx: &HttpFilterContext<'_>,
+        cfg: &ClusterSessionConfig,
+        cluster_name: &str,
+    ) -> Arc<SessionStore> {
+        let registry = ctx.session_stores.unwrap_or(&self.stores);
+        match cfg.storage {
+            StorageConfig::Local => registry.get_or_create(
+                cluster_name,
+                cfg.max_entries.get(),
+                Duration::from_secs(cfg.ttl_secs),
+                cfg.eviction,
+            ),
+        }
     }
 
     /// Get the cluster config for the current request's cluster.
@@ -341,13 +369,7 @@ impl HttpFilter for StickySessionsFilter {
         let Some(cluster_name) = ctx.cluster.clone() else {
             return Ok(FilterAction::Continue);
         };
-        let registry = ctx.session_stores.unwrap_or(&self.stores);
-        let store = registry.get_or_create(
-            &cluster_name,
-            cfg.max_entries.get(),
-            Duration::from_secs(cfg.ttl_secs),
-            cfg.eviction,
-        );
+        let store = self.session_store(ctx, cfg, &cluster_name);
 
         let Some(session_key) = Self::extract_session_key(cfg, ctx) else {
             return Ok(FilterAction::Continue);
@@ -371,13 +393,7 @@ impl HttpFilter for StickySessionsFilter {
         let Some(cluster_name) = ctx.cluster.clone() else {
             return Ok(FilterAction::Continue);
         };
-        let registry = ctx.session_stores.unwrap_or(&self.stores);
-        let store = registry.get_or_create(
-            &cluster_name,
-            cfg.max_entries.get(),
-            Duration::from_secs(cfg.ttl_secs),
-            cfg.eviction,
-        );
+        let store = self.session_store(ctx, cfg, &cluster_name);
 
         let endpoint = match ctx.upstream.as_ref() {
             Some(u) => Arc::clone(&u.address),

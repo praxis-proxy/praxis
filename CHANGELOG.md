@@ -48,6 +48,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   full certificate verification; static mTLS and non-mTLS listeners
   retain resumption.
 
+### Changed
+
+- Clarify that the default Pingora shutdown grace period is capped at five
+  seconds, including for streaming responses, regardless of a larger
+  `shutdown_timeout_secs` value.
+
 ### Added
 
 - Policy rate limiting (experimental): the policy filter runs a policy's
@@ -186,6 +192,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   name, rejecting duplicates with `KvRegistryError::AlreadyRegistered`.
 - `KvStoreRegistry::get_or_create_memory` deliberately creates an
   in-memory store.
+- **Breaking:** every `sticky_sessions` cluster now requires a `storage`
+  field, and startup fails with `missing field 'storage'` when it is
+  omitted. The only value is `local`, which keeps session bindings in the
+  proxy process: they are not shared between replicas and do not survive a
+  restart, so stickiness behind a load balancer is per-process. That was
+  already the behaviour; it is now a stated choice rather than a silent
+  default. Add `storage: local` to each cluster to keep the current
+  behaviour. See `docs/filters/http/traffic_management/sticky_sessions.md`.
 
 ### Removed
 
