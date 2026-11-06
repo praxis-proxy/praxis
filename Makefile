@@ -568,6 +568,10 @@ test-fips-host: fips-toolchain ## every suite as the FIPS build, on a FIPS host 
 # The suites run as the invoking user: praxis refuses to start as root.
 _FIPS_RUN_AS = $(if $(findstring podman,$(notdir $(CONTAINER_ENGINE))),--userns=keep-id,--user $(shell id -u):$(shell id -g) -e HOME=/tmp)
 test-fips-provider: | require-container-engine ## FIPS suites on the FIPS module, any host (toolchain image)
+	@# A freshly created volume is root-owned; hand it to the user the suites run as.
+	$(CONTAINER_ENGINE) run --rm --security-opt label=disable --user 0:0 \
+		-v praxis-fips-host-cargo:/cargo -v praxis-fips-host-target:/target \
+		$(FIPS_TOOLCHAIN_IMAGE) chown $(shell id -u):$(shell id -g) /cargo /target
 	$(CONTAINER_ENGINE) run --rm --security-opt label=disable $(_FIPS_RUN_AS) \
 		-v $(CURDIR):/src -w /src \
 		-v praxis-fips-host-cargo:/cargo \
