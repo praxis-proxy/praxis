@@ -285,11 +285,22 @@ fn response_over_stream_buffer_ceiling_is_not_delivered() {
     let reg = registry();
     let _proxy = start_full_proxy_with_registry(&config, &reg);
 
-    let (_status, body) = http_get(&format!("127.0.0.1:{proxy_port}"), "/", None);
-    assert!(
-        !body.contains(&big_body),
-        "a response over the StreamBuffer ceiling must not reach the client: {body:?}"
-    );
+    use std::io::{BufReader, Write as _};
+    let address = format!("127.0.0.1:{proxy_port}");
+    praxis_test_utils::wait_for_tcp(&address);
+    let mut stream = std::net::TcpStream::connect(&address).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut body = Vec::new();
+    let result = praxis_test_utils::read_h1_response(&mut BufReader::new(stream), false, 4096, |part| {
+        body.extend_from_slice(part);
+        Ok(())
+    });
+    praxis_test_utils::assert_buffered_response_rejected(&result, &body);
 }
 
 #[test]
@@ -303,6 +314,11 @@ fn request_body_filter_error_rejects_request() {
     let raw = http_send(
         &format!("127.0.0.1:{proxy_port}"),
         "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        500,
+        "a body-filter failure must still deliver its 500 response"
     );
     assert!(
         !raw.contains("should-not-be-reached"),

@@ -7,14 +7,18 @@ use std::{collections::VecDeque, fmt::Write as _};
 
 #[cfg(feature = "pingora")]
 use pingora_proxy::Session;
-use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
+#[cfg(test)]
+use praxis_core::config::DEFAULT_MAX_BUFFER_BYTES;
 use praxis_filter::{
     BodyBuffer, BodyMode, FilterAction, FilterError, FilterPipeline, HttpFilterContext, Rejection, Request,
     TrustedHeaderMutation,
 };
 use tracing::{debug, warn};
 
-use crate::http::pingora::context::PingoraRequestCtx;
+use crate::http::{
+    body_limit::{BodyLimitPhase, body_limit_rejection},
+    pingora::context::PingoraRequestCtx,
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -199,7 +203,9 @@ impl PreReadPass {
         let BodyMode::StreamBuffer { max_bytes } = pipeline.body_capabilities().request_body_mode else {
             return None;
         };
-        let max_bytes = max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES);
+        let max_bytes = max_bytes
+            .unwrap_or_else(|| pipeline.buffer_cap())
+            .min(pipeline.buffer_cap());
         Some(Self {
             buffer: BodyBuffer::new(max_bytes),
             eos_body: None,
@@ -227,18 +233,23 @@ impl PreReadPass {
     ) -> Result<bool, PreReadStop> {
         let end_of_stream = chunk.is_none();
         let mut body = chunk;
-        let downstream_chunk_len = body.as_ref().map_or(0, bytes::Bytes::len) as u64;
+        let downstream_chunk_len = u64::try_from(body.as_ref().map_or(0, bytes::Bytes::len)).unwrap_or(u64::MAX);
 
         // Track original downstream bytes before the synthetic EOS
         // body is created. This stays separate from the pipeline's
         // accumulate_body_bytes so the retry guard sees the original
         // size even when a ReadWrite filter shrinks or grows the body.
-        self.original_body_bytes += downstream_chunk_len;
+        self.original_body_bytes = self.original_body_bytes.saturating_add(downstream_chunk_len);
 
-        if let Some(b) = &body
-            && self.buffer.push(b.clone()).is_err()
+        if let Some(chunk) = &body
+            && let Err(overflow) = self.buffer.push(chunk.clone())
         {
-            return Err(PreReadStop::Rejected(Rejection::status(413)));
+            ctx.request_body_bytes = self.original_body_bytes;
+            return Err(PreReadStop::Rejected(body_limit_rejection(
+                overflow.limit,
+                u64::try_from(overflow.attempted).unwrap_or(u64::MAX),
+                BodyLimitPhase::PreRead,
+            )));
         }
 
         // At EOS, deliver the accumulated body to filters so
@@ -395,7 +406,19 @@ pub(super) fn push_grouped_queues(filter_ctx: &HttpFilterContext<'_>, log: &mut 
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    clippy::type_complexity,
+    clippy::significant_drop_tightening,
+    reason = "generated state-machine fixtures"
+)]
 mod tests {
+    use tracing::instrument::WithSubscriber as _;
+
     use super::*;
 
     #[test]
@@ -491,7 +514,7 @@ mod tests {
         let mode = BodyMode::StreamBuffer { max_bytes: Some(4096) };
         #[expect(clippy::wildcard_enum_match_arm, reason = "BodyMode is non_exhaustive")]
         let resolved = match mode {
-            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(DEFAULT_MAX_BUFFER_BYTES),
             _ => 0,
         };
         assert_eq!(resolved, 4096, "explicit max_bytes should be used");
@@ -502,12 +525,12 @@ mod tests {
         let mode = BodyMode::StreamBuffer { max_bytes: None };
         #[expect(clippy::wildcard_enum_match_arm, reason = "BodyMode is non_exhaustive")]
         let resolved = match mode {
-            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(DEFAULT_MAX_BUFFER_BYTES),
             _ => 0,
         };
         assert_eq!(
-            resolved, ABSOLUTE_MAX_BODY_BYTES,
-            "None max_bytes should fall back to ABSOLUTE_MAX_BODY_BYTES"
+            resolved, DEFAULT_MAX_BUFFER_BYTES,
+            "None max_bytes should fall back to DEFAULT_MAX_BUFFER_BYTES"
         );
     }
 
@@ -520,11 +543,401 @@ mod tests {
         }
     }
 
-    #[test]
-    fn body_buffer_overflow_produces_413() {
-        let mut buffer = BodyBuffer::new(10);
-        let large = bytes::Bytes::from(vec![0_u8; 20]);
-        assert!(buffer.push(large).is_err(), "oversized push should fail");
+    #[tokio::test]
+    async fn pre_read_overflow_returns_json_413_and_accounts_for_rejected_chunk()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = limited_pipeline()?;
+        let mut pass = PreReadPass::new(&pipeline).ok_or("expected StreamBuffer pre-read")?;
+        let mut ctx = PingoraRequestCtx::default();
+        let request = post_request();
+
+        let result = pass
+            .feed(
+                &pipeline,
+                &mut ctx,
+                &request,
+                Some(bytes::Bytes::from_static(b"01234567890")),
+            )
+            .await;
+
+        let Err(PreReadStop::Rejected(rejection)) = result else {
+            return Err("buffer overflow must return a rejection".into());
+        };
+        assert_eq!(rejection.status, 413, "overflow must retain its client-error status");
+        let error: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().ok_or("missing error body")?)?;
+        assert_eq!(
+            error.get("error").and_then(serde_json::Value::as_str),
+            Some("request body too large")
+        );
+        assert_eq!(
+            ctx.request_body_bytes, 11,
+            "rejection accounting includes the overflowing chunk"
+        );
+        drop(ctx);
+        assert_eq!(pass.buffer.total_bytes(), 0, "overflowing bytes must not be retained");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn generated_pre_read_partitions_preserve_release_and_single_drain() {
+        use std::sync::{Arc, Mutex};
+
+        use praxis_filter::{BodyAccess, FilterFactory, FilterRegistry, HttpFilter};
+
+        for size in 0..=9 {
+            for width in [1, 2, 3, 9] {
+                let seen = Arc::new(Mutex::new(Vec::new()));
+                let mut registry = FilterRegistry::with_builtins();
+                registry
+                    .register(
+                        "release_test",
+                        FilterFactory::Http(Arc::new(|_| Ok(Box::new(ReleaseTest)))),
+                    )
+                    .unwrap();
+                let captured = Arc::clone(&seen);
+                registry
+                    .register(
+                        "rewrite_test",
+                        FilterFactory::Http(Arc::new(move |_| Ok(Box::new(RewriteTest(Arc::clone(&captured)))))),
+                    )
+                    .unwrap();
+                let mut entries: Vec<praxis_filter::FilterEntry> =
+                    serde_yaml::from_str("- filter: release_test\n- filter: rewrite_test\n").unwrap();
+                let mut pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+                pipeline.apply_body_limits(Some(8), None, false).unwrap();
+                let mut pass = PreReadPass::new(&pipeline).unwrap();
+                let mut ctx = PingoraRequestCtx::default();
+                let request = post_request();
+                let bytes: Vec<_> = (0..size).map(|index| b'a' + u8::try_from(index).unwrap()).collect();
+                assert!(matches!(
+                    pass.feed(&pipeline, &mut ctx, &request, Some(bytes::Bytes::new()))
+                        .await,
+                    Ok(false)
+                ));
+                let mut rejected = false;
+                for chunk in bytes.chunks(width) {
+                    match pass
+                        .feed(
+                            &pipeline,
+                            &mut ctx,
+                            &request,
+                            Some(bytes::Bytes::copy_from_slice(chunk)),
+                        )
+                        .await
+                    {
+                        Ok(false) => {},
+                        Err(PreReadStop::Rejected(rejection)) => {
+                            assert_eq!(rejection.status, 413);
+                            rejected = true;
+                            break;
+                        },
+                        _ => panic!("unexpected pre-read outcome"),
+                    }
+                }
+                assert_eq!(rejected, size > 8, "size={size}, width={width}");
+                if rejected {
+                    continue;
+                }
+                assert!(matches!(pass.feed(&pipeline, &mut ctx, &request, None).await, Ok(true)));
+                assert_eq!(ctx.request_body_bytes, u64::try_from(size).unwrap());
+                let calls = seen.lock().unwrap().clone();
+                assert_eq!(
+                    calls.last(),
+                    Some(&(true, bytes.clone())),
+                    "writer sees the complete original body at EOS"
+                );
+                let mutations = pass.finish(&pipeline, &mut ctx);
+                assert_eq!(mutations.mutations.len(), 1);
+                assert_eq!(ctx.mutated_request_body_len, Some(size));
+                let mut forwarded = Some(bytes::Bytes::from_static(b"stale"));
+                assert!(
+                    super::super::super::request_body_filter::run_request_body(
+                        &pipeline,
+                        &mut forwarded,
+                        false,
+                        &mut ctx
+                    )
+                    .await
+                    .is_ok()
+                );
+                assert_eq!(
+                    forwarded.unwrap_or_default(),
+                    bytes::Bytes::from(bytes.to_ascii_uppercase())
+                );
+                assert_eq!(*seen.lock().unwrap(), calls, "draining does not rerun hooks");
+            }
+        }
+
+        struct ReleaseTest;
+        #[async_trait::async_trait]
+        impl HttpFilter for ReleaseTest {
+            fn name(&self) -> &'static str {
+                "release_test"
+            }
+
+            async fn on_request(&self, _: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+                Ok(FilterAction::Continue)
+            }
+
+            fn request_body_access(&self) -> BodyAccess {
+                BodyAccess::ReadOnly
+            }
+
+            fn request_body_mode(&self) -> BodyMode {
+                BodyMode::StreamBuffer { max_bytes: Some(8) }
+            }
+
+            async fn on_request_body(
+                &self,
+                _: &mut HttpFilterContext<'_>,
+                _: &mut Option<bytes::Bytes>,
+                _: bool,
+            ) -> Result<FilterAction, FilterError> {
+                Ok(FilterAction::Release)
+            }
+        }
+        struct RewriteTest(Arc<Mutex<Vec<(bool, Vec<u8>)>>>);
+        #[async_trait::async_trait]
+        impl HttpFilter for RewriteTest {
+            fn name(&self) -> &'static str {
+                "rewrite_test"
+            }
+
+            async fn on_request(&self, _: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+                Ok(FilterAction::Continue)
+            }
+
+            fn request_body_access(&self) -> BodyAccess {
+                BodyAccess::ReadWrite
+            }
+
+            async fn on_request_body(
+                &self,
+                ctx: &mut HttpFilterContext<'_>,
+                body: &mut Option<bytes::Bytes>,
+                end_of_stream: bool,
+            ) -> Result<FilterAction, FilterError> {
+                let input = body.as_deref().unwrap_or_default();
+                self.0.lock().unwrap().push((end_of_stream, input.to_vec()));
+                if end_of_stream {
+                    *body = Some(bytes::Bytes::from(input.to_ascii_uppercase()));
+                    ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
+                        http::header::HeaderName::from_static("x-praxis-probe"),
+                        http::HeaderValue::from_static("done"),
+                    ));
+                }
+                Ok(FilterAction::Continue)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_suspended_pre_read_drops_body_and_filter_state() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use praxis_filter::{BodyAccess, FilterFactory, FilterRegistry, HttpFilter};
+        use tokio::sync::Notify;
+
+        let entered = Arc::new(Notify::new());
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut registry = FilterRegistry::with_builtins();
+        let probe_entered = Arc::clone(&entered);
+        let probe_drops = Arc::clone(&drops);
+        registry
+            .register(
+                "pending_test",
+                FilterFactory::Http(Arc::new(move |_| {
+                    Ok(Box::new(PendingTest {
+                        entered: Arc::clone(&probe_entered),
+                        drops: Arc::clone(&probe_drops),
+                    }))
+                })),
+            )
+            .unwrap();
+        let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str("- filter: pending_test").unwrap();
+        let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+        let mut pass = PreReadPass::new(&pipeline).unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        let request = post_request();
+        let owner: Arc<[u8]> = vec![b'x'; 4].into();
+        let chunk = bytes::Bytes::from_owner(Arc::clone(&owner));
+        let mut call = Box::pin(pass.feed(&pipeline, &mut ctx, &request, Some(chunk)));
+        tokio::select! {
+            _ = &mut call => panic!("hook must stay suspended"),
+            () = entered.notified() => {},
+        }
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(call);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "future owns the suspended filter state"
+        );
+        assert_eq!(Arc::strong_count(&owner), 1, "cancelled input owner is released");
+        drop(pass);
+        drop(ctx);
+        let fresh = PingoraRequestCtx::default();
+        assert!(fresh.filter_state.is_empty());
+        assert_eq!(fresh.request_body_bytes, 0);
+
+        struct DropProbe(Arc<AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct PendingTest {
+            entered: Arc<Notify>,
+            drops: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl HttpFilter for PendingTest {
+            fn name(&self) -> &'static str {
+                "pending_test"
+            }
+
+            async fn on_request(&self, _: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+                Ok(FilterAction::Continue)
+            }
+
+            fn request_body_access(&self) -> BodyAccess {
+                BodyAccess::ReadOnly
+            }
+
+            fn request_body_mode(&self) -> BodyMode {
+                BodyMode::StreamBuffer { max_bytes: Some(8) }
+            }
+
+            async fn on_request_body(
+                &self,
+                ctx: &mut HttpFilterContext<'_>,
+                _: &mut Option<bytes::Bytes>,
+                _: bool,
+            ) -> Result<FilterAction, FilterError> {
+                ctx.filter_state.insert(0, Box::new(DropProbe(Arc::clone(&self.drops))));
+                self.entered.notify_one();
+                std::future::pending::<()>().await;
+                Ok(FilterAction::Continue)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_frozen_pre_read_releases_writer_owned_body() {
+        use std::sync::Arc;
+
+        use praxis_filter::{BodyAccess, FilterFactory, FilterRegistry, HttpFilter};
+
+        let owner: Arc<[u8]> = Vec::from(b"REWRITE".as_slice()).into();
+        let mut registry = FilterRegistry::with_builtins();
+        let factory_owner = Arc::clone(&owner);
+        registry
+            .register(
+                "owner_writer",
+                FilterFactory::Http(Arc::new(move |_| Ok(Box::new(OwnerWriter(Arc::clone(&factory_owner)))))),
+            )
+            .unwrap();
+        let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str("- filter: owner_writer").unwrap();
+        let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+        drop(registry);
+        assert_eq!(
+            Arc::strong_count(&owner),
+            2,
+            "test and installed filter own the backing"
+        );
+        let mut pass = PreReadPass::new(&pipeline).unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        let request = post_request();
+        assert!(matches!(
+            pass.feed(&pipeline, &mut ctx, &request, Some(bytes::Bytes::from_static(b"ab")))
+                .await,
+            Ok(false)
+        ));
+        assert!(matches!(pass.feed(&pipeline, &mut ctx, &request, None).await, Ok(true)));
+        assert_eq!(Arc::strong_count(&owner), 3, "frozen output owns the backing");
+        let _mutations = pass.finish(&pipeline, &mut ctx);
+        assert_eq!(ctx.mutated_request_body_len, Some(owner.len()));
+        assert_eq!(
+            Arc::strong_count(&owner),
+            3,
+            "direct and replay views share one output owner"
+        );
+        drop(ctx);
+        assert_eq!(
+            Arc::strong_count(&owner),
+            2,
+            "request cancellation drops its retained output"
+        );
+        drop(pipeline);
+        assert_eq!(Arc::strong_count(&owner), 1);
+
+        struct OwnerWriter(Arc<[u8]>);
+        #[async_trait::async_trait]
+        impl HttpFilter for OwnerWriter {
+            fn name(&self) -> &'static str {
+                "owner_writer"
+            }
+
+            async fn on_request(&self, _: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+                Ok(FilterAction::Continue)
+            }
+
+            fn request_body_access(&self) -> BodyAccess {
+                BodyAccess::ReadWrite
+            }
+
+            fn request_body_mode(&self) -> BodyMode {
+                BodyMode::StreamBuffer { max_bytes: Some(8) }
+            }
+
+            async fn on_request_body(
+                &self,
+                _: &mut HttpFilterContext<'_>,
+                body: &mut Option<bytes::Bytes>,
+                end_of_stream: bool,
+            ) -> Result<FilterAction, FilterError> {
+                if end_of_stream {
+                    *body = Some(bytes::Bytes::from_owner(Arc::clone(&self.0)));
+                }
+                Ok(FilterAction::Continue)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_read_overflow_logs_warning_with_limit_and_attempted_size()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pipeline = limited_pipeline()?;
+        let mut pass = PreReadPass::new(&pipeline).ok_or("expected StreamBuffer pre-read")?;
+        let mut ctx = PingoraRequestCtx::default();
+        let request = post_request();
+        let output = tempfile::NamedTempFile::new()?;
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(output.reopen()?)
+            .finish();
+        let chunk = Some(bytes::Bytes::from_static(b"01234567890"));
+
+        let result = pass
+            .feed(&pipeline, &mut ctx, &request, chunk)
+            .with_subscriber(subscriber)
+            .await;
+        drop(ctx);
+
+        assert!(
+            matches!(result, Err(PreReadStop::Rejected(_))),
+            "overflow must reject the request"
+        );
+        let log = std::fs::read_to_string(output.path())?;
+        assert!(log.contains("WARN") && log.contains("request body exceeds configured limit"));
+        assert!(log.contains("status=413") && log.contains("limit=10") && log.contains("attempted=11"));
+        assert!(log.contains("bytes_seen=11") && log.contains("phase=PreRead"));
+        Ok(())
     }
 
     #[test]
@@ -537,6 +950,29 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Build a pipeline with a ten-byte request-body inspection limit.
+    fn limited_pipeline() -> Result<FilterPipeline, Box<dyn std::error::Error + Send + Sync>> {
+        let mut entries = vec![praxis_filter::FilterEntry {
+            name: None,
+            branch_chains: None,
+            conditions: vec![],
+            config: serde_yaml::from_str("field: model\nheader: X-Model\nmax_body_bytes: 10\n")?,
+            failure_mode: praxis_core::config::FailureMode::default(),
+            filter_type: "json_body_field".into(),
+            response_conditions: vec![],
+        }];
+        FilterPipeline::build(&mut entries, &praxis_filter::FilterRegistry::with_builtins())
+    }
+
+    /// Build a POST request for body pre-read tests.
+    fn post_request() -> Request {
+        Request {
+            headers: http::HeaderMap::new(),
+            method: http::Method::POST,
+            uri: http::Uri::from_static("/"),
+        }
+    }
 
     fn is_trace_allowed(name: &str) -> bool {
         TRACE_ALLOWED_HEADERS.contains(&name)

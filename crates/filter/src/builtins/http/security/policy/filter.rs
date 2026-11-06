@@ -25,10 +25,11 @@ use ppe::praxis_policy_core::{
     },
     engine::PolicyEngine,
     error::{PluginError, PluginViolation},
-    extensions::{LLMExtension, LlmRequestDocument, MetaExtension},
+    extensions::{LLMExtension, LlmRequestDocument, MetaExtension, http::SecretHeaderProvenance},
     hooks::Extensions,
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
+    secrets::backends::EnvSecretProviderFactory,
 };
 use praxis_core::subrequest::SubRequestConnector;
 
@@ -144,6 +145,24 @@ enum GatedIdentity {
 /// See the [PPE 0.4.1 changelog] and
 /// [args migration guidance].
 ///
+/// PPE 0.5.0 tightens OAuth `delegate(...)` by default. A token-exchange
+/// response must name an access-token or JWT `issued_token_type`. When the
+/// step requests scopes, a granted scope that was neither requested nor
+/// listed in `allowed_extra_scopes` is refused; a step that requests none
+/// accepts the identity provider's defaults. When the minted token is a JWT,
+/// its `aud` must contain the step's `audience`, and on a token exchange its
+/// `sub` must match the caller. `strict_response_validation: false` turns
+/// these checks off. A JWT with an unsupported `crit` header is rejected, and an `env` secret provider with
+/// settings it does not use fails to load. CEL `size()` now counts code
+/// points rather than bytes, and `exists()` returns true when one element
+/// matches even if another errors, so some requests that were denied may now
+/// be allowed. See the [PPE 0.5.0 changelog].
+///
+/// The filter registers only the `env` secret provider. A `secrets:` block
+/// naming any other provider kind, including `file`, fails to load. Secret
+/// values are read when the filter is built, so a changed value takes effect
+/// on the next restart.
+///
 /// The configured policy receives the full parsed inference request. Treat
 /// policy documents and custom plugins as trusted: a rule or an explicit
 /// outbound call can disclose fields it reads. Review policy authorship and
@@ -185,6 +204,11 @@ enum GatedIdentity {
 /// and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these
 /// rules are skipped and a warning is emitted. A response-only route adds no
 /// request-phase route rule; identity checks and `global` policy still apply.
+/// When tool response hooks are configured, a nonempty classified `tools/call`
+/// response that is malformed or contains neither a result nor a valid
+/// JSON-RPC error produces a filter error instead of silently skipping
+/// inspection. The pipeline's `failure_mode` controls that error; valid
+/// JSON-RPC error responses continue unchanged.
 ///
 /// `result.<field>` projection for `prompt:` and `resource:` routes remains
 /// blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330].
@@ -220,6 +244,7 @@ enum GatedIdentity {
 ///
 /// [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
 /// [PPE 0.4.1 changelog]: https://github.com/praxis-proxy/policy/blob/v0.4.1/CHANGELOG.md#041---2026-10-05
+/// [PPE 0.5.0 changelog]: https://github.com/praxis-proxy/policy/blob/v0.5.0/CHANGELOG.md#050---2026-10-13
 /// [args migration guidance]: https://github.com/praxis-proxy/policy/blob/v0.4.1/docs/content/apl/pdp.md#migrating-args-policies
 ///
 /// # YAML configuration
@@ -265,6 +290,8 @@ pub struct PolicyFilter {
     entity_routes: bool,
     /// Whether the policy declares MCP entity routes.
     mcp_routes: bool,
+    /// Whether a tool response hook can inspect classified tool responses.
+    mcp_post_tool: bool,
     /// Whether the policy declares inference routes.
     llm_routes: bool,
     /// Whether the policy declares inference response hooks.
@@ -317,30 +344,27 @@ impl PolicyFilter {
         cfg.validate_context_headers()
             .map_err(|e| -> FilterError { format!("policy: {e}").into() })?;
 
-        // Bound the per-request ReadWrite buffer ceiling: 0 makes every
-        // non-empty body fail, and an unbounded value multiplies per-request
-        // memory by concurrency. The pipeline's unbounded-buffer startup check
-        // never fires here because this filter always passes a concrete
-        // Some(max_buffer_bytes), so validate it directly.
+        // Validate addressable, nonzero limits. The pipeline additionally clamps
+        // accumulation to body_limits.max_buffer_bytes before invoking this filter.
         if cfg.max_buffer_bytes == 0 {
             return Err("policy: max_buffer_bytes must be > 0".into());
         }
-        if cfg.max_buffer_bytes > praxis_core::config::ABSOLUTE_MAX_BODY_BYTES {
+        if cfg.max_buffer_bytes > praxis_core::config::MAX_BUFFER_BYTES {
             return Err(format!(
                 "policy: max_buffer_bytes ({}) exceeds the maximum ({})",
                 cfg.max_buffer_bytes,
-                praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+                praxis_core::config::MAX_BUFFER_BYTES
             )
             .into());
         }
         if cfg.llm.max_request_bytes == 0 {
             return Err("policy: llm.max_request_bytes must be > 0".into());
         }
-        if cfg.llm.max_request_bytes > praxis_core::config::ABSOLUTE_MAX_BODY_BYTES {
+        if cfg.llm.max_request_bytes > praxis_core::config::MAX_BUFFER_BYTES {
             return Err(format!(
                 "policy: llm.max_request_bytes ({}) exceeds the maximum ({})",
                 cfg.llm.max_request_bytes,
-                praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+                praxis_core::config::MAX_BUFFER_BYTES
             )
             .into());
         }
@@ -368,6 +392,20 @@ impl PolicyFilter {
             tracing::warn!(
                 target: "policy.filter",
                 "policy: an HTTP transport was already installed on a fresh engine"
+            );
+        }
+
+        // `env` only. PPE's `file` provider confirms `base_dir` containment by
+        // resolving the path again after opening it, so a writer inside
+        // `base_dir` who swaps a symlink between the two can have a file
+        // outside it accepted. A document whose `secrets:` block names any
+        // other provider kind fails at `initialize()`, naming `env`.
+        let mut secret_providers = ppe::SecretProviderRegistry::new();
+        secret_providers.register(Box::new(EnvSecretProviderFactory));
+        if !mgr.set_secret_providers(secret_providers) {
+            tracing::warn!(
+                target: "policy.filter",
+                "policy: secret providers were already registered on a fresh engine"
             );
         }
 
@@ -543,6 +581,7 @@ impl PolicyFilter {
             http_global,
             entity_routes,
             mcp_routes,
+            mcp_post_tool,
             llm_routes,
             llm_post,
             request_assertions,
@@ -1595,7 +1634,7 @@ impl PolicyFilter {
     ///
     /// Reuses the admitted identity rather than resolving again, so a token that
     /// expired mid-exchange cannot deny an already-authorized response.
-    fn response_extensions(
+    pub(super) fn response_extensions(
         ctx: &HttpFilterContext<'_>,
         response_headers: std::collections::HashMap<String, String>,
         status: u16,
@@ -1726,6 +1765,11 @@ impl PolicyFilter {
             host,
             scheme: req.uri.scheme_str().map(str::to_owned),
             request_headers,
+            secret_headers: ctx
+                .extensions
+                .get::<AssertedSecretHeaders>()
+                .map(|asserted| asserted.0.clone())
+                .unwrap_or_default(),
             ..Default::default()
         };
         ext.http = Some(Arc::new(http));
@@ -1760,6 +1804,14 @@ fn flatten_claim(value: &serde_json::Value) -> String {
 ///
 /// Typed storage avoids serializing credentials and revalidating expired tokens.
 pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
+
+/// Engine provenance for secret assertion headers applied to the request.
+///
+/// Applied headers reach the request snapshot that later phases read, so
+/// every `HttpExtension` built from that snapshot must carry these markers.
+/// Without them, plugins and PDPs on those phases receive the credential
+/// instead of its redaction marker.
+pub(super) struct AssertedSecretHeaders(pub(super) SecretHeaderProvenance);
 
 /// Inference request state retained for response policy evaluation.
 struct InferenceRequest {
@@ -2311,7 +2363,12 @@ impl HttpFilter for PolicyFilter {
         let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
         // Parse once for this phase; the id string, the deny-path id
         // echoes, and the typed content all read the same DOM.
-        let parsed = ParsedEnvelope::parse(&body_bytes);
+        let parsed = if self.mcp_post_tool && method == "tools/call" && !body_bytes.is_empty() {
+            ParsedEnvelope::try_parse(&body_bytes)
+                .map_err(|_error| -> FilterError { "policy: malformed JSON-RPC response cannot be inspected".into() })?
+        } else {
+            ParsedEnvelope::parse(&body_bytes)
+        };
         let id_str = parsed.id_string();
 
         // Rebuild `Extensions` from the identity resolved in the request
@@ -2350,13 +2407,16 @@ impl HttpFilter for PolicyFilter {
         let extensions = Self::extensions_from_identity(&headers, identity, entity_type, &entity_name, &self.cfg);
 
         let content = build_response_content_for_method(&method, &entity_name, &id_str, &parsed);
-        // For tools/call, empty content means the upstream returned an error
-        // response (no `result` field), and dispatching the post hook against
-        // that is a behavior change we do not want here. For prompts and
+        // A valid tools/call error has no result to inspect. Unknown shapes
+        // are not equivalent: treating them as errors would skip an active
+        // tool response policy without checking the upstream data. For prompts and
         // resources, content projection is not yet implemented (tools/call
         // only), so content is always empty, but attribute-only post rules
         // (identity, CEL predicates over subject/meta) are still valid.
         if content.is_empty() && method == "tools/call" {
+            if self.mcp_post_tool && !body_bytes.is_empty() && !parsed.is_json_rpc_error() {
+                return Err("policy: JSON-RPC tool response has no inspectable result or valid error".into());
+            }
             return Ok(FilterAction::Continue);
         }
         let payload = MessagePayload {
@@ -2512,8 +2572,9 @@ fn missing_protocol_metadata_rejection() -> Rejection {
 /// push them as upstream request headers. Returns the count attached
 /// (0 when no delegation ran or no extensions were returned). Each
 /// token's `outbound_header` field decides where it goes; the value
-/// is `Bearer <token>` (RFC 6750 wire format — what every audience
-/// expects). Uses `request_headers_to_set` rather than
+/// is its `outbound_prefix` followed by the token. OAuth delegates
+/// default the prefix to `Bearer ` (RFC 6750); a Vault API key without a
+/// `scheme_prefix` has none. Uses `request_headers_to_set` rather than
 /// `extra_request_headers` because authorization tokens are
 /// overwrites, not appends.
 ///
@@ -2578,12 +2639,12 @@ pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extension
             attached_outbound.remove(&outbound_lc);
             continue;
         };
-        // `tok.token` is already `Zeroizing`; keep the freshly-minted
-        // `Bearer …` plaintext in a `Zeroizing` buffer too so it is wiped
-        // as soon as the `HeaderValue` has copied its bytes, rather than
-        // lingering on the heap until the allocator reuses the page.
-        let bearer = zeroize::Zeroizing::new(format!("Bearer {}", tok.token.as_str()));
-        let Ok(value) = http::header::HeaderValue::try_from(bearer.as_str()) else {
+        // `tok.token` is already `Zeroizing`; keep the prefixed plaintext
+        // in a `Zeroizing` buffer too so it is wiped as soon as the
+        // `HeaderValue` has copied its bytes, rather than lingering on the
+        // heap until the allocator reuses the page.
+        let credential = zeroize::Zeroizing::new(format!("{}{}", tok.outbound_prefix, tok.token.as_str()));
+        let Ok(value) = http::header::HeaderValue::try_from(credential.as_str()) else {
             tracing::warn!(
                 target: "policy.filter",
                 audience = %tok.audience,

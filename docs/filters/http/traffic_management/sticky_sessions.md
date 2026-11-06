@@ -29,6 +29,7 @@ On request: looks up session store for pinned endpoint, sets `ctx.pinned_endpoin
 | `clusters[].failover` | bool | no | Re-pin to a healthy endpoint when the pinned one is unhealthy. |
 | `clusters[].max_entries` | MaxEntries | no | Maximum number of session entries in the store. |
 | `clusters[].eviction` | `lru` \| `ttl` | no | Eviction policy when at capacity. |
+| `clusters[].storage` | `local` | yes | Where session bindings are stored. |
 
 ## Example
 
@@ -47,4 +48,5 @@ clusters:
     failover: true
     max_entries: 100000
     eviction: lru
+    storage: local
 ```

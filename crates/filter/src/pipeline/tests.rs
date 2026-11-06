@@ -114,6 +114,7 @@ fn ordinary_router_in_terminal_branch_does_not_enable_binding() {
         &registry,
         &chains,
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
@@ -345,6 +346,7 @@ fn deny_branch_before_bound_dispatch_is_accepted_from_yaml() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -407,6 +409,7 @@ fn branch_trace_context_is_checked_by_where_its_branch_runs() {
             &registry,
             &HashMap::new(),
             &praxis_core::config::InsecureOptions::default(),
+            &[],
         )
         .unwrap();
 
@@ -467,6 +470,7 @@ fn binding_enabled_router_in_branch_is_rejected_from_yaml() {
         &registry,
         &chains,
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     assert!(
@@ -1577,6 +1581,47 @@ fn body_capabilities_multiple_stream_buffer_largest_wins() {
     );
 }
 
+#[test]
+fn body_mode_composition_is_order_independent_in_both_directions() {
+    let modes = [
+        BodyMode::StreamBuffer { max_bytes: Some(3) },
+        BodyMode::SizeLimit { max_bytes: 1 },
+        BodyMode::StreamBuffer { max_bytes: Some(7) },
+    ];
+    for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+        let filters = order
+            .into_iter()
+            .map(|index| {
+                let filter: Box<dyn HttpFilter> = Box::new(BidirectionalModeFilter { mode: modes[index] });
+                filter
+            })
+            .collect();
+        let mut pipeline = make_pipeline(filters);
+        let caps = pipeline.body_capabilities();
+        assert_eq!(caps.request_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
+        assert_eq!(caps.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
+        pipeline.apply_body_limits(Some(5), Some(11), false).unwrap();
+        let caps = pipeline.body_capabilities();
+        assert_eq!(caps.request_body_mode, BodyMode::StreamBuffer { max_bytes: Some(5) });
+        assert_eq!(caps.response_body_mode, BodyMode::StreamBuffer { max_bytes: Some(7) });
+    }
+    let mut pipeline = make_pipeline(vec![
+        Box::new(BidirectionalModeFilter {
+            mode: BodyMode::StreamBuffer { max_bytes: None },
+        }),
+        Box::new(BidirectionalModeFilter {
+            mode: BodyMode::StreamBuffer { max_bytes: Some(3) },
+        }),
+    ]);
+    pipeline.apply_body_limits(None, None, true).unwrap();
+    let caps = pipeline.body_capabilities();
+    let clamped = BodyMode::StreamBuffer {
+        max_bytes: Some(praxis_core::config::DEFAULT_MAX_BUFFER_BYTES),
+    };
+    assert_eq!(caps.request_body_mode, clamped);
+    assert_eq!(caps.response_body_mode, clamped);
+}
+
 #[tokio::test]
 async fn execute_request_body_release_propagates() {
     let pipeline = make_pipeline(vec![Box::new(StreamBufferReleaseFilter { marker: b"GO" })]);
@@ -2102,6 +2147,7 @@ fn build_with_chains_rejects_conditions_on_a_tcp_filter() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .err()
     .expect("the production build path must reject conditions on a TCP filter too");
@@ -2121,6 +2167,7 @@ fn build_with_chains_rejects_response_conditions_on_a_tcp_filter() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .err()
     .expect("a TCP filter has no response phase, so response_conditions alone must not build");
@@ -2140,6 +2187,7 @@ fn build_with_chains_rejects_branch_chains_on_a_tcp_filter() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .err()
     .expect("a TCP filter never branches, so a config that sets branch_chains must not build");
@@ -2163,6 +2211,7 @@ fn errors_conditional_security_filter_in_branch_chain() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
@@ -2187,6 +2236,7 @@ fn errors_open_security_filter_in_branch_chain() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
@@ -2208,6 +2258,7 @@ fn errors_open_security_filter_in_nested_branch_chain() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
@@ -2232,6 +2283,7 @@ fn allow_open_security_filter_in_branch_chain_with_insecure_flag() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let errors = pipeline.ordering_errors(&entries, true, &SkipPipelineChecks::default());
@@ -2254,6 +2306,7 @@ fn skip_conditional_security_suppresses_branch_chain_error() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let skip = SkipPipelineChecks {
@@ -2280,6 +2333,7 @@ fn warns_but_does_not_error_on_security_filter_in_conditional_branch_chain() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
 
@@ -2311,6 +2365,7 @@ fn no_conditional_branch_advisory_for_unconditional_branch_chain() {
         &registry,
         &HashMap::new(),
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     let warnings = pipeline.ordering_warnings();
@@ -2363,6 +2418,7 @@ fn build_with_chains_stamps_is_security_on_branch_filter() {
         &registry,
         &chains,
         &praxis_core::config::InsecureOptions::default(),
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -2892,10 +2948,102 @@ fn apply_body_limits_clamps_unbounded_stream_buffer_with_override() {
     assert_eq!(
         pipeline.body_capabilities().request_body_mode,
         BodyMode::StreamBuffer {
-            max_bytes: Some(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES)
+            max_bytes: Some(praxis_core::config::DEFAULT_MAX_BUFFER_BYTES)
         },
         "unbounded StreamBuffer should be clamped to absolute ceiling"
     );
+}
+
+#[test]
+fn apply_body_limits_cannot_override_finite_buffer_ceiling() {
+    let hard = praxis_core::config::DEFAULT_MAX_BUFFER_BYTES;
+    for requested in [1, hard - 1, hard, hard + 1, usize::MAX] {
+        for allow_unbounded in [false, true] {
+            let caps = BodyCapabilities {
+                request_body_mode: BodyMode::StreamBuffer {
+                    max_bytes: Some(requested),
+                },
+                response_body_mode: BodyMode::StreamBuffer {
+                    max_bytes: Some(requested),
+                },
+                needs_request_body: true,
+                needs_response_body: true,
+                ..BodyCapabilities::default()
+            };
+            let mut pipeline = test_pipeline(caps, vec![]);
+            pipeline.apply_body_limits(None, None, allow_unbounded).unwrap();
+            let expected = BodyMode::StreamBuffer {
+                max_bytes: Some(requested.min(hard)),
+            };
+            assert_eq!(pipeline.body_capabilities().request_body_mode, expected);
+            assert_eq!(pipeline.body_capabilities().response_body_mode, expected);
+            assert_eq!(pipeline.selected_upstream_request_body_limit(), requested.min(hard));
+        }
+    }
+}
+
+#[test]
+fn configured_buffer_cap_combines_with_transfer_and_filter_limits() {
+    use praxis_core::config::BodyLimitsConfig;
+    for cap in [1, 65_537, 67_108_865, 1_073_741_824] {
+        for requested in [None, Some(1), Some(cap), Some(usize::MAX)] {
+            for transfer in [None, Some(0), Some(17), Some(usize::MAX)] {
+                let limits = BodyLimitsConfig {
+                    max_buffer_bytes: cap.try_into().unwrap(),
+                    max_request_bytes: transfer,
+                    max_response_bytes: transfer,
+                };
+                let mut pipeline = make_pipeline(vec![Box::new(BidirectionalModeFilter {
+                    mode: BodyMode::StreamBuffer { max_bytes: requested },
+                })]);
+                pipeline.configure_body_limits(&limits, true).unwrap();
+                let effective = cap.min(requested.unwrap_or(cap)).min(transfer.unwrap_or(cap));
+                let expected = BodyMode::StreamBuffer {
+                    max_bytes: Some(effective),
+                };
+                assert_eq!(pipeline.buffer_cap(), cap);
+                assert_eq!(pipeline.response_buffer_limit(), cap.min(transfer.unwrap_or(cap)));
+                assert_eq!(pipeline.body_capabilities().request_body_mode, expected);
+                assert_eq!(pipeline.body_capabilities().response_body_mode, expected);
+                assert_eq!(pipeline.selected_upstream_request_body_limit(), effective);
+            }
+        }
+        for mode in [BodyMode::Stream, BodyMode::SizeLimit { max_bytes: usize::MAX }] {
+            // SizeLimit is established by pipeline configuration, not filter merging.
+            let mut pipeline = test_pipeline(
+                BodyCapabilities {
+                    request_body_mode: mode,
+                    response_body_mode: mode,
+                    needs_request_body: true,
+                    needs_response_body: true,
+                    ..BodyCapabilities::default()
+                },
+                vec![],
+            );
+            pipeline
+                .configure_body_limits(
+                    &BodyLimitsConfig {
+                        max_buffer_bytes: cap.try_into().unwrap(),
+                        max_request_bytes: None,
+                        max_response_bytes: None,
+                    },
+                    true,
+                )
+                .unwrap();
+            assert_eq!(pipeline.body_capabilities().request_body_mode, mode);
+            assert_eq!(pipeline.body_capabilities().response_body_mode, mode);
+        }
+    }
+}
+
+#[test]
+fn buffer_ceiling_does_not_cap_unbounded_streams() {
+    let mut pipeline = test_pipeline(BodyCapabilities::default(), vec![]);
+    pipeline.apply_body_limits(None, None, true).unwrap();
+    assert_eq!(pipeline.body_capabilities().request_body_mode, BodyMode::Stream);
+    assert_eq!(pipeline.body_capabilities().response_body_mode, BodyMode::Stream);
+    assert_eq!(pipeline.request_body_ceiling(), None);
+    assert_eq!(pipeline.response_body_ceiling(), None);
 }
 
 #[test]
@@ -3116,6 +3264,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         trace_context_filter_indices: Vec::new(),
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
@@ -3202,6 +3351,7 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         subrequest_client: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
@@ -3285,6 +3435,7 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
         subrequest_client: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
@@ -3362,6 +3513,7 @@ async fn all_executed_filters_run_on_response() {
         trace_context_filter_indices: Vec::new(),
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
@@ -3576,6 +3728,7 @@ async fn skipped_filter_skips_its_branches() {
         trace_context_filter_indices: Vec::new(),
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
@@ -4911,6 +5064,38 @@ struct BoundedStreamBufferFilter {
     max_bytes: usize,
 }
 
+/// Declares the same access and mode in both body directions.
+struct BidirectionalModeFilter {
+    mode: BodyMode,
+}
+
+#[async_trait]
+impl HttpFilter for BidirectionalModeFilter {
+    fn name(&self) -> &'static str {
+        "bidirectional_mode"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        self.mode
+    }
+
+    fn response_body_mode(&self) -> BodyMode {
+        self.mode
+    }
+}
+
 #[async_trait]
 impl HttpFilter for BoundedStreamBufferFilter {
     fn name(&self) -> &'static str {
@@ -5161,6 +5346,7 @@ fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilte
         trace_context_filter_indices: Vec::new(),
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
@@ -5607,6 +5793,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         trace_context_filter_indices: Vec::new(),
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
@@ -5651,6 +5838,7 @@ fn make_pipeline_with_conditions(
         trace_context_filter_indices: Vec::new(),
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
@@ -5695,6 +5883,7 @@ fn make_pipeline_with_response_conditions(
         trace_context_filter_indices: Vec::new(),
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
@@ -6369,6 +6558,7 @@ fn streaming_capability_detected_when_filter_declares_it() {
         may_select_streaming_subrequest_response: true,
         trace_context_filter_indices: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
         request_body_ceiling: None,
         response_body_ceiling: None,
         request_head_filter_indices: Vec::new(),
@@ -7239,6 +7429,7 @@ async fn reenter_over_the_real_router_republishes_or_fails_closed() {
             &FilterRegistry::with_builtins(),
             &HashMap::new(),
             &praxis_core::config::InsecureOptions::default(),
+            &[],
         )
         .unwrap();
         let req = crate::test_utils::make_request(Method::GET, "/x");
@@ -7623,6 +7814,7 @@ mod bound_upstream_body_barrier {
             &registry,
             &HashMap::new(),
             &praxis_core::config::InsecureOptions::default(),
+            &[],
         )
         .unwrap();
 
@@ -8290,7 +8482,8 @@ mod bound_upstream_body_barrier {
     /// the pipeline's action, and the recorded rewrite.
     async fn rewrite_with_output_near_the_limit(over_by_one: bool) -> (usize, FilterAction, Option<Bytes>) {
         let (participant, ..) = MarkingParticipant::new("limit", None);
-        let pipeline = make_pipeline(vec![binding_router("inference"), Box::new(participant)]);
+        let mut pipeline = make_pipeline(vec![binding_router("inference"), Box::new(participant)]);
+        pipeline.apply_body_limits(Some(16), None, false).unwrap();
         let limit = pipeline.selected_upstream_request_body_limit();
         let at_limit = limit.checked_sub("|limit".len()).expect("the limit covers the marker");
         let mut pre_read = vec![b'x'; at_limit];

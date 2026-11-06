@@ -26,7 +26,3 @@ filter_chains:
       - filter: tcp_load_balancer
         clusters:
           - name: db_pool
-            endpoints:
-              - "127.0.0.1:15432"
-              - "127.0.0.1:15433"
-              - "127.0.0.1:15434"

@@ -1579,6 +1579,21 @@ mod tests {
         assert!(ctx.get_filter_state::<super::CloudEventsState>().unwrap().emitted);
     }
 
+    #[test]
+    fn event_phase_declares_only_the_body_hook_it_uses() {
+        for phase in ["request", "response_headers", "response_complete"] {
+            let filter = phase_filter(phase);
+            assert_eq!(filter.request_body_access(), crate::BodyAccess::None);
+            let expected = if phase == "response_complete" {
+                crate::BodyAccess::ReadOnly
+            } else {
+                crate::BodyAccess::None
+            };
+            assert_eq!(filter.response_body_access(), expected);
+            assert_eq!(filter.response_body_mode(), crate::BodyMode::Stream);
+        }
+    }
+
     #[tokio::test]
     async fn response_complete_ignores_interim_informational_responses() {
         let filter = phase_filter("response_complete");

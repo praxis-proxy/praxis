@@ -150,9 +150,17 @@ not implemented, so `tls.ca.crl_paths` on a cluster
 definition is rejected at config validation rather
 than silently ignored.
 
-A CA/CRL reload invalidates all cached TLS sessions
-on that listener, so resumed sessions are re-verified
-against the new CA and CRLs.
+Listeners with client authentication and TLS hot-reload
+disable TLS 1.2 and TLS 1.3 session resumption. Every new
+connection performs a full handshake against the current
+CA and CRLs, including when client certificates are optional
+(`request`). This adds handshake work compared with resumed
+connections. Static mTLS listeners and listeners without
+client authentication retain session resumption.
+
+A reload does not terminate established connections or
+handshakes that have already authenticated. Those handshakes
+cannot create resumable sessions that bypass the new trust.
 
 CRL and CA files reload only on listeners with
 exactly one certificate and `hot_reload` not set to

@@ -1,5 +1,60 @@
 [files]
 extend-exclude = ["Cargo.lock", "target/"]
 
+[default]
+extend-ignore-identifiers-re = [
+    # W3C trace-context test parent IDs (including the alternate test ID).
+    '^00f067aa0ba902b[78]$',
+]
+extend-ignore-re = [
+    # Red Hat's full key fingerprint, in documentation and the key file.
+    '567E 347A D004 4ADE 55BA +8A5F 199E 2F91 FD43 1D51',
+    # Deliberately broken keys in deny-unknown-fields tests and their assertions.
+    'wieght: 3',
+    '\.contains\("wieght"\)',
+    'fitlers: \[\]',
+    '\.contains\("fitlers"\)',
+    # The documentation issue template shows an example spelling correction.
+    '"recieve" → "receive"',
+    # Compound words where "mis" is a prefix.
+    'mis-(gate|detected|indented)\b',
+    # Encoded café examples, including their Unicode, URL and byte escapes.
+    'caf\\u\{e9\}',
+    'caf\\+u00e9',
+    'caf\\xe9',
+    'caf%C3%A9',
+    # Deliberately split, escaped or invalid byte/string examples.
+    'b?"hel"',
+    'b?"data: hel"',
+    'b"hel\\"lo"',
+    'b"fo"',
+    'b"ba\\0d"',
+    'r#"val\\?"ue"#',
+    '"abd"',
+    # The PII test contains a German sentence.
+    'Grüße, meine Nummer ist',
+]
+
+[default.extend-identifiers]
+# Pingora's public error-source API.
+esource = "esource"
+# Common name of the HTTP benchmarking tool and Tencent's Kubernetes service.
+wrk = "wrk"
+TKE = "TKE"
+# Boolean conjunction as a verb in prose and test names.
+ANDed = "ANDed"
+grpc_predicate_ands_with_other_fields = "grpc_predicate_ands_with_other_fields"
+bound_upstream_ands_with_method_and_header = "bound_upstream_ands_with_method_and_header"
+bound_upstream_ands_with_path = "bound_upstream_ands_with_path"
+response_headers_present_ands_with_status = "response_headers_present_ands_with_status"
+headers_present_ands_with_exact_headers = "headers_present_ands_with_exact_headers"
+# Deliberate misspellings of full configuration keys in negative tests.
+routing_overides = "routing_overides"
+alow_root = "alow_root"
+sampl_rate = "sampl_rate"
+body_acces = "body_acces"
+path_prfix = "path_prfix"
+
 [default.extend-words]
-# Add project-specific identifiers that typos flags incorrectly.
+# An established alternative spelling of "unparsable".
+unparseable = "unparseable"

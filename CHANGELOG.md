@@ -17,6 +17,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Security
+
+- Apply the policy filter's configured failure mode when a classified tool
+  response is malformed JSON or lacks both a result and a valid JSON-RPC error.
+  Policies with tool response hooks no longer silently skip those inputs;
+  fail-closed pipelines stop delivery before the buffered payload escapes.
+- Validate the complete input's UTF-8 before `json_body` rewrites or
+  `json_body_field` header promotion. Invalid bytes in ignored JSON values
+  can no longer produce trusted metadata or bypass the configured invalid-input
+  behavior.
+- Disable TLS session resumption on listeners with client authentication
+  and TLS hot-reload. A handshake authenticated before a CA/CRL reload
+  could finish afterward and cache stale authentication, allowing new
+  connections to bypass the updated trust. New connections now perform
+  full certificate verification; static mTLS and non-mTLS listeners
+  retain resumption.
+
+### Changed
+
+- Clarify that the default Pingora shutdown grace period is capped at five
+  seconds, including for streaming responses, regardless of a larger
+  `shutdown_timeout_secs` value.
+
 ### Added
 
 - Experimental, off-by-default `local-http` handler contracts, mandatory
@@ -24,6 +47,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   with bounded fake I/O. Live adapters reject these pipelines until local
   transport serving lands. See `docs/architecture/local-http.md`.
 
+- Implicit cluster references: an inline load-balancer cluster that shares
+  its name with a top-level cluster may omit its endpoints, which are
+  filled in from the declaration at validation time, keeping the routed
+  and health-checked addresses together. A divergent endpoint list now
+  warns at startup and on reload, and an inline `health_check` is
+  rejected: probes are configured only at top level. Filling is capped at
+  16 MiB of copied endpoint data in validation and again in each pipeline
+  build, so many references to one large declaration cannot expand a small
+  config into an out-of-memory reload.
+- A [support diagnostics reference](docs/operating/diagnostics.md) covering
+  config checks, live state, logging, reloads and draining before shutdown.
+- `SUPPORT.md` with guidance on where to ask questions, report bugs,
+  report security vulnerabilities, and propose enhancements.
+- `runtime.overload_gauges` publishes `praxis_overload_pressure`
+  for cgroup memory, anonymous resident memory, CPU stall time,
+  connections, and file descriptors. The gauges do not shed load.
+- A `forward_proxy` block on `protocol: http` listeners, behind the
+  experimental `forward-proxy` cargo feature (off by default; config
+  surface for CONNECT-based forward proxying): destination allowlisting with
+  wildcard host patterns and optional ports, tunnel idle timeout and
+  optional max duration. Validation rejects the block on TCP listeners
+  and requires egress control (a non-empty `allow_destinations` list or
+  an `ip_acl`/`policy` filter without `conditions` in the listener's
+  chains); the check is structural — that the configured control actually
+  restricts egress remains the operator's responsibility. Destination
+  patterns ending in a numeric label (`*.0.1`) are rejected so no pattern
+  can match an IP literal. A reload that changes a bound listener's
+  `forward_proxy` block, removes a listener that has one, or changes
+  `insecure_options.allow_private_upstreams` while a bound listener has
+  an enabled block, is rejected. The CONNECT runtime is a follow-up
+  change; the block is inert until it lands.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
@@ -35,6 +89,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   handshakes remain healthy when that deadline expires without a response.
   Rust consumers matching `HealthCheckType` exhaustively must handle the new
   `Tls` variant even when the feature is disabled.
+- The policy filter registers the `env` secret provider, so a policy
+  document's `secrets:` block using `env` now loads instead of failing at
+  startup. Any other provider kind, including `file` and `vault`, is still
+  refused. Values are read when the filter is built, so a changed value
+  takes effect on the next restart.
+
+### Changed
+
+- Default accumulated bodies and buffered subrequest responses to a 64 MiB
+  cap, configurable through `body_limits.max_buffer_bytes`. The cap covers
+  explicit filter limits, runtime-selected buffering, nested pipelines, and
+  iterative-router state, including after reload. Request and response transfer
+  limits retain their 10 MiB defaults and remain independent for streams.
+  Larger JSON, policy, gRPC-Web, and iterative-router buffer settings are
+  accepted subject to the configured cap.
+- Keep Pingora uploads open while runtime-selected buffering withholds
+  non-final chunks, instead of sending a premature upstream end marker.
+
+- The policy engine is updated to PPE 0.5.0, which tightens OAuth
+  `delegate(...)` by default: a token-exchange response must name an
+  access-token or JWT `issued_token_type`, unrequested scopes outside
+  `allowed_extra_scopes` are refused, and a minted JWT's `aud` and `sub`
+  must match. `strict_response_validation: false` turns these checks off.
+  JWTs with an unsupported `crit` header are rejected, an `env` secret
+  provider with unused settings fails to load, and CEL `size()` and
+  `exists()` change in ways that can allow requests that were denied. See
+  `docs/filters/http/security/policy.md`.
+- `KvStoreRegistry::register` adds a caller-supplied `KvBackend` under a
+  name, rejecting duplicates with `KvRegistryError::AlreadyRegistered`.
+- `KvStoreRegistry::get_or_create_memory` deliberately creates an
+  in-memory store.
+- **Breaking:** every `sticky_sessions` cluster now requires a `storage`
+  field, and startup fails with `missing field 'storage'` when it is
+  omitted. The only value is `local`, which keeps session bindings in the
+  proxy process: they are not shared between replicas and do not survive a
+  restart, so stickiness behind a load balancer is per-process. That was
+  already the behaviour; it is now a stated choice rather than a silent
+  default. Add `storage: local` to each cluster to keep the current
+  behaviour. See `docs/filters/http/traffic_management/sticky_sessions.md`.
+
+### Removed
+
+- `KvStoreRegistry::get_or_create`, which silently created an in-memory
+  store for any unknown name. Use `get` to look up a configured store, or
+  `get_or_create_memory` to choose memory explicitly.
+
+### Changed
+
+- `FilterPipeline::build_with_chains` takes a new required
+  `top_level_clusters: &[Cluster]` argument. Rust callers pass the
+  config's top-level `clusters:` list, or `&[]` when none exists.
 
 ### Fixed
 
@@ -46,6 +151,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   their writes or removals leave the original headers unchanged.
 - Local CORS preflight responses keep their generated permissions through the
   coordinator's response-policy unwind.
+- Remove forbidden `Content-Length` and `Transfer-Encoding` headers from
+  204 responses after response filters run, preserving valid downstream
+  framing for the following response.
+
+- Preserve valid `Content-Length` metadata on Hyper HTTP/1 304 responses
+  while keeping them bodyless, including responses with huge hypothetical
+  lengths.
+
+- Count an original request-body prefix once across Pingora retries while
+  continuing to count newly received tail bytes. Stale-connection retries also
+  respect the 64 KiB original and final transformed body retention ceiling.
+  Requests whose streaming writer output was not retained now return the
+  upstream error instead of retrying with an unsafe reconstruction.
+
+- Decode `grpc-web-text` request bodies during pre-read inspection before
+  forwarding them to HTTP/2 backends. Invalid base64 now follows the filter
+  rejection policy even before request-phase state is initialized.
+
+- Flush small HTTP/1.1 server-sent events promptly when the upstream supplies
+  `Content-Length`. Body-bearing event streams use chunked downstream framing;
+  the upstream length still detects truncated responses.
+
+- A delegated credential is sent with its own prefix rather than always
+  `Bearer `, so a Vault credential with no `scheme_prefix` goes out bare
+  and a custom prefix such as `token ` is kept.
+- A request header asserted from `secret.<name>` stays redacted in the
+  views that request-body and response policy hooks receive, rather than
+  reaching those plugins and PDPs in plaintext.
+
+- Request-body limit rejections log structured warnings and return JSON 413
+  responses across buffering and streaming paths. Body-phase rejections
+  for requests armed by `grpc_status` return gRPC Trailers-Only responses
+  instead. Oversized declared Content-Length values, including validated
+  matching comma-separated lengths, are rejected before reading the body
+  or sending 100 Continue. Local body-limit rejections are not retried upstream,
+  even when 413 is configured as retriable. HEAD rejection responses retain
+  representation headers without sending payload bytes, including over HTTP/2.
+  Streaming rejections also cancel HTTP/2 upstream streams promptly instead of
+  waiting for an upstream response or allowing it to replace the rejection.
+- Early HTTP/1 responses with unread uploads use Pingora's write-side
+  shutdown and bounded cleanup before closing, including authentication
+  and rate-limit rejections and successful terminal responses. Cleanup has
+  a 30-second deadline and a 128 MiB discard budget checked between body
+  reads. Streaming rejections release the upstream before responding;
+  access logs and request duration metrics are recorded before downstream
+  cleanup. Expected client-error filter rejections no longer produce a
+  duplicate Pingora error log.
 - The FIPS runtime probe selects the Pingora backend when compiling its
   listener tests with default features disabled.
 - The Hyper backend rejects reserved client trailer names before forwarding

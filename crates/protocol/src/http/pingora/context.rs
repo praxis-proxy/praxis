@@ -246,6 +246,13 @@ pub struct PingoraRequestCtx {
     /// Accumulated request body bytes seen so far.
     pub request_body_bytes: u64,
 
+    /// The next body callback carries Pingora's already-read retry prefix.
+    pub(crate) request_replay_prefix_pending: bool,
+
+    /// A main-path streaming writer may have changed bytes without retaining
+    /// an authoritative representation for another Pingora attempt.
+    pub(crate) streaming_request_writer_ran: bool,
+
     /// Per-request body delivery mode for the request direction.
     /// Seeded from static pipeline capabilities, then potentially
     /// upgraded by filters during `on_request`.
@@ -328,10 +335,14 @@ pub struct PingoraRequestCtx {
     /// `logging()` hook when errors bypass `response_filter`.
     pub response_phase_done: bool,
 
-    /// Rejection raised during the response phase, carried across the
-    /// Pingora error boundary so `fail_to_proxy` can deliver its full
+    /// Rejection raised during request-body or response processing, carried
+    /// across the Pingora error boundary so `fail_to_proxy` can deliver its full
     /// configured headers and body instead of a bare status envelope.
     pub pending_rejection: Option<praxis_filter::Rejection>,
+
+    /// A local response needs transport cleanup after completion is recorded.
+    #[cfg(feature = "pingora")]
+    pub(crate) rejection_cleanup_pending: bool,
 
     /// Whether the response was delivered to completion: a bodyless
     /// response finished its response phase, or the response body
@@ -646,6 +657,8 @@ impl Default for PingoraRequestCtx {
             adapted_request_body_len: None,
             request_body_buffer: None,
             request_body_bytes: 0,
+            request_replay_prefix_pending: false,
+            streaming_request_writer_ran: false,
             request_body_mode: BodyMode::Stream,
             request_body_released: false,
             request_is_idempotent: false,
@@ -664,6 +677,8 @@ impl Default for PingoraRequestCtx {
             response_phase_done: false,
             response_delivery_complete: false,
             pending_rejection: None,
+            #[cfg(feature = "pingora")]
+            rejection_cleanup_pending: false,
             retries: 0,
             rewritten_path: None,
             selected_endpoint_index: None,

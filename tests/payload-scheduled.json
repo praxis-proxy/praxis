@@ -1,0 +1,138 @@
+[
+  {
+    "package": "praxis-tests-integration",
+    "test": "payload_transport::scheduled_opaque_upload_at_64_mib_limit",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-integration",
+    "test": "payload_transport::scheduled_unbounded_opaque_upload_256_mib",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-integration",
+    "test": "payload_transport::scheduled_64_mib_limit_rejects_the_next_content_byte",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-integration",
+    "test": "payload_transport::scheduled_unbounded_response_keeps_request_ceiling",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-integration",
+    "test": "payload_transport::scheduled_unbounded_opaque_upload_one_gib",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-integration",
+    "test": "payload_transport::scheduled_unbounded_opaque_response_256_mib",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-integration",
+    "test": "payload_processing::large_json_routes_at_64_mib",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-integration",
+    "test": "guardrails::scheduled_64_mib_tail_pii_is_inspected_before_dispatch",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-resilience",
+    "test": "payload_resources::scheduled_opaque_streaming_plateau_through_one_gib",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-resilience",
+    "test": "payload_resources::scheduled_inspection_memory_shapes_and_cpu_scaling",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-resilience",
+    "test": "payload_resources::scheduled_small_probes_during_16_and_32_paused_uploads",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-resilience",
+    "test": "payload_resources::scheduled_cpu_rules_and_early_late_errors",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-resilience",
+    "test": "payload_resources::scheduled_mixed_h1_h2_16_and_32_uploads",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-integration",
+    "test": "payload_transport::campaigns::scheduled_h1_framing_campaign_has_independent_backend_ledgers",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-integration",
+    "test": "payload_transport::campaigns::scheduled_h2_stream_campaign_preserves_preread_and_sibling_progress",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-resilience",
+    "test": "payload_resources::scheduled_small_probes_during_16_and_32_downloads",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  },
+  {
+    "package": "praxis-tests-integration",
+    "test": "examples::cloud_events::slow_process::scheduled_cloud_events_streaming_rss_plateau_through_one_gib",
+    "adapters": [
+      "pingora",
+      "hyper"
+    ]
+  }
+]

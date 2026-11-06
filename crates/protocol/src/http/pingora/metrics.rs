@@ -58,6 +58,9 @@ const TCP_ACTIVE_CONNECTIONS: &str = "praxis_tcp_active_connections";
 /// Counter for connections rejected by overload protection.
 const OVERLOAD_REJECTS_TOTAL: &str = "praxis_overload_rejects_total";
 
+/// Gauge for smoothed overload pressure, from 0 to 1, per resource.
+const OVERLOAD_PRESSURE: &str = "praxis_overload_pressure";
+
 /// Gauge for file descriptors the process holds open.
 const PROCESS_OPEN_FDS: &str = "praxis_process_open_fds";
 
@@ -780,6 +783,14 @@ pub(crate) fn record_overload_reject(reason: &'static str) {
     counter!(OVERLOAD_REJECTS_TOTAL, "reason" => reason).increment(1);
 }
 
+/// Publish one resource's smoothed overload pressure, from 0 to 1.
+pub fn set_overload_pressure(resource: &'static str, pressure: f64) {
+    if !is_recorder_installed() {
+        return;
+    }
+    gauge!(OVERLOAD_PRESSURE, "resource" => resource).set(pressure);
+}
+
 /// Publish a file descriptor usage sample as the
 /// `praxis_process_open_fds` and `praxis_process_max_fds` gauges.
 pub fn set_process_fd_gauges(usage: praxis_core::fd::FdUsage) {
@@ -1066,6 +1077,7 @@ mod tests {
     #[test]
     fn record_utilities_noop_without_recorder() {
         record_overload_reject(OVERLOAD_REASON_MEMORY);
+        set_overload_pressure("cpu", 0.0);
         record_upstream_connect_failure(cluster_none());
         record_error(ERROR_TYPE_INTERNAL);
         record_upstream_request(cluster_none(), SharedString::const_str("10.0.0.1:80"), "2xx");
@@ -1114,6 +1126,17 @@ mod tests {
             let needle = format!("praxis_overload_rejects_total{{reason=\"{reason}\"}}");
             assert!(body.contains(&needle), "expected `{needle}` in scrape:\n{body}");
         }
+    }
+
+    #[test]
+    fn overload_pressure_gauge_appears_in_scrape() {
+        install_prometheus_recorder();
+        set_overload_pressure("connections", 0.5);
+        let body = render_prometheus().expect("recorder should render");
+        assert!(
+            body.contains("praxis_overload_pressure{resource=\"connections\"} 0.5"),
+            "expected the pressure gauge in the scrape:\n{body}"
+        );
     }
 
     #[test]

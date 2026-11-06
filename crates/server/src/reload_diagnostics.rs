@@ -282,6 +282,7 @@ fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
             max_connections,
             max_memory_bytes,
             max_open_files,
+            overload_gauges,
             shed_on_fd_pressure,
             subrequest_pool_size,
             threads,

@@ -1,0 +1,54 @@
+name: Pull Request Review Tracker
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+#
+# Reports which pull request assignees still owe an initial review, keeps two
+# fields on organization project #13 in step, and reminds anyone who is
+# overdue. Shared from praxis-proxy/conventions (pr-review-tracker.yaml).
+#
+# The weekday run is live: it writes both project fields and posts reminder
+# comments. A manual dispatch still defaults to inert, so dry run is on and
+# both opt-ins are off unless they are checked.
+#
+# A scheduled run gets no `inputs`, so every value below is supplied
+# explicitly rather than through `inputs.*`, which is empty outside a
+# dispatch.
+#
+# The called job only uses the praxis-bot token, so it gets no permissions.
+
+on:
+  schedule:
+    # 08:15 UTC, Monday to Friday.
+    - cron: "15 8 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Report proposed changes without writing anything
+        type: boolean
+        default: true
+      apply-project:
+        description: Write the two project fields; needs dry-run off
+        type: boolean
+        default: false
+      apply-reminders:
+        description: Post reminder comments; needs dry-run off
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  track:
+    uses: praxis-proxy/conventions/.github/workflows/pr-review-tracker.yaml@13eaa03339ce872434489fd8e02c30d6f0a1d7e4 # unreleased, after v0.5.0
+    with:
+      # On a schedule these resolve to a live run with both opt-ins on. On a
+      # dispatch they resolve to whatever was checked, so the toggles in the
+      # Actions UI still mean what they say.
+      dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || false }}
+      apply-project: ${{ github.event_name != 'workflow_dispatch' || inputs.apply-project }}
+      apply-reminders: ${{ github.event_name != 'workflow_dispatch' || inputs.apply-reminders }}
+    secrets:
+      PRAXIS_BOT_APP_ID: ${{ secrets.PRAXIS_BOT_APP_ID }}
+      PRAXIS_BOT_APP_PRIVATE_KEY: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}

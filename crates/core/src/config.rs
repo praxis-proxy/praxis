@@ -24,6 +24,7 @@ mod cluster;
 mod condition;
 mod expanded_chains;
 mod filters;
+mod forward_proxy;
 mod hedge_policy;
 mod insecure_options;
 mod listener;
@@ -37,7 +38,10 @@ mod telemetry;
 mod validate;
 
 pub use admin::AdminConfig;
-pub use body_limits::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, DEFAULT_MAX_BODY_BYTES};
+pub use body_limits::{
+    ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, BufferLimit, DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_BUFFER_BYTES,
+    MAX_BUFFER_BYTES,
+};
 pub use bootstrap::{ConfigFile, DEFAULT_CONFIG, load_config};
 pub use branch_chain::{BranchChainConfig, BranchCondition, ResultMatch};
 pub use chain_ref::ChainRef;
@@ -54,6 +58,7 @@ pub use condition::{
 };
 pub use expanded_chains::ExpandedFilterChains;
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
+pub use forward_proxy::{DestinationRule, ForwardProxyConfig};
 pub use hedge_policy::{HedgePolicy, MAX_HEDGE_ATTEMPTS};
 pub use insecure_options::{InsecureFlag, InsecureOptions, SkipPipelineChecks};
 pub use listener::{Listener, ListenerTls, ProtocolKind};
@@ -69,9 +74,9 @@ pub use runtime::{DEFAULT_SUBREQUEST_POOL_SIZE, RuntimeConfig};
 pub(crate) use telemetry::OTLP_PROTOCOL_ENV_VAR;
 pub use telemetry::TelemetryConfig;
 pub use validate::{
-    MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING, TERMINAL_FILTERS, count_build_branches, is_ssrf_sensitive,
-    validate_chain_entries_branch_chains, validate_chain_entries_cardinality, validate_chain_entries_conditions,
-    validate_chain_entries_inline_clusters,
+    ClusterDeclarations, MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING, TERMINAL_FILTERS, count_build_branches,
+    is_ssrf_sensitive, resolve_chain_entries_references, validate_chain_entries_branch_chains,
+    validate_chain_entries_cardinality, validate_chain_entries_conditions, validate_chain_entries_inline_clusters,
 };
 
 // -----------------------------------------------------------------------------
@@ -133,7 +138,7 @@ pub struct Config {
     #[serde(default)]
     pub runtime: RuntimeConfig,
 
-    /// Drain time for graceful shutdown.
+    /// Upper bound on the duration of a graceful shutdown.
     #[serde(default = "default_shutdown_timeout_secs")]
     pub shutdown_timeout_secs: u64,
 

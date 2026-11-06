@@ -21,6 +21,10 @@ OPA, CEL, and Cedar `pre_invocation` steps on `llm:` routes also read the parsed
 
 PPE 0.4.1 changes OPA and CEL `args` on `tool:` routes to native JSON. Before upgrading, review rules that read `args`: for example, a numeric ID in `args.ids` must be compared with `13`, not `"13"`. A schema-backed `cedar-direct` PDP must set `structured_context: true` or the policy fails to load. Its schema must also declare the optional `args` and `llm` context fields its actions can receive, or those requests are denied. See the [PPE 0.4.1 changelog] and [args migration guidance].
 
+PPE 0.5.0 tightens OAuth `delegate(...)` by default. A token-exchange response must name an access-token or JWT `issued_token_type`. When the step requests scopes, a granted scope that was neither requested nor listed in `allowed_extra_scopes` is refused; a step that requests none accepts the identity provider's defaults. When the minted token is a JWT, its `aud` must contain the step's `audience`, and on a token exchange its `sub` must match the caller. `strict_response_validation: false` turns these checks off. A JWT with an unsupported `crit` header is rejected, and an `env` secret provider with settings it does not use fails to load. CEL `size()` now counts code points rather than bytes, and `exists()` returns true when one element matches even if another errors, so some requests that were denied may now be allowed. See the [PPE 0.5.0 changelog].
+
+The filter registers only the `env` secret provider. A `secrets:` block naming any other provider kind, including `file`, fails to load. Secret values are read when the filter is built, so a changed value takes effect on the next restart.
+
 The configured policy receives the full parsed inference request. Treat policy documents and custom plugins as trusted: a rule or an explicit outbound call can disclose fields it reads. Review policy authorship and outbound endpoints before enabling structured request input.
 
 On a policy with `llm:` routes, any request body without `mcp.method` metadata that repeats a key within one JSON object, at any depth, including keys that differ only in case, receives HTTP 400 with violation code `llm.duplicate_key` before any authorization rule runs, since backends disagree on which copy wins. This covers bodies with no `model` and unclaimed JSON-RPC envelopes too. The response names neither the key nor any value. A body that is not valid JSON is not refused for being malformed: it carries no usable `model`, so it is handled like any other body without one.
@@ -31,7 +35,7 @@ The CMF prompt text that APL steps and scanners read is projected from `system`,
 
 `body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also enables `cmf.llm_output` for non-streaming inference responses. APL field mutators do not rewrite inference bodies.
 
-`body_access: read_write` also enables response-phase `tool:`, `prompt:`, and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these rules are skipped and a warning is emitted. A response-only route adds no request-phase route rule; identity checks and `global` policy still apply.
+`body_access: read_write` also enables response-phase `tool:`, `prompt:`, and `resource:` rules, including attribute-only `post_invocation` rules. Under `read_only`, these rules are skipped and a warning is emitted. A response-only route adds no request-phase route rule; identity checks and `global` policy still apply. When tool response hooks are configured, a nonempty classified `tools/call` response that is malformed or contains neither a result nor a valid JSON-RPC error produces a filter error instead of silently skipping inspection. The pipeline's `failure_mode` controls that error; valid JSON-RPC error responses continue unchanged.
 
 `result.<field>` projection for `prompt:` and `resource:` routes remains blocked on [policy #75]; host-side content projection is tracked in [Praxis #1330]. A `result:` field pipeline on either entity, including an inherited one, is rejected at load so its controls cannot be silently skipped.
 
@@ -86,6 +90,7 @@ llm:
 ```
 
 [PPE 0.4.1 changelog]: https://github.com/praxis-proxy/policy/blob/v0.4.1/CHANGELOG.md#041---2026-10-05
+[PPE 0.5.0 changelog]: https://github.com/praxis-proxy/policy/blob/v0.5.0/CHANGELOG.md#050---2026-10-13
 [Praxis #1330]: https://github.com/praxis-proxy/praxis/issues/1330
 [Structured request input]: https://github.com/praxis-proxy/policy/blob/main/docs/content/apl/pdp.md#structured-request-input
 [args migration guidance]: https://github.com/praxis-proxy/policy/blob/v0.4.1/docs/content/apl/pdp.md#migrating-args-policies

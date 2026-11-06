@@ -96,7 +96,11 @@ pub fn build_subrequest_client(config: &Config) -> Result<SubRequestClient, Box<
             }),
     });
 
-    let ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
+    let ceiling = config
+        .body_limits
+        .max_response_bytes
+        .unwrap_or(usize::MAX)
+        .min(config.body_limits.max_buffer_bytes.get());
     let mut client = SubRequestClient::with_max_response_bytes(connector, ceiling);
     if let Some(path) = config.runtime.upstream_ca_file.as_deref() {
         let cached = praxis_tls::CachedCaCerts::from_pem_file(path)?;
@@ -211,8 +215,13 @@ pub(crate) fn resolve_pipelines_with_composition(
         // the full configuration or conditional filters and branch chains would
         // appear absent.
         let entry_snapshot = entries.clone();
-        let mut pipeline =
-            FilterPipeline::build_with_chains(&mut entries, &registry, &chains, &config.insecure_options)?;
+        let mut pipeline = FilterPipeline::build_with_chains(
+            &mut entries,
+            &registry,
+            &chains,
+            &config.insecure_options,
+            &config.clusters,
+        )?;
         #[cfg(feature = "local-http")]
         praxis_protocol::http::local::require_supported_adapter(&pipeline)?;
         configure_pipeline(
@@ -290,11 +299,7 @@ fn configure_pipeline(
     slow_start_registry: &Arc<praxis_filter::SlowStartRegistry>,
     subrequest_client: &SubRequestClient,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    pipeline.apply_body_limits(
-        config.body_limits.max_request_bytes,
-        config.body_limits.max_response_bytes,
-        config.insecure_options.allow_unbounded_body,
-    )?;
+    pipeline.configure_body_limits(&config.body_limits, config.insecure_options.allow_unbounded_body)?;
     pipeline.set_record_filter_duration_metrics(config.metrics.filter_duration);
     pipeline.set_route_templates(Arc::new(praxis_core::config::RouteTemplates::compile(
         &config.metrics.route_templates,
@@ -771,6 +776,20 @@ filter_chains:
                 && err.contains("no preceding filter is guaranteed to bind one"),
             "inherited bound_upstream gates must trigger the binding-order check: {err}"
         );
+    }
+
+    #[test]
+    fn subrequest_client_obeys_buffer_cap_and_stricter_response_transfer_limit() {
+        praxis_tls::provider::install();
+        let mut config = Config::from_yaml("listeners:\n  - name: web\n    address: '127.0.0.1:8080'\n    filter_chains: [main]\nfilter_chains:\n  - name: main\n    filters:\n      - filter: static_response\n        status: 200\n").unwrap();
+        for cap in [4, 67_108_865, 1_073_741_824] {
+            for transfer in [None, Some(0), Some(3), Some(usize::MAX)] {
+                config.body_limits.max_buffer_bytes = cap.try_into().unwrap();
+                config.body_limits.max_response_bytes = transfer;
+                let client = build_subrequest_client(&config).unwrap();
+                assert_eq!(client.max_response_bytes(), cap.min(transfer.unwrap_or(cap)));
+            }
+        }
     }
 
     #[test]
@@ -1471,7 +1490,7 @@ filter_chains:
     /// KV store registry with one test store.
     fn make_kv_registry() -> praxis_core::kv::KvStoreRegistry {
         let registry = praxis_core::kv::KvStoreRegistry::new();
-        registry.get_or_create("test");
+        registry.get_or_create_memory("test");
         registry
     }
 

@@ -365,7 +365,7 @@ impl FilterRegistry {
     /// )
     /// .unwrap();
     /// let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
-    /// FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+    /// FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default(), &[])
     ///     .expect("the outbound chain is validated and bound at build time");
     /// ```
     ///

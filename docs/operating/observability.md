@@ -273,6 +273,90 @@ descriptors neared the process limit (see
 `runtime.shed_on_fd_pressure`). A steady rate means
 the limit is too small for the traffic.
 
+#### `praxis_overload_pressure` (gauge)
+
+Smoothed pressure from 0 to 1 for one resource.
+Published only when `runtime.overload_gauges` is true,
+and scraped from `/metrics` on `admin.metrics_address`.
+`admin.address` answers `/metrics` with 404, and
+`/api/stats` omits these gauges. A resource with no
+sample is absent: no cgroup limit, no PSI file, no
+`runtime.max_memory_bytes` for heap, no connection
+cap, or no descriptor usage (including non-Linux).
+The gauge does not refuse work.
+
+| Label | Values |
+| ---------- | -------------------------------------------------------- |
+| `resource` | `cgroup_memory`, `heap`, `cpu`, `connections`, `file_descriptors` |
+
+`cgroup_memory` is the highest working-set ratio of this
+process's cgroup and its ancestors, up to the cgroup
+root. Each level is `(memory.current - inactive_file) /
+memory.max`. A level whose `memory.max` is `max` does
+not constrain the process, so a limit set on a parent
+slice still counts when the service cgroup itself is
+unlimited. A finite limit whose `memory.current` or
+`memory.stat` cannot be read keeps the previous
+pressure.
+`heap` is anonymous resident memory (`RssAnon`) over
+`runtime.max_memory_bytes`. `cpu` is Linux PSI stall
+time (per-cgroup when available, host-wide as
+fallback), not core utilization. `connections` is admitted requests over
+`runtime.max_connections`. Each in-flight HTTP request
+or active TCP session holds one permit; idle HTTP/1
+keep-alive connections do not, and a single HTTP/2
+connection may hold many.
+`file_descriptors` is open descriptors over the
+process limit.
+
+Each sample maps usage to a pressure from 0 to 1. Pressure is 0 at
+or below the resource's scaling threshold and 1 at or above its
+saturation threshold.
+
+| Resource | Scaling threshold | Saturation threshold |
+| ---------- | ----: | ----: |
+| `cgroup_memory` | 0.80 | 0.95 |
+| `heap` | 0.80 | 0.95 |
+| `cpu` | 0.10 | 0.50 |
+| `connections` | 0.70 | 0.95 |
+| `file_descriptors` | 0.70 | 0.95 |
+
+The published gauge smooths these samples. The first sample sets the
+gauge directly. Each later sample moves the gauge 30% of the way
+toward its pressure. A gauge at 0 reads 0.3 after one saturated
+sample, so it can read less than 1 at first saturation.
+Saturation is logged from the raw sample. Three
+consecutive samples at the saturation threshold log
+saturation while the gauge is still climbing. One
+sample does not, and one dip does not clear it.
+
+`cpu` uses the `avg10` value from the `some` line of
+Linux PSI. On cgroup v2 (kernels ≥ 4.20) the per-cgroup
+`cpu.pressure` file is read first so the gauge reflects
+this process's cgroup. When that file is absent the
+monitor falls back to host-wide `/proc/pressure/cpu`,
+which covers the whole node. It averages stall time
+over the preceding 10 seconds.
+
+If a read fails after an earlier sample, the gauge keeps its last
+value. A resource is absent only before its first sample.
+
+##### Label mapping to `praxis_overload_rejects_total`
+
+The pressure gauge and the reject counter use different
+label schemes. The mapping between them is:
+
+| Pressure `resource` | Reject `reason` |
+| -------------------- | -------------------------------- |
+| `cgroup_memory` | _(no reject reason today)_ |
+| `heap` | `memory` |
+| `connections` | `global_connections` |
+| `file_descriptors` | `file_descriptors` |
+| `cpu` | _(no reject reason today)_ |
+
+`listener_connections` rejects are per-listener and have
+no matching pressure gauge.
+
 #### `praxis_process_open_fds` / `praxis_process_max_fds` (gauges)
 
 File descriptors the process holds open, and its soft

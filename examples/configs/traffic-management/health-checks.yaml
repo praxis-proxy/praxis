@@ -63,11 +63,4 @@ filter_chains:
       - filter: load_balancer
         clusters:
           - name: backend
-            endpoints:
-              - "127.0.0.1:3001"
-              - "127.0.0.1:3002"
-              - "127.0.0.1:3003"
           - name: database
-            endpoints:
-              - "127.0.0.1:5432"
-              - "127.0.0.1:5433"

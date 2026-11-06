@@ -514,14 +514,7 @@ filter_chains:
       - filter: load_balancer
         clusters:
           - name: api
-            endpoints:
-              - "10.0.0.1:8080"
-              - "10.0.0.2:8080"
-              - "10.0.0.3:8080"
           - name: cache
-            endpoints:
-              - "10.0.1.1:6379"
-              - "10.0.1.2:6379"
 ```
 
 ## Threshold Tuning

@@ -1007,7 +1007,7 @@ fn branch_chains_are_rejected_even_with_every_validation_override() {
         ..Default::default()
     };
     assert!(FilterPipeline::build(&mut entries.clone(), &registry).is_err());
-    assert!(FilterPipeline::build_with_chains(&mut entries, &registry, &chains, &insecure).is_err());
+    assert!(FilterPipeline::build_with_chains(&mut entries, &registry, &chains, &insecure, &[]).is_err());
 }
 
 #[tokio::test]
