@@ -3411,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "cargo_metadata",
@@ -3453,7 +3453,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-core"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "chrono",
@@ -3493,7 +3493,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-filter"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3536,7 +3536,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-protocol"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3573,7 +3573,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-tls"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "arc-swap",
  "notify",
@@ -3595,7 +3595,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-test-utils"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3622,7 +3622,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-benches"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -3642,7 +3642,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-conformance"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "h2",
  "http",
@@ -3655,7 +3655,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-integration"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3691,7 +3691,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-resilience"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3707,7 +3707,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-schema"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3722,7 +3722,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-security"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-filter",
@@ -6232,7 +6232,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.7.5"
+version = "0.8.0"
 dependencies = [
  "base64 0.23.1",
  "cargo_metadata",
