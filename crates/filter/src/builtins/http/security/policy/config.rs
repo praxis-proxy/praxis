@@ -12,8 +12,8 @@ use serde::Deserialize;
 // -----------------------------------------------------------------------------
 
 /// Configuration block for the `policy` filter, which embeds the Praxis
-/// Policy Engine in-process (gated behind the `policy-engine` feature,
-/// on by default).
+/// Policy Engine in-process (gated behind the `policy-engine` feature;
+/// the default feature set also includes all supported builtins).
 ///
 /// Praxis filter configs are flat: the filter's typed fields sit
 /// directly under the `- filter:` entry alongside the structural keys
@@ -93,6 +93,24 @@ pub(crate) struct PolicyFilterConfig {
     /// default.
     #[serde(default)]
     pub trusted_private_endpoints: Vec<String>,
+
+    /// CIDR ranges of proxies trusted to report the client in
+    /// `X-Forwarded-For`.
+    ///
+    /// Empty by default, so `http.client_address` is the TCP peer. When the
+    /// peer is in a listed range, the field lines are joined and walked right
+    /// to left, and the first hop outside every range is the client; when
+    /// every hop is trusted, the leftmost is. Hops left of the client are
+    /// ignored; a malformed hop reached before it leaves the request with no
+    /// client address. Ports are dropped. RFC 7239 `Forwarded` is not read. This
+    /// changes only what the policy engine sees; IP ACLs and upstream
+    /// headers still use the TCP peer.
+    ///
+    /// ```yaml
+    /// trusted_proxies: ["10.0.0.0/8", "fd00::/8"]
+    /// ```
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
 
     /// Fail-closed policy gate for misconfigured chains. When `true`
     /// (default), `on_request_body` rejects any request that reaches
