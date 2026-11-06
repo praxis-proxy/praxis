@@ -1647,7 +1647,8 @@ filter_chains:
         std::fs::write(&good, "plugins: []\n").unwrap();
         let (live, old_config, registry, shutdown, meta, cluster_meta) =
             setup_live_pipelines_from(policy_config(&good));
-        let serving = Arc::as_ptr(&live.get("web").unwrap().load());
+        // Hold the serving pipeline so its address cannot be reused by a later swap.
+        let serving = live.get("web").unwrap().load_full();
 
         let bad = dir.path().join("bad.yaml");
         std::fs::write(
@@ -1688,9 +1689,8 @@ filter_chains:
             error.to_string().contains("dpop.external_base_url"),
             "the reload error must carry the construction refusal: {error}"
         );
-        assert_eq!(
-            serving,
-            Arc::as_ptr(&live.get("web").unwrap().load()),
+        assert!(
+            Arc::ptr_eq(&serving, &live.get("web").unwrap().load_full()),
             "a failed policy reload must keep the previous pipeline serving"
         );
 
@@ -1698,9 +1698,8 @@ filter_chains:
             let result = reload(&policy_config(&good));
             assert!(result.is_ok(), "valid reload {attempt} must succeed: {result:?}");
         }
-        assert_ne!(
-            serving,
-            Arc::as_ptr(&live.get("web").unwrap().load()),
+        assert!(
+            !Arc::ptr_eq(&serving, &live.get("web").unwrap().load_full()),
             "a valid policy reload must swap the pipeline"
         );
     }
