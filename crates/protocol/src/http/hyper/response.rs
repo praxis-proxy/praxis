@@ -14,7 +14,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::{HeaderMap, Response, StatusCode, Version};
-use praxis_core::egress::{Session as _, hyper::HyperSession};
+use praxis_core::{
+    egress::{Session as _, hyper::HyperSession},
+    server::LifecyclePhase,
+};
 use praxis_filter::{FilterAction, FilterError};
 use tracing::{Instrument as _, error, warn};
 
@@ -222,6 +225,25 @@ async fn run_filters(
     Some(ran.0)
 }
 
+/// Ask a draining data plane to close its non-HTTP/2 client connection.
+fn close_connection_on_drain(flight: &Flight, head: &mut Head) {
+    if matches!(flight.lifecycle.phase(), LifecyclePhase::Draining)
+        && flight.version != Version::HTTP_2
+        && !successful_connect_tunnel(
+            &flight
+                .ctx
+                .request_snapshot
+                .as_ref()
+                .map_or(http::Method::GET, |request| request.method.clone()),
+            head.response.status,
+        )
+    {
+        head.response
+            .headers
+            .insert(http::header::CONNECTION, http::HeaderValue::from_static("close"));
+    }
+}
+
 /// Act on the response pipeline's result.
 fn settle(
     listener: &ListenerShared,
@@ -235,6 +257,7 @@ fn settle(
         return Outcome::Failed(Failure::internal("request snapshot not set during response phase"));
     };
     reframe(flight, &mut head, &result);
+    close_connection_on_drain(flight, &mut head);
     match result {
         Ok(
             FilterAction::Continue

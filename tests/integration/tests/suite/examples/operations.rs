@@ -131,6 +131,7 @@ runtime:
   work_stealing: true
 
 shutdown_timeout_secs: 30
+shutdown_drain_delay_secs: 2
 insecure_options:
   allow_private_endpoints: true
 "#

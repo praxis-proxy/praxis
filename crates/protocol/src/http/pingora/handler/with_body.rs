@@ -22,7 +22,7 @@ use pingora_core::{
     upstreams::peer::HttpPeer,
 };
 use pingora_proxy::{FailToProxy, ProxyHttp, Session};
-use praxis_core::retry::reused_only_replay_safe;
+use praxis_core::{retry::reused_only_replay_safe, server::LifecycleHandle};
 use praxis_filter::{BodyMode, CompressionConfig, FilterPipeline};
 use tokio::sync::Semaphore;
 use tracing::{Instrument as _, debug};
@@ -104,16 +104,24 @@ pub struct PingoraHttpHandler {
 
     /// Swappable filter pipeline.
     pipeline: Arc<ArcSwap<FilterPipeline>>,
+
+    /// Shared lifecycle state used for downstream drain headers.
+    lifecycle: LifecycleHandle,
 }
 
 impl PingoraHttpHandler {
     /// Create a handler with body filter support.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the handler carries every listener-scoped limit plus the shared lifecycle"
+    )]
     pub(super) fn new(
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
         downstream_keepalive_timeout_secs: Option<u64>,
         connection_semaphore: Option<Arc<Semaphore>>,
         listener_name: ::metrics::SharedString,
+        lifecycle: LifecycleHandle,
     ) -> Self {
         let compression = pipeline.load().compression_config().cloned();
         Self {
@@ -123,8 +131,28 @@ impl PingoraHttpHandler {
             downstream_read_timeout,
             listener_name,
             pipeline,
+            lifecycle,
         }
     }
+}
+
+/// Mark HTTP/1 responses so clients reconnect after readiness-first drain.
+fn add_drain_connection_close(
+    session: &mut Session,
+    response: &mut pingora_http::ResponseHeader,
+    ctx: &PingoraRequestCtx,
+    lifecycle: &LifecycleHandle,
+) -> Result<()> {
+    let is_http1 = matches!(
+        ctx.client_http_version,
+        Some(http::Version::HTTP_10 | http::Version::HTTP_11)
+    );
+    if lifecycle.phase() == praxis_core::server::LifecyclePhase::Draining && is_http1 && !ctx.connection_upgraded {
+        session.set_keepalive(None);
+        response.remove_header("Connection");
+        response.insert_header("Connection", "close")?;
+    }
+    Ok(())
 }
 
 /// Resolve retry safety for a stale (`ReusedOnly`) upstream connection.
@@ -189,6 +217,7 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
+        ctx.lifecycle = Some(self.lifecycle.clone());
         // Defensively clear upstream-contact state at the first per-request hook.
         // The current Pingora fork builds a fresh context per request
         // (persist_connection_context is off), so nothing leaks across keep-alive
@@ -252,6 +281,7 @@ impl ProxyHttp for PingoraHttpHandler {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
+        ctx.lifecycle = Some(self.lifecycle.clone());
         let pipeline = ctx.pin_pipeline(&self.pipeline);
         request_filter::execute(&pipeline, session, ctx).await
     }
@@ -509,6 +539,7 @@ impl ProxyHttp for PingoraHttpHandler {
             .instrument(span)
             .await;
         if result.is_ok() {
+            add_drain_connection_close(session, upstream_response, ctx, &self.lifecycle)?;
             // RFC 9110 §7.6.3: the response Via received-protocol is the leg this
             // proxy received the response on — the upstream connection — not the
             // downstream client's version, captured before filters can rebuild
@@ -717,6 +748,7 @@ mod replay_tests {
             None,
             None,
             "test".into(),
+            LifecycleHandle::new(),
         );
         let (_client, stream) = tokio::io::duplex(1024);
         let mut session = Session::new_h1(Box::new(stream));
@@ -745,6 +777,7 @@ mod replay_tests {
             None,
             None,
             "test".into(),
+            LifecycleHandle::new(),
         );
         let (_client, stream) = tokio::io::duplex(1024);
         let mut session = Session::new_h1(Box::new(stream));

@@ -120,14 +120,16 @@ pub mod backend {
     pub mod admin {
         #[cfg(feature = "hyper")]
         pub use crate::http::hyper::admin::{
-            add_admin_api, add_health_endpoint, add_health_endpoint_with_pipelines, add_prometheus_upkeep,
+            add_admin_api, add_health_endpoint, add_health_endpoint_with_pipelines,
+            add_health_endpoint_with_pipelines_and_policy, add_prometheus_upkeep,
         };
         pub use crate::http::pingora::health::{
             AdminEndpointOptions, PrometheusAdminRecorder, StatsAdminState, install_prometheus_admin_recorder,
         };
         #[cfg(feature = "pingora")]
         pub use crate::http::pingora::health::{
-            add_admin_api, add_health_endpoint, add_health_endpoint_with_pipelines, add_prometheus_upkeep,
+            add_admin_api, add_health_endpoint, add_health_endpoint_with_pipelines,
+            add_health_endpoint_with_pipelines_and_policy, add_prometheus_upkeep,
         };
     }
 }

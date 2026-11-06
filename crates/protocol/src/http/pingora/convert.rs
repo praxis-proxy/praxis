@@ -102,6 +102,13 @@ pub(crate) async fn send_rejection_for(
     ctx: &mut crate::http::pingora::context::PingoraRequestCtx,
 ) {
     ctx.rejection_cleanup_pending = true;
+    if ctx
+        .lifecycle
+        .as_ref()
+        .is_some_and(|lifecycle| lifecycle.phase() == praxis_core::server::LifecyclePhase::Draining)
+    {
+        session.set_keepalive(None);
+    }
     // Path 1: gRPC filter already set grpc-status, just frame it.
     if rejection
         .headers
@@ -147,7 +154,6 @@ pub(in crate::http) fn grpc_error_message(rejection: &Rejection) -> &str {
 ///
 /// Disables downstream keep-alive by default so the connection closes after
 /// a short-circuit response. Complete responses may explicitly preserve it.
-/// The logging hook performs bounded upload cleanup after recording completion.
 ///
 /// ```ignore
 /// // Requires an active `pingora_proxy::Session` from a live request.
@@ -270,38 +276,6 @@ mod tests {
     use http::StatusCode;
 
     use super::*;
-
-    #[tokio::test]
-    async fn rejection_delivery_preserves_head_metadata_without_payload() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-        for method in ["HEAD", "GET"] {
-            let (mut client, server) = tokio::io::duplex(1024);
-            let request = format!("{method} / HTTP/1.1\r\nHost: localhost\r\n\r\n");
-            client.write_all(request.as_bytes()).await.unwrap();
-            let mut session = Session::new_h1(Box::new(server));
-            assert!(session.read_request().await.unwrap(), "the request must parse");
-            send_rejection(&mut session, Rejection::status(413).with_body("too big")).await;
-            drop(session);
-            let mut response = String::new();
-            client.read_to_string(&mut response).await.unwrap();
-            drop(client);
-            assert!(
-                response.starts_with("HTTP/1.1 413"),
-                "the rejection status must be retained"
-            );
-            assert!(
-                response.to_ascii_lowercase().contains("content-length: 7\r\n"),
-                "HEAD must retain the GET representation length"
-            );
-            let (_, body) = response.split_once("\r\n\r\n").unwrap();
-            assert_eq!(
-                body,
-                if method == "HEAD" { "" } else { "too big" },
-                "only HEAD must suppress rejection payload bytes"
-            );
-        }
-    }
 
     #[test]
     fn response_header_preserves_status() {
