@@ -2,6 +2,7 @@
 // Copyright (c) 2024 Praxis Contributors
 
 #![deny(unsafe_code)]
+#![cfg_attr(not(all(unix, feature = "overload-actions")), forbid(unsafe_code))]
 
 //! Server bootstrap for the Praxis proxy.
 //!

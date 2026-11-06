@@ -13,12 +13,17 @@ pub fn jemalloc_purge() -> bool {
 
 /// Execute a jemalloc purge control and report whether the allocator accepted it.
 fn purge(command: &CStr) -> bool {
+    // tikv-jemalloc-ctl has safe epoch/stat readers, but no typed API for the
+    // argument-free arena.<all>.purge command. Its raw control API is unsafe too,
+    // so keep the required FFI boundary here rather than exposing raw pointers.
+    // Remove this exception when a safe purge API exists: praxis-proxy/praxis#1514.
     #[expect(
         unsafe_code,
-        reason = "jemalloc mallctl FFI; null buffers request a command without reading or writing memory"
+        reason = "jemalloc's argument-free arena purge has no safe typed control API"
     )]
     // SAFETY: command is NUL-terminated and alive for the call. Null buffers
-    // with length zero request no memory access. Purging frees no live allocation.
+    // with length zero provide no caller-owned input or output buffers.
+    // Purging frees no live allocation; jemalloc synchronizes its arena state.
     let result = unsafe {
         tikv_jemalloc_sys::mallctl(
             command.as_ptr(),
@@ -38,32 +43,8 @@ fn purge(command: &CStr) -> bool {
 /// This measures live memory, so purging unused pages need not change it.
 #[doc(hidden)]
 pub fn allocated_bytes() -> Option<usize> {
-    let mut epoch = 1_u64;
-    let mut allocated = 0_usize;
-    let mut length = size_of::<usize>();
-    #[expect(
-        unsafe_code,
-        reason = "jemalloc mallctl writes exactly the typed output buffers whose sizes are passed"
-    )]
-    // SAFETY: all control names are static C strings. The epoch input and the
-    // allocated output are live, correctly aligned typed objects with matching sizes.
-    let ok = unsafe {
-        tikv_jemalloc_sys::mallctl(
-            c"epoch".as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::from_mut(&mut epoch).cast(),
-            size_of::<u64>(),
-        ) == 0
-            && tikv_jemalloc_sys::mallctl(
-                c"stats.allocated".as_ptr(),
-                std::ptr::from_mut(&mut allocated).cast(),
-                &raw mut length,
-                std::ptr::null_mut(),
-                0,
-            ) == 0
-    };
-    ok.then_some(allocated)
+    tikv_jemalloc_ctl::epoch::advance().ok()?;
+    tikv_jemalloc_ctl::stats::allocated::read().ok()
 }
 
 #[cfg(test)]
