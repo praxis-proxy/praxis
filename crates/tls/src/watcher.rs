@@ -113,17 +113,20 @@ impl CertWatcher {
     /// `shutdown` to request early termination: send `true` to
     /// stop the watcher, or drop the sender to keep it running
     /// indefinitely.
+    ///
+    /// `file_hashes` is the polling baseline read before the startup load.
+    /// Taking it before the load keeps a rotation that lands between the load
+    /// and this call visible: the first poll sees the new digests and reloads,
+    /// so the served certificate always matches the files. A baseline hashed
+    /// after the load would instead record the new bytes while the loaded
+    /// state is still the old one, and the poll would skip the change.
     pub fn spawn(
         current: Arc<ArcSwap<CertifiedKey>>,
         pair: CertKeyPair,
         verifier_reload: Option<ClientVerifierReload>,
         shutdown: tokio::sync::watch::Receiver<bool>,
+        file_hashes: Vec<Option<[u8; 32]>>,
     ) -> std::thread::JoinHandle<()> {
-        // Snapshot the watched files once, before the loop starts, so the
-        // immediate first interval tick does not reload files the startup load
-        // already read. Any later change is caught by the notification watcher
-        // or by the next poll.
-        let file_hashes = file_hashes_now(&pair, verifier_reload.as_ref());
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
@@ -413,8 +416,8 @@ async fn watched_file_hashes(pair: &CertKeyPair, verifier: Option<&ClientVerifie
 
 /// Fingerprints the watched files on the calling thread.
 ///
-/// Used once at startup, before the watcher runtime exists, to seed the
-/// polling baseline without a redundant reload on the first tick.
+/// Test helper that mirrors the pre-load snapshot the startup path takes.
+#[cfg(test)]
 fn file_hashes_now(pair: &CertKeyPair, verifier: Option<&ClientVerifierReload>) -> Vec<Option<[u8; 32]>> {
     watched_paths(pair, verifier)
         .iter()
@@ -433,7 +436,9 @@ fn watched_paths(pair: &CertKeyPair, verifier: Option<&ClientVerifierReload>) ->
 }
 
 /// SHA-256 of one watched file, or `None` when it cannot be read.
-fn file_digest(path: &str) -> Option<[u8; 32]> {
+///
+/// The setup path uses it to snapshot the files before the startup load.
+pub(crate) fn file_digest(path: &str) -> Option<[u8; 32]> {
     let contents = zeroize::Zeroizing::new(std::fs::read(path).ok()?);
     let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), &contents).ok()?;
     digest.as_ref().try_into().ok()
@@ -628,7 +633,8 @@ mod tests {
         let current = Arc::new(ArcSwap::from_pointee(certified));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let handle = CertWatcher::spawn(current, pair, None, shutdown_rx);
+        let baseline = file_hashes_now(&pair, None);
+        let handle = CertWatcher::spawn(current, pair, None, shutdown_rx, baseline);
 
         std::thread::sleep(Duration::from_millis(50));
         let _sent = shutdown_tx.send(true);
@@ -762,7 +768,8 @@ mod tests {
         let current = Arc::new(ArcSwap::from_pointee(certified));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let _handle = CertWatcher::spawn(Arc::clone(&current), pair.clone(), None, shutdown_rx);
+        let baseline = file_hashes_now(&pair, None);
+        let _handle = CertWatcher::spawn(Arc::clone(&current), pair.clone(), None, shutdown_rx, baseline);
 
         std::thread::sleep(Duration::from_millis(100));
 
@@ -824,6 +831,54 @@ mod tests {
             current.load().cert,
             "polling alone must reload after notify setup fails"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[expect(clippy::too_many_lines, reason = "startup rotation fixture and polling assertions")]
+    async fn startup_baseline_taken_before_the_load_reloads_a_changed_file() {
+        let certs = gen_test_certs();
+        let directory = certs.temp_dir.as_ref().expect("temp dir");
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let current = Arc::new(ArcSwap::from_pointee(
+            loader::load_certified_key(&pair).expect("load cert"),
+        ));
+        let loaded = current.load_full().cert[0].as_ref().to_vec();
+        // The startup path snapshots the files before loading them, so the
+        // baseline describes the certificate the load is expected to read.
+        let startup_baseline = file_hashes_now(&pair, None);
+
+        // A projection swap lands between that load and the watcher start.
+        let rotated = gen_test_certs_in(directory.path());
+        let expected = loader::load_certified_key(&pair).expect("load rotated cert").cert[0]
+            .as_ref()
+            .to_vec();
+        drop(rotated);
+        assert_ne!(loaded, expected, "the fixture must rotate the certificate");
+
+        let (_notifications, events) = mpsc::channel(1);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(watch_events(
+            Arc::clone(&current),
+            pair,
+            None,
+            startup_baseline,
+            shutdown_rx,
+            events,
+        ));
+        tokio::time::advance(CERTIFICATE_POLL_INTERVAL).await;
+        wait_until(|| current.load().cert[0].as_ref() != loaded.as_slice()).await;
+        assert_eq!(
+            current.load().cert[0].as_ref(),
+            expected.as_slice(),
+            "the first poll must install a rotation that landed after the startup load"
+        );
+        shutdown_tx.send(true).expect("stop polling");
+        task.await.expect("watch task");
     }
 
     #[tokio::test(start_paused = true)]

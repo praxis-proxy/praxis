@@ -156,6 +156,14 @@ pub struct ReloadableServerConfig {
 
     /// Handle to swap the client verifier atomically (mTLS only).
     pub verifier_handle: Option<Arc<arc_swap::ArcSwap<crate::reload::VerifierState>>>,
+
+    /// Digests of the watched files, captured before the startup load.
+    ///
+    /// The watcher seeds its polling baseline with these. A file that changes
+    /// during or after the load therefore differs from the baseline and is
+    /// reloaded on the first poll, instead of being recorded as already
+    /// loaded while the served state is stale.
+    pub startup_hashes: Vec<Option<[u8; 32]>>,
 }
 
 /// Build a `rustls::ServerConfig` that uses a
@@ -184,6 +192,8 @@ pub fn build_reloadable_server_config(
     tls: &ListenerTls,
     advertise_http_alpn: bool,
 ) -> Result<ReloadableServerConfig, TlsError> {
+    // Snapshot before the load so a rotation during it still differs from the baseline.
+    let startup_hashes = startup_file_hashes(tls);
     let builder = build_config_builder(tls)?;
 
     let (builder, verifier_handle) = if tls.client_cert_mode == ClientCertMode::None {
@@ -208,19 +218,46 @@ pub fn build_reloadable_server_config(
 
     let config = builder.with_cert_resolver(Arc::new(resolver));
     let mut config = finish_server_config(config, advertise_http_alpn, tls.cipher_suites.is_some())?;
-    if verifier_handle.is_some() {
-        // A handshake authenticated before reload can finish afterward. Cache
-        // invalidation alone lets it insert stale authentication into the new
-        // cache. The builder also leaves stateless ticket production disabled.
-        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
-        config.send_tls13_tickets = 0;
-    }
+    disable_resumption(&mut config, verifier_handle.is_some());
 
     Ok(ReloadableServerConfig {
         config: Arc::new(config),
         cert_handle,
         verifier_handle,
+        startup_hashes,
     })
+}
+
+/// Disable session resumption when client authentication is configured.
+///
+/// A handshake authenticated before a reload can finish afterward. Cache
+/// invalidation alone lets it insert stale authentication into the new cache.
+/// The builder also leaves stateless ticket production disabled.
+#[cfg(feature = "config-reload")]
+fn disable_resumption(config: &mut ServerConfig, client_auth: bool) {
+    if client_auth {
+        config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+        config.send_tls13_tickets = 0;
+    }
+}
+
+/// Digest the files the startup load is about to read.
+///
+/// Mirrors the watcher's path order (primary certificate, key, then CA and CRL
+/// files) so the returned baseline lines up with what polling compares.
+#[cfg(feature = "config-reload")]
+fn startup_file_hashes(tls: &ListenerTls) -> Vec<Option<[u8; 32]>> {
+    let Some(primary) = tls.certificates.first() else {
+        return Vec::new();
+    };
+    let mut paths = vec![primary.cert_path.clone(), primary.key_path.clone()];
+    if tls.client_cert_mode != ClientCertMode::None
+        && let Some(ca_cfg) = tls.client_ca.as_ref()
+    {
+        paths.push(ca_cfg.ca_path.clone());
+        paths.extend(ca_cfg.crl_paths.iter().cloned());
+    }
+    paths.iter().map(|path| crate::watcher::file_digest(path)).collect()
 }
 
 // -----------------------------------------------------------------------------
