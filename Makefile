@@ -491,13 +491,15 @@ lint-fips: ## clippy (all targets) + rustfmt for the FIPS feature set
 # A Policy profile refuses to construct without a FIPS provider, so its tests
 # need one: the host's in FIPS mode, or FIPS_PROVIDER_CONF, an OpenSSL config
 # that activates the FIPS module for the test processes only.
+# Startup scenarios require an explicit mode and run in test-fips-policy-startup.
 FIPS_PROVIDER_CONF      ?=
-_FIPS_TEST_ENV           = $(if $(FIPS_PROVIDER_CONF),OPENSSL_CONF=$(abspath $(FIPS_PROVIDER_CONF))) $(_FIPS_POLICY_TEST_ENV)
+_FIPS_TEST_ENV           = $(if $(FIPS_PROVIDER_CONF),OPENSSL_CONF=$(abspath $(FIPS_PROVIDER_CONF)))
 test-fips: ## unit tests resolved as the FIPS build
 	$(_FIPS_TEST_ENV) cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
 		-p praxis-proxy -p praxis-proxy-protocol -p praxis-proxy-filter \
 		-p praxis-proxy-core -p praxis-proxy-tls \
-		--features $(FIPS_FEATURES_QUALIFIED) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
+		--features $(FIPS_FEATURES_QUALIFIED) $(FIPS_CARGO_EXTRA) -- \
+		--skip policy::fips_startup_tests $(if $(V),--nocapture)
 
 # Every startup scenario runs in both modes. The configurable-provider mode
 # proves rejection; kernel-fips proves the host cannot be weakened by those

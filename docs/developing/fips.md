@@ -107,6 +107,11 @@ and push. `make test-fips-host` runs all four on the FIPS runner, alongside
 the unit, integration and conformance suites. `make test-fips-provider`
 also includes the configurable-provider startup checks.
 
+The general `test-fips` unit target excludes these startup scenarios, so it
+does not require `FIPS_POLICY_STARTUP_MODE`. Both container entrypoints run
+the dedicated startup target separately, including when a Policy profile
+is enabled.
+
 For a direct run inside the toolchain image, use:
 
 ```console
