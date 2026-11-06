@@ -280,6 +280,24 @@ To build one, name a profile: `make container-fips FIPS_POLICY_PROFILE=jwt`
 DPoP traffic through it. See
 [`examples/configs/security/policy-jwt-fips.yaml`](../../examples/configs/security/policy-jwt-fips.yaml).
 
+| Profile | Policy features | Status |
+|---|---|---|
+| `none` (published image) | none | supported |
+| `engine` | `policy-engine,policy-crypto-fips` | supported |
+| `api-key` | `policy-api-key-fips` | supported |
+| `jwt` | `policy-jwt-fips` | supported |
+| `both` | `policy-api-key-fips,policy-jwt-fips` | supported |
+| any of the above plus `policy-experimental-ratelimit` | adds the Limitador rate limiter | unvalidated; refused under `PRAXIS_REQUIRE_FIPS` |
+
+The limiter combination is unvalidated because Limitador enables `uuid`'s
+`fast-rng` feature, which switches every `uuid` v4 in the process, Policy's
+included, from the OS RNG (`getrandom`) to `rand 0.10`'s `chacha20` RNG.
+Praxis already links `rand` for request ids, but not for Policy's ids. The
+feature edge is Limitador's own dependency declaration, so neither Praxis
+nor Policy can turn it off. No denied crate enters the graph; the change of
+RNG behind Policy's ids has not been reviewed, so a build with both features
+refuses to start when FIPS is required.
+
 JWT under FIPS accepts RS256/384/512, PS256/384/512 and ES256/384 on RSA
 2048-8192 or P-256/P-384 keys, and refuses HMAC, EdDSA and
 `decoding_key: { kind: secret }` at load.
