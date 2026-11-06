@@ -30,7 +30,7 @@ pub(super) struct RequestFacts {
     path: String,
     /// Raw query without the leading `?`; `Some("")` for a bare `?`.
     query: Option<String>,
-    /// Validated authority, with its port when the request named one.
+    /// Validated host, lowercased, without a port.
     host: Option<String>,
     /// `https` when the downstream connection is TLS, else `http`.
     scheme: &'static str,
@@ -134,26 +134,23 @@ impl RequestView {
 // Helpers
 // -----------------------------------------------------------------------------
 
-/// The request authority: the URI's (HTTP/2 `:authority`, or an absolute-form
-/// target admission matched against `Host`), else the `Host` header admission
-/// validated. Never a forwarding header.
+/// The bare request host, ASCII-lowercased and without a port: the URI's
+/// (HTTP/2 `:authority`, or an absolute-form target admission matched against
+/// `Host`), else the `Host` header admission validated. Never a forwarding
+/// header.
 fn authority(request: &Request) -> Option<String> {
     request
         .uri
         .authority()
-        .map(|authority| {
-            authority.port_u16().map_or_else(
-                || authority.host().to_owned(),
-                |port| format!("{}:{port}", authority.host()),
-            )
-        })
+        .cloned()
         .or_else(|| {
             request
                 .headers
                 .get(http::header::HOST)
                 .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
+                .and_then(|value| value.parse::<http::uri::Authority>().ok())
         })
+        .map(|authority| authority.host().to_ascii_lowercase())
 }
 
 /// Lowercased header map with duplicate field lines comma-joined (RFC 9110
@@ -231,12 +228,16 @@ mod tests {
     }
 
     #[test]
-    fn the_authority_keeps_its_port_and_the_peer_is_the_client_address() {
-        let http = extension_for("http://api.example.test:8443/a", false, &[]);
-        assert_eq!(http.host.as_deref(), Some("api.example.test:8443"));
+    fn the_host_is_bare_and_lowercased_and_the_peer_is_the_client_address() {
+        let http = extension_for("http://API.example.test:8443/a", false, &[]);
+        assert_eq!(http.host.as_deref(), Some("api.example.test"), "no port in http.host");
         assert_eq!(http.client_address(), Some("203.0.113.7"));
-        let from_host = extension_for("/a", false, &[("host", "api.example.test")]);
-        assert_eq!(from_host.host.as_deref(), Some("api.example.test"));
+        let from_host = extension_for("/a", false, &[("host", "Example.COM:8443")]);
+        assert_eq!(
+            from_host.host.as_deref(),
+            Some("example.com"),
+            "a Host header loses its port and case"
+        );
     }
 
     #[test]
