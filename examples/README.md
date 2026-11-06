@@ -60,6 +60,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [access-logging.yaml](configs/observability/access-logging.yaml) | Structured JSON logging with sampling; logs ~10% of requests. request_id ensures each log line has a correlation ID. access_log emits method, path, status, and timing |
 | [cloud-events.yaml](configs/observability/cloud-events.yaml) | Publishes a bounded, best-effort CloudEvents 1.0 response event after the upstream response completes |
 | [errors-total.yaml](configs/observability/errors-total.yaml) | Prometheus counter for proxy errors classified by cause, covering filter rejections, timeouts, unreachable upstreams and internal faults |
+| [filter-resource-metrics.yaml](configs/observability/filter-resource-metrics.yaml) | Observe active filter hooks and retained body payload bytes while a JSON rewrite buffers a request |
 | [grpc-access-log.yaml](configs/observability/grpc-access-log.yaml) | Logs how each gRPC call ended |
 | [grpc-health-check.yaml](configs/observability/grpc-health-check.yaml) | Probes upstream endpoints with `grpc.health.v1.Health/Check` instead of an HTTP GET |
 | [http-active-requests.yaml](configs/observability/http-active-requests.yaml) | Prometheus gauge for HTTP requests currently in flight per listener |

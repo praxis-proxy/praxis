@@ -159,6 +159,49 @@ pub(crate) fn record_cloud_events_skipped(reason: &'static str) {
 }
 
 // -----------------------------------------------------------------------------
+// Filter Activity
+// -----------------------------------------------------------------------------
+
+/// Counts a filter hook while it runs, including time awaiting external work.
+pub(crate) struct FilterActivity(metrics::Gauge);
+
+/// Request-owned handles avoid repeated registry access on response chunks.
+#[derive(Default)]
+struct ResponseBodyActivity {
+    /// One recorder handle for each registered filter type in this request.
+    gauges: std::collections::HashMap<&'static str, metrics::Gauge>,
+}
+
+impl FilterActivity {
+    /// Begin attribution to a registered filter type.
+    pub(crate) fn new(filter: &'static str) -> Self {
+        Self::from_gauge(gauge!("praxis_filter_active", "filter" => filter))
+    }
+
+    /// Increment a handle retained independently of the current hook guard.
+    fn from_gauge(gauge: metrics::Gauge) -> Self {
+        gauge.increment(1.0);
+        Self(gauge)
+    }
+
+    /// Resolve a response-body handle lazily and reuse it for this request.
+    pub(crate) fn response_body(filter: &'static str, extensions: &mut crate::RequestExtensions) -> Self {
+        let handles = extensions.get_or_insert_with(ResponseBodyActivity::default);
+        let gauge = handles
+            .gauges
+            .entry(filter)
+            .or_insert_with(|| gauge!("praxis_filter_active", "filter" => filter));
+        Self::from_gauge(gauge.clone())
+    }
+}
+
+impl Drop for FilterActivity {
+    fn drop(&mut self) {
+        self.0.decrement(1.0);
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -167,6 +210,26 @@ pub(crate) fn record_cloud_events_skipped(reason: &'static str) {
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_activity_is_released_with_its_scope() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let active = FilterActivity::new("overload-test-filter");
+            assert!(
+                handle
+                    .render()
+                    .contains("praxis_filter_active{filter=\"overload-test-filter\"} 1")
+            );
+            drop(active);
+            assert!(
+                handle
+                    .render()
+                    .contains("praxis_filter_active{filter=\"overload-test-filter\"} 0")
+            );
+        });
+    }
 
     #[test]
     fn record_emits_correct_metric_name_and_label_keys() {
