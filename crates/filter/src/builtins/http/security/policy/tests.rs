@@ -2078,6 +2078,42 @@ async fn dotted_role_does_not_satisfy_its_prefix() {
     );
 }
 
+/// An operand that settles `&` or `|` decides the rule even when the other
+/// operand is unorderable (a string subject compared with a number).
+#[tokio::test(flavor = "multi_thread")]
+async fn apl_settled_operand_decides_past_an_unorderable_one() {
+    for rule in [
+        r#""subject.id > 10 & role.guest: deny('blocked', 'blocked')""#,
+        r#""role.guest & subject.id > 10: deny('blocked', 'blocked')""#,
+        r#""require(subject.id <= 10 | role.admin)""#,
+        r#""require(role.admin | subject.id <= 10)""#,
+    ] {
+        let action = dispatch_with_roles(rule, &["admin"]).await;
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "a settled operand must decide {rule}; got {action:?}"
+        );
+    }
+}
+
+/// With no settling operand an unorderable comparison still fails closed.
+#[tokio::test(flavor = "multi_thread")]
+async fn apl_unsettled_unorderable_operand_fails_closed() {
+    for rule in [
+        // Both deny only when the comparison is unorderable, not a boolean.
+        r#""subject.id > 10: deny('blocked', 'blocked')""#,
+        r#""subject.id <= 10: deny('blocked', 'blocked')""#,
+        r#""require(subject.id <= 10 | role.guest)""#,
+        r#""subject.id > 10 & role.admin: deny('blocked', 'blocked')""#,
+    ] {
+        let action = dispatch_with_roles(rule, &["admin"]).await;
+        assert!(
+            matches!(&action, FilterAction::Reject(_)),
+            "an unsettled unorderable predicate must deny {rule}; got {action:?}"
+        );
+    }
+}
+
 /// Write a pure-L7 JWT policy decided by `data.authz.allow` over `modules`,
 /// each an inline Rego module.
 #[expect(
