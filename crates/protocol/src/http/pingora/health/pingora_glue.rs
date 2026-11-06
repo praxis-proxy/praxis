@@ -25,6 +25,7 @@ use pingora_core::{
     },
 };
 use praxis_core::{PingoraServerRuntime, config::ReadinessMode, health::HealthRegistry, server::LifecycleHandle};
+use praxis_core::server::ServerRuntime as _;
 use tracing::info;
 
 use super::{

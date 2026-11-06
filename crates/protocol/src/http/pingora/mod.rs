@@ -25,6 +25,7 @@ use praxis_core::{
     ProxyError,
     backend::Runtime,
     config::{Config, ProtocolKind},
+    server::ServerRuntime as _,
 };
 
 #[cfg(feature = "pingora")]
