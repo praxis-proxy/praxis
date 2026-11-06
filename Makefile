@@ -553,7 +553,7 @@ test-integration-fips: ## integration suites against the FIPS build
 test-conformance-fips: $(H2SPEC) ## conformance suite against the FIPS build
 	$(call build-test-binary,$(FIPS_CARGO_ARGS)) \
 	$(_FIPS_TEST_ENV) PATH="$(BINUTILS_PATH):$(PATH)" \
-	$(_FIPS_TEST_ENV) cargo test --target-dir "$(FIPS_TARGET_DIR)" --no-default-features \
+	cargo test --target-dir "$(FIPS_TARGET_DIR)" --no-default-features \
 		-p praxis-tests-conformance --features praxis-tests-conformance/pingora \
 		$(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
 
@@ -977,11 +977,12 @@ build-test-proxy:
 
 # Everything under tests/ (schema, security, resilience, integration) in a
 # single pass, every feature on. Conformance is separate (test-conformance).
-test-integration: build-test-proxy ## schema, security, resilience and integration suites
+test-integration: ## schema, security, resilience and integration suites
 	$(call require-features,$(call package-features,$(SUITE_PACKAGES)))
 	$(call require-features,$(call package-features,praxis-proxy))
 	if [ -z "$${PRAXIS_BIN:-}" ]; then $(call build-test-binary,-p praxis-proxy --features $(call package-features,praxis-proxy)) fi; \
 	cargo test --features $(call package-features,$(SUITE_PACKAGES)) \
+		-p praxis-test-utils \
 		-p praxis-tests-schema \
 		-p praxis-tests-security \
 		-p praxis-tests-resilience \

@@ -4,7 +4,7 @@
 resource monitors, pressure gauges, and smoothing for
 [issue #145](https://github.com/praxis-proxy/praxis/issues/145).
 [PR #1487](https://github.com/praxis-proxy/praxis/pull/1487) completes the
-configurable thresholds, protective actions, and consumer attribution in
+configurable thresholds and protective actions in
 [proposal #28](https://github.com/praxis-proxy/enhancements/pull/28).
 
 ## Design
@@ -40,7 +40,7 @@ sequenceDiagram
     P->>U: Admit and forward
     M->>P: Rising pressure: shorten connect/header/idle waits
     M->>P: Above 0.5: close HTTP1 after its response
-    M->>P: Three saturated samples: refuse new work; readiness 503
+    M->>P: Three saturated samples - refuse new work and readiness 503
     U-->>P: Existing response continues
     P-->>C: Complete admitted response
     C->>P: New socket or HTTP2 stream
@@ -84,7 +84,8 @@ three clear samples restore admission after they release their permits.
 Actions require the off-default `overload-actions` Cargo feature and both
 `runtime.overload_gauges` and `runtime.overload_actions`. Flags and thresholds
 require a restart. Configuration, defaults, and shutdown behavior are described
-in [Configuration](../operating/configuration.md); action gauges, retained body
-payload bytes, active filter hooks, and correlation with in-flight work are
-described in [Observability](../operating/observability.md). Attribution covers
-owned body buffers and hook activity, rather than complete allocator profiling.
+in [Configuration](../operating/configuration.md); action gauges and correlation
+with in-flight work are described in
+[Observability](../operating/observability.md). Independent body-buffer and
+filter-hook attribution is reviewed separately in
+[PR #1515](https://github.com/praxis-proxy/praxis/pull/1515).
