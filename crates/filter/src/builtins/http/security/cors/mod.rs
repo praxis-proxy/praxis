@@ -248,6 +248,27 @@ impl CorsFilter {
             .all(|h| self.headers_header.split(", ").any(|a| a.eq_ignore_ascii_case(h)))
     }
 
+    /// Apply authoritative CORS response headers, reporting any mutations.
+    fn apply_response_headers(&self, origin: &str, resp: &mut crate::context::Response) -> bool {
+        let mut modified = strip_upstream_cors_headers(resp);
+        if modified {
+            trace!("stripped upstream CORS response headers");
+        }
+
+        if self.resolve_origin(origin).is_none() {
+            trace!(origin = %origin, "disallowed origin; omitting CORS headers");
+            if self.policy.needs_vary() {
+                self.append_vary(resp);
+                modified = true;
+            }
+            return modified;
+        }
+
+        debug!(origin = %origin, "injecting CORS response headers");
+        inject_response_headers(self, origin, resp);
+        true
+    }
+
     /// Append `Vary: Origin` to response headers.
     fn append_vary(&self, resp: &mut crate::context::Response) {
         resp.headers.append("vary", self.vary_origin.clone());
@@ -307,6 +328,11 @@ impl CorsFilter {
 
 #[async_trait]
 impl HttpFilter for CorsFilter {
+    #[cfg(feature = "local-http")]
+    fn local_http_compatibility(&self) -> crate::local_http::LocalCompatibility {
+        crate::local_http::LocalCompatibility::Policy
+    }
+
     fn name(&self) -> &'static str {
         "cors"
     }
@@ -333,6 +359,9 @@ impl HttpFilter for CorsFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        #[cfg(feature = "local-http")]
+        let local_preflight_request = is_local_preflight_request(ctx);
+
         let Some(resp) = ctx.response_header.as_mut() else {
             return Ok(FilterAction::Continue);
         };
@@ -348,23 +377,21 @@ impl HttpFilter for CorsFilter {
             return Ok(FilterAction::Continue);
         };
 
-        if strip_upstream_cors_headers(resp) {
-            trace!("stripped upstream CORS response headers");
-            ctx.response_headers_modified = true;
-        }
+        #[cfg(feature = "local-http")]
+        record_local_cors_headers(&mut ctx.extensions);
 
-        if self.resolve_origin(origin).is_none() {
-            trace!(origin = %origin, "disallowed origin; omitting CORS headers");
-            if self.policy.needs_vary() {
-                self.append_vary(resp);
-                ctx.response_headers_modified = true;
-            }
+        #[cfg(feature = "local-http")]
+        if self.resolve_origin(origin).is_some()
+            && local_preflight_request
+            && resp.status == http::StatusCode::NO_CONTENT
+            && resp.headers.contains_key("access-control-allow-methods")
+        {
+            trace!("preserving generated local CORS preflight headers");
+            ctx.response_headers_modified = true;
             return Ok(FilterAction::Continue);
         }
 
-        debug!(origin = %origin, "injecting CORS response headers");
-        inject_response_headers(self, origin, resp);
-        ctx.response_headers_modified = true;
+        ctx.response_headers_modified |= self.apply_response_headers(origin, resp);
         Ok(FilterAction::Continue)
     }
 }
@@ -372,6 +399,23 @@ impl HttpFilter for CorsFilter {
 // -----------------------------------------------------------------------------
 // Upstream Header Stripping
 // -----------------------------------------------------------------------------
+
+/// Preserve authoritative CORS writes and removals across local replacements.
+#[cfg(feature = "local-http")]
+fn record_local_cors_headers(extensions: &mut crate::extensions::RequestExtensions) {
+    crate::local_http::record_response_header_effects(
+        extensions,
+        UPSTREAM_CORS_HEADERS.map(http::header::HeaderName::from_static),
+    );
+}
+
+/// Identify a local preflight request before borrowing the response slot.
+#[cfg(feature = "local-http")]
+fn is_local_preflight_request(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.extensions.get::<crate::local_http::LocalHttpActive>().is_some()
+        && ctx.request.method == http::Method::OPTIONS
+        && ctx.request.headers.contains_key("access-control-request-method")
+}
 
 /// Remove every upstream CORS response header listed in
 /// [`UPSTREAM_CORS_HEADERS`].

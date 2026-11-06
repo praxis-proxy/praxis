@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Replay local response-header appends without retaining discarded handler
+  values on policy denials or precommit 500 replacements. Appending a policy
+  cookie no longer leaks the handler's session cookie into the replacement.
 - Apply the policy filter's configured failure mode when a classified tool
   response is malformed JSON or lacks both a result and a valid JSON-RPC error.
   Policies with tool response hooks no longer silently skip those inputs;
@@ -41,6 +44,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `shutdown_timeout_secs` value.
 
 ### Added
+
+- Experimental, off-by-default `local-http` handler contracts, mandatory
+  route/pipeline validation, and a fail-closed lifecycle coordinator tested
+  with bounded fake I/O. Live adapters reject these pipelines until local
+  transport serving lands. External policies can preserve explicit unchanged
+  response-header writes and absent removals across replacements through
+  `local_http::record_response_header_effects`. See
+  `docs/architecture/local-http.md`.
 
 - Implicit cluster references: an inline load-balancer cluster that shares
   its name with a top-level cluster may omit its endpoints, which are
@@ -138,6 +149,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Preserve local access-log eligibility from request processing when a later
+  header policy removes a header used by the logger's conditions.
+- Unmatched requests can use ordinary proxy processing in pipelines with
+  local HTTP routes, while matching or already-claimed requests remain local.
+- Local HTTP delivery cancels blocked response suppression and discards source
+  headers when replacing precommit failures with an empty 500.
+- Local HTTP header and CORS policies survive response replacement even when
+  their writes or removals leave the original headers unchanged.
+- Local CORS preflight responses keep their generated permissions through the
+  coordinator's response-policy unwind.
 - Remove forbidden `Content-Length` and `Transfer-Encoding` headers from
   204 responses after response filters run, preserving valid downstream
   framing for the following response.

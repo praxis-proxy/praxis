@@ -48,6 +48,8 @@ tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [features]
+# Adapter-neutral local HTTP lifecycle; live serving is not enabled yet.
+local-http = ["praxis-filter/local-http", "praxis-protocol/local-http", "experimental"]
 # TLS and HTTPS active probes. Off by default.
 tls-health-check = ["praxis-protocol/tls-health-check", "experimental"]
 default = ["pingora", "config-reload", "admin-api", "policy-engine"]

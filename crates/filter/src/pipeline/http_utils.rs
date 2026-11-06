@@ -656,7 +656,33 @@ pub(super) fn run_response_body_filter(
         http_filter.on_response_body(ctx, body, end_of_stream)
     };
     record_filter_result(&filter_span, &body_result);
+    #[cfg(feature = "local-http")]
+    reject_local_body_control(ctx, &body_result)?;
     dispatch_body_result(body_result, http_filter.name(), "response body", failure_mode)
+}
+
+/// Contract violations cannot use a policy's configured fail-open fallback.
+#[cfg(feature = "local-http")]
+fn reject_local_body_control(
+    ctx: &HttpFilterContext<'_>,
+    body_result: &Result<FilterAction, FilterError>,
+) -> Result<(), FilterError> {
+    if ctx
+        .extensions
+        .get::<crate::local_http::LocalHttpActive>()
+        .is_some_and(|active| active.claim.is_conflicted())
+    {
+        return Err("conflicting local HTTP claim".into());
+    }
+    if ctx.extensions.get::<crate::local_http::LocalHttpActive>().is_some()
+        && matches!(
+            body_result,
+            Ok(FilterAction::TerminalResponse(_) | FilterAction::StreamingTerminalResponse(_) | FilterAction::Release)
+        )
+    {
+        return Err("unexpected terminal/body-release action in local response policy".into());
+    }
+    Ok(())
 }
 
 /// Run a single response header filter.

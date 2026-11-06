@@ -13,6 +13,8 @@ readme.workspace = true
 name = "praxis_protocol"
 
 [features]
+# Adapter-neutral local HTTP lifecycle; live serving is not enabled yet.
+local-http = ["praxis-filter/local-http"]
 # TLS and HTTPS active probes. Off by default.
 tls-health-check = ["pingora", "praxis-core/tls-health-check"]
 # The Pingora network backend: the HTTP and TCP protocol adapters, the
@@ -109,3 +111,8 @@ rcgen = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing-subscriber = { workspace = true }
+
+[[example]]
+name = "local-http"
+path = "examples/local_http.rs"
+required-features = ["local-http"]
