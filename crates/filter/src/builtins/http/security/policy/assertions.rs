@@ -121,7 +121,7 @@ fn queue_remove(ctx: &mut HttpFilterContext<'_>, lowercase: &str) -> bool {
     true
 }
 
-/// Apply rendered request assertions and return the numbers set and removed.
+/// Apply rendered request assertions and return the queued set and remove counts.
 ///
 /// Governed names are set unconditionally to replace duplicate inbound values.
 /// Pending mutations are purged because later queue stages could otherwise

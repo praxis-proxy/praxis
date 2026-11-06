@@ -7,21 +7,20 @@ use http::{HeaderName, HeaderValue};
 
 use crate::{HttpFilterContext, TrustedHeaderMutation};
 
-/// Names touched by earlier pre-read passes and the current ordered producer.
+/// Names written by pending sets and adds across prior and current pre-read passes.
 pub(super) fn pending_names<'ctx>(ctx: &'ctx HttpFilterContext<'_>) -> impl Iterator<Item = &'ctx HeaderName> {
     ctx.prior_pre_read_mutations
         .iter()
         .chain(&ctx.pre_read_mutations)
-        .map(|mutation| match mutation {
-            TrustedHeaderMutation::Remove(name)
-            | TrustedHeaderMutation::Set(name, _)
-            | TrustedHeaderMutation::Add(name, _) => name,
+        .filter_map(|mutation| match mutation {
+            TrustedHeaderMutation::Remove(_) => None,
+            TrustedHeaderMutation::Set(name, _) | TrustedHeaderMutation::Add(name, _) => Some(name),
         })
 }
 
 /// Remove conflicting grouped writes, reporting whether either representation
-/// mentioned the header. Ordered writes remain until a later policy operation
-/// overrides them; the prior-pass log is read-only.
+/// contains a set or add for the header. Ordered writes remain until a later
+/// policy operation overrides them; the prior-pass log is read-only.
 pub(super) fn purge_pending(ctx: &mut HttpFilterContext<'_>, lowercase: &str) -> bool {
     let mut pending = pending_names(ctx).any(|name| name.as_str() == lowercase);
     ctx.request_headers_to_set.retain(|(name, _)| {
