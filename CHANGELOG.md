@@ -149,6 +149,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Preserve local access-log eligibility from request processing when a later
+  header policy removes a header used by the logger's conditions.
 - Unmatched requests can use ordinary proxy processing in pipelines with
   local HTTP routes, while matching or already-claimed requests remain local.
 - Local HTTP delivery cancels blocked response suppression and discards source

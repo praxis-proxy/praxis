@@ -165,8 +165,8 @@ impl FilterPipeline {
         if crate::access_record_already_emitted(ctx) {
             return;
         }
-        for filter in &self.filters {
-            if local_conditions_match(filter, ctx).unwrap_or(false)
+        for (index, filter) in self.filters.iter().enumerate() {
+            if ctx.executed_filter_indices.get(index) == Some(&true)
                 && let AnyFilter::Http(http) = &filter.filter
                 && http.local_http_compatibility() == LocalCompatibility::Policy
             {

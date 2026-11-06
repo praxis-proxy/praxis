@@ -1071,6 +1071,83 @@ async fn allowed_options_preflight_keeps_permissions_through_local_exchange() {
 }
 
 #[tokio::test]
+async fn access_logging_preserves_request_eligibility_after_header_removal() {
+    for (condition, expected) in [("when", 1), ("unless", 0)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("access.jsonl");
+        let state = State::default();
+        let registry = registry(vec![Fixture::owner(state.clone())]);
+        let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(&format!(
+            "
+- filter: access_log
+  sink:
+    type: file
+    path: '{}'
+- filter: headers
+  request_remove: [x-log]
+- filter: owner
+",
+            path.display()
+        ))
+        .unwrap();
+        entries.first_mut().unwrap().conditions =
+            serde_yaml::from_str(&format!("- {condition}:\n    headers_present: [x-log]")).unwrap();
+        let pipeline = Arc::new(FilterPipeline::build(&mut entries, &registry).unwrap());
+        let request = praxis_filter::Request {
+            method: http::Method::POST,
+            uri: "/files".parse().unwrap(),
+            headers: http::HeaderMap::from_iter([(
+                http::header::HeaderName::from_static("x-log"),
+                http::HeaderValue::from_static("yes"),
+            )]),
+        };
+        let mut head = Response {
+            status: http::StatusCode::OK,
+            headers: http::HeaderMap::new(),
+        };
+        let mut ctx = context::context(&request, &pipeline);
+        ctx.response_header = Some(&mut head);
+        let result = LocalExchange::claim(&pipeline, &mut ctx)
+            .unwrap()
+            .run(
+                &mut ctx,
+                &mut Transport {
+                    state: state.clone(),
+                    input: Input::bytes(1),
+                },
+            )
+            .await;
+        assert_eq!(result.status, 200);
+        assert!(ctx.request_headers_to_remove.iter().any(|name| name == "x-log"));
+        assert!(praxis_filter::access_record_already_emitted(&ctx));
+        pipeline.complete_local_http(&mut ctx, result.status);
+        let mut records = Vec::<serde_json::Value>::new();
+        for _attempt in 0..20 {
+            records = std::fs::read_to_string(&path)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            if expected != 0 && !records.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            records.len(),
+            expected,
+            "request eligibility must survive header removal: {condition}"
+        );
+        if let Some(record) = records.first() {
+            assert_eq!(record.get("status").unwrap(), "200");
+            assert_eq!(record.get("request_body_bytes").unwrap(), "1");
+            assert_eq!(record.get("response_body_bytes").unwrap(), "4");
+        }
+        assert_complete(&state, 1);
+    }
+}
+
+#[tokio::test]
 async fn access_logging_is_once_and_honors_scope_and_emit_conditions() {
     for (scope, emit, expected) in [("/files", "[2xx]", 1), ("/files", "[4xx]", 0), ("/other", "[2xx]", 0)] {
         let directory = tempfile::tempdir().unwrap();

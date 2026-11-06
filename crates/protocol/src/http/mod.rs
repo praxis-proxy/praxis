@@ -13,9 +13,6 @@
 //! [`metrics`]: crate::http::metrics
 //! [`pingora`]: crate::http::pingora
 
-/// Adapter-neutral local lifecycle and transport contract.
-#[cfg(feature = "local-http")]
-pub mod local;
 /// Shared request-body size admission and rejection diagnostics.
 #[cfg(any(feature = "pingora", feature = "hyper"))]
 mod body_limit;
@@ -23,6 +20,9 @@ mod body_limit;
 /// admin glue.
 #[cfg(feature = "hyper")]
 pub mod hyper;
+/// Adapter-neutral local lifecycle and transport contract.
+#[cfg(feature = "local-http")]
+pub mod local;
 /// Pingora-backed HTTP implementation, plus the backend-neutral health,
 /// metrics and admin modules it grew up around.
 pub mod pingora;
