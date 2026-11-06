@@ -35,7 +35,13 @@ use tracing::info;
 #[command(
     name = "praxis",
     version = env!("PRAXIS_VERSION"),
-    long_version = concat!(env!("PRAXIS_VERSION"), "\npolicy features: ", env!("PRAXIS_POLICY_FEATURES"))
+    long_version = concat!(
+        env!("PRAXIS_VERSION"),
+        "\nnetwork backend: ",
+        env!("PRAXIS_NETWORK_BACKEND"),
+        "\npolicy features: ",
+        env!("PRAXIS_POLICY_FEATURES")
+    )
 )]
 struct Cli {
     /// Path to the YAML configuration file.

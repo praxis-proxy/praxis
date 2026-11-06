@@ -89,8 +89,8 @@ pub const PRAXIS_BIN_ENV: &str = "PRAXIS_BIN";
 /// # Panics
 ///
 /// Panics if [`PRAXIS_BIN_ENV`] names a file that does not exist or whose
-/// `--version` reports a different Policy selection than this harness was
-/// built with, or if `cargo build` for the `praxis` binary fails or the binary
+/// `--version` reports a different network backend or Policy selection than
+/// this harness was built with, or if `cargo build` for the `praxis` binary fails or the binary
 /// is still missing or mismatched afterward.
 pub fn praxis_bin() -> PathBuf {
     if let Some(explicit) = std::env::var_os(PRAXIS_BIN_ENV) {
@@ -100,7 +100,7 @@ pub fn praxis_bin() -> PathBuf {
             "{PRAXIS_BIN_ENV} names {} but there is no such file",
             path.display()
         );
-        if let Err(mismatch) = binary_policy_profile_matches(&path) {
+        if let Err(mismatch) = binary_backend_matches(&path).and_then(|()| binary_policy_profile_matches(&path)) {
             panic!("{PRAXIS_BIN_ENV}: {mismatch}");
         }
         return path;
@@ -248,6 +248,32 @@ fn subprocess_features(backend: &str, policy: &[&str]) -> String {
         .chain(policy.iter().copied())
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// The network backend this harness tests, as `praxis --version` names it.
+const NETWORK_BACKEND: &str = if cfg!(feature = "hyper") { "hyper" } else { "pingora" };
+
+/// Whether the binary at `path` was compiled with this harness's network
+/// backend, going by `praxis --version`. `Err` carries the mismatch.
+fn binary_backend_matches(path: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|err| format!("run {} --version: {err}", path.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let reported = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("network backend: "))
+        .map(str::trim)
+        .ok_or_else(|| format!("{} --version reports no network backend:\n{stdout}", path.display()))?;
+    if reported == NETWORK_BACKEND {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is built on the {reported} backend, but this suite tests {NETWORK_BACKEND}",
+            path.display()
+        ))
+    }
 }
 
 /// Whether the binary at `path` was compiled with the Policy selection this
