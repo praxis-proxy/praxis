@@ -1406,7 +1406,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1775,10 +1775,6 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-dependencies = [
- "ahash",
- "allocator-api2",
-]
 
 [[package]]
 name = "hashbrown"
@@ -2760,7 +2756,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3274,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
@@ -3286,7 +3282,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-cmf"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "praxis-policy-apl-core",
@@ -3296,7 +3292,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -3311,7 +3307,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-apl-runtime"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3327,7 +3323,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-builtins"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3365,7 +3361,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3393,7 +3389,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-policy-orchestration"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "futures",
  "tokio",
@@ -3824,8 +3820,8 @@ version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
- "heck 0.4.1",
- "itertools 0.13.0",
+ "heck 0.5.0",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -3845,7 +3841,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -3858,7 +3854,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.14.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -4046,7 +4042,7 @@ dependencies = [
  "arrayvec 0.7.8",
  "async-channel",
  "flurry",
- "hashbrown 0.14.5",
+ "hashbrown 0.17.1",
  "log",
  "parking_lot",
  "rand 0.10.3",
@@ -4530,7 +4526,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5146,10 +5142,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5158,7 +5154,7 @@ version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c27177b12a6399ffc08b98f76f7c9a1f4fe9fc967c784c5a071fa8d93cf7e1"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6021,7 +6017,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
