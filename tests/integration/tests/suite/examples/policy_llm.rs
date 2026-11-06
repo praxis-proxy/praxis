@@ -3,6 +3,8 @@
 
 //! Functional tests for the inference authorization example.
 
+mod fallback;
+
 use std::{
     collections::HashMap,
     time::{SystemTime, UNIX_EPOCH},

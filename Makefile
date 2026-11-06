@@ -491,31 +491,41 @@ lint-fips: ## clippy (all targets) + rustfmt for the FIPS feature set
 # A Policy profile refuses to construct without a FIPS provider, so its tests
 # need one: the host's in FIPS mode, or FIPS_PROVIDER_CONF, an OpenSSL config
 # that activates the FIPS module for the test processes only.
+# Startup scenarios require an explicit mode and run in test-fips-policy-startup.
 FIPS_PROVIDER_CONF      ?=
 _FIPS_TEST_ENV           = $(if $(FIPS_PROVIDER_CONF),OPENSSL_CONF=$(abspath $(FIPS_PROVIDER_CONF)))
 test-fips: ## unit tests resolved as the FIPS build
 	$(_FIPS_TEST_ENV) cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features \
 		-p praxis-proxy -p praxis-proxy-protocol -p praxis-proxy-filter \
 		-p praxis-proxy-core -p praxis-proxy-tls \
-		--features $(FIPS_FEATURES_QUALIFIED) $(FIPS_CARGO_EXTRA) $(_NOCAPTURE)
+		--features $(FIPS_FEATURES_QUALIFIED) $(FIPS_CARGO_EXTRA) -- \
+		--skip policy::fips_startup_tests $(if $(V),--nocapture)
 
-# Policy FIPS construction in isolated child processes: a missing SHA-256
-# provider, FIPS JWT without `default_properties = fips=yes`, a rival
-# jsonwebtoken provider, and repeated FIPS JWT loads. The provider-dependent
-# cases need FIPS_POLICY_PROVIDER_CONF, an OpenSSL config that activates the
-# FIPS module with FIPS defaults; without it they print a counted
-# `fips-startup: skipped` line and pass, and PRAXIS_FIPS_HOST makes that a
-# failure. Policy stays out of FIPS_FEATURES; this target names its own.
+# Every startup scenario runs in both modes. The configurable-provider mode
+# proves rejection; kernel-fips proves the host cannot be weakened by those
+# configs. An explicit mode and a provider config are mandatory. Check both
+# libtest's result and child completion markers: zero matches, ignored tests,
+# and early returns must not silently turn this gate green.
 FIPS_POLICY_STARTUP_FEATURES := policy-jwt-fips,policy-api-key-fips
-FIPS_POLICY_PROVIDER_CONF    ?=
-test-fips-policy-startup: ## Policy FIPS construction checks, one process per case
-	$(if $(FIPS_POLICY_PROVIDER_CONF),PRAXIS_FIPS_PROVIDER_CONF=$(abspath $(FIPS_POLICY_PROVIDER_CONF))) \
-	cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features -p praxis-proxy-filter \
+FIPS_POLICY_PROVIDER_CONF    ?= $(FIPS_PROVIDER_CONF)
+FIPS_POLICY_STARTUP_MODE     ?=
+_FIPS_POLICY_TEST_ENV         = PRAXIS_POLICY_FIPS_TEST_MODE=$(FIPS_POLICY_STARTUP_MODE) \
+    $(if $(FIPS_POLICY_PROVIDER_CONF),PRAXIS_FIPS_PROVIDER_CONF=$(abspath $(FIPS_POLICY_PROVIDER_CONF)))
+test-fips-policy-startup: ## all four Policy FIPS startup cases (explicit mode and config required)
+	@case "$(FIPS_POLICY_STARTUP_MODE)" in configurable-provider|kernel-fips) ;; \
+		*) echo "set FIPS_POLICY_STARTUP_MODE=configurable-provider or kernel-fips"; exit 1 ;; esac
+	@test -r "$(FIPS_POLICY_PROVIDER_CONF)" || { echo "FIPS_POLICY_PROVIDER_CONF must name a readable provider config"; exit 1; }
+	@log=$$(mktemp); trap 'rm -f "$$log"' EXIT HUP INT TERM; \
+	if ! $(_FIPS_POLICY_TEST_ENV) cargo test --target-dir $(FIPS_TARGET_DIR) --no-default-features -p praxis-proxy-filter \
 		--features $(FIPS_POLICY_STARTUP_FEATURES) $(FIPS_CARGO_EXTRA) --lib \
-		-- policy::fips_startup_tests --nocapture
+		-- policy::fips_startup_tests --nocapture --color never >"$$log" 2>&1; then cat "$$log"; exit 1; fi; \
+	cat "$$log"; \
+	grep -q '^test result: ok. 4 passed; 0 failed; 0 ignored;' "$$log" && \
+		[ "$$(grep -o 'fips-startup: ran [[:alnum:]_]*' "$$log" | sort -u | wc -l)" -eq 4 ] || \
+		{ echo "all four startup scenarios must execute their assertions and pass"; exit 1; }
 
 .PHONY: test-integration-fips test-conformance-fips test-fips-host fips-toolchain fips-host-facts test-fips-policy-startup \
-	test-fips-provider fips-toolchain-present
+	test-fips-provider test-fips-policy-provider fips-toolchain-present
 
 # The integration suites against the FIPS build. The proxy they start in
 # process is built without default features, and the tests that spawn the
@@ -563,12 +573,13 @@ test-fips-host: fips-toolchain ## every suite as the FIPS build, on a FIPS host 
 		$(FIPS_TOOLCHAIN_IMAGE) \
 		make fips-host-facts test-fips test-fips-policy-startup test-integration-fips test-conformance-fips \
 			FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version FIPS_POLICY_PROFILE=$(FIPS_POLICY_PROFILE) \
-			FIPS_POLICY_PROVIDER_CONF=xtask/assets/fips/fips-provider.cnf $(if $(V),V=$(V))
+			FIPS_POLICY_PROVIDER_CONF=xtask/assets/fips/fips-provider.cnf \
+			FIPS_POLICY_STARTUP_MODE=kernel-fips $(if $(V),V=$(V))
 
 # The unit and integration suites as the FIPS build inside the toolchain
-# image, on any host: Red Hat's FIPS module, activated by
-# xtask/assets/fips/fips-provider.cnf, does the crypto, but the kernel is not
-# in FIPS mode, so the tests that need a FIPS host take their other branch.
+# image, on a host without kernel FIPS enforcement: Red Hat's FIPS module,
+# activated by xtask/assets/fips/fips-provider.cnf, does the crypto, but the
+# kernel is not in FIPS mode, so host-specific tests take their other branch.
 # Runs the selected FIPS_POLICY_PROFILE; any container engine works.
 # The suites run as the invoking user: praxis refuses to start as root.
 _FIPS_RUN_AS = $(if $(findstring podman,$(notdir $(CONTAINER_ENGINE))),--userns=keep-id,--user $(shell id -u):$(shell id -g) -e HOME=/tmp)
@@ -580,21 +591,25 @@ fips-toolchain-present: | require-container-engine
 	@$(CONTAINER_ENGINE) image inspect $(FIPS_TOOLCHAIN_IMAGE) >/dev/null 2>&1 || { \
 		echo "$(FIPS_TOOLCHAIN_IMAGE) is missing: run make fips-toolchain with podman, then" \
 			"podman save $(FIPS_TOOLCHAIN_IMAGE) | $(notdir $(CONTAINER_ENGINE)) load"; exit 1; }
-test-fips-provider: $(_FIPS_TOOLCHAIN_DEP) | require-container-engine ## FIPS suites on the FIPS module, any host (toolchain image)
-	@# A freshly created volume is root-owned; hand it to the user the suites run as.
-	$(CONTAINER_ENGINE) run --rm --security-opt label=disable --user 0:0 \
+test-fips-provider: ## FIPS unit, startup and integration suites on a non-FIPS kernel (toolchain image)
+test-fips-policy-provider: ## all four Policy startup cases on a non-FIPS kernel (toolchain image)
+test-fips-provider test-fips-policy-provider: $(_FIPS_TOOLCHAIN_DEP) | require-container-engine
+	@# Match the test container's user namespace when assigning cache ownership.
+	$(CONTAINER_ENGINE) run --rm --security-opt label=disable \
+		$(if $(findstring podman,$(notdir $(CONTAINER_ENGINE))),--userns=keep-id) --user 0:0 \
 		-v praxis-fips-host-cargo:/cargo -v praxis-fips-host-target:/target \
-		$(FIPS_TOOLCHAIN_IMAGE) chown $(shell id -u):$(shell id -g) /cargo /target
+		$(FIPS_TOOLCHAIN_IMAGE) chown -R $(shell id -u):$(shell id -g) /cargo /target
 	$(CONTAINER_ENGINE) run --rm --security-opt label=disable $(_FIPS_RUN_AS) \
 		-v $(CURDIR):/src -w /src \
 		-v praxis-fips-host-cargo:/cargo \
 		-v praxis-fips-host-target:/target \
 		-e CARGO_TERM_COLOR=always -e CARGO_INCREMENTAL=0 \
 		$(FIPS_TOOLCHAIN_IMAGE) \
-		make test-fips test-fips-policy-startup test-integration-fips \
+		make $(if $(filter test-fips-provider,$@),test-fips) test-fips-policy-startup $(if $(filter test-fips-provider,$@),test-integration-fips) \
 			FIPS_TARGET_DIR=/target FIPS_CARGO_EXTRA=--ignore-rust-version FIPS_POLICY_PROFILE=$(FIPS_POLICY_PROFILE) \
 			FIPS_PROVIDER_CONF=xtask/assets/fips/fips-provider.cnf \
-			FIPS_POLICY_PROVIDER_CONF=xtask/assets/fips/fips-provider.cnf $(if $(V),V=$(V))
+			FIPS_POLICY_PROVIDER_CONF=xtask/assets/fips/fips-provider.cnf \
+			FIPS_POLICY_STARTUP_MODE=configurable-provider $(if $(V),V=$(V))
 
 # What the process the suites run as actually sees, printed into the log next
 # to the results: the user, the kernel flag and boot parameter, the crypto

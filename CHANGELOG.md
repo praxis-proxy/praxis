@@ -23,6 +23,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   loss, rollouts, config reloads, TLS rotation, node drain, and upstream
   failure under continuous HTTP/1.1, HTTP/2, and HTTPS traffic.
 
+### Security
+
+- LLM policies now apply HTTP authorization, delegation and request assertions
+  to accepted unclassified requests without a model when
+  `llm.require_model: false`. Adding a body to a discovery request no longer
+  skips the HTTP policy. Move inference-only global rules into `llm:` routes
+  or `global.defaults.llm`; MCP-only and classified non-entity MCP admission
+  retain their existing behavior.
+- Policy credential stripping, delegation and asserted headers now survive
+  preceding ordered body-filter mutations, including stripped headers
+  introduced during earlier pre-read passes.
+
 ## [0.8.0] - 2026-11-06
 
 ### Added
