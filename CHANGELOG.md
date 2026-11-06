@@ -35,6 +35,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   this from a request that earlier phases could already have changed, and
   the scheme was usually missing. Place `policy` before `path_rewrite`,
   `url_rewrite` and header-rewriting filters.
+- A policy with request assertions but no `http.request` rules and no
+  entity routes now applies its header set and strip rules instead of
+  admitting the request on identity alone.
+- A delegation where no minted token forms a valid upstream header now
+  receives HTTP 500 (`policy.delegation_failed`) instead of forwarding the
+  inbound credential.
+- With `PRAXIS_REQUIRE_FIPS` set, building the policy filter refuses a build
+  that is not FIPS-capable (such as a host plugin factory registered after
+  startup), so that reload fails and the previous pipeline stays in place.
 
 - Apply the policy filter's configured failure mode when a classified tool
   response is malformed JSON or lacks both a result and a valid JSON-RPC error.
@@ -218,6 +227,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- The policy filter resolves `http.client_address` through
+  `trusted_proxies` on every request path.
+- On inference requests a `ratelimit.post_identity` limiter can bind
+  `llm.model_id`, `llm.provider` and `custom.llm.*`; such a limiter used to
+  deny every request.
 - Remove forbidden `Content-Length` and `Transfer-Encoding` headers from
   204 responses after response filters run, preserving valid downstream
   framing for the following response.
