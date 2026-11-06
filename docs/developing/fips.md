@@ -34,7 +34,7 @@ schema, security, integration and resilience suites (and
 `test-conformance-fips` the conformance suite) with `--no-default-features`,
 so the proxy each suite starts in process is built exactly as the FIPS binary
 is: the workspace declares the binary crate without its defaults, and every
-test crate opts into `policy-engine` through its own default feature. The
+test crate opts into `policy-builtins` through its own default feature. The
 tests that spawn the binary get the FIPS build through `PRAXIS_BIN`
 (`make build-fips` produces it first) rather than the standard binary the
 harness would otherwise build. `cargo tree -e normal,dev --no-default-features
@@ -85,6 +85,59 @@ does the reverse for the upstream client: it records what praxis offered and
 answers with a chosen `ServerHello` or alert, then watches for the client's
 alert. No cryptography is involved, which is the point: the probes work
 against any listener, including the shipped image, on any host.
+
+**Policy FIPS construction.** `make test-fips-policy-startup` builds the
+filter crate with `policy-jwt-fips,policy-api-key-fips` and runs each Policy
+crypto startup case in a child process with its own `OPENSSL_CONF`, since
+the provider, the default properties and `jsonwebtoken`'s provider are
+fixed once per process. The cases follow the host contract in
+[The policy filter on FIPS](../operating/fips.md#the-policy-filter-on-fips):
+a backend with no SHA-256 fails construction with `policy.crypto_failed`
+(this one needs only OpenSSL's `base` provider and runs anywhere); FIPS JWT
+with the module loaded beside the default provider but without
+`default_properties = fips=yes` fails its config load; a rival
+`jsonwebtoken` provider installed first is refused; and three FIPS JWT
+loads in one process all succeed, as reloads must. The last three need the
+module: `FIPS_POLICY_PROVIDER_CONF` names a config that activates it with
+FIPS defaults, and `test-fips-host` passes
+`xtask/assets/fips/fips-provider.cnf`. Without it each prints
+`fips-startup: skipped <case>` and passes, so the log counts what ran;
+`PRAXIS_FIPS_HOST` turns a missing config into a failure. Praxis adds no
+`default_properties` check of its own: Policy's JWT load enforces it, and
+the filter reports that as a construction error.
+
+**Policy FIPS profiles.** The default FIPS build leaves Policy out.
+`FIPS_POLICY_PROFILE` opts one in, and every FIPS target honors it: the
+build, `lint-fips`, `test-fips`, `test-integration-fips`, `fips-deps`,
+`fips-report`, `container-fips` (tagged `<version>-fips-policy-<profile>`),
+`fips-scan` and `fips-runtime-probe`.
+
+| Profile | Policy features |
+|---|---|
+| `none` (default) | none |
+| `engine` | `policy-engine,policy-crypto-fips` |
+| `api-key` | `policy-api-key-fips` |
+| `jwt` | `policy-jwt-fips` |
+| `both` | `policy-api-key-fips,policy-jwt-fips` |
+
+A Policy profile refuses to build its filter without a FIPS provider, so its
+tests need one. `make test-fips-provider FIPS_POLICY_PROFILE=jwt` runs
+`test-fips`, `test-fips-policy-startup` and `test-integration-fips` inside
+the toolchain image with Red Hat's module activated by
+`xtask/assets/fips/fips-provider.cnf`. It works on any host and with docker or
+podman, but the kernel is not in FIPS mode, so `test-fips-host` remains the
+FIPS-host proof. On the host itself those tests check the refusal instead. The
+`FIPS Policy profiles` workflow runs the four profiles nightly and on
+dispatch. The JWT example tests sign RS256 and ES256 tokens and DPoP proofs
+at run time with the test-only keys in `tests/integration/fixtures/policy-fips/`;
+the runtime probe signs its own with keys generated for the run.
+
+`fips-deps` checks the profile's production graph (normal and build edges)
+and, separately, the unit-test graph `make test-fips` compiles. A test edge
+may not add a feature to a crypto-selecting crate (`jsonwebtoken`, the Policy
+crates, rustls, openssl), may never bring in `aws-lc-rs`, and may bring in
+another denied crate only with a reason in `TEST_ONLY`
+(`xtask/src/fips/test_graph.rs`).
 
 **The fixtures.** `tests/integration/fixtures/fips/` holds a short RSA key
 and a SHA-1-signed certificate, with the commands that made them in its

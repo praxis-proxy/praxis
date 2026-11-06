@@ -396,6 +396,145 @@ fn header_is_safe(s: &str) -> bool {
 }
 
 // -----------------------------------------------------------------------------
+// rate_limit_rejection (limiter deny — real HTTP status)
+// -----------------------------------------------------------------------------
+
+/// Statuses a limiter denial may carry; anything else falls back.
+const RATE_LIMIT_STATUSES: [u16; 4] = [400, 401, 429, 503];
+
+/// `details` keys a limiter denial may show the client.
+const RATE_LIMIT_DETAILS: [&str; 4] = ["limit", "remaining", "retry_after_seconds", "window_seconds"];
+
+/// Code, status and client text for a limiter code this filter does not know.
+const UNKNOWN_LIMIT: (&str, u16, &str) = ("ratelimit.denied", 503, "request denied by rate limiting");
+
+/// What a limiter denial puts on the wire, built only from fixed text and
+/// validated detail fields: limiters run before authentication, so neither
+/// the plugin's `reason` nor its other details reach the client.
+struct LimitDenial {
+    /// Normalized violation code.
+    code: &'static str,
+    /// Response status.
+    status: u16,
+    /// Fixed client text for the code.
+    message: &'static str,
+    /// Allowlisted, validated detail fields.
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
+impl LimitDenial {
+    /// Map `violation` to its wire form.
+    fn from_violation(violation: Option<&PluginViolation>) -> Self {
+        let (code, declared, message) = violation
+            .and_then(|v| known_limit_code(&v.code))
+            .unwrap_or(UNKNOWN_LIMIT);
+        let details = violation.map(|v| &v.details);
+        let status = violation
+            .and_then(|v| v.proto_error_code)
+            .and_then(|n| u16::try_from(n).ok())
+            .filter(|s| RATE_LIMIT_STATUSES.contains(s))
+            .or_else(|| {
+                details
+                    .and_then(|d| d.get("http.status"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|n| u16::try_from(n).ok())
+                    .filter(|s| RATE_LIMIT_STATUSES.contains(s))
+            })
+            .unwrap_or(declared);
+        let fields = RATE_LIMIT_DETAILS
+            .iter()
+            .filter_map(|key| {
+                let value = details?.get(*key)?.as_u64()?;
+                Some(((*key).to_owned(), serde_json::Value::from(value)))
+            })
+            .collect();
+        Self {
+            code,
+            status,
+            message,
+            fields,
+        }
+    }
+
+    /// Seconds for `Retry-After`, only when positive.
+    fn retry_after(&self) -> Option<u64> {
+        self.fields
+            .get("retry_after_seconds")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|secs| *secs > 0)
+    }
+
+    /// A rejection with this denial's status and headers and `body`.
+    fn rejection(&self, body: &serde_json::Value) -> Rejection {
+        let bytes = serde_json::to_vec(body).unwrap_or_else(|_| b"{}".to_vec());
+        let mut rejection = Rejection::status(self.status)
+            .with_header("Content-Type", "application/json")
+            .with_header(VIOLATION_HEADER, self.code)
+            .with_body(Bytes::from(bytes));
+        if let Some(secs) = self.retry_after() {
+            rejection = rejection.with_header("Retry-After", secs.to_string());
+        }
+        if self.status == 401 {
+            rejection = rejection.with_header("WWW-Authenticate", "Bearer");
+        }
+        rejection
+    }
+}
+
+/// `(code, declared status, client text)` for a limiter code Policy documents.
+fn known_limit_code(code: &str) -> Option<(&'static str, u16, &'static str)> {
+    Some(match code {
+        "ratelimit.exceeded" => ("ratelimit.exceeded", 429, "rate limit exceeded"),
+        "ratelimit.check_failed" => ("ratelimit.check_failed", 503, "rate limit check failed"),
+        "ratelimit.unavailable" => ("ratelimit.unavailable", 503, "rate limiting is unavailable"),
+        "ratelimit.no_identity" => ("ratelimit.no_identity", 401, "authentication required"),
+        "ratelimit.no_http_method" => ("ratelimit.no_http_method", 400, "request method required"),
+        "ratelimit.missing_attribute" => ("ratelimit.missing_attribute", 400, "request attribute missing"),
+        "ratelimit.unsupported_attribute" => ("ratelimit.unsupported_attribute", 400, "request attribute unsupported"),
+        _ => return None,
+    })
+}
+
+/// Build the HTTP rejection for a limiter denial.
+///
+/// The status comes from `proto_error_code`, then `details["http.status"]`,
+/// restricted to 400, 401, 429 and 503; otherwise the code's declared status,
+/// or 503 for an unknown code. The JSON body carries the normalized code,
+/// fixed text and only `limit`, `remaining`, `retry_after_seconds` and
+/// `window_seconds` as non-negative integers. A positive
+/// `retry_after_seconds` also sets `Retry-After`.
+pub(super) fn rate_limit_rejection(violation: Option<&PluginViolation>) -> Rejection {
+    let denial = LimitDenial::from_violation(violation);
+    let mut body = denial.fields.clone();
+    body.insert("code".to_owned(), denial.code.into());
+    body.insert("message".to_owned(), denial.message.into());
+    denial.rejection(&serde_json::Value::Object(body))
+}
+
+/// [`rate_limit_rejection`] as a JSON-RPC error envelope that keeps the
+/// request `id`, still under the denial's real HTTP status.
+///
+/// [`rate_limit_rejection`]: rate_limit_rejection
+pub(super) fn rate_limit_json_rpc_rejection(
+    violation: Option<&PluginViolation>,
+    request_id: &serde_json::Value,
+) -> Rejection {
+    let denial = LimitDenial::from_violation(violation);
+    let mut data = denial.fields.clone();
+    data.insert("violation".to_owned(), denial.code.into());
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {
+            "code": GATEWAY_DENIED_CODE,
+            "message": denial.message,
+            "data": serde_json::Value::Object(data),
+        }
+    });
+    denial.rejection(&body)
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -591,5 +730,127 @@ mod tests {
         assert_eq!(truncate_on_char_boundary(text, 0), "");
         assert_eq!(truncate_on_char_boundary(text, 4), "日");
         assert_eq!(truncate_on_char_boundary(text, text.len()), text);
+    }
+
+    /// A limiter violation carrying `status` and `details`.
+    fn limit_violation(code: &str, status: Option<i64>, details: serde_json::Value) -> PluginViolation {
+        let details: HashMap<String, serde_json::Value> = serde_json::from_value(details).unwrap();
+        let v = PluginViolation::new(code, "SENTINEL-REASON").with_details(details);
+        match status {
+            Some(status) => v.with_proto_error_code(status),
+            None => v,
+        }
+    }
+
+    /// The header `name`'s value, if present.
+    fn header<'r>(rejection: &'r Rejection, name: &str) -> Option<&'r str> {
+        rejection
+            .headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// The rejection's body as JSON.
+    fn body_json(rejection: &Rejection) -> serde_json::Value {
+        serde_json::from_slice(rejection.body.as_ref().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn exceeded_limit_maps_to_429_with_retry_after_and_only_allowlisted_fields() {
+        let v = limit_violation(
+            "ratelimit.exceeded",
+            Some(429),
+            serde_json::json!({
+                "http.status": 429, "limit": 2, "remaining": 0, "retry_after_seconds": 7,
+                "window_seconds": 60, "namespace": "SENTINEL-NS", "limit_name": "SENTINEL-NAME"
+            }),
+        );
+        let rejection = rate_limit_rejection(Some(&v));
+        assert_eq!(rejection.status, 429);
+        assert_eq!(header(&rejection, "Retry-After"), Some("7"));
+        assert_eq!(header(&rejection, VIOLATION_HEADER), Some("ratelimit.exceeded"));
+        let body = body_json(&rejection);
+        let mut keys: Vec<_> = body.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                "code",
+                "limit",
+                "message",
+                "remaining",
+                "retry_after_seconds",
+                "window_seconds"
+            ]
+        );
+        let wire = format!("{:?} {}", rejection.headers, body);
+        assert!(!wire.contains("SENTINEL"), "plugin text leaked: {wire}");
+    }
+
+    #[test]
+    fn each_known_code_falls_back_to_its_declared_status() {
+        for (code, status) in [
+            ("ratelimit.check_failed", 503),
+            ("ratelimit.unavailable", 503),
+            ("ratelimit.no_identity", 401),
+            ("ratelimit.no_http_method", 400),
+            ("ratelimit.missing_attribute", 400),
+            ("ratelimit.unsupported_attribute", 400),
+        ] {
+            let v = limit_violation(code, None, serde_json::json!({}));
+            let rejection = rate_limit_rejection(Some(&v));
+            assert_eq!(rejection.status, status, "{code}");
+            assert!(header(&rejection, "Retry-After").is_none(), "{code}");
+            assert_eq!(body_json(&rejection)["code"], code);
+        }
+    }
+
+    #[test]
+    fn status_falls_back_to_details_then_to_the_declared_status() {
+        let from_details = limit_violation("ratelimit.exceeded", None, serde_json::json!({"http.status": 503}));
+        assert_eq!(rate_limit_rejection(Some(&from_details)).status, 503);
+        let bad = limit_violation(
+            "ratelimit.exceeded",
+            Some(200),
+            serde_json::json!({"http.status": "429", "retry_after_seconds": -3, "limit": "SENTINEL"}),
+        );
+        let rejection = rate_limit_rejection(Some(&bad));
+        assert_eq!(rejection.status, 429, "an unlisted status falls back to the code's");
+        assert!(header(&rejection, "Retry-After").is_none());
+        let body = body_json(&rejection);
+        assert!(body.get("limit").is_none() && body.get("retry_after_seconds").is_none());
+        let zero = limit_violation(
+            "ratelimit.exceeded",
+            Some(429),
+            serde_json::json!({"retry_after_seconds": 0}),
+        );
+        assert!(header(&rate_limit_rejection(Some(&zero)), "Retry-After").is_none());
+    }
+
+    #[test]
+    fn unknown_limiter_code_gets_a_generic_503() {
+        let v = limit_violation("SENTINEL-CODE", Some(418), serde_json::json!({}));
+        let rejection = rate_limit_rejection(Some(&v));
+        assert_eq!(rejection.status, 503);
+        assert_eq!(header(&rejection, VIOLATION_HEADER), Some("ratelimit.denied"));
+        assert!(!format!("{:?}", rejection.body).contains("SENTINEL"));
+        assert_eq!(rate_limit_rejection(None).status, 503);
+    }
+
+    #[test]
+    fn json_rpc_limit_denial_keeps_the_id_and_the_real_status() {
+        let v = limit_violation(
+            "ratelimit.exceeded",
+            Some(429),
+            serde_json::json!({"retry_after_seconds": 3, "secret": "SENTINEL"}),
+        );
+        let rejection = rate_limit_json_rpc_rejection(Some(&v), &serde_json::json!("req-9"));
+        assert_eq!(rejection.status, 429);
+        assert_eq!(header(&rejection, "Retry-After"), Some("3"));
+        let body = body_json(&rejection);
+        assert_eq!(body["id"], "req-9");
+        assert_eq!(body["error"]["data"]["violation"], "ratelimit.exceeded");
+        assert!(!body.to_string().contains("SENTINEL"));
     }
 }

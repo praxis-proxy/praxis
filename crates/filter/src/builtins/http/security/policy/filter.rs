@@ -25,13 +25,15 @@ use ppe::praxis_policy_core::{
     },
     engine::PolicyEngine,
     error::{PluginError, PluginViolation},
-    extensions::{LLMExtension, LlmRequestDocument, MetaExtension, http::SecretHeaderProvenance},
-    hooks::Extensions,
+    executor::PipelineResult,
+    extensions::{Credential, LLMExtension, LlmRequestDocument, MetaExtension, http::SecretHeaderProvenance},
+    hooks::{Extensions, HookTypeDef},
     http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
+    ratelimit_hook::{HOOK_RATELIMIT_POST_IDENTITY, HOOK_RATELIMIT_PRE_IDENTITY},
     secrets::backends::EnvSecretProviderFactory,
 };
-use praxis_core::subrequest::SubRequestConnector;
+use praxis_core::{connectivity::CidrRange, subrequest::SubRequestConnector};
 
 use super::{
     assertions::{
@@ -40,16 +42,22 @@ use super::{
     },
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
+    construction::{
+        engine_error, parse_trusted_proxies, refuse_fips_blockers, refuse_query_credentials_with_delegation,
+        require_dpop_external_base_url,
+    },
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
         VIOLATION_HEADER, auth_rejection, deny_with_body, json_rpc_error_envelope_bytes, json_rpc_error_rejection,
-        llm_deny_rejection, llm_error_envelope_bytes_within,
+        llm_deny_rejection, llm_error_envelope_bytes_within, rate_limit_json_rpc_rejection, rate_limit_rejection,
     },
     json_rpc::{
         ParsedEnvelope, build_content_for_method, build_response_content_for_method, reserialize_json_rpc_body,
         reserialize_json_rpc_response_body,
     },
     llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
+    request_facts::{RequestFacts, RequestView},
+    request_state::{state, state_mut},
     response_rules::ensure_supported_entity_results,
     transport::PolicyHttpTransport,
 };
@@ -71,38 +79,18 @@ static EMPTY_BODY: Bytes = Bytes::new();
 // PolicyFilter
 // -----------------------------------------------------------------------------
 
-/// Per-filter admission state shared across lifecycle phases. Both fields live
-/// here so multiple policy instances cannot overwrite one another's temporary
-/// identity projection or completion marker.
-#[derive(Default)]
-struct AdmissionState {
-    /// Whether this instance has already admitted the request.
-    complete: bool,
-    /// Sanitized result retained from the unscoped early gate.
-    gated_identity: GatedIdentity,
-}
-
-/// Three-state result for an early identity gate.
-#[derive(Default)]
-enum GatedIdentity {
-    /// The gate has not run for this policy instance.
-    #[default]
-    NotRun,
-    /// Validation succeeded without producing a user subject.
-    NoSubject,
-    /// Validation succeeded and produced a raw-credential-free subject.
-    Subject(AuthenticatedIdentity),
-}
-
 /// Embeds the Praxis Policy Engine in-process to enforce multi-source
 /// identity, APL route policy, RFC 8693 token exchange, field redaction,
 /// session taint, audit emission, and (under `body_access: read_write`)
 /// request / response body rewriting. Content scanning is a host plugin
 /// the engine dispatches, not a bundled one.
 ///
-/// Registered under the YAML filter name `policy`. The `policy-engine`
-/// cargo feature is on by default; `--no-default-features` leaves the
-/// filter out.
+/// Registered under the YAML filter name `policy`. The default build
+/// selects `policy-builtins`, which registers every Policy builtin plugin
+/// kind, including the experimental `ratelimit/limitador`. A narrower build
+/// names `policy-engine` or individual `policy-*` builtins plus one crypto
+/// backend; a policy naming a plugin kind the build did not compile in
+/// fails to load. `--no-default-features` leaves the filter out.
 ///
 /// A single request can carry multiple identity sources — user JWT in
 /// `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in
@@ -136,6 +124,12 @@ enum GatedIdentity {
 /// For rule syntax, engine types, and absent-value behavior, see
 /// [Structured request input] in the policy engine docs.
 ///
+/// Chat Completions and Anthropic Messages requests also expose normalized
+/// `llm.input.*` facts for instructions, offered tools, tool choice, completion
+/// limits, sampling and stop sequences. Unsupported shapes, unknown fields
+/// and malformed values leave these facts absent; rules that require them
+/// should deny their absence. See the [normalized LLM input example].
+///
 /// PPE 0.4.1 changes OPA and CEL `args` on `tool:` routes to native JSON.
 /// Before upgrading, review rules that read `args`: for example, a numeric
 /// ID in `args.ids` must be compared with `13`, not `"13"`. A schema-backed
@@ -158,6 +152,51 @@ enum GatedIdentity {
 /// matches even if another errors, so some requests that were denied may now
 /// be allowed. See the [PPE 0.5.0 changelog].
 ///
+/// Every hook sees the downstream request as this filter first received
+/// it: method, path, raw query, the validated host lowercased without a port,
+/// the effective client address, and headers. Trusted reserved-prefix and
+/// `context_headers` updates remain visible to later hooks. The scheme is
+/// `https` only when the downstream connection is TLS; `X-Forwarded-Proto`
+/// is never trusted. Place `policy`
+/// before `path_rewrite`, `url_rewrite` and header-rewriting filters so the
+/// request it authorizes is the one the client sent. A `DPoP` issuer must set
+/// `dpop.external_base_url`, so a proof's `htu` is never checked against the
+/// client-sent `Host`.
+///
+/// `http.client_address` is the TCP peer, without a port. When the peer is in
+/// `trusted_proxies`, it is the rightmost `X-Forwarded-For` hop outside those
+/// ranges instead, or the leftmost hop when every hop is trusted; hops left of
+/// the client are ignored; a malformed hop reached before it leaves no client
+/// address. RFC 7239 `Forwarded` is not supported. Only
+/// policy input changes: `ip_acl` and `forwarded_headers` still see the peer.
+///
+/// A policy with `rate_limits:` runs `ratelimit.pre_identity` once per
+/// request before the first identity resolution, on the HTTP coordinates
+/// (`http`, `*`) and the request as first received, and
+/// `ratelimit.post_identity` once after the last, on the final route and the
+/// resolved identity, before authorization and forwarding. Two `policy`
+/// filters in one chain each run both stages. A denial ends the request with
+/// its declared status (429, 400, 401 or 503), fixed text per code, and only
+/// the `limit`, `remaining`, `retry_after_seconds` and `window_seconds`
+/// details; a positive `retry_after_seconds` sets `Retry-After`. The
+/// plugin's reason is never sent. On a classified JSON-RPC call the body is a
+/// JSON-RPC error carrying the request `id`, under the same status. Counters
+/// belong to each limiter instance: they are not shared between replicas and
+/// reset when the configuration reloads. Each IPv6 /64 is one address key,
+/// so pair a per-address limit with a coarser one.
+///
+/// Policy can read a credential from a query parameter
+/// (`credential: { kind: query_param, name: ... }`, with the `read_query`
+/// capability). The filter does not rewrite the URL, so the parameter
+/// reaches the upstream, and access logs, CDN logs and browser history
+/// outside Policy can record it. A policy that combines a query credential
+/// with `delegate(...)` fails to load. At request time, a delegated token is
+/// never forwarded while an inbound credential sits where the filter cannot
+/// strip it; that request receives HTTP 500
+/// (`policy.unstrippable_credential`). A delegation none of whose tokens
+/// forms a valid upstream header receives HTTP 500
+/// (`policy.delegation_failed`) rather than forwarding the inbound one.
+///
 /// The filter registers only the `env` secret provider. A `secrets:` block
 /// naming any other provider kind, including `file`, fails to load. Secret
 /// values are read when the filter is built, so a changed value takes effect
@@ -167,6 +206,18 @@ enum GatedIdentity {
 /// policy documents and custom plugins as trusted: a rule or an explicit
 /// outbound call can disclose fields it reads. Review policy authorship and
 /// outbound endpoints before enabling structured request input.
+///
+/// On a policy with `llm:` routes, a bodyless request (a `GET`, `HEAD`,
+/// `OPTIONS`, `TRACE` or `CONNECT` with no body), such as `GET /v1/models`,
+/// runs the policy's HTTP authorization, delegation and request assertions
+/// before it is admitted: a matching `http:` route, the `global` rules
+/// otherwise. It carries no inference request, so a global rule that reads
+/// `llm.request` denies it; keep such rules in `llm:` routes or
+/// `global.defaults.llm`. A policy with neither HTTP rules nor request
+/// assertions admits it on identity. Two fallbacks still admit on identity
+/// alone, with a startup warning when HTTP rules or request assertions exist:
+/// a body with no usable `model` under `llm.require_model: false`, and an
+/// unclassified request under `require_protocol_metadata: false`.
 ///
 /// On a policy with `llm:` routes, any request body without `mcp.method`
 /// metadata that repeats a key within one JSON object, at any depth,
@@ -246,6 +297,7 @@ enum GatedIdentity {
 /// [PPE 0.4.1 changelog]: https://github.com/praxis-proxy/policy/blob/v0.4.1/CHANGELOG.md#041---2026-10-05
 /// [PPE 0.5.0 changelog]: https://github.com/praxis-proxy/policy/blob/v0.5.0/CHANGELOG.md#050---2026-10-13
 /// [args migration guidance]: https://github.com/praxis-proxy/policy/blob/v0.4.1/docs/content/apl/pdp.md#migrating-args-policies
+/// [normalized LLM input example]: https://github.com/praxis-proxy/praxis/blob/main/examples/configs/security/policy-llm-input.yaml
 ///
 /// # YAML configuration
 ///
@@ -279,11 +331,6 @@ pub struct PolicyFilter {
     /// dispatches hook chains. Wrapped in `Arc` so offloaded hook
     /// dispatches can hold their own handle without borrowing `&self`.
     mgr: Arc<PolicyEngine>,
-    /// Derived from the loaded policy at construction: the `global` policy
-    /// wired the entity-less HTTP path (`http.request`). When true and
-    /// `entity_routes` is false, the filter is a pure L7 policy evaluated at
-    /// `on_request` over `http.*` + identity — no classifier, no body.
-    http_global: bool,
     /// Derived from the loaded policy: it declares per-entity routes
     /// (tool/prompt/resource/llm). When true, authorization runs at the
     /// body phase, once the request is attributed to an entity.
@@ -296,6 +343,14 @@ pub struct PolicyFilter {
     llm_routes: bool,
     /// Whether the policy declares inference response hooks.
     llm_post: bool,
+    /// Whether a limiter runs at `ratelimit.pre_identity`.
+    limit_pre: bool,
+    /// Whether a limiter runs at `ratelimit.post_identity`.
+    limit_post: bool,
+    /// Whether `http.request` has work: a handler or request assertions.
+    /// Without entity routes, the filter is a pure L7 policy authorized at
+    /// `on_request`; bodyless inference requests are authorized there too.
+    http_request_policy: bool,
     /// Header names governed by request assertions.
     request_assertions: GovernedNames,
     /// Header names governed by response assertions.
@@ -311,9 +366,11 @@ pub struct PolicyFilter {
     /// Bound on one response-phase hook dispatch, derived from the engine's
     /// per-plugin timeout.
     response_dispatch_timeout: std::time::Duration,
+    /// Proxies trusted to report the client in `X-Forwarded-For`.
+    trusted_proxies: Vec<CidrRange>,
     /// The transport installed on the engine, kept so tests can see which
     /// connector policy calls go through.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     transport: Arc<PolicyHttpTransport>,
 }
 
@@ -333,6 +390,8 @@ impl PolicyFilter {
     /// Returns [`FilterError`] if the referenced YAML cannot be read,
     /// the policy document fails to parse, or plugin initialization
     /// fails (e.g., a JWKS endpoint is unreachable).
+    ///
+    /// [`FilterError`]: FilterError
     #[expect(
         clippy::too_many_lines,
         reason = "linear construction + init steps; splitting obscures the startup flow"
@@ -343,6 +402,7 @@ impl PolicyFilter {
     ) -> Result<Self, FilterError> {
         cfg.validate_context_headers()
             .map_err(|e| -> FilterError { format!("policy: {e}").into() })?;
+        refuse_fips_blockers(praxis_tls::provider::required())?;
 
         // Validate addressable, nonzero limits. The pipeline additionally clamps
         // accumulation to body_limits.max_buffer_bytes before invoking this filter.
@@ -372,13 +432,14 @@ impl PolicyFilter {
         // Reject a malformed pinned-endpoint entry at startup rather than let it
         // silently never match at request time.
         praxis_core::connectivity::validate_host_entries("policy", &cfg.trusted_private_endpoints)?;
+        let trusted_proxies = parse_trusted_proxies(&cfg.trusted_proxies)?;
 
         let yaml = std::fs::read_to_string(&cfg.config_path).map_err(|e| -> FilterError {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
         })?;
 
         let mgr = Arc::new(PolicyEngine::default());
-        ppe::install_builtins(&mgr);
+        Self::install_plugins(&mgr);
 
         // The lazy connection pool must not bind to the temporary init runtime.
         let transport = Self::http_transport(
@@ -430,10 +491,17 @@ impl PolicyFilter {
             mgr.register_factory(kind, factory);
         }
 
+        // Parsed separately because the engine does not retain the document.
+        // The DPoP check runs before the engine builds any plugin, since the
+        // JWT factory reads keys and installs its crypto provider. A parse
+        // error is reported after the engine's own, more specific one.
+        let parsed = ppe::praxis_policy_core::config::parse_config(&yaml);
+        if let Ok(document) = &parsed {
+            require_dpop_external_base_url(document)?;
+            refuse_query_credentials_with_delegation(document)?;
+        }
         mgr.load_config_yaml(&yaml)
-            .map_err(|e: Box<PluginError>| -> FilterError {
-                format!("policy: load_config_yaml failed for {}: {e}", cfg.config_path).into()
-            })?;
+            .map_err(|e: Box<PluginError>| engine_error("load_config_yaml", &cfg.config_path, &e))?;
 
         // `initialize()` is async. The praxis filter-factory signature
         // is sync, so we drive init to completion here. We spawn a
@@ -452,7 +520,8 @@ impl PolicyFilter {
         // could legitimately stall.
         let mgr_for_init = Arc::clone(&mgr);
         let init_timeout = std::time::Duration::from_secs(cfg.init_timeout_secs);
-        let init: Result<(), String> = std::thread::spawn(move || -> Result<(), String> {
+        let config_path = cfg.config_path.clone();
+        let init: Result<(), FilterError> = std::thread::spawn(move || -> Result<(), FilterError> {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -460,12 +529,13 @@ impl PolicyFilter {
             rt.block_on(async move {
                 match tokio::time::timeout(init_timeout, mgr_for_init.initialize()).await {
                     Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(format!("policy: PolicyEngine::initialize failed: {e}")),
+                    Ok(Err(e)) => Err(engine_error("PolicyEngine::initialize", &config_path, &e)),
                     Err(_) => Err(format!(
                         "policy: PolicyEngine::initialize timed out after {}s \
                          (init_timeout_secs); likely a JWKS / OAuth endpoint is unreachable",
                         init_timeout.as_secs(),
-                    )),
+                    )
+                    .into()),
                 }
             })
         })
@@ -478,7 +548,7 @@ impl PolicyFilter {
                 .unwrap_or_else(|| "<no panic message>".to_owned());
             format!("policy: PolicyEngine::initialize panicked in init thread: {msg}")
         })?;
-        init.map_err(|s: String| -> FilterError { s.into() })?;
+        init?;
 
         // Derive the evaluation shape from the loaded policy so the filter
         // needs no operator-set mode. `has_hooks_for` reports whether a hook
@@ -508,35 +578,14 @@ impl PolicyFilter {
         let llm_routes = mgr.has_hooks_for(HOOK_CMF_LLM_INPUT) || llm_post;
         let entity_routes = mcp_routes || llm_routes;
 
-        // Fail-silent guard. A policy with both a `global` HTTP policy and
-        // entity routes is the normal "global baseline layer + entity routes"
-        // pattern: for entity-aware policies the global policy is enforced as
-        // the per-entity layer (classified traffic) and non-classified traffic
-        // is fail-closed by `require_protocol_metadata`. If the operator
-        // disabled that gate, non-classified requests are admitted
-        // identity-only and are NOT evaluated against the global HTTP policy —
-        // a silent skip. Make that specific misconfiguration loud at startup.
-        if http_global && mcp_routes && !cfg.require_protocol_metadata {
-            tracing::warn!(
-                target: "policy.filter",
-                "policy declares a `global` HTTP policy AND entity routes with \
-                 `require_protocol_metadata: false`: non-classified (non-MCP) requests will be \
-                 admitted identity-only and will NOT be evaluated against the global HTTP policy. \
-                 Keep `require_protocol_metadata: true` (default) to fail closed, or move the \
-                 global HTTP policy to a separate listener/filter that fronts non-MCP traffic.",
-            );
-        }
-
-        // Re-parse because the engine does not retain the loaded document.
-        let policy_config =
-            ppe::praxis_policy_core::config::parse_config(&yaml).map_err(|e: Box<PluginError>| -> FilterError {
-                format!(
-                    "policy: the engine accepted {} but praxis could not re-read it for the \
+        let policy_config = parsed.map_err(|e: Box<PluginError>| -> FilterError {
+            format!(
+                "policy: the engine accepted {} but praxis could not re-read it for the \
                      assertions contract: {e}",
-                    cfg.config_path
-                )
-                .into()
-            })?;
+                cfg.config_path
+            )
+            .into()
+        })?;
         let dispatch_timeout = response_dispatch_timeout(policy_config.engine_settings.plugin_timeout);
         ensure_supported_entity_results(&yaml, &policy_config)?;
         if entity_routes {
@@ -545,11 +594,18 @@ impl PolicyFilter {
         }
         let request_assertions = GovernedNames::from_config(&policy_config, Direction::Request);
         let response_assertions = GovernedNames::from_config(&policy_config, Direction::Response);
+        let http_request_policy = http_global || !request_assertions.is_empty();
+        if entity_routes && http_request_policy {
+            for message in identity_only_fallback_warnings(&cfg, mcp_routes, llm_routes) {
+                tracing::warn!(target: "policy.filter", "{message}");
+            }
+        }
 
         if llm_routes {
-            Self::warn_on_inference_gaps(&policy_config, http_global, &cfg, llm_post);
+            Self::warn_on_inference_gaps(&policy_config, &cfg, llm_post);
         }
         Self::warn_on_inert_inference_defaults(&policy_config, llm_routes);
+        warn_on_rate_limits(&policy_config, &cfg.config_path);
         Self::warn_on_entity_response_gaps(&cfg, mcp_post_tool, mcp_post_prompt_resource);
 
         // Reject an `http:` route that no classified request can reach.
@@ -574,16 +630,20 @@ impl PolicyFilter {
             (mgr.has_hooks_for(HOOK_HTTP_RESPONSE) || !response_assertions.is_empty()).then_some(HOOK_HTTP_RESPONSE);
 
         let llm_route_table = llm_routes.then(|| Arc::new(policy_config));
+        let limit_pre = mgr.has_hooks_for(HOOK_RATELIMIT_PRE_IDENTITY);
+        let limit_post = mgr.has_hooks_for(HOOK_RATELIMIT_POST_IDENTITY);
 
         Ok(Self {
             cfg,
             mgr,
-            http_global,
             entity_routes,
             mcp_routes,
             mcp_post_tool,
             llm_routes,
             llm_post,
+            limit_pre,
+            limit_post,
+            http_request_policy,
             request_assertions,
             response_assertions,
             response_hook,
@@ -591,32 +651,39 @@ impl PolicyFilter {
             llm_request_mutator_warned: AtomicBool::new(false),
             llm_response_mutator_warned: AtomicBool::new(false),
             response_dispatch_timeout: dispatch_timeout,
-            #[cfg(test)]
+            trusted_proxies,
+            #[cfg(all(test, feature = "policy-builtins"))]
             transport,
         })
     }
 
     /// Test accessor for the transport installed on the engine.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn transport(&self) -> &PolicyHttpTransport {
         &self.transport
     }
 
     /// Test accessor for the hook the response half dispatches, if any.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn response_hook(&self) -> Option<&'static str> {
         self.response_hook
     }
 
     /// Test accessor for the shape derived from the loaded policy:
-    /// `(http_global, entity_routes)`.
-    #[cfg(test)]
+    /// `(http_request_policy, entity_routes)`.
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn derived_shape(&self) -> (bool, bool) {
-        (self.http_global, self.entity_routes)
+        (self.http_request_policy, self.entity_routes)
+    }
+
+    /// Return `(limit_pre, limit_post)` for tests.
+    #[cfg(all(test, feature = "policy-builtins"))]
+    pub(super) fn limit_stages(&self) -> (bool, bool) {
+        (self.limit_pre, self.limit_post)
     }
 
     /// Return `(llm_routes, llm_post)` for tests.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "policy-builtins"))]
     pub(super) fn derived_llm_shape(&self) -> (bool, bool) {
         (self.llm_routes, self.llm_post)
     }
@@ -624,7 +691,6 @@ impl PolicyFilter {
     /// Warn about inference configurations that can skip policy evaluation.
     fn warn_on_inference_gaps(
         policy_config: &ppe::praxis_policy_core::config::PolicyConfig,
-        http_global: bool,
         cfg: &PolicyFilterConfig,
         llm_post: bool,
     ) {
@@ -642,15 +708,6 @@ impl PolicyFilter {
                  add a catch-all route that denies.",
             );
             Self::warn_on_list_form_catch_all(policy_config);
-        }
-        if http_global && !cfg.llm.require_model {
-            tracing::warn!(
-                target: "policy.filter",
-                "policy declares `llm:` routes AND a `global` HTTP policy with \
-                 `llm.require_model: false`: a request whose body carries no usable `model` is \
-                 admitted identity-only and is NOT evaluated against the global HTTP policy. \
-                 Keep `llm.require_model: true` (default) to fail closed.",
-            );
         }
         if llm_post {
             Self::warn_on_inference_response_gaps(cfg);
@@ -785,6 +842,7 @@ impl PolicyFilter {
     ///
     /// [`FilterRegistry`]: crate::FilterRegistry
     /// [`FilterRegistry::set_policy_connector`]: crate::FilterRegistry::set_policy_connector
+    /// [`FilterError`]: FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: PolicyFilterConfig = parse_filter_config("policy", config)?;
         Ok(Box::new(Self::new(cfg, None)?))
@@ -797,6 +855,8 @@ impl PolicyFilter {
     ///
     /// Returns [`FilterError`] if the config block fails to parse
     /// as a `PolicyFilterConfig` or filter construction fails.
+    ///
+    /// [`FilterError`]: FilterError
     pub(crate) fn from_config_with_connector(
         config: &serde_yaml::Value,
         subrequest_connector: Option<SubRequestConnector>,
@@ -805,32 +865,67 @@ impl PolicyFilter {
         Self::new(cfg, subrequest_connector)
     }
 
-    /// Snapshot the request's HTTP headers into a case-normalized
-    /// map. Each registered identity plugin reads its own configured
-    /// header from this map.
+    /// The current request's headers, lowercased, duplicate field lines
+    /// comma-joined. Identity and policy input read [`RequestFacts`] instead;
+    /// this is for comparing against what the upstream will receive.
     ///
-    /// Keys are normalized to ASCII lowercase. HTTP header names are
-    /// case-insensitive (RFC 7230 §3.2) but the `HashMap` lookup is
-    /// case-sensitive; plugins lowercase their configured header
-    /// before lookup to match. Duplicate field-lines of the same header
-    /// are comma-joined (RFC 7230 §3.2.2), not collapsed to the last value.
+    /// [`RequestFacts`]: RequestFacts
     pub(super) fn snapshot_headers(ctx: &HttpFilterContext<'_>) -> std::collections::HashMap<String, String> {
-        // Duplicate field-lines of the same header are comma-joined
-        // (RFC 7230 §3.2.2) instead of collapsed to the last value, so
-        // the authorization view matches what a spec-compliant recipient
-        // sees and a spoofed extra line cannot silently outrank the
-        // proxy's own value.
-        let mut map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        for (name, value) in &ctx.request.headers {
-            let Ok(text) = value.to_str() else { continue };
-            map.entry(name.as_str().to_ascii_lowercase())
-                .and_modify(|acc| {
-                    acc.push_str(", ");
-                    acc.push_str(text);
-                })
-                .or_insert_with(|| text.to_owned());
+        super::request_facts::snapshot_headers(&ctx.request.headers)
+    }
+
+    /// Capture this pipeline instance's [`RequestFacts`] at its first callback.
+    ///
+    /// [`RequestFacts`]: RequestFacts
+    fn capture_request_facts(&self, ctx: &mut HttpFilterContext<'_>) {
+        if ctx.current_filter_id.is_some() && Self::stored_request_facts(ctx).is_none() {
+            let facts = Arc::new(RequestFacts::capture(ctx, &self.trusted_proxies));
+            state_mut(ctx).facts = Some(facts);
         }
-        map
+    }
+
+    /// The facts this instance captured, if any.
+    fn stored_request_facts(ctx: &HttpFilterContext<'_>) -> Option<Arc<RequestFacts>> {
+        state(ctx).and_then(|state| state.facts.clone())
+    }
+
+    /// Invoke `hook`, threading this instance's context table through it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the table.
+    async fn invoke<H: HookTypeDef>(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        hook: &'static str,
+        payload: H::Payload,
+        extensions: Extensions,
+    ) -> Result<PipelineResult, FilterError> {
+        let table = state_mut(ctx).take_table()?;
+        // The engine owns these tasks; awaiting their handles would delay the request.
+        let (mut result, _background) = Box::pin(self.mgr.invoke_named::<H>(hook, payload, extensions, table)).await;
+        state_mut(ctx).restore_table(std::mem::take(&mut result.context_table));
+        Ok(result)
+    }
+
+    /// What a hook invocation sees of the request: the captured facts, the
+    /// trusted header overlays, and the secret provenance of applied
+    /// assertions. Without a capture, the facts are captured per call.
+    fn request_view(
+        ctx: &HttpFilterContext<'_>,
+        context_headers: &std::collections::HashMap<super::config::ContextField, String>,
+        trusted_proxies: &[CidrRange],
+    ) -> RequestView {
+        let facts =
+            Self::stored_request_facts(ctx).unwrap_or_else(|| Arc::new(RequestFacts::capture(ctx, trusted_proxies)));
+        let mut headers = facts.headers_with_reserved(&ctx.request.headers);
+        Self::overlay_effective_context_headers(ctx, &mut headers, context_headers);
+        let secret_headers = ctx
+            .extensions
+            .get::<AssertedSecretHeaders>()
+            .map(|asserted| asserted.0.clone())
+            .unwrap_or_default();
+        RequestView::new(facts, headers, secret_headers)
     }
 
     /// Overlay effective header values for `context_headers` targets onto
@@ -878,59 +973,128 @@ impl PolicyFilter {
     /// Both are required to select route-scoped authentication; omitting the
     /// request line could silently fall back to the global authenticator.
     fn identity_extensions(
-        ctx: &HttpFilterContext<'_>,
-        headers: std::collections::HashMap<String, String>,
+        view: &RequestView,
         entity_type: &str,
         entity_name: &str,
         scope: Option<&str>,
     ) -> Extensions {
-        let mut ext = Extensions {
+        Extensions {
             meta: Some(Arc::new(MetaExtension {
                 entity_type: Some(entity_type.to_owned()),
                 entity_name: Some(entity_name.to_owned()),
                 scope: scope.map(ToOwned::to_owned),
                 ..Default::default()
             })),
+            http: Some(Arc::new(view.http_extension())),
             ..Default::default()
-        };
-        Self::attach_http_attributes(ctx, &mut ext, headers);
-        ext
+        }
+    }
+
+    /// Run `ratelimit.pre_identity` once per request, on the HTTP coordinates
+    /// and the request as first captured, before any identity resolution.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the context table.
+    async fn pre_identity_limit(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        view: &RequestView,
+    ) -> Result<Option<Rejection>, FilterError> {
+        if !self.limit_pre || state(ctx).is_some_and(|state| state.limits.pre_identity) {
+            return Ok(None);
+        }
+        state_mut(ctx).limits.pre_identity = true;
+        let ext = Self::identity_extensions(
+            view,
+            ENTITY_HTTP,
+            ENTITY_NAME_GLOBAL,
+            self.cfg.context_meta.scope.as_deref(),
+        );
+        let result = self
+            .invoke::<HttpHook>(ctx, HOOK_RATELIMIT_PRE_IDENTITY, HttpPayload, ext)
+            .await?;
+        if result.continue_processing {
+            return Ok(None);
+        }
+        tracing::debug!(target: "policy.filter", "rate limit deny (pre-identity)");
+        Ok(Some(rate_limit_rejection(result.violation.as_ref())))
+    }
+
+    /// Whether `ratelimit.post_identity` still has to run for this request.
+    fn post_identity_limit_pending(&self, ctx: &HttpFilterContext<'_>) -> bool {
+        self.limit_post && !state(ctx).is_some_and(|state| state.limits.post_identity)
+    }
+
+    /// Run `ratelimit.post_identity` once per request, after the final
+    /// identity resolution and before authorization, on `extensions`: the
+    /// final route coordinates and the resolved identity.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the context table.
+    async fn post_identity_limit(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        extensions: &Extensions,
+    ) -> Result<Option<LimitDenied>, FilterError> {
+        if !self.post_identity_limit_pending(ctx) {
+            return Ok(None);
+        }
+        state_mut(ctx).limits.post_identity = true;
+        let result = self
+            .invoke::<HttpHook>(ctx, HOOK_RATELIMIT_POST_IDENTITY, HttpPayload, extensions.clone())
+            .await?;
+        if result.continue_processing {
+            return Ok(None);
+        }
+        tracing::debug!(target: "policy.filter", "rate limit deny (post-identity)");
+        Ok(Some(LimitDenied(result.violation)))
+    }
+
+    /// [`Self::post_identity_limit`] on the entity-less HTTP coordinates, for
+    /// admissions that end at identity.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the context table.
+    ///
+    /// [`Self::post_identity_limit`]: Self::post_identity_limit
+    async fn post_identity_limit_http(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        identity: &IdentityPayload,
+    ) -> Result<Option<Rejection>, FilterError> {
+        if !self.post_identity_limit_pending(ctx) {
+            return Ok(None);
+        }
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+        let ext = Self::extensions_from_identity(&view, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
+        Ok(self.post_identity_limit(ctx, &ext).await?.map(|denied| denied.http()))
     }
 
     /// Resolve identity by invoking the identity hook chain. Returns the
     /// resolved [`IdentityPayload`] (subject / client / workload / raw
     /// credentials / delegation) or a rejection when no identity
     /// continues.
-    #[expect(
-        clippy::large_futures,
-        clippy::large_stack_frames,
-        reason = "async handler over large CMF/pipeline types"
-    )]
+    #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
     async fn resolve_identity(
         &self,
-        ctx: &HttpFilterContext<'_>,
-        headers: std::collections::HashMap<String, String>,
+        ctx: &mut HttpFilterContext<'_>,
+        view: &RequestView,
         entity_type: &str,
         entity_name: &str,
-    ) -> Result<IdentityPayload, Rejection> {
-        let route_ext = Self::identity_extensions(
-            ctx,
-            headers.clone(),
-            entity_type,
-            entity_name,
-            self.cfg.context_meta.scope.as_deref(),
-        );
-
-        let (id_result, _bg) = self
-            .mgr
-            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, Self::identity_payload(headers), route_ext, None)
-            .await;
-        if !id_result.continue_processing {
-            return Err(auth_rejection(id_result.violation.as_ref()));
+    ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
+        if let Some(rejection) = self.pre_identity_limit(ctx, view).await? {
+            return Ok(Err(rejection));
         }
-        IdentityPayload::from_pipeline_result(&id_result).ok_or_else(|| {
-            Rejection::status(500).with_body(Bytes::from_static(b"policy: identity result missing modified payload"))
-        })
+        let route_ext =
+            Self::identity_extensions(view, entity_type, entity_name, self.cfg.context_meta.scope.as_deref());
+        let payload = Self::identity_payload(view.headers().clone());
+        let id_result = self
+            .invoke::<IdentityHook>(ctx, HOOK_IDENTITY_RESOLVE, payload, route_ext)
+            .await?;
+        Ok(identity_from_result(&id_result))
     }
 
     /// Build the CMF `Extensions` from an already-resolved identity,
@@ -945,13 +1109,17 @@ impl PolicyFilter {
     /// identity hook: a token that expires between the request and the
     /// (already-served) response must not turn into a false deny.
     fn extensions_from_identity(
-        headers: &std::collections::HashMap<String, String>,
+        view: &RequestView,
         identity: &IdentityPayload,
         entity_type: &str,
         entity_name: &str,
         cfg: &PolicyFilterConfig,
     ) -> Extensions {
-        let mut ext = identity.apply_to_extensions(Extensions::default());
+        let headers = view.headers();
+        let mut ext = identity.apply_to_extensions(Extensions {
+            http: Some(Arc::new(view.http_extension())),
+            ..Default::default()
+        });
 
         // -- meta: entity identity (from protocol classifier) + operator config --
         let mut meta = ext.meta.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
@@ -1050,6 +1218,43 @@ impl PolicyFilter {
         Self::publish_identity_projection(ctx, Self::authenticated_identity(identity));
     }
 
+    /// Register the compiled builtin factories and the APL visitor on `mgr`.
+    ///
+    /// An engine-only build supports APL but refuses policies naming builtin
+    /// plugin kinds.
+    fn install_plugins(mgr: &Arc<PolicyEngine>) {
+        #[cfg(any(
+            feature = "policy-builtins",
+            feature = "policy-api-key",
+            feature = "policy-jwt",
+            feature = "policy-jwt-openssl-fips",
+            feature = "policy-oauth",
+            feature = "policy-delegator-vault",
+            feature = "policy-elicitation-ciba",
+            feature = "policy-cedar",
+            feature = "policy-cel",
+            feature = "policy-opa",
+            feature = "policy-valkey",
+            feature = "policy-experimental-ratelimit",
+        ))]
+        ppe::install_builtins(mgr);
+        #[cfg(not(any(
+            feature = "policy-builtins",
+            feature = "policy-api-key",
+            feature = "policy-jwt",
+            feature = "policy-jwt-openssl-fips",
+            feature = "policy-oauth",
+            feature = "policy-delegator-vault",
+            feature = "policy-elicitation-ciba",
+            feature = "policy-cedar",
+            feature = "policy-cel",
+            feature = "policy-opa",
+            feature = "policy-valkey",
+            feature = "policy-experimental-ratelimit",
+        )))]
+        let _visitor = ppe::register_apl(mgr, ppe::AplOptions::in_process());
+    }
+
     /// Build the proxy-backed transport with the configured destination policy.
     fn http_transport(
         subrequest_connector: Option<SubRequestConnector>,
@@ -1112,102 +1317,84 @@ impl PolicyFilter {
     /// Whether this policy instance already completed admission in an earlier
     /// lifecycle phase.
     fn admission_complete(ctx: &HttpFilterContext<'_>) -> bool {
-        ctx.get_filter_state::<AdmissionState>()
-            .is_some_and(|state| state.complete)
+        state(ctx).is_some_and(|state| state.admitted)
     }
 
-    /// Record successful admission when executing through a pipeline. Direct
-    /// unit-test calls have no current filter ID and intentionally skip the
-    /// marker rather than emitting the context utility's warning.
+    /// Record that this instance admitted the request.
     fn mark_admission_complete(ctx: &mut HttpFilterContext<'_>) {
-        if ctx.current_filter_id.is_none() {
-            return;
-        }
-        if let Some(state) = ctx.get_filter_state_mut::<AdmissionState>() {
-            state.complete = true;
-        } else {
-            ctx.insert_filter_state(AdmissionState {
-                complete: true,
-                ..Default::default()
-            });
-        }
+        state_mut(ctx).admitted = true;
     }
 
-    /// Preserve an unscoped gate result in state owned by this policy filter
-    /// instance until classification proves that no entity route applies.
-    fn store_gated_identity(ctx: &mut HttpFilterContext<'_>, authenticated: Option<AuthenticatedIdentity>) {
-        if ctx.current_filter_id.is_none() {
-            return;
-        }
-        let gated_identity = authenticated.map_or(GatedIdentity::NoSubject, GatedIdentity::Subject);
-        if let Some(state) = ctx.get_filter_state_mut::<AdmissionState>() {
-            state.gated_identity = gated_identity;
-        } else {
-            ctx.insert_filter_state(AdmissionState {
-                gated_identity,
-                ..Default::default()
-            });
-        }
+    /// Keep the full identity this instance admitted, for its later hooks.
+    fn store_identity(ctx: &mut HttpFilterContext<'_>, identity: IdentityPayload) {
+        let state = state_mut(ctx);
+        state.gated = None;
+        state.identity = Some(identity);
     }
 
-    /// Remove and return this policy instance's temporary early-gate result.
-    fn take_gated_identity(ctx: &mut HttpFilterContext<'_>) -> GatedIdentity {
-        ctx.get_filter_state_mut::<AdmissionState>()
-            .map_or(GatedIdentity::NotRun, |state| std::mem::take(&mut state.gated_identity))
+    /// The full identity this instance admitted, if any.
+    fn admitted_identity<'c>(ctx: &'c HttpFilterContext<'_>) -> Option<&'c IdentityPayload> {
+        state(ctx).and_then(|state| state.identity.as_ref())
     }
 
     /// Resolve the global identity gate without publishing route-scoped state.
     ///
     /// Reserved entity-less coordinates select global authentication; absent
     /// coordinates would be rejected as an unidentified request.
-    #[expect(
-        clippy::large_futures,
-        clippy::large_stack_frames,
-        reason = "async PPE identity payload"
-    )]
+    #[expect(clippy::large_stack_frames, reason = "async PPE identity payload")]
     async fn resolve_gated_identity(
         &self,
-        ctx: &HttpFilterContext<'_>,
-    ) -> Result<Option<AuthenticatedIdentity>, Rejection> {
-        let headers = Self::snapshot_headers(ctx);
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+        if let Some(rejection) = self.pre_identity_limit(ctx, &view).await? {
+            return Ok(Err(rejection));
+        }
         let gate_ext = Self::identity_extensions(
-            ctx,
-            headers.clone(),
+            &view,
             ENTITY_HTTP,
             ENTITY_NAME_GLOBAL,
             self.cfg.context_meta.scope.as_deref(),
         );
-        let (result, _bg) = self
-            .mgr
-            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, Self::identity_payload(headers), gate_ext, None)
-            .await;
+        let payload = Self::identity_payload(view.headers().clone());
+        let result = self
+            .invoke::<IdentityHook>(ctx, HOOK_IDENTITY_RESOLVE, payload, gate_ext)
+            .await?;
+        Ok(identity_from_result(&result))
+    }
 
-        if !result.continue_processing {
-            return Err(auth_rejection(result.violation.as_ref()));
+    /// The identity the early gate resolved, or a fresh gate resolution when
+    /// the body phase runs first.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the context table.
+    async fn gated_identity(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<Result<IdentityPayload, Rejection>, FilterError> {
+        match state_mut(ctx).gated.take() {
+            Some(identity) => Ok(Ok(identity)),
+            None => self.resolve_gated_identity(ctx).await,
         }
-        let identity = IdentityPayload::from_pipeline_result(&result).ok_or_else(|| {
-            Rejection::status(500).with_body(Bytes::from_static(b"policy: identity result missing modified payload"))
-        })?;
-        Ok(Self::authenticated_identity(&identity))
     }
 
     /// Finish an identity-only admission after classification establishes that
     /// no entity-specific resolver can apply.
     #[expect(
-        clippy::large_futures,
         clippy::large_stack_frames,
         reason = "PPE identity resolution carries large async payloads"
     )]
     async fn complete_gated_admission(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let authenticated = match Self::take_gated_identity(ctx) {
-            GatedIdentity::Subject(authenticated) => Some(authenticated),
-            GatedIdentity::NoSubject => None,
-            GatedIdentity::NotRun => match self.resolve_gated_identity(ctx).await {
-                Ok(authenticated) => authenticated,
-                Err(rejection) => return Ok(FilterAction::Reject(rejection)),
-            },
+        let identity = match self.gated_identity(ctx).await? {
+            Ok(identity) => identity,
+            Err(rejection) => return Ok(FilterAction::Reject(rejection)),
         };
-        Self::publish_identity_projection(ctx, authenticated);
+        if let Some(rejection) = self.post_identity_limit_http(ctx, &identity).await? {
+            return Ok(FilterAction::Reject(rejection));
+        }
+        Self::publish_authenticated_identity(ctx, &identity);
+        Self::store_identity(ctx, identity);
         Self::mark_admission_complete(ctx);
         Ok(FilterAction::BodyDone)
     }
@@ -1217,7 +1404,6 @@ impl PolicyFilter {
     /// paid. For entity-aware policies, authorization runs later, in
     /// `on_request_body`, once the request is classified.
     #[expect(
-        clippy::large_futures,
         clippy::large_stack_frames,
         reason = "PPE identity resolution carries large async payloads"
     )]
@@ -1225,18 +1411,18 @@ impl PolicyFilter {
         // When a downstream body-buffering filter (e.g. the protocol
         // classifier) forces a pre-read, praxis runs `on_request_body` BEFORE
         // this header phase. That body phase already resolved and enforced
-        // identity (stashing `ResolvedIdentity`) and may have stripped the
+        // identity (keeping it in this instance's state) and may have stripped the
         // inbound identity headers (`X-User-Token`, `Authorization`) for the
         // upstream. Re-resolving here would fail on the now-stripped headers
         // and spuriously reject an already-authorized request. The body phase
         // is authoritative — skip the early gate when it already ran.
-        if ctx.extensions.get::<ResolvedIdentity>().is_some() {
+        if Self::admitted_identity(ctx).is_some() {
             tracing::trace!(target: "policy.filter", "identity already resolved in body phase; skipping early gate");
             return Ok(FilterAction::Continue);
         }
 
-        let authenticated = match self.resolve_gated_identity(ctx).await {
-            Ok(authenticated) => authenticated,
+        let identity = match self.resolve_gated_identity(ctx).await? {
+            Ok(identity) => identity,
             Err(rejection) => {
                 tracing::debug!(target: "policy.filter", "identity deny (on_request)");
                 return Ok(FilterAction::Reject(rejection));
@@ -1246,9 +1432,13 @@ impl PolicyFilter {
         // PPE the authoritative route coordinates. Publishing this unscoped
         // gate result could expose a principal from the wrong route resolver.
         if self.entity_routes {
-            Self::store_gated_identity(ctx, authenticated);
+            state_mut(ctx).gated = Some(identity);
         } else {
-            Self::publish_identity_projection(ctx, authenticated);
+            if let Some(rejection) = self.post_identity_limit_http(ctx, &identity).await? {
+                return Ok(FilterAction::Reject(rejection));
+            }
+            Self::publish_authenticated_identity(ctx, &identity);
+            Self::store_identity(ctx, identity);
         }
         tracing::trace!(target: "policy.filter", "identity allow (on_request)");
         Ok(FilterAction::Continue)
@@ -1256,7 +1446,6 @@ impl PolicyFilter {
 
     /// Authorize an inference request through `cmf.llm_input`.
     #[expect(
-        clippy::large_futures,
         clippy::large_stack_frames,
         clippy::too_many_lines,
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
@@ -1281,14 +1470,11 @@ impl PolicyFilter {
             return Ok(FilterAction::Reject(llm_deny_rejection(Some(&no_route_violation()))));
         }
 
-        let mut headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
-
-        let identity = match self.resolve_identity(ctx, headers.clone(), entity_type, &model).await {
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+        let identity = match self.resolve_identity(ctx, &view, entity_type, &model).await? {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
-        Self::take_gated_identity(ctx);
         Self::publish_authenticated_identity(ctx, &identity);
 
         // Read what the handler needs before the document moves into the extensions.
@@ -1297,23 +1483,26 @@ impl PolicyFilter {
         };
         let streaming = parsed.is_streaming();
 
-        let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &model, &self.cfg);
-        Self::attach_http_attributes(ctx, &mut extensions, headers);
+        let mut extensions = Self::extensions_from_identity(&view, &identity, entity_type, &model, &self.cfg);
+        // Attach before the limit so a limiter can bind the model.
         self.attach_llm_attributes(&mut extensions, parsed, &model);
-        ctx.extensions.insert(ResolvedIdentity(identity));
-        ctx.extensions.insert(InferenceRequest { model: model.clone() });
+        if let Some(denied) = self.post_identity_limit(ctx, &extensions).await? {
+            return Ok(FilterAction::Reject(denied.http()));
+        }
+        Self::store_identity(ctx, identity);
+        state_mut(ctx).inference_model = Some(model.clone());
 
-        let (cmf_result, _bg) = self
-            .mgr
-            .invoke_named::<CmfHook>(hook_name, payload, extensions, None)
-            .await;
+        let cmf_result = self.invoke::<CmfHook>(ctx, hook_name, payload, extensions).await?;
 
         if !cmf_result.continue_processing {
             tracing::debug!(target: "policy.filter", model = %model, "inference deny");
             return Ok(FilterAction::Reject(llm_deny_rejection(cmf_result.violation.as_ref())));
         }
 
-        let attached = attach_delegated_tokens(ctx, cmf_result.modified_extensions.as_ref());
+        let attached = match attach_delegated_tokens(ctx, cmf_result.modified_extensions.as_ref()) {
+            Ok(attached) => attached,
+            Err(rejection) => return Ok(FilterAction::Reject(rejection)),
+        };
         if attached > 0 {
             tracing::debug!(
                 target: "policy.filter",
@@ -1385,7 +1574,12 @@ impl PolicyFilter {
         }));
 
         let promoted = parsed.promoted_params(&self.cfg.llm.promote_params);
-        ext.llm_request = Some(LlmRequestDocument::new(parsed.into_value()));
+        let parts = parsed.parts();
+        let document = LlmRequestDocument::new(parsed.into_value());
+        ext.llm_request = Some(match parts {
+            Some(parts) => document.with_parts(parts),
+            None => document,
+        });
         if promoted.is_empty() {
             return;
         }
@@ -1402,7 +1596,7 @@ impl PolicyFilter {
     )]
     fn dispatch_llm_response(
         &self,
-        ctx: &HttpFilterContext<'_>,
+        ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
     ) -> Result<FilterAction, FilterError> {
         let Some(model) = Self::llm_response_model(ctx) else {
@@ -1443,9 +1637,8 @@ impl PolicyFilter {
         }
 
         let (entity_type, hook_name) = (ENTITY_LLM, HOOK_CMF_LLM_OUTPUT);
-        let mut headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
-        let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+        let Some(identity) = Self::admitted_identity(ctx) else {
             // Missing request identity would otherwise skip response policy.
             tracing::error!(
                 target: "policy.filter",
@@ -1462,7 +1655,7 @@ impl PolicyFilter {
             return Ok(FilterAction::Continue);
         };
 
-        let mut extensions = Self::extensions_from_identity(&headers, identity, entity_type, &model, &self.cfg);
+        let mut extensions = Self::extensions_from_identity(&view, identity, entity_type, &model, &self.cfg);
         extensions.llm = Some(Arc::new(LLMExtension {
             model_id: Some(model.clone()),
             provider: self.cfg.llm.provider.clone(),
@@ -1473,7 +1666,7 @@ impl PolicyFilter {
         let payload = MessagePayload {
             message: response_message(&parsed),
         };
-        let cmf_result = self.dispatch_response_cmf(hook_name, payload, extensions, "inference response-phase")?;
+        let cmf_result = self.dispatch_response_cmf(ctx, hook_name, payload, extensions)?;
 
         if !cmf_result.continue_processing {
             tracing::warn!(
@@ -1505,21 +1698,23 @@ impl PolicyFilter {
 
     /// Return the request model for a non-streaming inference response.
     fn llm_response_model(ctx: &HttpFilterContext<'_>) -> Option<String> {
-        let inference = ctx.extensions.get::<InferenceRequest>()?;
+        let model = state(ctx)?.inference_model.as_ref()?;
         if Self::response_is_event_stream(ctx) {
             tracing::debug!(
                 target: "policy.filter",
-                model = %inference.model,
+                model = %model,
                 "streamed inference response; skipping the response-phase policy",
             );
             return None;
         }
-        Some(inference.model.clone())
+        Some(model.clone())
     }
 
     /// Whether inference response evaluation will skip this stream.
     fn inference_response_is_streamed(&self, ctx: &HttpFilterContext<'_>) -> bool {
-        self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() && Self::response_is_event_stream(ctx)
+        self.llm_post
+            && state(ctx).is_some_and(|state| state.inference_model.is_some())
+            && Self::response_is_event_stream(ctx)
     }
 
     /// Whether the upstream is streaming this response as server-sent events.
@@ -1564,69 +1759,98 @@ impl PolicyFilter {
     /// plain HTTP response ([`super::error::http_authz_rejection`]); an
     /// identity failure is the usual 401. Authorization runs here (not the
     /// body phase) because it needs no request body.
-    #[expect(
-        clippy::large_futures,
-        clippy::large_stack_frames,
-        clippy::too_many_lines,
-        reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
-    )]
+    #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let mut headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
         let identity = match self
-            .resolve_identity(ctx, headers.clone(), ENTITY_HTTP, ENTITY_NAME_GLOBAL)
-            .await
+            .resolve_identity(ctx, &view, ENTITY_HTTP, ENTITY_NAME_GLOBAL)
+            .await?
         {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
+        Box::pin(self.authorize_http(ctx, &view, identity)).await
+    }
+
+    /// Authorize a resolved identity at `http.request`, then attach delegated
+    /// tokens and apply request assertions. `Continue` means allowed; the
+    /// caller marks admission.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the context table.
+    async fn authorize_http(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        view: &RequestView,
+        identity: IdentityPayload,
+    ) -> Result<FilterAction, FilterError> {
         Self::publish_authenticated_identity(ctx, &identity);
-        let mut extensions =
-            Self::extensions_from_identity(&headers, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
-        Self::attach_http_attributes(ctx, &mut extensions, headers);
-
-        // Awaited on the worker runtime on purpose. The engine runs every
-        // handler in a task it spawns onto the current runtime, so the
-        // evaluation lands on the workers however it is invoked; a
-        // blocking-pool hop would only park a pool thread on the join handle.
-        // Generic HTTP handlers read request data from extensions, not a body
-        // payload.
-        let (result, _bg) = self
-            .mgr
-            .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, HttpPayload, extensions, None)
-            .await;
-
+        let extensions = Self::extensions_from_identity(view, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, &self.cfg);
+        if let Some(denied) = self.post_identity_limit(ctx, &extensions).await? {
+            return Ok(FilterAction::Reject(denied.http()));
+        }
+        let result = self
+            .invoke::<HttpHook>(ctx, HOOK_HTTP_REQUEST, HttpPayload, extensions)
+            .await?;
         if !result.continue_processing {
-            tracing::debug!(target: "policy.filter", "http authz deny (on_request)");
+            tracing::debug!(target: "policy.filter", "http authz deny");
             return Ok(FilterAction::Reject(super::error::http_authz_rejection(
                 result.violation.as_ref(),
             )));
         }
-        // Allow path. If the `global` policy ran `delegate(...)` steps, attach
-        // the minted tokens to the upstream request (mirrors the entity path in
-        // `on_request_body`); a no-op when the policy declares no delegation.
-        let attached = attach_delegated_tokens(ctx, result.modified_extensions.as_ref());
-        if attached > 0 {
-            tracing::debug!(
-                target: "policy.filter",
-                count = attached,
-                "attached delegated tokens to upstream request (L7 authz)",
-            );
-        }
-        // Apply assertions after delegation so strip rules govern delegated headers.
-        let (set, removed) =
-            apply_request_assertions(ctx, result.modified_extensions.as_ref(), &self.request_assertions);
-        if set > 0 || removed > 0 {
-            tracing::debug!(
-                target: "policy.filter",
-                set, removed,
-                "applied request assertions to upstream request (L7 authz)",
-            );
+        if let Some(rejection) = self.apply_http_grants(ctx, result.modified_extensions.as_ref()) {
+            return Ok(FilterAction::Reject(rejection));
         }
         // Reuse the admitted identity so mid-exchange token expiry cannot cause a late deny.
-        ctx.extensions.insert(ResolvedIdentity(identity));
-        tracing::trace!(target: "policy.filter", "http authz allow (on_request)");
+        Self::store_identity(ctx, identity);
+        tracing::trace!(target: "policy.filter", "http authz allow");
         Ok(FilterAction::Continue)
+    }
+
+    /// Attach delegated tokens, then apply request assertions, so strip rules
+    /// govern delegated headers.
+    fn apply_http_grants(&self, ctx: &mut HttpFilterContext<'_>, extensions: Option<&Extensions>) -> Option<Rejection> {
+        let attached = match attach_delegated_tokens(ctx, extensions) {
+            Ok(attached) => attached,
+            Err(rejection) => return Some(rejection),
+        };
+        if attached > 0 {
+            tracing::debug!(target: "policy.filter", count = attached, "attached delegated tokens (http authz)");
+        }
+        let (set, removed) = apply_request_assertions(ctx, extensions, &self.request_assertions);
+        if set > 0 || removed > 0 {
+            tracing::debug!(target: "policy.filter", set, removed, "applied request assertions (http authz)");
+        }
+        None
+    }
+
+    /// Admit a bodyless request on an inference policy: the gate's identity,
+    /// then HTTP authorization, delegation and assertions when the policy
+    /// installs any; identity alone otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Fails when an earlier dispatch lost the context table.
+    #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
+    async fn admit_bodyless(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if Self::admission_complete(ctx) {
+            return Ok(FilterAction::BodyDone);
+        }
+        if !self.http_request_policy {
+            return self.complete_gated_admission(ctx).await;
+        }
+        let identity = match self.gated_identity(ctx).await? {
+            Ok(identity) => identity,
+            Err(rejection) => return Ok(FilterAction::Reject(rejection)),
+        };
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+        let action = Box::pin(self.authorize_http(ctx, &view, identity)).await?;
+        if !matches!(action, FilterAction::Continue) {
+            return Ok(action);
+        }
+        Self::mark_admission_complete(ctx);
+        Ok(FilterAction::BodyDone)
     }
 
     /// The extensions a response-phase invocation carries: the identity admitted
@@ -1639,11 +1863,11 @@ impl PolicyFilter {
         response_headers: std::collections::HashMap<String, String>,
         status: u16,
         cfg: &PolicyFilterConfig,
+        trusted_proxies: &[CidrRange],
     ) -> Extensions {
-        let mut request_headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut request_headers, &cfg.context_headers);
-        let mut extensions = if let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() {
-            Self::extensions_from_identity(&request_headers, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, cfg)
+        let view = Self::request_view(ctx, &cfg.context_headers, trusted_proxies);
+        let mut extensions = if let Some(identity) = Self::admitted_identity(ctx) {
+            Self::extensions_from_identity(&view, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL, cfg)
         } else {
             tracing::debug!(
                 target: "policy.filter",
@@ -1660,8 +1884,7 @@ impl PolicyFilter {
         };
         // Keep the request line, so a response contract resolves the same route
         // the request half did.
-        Self::attach_http_attributes(ctx, &mut extensions, request_headers);
-        let mut http = extensions.http.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
+        let mut http = view.http_extension();
         http.response_headers = response_headers;
         http.status = Some(status);
         extensions.http = Some(Arc::new(http));
@@ -1680,48 +1903,33 @@ impl PolicyFilter {
         }
     }
 
-    /// Await the response hook on the worker runtime, as the request half does.
-    #[expect(
-        clippy::large_stack_frames,
-        reason = "PPE response dispatch carries large async payloads"
-    )]
-    async fn dispatch_response_hook(
-        &self,
-        hook: &'static str,
-        extensions: Extensions,
-    ) -> ppe::praxis_policy_core::executor::PipelineResult {
-        let (result, _bg) = self
-            .mgr
-            .invoke_named::<HttpHook>(hook, HttpPayload, extensions, None)
-            .await;
-        result
-    }
-
     /// Dispatch a CMF hook from the synchronous response-body phase, blocking
     /// for at most the filter's response dispatch bound.
     ///
     /// # Errors
     ///
     /// Returns [`FilterError`] when the hook times out or yields no result,
-    /// so the response fails under the filter's `failure_mode`.
-    #[expect(
-        clippy::large_stack_frames,
-        reason = "PPE response dispatch carries large async payloads"
-    )]
+    /// so the response fails under the filter's `failure_mode`. The context
+    /// table moved into the hook is then lost, and later hooks refuse to run.
+    ///
+    /// [`FilterError`]: FilterError
     fn dispatch_response_cmf(
         &self,
+        ctx: &mut HttpFilterContext<'_>,
         hook: &'static str,
         payload: MessagePayload,
         extensions: Extensions,
-        phase: &str,
-    ) -> Result<ppe::praxis_policy_core::executor::PipelineResult, FilterError> {
+    ) -> Result<PipelineResult, FilterError> {
+        let table = state_mut(ctx).take_table()?;
         let mgr = Arc::clone(&self.mgr);
         let invoke = async move {
-            let (r, _bg) = mgr.invoke_named::<CmfHook>(hook, payload, extensions, None).await;
-            r
+            let (result, _background) = Box::pin(mgr.invoke_named::<CmfHook>(hook, payload, extensions, table)).await;
+            result
         };
-        block_on_bounded(invoke, self.response_dispatch_timeout)
-            .map_err(|e| -> FilterError { format!("policy: {phase} dispatch failed: {e}").into() })
+        let mut result = block_on_bounded(invoke, self.response_dispatch_timeout)
+            .map_err(|e| -> FilterError { format!("policy: {hook} dispatch failed: {e}").into() })?;
+        state_mut(ctx).restore_table(std::mem::take(&mut result.context_table));
+        Ok(result)
     }
 
     /// Put the rendered response contract on the response the client receives.
@@ -1738,41 +1946,6 @@ impl PolicyFilter {
                 "applied response assertions to the downstream response",
             );
         }
-    }
-
-    /// Populate `ext.http` with the request line + headers so CEL/APL
-    /// predicates over `http.method` / `http.path` / `http.host` /
-    /// `http.request_headers.*` evaluate. `host` is sourced from the parsed
-    /// request authority (Praxis validates Host upstream — see the Pingora
-    /// boundary docs), never a raw unvalidated header.
-    fn attach_http_attributes(
-        ctx: &HttpFilterContext<'_>,
-        ext: &mut Extensions,
-        request_headers: std::collections::HashMap<String, String>,
-    ) {
-        use ppe::praxis_policy_core::extensions::HttpExtension;
-
-        let req = ctx.request;
-        let host = req.uri.authority().map(|a| a.host().to_owned()).or_else(|| {
-            req.headers
-                .get(http::header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-        });
-        let http = HttpExtension {
-            method: Some(req.method.as_str().to_owned()),
-            path: Some(req.uri.path().to_owned()),
-            host,
-            scheme: req.uri.scheme_str().map(str::to_owned),
-            request_headers,
-            secret_headers: ctx
-                .extensions
-                .get::<AssertedSecretHeaders>()
-                .map(|asserted| asserted.0.clone())
-                .unwrap_or_default(),
-            ..Default::default()
-        };
-        ext.http = Some(Arc::new(http));
     }
 }
 
@@ -1793,17 +1966,37 @@ fn selector_lists_any_model_literal(selector: &ppe::praxis_policy_core::config::
     )
 }
 
+/// A limiter denial, mapped to the wire by the path that hit it.
+struct LimitDenied(Option<PluginViolation>);
+
+impl LimitDenied {
+    /// The plain HTTP rejection.
+    fn http(&self) -> Rejection {
+        rate_limit_rejection(self.0.as_ref())
+    }
+
+    /// The JSON-RPC rejection keeping `request_id`.
+    fn json_rpc(&self, request_id: &serde_json::Value) -> Rejection {
+        rate_limit_json_rpc_rejection(self.0.as_ref(), request_id)
+    }
+}
+
+/// The identity a resolution produced, or the rejection it ended in.
+fn identity_from_result(result: &PipelineResult) -> Result<IdentityPayload, Rejection> {
+    if !result.continue_processing {
+        return Err(auth_rejection(result.violation.as_ref()));
+    }
+    IdentityPayload::from_pipeline_result(result).ok_or_else(|| {
+        Rejection::status(500).with_body(Bytes::from_static(b"policy: identity result missing modified payload"))
+    })
+}
+
 /// Render a validated claim into the identity projection's string format.
 ///
 /// Strings remain unquoted; other values use compact JSON.
 fn flatten_claim(value: &serde_json::Value) -> String {
     value.as_str().map_or_else(|| value.to_string(), str::to_owned)
 }
-
-/// Request-scoped identity reused during response processing.
-///
-/// Typed storage avoids serializing credentials and revalidating expired tokens.
-pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
 
 /// Engine provenance for secret assertion headers applied to the request.
 ///
@@ -1812,12 +2005,6 @@ pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
 /// Without them, plugins and PDPs on those phases receive the credential
 /// instead of its redaction marker.
 pub(super) struct AssertedSecretHeaders(pub(super) SecretHeaderProvenance);
-
-/// Inference request state retained for response policy evaluation.
-struct InferenceRequest {
-    /// The model parsed from the request body.
-    model: String,
-}
 
 /// Build an inference denial body that fits the committed response size.
 fn llm_deny_body(violation: Option<&PluginViolation>, original_len: usize, reason: &str) -> Bytes {
@@ -1963,6 +2150,7 @@ impl HttpFilter for PolicyFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.capture_request_facts(ctx);
         // A StreamBuffer filter can force the body phase to run before this
         // header phase. In that case admission already ran in on_request_body,
         // and re-running it could fail after credential-stripping mutations.
@@ -1971,11 +2159,11 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Continue);
         }
 
-        // Pure L7 policy (a `global` HTTP policy, no entity routes): authorize
+        // Pure L7 policy (`global` HTTP rules or assertions, no entity routes): authorize
         // here over `http.*` + identity. Authorization is an admission check
         // with no body, and no classifier is involved, so this is the
         // efficient path for Praxis as an L7 HTTP proxy.
-        if self.http_global && !self.entity_routes {
+        if self.http_request_policy && !self.entity_routes {
             // Box the (large CMF-typed) future so it lives on the heap
             // rather than inflating this method's stack frame.
             let action = Box::pin(self.on_request_http_authz(ctx)).await?;
@@ -1998,7 +2186,6 @@ impl HttpFilter for PolicyFilter {
     }
 
     #[expect(
-        clippy::large_futures,
         clippy::large_stack_frames,
         clippy::too_many_lines,
         reason = "async handler with multiple await points over large CMF types; linear phase flow"
@@ -2009,6 +2196,7 @@ impl HttpFilter for PolicyFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
+        self.capture_request_facts(ctx);
         // A downstream StreamBuffer filter makes this body hook run before
         // on_request. Pure-L7 and identity-only admission needs no body, so run
         // it on the first chunk before any later body filter can act. In the
@@ -2018,7 +2206,7 @@ impl HttpFilter for PolicyFilter {
             if Self::admission_complete(ctx) {
                 return Ok(FilterAction::BodyDone);
             }
-            let action = if self.http_global {
+            let action = if self.http_request_policy {
                 Box::pin(self.on_request_http_authz(ctx)).await?
             } else {
                 self.identity_gate(ctx).await?
@@ -2038,7 +2226,6 @@ impl HttpFilter for PolicyFilter {
 
         // MCP routes use classifier metadata; inference routes use the body model.
         let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
-            // Bodyless discovery and preflight requests remain identity-gated.
             if self.llm_routes
                 && let Some(rejection) = self.reject_oversized_inference_body(body.as_ref())
             {
@@ -2049,7 +2236,7 @@ impl HttpFilter for PolicyFilter {
                     target: "policy.filter",
                     "request carries no body; no inference dispatch",
                 );
-                return self.complete_gated_admission(ctx).await;
+                return Box::pin(self.admit_bodyless(ctx)).await;
             }
 
             // A repeated key makes the body mean different things to
@@ -2149,29 +2336,24 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Reject(missing_protocol_metadata_rejection()));
         };
 
-        // Snapshot headers once for both identity resolution and
-        // extensions building (avoids iterating the header map twice).
-        let mut headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
 
         // Resolve identity once here, then stash it so the response phase
         // can rebuild `Extensions` without re-validating the token.
-        let identity = match self
-            .resolve_identity(ctx, headers.clone(), entity_type, &entity_name)
-            .await
-        {
+        let identity = match self.resolve_identity(ctx, &view, entity_type, &entity_name).await? {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
-        Self::take_gated_identity(ctx);
         Self::publish_authenticated_identity(ctx, &identity);
-        let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &entity_name, &self.cfg);
-        // Attach the HTTP request line + headers so a single policy can combine
-        // entity/`args.*` checks with `http.*` predicates in one evaluation.
-        // The engine grants entity route handlers the `read_headers` capability, so
-        // these `http.*` attributes reach the CEL/APL bag at the entity phase.
-        Self::attach_http_attributes(ctx, &mut extensions, headers);
-        ctx.extensions.insert(ResolvedIdentity(identity));
+        // The engine grants entity route handlers `read_headers` and
+        // `read_query`, so one policy can combine `args.*` with `http.*`.
+        let extensions = Self::extensions_from_identity(&view, &identity, entity_type, &entity_name, &self.cfg);
+        let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
+        let parsed = ParsedEnvelope::parse(&body_bytes);
+        if let Some(denied) = self.post_identity_limit(ctx, &extensions).await? {
+            return Ok(FilterAction::Reject(denied.json_rpc(&parsed.id_value())));
+        }
+        Self::store_identity(ctx, identity);
 
         // Parse the JSON-RPC body to build the typed CMF content part.
         // The protocol classifier filter already parsed once but only stashed
@@ -2179,10 +2361,6 @@ impl HttpFilter for PolicyFilter {
         // that APL `args.*` predicates need. We re-parse here. The
         // body is already in memory; the duplicate parse is
         // microseconds.
-        let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
-        // Parse once for this phase: the id, the typed content, and the
-        // deny-path id echo all read the same DOM.
-        let parsed = ParsedEnvelope::parse(&body_bytes);
         let id = parsed.id_string();
         let content = build_content_for_method(&method, &entity_name, &id, &parsed);
 
@@ -2198,10 +2376,7 @@ impl HttpFilter for PolicyFilter {
         let payload = MessagePayload {
             message: Message::with_content(Role::User, content),
         };
-        let (cmf_result, _bg) = self
-            .mgr
-            .invoke_named::<CmfHook>(hook_name, payload, extensions, None)
-            .await;
+        let cmf_result = self.invoke::<CmfHook>(ctx, hook_name, payload, extensions).await?;
 
         if !cmf_result.continue_processing {
             let request_id = parsed.id_value();
@@ -2222,7 +2397,10 @@ impl HttpFilter for PolicyFilter {
         // `modified_extensions.raw_credentials.delegated_tokens`.
         // Attach each one to the upstream request as the configured
         // header.
-        let attached = attach_delegated_tokens(ctx, cmf_result.modified_extensions.as_ref());
+        let attached = match attach_delegated_tokens(ctx, cmf_result.modified_extensions.as_ref()) {
+            Ok(attached) => attached,
+            Err(rejection) => return Ok(FilterAction::Reject(rejection)),
+        };
         if attached > 0 {
             tracing::debug!(
                 target: "policy.filter",
@@ -2280,11 +2458,6 @@ impl HttpFilter for PolicyFilter {
         Ok(FilterAction::BodyDone)
     }
 
-    #[expect(
-        clippy::large_futures,
-        clippy::large_stack_frames,
-        reason = "PPE response dispatch carries large async payloads"
-    )]
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(hook) = self.response_hook else {
             return Ok(FilterAction::Continue);
@@ -2297,9 +2470,10 @@ impl HttpFilter for PolicyFilter {
             snapshot_response_headers(&response.headers),
             response.status.as_u16(),
             &self.cfg,
+            &self.trusted_proxies,
         );
 
-        let result = self.dispatch_response_hook(hook, extensions).await;
+        let result = self.invoke::<HttpHook>(ctx, hook, HttpPayload, extensions).await?;
         if !result.continue_processing {
             tracing::warn!(
                 target: "policy.filter",
@@ -2342,7 +2516,7 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Continue);
         }
 
-        if self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() {
+        if self.llm_post && state(ctx).is_some_and(|state| state.inference_model.is_some()) {
             return self.dispatch_llm_response(ctx, body);
         }
 
@@ -2377,7 +2551,7 @@ impl HttpFilter for PolicyFilter {
         // no token re-validation — so a token that expired between the
         // request and this (already-served) response can't produce a
         // false deny on a request that was authorized.
-        let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
+        let Some(identity) = Self::admitted_identity(ctx) else {
             // Fail closed: a response we can no longer attribute to a
             // request-phase identity must be denied rather than passed
             // through, which would skip configured response-side
@@ -2402,9 +2576,8 @@ impl HttpFilter for PolicyFilter {
             ));
             return Ok(FilterAction::Continue);
         };
-        let mut headers = Self::snapshot_headers(ctx);
-        Self::overlay_effective_context_headers(ctx, &mut headers, &self.cfg.context_headers);
-        let extensions = Self::extensions_from_identity(&headers, identity, entity_type, &entity_name, &self.cfg);
+        let view = Self::request_view(ctx, &self.cfg.context_headers, &self.trusted_proxies);
+        let extensions = Self::extensions_from_identity(&view, identity, entity_type, &entity_name, &self.cfg);
 
         let content = build_response_content_for_method(&method, &entity_name, &id_str, &parsed);
         // A valid tools/call error has no result to inspect. Unknown shapes
@@ -2422,7 +2595,7 @@ impl HttpFilter for PolicyFilter {
         let payload = MessagePayload {
             message: Message::with_content(Role::Assistant, content),
         };
-        let cmf_result = self.dispatch_response_cmf(hook_name, payload, extensions, "response-phase CMF")?;
+        let cmf_result = self.dispatch_response_cmf(ctx, hook_name, payload, extensions)?;
 
         // Post-phase deny — the upstream's response carries something
         // the operator wants suppressed (output PII, late policy
@@ -2568,41 +2741,85 @@ fn missing_protocol_metadata_rejection() -> Rejection {
 // attach_delegated_tokens
 // -----------------------------------------------------------------------------
 
-/// Walk the minted delegated tokens on the resolved `Extensions` and
-/// push them as upstream request headers. Returns the count attached
-/// (0 when no delegation ran or no extensions were returned). Each
-/// token's `outbound_header` field decides where it goes; the value
-/// is its `outbound_prefix` followed by the token. OAuth delegates
-/// default the prefix to `Bearer ` (RFC 6750); a Vault API key without a
-/// `scheme_prefix` has none. Uses `request_headers_to_set` rather than
-/// `extra_request_headers` because authorization tokens are
-/// overwrites, not appends.
+/// Push the minted delegated tokens on the resolved `Extensions` as upstream
+/// request headers and strip the inbound credentials they replace. Returns
+/// the count attached (0 when no delegation ran). Each token's
+/// `outbound_header` decides where it goes; the value is its
+/// `outbound_prefix` followed by the token. Delegated headers replace existing
+/// values.
 ///
-/// Multiple tokens targeting the same outbound header are a
-/// configuration ambiguity — praxis's `request_headers_to_set`
-/// would otherwise let the last writer silently win, with order
-/// determined by `HashMap` iteration. Apply first-writer-wins keyed
-/// on `(outbound_header_lc, audience)`, log a warn on each skip so
-/// the operator can fix the overlapping delegators.
-#[expect(
-    clippy::too_many_lines,
-    reason = "single linear pass attaching delegated tokens with first-writer-wins dedupe"
-)]
-pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extensions: Option<&Extensions>) -> usize {
-    let Some(ext) = extensions else {
-        return 0;
+/// # Errors
+///
+/// Returns a rejection, attaching nothing, when a token would be forwarded
+/// while an inbound credential sits where it cannot be stripped (a query
+/// parameter, or a location this build does not know): the upstream would
+/// receive the caller's credential beside the delegated one. Also rejects
+/// when delegation ran but no token forms a valid header, so the inbound
+/// credential is never forwarded in the delegated one's place.
+pub(super) fn attach_delegated_tokens(
+    ctx: &mut HttpFilterContext<'_>,
+    extensions: Option<&Extensions>,
+) -> Result<usize, Rejection> {
+    let Some(raw) = extensions.and_then(|ext| ext.raw_credentials.as_ref()) else {
+        return Ok(0);
     };
-    let Some(raw) = ext.raw_credentials.as_ref() else {
-        return 0;
-    };
+    let outbound = delegated_headers(raw);
+    if outbound.is_empty() {
+        if raw.delegated_tokens.is_empty() {
+            return Ok(0);
+        }
+        tracing::warn!(
+            target: "policy.filter",
+            "refusing to forward the request: no delegated token forms a valid upstream header, \
+             so the inbound credential would travel in its place",
+        );
+        return Err(delegation_failed_rejection());
+    }
+    refuse_unstrippable_inbound(raw)?;
+    let attached: std::collections::HashSet<http::header::HeaderName> =
+        outbound.iter().map(|(name, _)| name.clone()).collect();
+    let count = outbound.len();
+    ctx.request_headers_to_set.extend(outbound);
+    for inbound in raw.inbound_tokens.values() {
+        strip_inbound_header(ctx, &inbound.source, &attached);
+    }
+    Ok(count)
+}
 
-    // Stable-order the tokens before we attach. `delegated_tokens` is
-    // a `HashMap`, so iteration order is non-deterministic — two
-    // tokens targeting the same outbound header would otherwise
-    // produce order-dependent results (praxis's
-    // `request_headers_to_set` is overwrite semantics). Sorting by
-    // `(outbound_header_lc, audience)` gives first-writer-wins where
-    // "first" is alphabetically lowest audience for that header.
+/// Refuse delegation while an inbound credential in `raw` sits where it
+/// cannot be stripped.
+///
+/// # Errors
+///
+/// Returns [`unstrippable_credential_rejection`] for such a credential.
+///
+/// [`unstrippable_credential_rejection`]: unstrippable_credential_rejection
+fn refuse_unstrippable_inbound(
+    raw: &ppe::praxis_policy_core::extensions::raw_credentials::RawCredentialsExtension,
+) -> Result<(), Rejection> {
+    let Some(inbound) = raw
+        .inbound_tokens
+        .values()
+        .find(|inbound| inbound_source_header(&inbound.source).is_none())
+    else {
+        return Ok(());
+    };
+    tracing::warn!(
+        target: "policy.filter",
+        source = %inbound.source,
+        "refusing to forward a delegated token: the inbound credential cannot be stripped \
+         from the upstream request",
+    );
+    Err(unstrippable_credential_rejection())
+}
+
+/// The `(header, value)` pairs for the delegated tokens in `raw`.
+///
+/// Returns one token per header, choosing the first valid token by audience
+/// in ascending order when delegators target the same header.
+fn delegated_headers(
+    raw: &ppe::praxis_policy_core::extensions::raw_credentials::RawCredentialsExtension,
+) -> Vec<(http::header::HeaderName, http::header::HeaderValue)> {
     let mut sorted: Vec<&_> = raw.delegated_tokens.values().collect();
     sorted.sort_by(|a, b| {
         a.outbound_header
@@ -2610,17 +2827,12 @@ pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extension
             .cmp(&b.outbound_header.to_ascii_lowercase())
             .then_with(|| a.audience.cmp(&b.audience))
     });
-
-    let mut attached_outbound: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut count = 0;
+    let mut out: Vec<(http::header::HeaderName, http::header::HeaderValue)> = Vec::new();
     for tok in sorted {
-        let outbound_lc = tok.outbound_header.to_ascii_lowercase();
-        if !attached_outbound.insert(outbound_lc.clone()) {
-            // A token for this outbound header was already attached
-            // earlier in the sorted pass — refuse to overwrite. Warn
-            // loudly so an operator notices the policy ambiguity
-            // (two delegators racing for the same header is almost
-            // always a mistake in route/global config layering).
+        let Some((name, value)) = delegated_header(tok) else {
+            continue;
+        };
+        if out.iter().any(|(attached, _)| *attached == name) {
             tracing::warn!(
                 target: "policy.filter",
                 outbound_header = %tok.outbound_header,
@@ -2630,56 +2842,141 @@ pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extension
             );
             continue;
         }
-        let Ok(name) = http::header::HeaderName::try_from(tok.outbound_header.as_str()) else {
+        out.push((name, value));
+    }
+    out
+}
+
+/// The upstream header for one delegated token, or `None` (logged) when its
+/// name or value is not valid HTTP.
+fn delegated_header(
+    tok: &ppe::praxis_policy_core::extensions::raw_credentials::RawDelegatedToken,
+) -> Option<(http::header::HeaderName, http::header::HeaderValue)> {
+    let Ok(name) = http::header::HeaderName::try_from(tok.outbound_header.as_str()) else {
+        tracing::warn!(
+            target: "policy.filter",
+            header = %tok.outbound_header,
+            "delegated token outbound_header is not a valid HTTP header name; skipping",
+        );
+        return None;
+    };
+    // Zeroized so the prefixed plaintext is wiped once the value copies it.
+    let credential = zeroize::Zeroizing::new(format!("{}{}", tok.outbound_prefix, tok.token.as_str()));
+    let Ok(value) = http::header::HeaderValue::try_from(credential.as_str()) else {
+        tracing::warn!(
+            target: "policy.filter",
+            audience = %tok.audience,
+            "minted token bytes are not a valid HTTP header value; skipping",
+        );
+        return None;
+    };
+    Some((name, value))
+}
+
+/// Remove the header carrying an inbound credential, unless a delegated token
+/// overwrites it.
+fn strip_inbound_header(
+    ctx: &mut HttpFilterContext<'_>,
+    source: &Credential,
+    attached: &std::collections::HashSet<http::header::HeaderName>,
+) {
+    let Some(source_header) = inbound_source_header(source) else {
+        return;
+    };
+    match http::header::HeaderName::try_from(source_header) {
+        Ok(name) if attached.contains(&name) => {},
+        Ok(name) => ctx.request_headers_to_remove.push(name),
+        Err(_) => tracing::warn!(
+            target: "policy.filter",
+            header = source_header,
+            "inbound credential source is not a valid HTTP header name; cannot strip",
+        ),
+    }
+}
+
+/// Rejection for a delegated token that would travel beside an inbound
+/// credential the filter cannot strip. HTTP 500: the policy is
+/// misconfigured, and the body names no credential.
+fn unstrippable_credential_rejection() -> Rejection {
+    Rejection::status(500)
+        .with_header("Content-Type", "text/plain")
+        .with_header(VIOLATION_HEADER, "policy.unstrippable_credential")
+        .with_body(Bytes::from_static(
+            b"policy: a delegated token cannot be forwarded while the inbound credential \
+              sits in a location the filter cannot strip from the upstream request",
+        ))
+}
+
+/// Rejection for a delegation whose every token failed to form an upstream
+/// header. HTTP 500: the body names no credential.
+fn delegation_failed_rejection() -> Rejection {
+    Rejection::status(500)
+        .with_header("Content-Type", "text/plain")
+        .with_header(VIOLATION_HEADER, "policy.delegation_failed")
+        .with_body(Bytes::from_static(
+            b"policy: no delegated token could be attached to the upstream request",
+        ))
+}
+
+/// Startup warnings for fallbacks that admit on identity alone, skipping the
+/// policy's HTTP rules and request assertions.
+pub(super) fn identity_only_fallback_warnings(
+    cfg: &PolicyFilterConfig,
+    mcp_routes: bool,
+    llm_routes: bool,
+) -> Vec<&'static str> {
+    let no_model = (llm_routes && !cfg.llm.require_model).then_some(
+        "policy declares HTTP rules or request assertions alongside `llm.require_model: false`: a \
+         request body with no usable `model` is admitted on identity alone, without HTTP \
+         authorization, delegation or request assertions",
+    );
+    let unclassified = (mcp_routes && !cfg.require_protocol_metadata).then_some(
+        "policy declares HTTP rules or request assertions alongside `require_protocol_metadata: \
+         false`: an unclassified request is admitted on identity alone, without HTTP \
+         authorization, delegation or request assertions",
+    );
+    no_model.into_iter().chain(unclassified).collect()
+}
+
+/// Warn when the loaded policy declares `rate_limits:`, which runs the
+/// experimental limiter. Runs on every construction, so on every reload too.
+fn warn_on_rate_limits(policy_config: &ppe::praxis_policy_core::config::PolicyConfig, config_path: &str) {
+    if declares_rate_limits(policy_config) {
+        tracing::warn!(
+            target: "policy.filter",
+            config_path,
+            "policy declares `rate_limits:`; Policy rate limiting is experimental and outside its \
+             semver guarantees, and should not be relied on in production",
+        );
+    }
+}
+
+/// Whether any layer of `policy_config` declares a `rate_limits:` block.
+pub(super) fn declares_rate_limits(policy_config: &ppe::praxis_policy_core::config::PolicyConfig) -> bool {
+    let global = &policy_config.global;
+    // Parsing moves top-level `groups:` into `global.bundles`; read both.
+    global.rate_limits.is_some()
+        || global.bundles.values().any(|group| group.rate_limits.is_some())
+        || global.defaults.values().any(|group| group.rate_limits.is_some())
+        || policy_config.groups.values().any(|group| group.rate_limits.is_some())
+        || policy_config.routes.iter().any(|route| route.rate_limits.is_some())
+}
+
+/// Map a Policy credential location to the HTTP header that can be stripped.
+fn inbound_source_header(source: &Credential) -> Option<&str> {
+    match source {
+        Credential::Header { name } => Some(name),
+        Credential::Cookie { .. } => Some(http::header::COOKIE.as_str()),
+        Credential::QueryParam { .. } => None,
+        other => {
             tracing::warn!(
                 target: "policy.filter",
-                header = %tok.outbound_header,
-                "delegated token outbound_header is not a valid HTTP header name; skipping",
+                source = %other,
+                "unsupported inbound credential location; cannot strip",
             );
-            attached_outbound.remove(&outbound_lc);
-            continue;
-        };
-        // `tok.token` is already `Zeroizing`; keep the prefixed plaintext
-        // in a `Zeroizing` buffer too so it is wiped as soon as the
-        // `HeaderValue` has copied its bytes, rather than lingering on the
-        // heap until the allocator reuses the page.
-        let credential = zeroize::Zeroizing::new(format!("{}{}", tok.outbound_prefix, tok.token.as_str()));
-        let Ok(value) = http::header::HeaderValue::try_from(credential.as_str()) else {
-            tracing::warn!(
-                target: "policy.filter",
-                audience = %tok.audience,
-                "minted token bytes are not a valid HTTP header value; skipping",
-            );
-            attached_outbound.remove(&outbound_lc);
-            continue;
-        };
-        ctx.request_headers_to_set.push((name, value));
-        count += 1;
+            None
+        },
     }
-
-    // Strip the inbound credential headers — but only when we
-    // actually attached delegated tokens, and only headers that are
-    // NOT also being set by an outbound (collision case —
-    // `request_headers_to_set` overwrites, no remove needed).
-    if count > 0 {
-        for inbound in raw.inbound_tokens.values() {
-            let normalized = inbound.source_header.to_ascii_lowercase();
-            if attached_outbound.contains(&normalized) {
-                continue;
-            }
-            if let Ok(n) = http::header::HeaderName::try_from(inbound.source_header.as_str()) {
-                ctx.request_headers_to_remove.push(n);
-            } else {
-                tracing::warn!(
-                    target: "policy.filter",
-                    header = %inbound.source_header,
-                    "inbound source_header is not a valid HTTP header name; cannot strip",
-                );
-            }
-        }
-    }
-
-    count
 }
 
 // -----------------------------------------------------------------------------
