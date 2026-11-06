@@ -263,6 +263,11 @@ branch request hooks, and TCP connect/disconnect hooks. Each guard ends with
 its hook, including cancellation and errors. Labels use registered filter
 types, never request paths or client-supplied values.
 
+Response-body hooks resolve their gauge lazily on the first chunk and retain
+that recorder handle in request extensions. Later chunks reuse the handle;
+the active guard still ends after each hook. New requests resolve their own
+handles, so pipeline construction cannot capture an uninstalled recorder.
+
 `praxis_body_buffer_bytes` measures retained payload bytes accumulated by
 `BodyBuffer`. Freezing a buffer transfers its accounting to the `Bytes` owner;
 the gauge decreases only when the final shared owner drops. Cloning a body
