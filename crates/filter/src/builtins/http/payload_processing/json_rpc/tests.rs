@@ -58,7 +58,7 @@ fn reject_zero_max_body_bytes() {
 
 #[test]
 fn rejects_max_body_bytes_above_ceiling() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("max_body_bytes: 67108865").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!("max_body_bytes: {}", usize::MAX)).unwrap();
     let err = JsonRpcFilter::from_config(&yaml).err().expect("should fail");
     assert!(
         err.to_string().contains("exceeds maximum"),
@@ -1351,4 +1351,136 @@ async fn no_strip_before_end_of_stream() {
         ctx.request_headers_to_remove.is_empty(),
         "pre-EOS should not modify the remove list"
     );
+}
+
+#[tokio::test]
+async fn large_late_method_and_batches_follow_configured_policy() {
+    let padding = "x".repeat(1_048_576);
+    let message = format!(r#"{{"jsonrpc":"2.0","params":{{"text":"{padding}"}},"method":"late/call","id":7}}"#);
+    let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(message.clone()));
+    assert!(matches!(
+        make_filter().on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::Release
+    ));
+    assert_promoted_header(&ctx, "X-Json-Rpc-Method", "late/call");
+    assert_promoted_header(&ctx, "X-Json-Rpc-Id", "7");
+    assert_eq!(ctx.filter_results.get("json_rpc").unwrap().get("kind"), Some("request"));
+    assert_eq!(body.as_ref().unwrap().as_ref(), message.as_bytes());
+    check_large_batch_policies(&req, &message).await;
+}
+
+/// Check first-item, empty, oversized and default batch policies on the same large message.
+async fn check_large_batch_policies(req: &crate::Request, message: &str) {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("batch_policy: first\nmax_batch_size: 2").unwrap();
+    let first_filter = JsonRpcFilter::from_config(&yaml).unwrap();
+    let batch = format!(r#"[{message},{{"jsonrpc":"2.0","method":"other"}}]"#);
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    let mut body = Some(Bytes::from(batch));
+    assert!(matches!(
+        first_filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::Release
+    ));
+    assert_promoted_header(&ctx, "X-Json-Rpc-Method", "late/call");
+    assert_promoted_header(&ctx, "X-Json-Rpc-Kind", "batch");
+    assert_eq!(ctx.filter_results.get("json_rpc").unwrap().get("batch_len"), Some("2"));
+
+    for invalid in ["[]".to_owned(), format!(r#"[{message},{message},{message}]"#)] {
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        let mut body = Some(Bytes::from(invalid));
+        assert!(
+            matches!(first_filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(), FilterAction::Reject(r) if r.status == 400)
+        );
+        assert!(ctx.extra_request_headers.is_empty());
+        assert!(!ctx.filter_results.contains_key("json_rpc"));
+        assert_eq!(ctx.request_headers_to_remove.len(), 3);
+    }
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    let mut body = Some(Bytes::from(format!(r#"[{message}]"#)));
+    assert!(
+        matches!(make_filter().on_request_body(&mut ctx, &mut body, true).await.unwrap(), FilterAction::Reject(r) if r.status == 400)
+    );
+}
+
+/// Invalid envelopes put each fault after a large, valid parameter value.
+fn large_invalid_rpc_bodies(padding: &str) -> [String; 3] {
+    [
+        format!(r#"{{"jsonrpc":"2.0","params":"{padding}","method":42}}"#),
+        format!(r#"{{"jsonrpc":"2.0","params":"{padding}","id":1}}"#),
+        format!(r#"{{"jsonrpc":"2.0","params":"{padding}","method":"call"}}garbage"#),
+    ]
+}
+
+/// Check the configured invalid-envelope policy without weakening its outcome.
+fn assert_invalid_rpc_action(mode: &str, action: Result<FilterAction, crate::FilterError>) {
+    match mode {
+        "continue" => assert!(matches!(action, Ok(FilterAction::Continue))),
+        "reject" => assert!(matches!(action, Ok(FilterAction::Reject(r)) if r.status == 400)),
+        "error" => {
+            action.expect_err("registered filter must return FilterError");
+        },
+        _ => unreachable!(),
+    }
+}
+
+#[tokio::test]
+async fn large_invalid_envelopes_obey_modes_and_strip_classifier_headers() {
+    let padding = "x".repeat(1_048_576);
+    let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
+    let invalid_bodies = large_invalid_rpc_bodies(&padding);
+    for mode in ["continue", "reject", "error"] {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!("on_invalid: {mode}")).unwrap();
+        let filter = JsonRpcFilter::from_config(&yaml).unwrap();
+        for input in &invalid_bodies {
+            let mut ctx = crate::test_utils::make_filter_context(&req);
+            let original = Bytes::copy_from_slice(input.as_bytes());
+            let mut body = Some(original.clone());
+            let action = filter.on_request_body(&mut ctx, &mut body, true).await;
+            assert_invalid_rpc_action(mode, action);
+            assert_eq!(body.as_ref(), Some(&original));
+            assert!(ctx.extra_request_headers.is_empty());
+            assert!(!ctx.filter_results.contains_key("json_rpc"));
+            assert_eq!(
+                ctx.request_headers_to_remove.len(),
+                3,
+                "classifier names must be stripped even on failure"
+            );
+        }
+    }
+}
+
+
+#[tokio::test]
+async fn invalid_utf8_in_ignored_json_rpc_params_obeys_policy() {
+    let filter = make_reject_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
+    for input in [
+        b"{\"jsonrpc\":\"2.0\",\"method\":\"call\",\"params\":\"\xff\"}".as_slice(),
+        b"{\"jsonrpc\":\"2.0\",\"method\":\"call\",\"params\":{\"\xff\":1}}".as_slice(),
+    ] {
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let original = Bytes::copy_from_slice(input);
+        serde_json::from_slice::<serde_json::Value>(&original).expect_err("reference must reject invalid UTF-8");
+        let mut body = Some(original.clone());
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Reject(r) if r.status == 400),
+            "input {input:?}"
+        );
+        assert_eq!(body.as_ref(), Some(&original));
+        assert!(ctx.extra_request_headers.is_empty());
+        assert!(!ctx.filter_results.contains_key("json_rpc"));
+        assert_eq!(ctx.request_headers_to_remove.len(), 3);
+    }
+
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(
+        "{\"jsonrpc\":\"2.0\",\"method\":\"call\",\"params\":\"café\"}",
+    ));
+    assert!(matches!(
+        filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::Release
+    ));
+    assert_promoted_header(&ctx, "X-Json-Rpc-Method", "call");
 }

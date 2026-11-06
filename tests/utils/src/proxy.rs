@@ -197,11 +197,7 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
 /// the server's `configure_pipeline`.
 fn configure_test_pipeline(pipeline: &mut FilterPipeline, config: &Config) {
     pipeline
-        .apply_body_limits(
-            config.body_limits.max_request_bytes,
-            config.body_limits.max_response_bytes,
-            config.insecure_options.allow_unbounded_body,
-        )
+        .configure_body_limits(&config.body_limits, config.insecure_options.allow_unbounded_body)
         .unwrap();
     pipeline.set_record_filter_duration_metrics(config.metrics.filter_duration);
     pipeline.set_route_templates(Arc::new(praxis_core::config::RouteTemplates::compile(

@@ -84,10 +84,11 @@ pub(super) fn store_canonical_request_body(ctx: &mut PingoraRequestCtx, body: By
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::significant_drop_tightening,
+    clippy::too_many_lines,
     reason = "tests"
 )]
 mod tests {
-    use praxis_core::config::{ABSOLUTE_MAX_BODY_BYTES, FailureMode};
+    use praxis_core::config::{DEFAULT_MAX_BUFFER_BYTES, FailureMode};
     use praxis_filter::{BodyMode, FilterRegistry};
 
     use super::*;
@@ -161,7 +162,10 @@ mod tests {
 
     #[test]
     fn selected_upstream_body_limit_falls_back_to_absolute_max() {
-        assert_eq!(selected_upstream_body_limit(&empty_pipeline()), ABSOLUTE_MAX_BODY_BYTES);
+        assert_eq!(
+            selected_upstream_body_limit(&empty_pipeline()),
+            DEFAULT_MAX_BUFFER_BYTES
+        );
     }
 
     #[test]
@@ -242,6 +246,42 @@ mod tests {
             Some(&chunks),
             "a body a retry may replay must be kept"
         );
+    }
+
+    #[test]
+    fn transformed_replay_boundary_retains_only_complete_bodies() {
+        use std::sync::Arc;
+
+        for adapted in [false, true] {
+            for size in [replay_cap() - 1, replay_cap(), replay_cap() + 1] {
+                let owner: Arc<[u8]> = vec![b'x'; size].into();
+                let body = Bytes::from_owner(Arc::clone(&owner));
+                let mut ctx = make_ctx();
+                if adapted {
+                    store_adapted_request_body(&mut ctx, Some(body));
+                    assert_eq!(ctx.adapted_request_body_len, Some(size));
+                    ctx.adapted_request_body = None;
+                    let retained = ctx.retained_adapted_request_body.as_ref().unwrap();
+                    assert_eq!(
+                        retained.iter().map(Bytes::len).sum::<usize>(),
+                        if size <= replay_cap() { size } else { 0 }
+                    );
+                    assert_eq!(Arc::strong_count(&owner), if size <= replay_cap() { 2 } else { 1 });
+                    ctx.retained_adapted_request_body = None;
+                } else {
+                    store_canonical_request_body(&mut ctx, body);
+                    assert_eq!(ctx.mutated_request_body_len, Some(size));
+                    ctx.pre_read_body = None;
+                    assert_eq!(ctx.retained_pre_read_body.is_some(), size <= replay_cap());
+                    if let Some(retained) = &ctx.retained_pre_read_body {
+                        assert_eq!(retained.iter().map(Bytes::len).sum::<usize>(), size);
+                    }
+                    assert_eq!(Arc::strong_count(&owner), if size <= replay_cap() { 2 } else { 1 });
+                    ctx.retained_pre_read_body = None;
+                }
+                assert_eq!(Arc::strong_count(&owner), 1, "no body remains pinned");
+            }
+        }
     }
 
     #[test]

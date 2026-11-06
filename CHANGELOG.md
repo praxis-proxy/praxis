@@ -19,12 +19,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
+- Apply the policy filter's configured failure mode when a classified tool
+  response is malformed JSON or lacks both a result and a valid JSON-RPC error.
+  Policies with tool response hooks no longer silently skip those inputs;
+  fail-closed pipelines stop delivery before the buffered payload escapes.
+- Validate the complete input's UTF-8 before `json_body` rewrites or
+  `json_body_field` header promotion. Invalid bytes in ignored JSON values
+  can no longer produce trusted metadata or bypass the configured invalid-input
+  behavior.
 - Disable TLS session resumption on listeners with client authentication
   and TLS hot-reload. A handshake authenticated before a CA/CRL reload
   could finish afterward and cache stale authentication, allowing new
   connections to bypass the updated trust. New connections now perform
   full certificate verification; static mTLS and non-mTLS listeners
   retain resumption.
+
+### Changed
+
+- Clarify that the default Pingora shutdown grace period is capped at five
+  seconds, including for streaming responses, regardless of a larger
+  `shutdown_timeout_secs` value.
 
 ### Added
 
@@ -87,6 +101,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Default accumulated bodies and buffered subrequest responses to a 64 MiB
+  cap, configurable through `body_limits.max_buffer_bytes`. The cap covers
+  explicit filter limits, runtime-selected buffering, nested pipelines, and
+  iterative-router state, including after reload. Request and response transfer
+  limits retain their 10 MiB defaults and remain independent for streams.
+  Larger JSON, policy, gRPC-Web, and iterative-router buffer settings are
+  accepted subject to the configured cap.
+- Keep Pingora uploads open while runtime-selected buffering withholds
+  non-final chunks, instead of sending a premature upstream end marker.
+
 - The policy engine is updated to PPE 0.5.0, which tightens OAuth
   `delegate(...)` by default: a token-exchange response must name an
   access-token or JWT `issued_token_type`, unrequested scopes outside
@@ -100,6 +124,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   name, rejecting duplicates with `KvRegistryError::AlreadyRegistered`.
 - `KvStoreRegistry::get_or_create_memory` deliberately creates an
   in-memory store.
+- **Breaking:** every `sticky_sessions` cluster now requires a `storage`
+  field, and startup fails with `missing field 'storage'` when it is
+  omitted. The only value is `local`, which keeps session bindings in the
+  proxy process: they are not shared between replicas and do not survive a
+  restart, so stickiness behind a load balancer is per-process. That was
+  already the behaviour; it is now a stated choice rather than a silent
+  default. Add `storage: local` to each cluster to keep the current
+  behaviour. See `docs/filters/http/traffic_management/sticky_sessions.md`.
 
 ### Removed
 
@@ -114,6 +146,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   config's top-level `clusters:` list, or `&[]` when none exists.
 
 ### Fixed
+
+- Remove forbidden `Content-Length` and `Transfer-Encoding` headers from
+  204 responses after response filters run, preserving valid downstream
+  framing for the following response.
+
+- Preserve valid `Content-Length` metadata on Hyper HTTP/1 304 responses
+  while keeping them bodyless, including responses with huge hypothetical
+  lengths.
+
+- Count an original request-body prefix once across Pingora retries while
+  continuing to count newly received tail bytes. Stale-connection retries also
+  respect the 64 KiB original and final transformed body retention ceiling.
+  Requests whose streaming writer output was not retained now return the
+  upstream error instead of retrying with an unsafe reconstruction.
+
+- Decode `grpc-web-text` request bodies during pre-read inspection before
+  forwarding them to HTTP/2 backends. Invalid base64 now follows the filter
+  rejection policy even before request-phase state is initialized.
+
+- Flush small HTTP/1.1 server-sent events promptly when the upstream supplies
+  `Content-Length`. Body-bearing event streams use chunked downstream framing;
+  the upstream length still detects truncated responses.
 
 - A delegated credential is sent with its own prefix rather than always
   `Bearer `, so a Vault credential with no `scheme_prefix` goes out bare
