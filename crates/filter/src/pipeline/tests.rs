@@ -3,6 +3,8 @@
 
 //! Tests for pipeline construction, body capabilities, execution, and ordering warnings.
 
+mod activity_metrics;
+
 use std::{
     collections::HashMap,
     sync::{
