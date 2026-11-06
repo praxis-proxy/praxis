@@ -6892,10 +6892,7 @@ mod filter_duration_metrics_tests {
 
         let metrics = crate::test_utils::render_metrics();
         assert!(
-            !metrics
-                .lines()
-                .any(|line| line.starts_with("praxis_filter_duration_seconds")
-                    && line.contains("filter=\"disabled_only\"")),
+            !metrics.contains("filter=\"disabled_only\""),
             "disabled filter metrics should not record this filter: {metrics}"
         );
     }

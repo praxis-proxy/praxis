@@ -151,6 +151,7 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["logg
 tokio-tungstenite = "0.30.0"
 thiserror = "2.0.21"
 tikv-jemallocator = "0.7.0"
+tikv-jemalloc-ctl = "0.7.0"
 tikv-jemalloc-sys = "0.7.0"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"

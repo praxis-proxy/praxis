@@ -319,7 +319,6 @@ pub(super) async fn run_request_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
-    let _activity = crate::metrics::FilterActivity::new(http_filter.name());
     let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:request", http_filter.name()),
@@ -393,17 +392,12 @@ pub(super) async fn run_request_filter(
 /// streaming-terminal action is logged and treated as `Continue`. When
 /// `failure_mode` is [`FailureMode::Open`], an error is logged and treated as
 /// `Continue`.
-#[expect(
-    clippy::too_many_lines,
-    reason = "hook timing and cancellation-safe activity instrumentation"
-)]
 pub(super) async fn run_request_head_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<Option<Rejection>, FilterError> {
-    let _activity = crate::metrics::FilterActivity::new(http_filter.name());
     let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:request_head", http_filter.name()),
@@ -472,10 +466,6 @@ fn dispatch_request_head_result(
 
 /// Run a single request body filter hook with tracing and metrics.
 #[expect(clippy::too_many_arguments, reason = "metrics_enabled flag is required per hook")]
-#[expect(
-    clippy::too_many_lines,
-    reason = "hook timing and cancellation-safe activity instrumentation"
-)]
 pub(super) async fn run_request_body_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
@@ -484,7 +474,6 @@ pub(super) async fn run_request_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
-    let _activity = crate::metrics::FilterActivity::new(http_filter.name());
     let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:request_body", http_filter.name()),
@@ -557,7 +546,6 @@ pub(super) async fn run_selected_upstream_request_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<SelectedUpstreamBodyOutcome, FilterError> {
-    let _activity = crate::metrics::FilterActivity::new(http_filter.name());
     let filter_span = body_hook_span(http_filter.name(), "selected_upstream_request_body");
     // A read-only filter works on a scratch copy so it cannot change the body
     // it was promised not to; a writer that errors gets its partial edit
@@ -605,7 +593,6 @@ pub(super) async fn run_bound_upstream_request_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<(BoundUpstreamBodyOutcome, bool), FilterError> {
-    let _activity = crate::metrics::FilterActivity::new(http_filter.name());
     // A read-only participant works on a scratch copy so it cannot change the
     // body it was promised not to; a writer that errors gets its partial edit
     // undone before a fail-open swallows the error. The flag says whether the
@@ -646,7 +633,6 @@ pub(super) fn run_response_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
-    let _activity = crate::metrics::FilterActivity::new(http_filter.name());
     let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:response_body", http_filter.name()),
@@ -694,7 +680,6 @@ pub(super) async fn run_response_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
-    let _activity = crate::metrics::FilterActivity::new(http_filter.name());
     let filter_span = debug_span!(
         "filter",
         "otel.name" = %format_args!("filter:{}:response", http_filter.name()),

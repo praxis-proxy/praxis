@@ -421,15 +421,10 @@ idle entries keep their scheduled expiry. No active upstream connection or
 response body is interrupted to reclaim idle capacity.
 
 Correlate pressure with `praxis_http_active_requests{listener}` and
-`praxis_tcp_active_connections{listener}` for in-flight work,
-`praxis_body_buffer_bytes` for accumulated/frozen body payload bytes still
-owned by the pipeline (including shared Bytes clones), and
-`praxis_filter_active{filter}` for hooks running or awaiting external work.
-The existing opt-in `praxis_filter_duration_seconds` histogram shows which
-filter consumes time. These are attribution signals, not a per-filter heap
-profiler: private filter allocations and transport buffers are outside the
-body-buffer gauge. Labels use registered filter types and configured
-listeners, never request paths or arbitrary client values.
+`praxis_tcp_active_connections{listener}` for in-flight work. The existing
+opt-in `praxis_filter_duration_seconds` histogram shows which filter consumes
+time. Labels use registered filter types and configured listeners, never
+request paths or arbitrary client values.
 
 Action signals belong to one server instance and survive pipeline reloads;
 stopping one embedded server does not reset another's controller. Exported

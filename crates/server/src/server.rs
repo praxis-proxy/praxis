@@ -1736,7 +1736,7 @@ filter_chains:
         let bands = serde_yaml::from_str("cpu: {scaling: 0.7, saturation: 0.95}").unwrap();
         let mut sibling_monitor = praxis_core::overload::Monitor::with_bands(bands);
         for (monitor, signal) in [(&mut first_monitor, &first), (&mut sibling_monitor, &sibling)] {
-            monitor.set_cpu_sample_for_test(Some((0.3, true)));
+            monitor.set_cpu_sample_for_test(Some((0.8, true)));
             sample_overload(
                 monitor,
                 &mut praxis_core::overload::TransitionTracker::default(),
@@ -1759,8 +1759,10 @@ filter_chains:
                 .parse::<f64>()
                 .unwrap()
         };
-        assert!(pressure(&scrape, &first) > 0.0);
-        assert!(pressure(&scrape, &sibling).abs() < f64::EPSILON);
+        let first_pressure = pressure(&scrape, &first);
+        let sibling_pressure = pressure(&scrape, &sibling);
+        assert!(sibling_pressure > 0.0);
+        assert!(first_pressure > sibling_pressure);
         reset_overload_actions(&first, true);
         let after_stop = praxis_protocol::http::metrics::render_prometheus().unwrap();
         assert!(
@@ -1768,9 +1770,10 @@ filter_chains:
             "shutdown must clear the pressure gauge"
         );
         assert!(
-            pressure(&after_stop, &sibling).abs() < f64::EPSILON,
+            (pressure(&after_stop, &sibling) - sibling_pressure).abs() < f64::EPSILON,
             "shutdown must preserve the sibling's pressure gauge"
         );
+        reset_overload_actions(&sibling, true);
     }
 
     #[tokio::test]
