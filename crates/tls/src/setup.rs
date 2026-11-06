@@ -1019,6 +1019,10 @@ mod tests {
 
         let crl_one = tempfile::NamedTempFile::new()?;
         let crl_two = tempfile::NamedTempFile::new()?;
+        // Distinct contents keep the two digests distinct, so a reversed CRL
+        // order fails instead of comparing identical empty files.
+        std::fs::write(crl_one.path(), b"first CRL")?;
+        std::fs::write(crl_two.path(), b"second CRL, different length")?;
         let crl_one_path = crl_one.path().to_str().ok_or("CRL path is not UTF-8")?.to_owned();
         let crl_two_path = crl_two.path().to_str().ok_or("CRL path is not UTF-8")?.to_owned();
         let expected = vec![
