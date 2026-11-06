@@ -90,8 +90,8 @@ fn chat(tools: &[&str], extra: serde_json::Value) -> serde_json::Value {
         ],
         "tools": tools,
     });
-    if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
-        body.extend(extra.clone());
+    if let (Some(body), serde_json::Value::Object(extra)) = (body.as_object_mut(), extra) {
+        body.extend(extra);
     }
     body
 }
@@ -172,6 +172,16 @@ fn requests_the_proxy_cannot_account_for_are_denied() {
             "tools": [{"type": "mcp", "server_url": "https://tools.example.com"}],
         }),
         serde_json::json!({"model": "gpt-4o", "messages": [], "max_tokens": "lots"}),
+        // A tool offered through a field the proxy does not model.
+        chat(
+            &["lookup_invoice"],
+            serde_json::json!({"mcp_servers": [{"type": "url", "url": "https://tools.example.com", "name": "funds"}]}),
+        ),
+        serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [],
+            "Tools": [{"type": "function", "function": {"name": "transfer_funds"}}],
+        }),
     ];
     for (body, raw) in send_all(&unaccounted) {
         assert_eq!(

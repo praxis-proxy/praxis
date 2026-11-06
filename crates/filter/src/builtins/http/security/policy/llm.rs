@@ -31,8 +31,81 @@ const INPUT_TEXT_TYPES: &[&str] = &["input_text", "text", "output_text", "reason
 /// reasoning) that carry text, in projection order.
 const INPUT_ITEM_TEXT_FIELDS: &[&str] = &["arguments", "input", "output", "text", "content", "summary"];
 
-/// Top-level fields of request shapes the parts normalizer does not cover.
-const UNNORMALIZED_REQUEST_FIELDS: &[&str] = &["input", "instructions", "prompt"];
+/// Top-level Chat Completions keys the parts normalizer models or knows
+/// offer no tool, add no instruction, and leave the completion cap alone.
+///
+/// Any other key, including a case variant of one of these, leaves the parts
+/// absent: a lenient backend may act on what the normalizer cannot see.
+const CHAT_REQUEST_KEYS: &[&str] = &[
+    "model",
+    "messages",
+    "tools",
+    "tool_choice",
+    "functions",
+    "function_call",
+    "max_tokens",
+    "max_completion_tokens",
+    "n",
+    "temperature",
+    "top_p",
+    "stop",
+    "stream",
+    "stream_options",
+    "frequency_penalty",
+    "presence_penalty",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
+    "response_format",
+    "seed",
+    "user",
+    "metadata",
+    "parallel_tool_calls",
+    "store",
+    "service_tier",
+    "reasoning_effort",
+];
+
+/// Top-level Anthropic Messages keys, on the terms of [`CHAT_REQUEST_KEYS`].
+const MESSAGES_REQUEST_KEYS: &[&str] = &[
+    "model",
+    "messages",
+    "system",
+    "tools",
+    "tool_choice",
+    "max_tokens",
+    "stop_sequences",
+    "temperature",
+    "top_p",
+    "top_k",
+    "metadata",
+    "stream",
+    "thinking",
+    "service_tier",
+];
+
+/// Keys of a conversation message, across both shapes.
+const MESSAGE_KEYS: &[&str] = &[
+    "role",
+    "content",
+    "name",
+    "tool_calls",
+    "tool_call_id",
+    "function_call",
+    "refusal",
+];
+
+/// Keys of a Chat Completions `{"type": "function", "function": ...}` tool entry.
+const FUNCTION_TOOL_KEYS: &[&str] = &["type", "function"];
+
+/// Keys of a Chat Completions function definition.
+const FUNCTION_KEYS: &[&str] = &["name", "description", "parameters", "strict"];
+
+/// Keys of an Anthropic custom tool.
+const CUSTOM_TOOL_KEYS: &[&str] = &["type", "name", "description", "input_schema", "cache_control"];
+
+/// Keys of a legacy Chat Completions `functions` entry.
+const LEGACY_FUNCTION_KEYS: &[&str] = &["name", "description", "parameters"];
 
 /// Maximum nesting depth followed into content parts (e.g. a `tool_result`
 /// block whose `content` is itself an array of parts).
@@ -338,7 +411,7 @@ fn normalize_parts(body: &serde_json::Value) -> Result<LlmRequestParts, Unsuppor
         .get("messages")
         .and_then(serde_json::Value::as_array)
         .ok_or(Unsupported)?;
-    if UNNORMALIZED_REQUEST_FIELDS.iter().any(|key| object.contains_key(*key)) {
+    if !(keys_within(object, CHAT_REQUEST_KEYS) || keys_within(object, MESSAGES_REQUEST_KEYS)) {
         return Err(Unsupported);
     }
     Ok(LlmRequestParts {
@@ -352,6 +425,19 @@ fn normalize_parts(body: &serde_json::Value) -> Result<LlmRequestParts, Unsuppor
         stop_sequences: stop_sequences(object)?,
         stream: optional(object, "stream", serde_json::Value::as_bool)?,
     })
+}
+
+/// Whether every key of `object` is exactly one of `allowed`.
+fn keys_within(object: &JsonObject, allowed: &[&str]) -> bool {
+    object.keys().all(|key| allowed.contains(&key.as_str()))
+}
+
+/// The object `value`, when it has no key outside `allowed`.
+fn strict_object<'doc>(value: &'doc serde_json::Value, allowed: &[&str]) -> Result<&'doc JsonObject, Unsupported> {
+    value
+        .as_object()
+        .filter(|object| keys_within(object, allowed))
+        .ok_or(Unsupported)
 }
 
 /// Read an optional field; `null` counts as unset, any other unreadable value is unsupported.
@@ -388,6 +474,7 @@ fn instructions(
         push_instruction(&mut out, LlmInstructionRole::System, system)?;
     }
     for message in messages {
+        strict_object(message, MESSAGE_KEYS)?;
         let role = match message.get("role").and_then(serde_json::Value::as_str) {
             Some("system") => LlmInstructionRole::System,
             Some("developer") => LlmInstructionRole::Developer,
@@ -449,20 +536,25 @@ fn offered_tools(object: &JsonObject) -> Result<Vec<ToolMetadata>, Unsupported> 
 /// A Chat Completions function tool or an Anthropic custom tool.
 fn tool(entry: &serde_json::Value) -> Result<ToolMetadata, Unsupported> {
     match entry.get("type").map(serde_json::Value::as_str) {
-        Some(Some("function")) => named_tool(entry.get("function").ok_or(Unsupported)?, "parameters"),
-        Some(Some("custom")) | None => named_tool(entry, "input_schema"),
+        Some(Some("function")) => {
+            let function = strict_object(entry, FUNCTION_TOOL_KEYS)?
+                .get("function")
+                .ok_or(Unsupported)?;
+            named_tool(function, "parameters", FUNCTION_KEYS)
+        },
+        Some(Some("custom")) | None => named_tool(entry, "input_schema", CUSTOM_TOOL_KEYS),
         Some(_) => Err(Unsupported),
     }
 }
 
 /// An entry of the legacy Chat Completions `functions` list.
 fn legacy_function(entry: &serde_json::Value) -> Result<ToolMetadata, Unsupported> {
-    named_tool(entry, "parameters")
+    named_tool(entry, "parameters", LEGACY_FUNCTION_KEYS)
 }
 
 /// Tool metadata from an object carrying `name`, `description`, and a schema field.
-fn named_tool(value: &serde_json::Value, schema_key: &str) -> Result<ToolMetadata, Unsupported> {
-    let object = value.as_object().ok_or(Unsupported)?;
+fn named_tool(value: &serde_json::Value, schema_key: &str, allowed: &[&str]) -> Result<ToolMetadata, Unsupported> {
+    let object = strict_object(value, allowed)?;
     let name = optional(object, "name", serde_json::Value::as_str)?
         .filter(|name| !name.is_empty())
         .ok_or(Unsupported)?;
@@ -1647,6 +1739,18 @@ mod tests {
     }
 
     #[test]
+    fn inert_top_level_fields_keep_the_parts() {
+        for body in [
+            r#"{"model":"m","messages":[{"role":"user","content":"hi","name":"bob"}],"seed":7,"user":"u",
+            "response_format":{"type":"json_object"},"parallel_tool_calls":false,"store":false}"#,
+            r#"{"model":"m","messages":[],"tools":[{"name":"a","input_schema":{},"cache_control":{"type":"ephemeral"}}],
+            "top_k":5,"thinking":{"type":"disabled"},"max_tokens":16}"#,
+        ] {
+            assert!(request(body).parts().is_some(), "body {body} must keep its parts");
+        }
+    }
+
+    #[test]
     fn unknown_or_malformed_shapes_leave_parts_absent() {
         for body in [
             // Unknown tool types and shapes.
@@ -1673,6 +1777,29 @@ mod tests {
             r#"{"model":"m","messages":[],"instructions":"x"}"#,
             r#"{"model":"m","prompt":"hi"}"#,
             "not json",
+        ] {
+            assert!(request(body).parts().is_none(), "body {body} must leave parts absent");
+        }
+    }
+
+    #[test]
+    fn unrecognized_keys_leave_parts_absent() {
+        for body in [
+            // Top-level keys the normalizer cannot vouch for.
+            r#"{"model":"m","messages":[],"future_tool_list":[{"name":"transfer_funds"}]}"#,
+            r#"{"model":"m","messages":[],"mcp_servers":[{"type":"url","url":"https://x","name":"x"}]}"#,
+            r#"{"model":"m","messages":[],"web_search_options":{}}"#,
+            r#"{"model":"m","messages":[],"Tools":[{"name":"transfer_funds"}]}"#,
+            r#"{"model":"m","messages":[],"Max_Tokens":100000}"#,
+            // Chat-only and Anthropic-only keys mixed in one body.
+            r#"{"model":"m","messages":[],"system":"s","functions":[{"name":"a"}]}"#,
+            // Message and tool entry keys outside their shape.
+            r#"{"model":"m","messages":[{"Role":"system","content":"x"}]}"#,
+            r#"{"model":"m","messages":[{"role":"user","Content":"x"}]}"#,
+            r#"{"model":"m","messages":[],"tools":[{"name":"a","Type":"mcp"}]}"#,
+            r#"{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"a"},"server_url":"x"}]}"#,
+            r#"{"model":"m","messages":[],"tools":[{"type":"function","function":{"name":"a","Parameters":{}}}]}"#,
+            r#"{"model":"m","messages":[],"functions":[{"name":"a","input_schema":{}}]}"#,
         ] {
             assert!(request(body).parts().is_none(), "body {body} must leave parts absent");
         }
