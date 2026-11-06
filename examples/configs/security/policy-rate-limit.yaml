@@ -7,6 +7,11 @@
 # API-key caller. A denial is HTTP 429 with `Retry-After` and never reaches the
 # backend.
 #
+# The policy document at /etc/praxis/rate-limit-policy.yaml and the API-key
+# file it references must be provisioned before startup; see
+# tests/integration/fixtures/rate-limit-policy.yaml and api-keys.yaml for a
+# reference pair.
+#
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/security/policy-rate-limit.yaml
 

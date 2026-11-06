@@ -26,9 +26,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   both credentials. A policy that reads a query credential and also
   delegates fails to load.
 - Every policy hook now sees the request as the client sent it: the raw
-  query, the TCP peer as `http.client_address`, the validated authority
-  with its port, and a scheme taken from the downstream TLS state, never
-  from `X-Forwarded-Proto`. Before, response and body-phase hooks rebuilt
+  query, the effective client address as `http.client_address` (the TCP
+  peer, or with `trusted_proxies` the rightmost untrusted `X-Forwarded-For`
+  hop), the validated bare host as `http.host` (lowercased, no port), and a
+  scheme taken from the downstream TLS state, never from
+  `X-Forwarded-Proto`. Before, response and body-phase hooks rebuilt
   this from a request that earlier phases could already have changed, and
   the scheme was usually missing. Place `policy` before `path_rewrite`,
   `url_rewrite` and header-rewriting filters.
