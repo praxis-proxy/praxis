@@ -371,3 +371,43 @@ fn multi_listener_body_pipeline_stream_buffer_routes() {
         "model=model-alpha-1 should route to alpha_cluster cluster on stream-buffer listener"
     );
 }
+
+#[test]
+fn body_size_example_routes_late_selector_at_limit_and_rejects_one_over() {
+    use std::{sync::mpsc::TryRecvError, time::Duration};
+
+    use praxis_test_utils::{PayloadSpec, start_counting_backend};
+
+    for size in [1024, 1025] {
+        let spec = PayloadSpec::padded(size, br#"{"prompt":""#, br#"","model":"model-alpha-1"}"#, b'x').unwrap();
+        let backend = start_counting_backend(spec.clone(), "example", size);
+        let proxy_port = free_port();
+        let config = load_example_config(
+            "payload-processing/body-size-limit-with-extraction.yaml",
+            proxy_port,
+            HashMap::from([("127.0.0.1:3000", backend.port)]),
+        );
+        let proxy = praxis_test_utils::start_full_proxy(&config);
+        wait_for_tcp(proxy.addr());
+        let body = String::from_utf8(spec.chunk(0, usize::try_from(size).unwrap())).unwrap();
+        let response = http_send(proxy.addr(), &json_post("/v1/chat", &body));
+        if size == 1024 {
+            assert_eq!(parse_status(&response), 200);
+            let receipt = backend.receipt.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert_eq!(receipt.bytes, size);
+            assert_eq!(receipt.verified_bytes, size);
+            assert_eq!(receipt.mismatch, None);
+            assert!(receipt.completion.is_some());
+            assert!(
+                receipt
+                    .headers
+                    .iter()
+                    .any(|(name, value)| name == "x-model" && value == "model-alpha-1")
+            );
+        } else {
+            assert_eq!(parse_status(&response), 413);
+            assert!(matches!(backend.accepted.try_recv(), Err(TryRecvError::Empty)));
+        }
+        backend.join();
+    }
+}

@@ -178,6 +178,7 @@ impl FilterPipeline {
             may_select_streaming_subrequest_response,
             trace_context_filter_indices,
             time_source: Arc::clone(&time_source),
+            buffer_cap: praxis_core::config::DEFAULT_MAX_BUFFER_BYTES,
             request_body_ceiling: None,
             response_body_ceiling: None,
         };

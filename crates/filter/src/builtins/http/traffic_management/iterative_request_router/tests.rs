@@ -536,30 +536,23 @@ steps:
 }
 
 #[test]
-fn rejects_max_state_bytes_over_ceiling() -> Result<(), crate::FilterError> {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(
-        "
-initial_step: step1
-max_state_bytes: 1073741825
-steps:
-  - name: step1
-    filters:
-      - filter: static_response
-        status: 200
-    on_result:
-      - default: true
-        done: true
-",
-    )?;
-    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml)?;
-    let result = config::validate(&cfg);
-    assert!(
-        result
-            .err()
-            .is_some_and(|e| e.to_string().contains("max_state_bytes must be <=")),
-        "max_state_bytes above 1 GiB should be rejected"
-    );
-    Ok(())
+fn buffered_limits_accept_addressable_overrides() {
+    let hard = praxis_core::config::MAX_BUFFER_BYTES;
+    for field in ["max_state_bytes", "max_response_bytes"] {
+        for value in [hard - 1, hard, hard + 1, 1_073_741_824] {
+            let yaml = serde_yaml::from_str(&format!(
+                "initial_step: step1\n{field}: {value}\nmax_stream_response_bytes: 1073741824\nsteps:\n  - name: step1\n    filters:\n      - filter: static_response\n        status: 200\n    on_result:\n      - default: true\n        done: true\n"
+            )).unwrap();
+            let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml).unwrap();
+            match config::validate(&cfg) {
+                Ok(()) => assert!(value <= hard, "{field}={value} bypassed the hard ceiling"),
+                Err(error) => {
+                    assert!(value > hard, "valid {field}={value} rejected: {error}");
+                    assert!(error.to_string().contains(&format!("{field} must be <= {hard}")));
+                },
+            }
+        }
+    }
 }
 
 #[test]
@@ -2679,6 +2672,21 @@ fn build_n_step_yaml(n: usize) -> serde_yaml::Value {
         }
     }
     serde_yaml::from_str(&yaml).unwrap()
+}
+
+#[test]
+fn configured_buffer_cap_tightens_iteration_state() {
+    let mut filter = build_filter();
+    filter.apply_buffer_cap(4);
+    assert_eq!(
+        filter.request_body_mode(),
+        crate::BodyMode::StreamBuffer { max_bytes: Some(4) }
+    );
+    filter.apply_buffer_cap(8);
+    assert_eq!(
+        filter.request_body_mode(),
+        crate::BodyMode::StreamBuffer { max_bytes: Some(4) }
+    );
 }
 
 /// Build a filter from a minimal valid config for trait method tests.

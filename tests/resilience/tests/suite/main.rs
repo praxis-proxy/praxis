@@ -56,6 +56,13 @@ mod dns_failure;
 mod health_check_recovery;
 mod large_payload;
 mod multi_listener_isolation;
+mod payload_fanout;
+#[cfg(target_os = "linux")]
+mod payload_lifecycle;
+#[cfg(target_os = "linux")]
+mod payload_metadata;
+#[cfg(target_os = "linux")]
+mod payload_resources;
 mod rate_limit_burst;
 mod reload_under_load;
 mod retry;
