@@ -107,6 +107,13 @@ const CUSTOM_TOOL_KEYS: &[&str] = &["type", "name", "description", "input_schema
 /// Keys of a legacy Chat Completions `functions` entry.
 const LEGACY_FUNCTION_KEYS: &[&str] = &["name", "description", "parameters"];
 
+/// Keys of an instruction text block.
+const TEXT_BLOCK_KEYS: &[&str] = &["type", "text", "cache_control"];
+
+/// Message roles that carry no instruction; matched exactly, since a backend may fold
+/// a case variant such as `SYSTEM` into an instruction.
+const NON_INSTRUCTION_ROLES: &[&str] = &["user", "assistant", "tool", "function"];
+
 /// Maximum nesting depth followed into content parts (e.g. a `tool_result`
 /// block whose `content` is itself an array of parts).
 const MAX_CONTENT_DEPTH: u8 = 4;
@@ -478,8 +485,8 @@ fn instructions(
         let role = match message.get("role").and_then(serde_json::Value::as_str) {
             Some("system") => LlmInstructionRole::System,
             Some("developer") => LlmInstructionRole::Developer,
-            Some(_) => continue,
-            None => return Err(Unsupported),
+            Some(role) if NON_INSTRUCTION_ROLES.contains(&role) => continue,
+            Some(_) | None => return Err(Unsupported),
         };
         push_instruction(&mut out, role, message.get("content").ok_or(Unsupported)?)?;
     }
@@ -504,8 +511,9 @@ fn push_instruction(
     Ok(())
 }
 
-/// The text of a `{"type": "text", "text": ...}` block.
+/// The text of a `{"type": "text", "text": ...}` block with no unrecognized key.
 fn text_block(block: &serde_json::Value) -> Result<&str, Unsupported> {
+    let block = strict_object(block, TEXT_BLOCK_KEYS)?;
     block
         .get("type")
         .and_then(serde_json::Value::as_str)
@@ -1780,6 +1788,43 @@ mod tests {
         ] {
             assert!(request(body).parts().is_none(), "body {body} must leave parts absent");
         }
+    }
+
+    #[test]
+    fn only_exact_known_roles_keep_the_parts() {
+        for role in ["SYSTEM", "System", "Developer", "custom"] {
+            let body = format!(r#"{{"model":"m","messages":[{{"role":"{role}","content":"x"}}]}}"#);
+            assert!(request(&body).parts().is_none(), "role {role} must leave parts absent");
+        }
+        assert!(
+            request(r#"{"model":"m","messages":[{"role":1,"content":"x"}]}"#)
+                .parts()
+                .is_none()
+        );
+        let parts = request(
+            r#"{"model":"m","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":null,
+            "function_call":{"name":"a","arguments":"{}"}},{"role":"function","name":"a","content":"ok"},
+            {"role":"tool","tool_call_id":"t","content":"ok"}]}"#,
+        )
+        .parts()
+        .unwrap();
+        assert!(parts.instructions.is_empty());
+    }
+
+    #[test]
+    fn text_blocks_with_unrecognized_keys_leave_parts_absent() {
+        for body in [
+            r#"{"model":"m","messages":[{"role":"system","content":[{"type":"text","text":"approved","content":"more"}]}]}"#,
+            r#"{"model":"m","system":[{"type":"text","text":"approved","extra":"more"}],"messages":[],"max_tokens":1}"#,
+        ] {
+            assert!(request(body).parts().is_none(), "body {body} must leave parts absent");
+        }
+        let cached = request(
+            r#"{"model":"m","system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],"messages":[],"max_tokens":1}"#,
+        )
+        .parts()
+        .unwrap();
+        assert_eq!(cached.instructions.len(), 1);
     }
 
     #[test]
