@@ -25,7 +25,7 @@ use hyper_util::{
 use praxis_core::{
     config::ReadinessMode,
     health::HealthRegistry,
-    server::{HyperRuntime, LifecycleHandle, hyper::ShutdownWatch},
+    server::{HyperRuntime, LifecycleHandle, ServerRuntime as _, hyper::ShutdownWatch},
 };
 use tokio::net::{TcpSocket, TcpStream};
 use tracing::{debug, error, info};

@@ -277,7 +277,6 @@ impl HyperRuntime {
         });
 
         runtime.shutdown_timeout(RUNTIME_DROP_TIMEOUT);
-        lifecycle.mark_stopped();
         info!(aborted, "server stopped");
         assert_ne!(mode, ShutdownMode::Failed, "required service exited before shutdown");
     }

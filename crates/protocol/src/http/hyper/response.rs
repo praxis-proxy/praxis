@@ -225,19 +225,8 @@ async fn run_filters(
     Some(ran.0)
 }
 
-/// Act on the response pipeline's result.
-fn settle(
-    listener: &ListenerShared,
-    flight: &mut Flight,
-    session: HyperSession,
-    mut head: Head,
-    ran: Option<Result<FilterAction, FilterError>>,
-) -> Outcome {
-    let Some(result) = ran else {
-        release(&listener.connector, session, false);
-        return Outcome::Failed(Failure::internal("request snapshot not set during response phase"));
-    };
-    reframe(flight, &mut head, &result);
+/// Ask a draining data plane to close its non-HTTP/2 client connection.
+fn close_connection_on_drain(flight: &Flight, head: &mut Head) {
     if matches!(flight.lifecycle.phase(), LifecyclePhase::Draining)
         && flight.version != Version::HTTP_2
         && !successful_connect_tunnel(
@@ -253,6 +242,22 @@ fn settle(
             .headers
             .insert(http::header::CONNECTION, http::HeaderValue::from_static("close"));
     }
+}
+
+/// Act on the response pipeline's result.
+fn settle(
+    listener: &ListenerShared,
+    flight: &mut Flight,
+    session: HyperSession,
+    mut head: Head,
+    ran: Option<Result<FilterAction, FilterError>>,
+) -> Outcome {
+    let Some(result) = ran else {
+        release(&listener.connector, session, false);
+        return Outcome::Failed(Failure::internal("request snapshot not set during response phase"));
+    };
+    reframe(flight, &mut head, &result);
+    close_connection_on_drain(flight, &mut head);
     match result {
         Ok(
             FilterAction::Continue

@@ -79,7 +79,7 @@ use praxis_core::{
     ProxyError,
     config::{Config, ProtocolKind},
     egress::{Connector as _, hyper::HyperConnector},
-    server::HyperRuntime,
+    server::{HyperRuntime, ServerRuntime as _},
 };
 use tokio::sync::watch;
 
