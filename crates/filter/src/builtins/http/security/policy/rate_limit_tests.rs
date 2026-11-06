@@ -421,6 +421,58 @@ async fn a_tool_route_counts_each_subject_separately_and_keeps_the_json_rpc_id()
     assert!(matches!(tool_call(&filter, "bob").await, FilterAction::BodyDone));
 }
 
+/// An inference route with a post-identity limiter keyed by model.
+const MODEL_LIMIT: &str = "plugins:
+  - name: who
+    kind: {kind}
+    hooks: [identity.resolve]
+    capabilities: [read_headers]
+  - name: per-model
+    kind: ratelimit/limitador
+    hooks: [ratelimit.post_identity]
+    capabilities: [read_subject]
+    config:
+      namespace: per-model
+      bindings:
+        model: llm.model_id
+      limits:
+        - max: 1
+          seconds: 60
+          variables: [model]
+global:
+  authentication: [who]
+routes:
+  - llm: \"*\"
+    rate_limits: [per-model]
+    authorization:
+      pre_invocation:
+        - \"require(authenticated)\"
+";
+
+/// Run an inference request for `model` through both phases.
+async fn inference_call(filter: &PolicyFilter, model: &str) -> FilterAction {
+    let mut req = request(Some("alice"));
+    req.uri = "/v1/chat/completions".parse().unwrap();
+    let mut ctx = context(&req, 1);
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "gate: {action:?}");
+    let mut body = Some(Bytes::from(format!(r#"{{"model":"{model}","messages":[]}}"#)));
+    filter.on_request_body(&mut ctx, &mut body, true).await.unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_post_identity_limit_binds_the_inference_model() {
+    let (_dir, path, _calls) = recorded_policy("test/rl-model", MODEL_LIMIT);
+    let filter = filter(path);
+    assert!(matches!(inference_call(&filter, "m1").await, FilterAction::BodyDone));
+    let denied = rejection(inference_call(&filter, "m1").await);
+    assert_eq!(denied.status, 429, "the second call on one model is over the limit");
+    assert!(
+        matches!(inference_call(&filter, "m2").await, FilterAction::BodyDone),
+        "another model has its own counter"
+    );
+}
+
 /// Pre- and post-identity host limiters around a host resolver; `{deny}` is
 /// the pre limiter's extra config.
 const HOST_LIMITERS: &str = "plugins:

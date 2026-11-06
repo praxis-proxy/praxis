@@ -1471,10 +1471,11 @@ impl PolicyFilter {
         let streaming = parsed.is_streaming();
 
         let mut extensions = Self::extensions_from_identity(&view, &identity, entity_type, &model, &self.cfg);
+        // Attach before the limit so a limiter can bind the model.
+        self.attach_llm_attributes(&mut extensions, parsed, &model);
         if let Some(denied) = self.post_identity_limit(ctx, &extensions).await? {
             return Ok(FilterAction::Reject(denied.http()));
         }
-        self.attach_llm_attributes(&mut extensions, parsed, &model);
         Self::store_identity(ctx, identity);
         state_mut(ctx).inference_model = Some(model.clone());
 
