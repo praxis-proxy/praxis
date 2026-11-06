@@ -70,6 +70,7 @@ fn build_config(args: &Args) -> Config {
             filters: vec![entry],
         }],
         insecure_options: InsecureOptions::default(),
+        jobs: None,
         listeners: vec![echo_listener(&args.address)],
         metrics: MetricsConfig::default(),
         runtime: RuntimeConfig::default(),
