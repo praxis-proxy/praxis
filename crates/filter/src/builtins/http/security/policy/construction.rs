@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Construction-time refusals for the `policy` filter: `DPoP` issuers without
-//! a fixed external URL, query credentials beside delegation, and crypto
-//! backend failures.
+//! a fixed external URL, query credentials beside delegation, crypto backend
+//! failures, and a build that cannot honor a FIPS requirement.
 
 use ppe::praxis_policy_core::{
     CRYPTO_FAILED_CODE,
@@ -40,6 +40,24 @@ pub(super) fn parse_trusted_proxies(entries: &[String]) -> Result<Vec<CidrRange>
         .map(|entry| CidrRange::parse(entry))
         .collect::<Result<_, _>>()
         .map_err(|e| format!("policy: trusted_proxies: {e}").into())
+}
+
+// -----------------------------------------------------------------------------
+// FIPS
+// -----------------------------------------------------------------------------
+
+/// Refuse construction when FIPS is `required` and [`super::fips_crypto_blocker`]
+/// names a blocker. Startup checks the same, but a host plugin factory
+/// registered later would otherwise be built on reload.
+pub(super) fn refuse_fips_blockers(required: bool) -> Result<(), FilterError> {
+    let Some(reason) = required.then(super::fips_crypto_blocker).flatten() else {
+        return Ok(());
+    };
+    Err(format!(
+        "policy: {} is set but this `policy` filter is not FIPS-capable: {reason}",
+        praxis_tls::provider::REQUIRE_FIPS_ENV
+    )
+    .into())
 }
 
 // -----------------------------------------------------------------------------
@@ -219,7 +237,7 @@ mod tests {
             filter::PolicyFilter,
             register_policy_plugin_factory,
         },
-        require_dpop_external_base_url,
+        refuse_fips_blockers, require_dpop_external_base_url,
     };
 
     /// A JWT plugin whose one issuer carries `dpop`.
@@ -315,8 +333,18 @@ mod tests {
         );
     }
 
+    /// Whether this process requires FIPS. A host factory registered here
+    /// would make every later construction in the process refuse, so the
+    /// tests that register one skip.
+    fn fips_required() -> bool {
+        praxis_tls::provider::required()
+    }
+
     #[test]
     fn a_crypto_failure_while_loading_fails_construction_with_the_crypto_code() {
+        if fips_required() {
+            return;
+        }
         register_policy_plugin_factory(
             "test/crypto-create-failing",
             Arc::new(|| -> Box<dyn ppe::PluginFactory> { Box::new(CryptoFailingFactory) }),
@@ -331,6 +359,28 @@ mod tests {
         assert!(
             error.contains(ppe::CRYPTO_FAILED_CODE) && error.contains("OpenSSL provider"),
             "a crypto failure must name the failure code and the remedy: {error}"
+        );
+    }
+
+    #[test]
+    fn a_fips_requirement_refuses_a_registered_host_factory() {
+        if fips_required() {
+            return;
+        }
+        register_policy_plugin_factory(
+            "test/fips-unreviewed",
+            Arc::new(|| -> Box<dyn ppe::PluginFactory> { Box::new(CryptoFailingFactory) }),
+        );
+        let error = refuse_fips_blockers(true)
+            .expect_err("a host factory carries no FIPS evidence")
+            .to_string();
+        assert!(
+            error.contains("PRAXIS_REQUIRE_FIPS") && error.contains("host policy plugin"),
+            "the refusal must name the requirement and the blocker: {error}"
+        );
+        assert!(
+            refuse_fips_blockers(false).is_ok(),
+            "without the requirement nothing is refused"
         );
     }
 

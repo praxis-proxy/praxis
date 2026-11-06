@@ -43,7 +43,8 @@ use super::{
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
     construction::{
-        engine_error, parse_trusted_proxies, refuse_query_credentials_with_delegation, require_dpop_external_base_url,
+        engine_error, parse_trusted_proxies, refuse_fips_blockers, refuse_query_credentials_with_delegation,
+        require_dpop_external_base_url,
     },
     dispatch::{block_on_bounded, ensure_dispatch_runtime, response_dispatch_timeout},
     error::{
@@ -390,6 +391,7 @@ impl PolicyFilter {
     ) -> Result<Self, FilterError> {
         cfg.validate_context_headers()
             .map_err(|e| -> FilterError { format!("policy: {e}").into() })?;
+        refuse_fips_blockers(praxis_tls::provider::required())?;
 
         // Validate addressable, nonzero limits. The pipeline additionally clamps
         // accumulation to body_limits.max_buffer_bytes before invoking this filter.
