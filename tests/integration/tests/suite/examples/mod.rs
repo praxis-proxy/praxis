@@ -112,6 +112,8 @@ mod policy_llm_input;
 #[cfg(feature = "policy-builtins")]
 mod policy_llm_request;
 #[cfg(feature = "policy-builtins")]
+mod policy_query;
+#[cfg(feature = "policy-builtins")]
 mod policy_query_credential;
 #[cfg(feature = "policy-builtins")]
 mod policy_rate_limit;

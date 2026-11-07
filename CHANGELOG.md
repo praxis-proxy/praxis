@@ -17,6 +17,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- The policy filter reference documents the HTTP request-line attributes
+  rules can read (`http.method`, `http.path`, `http.host`, `http.scheme`,
+  `http.query`), with the example `security/policy-query.yaml`, which
+  authorizes a request on its query string through a CEL rule.
+
 ## [0.8.0] - 2026-11-06
 
 ### Added
