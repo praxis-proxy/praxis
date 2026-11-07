@@ -728,12 +728,15 @@ fn register_admin_endpoints(
     }
 
     if let Some(metrics_addr) = &config.admin.metrics_address {
-        admin::add_health_endpoint_with_pipelines(
+        let lifecycle = server.lifecycle();
+        admin::add_health_endpoint_with_pipelines_and_policy(
             server,
             metrics_addr,
             Some(health_registry),
             config.admin.verbose,
             Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
+            config.admin.readiness,
+            Some(lifecycle),
         );
     }
 }

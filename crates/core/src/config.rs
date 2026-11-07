@@ -37,7 +37,7 @@ pub mod runtime;
 mod telemetry;
 mod validate;
 
-pub use admin::AdminConfig;
+pub use admin::{AdminConfig, ReadinessMode};
 pub use body_limits::{
     ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, BufferLimit, DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_BUFFER_BYTES,
     MAX_BUFFER_BYTES,

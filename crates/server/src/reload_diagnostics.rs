@@ -297,7 +297,8 @@ fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
 fn detect_admin_changes(old: &Config, new: &Config) {
     let changed = old.admin.address != new.admin.address
         || old.admin.verbose != new.admin.verbose
-        || old.admin.metrics_address != new.admin.metrics_address;
+        || old.admin.metrics_address != new.admin.metrics_address
+        || old.admin.readiness != new.admin.readiness;
     if changed {
         warn!(
             old_address = ?old.admin.address,
