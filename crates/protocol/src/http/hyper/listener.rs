@@ -92,6 +92,8 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60); // 60 s
 
 /// What every request on one listener shares.
 pub(super) struct ListenerShared {
+    /// Server-scoped overload controller.
+    pub(super) overload: Arc<praxis_core::overload::Signal>,
     /// Listener name, as the active-request gauge labels it.
     pub(super) name: ::metrics::SharedString,
 
@@ -129,6 +131,7 @@ impl ListenerShared {
             .downstream_keepalive_timeout_ms
             .map(|millis| Duration::from_secs(millis.div_ceil(1_000)));
         Self {
+            overload: Arc::default(),
             name: ::metrics::SharedString::from_shared(Arc::from(listener.name.as_str())),
             connection_limit: listener
                 .max_connections
@@ -204,7 +207,6 @@ pub(super) fn register(
     );
     let accept = AcceptLoop {
         acceptor,
-        builder: Arc::new(connection_builder(&shared)),
         drain_bound: runtime.shutdown_timeout().saturating_sub(DRAIN_HEADROOM),
         shared: Arc::new(shared),
     };
@@ -225,7 +227,7 @@ fn connection_builder(shared: &ListenerShared) -> auto::Builder<TokioExecutor> {
         .half_close(true)
         .max_headers(H1_MAX_HEADERS)
         .header_read_timeout(shared.header_timeout)
-        .timer(TokioTimer::new());
+        .timer(HeaderTimer(Arc::clone(&shared.overload)));
     builder
         .http2()
         .max_header_list_size(H2_MAX_HEADER_LIST_SIZE)
@@ -242,9 +244,6 @@ fn connection_builder(shared: &ListenerShared) -> auto::Builder<TokioExecutor> {
 struct AcceptLoop {
     /// TLS acceptor for a TLS listener.
     acceptor: Option<TlsAcceptor>,
-
-    /// The connection builder every connection of the listener uses.
-    builder: Arc<auto::Builder<TokioExecutor>>,
 
     /// How long connections may take to finish once shutdown starts: less
     /// than the runtime gives the service.
@@ -265,12 +264,16 @@ impl AcceptLoop {
     ) {
         match accepted {
             Ok((stream, peer)) => {
+                if self.shared.overload.is_saturated() {
+                    crate::http::metrics::record_overload_reject("pre_tls_pressure");
+                    return;
+                }
                 if let Err(err) = stream.set_nodelay(true) {
                     debug!(%peer, error = %err, "could not set TCP_NODELAY on the client socket");
                 }
                 let connection = Connection {
                     acceptor: self.acceptor.clone(),
-                    builder: Arc::clone(&self.builder),
+                    builder: Arc::new(connection_builder(&self.shared)),
                     peer,
                     shared: Arc::clone(&self.shared),
                     shutdown: shutdown.clone(),
@@ -356,7 +359,7 @@ impl Connection {
     async fn first_bytes(&mut self, socket: &TcpStream) -> bool {
         let mut probe = [0_u8; 1];
         let peeked = tokio::select! {
-            peeked = tokio::time::timeout(self.shared.header_timeout, socket.peek(&mut probe)) => peeked,
+            peeked = tokio::time::timeout(self.shared.overload.scale_timeout(self.shared.header_timeout), socket.peek(&mut probe)) => peeked,
             _stopping = self.shutdown.wait_for(|stopping| *stopping) => return false,
         };
         match peeked {
@@ -490,6 +493,21 @@ fn tls_holds_data(tls: &mut TlsStream<TcpStream>) -> bool {
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
+
+/// Resample overload whenever Hyper starts a new header wait, including reuse.
+/// This timer is installed only on HTTP/1's header parser, never body I/O.
+#[derive(Clone, Debug)]
+struct HeaderTimer(Arc<praxis_core::overload::Signal>);
+
+impl hyper::rt::Timer for HeaderTimer {
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn hyper::rt::Sleep>> {
+        hyper::rt::Timer::sleep(&TokioTimer::new(), self.0.scale_timeout(duration))
+    }
+
+    fn sleep_until(&self, deadline: std::time::Instant) -> Pin<Box<dyn hyper::rt::Sleep>> {
+        self.sleep(deadline.saturating_duration_since(std::time::Instant::now()))
+    }
+}
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     fmt,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, OnceLock},
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -79,12 +79,15 @@ const TEST_WORKER_THREADS: usize = 2;
 /// hyper build.
 pub const PRAXIS_BIN_ENV: &str = "PRAXIS_BIN";
 
+/// Feature-specific subprocess binary built once per test process.
+static SUBPROCESS_BINARY: OnceLock<PathBuf> = OnceLock::new();
+
 /// Path to the `praxis` binary for subprocess integration tests.
 ///
-/// Uses [`PRAXIS_BIN_ENV`] when set, then `CARGO_BIN_EXE_praxis`; otherwise
-/// resolves under `CARGO_TARGET_DIR` (including llvm-cov's alternate target
-/// dir; see `build_target_dir`), and builds the binary for this harness's
-/// backend and Policy selection unless one with that selection is present.
+/// Uses [`PRAXIS_BIN_ENV`] when explicitly set. Otherwise builds the matching
+/// backend/Policy variant once per test process under `CARGO_TARGET_DIR`,
+/// isolated for both enabled and disabled overload actions. A configured
+/// build target/profile is resolved from Cargo’s emitted executable artifact.
 ///
 /// # Panics
 ///
@@ -108,39 +111,48 @@ pub fn praxis_bin() -> PathBuf {
         return path;
     }
 
-    let path = resolve_praxis_bin_path();
-    if path.exists() && binary_policy_profile_matches(&path).is_ok() {
-        return path;
-    }
+    SUBPROCESS_BINARY.get_or_init(build_praxis_bin).clone()
+}
 
-    let status = std::process::Command::new(env!("CARGO"))
+/// Build a subprocess binary with matching backend, Policy, and overload features.
+fn build_praxis_bin() -> PathBuf {
+    let output = std::process::Command::new(env!("CARGO"))
         .args(["build", "-p", "praxis-proxy", "--bin", "praxis", "-q", "--target-dir"])
         .arg(build_target_dir())
         .args(backend_build_args())
-        .status()
+        .arg("--message-format=json-render-diagnostics")
+        .stderr(std::process::Stdio::inherit())
+        .output()
         .expect("spawn cargo build for praxis binary");
-    assert!(status.success(), "cargo build -p praxis-proxy --bin praxis failed");
+    assert!(
+        output.status.success(),
+        "cargo build -p praxis-proxy --bin praxis failed"
+    );
 
-    let path = resolve_praxis_bin_path();
-    assert!(path.exists(), "praxis binary missing at {} after build", path.display());
-    if let Err(mismatch) = binary_policy_profile_matches(&path) {
+    let path = built_executable(output.stdout);
+    if let Err(mismatch) = binary_backend_matches(&path).and_then(|()| binary_policy_profile_matches(&path)) {
         panic!("the harness-built binary: {mismatch}");
     }
     path
 }
 
-/// Resolve the expected `praxis` binary path without building.
-fn resolve_praxis_bin_path() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_praxis").map_or_else(
-        || {
-            let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
-            build_target_dir().join(profile).join("praxis")
-        },
-        PathBuf::from,
-    )
+/// Select the executable from Cargo output, including configured target triples.
+fn built_executable(messages: Vec<u8>) -> PathBuf {
+    cargo_metadata::Message::parse_stream(std::io::Cursor::new(messages))
+        .filter_map(Result::ok)
+        .find_map(|message| match message {
+            cargo_metadata::Message::CompilerArtifact(artifact) if artifact.target.name == "praxis" => artifact
+                .executable
+                .map(cargo_metadata::camino::Utf8PathBuf::into_std_path_buf),
+            _ => None,
+        })
+        .expect("cargo build must emit the praxis executable artifact")
 }
 
-/// Target directory for fallback builds, isolated by backend and Policy profile.
+/// The target directory the fallback build uses: cargo's, with a `hyper`
+/// subdirectory when this harness tests the hyper backend, so neither
+/// backend's binary stands in for the other's. Overload-enabled subprocesses
+/// use a further isolated feature directory.
 fn build_target_dir() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
@@ -153,7 +165,12 @@ fn build_target_dir() -> PathBuf {
     };
     let default_bundle =
         effective_policy_features(&selected_policy_features()) == effective_policy_features(&["policy-builtins"]);
-    if default_bundle { target } else { target.join("policy") }
+    let target = if default_bundle { target } else { target.join("policy") };
+    if cfg!(feature = "overload-actions") {
+        target.join("overload-actions")
+    } else {
+        target.join("default-actions")
+    }
 }
 
 /// Policy features this harness and its subprocess proxies must carry.
@@ -223,7 +240,7 @@ fn effective_policy_features<'name>(names: &[&'name str]) -> std::collections::B
 fn backend_build_args() -> Vec<String> {
     let policy = selected_policy_features();
     let is_default_bundle = effective_policy_features(&policy) == effective_policy_features(&["policy-builtins"]);
-    if !cfg!(feature = "hyper") && is_default_bundle {
+    if !cfg!(feature = "hyper") && is_default_bundle && !cfg!(feature = "overload-actions") {
         return Vec::new();
     }
     let backend = if cfg!(feature = "hyper") { "hyper" } else { "pingora" };
@@ -239,6 +256,7 @@ fn subprocess_features(backend: &str, policy: &[&str]) -> String {
     [backend, "config-reload", "admin-api"]
         .into_iter()
         .chain(policy.iter().copied())
+        .chain(cfg!(feature = "overload-actions").then_some("overload-actions"))
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -448,7 +466,7 @@ fn capped_config(config: &Config) -> Config {
 /// Build a backend runtime with every HTTP listener's pipeline resolved from
 /// `registry`, plus the optional admin and metrics endpoints, and nothing else
 /// (no sub-request client, no health probes).
-fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> Runtime {
+fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> (Runtime, Arc<praxis_core::overload::Signal>) {
     // Registering a listener builds the backend's upstream connector, which
     // constructs a rustls `ClientConfig` even for a listener that serves plain HTTP.
     crate::net::tls::ensure_crypto_provider();
@@ -465,6 +483,7 @@ fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> Runtime {
         })
         .collect();
     let pipelines = ListenerPipelines::new(pipelines);
+    let signal = pipelines.overload();
     // Dropping the senders does not stop the cert watchers; they run for the
     // life of the test process.
     let _cert_shutdowns = Box::new(Http)
@@ -479,7 +498,7 @@ fn build_light_runtime(config: &Config, registry: &FilterRegistry) -> Runtime {
         admin::add_health_endpoint(&mut runtime, metrics_addr, None, config.admin.verbose);
     }
 
-    runtime
+    (runtime, signal)
 }
 
 /// Build a [`ProxyGuard`] by spawning a backend runtime that
@@ -491,7 +510,7 @@ fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard 
         .expect("config must have at least one listener")
         .address
         .clone();
-    let runtime = build_light_runtime(config, registry);
+    let (runtime, _) = build_light_runtime(config, registry);
     spawn_runtime(addr, runtime)
 }
 
@@ -510,6 +529,22 @@ fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard 
 /// Panics if `config.listeners` is empty.
 pub fn start_proxy(config: &Config) -> ProxyGuard {
     start_proxy_with_registry(config, &FilterRegistry::with_builtins())
+}
+
+/// Configure a lightweight proxy's existing controller before starting it.
+///
+/// # Panics
+/// Panics when listener configuration cannot be registered or started.
+pub fn start_proxy_with_overload<Configure: FnOnce(&praxis_core::overload::Signal)>(
+    config: &Config,
+    configure: Configure,
+) -> (ProxyGuard, Arc<praxis_core::overload::Signal>) {
+    let (runtime, signal) = build_light_runtime(config, &FilterRegistry::with_builtins());
+    configure(&signal);
+    let addr = config.listeners.first().expect("listener").address.clone();
+    let guard = spawn_runtime(addr, runtime);
+    crate::net::wait::wait_for_http(&guard.addr);
+    (guard, signal)
 }
 
 /// Start the proxy with a custom filter registry.

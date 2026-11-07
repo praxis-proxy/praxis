@@ -178,6 +178,13 @@ impl PingoraHealthService {
         // rather than the startup snapshot, exactly as /api/stats does, so
         // /ready reflects current endpoint health after a config reload
         // instead of health frozen at the first reload.
+        if self
+            .pipelines
+            .as_ref()
+            .is_some_and(|state| state.pipelines.overload().is_saturated())
+        {
+            return (503, r#"{"status":"overloaded"}"#.to_owned());
+        }
         let registry = match self.pipelines.as_ref() {
             Some(state) => stats_admin::resolve_health_registry(self.registry.as_ref(), Some(state), &state.meta),
             None => self.registry.clone(),
@@ -640,6 +647,29 @@ mod tests {
 
         shutdown_tx.send(true).unwrap();
         task.await.unwrap();
+    }
+
+    #[test]
+    fn readiness_uses_only_its_own_server_controller() {
+        let first = Arc::new(crate::ListenerPipelines::new(HashMap::new()));
+        let signal = first.overload();
+        let second = Arc::new(crate::ListenerPipelines::new(HashMap::new()));
+        let one =
+            PingoraHealthService::new(None, false).with_live_pipelines(first, new_listener_meta_store(HashMap::new()));
+        let two =
+            PingoraHealthService::new(None, false).with_live_pipelines(second, new_listener_meta_store(HashMap::new()));
+        signal.update(
+            praxis_core::overload::EngagedActions {
+                fail_readiness: true,
+                ..Default::default()
+            },
+            1.0,
+        );
+        assert_eq!(one.ready_response().0, 503);
+        assert_eq!(two.ready_response().0, 200);
+        assert_eq!(PingoraHealthService::new(None, false).ready_response().0, 200);
+        signal.clear();
+        assert_eq!(one.ready_response().0, 200);
     }
 
     #[test]

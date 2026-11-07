@@ -17,6 +17,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Experimental `runtime.overload_actions` (requires
+  `runtime.overload_gauges` and the `overload-actions` Cargo feature)
+  purges unused jemalloc pages under memory pressure, disables HTTP/1
+  keep-alive above 50% pressure with recovery at 40%, and fails
+  `/ready` after sustained saturation. It now includes validated per-resource
+  bands, server-scoped transport admission, connect/header timeout scaling,
+  and idle pool aging, with
+  `praxis_overload_action` exposing the applied policy.
+
 ### Security
 
 - LLM policies now apply HTTP authorization, delegation and request assertions

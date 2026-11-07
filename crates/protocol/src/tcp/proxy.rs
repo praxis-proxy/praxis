@@ -86,6 +86,8 @@ const SNI_PEEK_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`TcpFilterContext::upstream_addr`]: praxis_filter::TcpFilterContext::upstream_addr
 /// [`ArcSwap`]: arc_swap::ArcSwap
 pub(crate) struct PingoraTcpProxy {
+    /// Owning server overload signal, shared with its pre-TLS admission gate.
+    pub(super) overload: Arc<praxis_core::overload::Signal>,
     /// Allow upstream connections to private/reserved IP addresses.
     allow_private_upstreams: bool,
 
@@ -140,6 +142,7 @@ impl PingoraTcpProxy {
         default_listener_name: ::metrics::SharedString,
     ) -> Self {
         Self {
+            overload: Arc::default(),
             allow_private_upstreams,
             cluster,
             connection_semaphore,
@@ -316,6 +319,10 @@ impl PingoraTcpProxy {
         );
 
         async {
+            if self.overload.is_saturated() {
+                crate::http::metrics::record_overload_reject("pressure");
+                return;
+            }
             if praxis_core::memory::is_exceeded() {
                 warn!(remote = %remote_addr, "memory pressure threshold exceeded, closing TCP connection");
                 crate::http::pingora::metrics::record_overload_reject(
@@ -362,7 +369,9 @@ impl PingoraTcpProxy {
             info!("connection_accepted");
 
             let (sni_hostname, peeked_bytes) = if self.upstream_addr.is_none() {
-                let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {
+                let Ok(result) =
+                    tokio::time::timeout(self.overload.scale_timeout(SNI_PEEK_TIMEOUT), peek_sni(&mut session)).await
+                else {
                     warn!(remote = %remote_addr, "SNI peek timed out, closing connection");
                     super::metrics::record_tcp_connection_duration(
                         self.listener_label_for(local_addr),
@@ -400,39 +409,44 @@ impl PingoraTcpProxy {
 
             let upstream_connect_start = std::time::Instant::now();
             let cluster_label = self.metrics_cluster_label();
-            let mut upstream =
-                if let Some(stream) = connect_upstream(&upstream_addr, self.allow_private_upstreams).await {
-                    fd_admission.connected(true);
-                    crate::http::pingora::metrics::record_upstream_connect_duration(
-                        cluster_label,
-                        upstream_connect_start.elapsed().as_secs_f64(),
-                    );
-                    stream
-                } else {
-                    crate::http::pingora::metrics::record_upstream_connect_failure(cluster_label);
-                    // Connect filters already ran (least-connections/P2C counters
-                    // were incremented on selection), so the paired disconnect
-                    // filters must run on this exit path too or the in-flight
-                    // counters leak permanently.
-                    self.run_disconnect_filters(
-                        &pipeline,
-                        remote_addr,
-                        local_addr,
-                        &upstream_addr,
-                        sni_hostname.as_deref(),
-                        connect_time,
-                        0,
-                        0,
-                    )
-                    .await;
-                    super::metrics::record_tcp_connection_duration(
-                        self.listener_label_for(local_addr),
-                        "connect_failure",
-                        connect_time.elapsed().as_secs_f64(),
-                    );
-                    log_early_close(connect_time, "connect_failure");
-                    return;
-                };
+            let mut upstream = if let Some(stream) = connect_upstream(
+                &upstream_addr,
+                self.allow_private_upstreams,
+                self.overload.scale_timeout(UPSTREAM_CONNECT_TIMEOUT),
+            )
+            .await
+            {
+                fd_admission.connected(true);
+                crate::http::pingora::metrics::record_upstream_connect_duration(
+                    cluster_label,
+                    upstream_connect_start.elapsed().as_secs_f64(),
+                );
+                stream
+            } else {
+                crate::http::pingora::metrics::record_upstream_connect_failure(cluster_label);
+                // Connect filters already ran (least-connections/P2C counters
+                // were incremented on selection), so the paired disconnect
+                // filters must run on this exit path too or the in-flight
+                // counters leak permanently.
+                self.run_disconnect_filters(
+                    &pipeline,
+                    remote_addr,
+                    local_addr,
+                    &upstream_addr,
+                    sni_hostname.as_deref(),
+                    connect_time,
+                    0,
+                    0,
+                )
+                .await;
+                super::metrics::record_tcp_connection_duration(
+                    self.listener_label_for(local_addr),
+                    "connect_failure",
+                    connect_time.elapsed().as_secs_f64(),
+                );
+                log_early_close(connect_time, "connect_failure");
+                return;
+            };
 
             if !peeked_bytes.is_empty()
                 && let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut upstream, &peeked_bytes).await
@@ -553,7 +567,7 @@ pub(super) fn build_group_proxy(
         .and_then(|l| l.max_connections)
         .map(|max| Arc::new(Semaphore::new(max as usize)));
     let (listener_names, default_listener_name) = build_listener_labels(listeners);
-    PingoraTcpProxy::new(
+    let mut proxy = PingoraTcpProxy::new(
         upstream_opt.clone(),
         cluster_opt.clone().map(Arc::from),
         pipeline,
@@ -563,7 +577,9 @@ pub(super) fn build_group_proxy(
         config.insecure_options.allow_private_upstreams,
         listener_names,
         default_listener_name,
-    )
+    );
+    proxy.overload = pipelines.overload();
+    proxy
 }
 
 /// Derive the service name for a TCP listener group.
@@ -967,18 +983,13 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for CountingStream<'_, S> {
 /// config time but a private IP at connection time. The check is
 /// skipped when `allow_private` is `true`
 /// (`insecure_options.allow_private_upstreams`).
-async fn connect_upstream(upstream_addr: &str, allow_private: bool) -> Option<TcpStream> {
-    if let Ok(result) = tokio::time::timeout(
-        UPSTREAM_CONNECT_TIMEOUT,
-        resolve_and_connect(upstream_addr, allow_private),
-    )
-    .await
-    {
+async fn connect_upstream(upstream_addr: &str, allow_private: bool, timeout: Duration) -> Option<TcpStream> {
+    if let Ok(result) = tokio::time::timeout(timeout, resolve_and_connect(upstream_addr, allow_private)).await {
         return result;
     }
     warn!(
         upstream = %upstream_addr,
-        timeout_secs = UPSTREAM_CONNECT_TIMEOUT.as_secs(),
+        timeout_secs = timeout.as_secs(),
         phase = "connect_timeout",
         "connection_error"
     );

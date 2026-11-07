@@ -4,7 +4,6 @@
 //! Adds TCP or TLS listeners to a Pingora HTTP proxy service.
 
 use pingora_core::services::listening::Service;
-use pingora_proxy::HttpProxy;
 use praxis_core::ProxyError;
 use tokio::sync::watch;
 use tracing::info;
@@ -19,9 +18,12 @@ use tracing::info;
 /// watcher. The caller must keep this sender alive; dropping it
 /// signals the watcher task to stop.
 pub(crate) fn add_listener<H>(
-    service: &mut Service<HttpProxy<H>>,
+    service: &mut Service<H>,
     listener: &praxis_core::config::Listener,
-) -> Result<Option<watch::Sender<bool>>, ProxyError> {
+) -> Result<Option<watch::Sender<bool>>, ProxyError>
+where
+    H: pingora_core::apps::ServerApp + Send + Sync + 'static,
+{
     let tls_enabled = listener.tls.is_some();
     let mut shutdown_tx = None;
 
