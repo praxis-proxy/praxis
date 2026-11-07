@@ -3619,8 +3619,7 @@ fn nested_header_registry() -> FilterRegistry {
 fn start_split_delay_chunked_backend(header_delay: std::time::Duration, body_delay: std::time::Duration) -> u16 {
     use std::io::{Read as _, Write as _};
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     std::thread::spawn(move || {
         let Ok((mut stream, _)) = listener.accept() else {
             return;
@@ -3639,8 +3638,7 @@ fn start_split_delay_chunked_backend(header_delay: std::time::Duration, body_del
 fn start_incomplete_chunked_backend() -> u16 {
     use std::io::{Read as _, Write as _};
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     std::thread::spawn(move || {
         let Ok((mut stream, _)) = listener.accept() else {
             return;

@@ -5,7 +5,7 @@
 
 use std::{
     io::{Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -192,7 +192,9 @@ fn stalled_streaming_rejection_releases_upstream_before_cleanup() {
 async fn streaming_body_limit_rejection_does_not_retry_upstream() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (listener, _) = praxis_test_utils::bind_unique_port();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
     let backend = listener.local_addr().unwrap().port();
     let (accepted, mut attempts) = tokio::sync::mpsc::unbounded_channel();
     let server = tokio::spawn(async move {
@@ -313,7 +315,9 @@ async fn streaming_rejection_wins_over_a_late_h2_upstream_response() {
 async fn assert_h2_streaming_rejection(late_response: bool) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (listener, _) = praxis_test_utils::bind_unique_port();
+    listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap();
     let backend = listener.local_addr().unwrap().port();
     let (started, receiving) = tokio::sync::oneshot::channel();
     let (uploaded, overflow_sent) = tokio::sync::oneshot::channel();
@@ -467,8 +471,7 @@ impl HttpFilter for SuccessfulTerminalFilter {
 
 /// Observe closure of the upstream's incomplete request without sending a response.
 fn upstream_close_probe() -> (u16, mpsc::Receiver<usize>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let (sender, receiver) = mpsc::channel();
     drop(std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();

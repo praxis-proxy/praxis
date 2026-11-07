@@ -245,6 +245,62 @@ async fn an_assertions_only_l7_policy_applies_its_contract_in_both_phases() {
     }
 }
 
+#[expect(clippy::too_many_lines, reason = "prior and current mutation representations")]
+#[tokio::test(flavor = "multi_thread")]
+async fn assertions_override_prior_and_current_ordered_headers() {
+    let contract = format!(
+        "{}routes:\n  - llm: \"*\"\n    authorization:\n      pre_invocation: [allow]\n",
+        L7_ASSERTIONS.replace("- authorization", "- authorization\n        - x-secret-*")
+    );
+    let (_dir, path, _count) = policy("test/bodyless-ordered-assertions", &contract);
+    let filter = filter(path);
+    let mut req = request(Method::GET, "/v1/models", "alice");
+    req.headers
+        .insert("authorization", HeaderValue::from_static("Bearer inbound"));
+    for ordered in [false, true] {
+        let mut ctx = context(&req);
+        ctx.prior_pre_read_mutations.push(crate::TrustedHeaderMutation::Add(
+            http::HeaderName::from_static("x-secret-prior"),
+            "prior".to_owned(),
+        ));
+        if ordered {
+            ctx.pre_read_mutations.push(crate::TrustedHeaderMutation::Set(
+                http::HeaderName::from_static("x-auth-user-id"),
+                HeaderValue::from_static("root"),
+            ));
+            ctx.pre_read_mutations.push(crate::TrustedHeaderMutation::Add(
+                http::HeaderName::from_static("x-secret-current"),
+                "current".to_owned(),
+            ));
+        }
+        assert_eq!(status(&body_phase(&filter, &mut ctx).await), None);
+        for name in ["authorization", "x-secret-prior"] {
+            assert!(
+                ctx.request_headers_to_remove.iter().any(|header| header == name),
+                "{name}, ordered={ordered}"
+            );
+        }
+        if ordered {
+            for name in ["authorization", "x-secret-prior", "x-secret-current"] {
+                let header = http::HeaderName::from_static(name);
+                let last = ctx
+                    .pre_read_mutations
+                    .iter()
+                    .rev()
+                    .find(|mutation| mutation.matches_header(&header));
+                assert!(
+                    matches!(last, Some(crate::TrustedHeaderMutation::Remove(_))),
+                    "{name}: {last:?}"
+                );
+            }
+            assert!(
+                matches!(ctx.pre_read_mutations.iter().rev().find(|mutation| mutation.matches_header(&http::HeaderName::from_static("x-auth-user-id"))),
+                Some(crate::TrustedHeaderMutation::Set(_, value)) if value == "alice")
+            );
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_global_rule_requiring_the_inference_request_denies_discovery() {
     let (_dir, path, _count) = policy(
@@ -288,7 +344,8 @@ async fn an_inference_policy_without_http_rules_admits_on_identity() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_fallback_without_a_model_still_admits_on_identity() {
+#[expect(clippy::too_many_lines, reason = "fallback inputs and both lifecycle orders")]
+async fn a_fallback_without_a_model_enforces_http_admission() {
     let (_dir, path, _count) = policy("test/bodyless-no-model-fallback", ALICE_ONLY);
     let filter = filter_with(
         path,
@@ -297,11 +354,35 @@ async fn a_fallback_without_a_model_still_admits_on_identity() {
             ..Default::default()
         },
     );
-    let req = request(Method::POST, "/v1/chat/completions", "bob");
-    let mut ctx = context(&req);
-    let mut body = Some(bytes::Bytes::from_static(br#"{"messages":[]}"#));
-    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
-    assert!(matches!(action, FilterAction::BodyDone), "got {action:?}");
+    for method in [Method::GET, Method::POST] {
+        for input in ["", " ", "{}", r#"{"messages":[]}"#] {
+            for header_first in [false, true] {
+                for (user, expected) in [("bob", Some(403)), ("alice", None)] {
+                    let req = request(method.clone(), "/v1/models", user);
+                    let mut ctx = context(&req);
+                    if header_first {
+                        assert!(matches!(
+                            filter.on_request(&mut ctx).await.unwrap(),
+                            FilterAction::Continue
+                        ));
+                    }
+                    let mut body = Some(bytes::Bytes::from(input));
+                    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+                    assert_eq!(
+                        status(&action),
+                        expected,
+                        "{method} {input:?}, {user}, header_first={header_first}"
+                    );
+                    if expected.is_none() {
+                        assert!(matches!(
+                            filter.on_request(&mut ctx).await.unwrap(),
+                            FilterAction::Continue
+                        ));
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[expect(clippy::too_many_lines, reason = "one fixture and its cases")]
@@ -328,22 +409,19 @@ fn identity_only_fallbacks_beside_http_rules_warn_at_startup() {
         },
         ..base.clone()
     };
-    let warned = identity_only_fallback_warnings(&no_model, true, true);
-    assert!(
-        warned.len() == 1 && warned.iter().all(|w| w.contains("llm.require_model")),
-        "{warned:?}"
-    );
+    assert!(identity_only_fallback_warnings(&no_model, true, true).is_empty());
     assert!(identity_only_fallback_warnings(&no_model, true, false).is_empty());
     let unclassified = PolicyFilterConfig {
         require_protocol_metadata: false,
         ..base
     };
-    let warned = identity_only_fallback_warnings(&unclassified, true, true);
+    let warned = identity_only_fallback_warnings(&unclassified, true, false);
     assert!(
         warned.len() == 1 && warned.iter().all(|w| w.contains("require_protocol_metadata")),
         "{warned:?}"
     );
     assert!(identity_only_fallback_warnings(&unclassified, false, true).is_empty());
+    assert!(identity_only_fallback_warnings(&unclassified, true, true).is_empty());
 }
 
 // -----------------------------------------------------------------------------

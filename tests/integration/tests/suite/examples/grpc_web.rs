@@ -11,7 +11,7 @@
 use std::{
     collections::HashMap,
     io::{BufReader, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::mpsc::{self, Receiver},
     thread,
     time::Duration,
@@ -358,8 +358,7 @@ impl Drop for RecordingGrpcBackend {
 
 /// Observe the exact request, then send a gRPC message and status trailers over h2c.
 fn recording_grpc_backend(response: Vec<u8>) -> RecordingGrpcBackend {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     listener.set_nonblocking(true).unwrap();
     let (sender, receipts) = mpsc::channel();
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
