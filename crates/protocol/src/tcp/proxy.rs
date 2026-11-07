@@ -967,7 +967,10 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for CountingStream<'_, S> {
 /// config time but a private IP at connection time. The check is
 /// skipped when `allow_private` is `true`
 /// (`insecure_options.allow_private_upstreams`).
-async fn connect_upstream(upstream_addr: &str, allow_private: bool) -> Option<TcpStream> {
+///
+/// Shared with the HTTP CONNECT forward-proxy path, which dials
+/// client-chosen destinations under the same guard.
+pub(crate) async fn connect_upstream(upstream_addr: &str, allow_private: bool) -> Option<TcpStream> {
     if let Ok(result) = tokio::time::timeout(
         UPSTREAM_CONNECT_TIMEOUT,
         resolve_and_connect(upstream_addr, allow_private),
