@@ -49,7 +49,16 @@ dashmap = "6.2.1"
 futures = "0.3.34"
 # Same backend pingora already builds (zlib-ng), so xtask adds no crate to the lockfile.
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-ng"] }
-h2 = "0.4.20"
+# Held below 0.4.20: since 0.11.1 the Pingora fork caps h2 at
+# `>=0.4.16, <0.4.20` (praxis-proxy/pingora@4a91f3f), because 0.4.20 began
+# rejecting conflicting duplicate Content-Length itself and the fork's tests
+# expect Pingora's own check to do it. That defense holds either way: the
+# fork and Praxis inbound admission both reject conflicting values. The cap
+# does forgo h2 0.4.20's other fixes, among them counting refused streams
+# against the reset limit, rejecting GOAWAY with a non-zero stream id, and
+# rejecting responses without `:status`. Return to the latest h2 once the
+# fork lifts the cap.
+h2 = "0.4.19"
 http = "1.5.0"
 # The hyper network backend (the `hyper` feature of praxis-proxy-core and
 # praxis-proxy-protocol). Already in the lock through tonic and reqwest;
@@ -68,9 +77,9 @@ opentelemetry_sdk = { version = "0.33.1", default-features = false, features = [
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "tls-provider-agnostic", "tls-roots", "trace"] }
 opentelemetry-proto = { version = "0.33.1", default-features = false, features = ["gen-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
-pingora-core = { version = "0.11.0", package = "quixotic-plecostomus-core", features = ["rustls"] }
-pingora-http = { version = "0.11.0", package = "quixotic-plecostomus-http" }
-pingora-proxy = { version = "0.11.0", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
+pingora-core = { version = "0.11.3", package = "quixotic-plecostomus-core", features = ["rustls"] }
+pingora-http = { version = "0.11.3", package = "quixotic-plecostomus-http" }
+pingora-proxy = { version = "0.11.3", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
 percent-encoding = "2.3.2"
 rand = "0.10.3"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
