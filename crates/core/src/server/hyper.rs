@@ -236,16 +236,21 @@ impl HyperRuntime {
         );
 
         let (mode, lingering) = runtime.block_on(async move {
-            let stop = make_stop();
+            let mut stop = pin!(make_stop());
             let mut services = ServiceSet::start(self.services, &shutdown_rx);
-            let mode = if services.wait_for_required_ready().await {
-                if let Err(error) = lifecycle.mark_serving() {
-                    warn!(%error, "lifecycle shutdown began before hyper startup completed");
-                }
-                services.serve_until(stop).await
-            } else {
-                error!("required service failed before becoming ready");
-                ShutdownMode::Failed
+            let mode = tokio::select! {
+                mode = &mut stop => mode,
+                ready = services.wait_for_required_ready() => {
+                    if ready {
+                        if let Err(error) = lifecycle.mark_serving() {
+                            warn!(%error, "lifecycle shutdown began before hyper startup completed");
+                        }
+                        services.serve_until(stop).await
+                    } else {
+                        error!("required service failed before becoming ready");
+                        ShutdownMode::Failed
+                    }
+                },
             };
             lifecycle.begin_drain();
             let result = services.stop(&shutdown_tx, mode.bound(graceful)).await;
@@ -336,8 +341,8 @@ fn start_and_signal_ready(
         let first = std::future::poll_fn(|cx| std::task::Poll::Ready(running.as_mut().poll(cx))).await;
         if first.is_pending() {
             _ = ready.send(());
+            running.await;
         }
-        running.await;
     })
 }
 
@@ -463,15 +468,14 @@ impl ServiceSet {
     }
 
     /// Serve until shutdown or a required service exits early.
-    async fn serve_until<Stop>(&mut self, stop: Stop) -> ShutdownMode
+    async fn serve_until<Stop>(&mut self, mut stop: Pin<&mut Stop>) -> ShutdownMode
     where
         Stop: Future<Output = ShutdownMode> + Send,
     {
-        let mut stop = pin!(stop);
         loop {
             tokio::select! {
                 biased;
-                mode = &mut stop => return mode,
+                mode = stop.as_mut() => return mode,
                 Some(required) = self.join_next() => if required {
                     error!("required service exited; stopping the server");
                     return ShutdownMode::Failed;
@@ -981,6 +985,48 @@ mod tests {
             "a required service that never signals readiness must fail startup"
         );
     }
+    #[test]
+    fn shutdown_wins_even_when_a_required_service_delays_its_first_poll() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 2\n"));
+        let observed = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&observed);
+        runtime.add_required_service("slow-start", move |mut shutdown| async move {
+            started_tx.send(()).expect("test waits for the first poll");
+            release_rx.recv().expect("test releases the first poll");
+            drop(shutdown.wait_for(|stopping| *stopping).await);
+            seen.store(true, Ordering::SeqCst);
+        });
+        let lifecycle = runtime.lifecycle();
+        let runner = std::thread::spawn(move || {
+            runtime.run_with_shutdown(Box::pin(async move {
+                drop(stop_rx.await);
+            }));
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the required service must begin its first poll");
+        stop_tx.send(()).expect("request shutdown");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lifecycle.phase() != LifecyclePhase::Draining {
+            assert!(
+                Instant::now() < deadline,
+                "draining must begin before the blocked first poll is released"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        release_tx.send(()).expect("release the first poll");
+        runner.join().expect("runtime thread");
+        assert_eq!(
+            lifecycle.phase(),
+            LifecyclePhase::Stopped,
+            "the runtime must finish in the stopped phase"
+        );
+        assert!(observed.load(Ordering::SeqCst), "the service must observe shutdown");
+    }
+
     #[tokio::test]
     #[expect(clippy::panic, reason = "exercise required-service panic supervision")]
     async fn required_service_panic_stops_supervision() {
@@ -988,7 +1034,8 @@ mod tests {
         runtime.add_required_service("failed-listener", |_shutdown| async { panic!("failed") });
         let (_sender, receiver) = watch::channel(false);
         let mut services = ServiceSet::start(runtime.services, &receiver);
-        let mode = tokio::time::timeout(Duration::from_secs(2), services.serve_until(std::future::pending()))
+        let mut stop = pin!(std::future::pending());
+        let mode = tokio::time::timeout(Duration::from_secs(2), services.serve_until(stop))
             .await
             .unwrap();
         assert_eq!(mode, ShutdownMode::Failed, "a required task panic is fatal");

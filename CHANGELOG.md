@@ -45,6 +45,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- `/ready` now defaults to serving readiness instead of upstream-gated
+  readiness, so a serving replica stays ready during upstream degradation.
+  Set `admin.readiness: upstreams` to restore upstream gating. The new default
+  also applies to the legacy Hyper and Pingora wrappers.
+- **Breaking:** `UnavailableRuntime` is no longer a `Copy` unit struct, and
+  `backend::Runtime` exposes it when no network backend feature is enabled.
 - **Breaking:** Rust API: `AdminConfig` has a new public `readiness` field,
   so struct literals must set it or use `..Default::default()`.
 - **Breaking:** Rust API: `ServerRuntime` implementations must implement

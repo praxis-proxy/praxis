@@ -123,6 +123,26 @@ readiness: upstreams
     }
 
     #[test]
+    fn readiness_parses_every_supported_value_and_rejects_unknown() {
+        let serving: AdminConfig = serde_yaml::from_str("readiness: serving").unwrap();
+        assert_eq!(
+            serving.readiness,
+            ReadinessMode::Serving,
+            "serving readiness must parse"
+        );
+        let upstreams: AdminConfig = serde_yaml::from_str("readiness: upstreams").unwrap();
+        assert_eq!(
+            upstreams.readiness,
+            ReadinessMode::Upstreams,
+            "upstream readiness must parse"
+        );
+        assert!(
+            serde_yaml::from_str::<AdminConfig>("readiness: sometimes").is_err(),
+            "an unknown readiness mode must be rejected"
+        );
+    }
+
+    #[test]
     fn parse_empty_yields_defaults() {
         let admin: AdminConfig = serde_yaml::from_str("{}").unwrap();
         assert!(admin.address.is_none(), "address should default to None");
