@@ -364,7 +364,7 @@ insecure_options:
         }
         let pipeline = Arc::new(praxis_filter::FilterPipeline::build(&mut entries, &registry).unwrap());
         let swappable = Arc::new(arc_swap::ArcSwap::from(pipeline));
-        praxis_protocol::http::load_http_handler(&mut server, listener, swappable, &mut Vec::new()).unwrap();
+        praxis_protocol::http::load_http_handler(&mut server, listener, swappable, &mut Vec::new(), false).unwrap();
     }
 
     let mut health_map = HashMap::new();
@@ -449,7 +449,7 @@ filter_chains:
         }
         let pipeline = Arc::new(praxis_filter::FilterPipeline::build(&mut entries, &registry).unwrap());
         let swappable = Arc::new(arc_swap::ArcSwap::from(pipeline));
-        praxis_protocol::http::load_http_handler(&mut server, listener, swappable, &mut Vec::new()).unwrap();
+        praxis_protocol::http::load_http_handler(&mut server, listener, swappable, &mut Vec::new(), false).unwrap();
     }
 
     let mut health_map = HashMap::new();

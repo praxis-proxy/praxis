@@ -66,7 +66,14 @@ insecure_options:
     let pipeline = std::sync::Arc::new(build_pipeline(&config));
     let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &Default::default());
     for listener in &config.listeners {
-        load_http_handler(&mut server, listener, swappable(pipeline.clone()), &mut Vec::new()).unwrap();
+        load_http_handler(
+            &mut server,
+            listener,
+            swappable(pipeline.clone()),
+            &mut Vec::new(),
+            false,
+        )
+        .unwrap();
     }
     let server = server;
     std::thread::spawn(move || {

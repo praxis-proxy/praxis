@@ -28,7 +28,7 @@ use super::super::{
 
 /// Run response filters on a buffered terminal response and send it downstream.
 #[cfg(feature = "pingora")]
-pub(super) async fn run_terminal_response(
+pub(in crate::http) async fn run_terminal_response(
     pipeline: &FilterPipeline,
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
@@ -231,7 +231,7 @@ pub(in crate::http) fn run_parent_terminal_body_filters(
     clippy::large_stack_frames,
     reason = "streaming lifecycle with body filter writeback"
 )]
-pub(super) async fn run_streaming_terminal_response(
+pub(in crate::http) async fn run_streaming_terminal_response(
     pipeline: &FilterPipeline,
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
