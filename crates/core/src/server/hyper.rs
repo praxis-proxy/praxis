@@ -236,22 +236,9 @@ impl HyperRuntime {
         );
 
         let (mode, lingering) = runtime.block_on(async move {
-            let mut stop = pin!(make_stop());
+            let stop = pin!(make_stop());
             let mut services = ServiceSet::start(self.services, &shutdown_rx);
-            let mode = tokio::select! {
-                mode = &mut stop => mode,
-                ready = services.wait_for_required_ready() => {
-                    if ready {
-                        if let Err(error) = lifecycle.mark_serving() {
-                            warn!(%error, "lifecycle shutdown began before hyper startup completed");
-                        }
-                        services.serve_until(stop).await
-                    } else {
-                        error!("required service failed before becoming ready");
-                        ShutdownMode::Failed
-                    }
-                },
-            };
+            let mode = Self::serve_ready_or_stop(&mut services, stop, &lifecycle).await;
             lifecycle.begin_drain();
             let result = services.stop(&shutdown_tx, mode.bound(graceful)).await;
             lifecycle.mark_stopped();
@@ -261,6 +248,31 @@ impl HyperRuntime {
         runtime.shutdown_timeout(RUNTIME_DROP_TIMEOUT);
         info!(lingering, "server stopped");
         assert_ne!(mode, ShutdownMode::Failed, "required service exited before shutdown");
+    }
+
+    /// Serve until shutdown, publishing Serving only after required services bind.
+    async fn serve_ready_or_stop<Stop>(
+        services: &mut ServiceSet,
+        mut stop: Pin<&mut Stop>,
+        lifecycle: &LifecycleHandle,
+    ) -> ShutdownMode
+    where
+        Stop: Future<Output = ShutdownMode> + Send,
+    {
+        tokio::select! {
+            mode = &mut stop => mode,
+            ready = services.wait_for_required_ready() => {
+                if ready {
+                    if let Err(error) = lifecycle.mark_serving() {
+                        warn!(%error, "lifecycle shutdown began before hyper startup completed");
+                    }
+                    services.serve_until(stop).await
+                } else {
+                    error!("required service failed before becoming ready");
+                    ShutdownMode::Failed
+                }
+            },
+        }
     }
 
     /// Build the service runtime, failing the process when it cannot start.
@@ -986,10 +998,11 @@ mod tests {
         );
     }
     #[test]
+    #[expect(clippy::too_many_lines, reason = "synchronized readiness-race setup")]
     fn shutdown_wins_even_when_a_required_service_delays_its_first_poll() {
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let (stop_tx, stop_rx) = oneshot::channel();
         let mut runtime = HyperRuntime::new(&config_with("runtime:\n  threads: 2\n"));
         let observed = Arc::new(AtomicBool::new(false));
         let seen = Arc::clone(&observed);
@@ -1015,7 +1028,7 @@ mod tests {
                 Instant::now() < deadline,
                 "draining must begin before the blocked first poll is released"
             );
-            std::thread::sleep(Duration::from_millis(5));
+            std::thread::yield_now();
         }
         release_tx.send(()).expect("release the first poll");
         runner.join().expect("runtime thread");
@@ -1034,7 +1047,7 @@ mod tests {
         runtime.add_required_service("failed-listener", |_shutdown| async { panic!("failed") });
         let (_sender, receiver) = watch::channel(false);
         let mut services = ServiceSet::start(runtime.services, &receiver);
-        let mut stop = pin!(std::future::pending());
+        let stop = pin!(std::future::pending());
         let mode = tokio::time::timeout(Duration::from_secs(2), services.serve_until(stop))
             .await
             .unwrap();
