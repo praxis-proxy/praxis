@@ -255,7 +255,7 @@ fn filter_policy_block(
     Ok(retained.len())
 }
 
-/// Compile each declared step and retain only effects independent of response content.
+/// Compile each declared step and retain only effects available in the metadata-only view.
 fn filter_post_steps(
     steps: &[Value],
     source: &str,
@@ -278,26 +278,26 @@ fn filter_post_steps(
             Ok((!compiled
                 .post_invocation
                 .iter()
-                .any(|effect| effect_reads_response_content(effect, metadata_plugins)))
+                .any(|effect| effect_unavailable_in_metadata_view(effect, metadata_plugins)))
             .then(|| step.clone()))
         })
         .filter_map(|result: Result<Option<Value>, FilterError>| result.transpose())
         .collect()
 }
 
-/// Whether an effect reads response content unavailable on metadata-only dispatch.
-fn effect_reads_response_content(effect: &Effect, metadata_plugins: &HashSet<String>) -> bool {
+/// Whether an effect needs response content or a handler absent from the metadata view.
+fn effect_unavailable_in_metadata_view(effect: &Effect, metadata_plugins: &HashSet<String>) -> bool {
     match effect {
         Effect::FieldOp { path, .. } => content_key(path),
         Effect::When { condition, body, .. } => {
             expression_reads_response_content(condition)
                 || body
                     .iter()
-                    .any(|effect| effect_reads_response_content(effect, metadata_plugins))
+                    .any(|effect| effect_unavailable_in_metadata_view(effect, metadata_plugins))
         },
         Effect::Sequential(effects) | Effect::Parallel(effects) => effects
             .iter()
-            .any(|effect| effect_reads_response_content(effect, metadata_plugins)),
+            .any(|effect| effect_unavailable_in_metadata_view(effect, metadata_plugins)),
         Effect::Pdp {
             call,
             on_allow,
@@ -306,10 +306,10 @@ fn effect_reads_response_content(effect: &Effect, metadata_plugins: &HashSet<Str
             yaml_reads_response_content(&call.args)
                 || on_allow
                     .iter()
-                    .any(|effect| effect_reads_response_content(effect, metadata_plugins))
+                    .any(|effect| effect_unavailable_in_metadata_view(effect, metadata_plugins))
                 || on_deny
                     .iter()
-                    .any(|effect| effect_reads_response_content(effect, metadata_plugins))
+                    .any(|effect| effect_unavailable_in_metadata_view(effect, metadata_plugins))
         },
         Effect::Plugin { name } => !metadata_plugins.contains(name),
         Effect::Allow | Effect::Deny { .. } | Effect::Taint { .. } | Effect::Restrict { .. } => false,
@@ -504,7 +504,12 @@ routes:
     #[test]
     fn drops_handler_dependent_post_steps() {
         let yaml = format!(
-            r#"{PLUGINS}
+            r#"{PLUGINS}  - name: workday-oauth
+    kind: oauth/token-exchange
+    hooks: [token.delegate]
+  - name: manager-approver
+    kind: elicitation/ciba
+    hooks: [elicit]
 routes:
   - llm: "*"
     authorization:
@@ -519,6 +524,8 @@ routes:
             .expect("metadata rule remains");
         assert!(!filtered.contains("delegate("));
         assert!(!filtered.contains("require_approval("));
+        assert!(!filtered.contains("name: workday-oauth"));
+        assert!(!filtered.contains("name: manager-approver"));
         assert!(filtered.contains("run(metadata)"));
     }
 }
