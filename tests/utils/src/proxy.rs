@@ -322,13 +322,13 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
         .for_listener(listener)
         .unwrap_or_else(|err| panic!("{err}"));
 
-    let mut pipeline = FilterPipeline::build_with_chains_for(
+    let registry = registry.for_protocol(listener.protocol);
+    let mut pipeline = FilterPipeline::build_with_chains(
         &mut entries,
-        registry,
+        &registry,
         &chains,
         &config.insecure_options,
         &config.clusters,
-        listener.protocol,
     )
     .unwrap();
     configure_test_pipeline(&mut pipeline, config);

@@ -216,20 +216,27 @@ pub struct FilterRegistry {
 
 impl FilterRegistry {
     /// Select dual built-ins for a listener, preserving custom registrations.
-    #[cfg(feature = "bandwidth")]
     #[must_use]
     pub fn for_protocol(&self, protocol: praxis_core::config::ProtocolKind) -> Self {
-        let mut registry = self.clone();
-        for entry in registry.filters.values_mut() {
-            if let RegisteredFilterFactory::Dual { http, tcp } = &entry.factory {
-                let factory = match protocol {
-                    praxis_core::config::ProtocolKind::Http => http_builtin(*http),
-                    praxis_core::config::ProtocolKind::Tcp => tcp_builtin(*tcp),
-                };
-                entry.factory = RegisteredFilterFactory::Standard(factory);
+        #[cfg(feature = "bandwidth")]
+        {
+            let mut registry = self.clone();
+            for entry in registry.filters.values_mut() {
+                if let RegisteredFilterFactory::Dual { http, tcp } = &entry.factory {
+                    let factory = match protocol {
+                        praxis_core::config::ProtocolKind::Http => http_builtin(*http),
+                        praxis_core::config::ProtocolKind::Tcp => tcp_builtin(*tcp),
+                    };
+                    entry.factory = RegisteredFilterFactory::Standard(factory);
+                }
             }
+            registry
         }
-        registry
+        #[cfg(not(feature = "bandwidth"))]
+        {
+            let _ = protocol;
+            self.clone()
+        }
     }
 
     /// Creates a registry with only the built-in filters.
