@@ -233,6 +233,20 @@ pub fn download_pace_delay(extensions: &RequestExtensions) -> Option<Duration> {
     if delay.is_zero() { None } else { Some(delay) }
 }
 
+/// Move upload grants into a reservation that refunds if its wait is cancelled.
+pub(crate) fn take_upload(extensions: &mut RequestExtensions) -> Option<PaceReservation> {
+    extensions.get_mut::<UploadPace>().map(|pace| PaceReservation {
+        grants: std::mem::take(&mut pace.grants),
+    })
+}
+
+/// Move download grants into a reservation that refunds if its wait is cancelled.
+pub(crate) fn take_download(extensions: &mut RequestExtensions) -> Option<PaceReservation> {
+    extensions.get_mut::<DownloadPace>().map(|pace| PaceReservation {
+        grants: std::mem::take(&mut pace.grants),
+    })
+}
+
 /// Commit upload grants after the protocol has waited.
 pub fn commit_upload_pace(extensions: &mut RequestExtensions) {
     if let Some(pace) = extensions.get_mut::<UploadPace>() {

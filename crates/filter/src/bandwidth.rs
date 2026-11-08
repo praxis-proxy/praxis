@@ -17,7 +17,7 @@ pub use pace::{
     download_grants_pending, download_pace_delay, limits_download, reserve_generated_download, settle_bandwidth,
     settle_download_write, upload_pace_delay,
 };
-pub(crate) use pace::{push_download, push_download_schedule, push_upload};
+pub(crate) use pace::{push_download, push_download_schedule, push_upload, take_download, take_upload};
 pub(crate) use schedule::{BandwidthGrant, Schedule};
 pub use table::ConnectionAlive;
 pub(crate) use table::{AcquireError, Acquired, BandwidthTable, BudgetKey, InFlightGuard};
