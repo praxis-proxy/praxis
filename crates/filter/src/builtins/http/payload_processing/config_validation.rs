@@ -46,7 +46,7 @@ pub fn validate_header_name(filter: &str, field: &str, header_name: Option<&str>
 /// # Errors
 ///
 /// Returns [`FilterError`] when the value is zero or exceeds
-/// the `MAX_JSON_BODY_BYTES` ceiling (64 MiB).
+/// the addressable `MAX_JSON_BODY_BYTES` ceiling.
 ///
 /// [`FilterError`]: crate::FilterError
 pub fn validate_max_body_bytes(filter: &str, value: usize) -> Result<(), FilterError> {

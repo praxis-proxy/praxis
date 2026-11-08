@@ -237,21 +237,6 @@ async fn answered_instead(session: &mut HyperSession, failure: Failure) -> Resul
 // Upload Deadline
 // -----------------------------------------------------------------------------
 
-/// How a wait for the upload deadline ended.
-enum Release {
-    /// The deadline passed. The reserved bytes may be sent.
-    Ready,
-
-    /// The final response head arrived first.
-    Final,
-
-    /// An interim (`1xx`) head arrived. Keep waiting.
-    Interim,
-
-    /// The read timeout elapsed first.
-    Overdue(Duration),
-}
-
 /// What the deadline select observed.
 enum Held {
     /// The upload deadline passed.
@@ -287,14 +272,15 @@ async fn release_or_answer(
     let overdue = read_timeout.and_then(|limit| Instant::now().checked_add(limit).map(|at| (at, limit)));
     let mut interims = 0_u32;
     loop {
-        match wait_for_release(session, deadline, overdue).await? {
-            Release::Ready => {
+        match wait_for_release(session, deadline, overdue).await {
+            Held::Ready => {
                 release_upload(&mut flight.ctx.extensions);
                 return Ok(false);
             },
-            Release::Final => return Ok(true),
-            Release::Interim => interims = interims.saturating_add(1),
-            Release::Overdue(limit) => return Err(UploadEnd::Upstream(Failure::read_timeout(limit))),
+            Held::Head(Ok(())) if is_final(session) => return Ok(true),
+            Held::Head(Ok(())) => interims = interims.saturating_add(1),
+            Held::Head(Err(error)) => return Err(UploadEnd::upstream(error)),
+            Held::Overdue(limit) => return Err(UploadEnd::Upstream(Failure::read_timeout(limit))),
         }
         if interims > MAX_INTERIM_RESPONSES {
             return Err(UploadEnd::Upstream(Failure::new(
@@ -305,28 +291,13 @@ async fn release_or_answer(
     }
 }
 
-/// One turn of [`release_or_answer`].
-///
-/// # Errors
-///
-/// Returns [`UploadEnd::Upstream`] when the head read fails.
-async fn wait_for_release(
-    session: &mut HyperSession,
-    deadline: Instant,
-    overdue: Option<(Instant, Duration)>,
-) -> Result<Release, UploadEnd> {
-    let turn = tokio::select! {
+/// Race the upload deadline against the upstream head and read timeout.
+async fn wait_for_release(session: &mut HyperSession, deadline: Instant, overdue: Option<(Instant, Duration)>) -> Held {
+    tokio::select! {
         biased;
         head = session.read_response_head() => Held::Head(head),
         limit = until_overdue(overdue) => Held::Overdue(limit),
         () = tokio::time::sleep_until(deadline) => Held::Ready,
-    };
-    match turn {
-        Held::Ready => Ok(Release::Ready),
-        Held::Overdue(limit) => Ok(Release::Overdue(limit)),
-        Held::Head(Ok(())) if is_final(session) => Ok(Release::Final),
-        Held::Head(Ok(())) => Ok(Release::Interim),
-        Held::Head(Err(err)) => Err(UploadEnd::upstream(err)),
     }
 }
 

@@ -11,8 +11,9 @@
 
 use std::collections::HashMap;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use http::{HeaderValue, Method};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use openssl::{hash::MessageDigest, pkey::PKey, sign::Signer};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -38,11 +39,27 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
+/// Mint a compact HS256 JWT over `claims`, signed with `secret` through the
+/// system OpenSSL (RFC 7515 section 5.1).
+fn hs256(claims: &serde_json::Value, secret: &[u8]) -> String {
+    let header = json!({ "alg": "HS256", "typ": "JWT" });
+    let signing_input = format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header.to_string()),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+    );
+    let key = PKey::hmac(secret).expect("HMAC key");
+    let mut signer = Signer::new(MessageDigest::sha256(), &key).expect("HMAC-SHA256 signer");
+    signer
+        .update(signing_input.as_bytes())
+        .expect("feed the JWT signing input");
+    let signature = signer.sign_to_vec().expect("HMAC-SHA256 signature");
+    format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature))
+}
+
 /// Mint an HS256 JWT signed with [`TEST_SECRET`].
 fn mint_jwt(claims: &serde_json::Value) -> String {
-    let header = Header::new(Algorithm::HS256);
-    let key = EncodingKey::from_secret(TEST_SECRET.as_bytes());
-    encode(&header, claims, &key).expect("sign JWT")
+    hs256(claims, TEST_SECRET.as_bytes())
 }
 
 /// Standard token claims: test issuer + audience, fresh `exp`.
@@ -894,6 +911,7 @@ fn build_filter_with_meta(config_path: String, context_meta: ContextMetaConfig) 
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -1015,6 +1033,7 @@ fn build_filter_with_context(
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -1207,6 +1226,7 @@ fn filter_config(config_path: String) -> PolicyFilterConfig {
         config_path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1442,6 +1462,7 @@ fn rejects_zero_max_buffer_bytes() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1463,10 +1484,11 @@ fn rejects_oversized_max_buffer_bytes() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
-        max_buffer_bytes: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1,
+        max_buffer_bytes: praxis_core::config::MAX_BUFFER_BYTES + 1,
         llm: super::config::LlmOptions::default(),
         context_headers: HashMap::default(),
         context_meta: ContextMetaConfig::default(),
@@ -1772,20 +1794,9 @@ async fn request_without_auth_header_rejects_401() {
     }
 }
 
-/// When a downstream pre-read ran `on_request_body` first and stashed
-/// `ResolvedIdentity` (having stripped the inbound credential for the
-/// upstream), the early `identity_gate` must skip rather than re-resolve
-/// against the now-missing headers. A credential-less request that would
-/// normally 401 here passes because the body phase is authoritative.
-///
-/// The routes-only config is what puts `on_request` on the `identity_gate`
-/// path, and stashing `ResolvedIdentity` is what a body phase that already
-/// resolved and enforced identity leaves behind.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_skips_when_body_phase_already_resolved() {
     use ppe::praxis_policy_core::identity::{IdentityPayload, TokenSource};
-
-    use super::filter::ResolvedIdentity;
 
     let (_dir, path) = write_cel_policy_config();
     let filter = build_filter(path);
@@ -1793,22 +1804,15 @@ async fn identity_gate_skips_when_body_phase_already_resolved() {
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
 
-    ctx.extensions.insert(ResolvedIdentity(IdentityPayload::new(
-        String::new(),
-        TokenSource::Bearer,
-    )));
+    super::request_state::state_mut(&mut ctx).identity = Some(IdentityPayload::new(String::new(), TokenSource::Bearer));
 
     let action = filter.on_request(&mut ctx).await.expect("on_request ran");
     assert!(
         matches!(action, FilterAction::Continue),
-        "gate must be skipped when ResolvedIdentity is already stashed; got {action:?}",
+        "gate must be skipped when this instance already admitted an identity; got {action:?}",
     );
 }
 
-/// Control for `identity_gate_skips_when_body_phase_already_resolved`: the
-/// same credential-less request with no `ResolvedIdentity` stashed must run
-/// the gate and reject — proving the skip (not something else) is what flips
-/// the outcome to `Continue`.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_rejects_when_identity_not_yet_resolved() {
     let (_dir, path) = write_cel_policy_config();
@@ -2059,6 +2063,38 @@ async fn dotted_role_does_not_satisfy_its_prefix() {
         matches!(&action, FilterAction::Reject(_)),
         "admin.readonly must not grant role.admin; got {action:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn apl_settled_operand_decides_past_an_unorderable_one() {
+    for rule in [
+        r#""subject.id > 10 & role.guest: deny('blocked', 'blocked')""#,
+        r#""role.guest & subject.id > 10: deny('blocked', 'blocked')""#,
+        r#""require(subject.id <= 10 | role.admin)""#,
+        r#""require(role.admin | subject.id <= 10)""#,
+    ] {
+        let action = dispatch_with_roles(rule, &["admin"]).await;
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "a settled operand must decide {rule}; got {action:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn apl_unsettled_unorderable_operand_fails_closed() {
+    for rule in [
+        r#""subject.id > 10: deny('blocked', 'blocked')""#,
+        r#""subject.id <= 10: deny('blocked', 'blocked')""#,
+        r#""require(subject.id <= 10 | role.guest)""#,
+        r#""subject.id > 10 & role.admin: deny('blocked', 'blocked')""#,
+    ] {
+        let action = dispatch_with_roles(rule, &["admin"]).await;
+        assert!(
+            matches!(&action, FilterAction::Reject(_)),
+            "an unsettled unorderable predicate must deny {rule}; got {action:?}"
+        );
+    }
 }
 
 /// Write a pure-L7 JWT policy decided by `data.authz.allow` over `modules`,
@@ -2459,6 +2495,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: false,
         init_timeout_secs: 30,
@@ -3299,6 +3336,7 @@ async fn response_phase_without_request_identity_fails_closed() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -3371,7 +3409,7 @@ fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    let count = attach_delegated_tokens(&mut ctx, Some(&ext));
+    let count = attach_delegated_tokens(&mut ctx, Some(&ext)).expect("header credentials attach");
 
     assert_eq!(count, 1, "exactly one token attaches for a colliding header");
     assert_eq!(ctx.request_headers_to_set.len(), 1, "exactly one header push");
@@ -3415,7 +3453,7 @@ fn attach_delegated_tokens_uses_each_tokens_outbound_prefix() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    assert_eq!(attach_delegated_tokens(&mut ctx, Some(&ext)), 2);
+    assert_eq!(attach_delegated_tokens(&mut ctx, Some(&ext)).expect("tokens attach"), 2);
 
     let attached: HashMap<&str, &str> = ctx
         .request_headers_to_set
@@ -3461,7 +3499,7 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    let count = attach_delegated_tokens(&mut ctx, Some(&ext));
+    let count = attach_delegated_tokens(&mut ctx, Some(&ext)).expect("header credentials attach");
 
     assert_eq!(count, 2, "two distinct headers must both attach");
     assert_eq!(ctx.request_headers_to_set.len(), 2);
@@ -3638,6 +3676,7 @@ fn try_build_filter_allowing_private(
             config_path,
             allow_private_idp,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -3749,12 +3788,7 @@ fn mint_route_jwt(subject: &str) -> String {
         "exp": now_unix() + 300,
         "iat": now_unix(),
     });
-    encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(ROUTE_SECRET.as_bytes()),
-    )
-    .expect("sign route JWT")
+    hs256(&claims, ROUTE_SECRET.as_bytes())
 }
 
 /// Return identity plugins that trust distinct global and route issuers.
@@ -4313,7 +4347,7 @@ async fn an_asserted_secret_stays_redacted_on_the_response_half() {
     let mut response_ctx = make_filter_context(&forwarded);
     response_ctx.extensions = std::mem::take(&mut ctx.extensions);
 
-    let extensions = PolicyFilter::response_extensions(&response_ctx, HashMap::new(), 200, &filter_config(path));
+    let extensions = PolicyFilter::response_extensions(&response_ctx, HashMap::new(), 200, &filter_config(path), &[]);
     let http = extensions.http.as_deref().expect("the response half carries http");
     let view = serde_json::to_string(http).expect("serialize http extension");
     assert!(!view.contains(&secret), "response view leaks the secret: {view}");
@@ -4381,6 +4415,7 @@ routes:
         config_path: cfg_path.to_str().expect("utf8 path").to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -4751,6 +4786,7 @@ fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) ->
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadOnly,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -5124,6 +5160,7 @@ fn the_lower_ceiling_binds_when_both_apply() {
             config_path: path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadWrite,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -5149,10 +5186,55 @@ fn the_lower_ceiling_binds_when_both_apply() {
 }
 
 #[test]
+fn policy_body_capabilities_reflect_both_limits_and_access_tiers() {
+    for (access, inference, buffer, expected_request, expected_response) in [
+        (BodyAccessMode::ReadOnly, 4_096, 8_192, 4_096, None),
+        (BodyAccessMode::ReadWrite, 4_096, 8_192, 4_096, Some(8_192)),
+        (BodyAccessMode::ReadWrite, 8_192, 4_096, 4_096, Some(4_096)),
+    ] {
+        assert_policy_body_capabilities(access, inference, buffer, expected_request, expected_response);
+    }
+}
+
+/// Verify request and response body capabilities for one configuration.
+fn assert_policy_body_capabilities(
+    access: BodyAccessMode,
+    inference: usize,
+    buffer: usize,
+    expected_request: usize,
+    expected_response: Option<usize>,
+) {
+    let (_dir, path) = write_llm_route_config();
+    let mut cfg = filter_config(path);
+    cfg.body_access = access;
+    cfg.max_buffer_bytes = buffer;
+    cfg.llm.max_request_bytes = inference;
+    let filter = PolicyFilter::new(cfg, None).unwrap();
+    assert_eq!(
+        filter.request_body_mode(),
+        BodyMode::StreamBuffer {
+            max_bytes: Some(expected_request)
+        }
+    );
+    assert_eq!(
+        filter.response_body_mode(),
+        expected_response.map_or(BodyMode::Stream, |limit| BodyMode::StreamBuffer {
+            max_bytes: Some(limit)
+        })
+    );
+    let expected_access = if matches!(access, BodyAccessMode::ReadWrite) {
+        BodyAccess::ReadWrite
+    } else {
+        BodyAccess::ReadOnly
+    };
+    assert_eq!(filter.request_body_access(), expected_access);
+}
+
+#[test]
 fn rejects_an_out_of_range_inference_ceiling() {
     for (max_request_bytes, expected) in [
         (0, "llm.max_request_bytes must be > 0"),
-        (praxis_core::config::ABSOLUTE_MAX_BODY_BYTES + 1, "exceeds the maximum"),
+        (praxis_core::config::MAX_BUFFER_BYTES + 1, "exceeds the maximum"),
     ] {
         let (_dir, path) = write_llm_route_config();
         let err = PolicyFilter::new(
@@ -5160,6 +5242,7 @@ fn rejects_an_out_of_range_inference_ceiling() {
                 config_path: path,
                 allow_private_idp: false,
                 trusted_private_endpoints: vec![],
+                trusted_proxies: vec![],
                 body_access: BodyAccessMode::ReadOnly,
                 require_protocol_metadata: true,
                 init_timeout_secs: 30,
@@ -5235,6 +5318,7 @@ fn build_read_write_filter(config_path: String) -> PolicyFilter {
             config_path,
             allow_private_idp: false,
             trusted_private_endpoints: vec![],
+            trusted_proxies: vec![],
             body_access: BodyAccessMode::ReadWrite,
             require_protocol_metadata: true,
             init_timeout_secs: 30,
@@ -6073,6 +6157,95 @@ async fn a_malformed_body_is_not_reported_as_a_duplicate_key() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn large_late_duplicates_and_malformed_json_have_distinct_policy_outcomes() {
+    let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
+    let filter = build_filter(path);
+    let padding = "x".repeat(900_000);
+    let duplicate = format!(r#"{{"model":"m","padding":"{padding}","mo\u0064el":"m"}}"#);
+    let malformed = format!(r#"{{"model":"m","padding":"{padding}","mo\u0064el":"m""#);
+    let allowed = format!(r#"{{"padding":"{padding}","model":"m","tools":[]}}"#);
+    assert!(matches!(
+        dispatch_inference_as(&filter, "alice", &allowed).await,
+        FilterAction::BodyDone
+    ));
+    for (body, status, violation) in [
+        (duplicate, 400, "llm.duplicate_key"),
+        (malformed, 403, "llm.model_missing"),
+    ] {
+        let action = dispatch_inference_as(&filter, "alice", &body).await;
+        let FilterAction::Reject(rejection) = action else {
+            panic!("expected rejection, got {action:?}");
+        };
+        assert_eq!(rejection.status, status);
+        assert!(has_header(&rejection, "x-policy-violation", violation));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn large_policy_request_uses_the_late_model_and_tool_content() {
+    let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            max_request_bytes: 1_000_000,
+            ..Default::default()
+        },
+    );
+    let padding = "x".repeat(900_000);
+    let body =
+        |tool: &str| format!(r#"{{"padding":"{padding}","model":"m","tools":[{{"function":{{"name":"{tool}"}}}}]}}"#);
+    let allowed = body("weather");
+    let forbidden = body("transfer_funds");
+    assert!(matches!(
+        dispatch_inference_as(&filter, "alice", &allowed).await,
+        FilterAction::BodyDone
+    ));
+    assert!(
+        matches!(dispatch_inference_as(&filter, "alice", &forbidden).await, FilterAction::Reject(rejection) if rejection.status == 403)
+    );
+    let missing = format!(r#"{{"padding":"{padding}"}}"#);
+    let wrong_type = format!(r#"{{"padding":"{padding}","model":123}}"#);
+    for body in [missing, wrong_type] {
+        let FilterAction::Reject(rejection) = dispatch_inference_as(&filter, "alice", &body).await else {
+            panic!("missing or unusable model must be denied");
+        };
+        assert!(has_header(&rejection, "x-policy-violation", "llm.model_missing"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_size_failure_is_distinct_from_invalid_input_at_the_limit() {
+    let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
+    let filter = build_filter_with_llm(
+        path,
+        super::config::LlmOptions {
+            max_request_bytes: 1_000_000,
+            ..Default::default()
+        },
+    );
+    let prefix = r#"{"padding":""#;
+    let suffix = r#"","model":"m"}"#;
+    let exact = format!(
+        "{prefix}{}{suffix}",
+        "x".repeat(1_000_000 - prefix.len() - suffix.len())
+    );
+    assert_eq!(exact.len(), 1_000_000);
+    assert!(matches!(
+        dispatch_inference_as(&filter, "alice", &exact).await,
+        FilterAction::BodyDone
+    ));
+    let over = format!("{exact} ");
+    let malformed = format!("{}!", exact.strip_suffix('}').unwrap());
+    for (body, status, violation) in [(over, 413, "llm.body_too_large"), (malformed, 403, "llm.model_missing")] {
+        let FilterAction::Reject(rejection) = dispatch_inference_as(&filter, "alice", &body).await else {
+            panic!("expected rejection");
+        };
+        assert_eq!(rejection.status, status);
+        assert!(has_header(&rejection, "x-policy-violation", violation));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_streaming_request_still_records_the_stream_flag() {
     let (_dir, path) = write_llm_structured_config(CEL_TOOL_GUARD);
     let filter = build_filter(path);
@@ -6549,6 +6722,598 @@ async fn a_result_pipeline_alone_redacts_the_response() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn large_policy_mutations_preserve_unrelated_request_and_response_content() {
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    args:
+      ssn: "str | mask(2)"
+    result:
+      ssn: "str | mask(2)"
+"#,
+    );
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let padding = "x".repeat(900_000);
+    let original = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"padding":padding,"ssn":"123-45-6789"}}}).to_string();
+    let mut request = Some(bytes::Bytes::from(original));
+    let action = filter.on_request_body(&mut ctx, &mut request, true).await.unwrap();
+    assert!(matches!(action, FilterAction::BodyDone));
+    let transformed = request.unwrap();
+    assert_large_masked_value(&transformed, "/params/arguments", &padding);
+
+    let original_response = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"padding":padding,"ssn":"123-45-6789"}}}).to_string();
+    let original_len = original_response.len();
+    let mut response = Some(bytes::Bytes::from(original_response));
+    let action = filter.on_response_body(&mut ctx, &mut response, true).unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    let transformed = response.unwrap();
+    assert_eq!(transformed.len(), original_len);
+    assert_large_masked_value(&transformed, "/result/structuredContent", &padding);
+}
+
+/// Check that masking preserves the unrelated large field and removes the secret.
+fn assert_large_masked_value(transformed: &[u8], pointer: &str, padding: &str) {
+    let parsed: serde_json::Value = serde_json::from_slice(transformed).unwrap();
+    let value = parsed.pointer(pointer).unwrap();
+    assert_ne!(value["ssn"], "123-45-6789");
+    assert_eq!(value["padding"], padding);
+    assert!(!transformed.windows(11).any(|part| part == b"123-45-6789"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture checks admission, a growing rewrite and its fitted denial"
+)]
+async fn large_policy_response_growth_fails_closed_with_fitted_error() {
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    result:
+      secret: "str | redact"
+"#,
+    );
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let original = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"padding":"x".repeat(900_000),"secret":"s"}}}).to_string();
+    let original_len = original.len();
+    let mut response = Some(bytes::Bytes::from(original));
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut response, true).unwrap(),
+        FilterAction::Continue
+    ));
+    let served = response.unwrap();
+    assert_eq!(served.len(), original_len);
+    let parsed: serde_json::Value = serde_json::from_slice(&served).unwrap();
+    assert_eq!(
+        parsed["error"]["data"]["violation"],
+        "gateway.response_rewrite_overflow"
+    );
+    assert!(parsed.get("result").is_none());
+    assert!(!served.windows(b"\"secret\"".len()).any(|part| part == b"\"secret\""));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn large_policy_response_without_identity_emits_a_fitted_error() {
+    let (_dir, path) = write_tool_result_pipeline_config();
+    let filter = build_read_write_filter(path);
+    let req = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let original = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"structuredContent":{"padding":"x".repeat(900_000),"ssn":"123-45-6789"}}}).to_string();
+    let original_len = original.len();
+    let mut response = Some(bytes::Bytes::from(original));
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut response, true).unwrap(),
+        FilterAction::Continue
+    ));
+    let served = response.unwrap();
+    assert_eq!(served.len(), original_len);
+    let parsed: serde_json::Value = serde_json::from_slice(&served).unwrap();
+    assert_eq!(parsed["error"]["data"]["violation"], "identity.post_phase_unavailable");
+    assert!(parsed.get("result").is_none());
+    assert!(!served.windows(11).any(|part| part == b"123-45-6789"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "compares malformed variants with a valid JSON-RPC error in the same admitted context"
+)]
+async fn malformed_classified_tool_response_returns_filter_error_without_partial_rewrite() {
+    let (_dir, path) = write_tool_result_pipeline_config();
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let valid = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":{{"structuredContent":{{"padding":"{}","ssn":"123-45-6789"}}}}}}"#,
+        "x".repeat(900_000)
+    );
+    let mut truncated = valid.as_bytes().to_vec();
+    truncated.pop();
+    let mut suffix = valid.as_bytes().to_vec();
+    suffix.push(b'!');
+    let mut invalid_utf8 = valid.as_bytes().to_vec();
+    *invalid_utf8.get_mut(1_000).unwrap() = 0xFF;
+    for malformed in [truncated, suffix, invalid_utf8] {
+        let original = bytes::Bytes::from(malformed);
+        let mut body = Some(original.clone());
+        let error = filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect_err("invalid JSON must surface an inspection error");
+        assert!(!error.to_string().contains("123-45-6789"));
+        assert_eq!(body, Some(original), "error must not partially rewrite the response");
+    }
+    let upstream_error =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"unavailable"}}"#);
+    let mut body = Some(upstream_error.clone());
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(body, Some(upstream_error));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "checks unknown JSON shapes, genuine errors and empty results after one admitted call"
+)]
+async fn uninspectable_tool_response_is_error_but_empty_results_and_valid_errors_pass() {
+    // An admitting post hook isolates envelope validation from result rewriting.
+    // The masking fixture intentionally canonicalizes content arrays and can grow them.
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      post_invocation:
+        - "require(subject.id == 'alice')"
+"#,
+    );
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let invalid_shapes = [
+        serde_json::json!("confidential-marker"),
+        serde_json::json!(["confidential-marker"]),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"message":"confidential-marker"}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"error":"confidential-marker"}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"error":{"message":"confidential-marker"}}),
+        serde_json::json!({"id":1,"error":{"code":-32000,"message":"confidential-marker"}}),
+    ];
+    for value in invalid_shapes {
+        let original = bytes::Bytes::from(serde_json::to_vec(&value).unwrap());
+        let mut body = Some(original.clone());
+        let error = filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect_err("no result or genuine error cannot be inspected");
+        assert!(!error.to_string().contains("confidential-marker"));
+        assert_eq!(body, Some(original));
+    }
+    for value in [
+        serde_json::json!({"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"upstream error"}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":null}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}}),
+        serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"content":[]}}),
+    ] {
+        // Response hooks canonicalize a content array even without a mutator.
+        // Supply room for that existing representation and preserve its length.
+        let mut original = serde_json::to_vec(&value).unwrap();
+        original.resize(512, b' ');
+        let mut body = Some(bytes::Bytes::from(original));
+        assert!(matches!(
+            filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+            FilterAction::Continue
+        ));
+        assert_eq!(body.as_ref().unwrap().len(), 512);
+        let actual: serde_json::Value = serde_json::from_slice(body.as_deref().unwrap()).unwrap();
+        let expected = if value.pointer("/result/content").is_some() {
+            serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"null"}]}})
+        } else {
+            value
+        };
+        assert_eq!(actual, expected);
+    }
+    let mut empty = Some(bytes::Bytes::new());
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut empty, true).unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(empty, Some(bytes::Bytes::new()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_unclassified_and_request_only_policy_responses_are_not_newly_parsed() {
+    let (_dir, path) = write_tool_route_config();
+    let filter = build_read_write_filter(path);
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    let original = bytes::Bytes::from_static(b"not a JSON-RPC response");
+    let mut body = Some(original.clone());
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(body, Some(original.clone()));
+
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let mut body = Some(original.clone());
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut body, true).unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(body, Some(original));
+}
+
+/// Owns the incoming allocation and records its eventual release.
+struct PolicyBodyOwner {
+    bytes: Vec<u8>,
+    drops: Arc<AtomicUsize>,
+}
+
+impl AsRef<[u8]> for PolicyBodyOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for PolicyBodyOwner {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Observes destruction of request state retained across response processing.
+struct PolicyResponseStateOwner(Arc<AtomicUsize>);
+
+impl Drop for PolicyResponseStateOwner {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// Counts releases of the input, rewritten output and response state.
+#[derive(Clone, Default)]
+struct PolicyResponseDrops {
+    /// Releases of the original body allocation.
+    input: Arc<AtomicUsize>,
+    /// Releases of the rewritten body allocation.
+    output: Arc<AtomicUsize>,
+    /// Releases of response state retained in the request context.
+    state: Arc<AtomicUsize>,
+}
+
+/// Hold a real tool response at an I/O wait before or after the synchronous policy callback.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture coordinates policy, owned buffers and a pending I/O operation"
+)]
+async fn hold_tool_response_at_io_boundary(
+    filter: Arc<PolicyFilter>,
+    drops: PolicyResponseDrops,
+    mut io: tokio::io::DuplexStream,
+    ready: tokio::sync::oneshot::Sender<()>,
+    after_callback: bool,
+) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.extensions
+        .insert(PolicyResponseStateOwner(Arc::clone(&drops.state)));
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let response = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":{{"structuredContent":{{"padding":"{}","ssn":"123-45-6789"}}}}}}"#,
+        "x".repeat(900_000)
+    );
+    let mut body = Some(bytes::Bytes::from_owner(PolicyBodyOwner {
+        bytes: response.into_bytes(),
+        drops: Arc::clone(&drops.input),
+    }));
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut body, after_callback).unwrap(),
+        FilterAction::Continue
+    ));
+    if after_callback {
+        let rewritten = body.take().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_ne!(value["result"]["structuredContent"]["ssn"], "123-45-6789");
+        assert_eq!(drops.input.load(Ordering::SeqCst), 1);
+        body = Some(bytes::Bytes::from_owner(PolicyBodyOwner {
+            bytes: rewritten.to_vec(),
+            drops: drops.output,
+        }));
+    }
+    let held = body.unwrap();
+    let operation = async {
+        if after_callback {
+            io.write_all(&held).await.unwrap();
+        } else {
+            let mut byte = [0];
+            io.read_exact(&mut byte).await.unwrap();
+        }
+    };
+    tokio::pin!(operation);
+    tokio::select! {
+        () = &mut operation => panic!("the peer must leave this response I/O pending"),
+        () = tokio::time::sleep(std::time::Duration::from_millis(25)) => {},
+    }
+    ready.send(()).unwrap();
+    operation.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "checks both I/O waits and a subsequent clean response"
+)]
+async fn cancelled_response_io_releases_policy_state_and_owned_body_on_both_sides_of_callback() {
+    let (_dir, path) = write_tool_result_pipeline_config();
+    let filter = Arc::new(build_read_write_filter(path));
+    for after_callback in [false, true] {
+        let drops = PolicyResponseDrops::default();
+        let (io, _peer) = tokio::io::duplex(1_024);
+        let (ready, observed) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(hold_tool_response_at_io_boundary(
+            Arc::clone(&filter),
+            drops.clone(),
+            io,
+            ready,
+            after_callback,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(drops.input.load(Ordering::SeqCst), usize::from(after_callback));
+        assert_eq!(drops.output.load(Ordering::SeqCst), 0);
+        assert_eq!(drops.state.load(Ordering::SeqCst), 0);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(drops.input.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.output.load(Ordering::SeqCst), usize::from(after_callback));
+        assert_eq!(drops.state.load(Ordering::SeqCst), 1);
+    }
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    assert!(matches!(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request), true)
+            .await
+            .unwrap(),
+        FilterAction::BodyDone
+    ));
+    let mut response = Some(bytes::Bytes::from_static(STRUCTURED_MCP_RESPONSE.as_bytes()));
+    assert!(matches!(
+        filter.on_response_body(&mut ctx, &mut response, true).unwrap(),
+        FilterAction::Continue
+    ));
+    assert!(!response.unwrap().windows(11).any(|part| part == b"123-45-6789"));
+}
+
+/// Notifies the test when the suspended policy hook's future is dropped.
+struct PolicyHookDrop(Arc<tokio::sync::Notify>);
+
+impl Drop for PolicyHookDrop {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
+
+/// A host plugin that suspends its first real policy invocation.
+struct SuspendedPolicyPlugin {
+    cfg: PluginConfig,
+    started: Arc<tokio::sync::Notify>,
+    dropped: Arc<tokio::sync::Notify>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl Plugin for SuspendedPolicyPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for SuspendedPolicyPlugin {
+    async fn handle(
+        &self,
+        _payload: &MessagePayload,
+        _ext: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let guard = PolicyHookDrop(Arc::clone(&self.dropped));
+            self.started.notify_one();
+            std::future::pending::<()>().await;
+            drop(guard);
+        }
+        PluginResult::allow()
+    }
+}
+
+/// Factory for a plugin whose test signals are shared with its caller.
+struct SuspendedPolicyFactory {
+    started: Arc<tokio::sync::Notify>,
+    dropped: Arc<tokio::sync::Notify>,
+    calls: Arc<AtomicUsize>,
+}
+
+impl PluginFactory for SuspendedPolicyFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(SuspendedPolicyPlugin {
+            cfg: config.clone(),
+            started: Arc::clone(&self.started),
+            dropped: Arc::clone(&self.dropped),
+            calls: Arc::clone(&self.calls),
+        });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_pre_invoke", adapter)],
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the fixture coordinates a real suspended policy hook and owned body"
+)]
+async fn cancelling_suspended_policy_releases_payload_and_next_request_is_clean() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let dropped = Arc::new(tokio::sync::Notify::new());
+    let calls = Arc::new(AtomicUsize::new(0));
+    let body_drops = Arc::new(AtomicUsize::new(0));
+    let factory_started = Arc::clone(&started);
+    let factory_dropped = Arc::clone(&dropped);
+    let factory_calls = Arc::clone(&calls);
+    register_policy_plugin_factory(
+        "test/payload-cancellation",
+        Arc::new(move || {
+            Box::new(SuspendedPolicyFactory {
+                started: Arc::clone(&factory_started),
+                dropped: Arc::clone(&factory_dropped),
+                calls: Arc::clone(&factory_calls),
+            })
+        }),
+    );
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "run(payload-suspender)"
+"#,
+    );
+    let yaml = std::fs::read_to_string(&path).unwrap().replace("\nglobal:", "\n  - name: payload-suspender\n    kind: test/payload-cancellation\n    hooks: [cmf.tool_pre_invoke]\n    mode: sequential\n    on_error: fail\nglobal:");
+    std::fs::write(&path, yaml).unwrap();
+    let filter = Arc::new(build_read_write_filter(path));
+    let running_filter = Arc::clone(&filter);
+    let running_drops = Arc::clone(&body_drops);
+    let task = tokio::spawn(async move {
+        let req = request_for_alice();
+        let mut ctx = make_filter_context(&req);
+        ctx.set_metadata("mcp.method", "tools/call");
+        ctx.set_metadata("mcp.name", "echo");
+        let text = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"echo","arguments":{{"padding":"{}"}}}}}}"#,
+            "x".repeat(900_000)
+        );
+        let owner = PolicyBodyOwner {
+            bytes: text.into_bytes(),
+            drops: running_drops,
+        };
+        running_filter
+            .on_request_body(&mut ctx, &mut Some(bytes::Bytes::from_owner(owner)), true)
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(body_drops.load(Ordering::SeqCst), 0);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(std::time::Duration::from_secs(5), dropped.notified())
+        .await
+        .unwrap();
+    assert_eq!(body_drops.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        dispatch_echo_as(&filter, "alice").await,
+        FilterAction::BodyDone
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crypto_failure_in_a_policy_hook_denies_the_request() {
+    register_policy_plugin_factory("test/crypto-failing", Arc::new(|| Box::new(CryptoFailingFactory)));
+    let (_dir, path) = write_entity_config_with_routes(
+        r#"routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "run(crypto-failing)"
+"#,
+    );
+    let yaml = std::fs::read_to_string(&path).unwrap().replace(
+        "\nglobal:",
+        "\n  - name: crypto-failing\n    kind: test/crypto-failing\n    hooks: [cmf.tool_pre_invoke]\n    mode: sequential\n    on_error: fail\nglobal:",
+    );
+    std::fs::write(&path, yaml).unwrap();
+    let filter = build_filter(path);
+
+    let action = dispatch_echo_as(&filter, "alice").await;
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "a crypto backend failure must deny an authenticated request, never allow it; got {action:?}",
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Load-time warnings
 // -----------------------------------------------------------------------------
@@ -6601,6 +7366,16 @@ fn a_read_only_tool_response_policy_warns_that_the_rules_will_not_run() {
     assert!(
         logs.contains("response-phase `tool:` rules") && logs.contains("body_access: read_write"),
         "a `read_only` filter must name the remedy for tool response rules; got {logs}",
+    );
+}
+
+#[test]
+fn a_legacy_header_credential_loads_with_a_deprecation_warning() {
+    let (_dir, path) = write_l7_global_config();
+    let logs = capture_warnings(|| drop(build_filter(path)));
+    assert!(
+        logs.contains("deprecated `header:` setting"),
+        "the legacy `header:` form must still load and name its replacement; got {logs}",
     );
 }
 
@@ -6721,6 +7496,7 @@ fn an_http_route_beside_entity_routes_fails_filter_construction() {
         config_path: path,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -6922,6 +7698,7 @@ fn minimal_cfg() -> PolicyFilterConfig {
         require_protocol_metadata: true,
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         llm: super::config::LlmOptions::default(),
         context_headers: HashMap::default(),
         context_meta: ContextMetaConfig::default(),
@@ -6964,6 +7741,7 @@ fn policy_filter_new_rejects_non_reserved_context_header() {
         config_path: "/nonexistent/policy.yaml".to_owned(),
         allow_private_idp: false,
         trusted_private_endpoints: vec![],
+        trusted_proxies: vec![],
         body_access: BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -7215,4 +7993,58 @@ context_headers:
         Some("x-ext-agent-id")
     );
     cfg.validate_context_headers().unwrap();
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// A host plugin whose policy hook fails with a crypto backend error.
+struct CryptoFailingPlugin {
+    /// Configuration of the failing test plugin.
+    cfg: PluginConfig,
+}
+
+impl Plugin for CryptoFailingPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+/// Type-erased handler that reports a crypto failure instead of a decision.
+struct CryptoFailingHandler;
+
+#[async_trait::async_trait]
+impl AnyHookHandler for CryptoFailingHandler {
+    async fn invoke(
+        &self,
+        _payload: &dyn ppe::prelude::PluginPayload,
+        _extensions: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>, Box<PluginError>> {
+        Err(PluginError::Crypto {
+            source: ppe::CryptoError::DigestLength,
+        }
+        .boxed())
+    }
+
+    fn hook_type_name(&self) -> &'static str {
+        <CmfHook as ppe::prelude::HookTypeDef>::NAME
+    }
+}
+
+/// Factory for [`CryptoFailingPlugin`].
+///
+/// [`CryptoFailingPlugin`]: CryptoFailingPlugin
+struct CryptoFailingFactory;
+
+impl PluginFactory for CryptoFailingFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        let plugin = Arc::new(CryptoFailingPlugin { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(CryptoFailingHandler);
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_pre_invoke", adapter)],
+        })
+    }
 }

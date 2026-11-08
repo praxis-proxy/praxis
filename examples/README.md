@@ -96,7 +96,7 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 
 | File | Description |
 | ------ | ------------- |
-| [body-size-limit-with-extraction.yaml](configs/payload-processing/body-size-limit-with-extraction.yaml) | Combines body_limits.max_request_bytes with json_body_field to enforce a global body ceiling while still performing body-based routing |
+| [body-size-limit-with-extraction.yaml](configs/payload-processing/body-size-limit-with-extraction.yaml) | Combines body_limits.max_buffer_bytes with json_body_field to enforce a buffering cap while still performing body-based routing |
 | [compression.yaml](configs/payload-processing/compression.yaml) | Enables transparent response compression using Pingora's built-in compression module |
 | [conditional-field-extraction.yaml](configs/payload-processing/conditional-field-extraction.yaml) | Uses the condition system to apply json_body_field only on specific request paths |
 | [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extracts the "tenant_id" field from the JSON request body and promotes it to an X-Tenant-Id header |
@@ -172,7 +172,11 @@ See [Quickstart](../docs/quickstart.md#quick-test-servers) for full options.
 | [policy-assertions.yaml](configs/security/policy-assertions.yaml) | Projects policy-derived identity into request headers and removes credentials that should not reach the upstream |
 | [policy-context.yaml](configs/security/policy-context.yaml) | Demonstrates the host-supplied context surface: `context_headers` maps reserved-prefix HTTP headers to agent / framework extension fields so APL rules can reference them; `context_meta` stamps operator-defined scope, tags, and properties onto every policy evaluation |
 | [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the Praxis Policy Engine |
+| [policy-jwt-fips.yaml](configs/security/policy-jwt-fips.yaml) | Authenticates generic HTTP traffic with asymmetric JWTs, verified through the system OpenSSL FIPS provider |
+| [policy-llm-input.yaml](configs/security/policy-llm-input.yaml) | Denies inference requests by what they ask of the model, using the normalized `llm.input.*` facts the proxy derives from the request body: offered tools, tool choice, completion cap, and ordered instructions |
 | [policy-llm.yaml](configs/security/policy-llm.yaml) | Authorizes body-addressed inference requests against `llm:` policy routes |
+| [policy-query-credential.yaml](configs/security/policy-query-credential.yaml) | Authenticates requests whose API key arrives in the query string, as WebSocket and SSE clients that cannot set headers send it |
+| [policy-rate-limit.yaml](configs/security/policy-rate-limit.yaml) | Rate limits requests in two stages with the Praxis Policy Engine's in-process limiter (`ratelimit/limitador`, experimental) |
 | [policy.yaml](configs/security/policy.yaml) | Embeds the Praxis Policy Engine in-process to enforce multi-source identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, field redaction, session taint, audit emission, and (under `body_access: read_write`) request / response body rewriting |
 
 ### Traffic Management

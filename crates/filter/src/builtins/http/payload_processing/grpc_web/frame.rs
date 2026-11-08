@@ -247,4 +247,75 @@ mod tests {
     fn invalid_base64_is_rejected() {
         assert!(decode_base64(b"not base64!!").is_err(), "a bad body should not decode");
     }
+
+    #[test]
+    fn boundaries_and_large_fragmented_stream_keep_only_the_carry() {
+        for length in [0_usize, 1, 2, 3, 4, 5, 6, 7, 65_535, 65_536, 65_537, 1_048_579] {
+            let input: Vec<_> = (0..length).map(|offset| u8::try_from(offset % 251).unwrap()).collect();
+            for chunk_size in [1, 2, 3, 4, 7, 4_093] {
+                assert_fragmented_carry(&input, chunk_size);
+            }
+        }
+    }
+
+    /// Check each carry and the final encoding for a given fragmentation.
+    fn assert_fragmented_carry(input: &[u8], chunk_size: usize) {
+        let mut encoder = Base64Stream::default();
+        let mut encoded = Vec::new();
+        for chunk in input.chunks(chunk_size) {
+            let output = encoder.push(chunk);
+            assert!(!output.contains(&b'='), "padding belongs only to the final group");
+            encoded.extend_from_slice(&output);
+            assert!(encoder.pending.len() < 3, "at most two bytes remain between chunks");
+            assert!(encoder.pending.capacity() <= 16, "the carry allocation must stay small");
+        }
+        encoded.extend_from_slice(&encoder.finish());
+        assert!(encoder.pending.is_empty(), "finish consumes the carry");
+        assert!(encoder.finish().is_empty(), "finish does not emit the carry twice");
+        let expected_length = input.len().div_ceil(3) * 4;
+        assert_eq!(encoded.len(), expected_length, "encoded length includes final padding");
+        assert_eq!(
+            decode_base64(&encoded).unwrap(),
+            input,
+            "fragmentation preserves every byte"
+        );
+    }
+
+    #[test]
+    fn fragmented_message_and_trailers_form_one_padded_stream() {
+        let message = b"\0\0\0\0\x04body";
+        let frame = encode_trailer_frame(&trailers(&[("grpc-status", "0"), ("grpc-message", "complete")]));
+        let mut encoder = Base64Stream::default();
+        let mut encoded = Vec::new();
+        for chunk in message.chunks(2).chain(frame.chunks(5)) {
+            encoded.extend_from_slice(&encoder.push(chunk));
+            assert!(encoder.pending.len() < 3);
+        }
+        encoded.extend_from_slice(&encoder.finish());
+        let decoded = decode_base64(&encoded).unwrap();
+        assert_eq!(&decoded[..message.len()], message);
+        assert_eq!(&decoded[message.len()..], frame.as_ref());
+        assert_eq!(frame[0], TRAILER_FLAG);
+        assert_eq!(
+            usize::try_from(u32::from_be_bytes(frame[1..5].try_into().unwrap())).unwrap(),
+            frame.len() - 5
+        );
+        assert_eq!(encoded.len(), (message.len() + frame.len()).div_ceil(3) * 4);
+    }
+
+    #[test]
+    fn invalid_final_quartets_are_not_accepted() {
+        for invalid in [
+            b"Z".as_slice(),
+            b"Zg=".as_slice(),
+            b"Zg==A".as_slice(),
+            b"Zm9!".as_slice(),
+            b"Zm=8".as_slice(),
+        ] {
+            assert!(decode_base64(invalid).is_err(), "invalid final quartet {invalid:?}");
+        }
+        assert_eq!(decode_base64(b"Zg==").unwrap(), b"f");
+        assert_eq!(decode_base64(b"Zm8=").unwrap(), b"fo");
+        assert_eq!(decode_base64(b"Zm9v").unwrap(), b"foo");
+    }
 }

@@ -1,0 +1,46 @@
+# Policy rate limiting
+#
+# Rate limits requests in two stages with the Praxis Policy Engine's
+# in-process limiter (`ratelimit/limitador`, experimental). Before identity, a
+# per-client-address limit and a coarse limit shared by every caller protect
+# credential verification; after identity, a per-subject limit applies to the
+# API-key caller. A denial is HTTP 429 with `Retry-After` and never reaches the
+# backend.
+#
+# The policy document at /etc/praxis/rate-limit-policy.yaml and the API-key
+# file it references must be provisioned before startup; see
+# tests/integration/fixtures/rate-limit-policy.yaml and api-keys.yaml for a
+# reference pair.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/security/policy-rate-limit.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # `config_path` points at the policy document, which declares the
+      # API-key resolver, the two limiter plugins and the `rate_limits:` list
+      # that selects them. Counters live in each limiter instance: they are
+      # per replica and reset when the configuration reloads.
+      - filter: policy
+        config_path: /etc/praxis/rate-limit-policy.yaml
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

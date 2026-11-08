@@ -13,7 +13,7 @@
 use std::{
     collections::HashMap,
     io::{Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -398,8 +398,7 @@ fn send_keep_alive(stream: &mut TcpStream, request: &str) -> String {
 /// Start a backend that serves `tag` to one request per connection and counts
 /// the requests it saw.
 fn start_counting_backend(tag: &'static str) -> CountingBackend {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let hits = Arc::new(AtomicUsize::new(0));
     let served = Arc::clone(&hits);
     std::thread::spawn(move || {

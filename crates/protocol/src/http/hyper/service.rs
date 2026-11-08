@@ -189,7 +189,11 @@ impl Flight {
 
     /// Return the head now. The bandwidth wait and the body write follow.
     fn reply_after_head(mut self, mut reply: LocalReply) -> Response<ProxyBody> {
-        let chunk = take_paced_chunk(&self, &mut reply);
+        let chunk = if self.is_head() || reply.body_suppressed {
+            None
+        } else {
+            reply.body.take().filter(|bytes| !bytes.is_empty())
+        };
         let mut response = self.local_response(reply);
         let relay = chunk.is_some().then(|| {
             let (relay, body) = Relay::new();
@@ -197,81 +201,31 @@ impl Flight {
             relay
         });
         let span = self.ctx.request_span.clone();
-        let task = PacedReply {
-            chunk,
-            flight: self,
-            relay,
-            settled: false,
-        };
-        drop(tokio::spawn(task.run().instrument(span)));
+        drop(tokio::spawn(self.finish_paced_reply(relay, chunk).instrument(span)));
         response
     }
-}
 
-/// The bytes of `reply` that still have to be written after its head.
-fn take_paced_chunk(flight: &Flight, reply: &mut LocalReply) -> Option<Bytes> {
-    if flight.is_head() || reply.body_suppressed {
-        return None;
-    }
-    reply.body.take().filter(|bytes| !bytes.is_empty())
-}
-
-/// A local body written after [`Flight::reply`] has already returned its head.
-struct PacedReply {
-    /// The bytes to send once the bandwidth wait is over.
-    chunk: Option<Bytes>,
-
-    /// Completed after the body is settled.
-    flight: Flight,
-
-    /// The body hyper is already reading, when there are bytes to send.
-    relay: Option<Relay>,
-
-    /// Whether the download grant was committed or cancelled.
-    settled: bool,
-}
-
-impl PacedReply {
-    /// Wait, write the body, then complete the request.
-    ///
-    /// A client that leaves during the wait ends the task immediately. A reply
-    /// with nothing to write cancels the grant instead of sleeping.
-    async fn run(mut self) {
-        let had_chunk = self.chunk.is_some();
-        let paced = match self.relay.as_ref() {
-            Some(relay) if had_chunk => super::stream::pace_unless_closed(relay, &mut self.flight).await,
-            _ => false,
-        };
-        let wrote = paced && self.send_chunk().await;
-        praxis_filter::settle_download_write(&mut self.flight.ctx.extensions, wrote);
-        self.settled = true;
-        if had_chunk && !wrote {
-            self.flight.error = Some(ErrorOrigin::Downstream);
+    /// Settle a generated body and complete its request after the head is returned.
+    async fn finish_paced_reply(mut self, relay: Option<Relay>, chunk: Option<Bytes>) {
+        match (relay, chunk) {
+            (Some(relay), Some(chunk)) => {
+                let wrote =
+                    super::stream::pace_unless_closed(&relay, &mut self).await && relay.data(chunk).await.is_ok();
+                praxis_filter::settle_download_write(&mut self.ctx.extensions, wrote);
+                if !wrote {
+                    self.error = Some(ErrorOrigin::Downstream);
+                }
+                let _end = relay.end().await;
+            },
+            _ => praxis_filter::cancel_download_pace(&mut self.ctx.extensions),
         }
-        self.flight.complete().await;
-    }
-
-    /// Send the chunk and end the body. `false` when there is nothing to send or the client is gone.
-    async fn send_chunk(&mut self) -> bool {
-        let (Some(relay), Some(chunk)) = (self.relay.take(), self.chunk.take()) else {
-            return false;
-        };
-        let wrote = relay.data(chunk).await.is_ok();
-        let _end = relay.end().await;
-        wrote
-    }
-}
-
-impl Drop for PacedReply {
-    fn drop(&mut self) {
-        if !self.settled {
-            praxis_filter::cancel_download_pace(&mut self.flight.ctx.extensions);
-        }
+        self.complete().await;
     }
 }
 
 impl Drop for Flight {
     fn drop(&mut self) {
+        praxis_filter::cancel_bandwidth(&mut self.ctx.extensions);
         // An orphan dropped unfinished means the runtime is shutting down
         // and cancelled its completion; handing it on again would recurse.
         if self.completed || self.orphaned {
@@ -337,6 +291,49 @@ impl std::error::Error for ResponseAbort {}
     reason = "tests"
 )]
 mod tests {
+    #[cfg(feature = "bandwidth")]
+    #[tokio::test]
+    async fn dropped_flight_refunds_before_background_completion() {
+        let mut entries = serde_yaml::from_str::<Vec<praxis_core::config::FilterEntry>>(
+            "- filter: bandwidth_limit\n  mode: per_ip\n  download_bytes_per_sec: 1",
+        )
+        .unwrap();
+        let pipeline = FilterPipeline::build(&mut entries, &praxis_filter::FilterRegistry::with_builtins()).unwrap();
+        let pipelines = ArcSwap::from_pointee(pipeline);
+        let first = reserved_flight(&pipelines);
+        assert!(
+            praxis_filter::download_pace_delay(&first.ctx.extensions).unwrap() > Duration::from_secs(900),
+            "the first request must hold a reservation"
+        );
+        drop(first);
+        let second = reserved_flight(&pipelines);
+        assert!(
+            praxis_filter::download_pace_delay(&second.ctx.extensions).unwrap() < Duration::from_secs(1100),
+            "unsent bytes must be refunded before completion is polled"
+        );
+    }
+
+    /// Hold one download reservation on a shared source-IP budget.
+    #[cfg(feature = "bandwidth")]
+    fn reserved_flight(pipelines: &ArcSwap<FilterPipeline>) -> Flight {
+        let mut flight = Flight::new(pipelines, Method::GET, Version::HTTP_11);
+        flight.ctx.client_addr = Some("127.0.0.1".parse().unwrap());
+        flight.ctx.request_snapshot = Some(praxis_filter::Request {
+            method: Method::GET,
+            uri: "/".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        });
+        let mut body = Some(Bytes::from(vec![1_u8; 1000]));
+        crate::http::pingora::handler::response_body_filter::run_response_body(
+            &flight.pipeline,
+            &mut body,
+            false,
+            &mut flight.ctx,
+        )
+        .unwrap();
+        flight
+    }
+
     use std::{sync::atomic::Ordering, time::Duration};
 
     use http::StatusCode;

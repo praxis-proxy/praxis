@@ -246,23 +246,23 @@ impl PingoraTcpProxy {
         work: F,
         shutdown_rx: &mut watch::Receiver<bool>,
         upstream_addr: &str,
-    ) -> Bound<T>
+    ) -> Drive<T>
     where
         F: Future<Output = T>,
     {
         let driven = drive_session(work, shutdown_rx, self.session_timeout, upstream_addr);
         let Some(limit) = self.max_duration else {
-            return Bound::Drive(driven.await);
+            return driven.await;
         };
         match tokio::time::timeout(limit, driven).await {
-            Ok(outcome) => Bound::Drive(outcome),
+            Ok(outcome) => outcome,
             Err(_elapsed) => {
                 warn!(
                     upstream = %upstream_addr,
                     max_duration_secs = limit.as_secs(),
                     "TCP session exceeded maximum duration"
                 );
-                Bound::MaxDuration
+                Drive::MaxDuration
             },
         }
     }
@@ -921,14 +921,8 @@ enum Drive<T> {
 
     /// The session deadline elapsed.
     SessionTimeout,
-}
 
-/// [`Drive`] after the optional max-duration bound.
-enum Bound<T> {
-    /// Shutdown, the session deadline, or the future's own result.
-    Drive(Drive<T>),
-
-    /// The max duration elapsed.
+    /// The maximum connection duration elapsed.
     MaxDuration,
 }
 
@@ -1025,6 +1019,7 @@ fn close_reason(driven: Drive<io::Result<(u64, u64)>>, upstream_addr: &str) -> T
         Drive::Ready(Err(error)) => forward_io_error(upstream_addr, &error),
         Drive::Shutdown => TcpCloseReason::Shutdown,
         Drive::SessionTimeout => TcpCloseReason::SessionTimeout,
+        Drive::MaxDuration => TcpCloseReason::MaxDuration,
     }
 }
 
@@ -1040,30 +1035,16 @@ fn forward_io_error(upstream_addr: &str, error: &io::Error) -> TcpCloseReason {
 }
 
 /// Turn one bounded forwarding attempt into the session result.
-fn session_end(bound: Bound<Result<(u64, u64), CopyFault>>, prefix_written: bool, upstream_addr: &str) -> SessionEnd {
-    match bound {
-        Bound::MaxDuration => SessionEnd::Closed {
-            reason: TcpCloseReason::MaxDuration,
-            prefix_written,
-        },
-        Bound::Drive(Drive::Shutdown) => SessionEnd::Closed {
-            reason: TcpCloseReason::Shutdown,
-            prefix_written,
-        },
-        Bound::Drive(Drive::SessionTimeout) => SessionEnd::Closed {
-            reason: TcpCloseReason::SessionTimeout,
-            prefix_written,
-        },
-        Bound::Drive(Drive::Ready(Ok(_counts))) => SessionEnd::Closed {
-            reason: TcpCloseReason::Completed,
-            prefix_written,
-        },
-        Bound::Drive(Drive::Ready(Err(CopyFault::Prefix(error)))) => SessionEnd::PrefixFailed(error),
-        Bound::Drive(Drive::Ready(Err(CopyFault::Forward(error)))) => SessionEnd::Closed {
-            reason: forward_io_error(upstream_addr, &error),
-            prefix_written,
-        },
-    }
+fn session_end(driven: Drive<Result<(u64, u64), CopyFault>>, prefix_written: bool, upstream_addr: &str) -> SessionEnd {
+    let reason = match driven {
+        Drive::MaxDuration => TcpCloseReason::MaxDuration,
+        Drive::Shutdown => TcpCloseReason::Shutdown,
+        Drive::SessionTimeout => TcpCloseReason::SessionTimeout,
+        Drive::Ready(Ok(_counts)) => TcpCloseReason::Completed,
+        Drive::Ready(Err(CopyFault::Prefix(error))) => return SessionEnd::PrefixFailed(error),
+        Drive::Ready(Err(CopyFault::Forward(error))) => forward_io_error(upstream_addr, &error),
+    };
+    SessionEnd::Closed { reason, prefix_written }
 }
 
 // -----------------------------------------------------------------------------

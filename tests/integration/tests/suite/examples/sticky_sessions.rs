@@ -140,8 +140,7 @@ fn sticky_sessions_header_pins_to_same_backend() {
 fn start_cookie_setting_backend(body: &'static str, session_id: &'static str) -> u16 {
     use std::io::{Read as _, Write as _};
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { return };

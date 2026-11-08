@@ -88,6 +88,7 @@ mod json_rpc;
 mod kv_admin;
 mod path_rewrite;
 mod payload_processing;
+mod payload_transport;
 mod per_listener_pipeline;
 mod pipelines_admin;
 mod process_logging;
