@@ -1,0 +1,36 @@
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "n": "oaAmBs4uWvzi02KZEYyUWuaaE7XA4hRuA-6jgk1d443SRXYT6Mpt8EYVg6u3fHN4z3LcWofjho2ZyV0-pkrCMDkIxaRDXlqPMHAJ3tSXNZ4FoP2UzkFjkH6CqCkgiWUNJNFrie2MmbnSE31me8tJA4hvABSUBMTySKtl7tISIUrmyI7HNsex3ob7k28ByEpXATLVXNbQGgnPrzEZW1KFogzcDj4XIZPHEDcfzR-jW1w2FPHt4MTSOj0cY2uo4nQYe702DdkZZa7QHkAaw09LFdVhzuQV-QacCZNIa_l7ZO6u0X9PaP1tk6MJFo-P4zo-NcXW82Tydf5Em9xitZtmjw",
+      "e": "AQAB",
+      "use": "sig",
+      "alg": "RS256",
+      "kid": "praxis-fips-test-rsa"
+    },
+    {
+      "kty": "EC",
+      "crv": "P-256",
+      "x": "2Z1X_813j4OiURLMKiMCILEczod9x8g3JVRlK2v-Geg",
+      "y": "akaKDNaNyWY3pbbmS_igKtXKU3iq0xJbkby3abEP6oc",
+      "use": "sig",
+      "alg": "ES256",
+      "kid": "praxis-fips-test-p256"
+    },
+    {
+      "kty": "oct",
+      "use": "sig",
+      "alg": "HS256",
+      "kid": "praxis-fips-test-hmac",
+      "k": "cHJheGlzLWZpcHMtdGVzdC1obWFjLXNlY3JldC1ub3QtZm9yLXByb2R1Y3Rpb24"
+    },
+    {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "x": "n9BCSFD6aVvdpz-mc74fka3Vm8VG_KSnggH9TkrMZl4",
+      "use": "sig",
+      "alg": "EdDSA",
+      "kid": "praxis-fips-test-ed25519"
+    }
+  ]
+}

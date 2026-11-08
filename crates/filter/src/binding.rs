@@ -36,7 +36,7 @@ use praxis_core::config::{
     ChainRef, validate_chain_entries_branch_chains, validate_chain_entries_cardinality,
     validate_chain_entries_conditions, validate_chain_entries_inline_clusters,
 };
-use praxis_core::config::{ClusterDeclarations, FilterEntry, InsecureOptions, ProtocolKind};
+use praxis_core::config::{ClusterDeclarations, FilterEntry, InsecureOptions};
 
 #[cfg(feature = "chain-binding")]
 use crate::filter::HttpFilter;
@@ -224,10 +224,6 @@ pub struct ChainBindingContext<'a> {
         )
     )]
     branch_budget: &'a Cell<usize>,
-
-    /// Listener protocol. A dual filter builds its TCP form on a TCP listener
-    /// and its HTTP form everywhere else, including a nested outbound chain.
-    protocol: ProtocolKind,
 }
 
 impl<'a> ChainBindingContext<'a> {
@@ -245,7 +241,6 @@ impl<'a> ChainBindingContext<'a> {
         top_level_clusters: &'a ClusterDeclarations<'a>,
         budget: &'a Cell<usize>,
         branch_budget: &'a Cell<usize>,
-        protocol: ProtocolKind,
     ) -> Self {
         Self {
             registry,
@@ -256,7 +251,6 @@ impl<'a> ChainBindingContext<'a> {
             top_level_clusters,
             budget,
             branch_budget,
-            protocol,
         }
     }
 
@@ -294,7 +288,6 @@ impl<'a> ChainBindingContext<'a> {
             &clusters,
             &budget,
             &branch_budget,
-            ProtocolKind::Http,
         );
         f(&ctx)
     }
@@ -344,7 +337,6 @@ impl<'a> ChainBindingContext<'a> {
             self.budget,
             self.branch_budget,
             self.outbound_depth,
-            self.protocol,
             self.top_level_clusters,
         )?;
         Ok(FilterPipeline::from_filters(filters))
@@ -353,11 +345,6 @@ impl<'a> ChainBindingContext<'a> {
     /// The active registry, used by the builder to instantiate filters.
     pub(crate) fn registry(&self) -> &'a FilterRegistry {
         self.registry
-    }
-
-    /// Listener protocol used to choose a dual filter's HTTP or TCP form.
-    pub(crate) fn protocol(&self) -> ProtocolKind {
-        self.protocol
     }
 
     /// Resolve a chain reference into a prebuilt outbound [`FilterPipeline`].
@@ -408,7 +395,6 @@ impl<'a> ChainBindingContext<'a> {
             self.budget,
             self.branch_budget,
             self.outbound_depth + 1,
-            self.protocol,
             self.top_level_clusters,
         )?;
         let pipeline = FilterPipeline::from_filters(filters);
@@ -1736,7 +1722,6 @@ mod tests {
     }
 
     #[test]
-    #[expect(clippy::too_many_lines, reason = "verifies outbound runtime resource propagation")]
     fn outbound_pipeline_receives_and_retains_runtime_resources() {
         let mut registry = FilterRegistry::with_builtins();
         register_outbound_callout(&mut registry);
@@ -1744,19 +1729,8 @@ mod tests {
         let stack = ResolutionStack::new();
         let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
         let insecure = InsecureOptions::default();
-        let (budget, branch_budget) = (Cell::new(0), Cell::new(0));
-        let decls = ClusterDeclarations::default();
-        let ctx = ChainBindingContext::new(
-            &registry,
-            &chains,
-            &stack,
-            0,
-            &insecure,
-            &decls,
-            &budget,
-            &branch_budget,
-            ProtocolKind::Http,
-        );
+        let (budget, branches, decls) = (Cell::new(0), Cell::new(0), ClusterDeclarations::default());
+        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &decls, &budget, &branches);
         let chain_ref = ChainRef::Inline {
             name: "outbound".to_owned(),
             filters: entries("- filter: request_id\n- filter: headers\n"),

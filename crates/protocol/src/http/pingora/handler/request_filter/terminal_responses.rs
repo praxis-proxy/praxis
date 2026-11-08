@@ -132,7 +132,8 @@ pub(in crate::http) async fn prepare_terminal_response(
     ctx.cached_executed_branch_filters = executed_branch_filters;
     ctx.cached_executed_filter_indices = executed_indices;
     ctx.cached_body_done_indices = body_done;
-    ctx.response_body_mode = clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
+    ctx.response_body_mode =
+        clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode, pipeline.buffer_cap());
 
     match result {
         Ok(FilterAction::Reject(rejection)) => {

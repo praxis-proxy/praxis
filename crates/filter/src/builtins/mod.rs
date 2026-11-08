@@ -28,5 +28,5 @@ pub use http::{
 #[cfg(feature = "bandwidth")]
 pub use http::{BandwidthLimitFilter, BandwidthMode};
 #[cfg(feature = "policy-engine")]
-pub use http::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use http::{PolicyFilter, PolicyPluginFactoryFn, fips_crypto_blocker, register_policy_plugin_factory};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

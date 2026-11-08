@@ -22,6 +22,7 @@ clusters:
       http_only: true
       secure: true
     max_entries: 1000
+    storage: local
 "#,
     )
     .unwrap();
@@ -37,6 +38,7 @@ clusters:
   - name: backend
     type: cookie
     ttl_secs: 3600
+    storage: local
 ",
     )
     .unwrap();
@@ -52,6 +54,7 @@ clusters:
   - name: backend
     type: header
     ttl_secs: 3600
+    storage: local
 ",
     )
     .unwrap();
@@ -69,11 +72,64 @@ clusters:
     cookie_name: "_sess"
     ttl_secs: 3600
     max_entries: 1000
+    storage: local
 "#,
     )
     .unwrap();
     let filter = StickySessionsFilter::from_config(&yaml);
     assert!(filter.is_ok(), "filter should be created successfully with stores");
+}
+
+#[test]
+fn from_config_rejects_omitted_storage() {
+    let yaml = serde_yaml::from_str(
+        r#"
+clusters:
+  - name: backend
+    type: cookie
+    cookie_name: "_sess"
+"#,
+    )
+    .unwrap();
+    // `Box<dyn HttpFilter>` is not `Debug`, so unwrap the error side.
+    let err = StickySessionsFilter::from_config(&yaml).err().unwrap();
+    assert!(err.to_string().contains("storage"), "got: {err}");
+}
+
+#[test]
+fn session_store_falls_back_to_filter_registry_without_pipeline_stores() {
+    let cfg = Arc::new(ClusterSessionConfig {
+        name: "cluster-a".into(),
+        persistence: PersistenceConfig::Cookie {
+            cookie_name: "_sess".into(),
+            cookie_attributes: CookieAttributes::default(),
+        },
+        ttl_secs: 3600,
+        failover: true,
+        max_entries: config::MaxEntries::try_from(1000).unwrap(),
+        eviction: config::EvictionPolicy::Lru,
+        storage: StorageConfig::Local,
+    });
+    let mut configs = HashMap::new();
+    configs.insert(Arc::<str>::from("cluster-a"), Arc::clone(&cfg));
+    let filter = StickySessionsFilter {
+        stores: Arc::new(StickySessionsFilter::build_stores(&configs)),
+        configs,
+    };
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let ctx = crate::test_utils::make_filter_context(&req);
+    assert!(ctx.session_stores.is_none(), "context should lack pipeline stores");
+
+    let store = filter.session_store(&ctx, &cfg, "cluster-a");
+    store.put("sess-1", Arc::from("10.0.0.1:80"));
+
+    let again = filter.session_store(&ctx, &cfg, "cluster-a");
+    assert_eq!(
+        again.get("sess-1").as_deref(),
+        Some("10.0.0.1:80"),
+        "fallback registry should return the same store across calls"
+    );
 }
 
 #[test]
@@ -99,6 +155,7 @@ fn extract_session_key_header_mode() {
         failover: true,
         max_entries: config::MaxEntries::try_from(1000).unwrap(),
         eviction: config::EvictionPolicy::Lru,
+        storage: StorageConfig::Local,
     };
 
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
@@ -121,6 +178,7 @@ fn extract_session_key_learn_mode_reads_cookie() {
         failover: true,
         max_entries: config::MaxEntries::try_from(1000).unwrap(),
         eviction: config::EvictionPolicy::Lru,
+        storage: StorageConfig::Local,
     };
 
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
@@ -145,6 +203,7 @@ fn extract_session_key_rejects_overlong_key() {
         failover: true,
         max_entries: config::MaxEntries::try_from(1000).unwrap(),
         eviction: config::EvictionPolicy::Lru,
+        storage: StorageConfig::Local,
     };
 
     let long_key = "x".repeat(MAX_SESSION_KEY_LEN + 1);
@@ -174,6 +233,7 @@ fn handle_learn_response_records_session() {
         failover: true,
         max_entries: config::MaxEntries::try_from(1000).unwrap(),
         eviction: config::EvictionPolicy::Lru,
+        storage: StorageConfig::Local,
     });
 
     let req = crate::test_utils::make_request(http::Method::GET, "/");
@@ -250,6 +310,7 @@ fn cookie_cfg() -> Arc<ClusterSessionConfig> {
         failover: true,
         max_entries: config::MaxEntries::try_from(1000).unwrap(),
         eviction: config::EvictionPolicy::Lru,
+        storage: StorageConfig::Local,
     })
 }
 
@@ -333,6 +394,7 @@ fn learn_response_repins_existing_binding_after_failover() {
         failover: true,
         max_entries: config::MaxEntries::try_from(1000).unwrap(),
         eviction: config::EvictionPolicy::Lru,
+        storage: StorageConfig::Local,
     });
 
     let req = crate::test_utils::make_request(http::Method::GET, "/");
@@ -364,6 +426,7 @@ fn learn_response_does_not_adopt_unknown_metadata_key() {
         failover: true,
         max_entries: config::MaxEntries::try_from(1000).unwrap(),
         eviction: config::EvictionPolicy::Lru,
+        storage: StorageConfig::Local,
     });
 
     let req = crate::test_utils::make_request(http::Method::GET, "/");

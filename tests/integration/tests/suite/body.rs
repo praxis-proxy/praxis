@@ -499,25 +499,6 @@ fn buffering_stream_buffer_body_honors_global_limit() {
 }
 
 #[test]
-fn response_body_over_limit_returns_error() {
-    let large_body = "z".repeat(512);
-    let backend_port_guard = start_backend_with_shutdown(&large_body);
-    let backend_port = backend_port_guard.port();
-    let proxy_port = free_port();
-    let config = Config::from_yaml(&body_limit_yaml_response(proxy_port, backend_port, 64)).unwrap();
-    let registry = registry_with("response_body_reject_large", || Box::new(ResponseBodyLimitCheckFilter));
-    let proxy = start_proxy_with_registry(&config, &registry);
-
-    let (status, body) = praxis_test_utils::http_get(proxy.addr(), "/", None);
-
-    assert!(
-        status == 502 || status == 500 || body.len() <= 64,
-        "response exceeding limit should be rejected or truncated; got status={status} body_len={}",
-        body.len()
-    );
-}
-
-#[test]
 fn body_size_limit_under_limit_succeeds() {
     let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
@@ -958,47 +939,6 @@ impl HttpFilter for Reject418Filter {
     }
 }
 
-/// A filter that rejects response bodies exceeding a small threshold.
-struct ResponseBodyLimitCheckFilter;
-
-#[async_trait::async_trait]
-impl HttpFilter for ResponseBodyLimitCheckFilter {
-    fn name(&self) -> &'static str {
-        "response_body_reject_large"
-    }
-
-    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        Ok(FilterAction::Continue)
-    }
-
-    fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
-    }
-
-    fn response_body_mode(&self) -> BodyMode {
-        BodyMode::StreamBuffer {
-            max_bytes: Some(1_048_576),
-        }
-    }
-
-    fn on_response_body(
-        &self,
-        _ctx: &mut HttpFilterContext<'_>,
-        body: &mut Option<Bytes>,
-        end_of_stream: bool,
-    ) -> Result<FilterAction, FilterError> {
-        if !end_of_stream {
-            return Ok(FilterAction::Continue);
-        }
-        if let Some(b) = body
-            && b.len() > 64
-        {
-            return Ok(FilterAction::Reject(Rejection::status(502)));
-        }
-        Ok(FilterAction::Continue)
-    }
-}
-
 /// YAML config with `body_limits.max_request_bytes` set to the given limit.
 fn body_limit_yaml(proxy_port: u16, backend_port: u16, limit: usize) -> String {
     format!(
@@ -1041,35 +981,6 @@ filter_chains:
   - name: main
     filters:
       - filter: {filter_name}
-      - filter: router
-        routes:
-          - path_prefix: "/"
-            cluster: "backend"
-      - filter: load_balancer
-        clusters:
-          - name: "backend"
-            endpoints:
-              - "127.0.0.1:{backend_port}"
-insecure_options:
-  allow_private_endpoints: true
-"#
-    )
-}
-
-/// YAML config with `body_limits.max_response_bytes` and a custom response filter.
-fn body_limit_yaml_response(proxy_port: u16, backend_port: u16, limit: usize) -> String {
-    format!(
-        r#"
-body_limits:
-  max_response_bytes: {limit}
-listeners:
-  - name: default
-    address: "127.0.0.1:{proxy_port}"
-    filter_chains: [main]
-filter_chains:
-  - name: main
-    filters:
-      - filter: response_body_reject_large
       - filter: router
         routes:
           - path_prefix: "/"

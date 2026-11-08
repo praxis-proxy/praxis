@@ -11,6 +11,7 @@ pub use branch_chain::{
 };
 pub(in crate::config) mod cluster;
 mod filter_chain;
+mod forward_proxy;
 mod inline_clusters;
 mod listener;
 mod rules;

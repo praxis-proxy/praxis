@@ -12,7 +12,7 @@
 
 use std::{
     io::{Read as _, Write as _},
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -195,8 +195,7 @@ listeners:
 /// An upstream that answers every request with `body` after `delay`, and
 /// reports on the returned channel each request head it receives.
 fn slow_upstream(body: &'static str, delay: Duration) -> (u16, mpsc::Receiver<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     let (arrived, arrivals) = mpsc::channel();
     thread::spawn(move || {
         for stream in listener.incoming() {

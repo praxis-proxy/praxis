@@ -11,7 +11,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
-use praxis_core::{config::ABSOLUTE_MAX_BODY_BYTES, connectivity::Upstream};
+use praxis_core::{config::DEFAULT_MAX_BUFFER_BYTES, connectivity::Upstream};
 use praxis_filter::{BodyBuffer, BodyMode, RequestExtensions};
 
 use crate::http::pingora::context::PingoraRequestCtx;
@@ -22,13 +22,14 @@ use crate::http::pingora::context::PingoraRequestCtx;
 /// run (typically from pipeline capabilities + global body limits). Runtime
 /// `set_*_body_mode` calls may widen limits; this utility preserves the original
 /// ceiling while still allowing upgrades between body mode variants.
+/// Buffering also obeys the configured cap, including runtime upgrades.
 ///
 /// `Stream` mode passes through unconditionally: it delivers chunks as they
 /// arrive, with no buffer to cap. A runtime downgrade from `StreamBuffer` to
 /// `Stream` opts out of buffering entirely. The pipeline-level body size
 /// limit (enforced separately via `SizeLimit`) remains the backstop for
 /// oversized payloads.
-pub(super) fn clamp_body_mode_to_ceiling(mode: BodyMode, baseline: BodyMode) -> BodyMode {
+pub(super) fn clamp_body_mode_to_ceiling(mode: BodyMode, baseline: BodyMode, buffer_cap: usize) -> BodyMode {
     #[expect(
         clippy::wildcard_enum_match_arm,
         reason = "BodyMode is non_exhaustive; every other mode imposes no ceiling"
@@ -39,14 +40,18 @@ pub(super) fn clamp_body_mode_to_ceiling(mode: BodyMode, baseline: BodyMode) -> 
     };
 
     match (mode, ceiling) {
-        (BodyMode::StreamBuffer { max_bytes }, Some(limit)) => BodyMode::StreamBuffer {
-            max_bytes: Some(max_bytes.map_or(limit, |v| v.min(limit))),
+        (BodyMode::StreamBuffer { max_bytes }, limit) => BodyMode::StreamBuffer {
+            max_bytes: Some(
+                max_bytes
+                    .unwrap_or(buffer_cap)
+                    .min(limit.unwrap_or(buffer_cap))
+                    .min(buffer_cap),
+            ),
         },
         (BodyMode::SizeLimit { max_bytes }, Some(limit)) => BodyMode::SizeLimit {
             max_bytes: max_bytes.min(limit),
         },
-        // Stream has no buffer to clamp; other modes pass through when the
-        // baseline imposes no ceiling (e.g. unbounded StreamBuffer).
+        // Non-buffering modes keep their independent cumulative byte policy.
         (m, None | Some(_)) => m,
     }
 }
@@ -55,11 +60,13 @@ pub(super) fn clamp_body_mode_to_ceiling(mode: BodyMode, baseline: BodyMode) -> 
 /// the total exceeds `max_bytes`. Returns `false` when the body is `None`.
 pub(super) fn check_body_size_limit(body: Option<&Bytes>, accumulated_bytes: &mut u64, max_bytes: usize) -> bool {
     if let Some(chunk) = body {
-        let chunk_len = chunk.len() as u64;
-        *accumulated_bytes += chunk_len;
-
-        let limit = max_bytes as u64;
-        return *accumulated_bytes > limit;
+        let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        let Some(total) = accumulated_bytes.checked_add(chunk_len) else {
+            *accumulated_bytes = u64::MAX;
+            return true;
+        };
+        *accumulated_bytes = total;
+        return total > u64::try_from(max_bytes).unwrap_or(u64::MAX);
     }
     false
 }
@@ -67,8 +74,12 @@ pub(super) fn check_body_size_limit(body: Option<&Bytes>, accumulated_bytes: &mu
 /// Whether `chunk` would take a body already `counted` bytes long past the
 /// global `ceiling`. Does not update the count.
 pub(super) fn exceeds_body_ceiling(ceiling: Option<usize>, counted: u64, chunk: Option<&Bytes>) -> bool {
-    let chunk_len = chunk.map_or(0, Bytes::len) as u64;
-    ceiling.is_some_and(|max| counted.saturating_add(chunk_len) > max as u64)
+    let chunk_len = u64::try_from(chunk.map_or(0, Bytes::len)).unwrap_or(u64::MAX);
+    ceiling.is_some_and(|max| {
+        counted
+            .checked_add(chunk_len)
+            .is_none_or(|total| total > u64::try_from(max).unwrap_or(u64::MAX))
+    })
 }
 
 /// Push `chunk` into the stream buffer, creating it if absent. At end-of-stream
@@ -80,7 +91,7 @@ pub(super) fn accumulate_stream_buffer(
     max_bytes: Option<usize>,
 ) -> bool {
     if let Some(chunk) = &*body {
-        let limit = max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES);
+        let limit = max_bytes.unwrap_or(DEFAULT_MAX_BUFFER_BYTES);
         let buf = body_buffer.get_or_insert_with(|| BodyBuffer::new(limit));
 
         if buf.push(chunk.clone()).is_err() {

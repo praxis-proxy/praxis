@@ -380,6 +380,14 @@ pub struct HttpFilterContext<'a> {
     /// Ordered log of trusted header mutations written during the current
     /// pass (or, in the request phase, the full accumulated log). Replayed
     /// by the protocol layer after the request-phase pipeline runs.
+    ///
+    /// During body pre-read, a non-empty log replaces the grouped header
+    /// queues for the entire pass. Before adding the first ordered mutation,
+    /// preserve any queued removals, sets, and adds in this log, in that order.
+    /// Once the log is non-empty, subsequent header mutations must also be
+    /// recorded here; writes only to the grouped queues will not be replayed.
+    /// Do not copy the grouped queues again after ordered recording begins,
+    /// because that can duplicate or reorder operations.
     pub pre_read_mutations: Vec<TrustedHeaderMutation>,
 
     /// Structured per-request metadata keyed by namespace.

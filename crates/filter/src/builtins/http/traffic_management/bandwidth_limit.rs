@@ -426,22 +426,16 @@ fn store_attachment(extensions: &mut RequestExtensions, instance: u64, acquired:
 fn take_grant(extensions: &mut RequestExtensions, instance: u64, chunk: &PaceChunk) -> Option<BandwidthGrant> {
     let items = extensions.get_mut::<BandwidthAttachments>()?;
     let attachment = items.items.iter_mut().find(|item| item.instance == instance)?;
-    let schedule = match chunk.direction {
-        ChargeDirection::Upload => attachment.upload.as_ref().map(Arc::clone),
-        ChargeDirection::Download => attachment.download.as_ref().map(Arc::clone),
-    }?;
-    let already = match chunk.direction {
-        ChargeDirection::Upload => attachment.paced_upload,
-        ChargeDirection::Download => attachment.paced_download,
+    let (schedule, paced) = match chunk.direction {
+        ChargeDirection::Upload => (attachment.upload.as_ref(), &mut attachment.paced_upload),
+        ChargeDirection::Download => (attachment.download.as_ref(), &mut attachment.paced_download),
     };
-    let charge = bytes_to_charge(already, chunk.len, chunk.end_of_stream, chunk.buffering);
+    let schedule = schedule?;
+    let charge = bytes_to_charge(*paced, chunk.len, chunk.end_of_stream, chunk.buffering);
     if charge == 0 {
         return None;
     }
-    match chunk.direction {
-        ChargeDirection::Upload => attachment.paced_upload = already.saturating_add(charge),
-        ChargeDirection::Download => attachment.paced_download = already.saturating_add(charge),
-    }
+    *paced = paced.saturating_add(charge);
     Some(schedule.reserve(charge))
 }
 
