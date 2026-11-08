@@ -89,6 +89,11 @@ impl PendingStreamChunks {
         self.chunks
     }
 
+    /// Move pending output into a wait while preserving the empty queue's limit.
+    pub(crate) fn take_pending(&mut self) -> Self {
+        std::mem::replace(self, Self::new(self.max_retained_bytes))
+    }
+
     /// Drain queued chunks and reset their retained-byte accounting.
     pub(crate) fn drain_chunks(&mut self) -> VecDeque<bytes::Bytes> {
         self.retained_bytes = 0;
