@@ -13,6 +13,10 @@
 //! Finally the container's log must carry the startup line that reports the
 //! provider and the kernel flag as FIPS.
 //!
+//! An image built with a Policy profile (`--policy-profile`) is then started
+//! again with a Policy listener and sent real API-key, JWT and `DPoP` traffic
+//! (`policy_probe`).
+//!
 //! This is the check against the bits that ship: the same image the static
 //! checks built and scanned, not a rebuild.
 
@@ -38,6 +42,7 @@ use openssl::{
     },
 };
 
+use super::policy_probe;
 use crate::paths::workspace_root;
 
 // -----------------------------------------------------------------------------
@@ -48,7 +53,7 @@ use crate::paths::workspace_root;
 const CONTAINER_PORT: u16 = 8_443;
 
 /// Where the probe's files are mounted inside both containers.
-const PROBE_MOUNT: &str = "/probe";
+pub(super) const PROBE_MOUNT: &str = "/probe";
 
 /// How long the image gets to come up.
 const STARTUP_DEADLINE: Duration = Duration::from_secs(30);
@@ -90,6 +95,11 @@ pub(crate) struct Args {
     /// Also write the container's log here.
     #[arg(long, value_name = "FILE")]
     log: Option<PathBuf>,
+
+    /// The Policy profile the image was built with (`FIPS_POLICY_PROFILE`);
+    /// any but `none` also drives Policy traffic through the image.
+    #[arg(long, value_enum, default_value_t = policy_probe::Profile::None)]
+    policy_profile: policy_probe::Profile,
 }
 
 // -----------------------------------------------------------------------------
@@ -113,7 +123,7 @@ fn probe(args: &Args) -> Result<(), String> {
     generate_certificates(work.path())?;
     write_config(work.path())?;
     let port = free_port()?;
-    let container = Container::start(&args.image, work.path(), port)?;
+    let container = Container::start(&args.image, work.path(), port, CONTAINER_PORT, "config.yaml")?;
     container.wait_until_serving(port)?;
     println!(
         "fips-runtime-probe: ok: {} serves TLS on 127.0.0.1:{port} under PRAXIS_REQUIRE_FIPS=1",
@@ -130,11 +140,11 @@ fn probe(args: &Args) -> Result<(), String> {
     println!("fips-runtime-probe: ok: the listener probes passed against the image");
     let line = status_line(&log)?;
     println!("fips-runtime-probe: ok: {line}");
-    Ok(())
+    policy_probe::run(&args.image, work.path(), args.policy_profile)
 }
 
 /// Set a path's permission bits.
-fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
+pub(super) fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
         .map_err(|err| format!("cannot set the mode of {}: {err}", path.display()))
@@ -145,21 +155,28 @@ fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
 // -----------------------------------------------------------------------------
 
 /// The running image, removed when dropped.
-struct Container {
+pub(super) struct Container {
     /// Its podman name.
     name: String,
 }
 
 impl Container {
-    /// Start the image with the probe listener, publishing it on loopback.
-    fn start(image: &str, work: &Path, port: u16) -> Result<Self, String> {
-        let name = format!("praxis-fips-probe-{}", std::process::id());
+    /// Start the image under `PRAXIS_REQUIRE_FIPS=1` with `config` (a file in
+    /// `work`), publishing `container_port` on loopback `port`.
+    pub(super) fn start(
+        image: &str,
+        work: &Path,
+        port: u16,
+        container_port: u16,
+        config: &str,
+    ) -> Result<Self, String> {
+        let name = format!("praxis-fips-probe-{}-{container_port}", std::process::id());
         let output = Command::new("podman")
             .args(["run", "--detach", "--name", &name, "--security-opt", "label=disable"])
-            .args(["--publish", &format!("127.0.0.1:{port}:{CONTAINER_PORT}")])
+            .args(["--publish", &format!("127.0.0.1:{port}:{container_port}")])
             .args(["--volume", &format!("{}:{PROBE_MOUNT}:ro", work.display())])
             .args(["--env", "PRAXIS_REQUIRE_FIPS=1", "--entrypoint", "praxis", image])
-            .args(["-c", &format!("{PROBE_MOUNT}/config.yaml")])
+            .args(["-c", &format!("{PROBE_MOUNT}/{config}")])
             .output()
             .map_err(|err| format!("podman is required to run the image ({err})"))?;
         if !output.status.success() {
@@ -202,7 +219,7 @@ impl Container {
     }
 
     /// Whether podman still reports the container running.
-    fn running(&self) -> Result<bool, String> {
+    pub(super) fn running(&self) -> Result<bool, String> {
         let output = Command::new("podman")
             .args(["inspect", "--format", "{{.State.Running}}", &self.name])
             .output()
@@ -211,7 +228,7 @@ impl Container {
     }
 
     /// The container's log so far, both streams.
-    fn logs(&self) -> Result<String, String> {
+    pub(super) fn logs(&self) -> Result<String, String> {
         let output = Command::new("podman")
             .args(["logs", &self.name])
             .output()
@@ -511,7 +528,7 @@ fn ossl(err: ErrorStack) -> String {
 }
 
 /// A free loopback port.
-fn free_port() -> Result<u16, String> {
+pub(super) fn free_port() -> Result<u16, String> {
     std::net::TcpListener::bind("127.0.0.1:0")
         .and_then(|listener| listener.local_addr())
         .map(|addr| addr.port())

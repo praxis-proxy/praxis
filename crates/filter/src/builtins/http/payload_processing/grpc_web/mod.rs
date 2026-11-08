@@ -83,7 +83,7 @@ struct GrpcWebConfig {
     /// Downstream encodings to translate.
     encodings: Encodings,
 
-    /// Maximum bytes buffered while decoding a base64 request body.
+    /// Maximum bytes buffered while decoding a base64 request body (also bounded by `body_limits.max_buffer_bytes`).
     max_buffer_bytes: usize,
 
     /// Behaviour when the upstream response carries no gRPC status.
@@ -182,6 +182,9 @@ impl GrpcWebFilter {
         if cfg.max_buffer_bytes == 0 {
             return Err("grpc_web: max_buffer_bytes must be greater than 0".into());
         }
+        if cfg.max_buffer_bytes > praxis_core::config::MAX_BUFFER_BYTES {
+            return Err("grpc_web: max_buffer_bytes exceeds the addressable buffer maximum".into());
+        }
         Ok(Box::new(Self {
             encodings: cfg.encodings,
             max_buffer_bytes: cfg.max_buffer_bytes,
@@ -266,10 +269,15 @@ impl HttpFilter for GrpcWebFilter {
         if !end_of_stream {
             return Ok(FilterAction::Continue);
         }
-        let Some(state) = ctx.get_filter_state::<GrpcWebState>() else {
+        // StreamBuffer pre-read runs before `on_request` creates the state.
+        // Classify from the same request headers until that state exists.
+        let kind = ctx
+            .get_filter_state::<GrpcWebState>()
+            .map_or_else(|| GrpcWebKind::from_headers(&ctx.request.headers), |state| state.kind);
+        if !self.accepts(kind) {
             return Ok(FilterAction::Continue);
-        };
-        if !state.kind.is_text() {
+        }
+        if !kind.is_text() {
             return Ok(FilterAction::Release);
         }
 

@@ -83,15 +83,17 @@ pub const PRAXIS_BIN_ENV: &str = "PRAXIS_BIN";
 ///
 /// Uses [`PRAXIS_BIN_ENV`] when set, then `CARGO_BIN_EXE_praxis`; otherwise
 /// resolves under `CARGO_TARGET_DIR` (including llvm-cov's alternate target
-/// dir), in its `hyper` subdirectory when this harness tests the hyper
-/// backend, and builds the binary for that backend if it is not already
-/// present.
+/// dir; see `build_target_dir`), and builds the binary for this harness's
+/// backend and Policy selection unless one with that selection is present.
 ///
 /// # Panics
 ///
-/// Panics if [`PRAXIS_BIN_ENV`] names a file that does not exist, or if
-/// `cargo build` for the `praxis` binary fails or the binary is still missing
-/// afterward.
+/// Panics if [`PRAXIS_BIN_ENV`] names a file that does not exist or whose
+/// `--version` reports a different network backend or Policy selection than
+/// this harness was built with, or if `cargo build` for the `praxis` binary fails or the binary
+/// is still missing or mismatched afterward.
+///
+/// [`PRAXIS_BIN_ENV`]: PRAXIS_BIN_ENV
 pub fn praxis_bin() -> PathBuf {
     if let Some(explicit) = std::env::var_os(PRAXIS_BIN_ENV) {
         let path = PathBuf::from(explicit);
@@ -100,11 +102,14 @@ pub fn praxis_bin() -> PathBuf {
             "{PRAXIS_BIN_ENV} names {} but there is no such file",
             path.display()
         );
+        if let Err(mismatch) = binary_backend_matches(&path).and_then(|()| binary_policy_profile_matches(&path)) {
+            panic!("{PRAXIS_BIN_ENV}: {mismatch}");
+        }
         return path;
     }
 
     let path = resolve_praxis_bin_path();
-    if path.exists() {
+    if path.exists() && binary_policy_profile_matches(&path).is_ok() {
         return path;
     }
 
@@ -118,6 +123,9 @@ pub fn praxis_bin() -> PathBuf {
 
     let path = resolve_praxis_bin_path();
     assert!(path.exists(), "praxis binary missing at {} after build", path.display());
+    if let Err(mismatch) = binary_policy_profile_matches(&path) {
+        panic!("the harness-built binary: {mismatch}");
+    }
     path
 }
 
@@ -132,34 +140,167 @@ fn resolve_praxis_bin_path() -> PathBuf {
     )
 }
 
-/// The target directory the fallback build uses: cargo's, with a `hyper`
-/// subdirectory when this harness tests the hyper backend, so neither
-/// backend's binary stands in for the other's.
+/// Target directory for fallback builds, isolated by backend and Policy profile.
 fn build_target_dir() -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
         PathBuf::from,
     );
-    if cfg!(feature = "hyper") {
+    let target = if cfg!(feature = "hyper") {
         target.join("hyper")
     } else {
         target
+    };
+    let default_bundle =
+        effective_policy_features(&selected_policy_features()) == effective_policy_features(&["policy-builtins"]);
+    if default_bundle { target } else { target.join("policy") }
+}
+
+/// Policy features this harness and its subprocess proxies must carry.
+const POLICY_FEATURES: &[(&str, bool)] = &[
+    ("policy-api-key", cfg!(feature = "policy-api-key")),
+    ("policy-api-key-fips", cfg!(feature = "policy-api-key-fips")),
+    ("policy-builtins", cfg!(feature = "policy-builtins")),
+    ("policy-crypto-default", cfg!(feature = "policy-crypto-default")),
+    ("policy-crypto-fips", cfg!(feature = "policy-crypto-fips")),
+    ("policy-engine", cfg!(feature = "policy-engine")),
+    (
+        "policy-experimental-ratelimit",
+        cfg!(feature = "policy-experimental-ratelimit"),
+    ),
+    ("policy-jwt", cfg!(feature = "policy-jwt")),
+    ("policy-jwt-fips", cfg!(feature = "policy-jwt-fips")),
+    ("policy-jwt-openssl-fips", cfg!(feature = "policy-jwt-openssl-fips")),
+];
+
+/// The granular features `policy-builtins` stands for.
+const POLICY_BUNDLE: &[&str] = &[
+    "policy-api-key",
+    "policy-cedar",
+    "policy-cel",
+    "policy-crypto-default",
+    "policy-delegator-vault",
+    "policy-elicitation-ciba",
+    "policy-engine",
+    "policy-experimental-ratelimit",
+    "policy-jwt",
+    "policy-oauth",
+    "policy-opa",
+    "policy-secrets-vault",
+    "policy-valkey",
+];
+
+/// The Policy features selected for this harness.
+pub fn selected_policy_features() -> Vec<&'static str> {
+    POLICY_FEATURES
+        .iter()
+        .filter(|(_, selected)| *selected)
+        .map(|(name, _)| *name)
+        .collect()
+}
+
+/// The granular selection `names` amounts to: the bundle and the FIPS aliases
+/// expanded, and `policy-engine` implied by any Policy feature.
+fn effective_policy_features<'name>(names: &[&'name str]) -> std::collections::BTreeSet<&'name str> {
+    let mut effective = std::collections::BTreeSet::new();
+    for name in names {
+        match *name {
+            "policy-builtins" => effective.extend(POLICY_BUNDLE.iter().copied()),
+            "policy-api-key-fips" => effective.extend(["policy-api-key", "policy-crypto-fips"]),
+            "policy-jwt-fips" => effective.extend(["policy-jwt-openssl-fips", "policy-crypto-fips"]),
+            other => {
+                effective.insert(other);
+            },
+        }
+    }
+    if !effective.is_empty() {
+        effective.insert("policy-engine");
+    }
+    effective
+}
+
+/// Build arguments matching this harness's backend and Policy feature selection.
+fn backend_build_args() -> Vec<String> {
+    let policy = selected_policy_features();
+    let is_default_bundle = effective_policy_features(&policy) == effective_policy_features(&["policy-builtins"]);
+    if !cfg!(feature = "hyper") && is_default_bundle {
+        return Vec::new();
+    }
+    let backend = if cfg!(feature = "hyper") { "hyper" } else { "pingora" };
+    vec![
+        "--no-default-features".to_owned(),
+        "--features".to_owned(),
+        subprocess_features(backend, &policy),
+    ]
+}
+
+/// The comma-separated feature list for a subprocess build on `backend`.
+fn subprocess_features(backend: &str, policy: &[&str]) -> String {
+    [backend, "config-reload", "admin-api"]
+        .into_iter()
+        .chain(policy.iter().copied())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// The network backend this harness tests, as `praxis --version` names it.
+const NETWORK_BACKEND: &str = if cfg!(feature = "hyper") { "hyper" } else { "pingora" };
+
+/// Whether the binary at `path` was compiled with this harness's network
+/// backend, going by `praxis --version`. `Err` carries the mismatch.
+fn binary_backend_matches(path: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|err| format!("run {} --version: {err}", path.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let reported = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("network backend: "))
+        .map(str::trim)
+        .ok_or_else(|| format!("{} --version reports no network backend:\n{stdout}", path.display()))?;
+    if reported == NETWORK_BACKEND {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} is built on the {reported} backend, but this suite tests {NETWORK_BACKEND}",
+            path.display()
+        ))
     }
 }
 
-/// The feature arguments selecting the backend this harness tests: the
-/// binary's defaults, or under `hyper` that backend with the binary's other
-/// default features, as `make build-hyper` builds it.
-fn backend_build_args() -> &'static [&'static str] {
-    if cfg!(feature = "hyper") {
-        &[
-            "--no-default-features",
-            "--features",
-            "hyper,config-reload,admin-api,policy-engine",
-        ]
+/// Whether the binary at `path` was compiled with the Policy selection this
+/// harness claims, going by `praxis --version`. `Err` carries the mismatch.
+fn binary_policy_profile_matches(path: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|err| format!("run {} --version: {err}", path.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let reported = parse_policy_features(&stdout)
+        .ok_or_else(|| format!("{} --version reports no policy features:\n{stdout}", path.display()))?;
+    let selected = selected_policy_features();
+    let (reported, expected) = (
+        effective_policy_features(&reported),
+        effective_policy_features(&selected),
+    );
+    if reported == expected {
+        Ok(())
     } else {
-        &[]
+        Err(format!(
+            "{} carries Policy features {reported:?}, but this suite was built with {expected:?}",
+            path.display()
+        ))
     }
+}
+
+/// The `policy-*` names on the `policy features:` line of `praxis --version`;
+/// empty for `none`.
+fn parse_policy_features(version: &str) -> Option<Vec<&str>> {
+    let line = version
+        .lines()
+        .find_map(|line| line.strip_prefix("policy features: "))?;
+    Some(line.split(',').map(str::trim).filter(|name| *name != "none").collect())
 }
 
 // -----------------------------------------------------------------------------
@@ -197,11 +338,7 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
 /// the server's `configure_pipeline`.
 fn configure_test_pipeline(pipeline: &mut FilterPipeline, config: &Config) {
     pipeline
-        .apply_body_limits(
-            config.body_limits.max_request_bytes,
-            config.body_limits.max_response_bytes,
-            config.insecure_options.allow_unbounded_body,
-        )
+        .configure_body_limits(&config.body_limits, config.insecure_options.allow_unbounded_body)
         .unwrap();
     pipeline.set_record_filter_duration_metrics(config.metrics.filter_duration);
     pipeline.set_route_templates(Arc::new(praxis_core::config::RouteTemplates::compile(
@@ -815,4 +952,103 @@ pub fn registry_with(name: &str, make: fn() -> Box<dyn HttpFilter>) -> FilterReg
         .register(name, FilterFactory::Http(Arc::new(move |_| Ok(make()))))
         .expect("duplicate filter name in test registry");
     registry
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_policy_features, parse_policy_features, subprocess_features};
+
+    /// The Policy selections the harness supports, by profile name.
+    fn profiles() -> Vec<(&'static str, Vec<&'static str>)> {
+        vec![
+            ("engine only", vec!["policy-crypto-default", "policy-engine"]),
+            ("JWT only", vec!["policy-crypto-default", "policy-engine", "policy-jwt"]),
+            (
+                "API-key only",
+                vec!["policy-api-key", "policy-crypto-default", "policy-engine"],
+            ),
+            (
+                "limiter only",
+                vec![
+                    "policy-crypto-default",
+                    "policy-engine",
+                    "policy-experimental-ratelimit",
+                ],
+            ),
+            (
+                "FIPS JWT",
+                vec![
+                    "policy-crypto-fips",
+                    "policy-engine",
+                    "policy-jwt-fips",
+                    "policy-jwt-openssl-fips",
+                ],
+            ),
+            ("policy-free", vec![]),
+        ]
+    }
+
+    #[test]
+    fn subprocess_features_carry_exactly_the_policy_selection() {
+        for (profile, policy) in profiles() {
+            let features = subprocess_features("pingora", &policy);
+            let listed: Vec<&str> = features.split(',').filter(|name| name.starts_with("policy-")).collect();
+            assert_eq!(
+                listed, policy,
+                "{profile}: the build must name exactly its Policy features"
+            );
+            assert!(
+                features.starts_with("pingora,config-reload,admin-api"),
+                "{profile}: the backend and standard features lead: {features}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_bundle_and_its_granular_spelling_are_the_same_profile() {
+        let granular = super::POLICY_BUNDLE.to_vec();
+        assert_eq!(
+            effective_policy_features(&["policy-builtins", "policy-engine"]),
+            effective_policy_features(&granular),
+            "a binary with every granular builtin matches a suite claiming the bundle"
+        );
+        assert_ne!(
+            effective_policy_features(&["policy-builtins"]),
+            effective_policy_features(&["policy-engine", "policy-crypto-default"]),
+            "an engine-only binary must not pass for the bundle"
+        );
+        assert_eq!(
+            effective_policy_features(&["policy-jwt-fips"]),
+            effective_policy_features(&["policy-jwt-openssl-fips", "policy-crypto-fips", "policy-engine"]),
+            "the FIPS JWT alias expands to its parts"
+        );
+        assert!(
+            effective_policy_features(&[]).is_empty(),
+            "no feature is the policy-free profile"
+        );
+    }
+
+    #[test]
+    fn version_output_yields_the_compiled_policy_features() {
+        let version = "praxis 0.8.0 (abc)\npolicy features: policy-crypto-default,policy-engine\n";
+        assert_eq!(
+            parse_policy_features(version),
+            Some(vec!["policy-crypto-default", "policy-engine"]),
+            "the names come from the policy features line"
+        );
+        assert_eq!(
+            parse_policy_features("praxis 0.8.0\npolicy features: none\n"),
+            Some(vec![]),
+            "`none` means a policy-free binary"
+        );
+        assert_eq!(
+            parse_policy_features("praxis 0.8.0\n"),
+            None,
+            "an older binary reports nothing"
+        );
+    }
 }

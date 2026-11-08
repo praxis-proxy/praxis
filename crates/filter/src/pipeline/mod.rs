@@ -72,7 +72,7 @@ use std::sync::Arc;
 
 pub use extension::PipelineExtension;
 use praxis_core::{
-    config::{ABSOLUTE_MAX_BODY_BYTES, FailureMode, InsecureOptions},
+    config::{BodyLimitsConfig, FailureMode, InsecureOptions},
     health::HealthRegistry,
     id::IdGenerator,
     kv::KvStoreRegistry,
@@ -159,6 +159,9 @@ pub struct FilterPipeline {
     /// Global response body ceiling, enforced by counting in Stream mode.
     response_body_ceiling: Option<usize>,
 
+    /// Cap on each accumulated body, separate from cumulative streaming limits.
+    buffer_cap: usize,
+
     /// Indices into `filters` of top-level filters that run the request-head
     /// phase, walked once per request by [`execute_http_request_head`] before
     /// any `StreamBuffer` request-body pre-read. Empty when no filter opts in,
@@ -220,8 +223,55 @@ impl FilterPipeline {
         max_response: Option<usize>,
         allow_unbounded: bool,
     ) -> Result<(), FilterError> {
-        self.apply_nested_body_limits(max_request, max_response, allow_unbounded)?;
+        self.configure_body_limits(
+            &BodyLimitsConfig {
+                max_request_bytes: max_request,
+                max_response_bytes: max_response,
+                ..BodyLimitsConfig::default()
+            },
+            allow_unbounded,
+        )
+    }
 
+    /// Apply configured transfer limits and the independent buffering cap.
+    /// Nested pipelines and filter-owned buffers receive the same cap.
+    ///
+    /// # Errors
+    /// Returns an error for an unbounded buffer without the insecure opt-in.
+    pub fn configure_body_limits(
+        &mut self,
+        limits: &BodyLimitsConfig,
+        allow_unbounded: bool,
+    ) -> Result<(), FilterError> {
+        self.apply_nested_body_limits(limits, allow_unbounded)?;
+        self.buffer_cap = limits.max_buffer_bytes.get();
+        apply_filter_buffer_cap(&mut self.filters, self.buffer_cap);
+        let max_request = limits.max_request_bytes;
+        let max_response = limits.max_response_bytes;
+
+        self.apply_transfer_limits(max_request, max_response);
+
+        check_unbounded_stream_buffer(
+            "request",
+            &mut self.body_capabilities.request_body_mode,
+            self.buffer_cap,
+            allow_unbounded,
+        )?;
+        check_unbounded_stream_buffer(
+            "response",
+            &mut self.body_capabilities.response_body_mode,
+            self.buffer_cap,
+            allow_unbounded,
+        )?;
+
+        self.request_body_ceiling = max_request;
+        self.response_body_ceiling = max_response;
+
+        Ok(())
+    }
+
+    /// Clamp cumulative limits without converting explicitly incremental filters.
+    fn apply_transfer_limits(&mut self, max_request: Option<usize>, max_response: Option<usize>) {
         if let Some(ceiling) = max_request {
             self.body_capabilities.request_body_mode = clamp_body_mode(
                 self.body_capabilities.request_body_mode,
@@ -239,35 +289,18 @@ impl FilterPipeline {
             );
             self.body_capabilities.needs_response_body = true;
         }
-
-        check_unbounded_stream_buffer(
-            "request",
-            &mut self.body_capabilities.request_body_mode,
-            allow_unbounded,
-        )?;
-        check_unbounded_stream_buffer(
-            "response",
-            &mut self.body_capabilities.response_body_mode,
-            allow_unbounded,
-        )?;
-
-        self.request_body_ceiling = max_request;
-        self.response_body_ceiling = max_response;
-
-        Ok(())
     }
 
     /// Apply the listener ceilings recursively to nested pipelines.
     fn apply_nested_body_limits(
         &mut self,
-        max_request: Option<usize>,
-        max_response: Option<usize>,
+        limits: &BodyLimitsConfig,
         allow_unbounded: bool,
     ) -> Result<(), FilterError> {
         let mut nested_error = None;
         self.visit_nested_pipelines(&mut |pipeline| {
             if nested_error.is_none()
-                && let Err(error) = pipeline.apply_body_limits(max_request, max_response, allow_unbounded)
+                && let Err(error) = pipeline.configure_body_limits(limits, allow_unbounded)
             {
                 nested_error = Some(error);
             }
@@ -276,6 +309,12 @@ impl FilterPipeline {
             return Err(error);
         }
         Ok(())
+    }
+
+    /// Maximum bytes retained by an accumulated body.
+    #[must_use]
+    pub fn buffer_cap(&self) -> usize {
+        self.buffer_cap
     }
 
     /// Global request body ceiling; `None` means unbounded was allowed.
@@ -292,30 +331,38 @@ impl FilterPipeline {
     /// correct whether or not `request_body_mode` is already clamped at build.
     ///
     /// ```
-    /// use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
+    /// use praxis_core::config::DEFAULT_MAX_BUFFER_BYTES;
     /// use praxis_filter::{FilterPipeline, FilterRegistry};
     ///
     /// let registry = FilterRegistry::with_builtins();
     /// let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
     /// assert_eq!(
     ///     pipeline.selected_upstream_request_body_limit(),
-    ///     ABSOLUTE_MAX_BODY_BYTES,
+    ///     DEFAULT_MAX_BUFFER_BYTES,
     ///     "an empty pipeline uses the defensive absolute limit",
     /// );
     /// ```
     #[must_use]
     pub fn selected_upstream_request_body_limit(&self) -> usize {
         let mode_limit = match self.body_capabilities().request_body_mode {
-            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(self.buffer_cap),
             // Defensive default: selected-upstream participation always merges the
             // request-body mode to StreamBuffer (see `selected_upstream_body_mode`
             // in crates/filter/src/pipeline/body.rs), so this arm is not reachable
             // for the phase; it keeps the limit well-defined if that ever changes.
             BodyMode::SizeLimit { max_bytes } => max_bytes,
-            _ => ABSOLUTE_MAX_BODY_BYTES,
+            _ => self.buffer_cap,
         };
         self.request_body_ceiling()
             .map_or(mode_limit, |ceiling| mode_limit.min(ceiling))
+            .min(self.buffer_cap)
+    }
+
+    /// Cap for buffered upstream responses, including hedged attempts.
+    #[must_use]
+    pub fn response_buffer_limit(&self) -> usize {
+        self.response_body_ceiling
+            .map_or(self.buffer_cap, |limit| limit.min(self.buffer_cap))
     }
 
     /// Global response body ceiling; `None` means unbounded was allowed.
@@ -832,6 +879,18 @@ pub(super) fn collect_cluster_declarations(filters: &[PipelineFilter]) -> Vec<ca
     declarations
 }
 
+/// Clamp filter-owned buffers throughout branch sub-chains.
+fn apply_filter_buffer_cap(filters: &mut [PipelineFilter], cap: usize) {
+    for entry in filters {
+        if let AnyFilter::Http(filter) = &mut entry.filter {
+            filter.apply_buffer_cap(cap);
+        }
+        for branch in &mut entry.branches {
+            apply_filter_buffer_cap(&mut branch.filters, cap);
+        }
+    }
+}
+
 /// Invoke each filter's [`visit_nested_pipelines`], descending recursively into
 /// branch sub-chains so pipelines embedded by branch-contained filters (for
 /// example an outbound chain bound by a callout placed inside a branch) receive
@@ -857,7 +916,7 @@ fn visit_branch_nested_pipelines(filters: &mut [PipelineFilter], visitor: &mut d
 /// When `filter_declared` is true a filter explicitly chose Stream
 /// mode; preserve it so streaming filters keep working. When false
 /// the mode is the default (no filter needs body); convert to
-/// `SizeLimit` so the body limit is enforced by buffering.
+/// `SizeLimit` so the body limit is enforced by counting.
 fn clamp_body_mode(mode: BodyMode, ceiling: usize, filter_declared: bool) -> BodyMode {
     match mode {
         BodyMode::StreamBuffer { max_bytes } => BodyMode::StreamBuffer {
@@ -871,10 +930,11 @@ fn clamp_body_mode(mode: BodyMode, ceiling: usize, filter_declared: bool) -> Bod
     }
 }
 
-/// Reject or clamp unbounded [`StreamBuffer`] body modes.
+/// Enforce the configured buffering cap, including explicit finite limits.
 ///
 /// When `allow_unbounded` is `true`, the mode is clamped to
-/// [`ABSOLUTE_MAX_BODY_BYTES`] and a warning is emitted.
+/// the configured cap and a warning is emitted. Finite limits
+/// are always tightened to that cap.
 ///
 /// # Errors
 ///
@@ -882,22 +942,25 @@ fn clamp_body_mode(mode: BodyMode, ceiling: usize, filter_declared: bool) -> Bod
 /// and `allow_unbounded` is `false`.
 ///
 /// [`StreamBuffer`]: BodyMode::StreamBuffer
-/// [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
 fn check_unbounded_stream_buffer(
     direction: &str,
     mode: &mut BodyMode,
+    buffer_cap: usize,
     allow_unbounded: bool,
 ) -> Result<(), FilterError> {
+    if let BodyMode::StreamBuffer { max_bytes: Some(max) } = mode {
+        *max = (*max).min(buffer_cap);
+    }
     if let BodyMode::StreamBuffer { max_bytes: max @ None } = mode {
         if allow_unbounded {
             warn!(
                 direction = direction,
-                ceiling = ABSOLUTE_MAX_BODY_BYTES,
+                ceiling = buffer_cap,
                 "StreamBuffer body mode has no per-filter size limit; \
-                 clamped to absolute ceiling ({} MiB)",
-                ABSOLUTE_MAX_BODY_BYTES / 1_048_576
+                 clamped to configured buffering cap ({} MiB)",
+                buffer_cap / 1_048_576
             );
-            *max = Some(ABSOLUTE_MAX_BODY_BYTES);
+            *max = Some(buffer_cap);
         } else {
             return Err(format!(
                 "StreamBuffer {direction} body mode has no size limit; \

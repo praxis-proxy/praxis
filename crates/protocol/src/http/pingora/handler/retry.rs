@@ -133,6 +133,25 @@ fn classify_h2_error(e: &pingora_core::Error) -> RetryOutcome {
 // Decision
 // -----------------------------------------------------------------------------
 
+/// A streamed writer's first output has no authoritative Pingora replay copy.
+pub(super) fn streaming_writer_cannot_replay(ctx: &PingoraRequestCtx) -> bool {
+    ctx.streaming_request_writer_ran
+        && ctx.retained_pre_read_body.is_none()
+        && ctx.retained_adapted_request_body.is_none()
+}
+
+/// Larger of the original input and the final authoritative representation.
+///
+/// The adapted body, when present, supersedes the earlier canonical body.
+pub(super) fn replay_body_size(ctx: &PingoraRequestCtx) -> u64 {
+    let transformed = ctx
+        .adapted_request_body_len
+        .or(ctx.mutated_request_body_len)
+        .unwrap_or(0);
+    ctx.request_body_bytes
+        .max(u64::try_from(transformed).unwrap_or(u64::MAX))
+}
+
 /// Retry decision over `ctx` and `policy`. Does not mutate `ctx`, but a
 /// passing budget check consumes one token from `budget`; callers must not
 /// re-invoke this for the same failure.
@@ -166,14 +185,15 @@ pub(super) fn should_retry(
         return RetryDecision::DoNotRetry;
     }
 
+    if streaming_writer_cannot_replay(ctx) {
+        debug!("skipping retry: streamed writer output was not retained");
+        return RetryDecision::DoNotRetry;
+    }
+
     // Adapted length (selected-upstream phase, #1139) supersedes the pre-read
     // mutated length; retry accounting uses the larger of the original
     // downstream body and the final transformed body.
-    let transformed_len = ctx
-        .adapted_request_body_len
-        .or(ctx.mutated_request_body_len)
-        .unwrap_or(0) as u64;
-    let effective_body_size = std::cmp::max(ctx.request_body_bytes, transformed_len);
+    let effective_body_size = replay_body_size(ctx);
     let body_limit = policy.body_limit_bytes();
     if effective_body_size > body_limit {
         debug!(
@@ -319,6 +339,39 @@ mod tests {
         assert_eq!(decision, RetryDecision::DoNotRetry);
     }
 
+    /// Check that a retained representation makes a connection retry safe.
+    fn assert_body_retryable(ctx: &PingoraRequestCtx, policy: &RetryPolicy, reason: &str) {
+        assert!(
+            matches!(
+                should_retry(ctx, policy, RetryOutcome::ConnectFailure, None),
+                RetryDecision::Retry { .. }
+            ),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn streamed_writer_requires_an_authoritative_replay_body() {
+        let policy = RetryPolicy::legacy_default();
+        let mut ctx = ctx_idempotent();
+        assert_body_retryable(
+            &ctx,
+            &policy,
+            "a writer that has not run does not block a connection retry",
+        );
+        ctx.streaming_request_writer_ran = true;
+        assert_eq!(
+            should_retry(&ctx, &policy, RetryOutcome::ConnectFailure, None),
+            RetryDecision::DoNotRetry,
+            "unretained streamed output cannot be replayed safely"
+        );
+        ctx.retained_pre_read_body = Some(std::collections::VecDeque::new());
+        assert_body_retryable(&ctx, &policy, "a retained canonical body is replayable");
+        ctx.retained_pre_read_body = None;
+        ctx.retained_adapted_request_body = Some(std::collections::VecDeque::new());
+        assert_body_retryable(&ctx, &policy, "a retained adapted body is replayable");
+    }
+
     #[test]
     fn should_retry_blocks_when_budget_exhausted() {
         use praxis_core::{config::RetryBudgetConfig, retry::ClusterRetryState};
@@ -409,6 +462,32 @@ mod tests {
             matches!(decision, RetryDecision::DoNotRetry),
             "an adapted body over the replay limit must block the retry"
         );
+    }
+
+    #[test]
+    fn retry_guard_uses_original_and_final_transformed_lengths() {
+        let cap = praxis_core::config::DEFAULT_RETRY_BODY_LIMIT_BYTES;
+        for (original, mutated, adapted, allowed) in [
+            (cap - 1, None, None, true),
+            (cap, None, None, true),
+            (cap + 1, Some(1), None, false),
+            (1, Some(usize::try_from(cap).unwrap()), None, true),
+            (1, Some(usize::try_from(cap + 1).unwrap()), None, false),
+            (1, Some(usize::try_from(cap + 1).unwrap()), Some(1), true),
+            (1, Some(1), Some(usize::try_from(cap + 1).unwrap()), false),
+            (cap + 1, Some(1), Some(1), false),
+        ] {
+            let mut ctx = ctx_idempotent();
+            ctx.request_body_bytes = original;
+            ctx.mutated_request_body_len = mutated;
+            ctx.adapted_request_body_len = adapted;
+            let decision = should_retry(&ctx, &RetryPolicy::legacy_default(), RetryOutcome::ConnectFailure, None);
+            assert_eq!(
+                matches!(decision, RetryDecision::Retry { .. }),
+                allowed,
+                "original={original}, mutated={mutated:?}, adapted={adapted:?}"
+            );
+        }
     }
 
     #[cfg(feature = "pingora")]

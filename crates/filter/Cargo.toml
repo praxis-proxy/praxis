@@ -13,12 +13,47 @@ readme.workspace = true
 name = "praxis_filter"
 
 [features]
-default = ["policy-engine"]
+default = ["policy-builtins"]
+# The `policy` filter and the Policy engine, with no builtin plugin and no
+# crypto backend. Every build that names it must also select exactly one
+# backend (`policy-crypto-default` or `policy-crypto-fips`); PPE refuses to
+# compile otherwise.
 policy-engine = [
     "dep:ppe",
     "dep:unicase",
     "tokio/rt-multi-thread",
 ]
+# The standard bundle: every PPE builtin, the RustCrypto backend and the
+# experimental rate limiter.
+policy-builtins = [
+    "policy-engine",
+    "ppe/builtins",
+    "ppe/crypto-rustcrypto",
+    "policy-experimental-ratelimit",
+]
+# Shared Policy crypto backends; select exactly one.
+policy-crypto-default = ["policy-engine", "ppe/crypto-rustcrypto"]
+policy-crypto-fips = ["policy-engine", "ppe/fips"]
+# Individual builtins. None selects a backend.
+policy-api-key = ["policy-engine", "ppe/api-key"]
+policy-api-key-fips = ["policy-api-key", "policy-crypto-fips"]
+# JWT identity verifying on aws-lc-rs; not FIPS.
+policy-jwt = ["policy-engine", "ppe/jwt"]
+# JWT identity verifying on system OpenSSL; requires `policy-crypto-fips` and
+# cannot be combined with `policy-jwt`.
+policy-jwt-openssl-fips = ["policy-engine", "ppe/jwt-openssl-fips"]
+policy-jwt-fips = ["policy-jwt-openssl-fips", "policy-crypto-fips"]
+policy-oauth = ["policy-engine", "ppe/oauth"]
+policy-delegator-vault = ["policy-engine", "ppe/delegator-vault"]
+policy-elicitation-ciba = ["policy-engine", "ppe/elicitation-ciba"]
+policy-cedar = ["policy-engine", "ppe/cedar"]
+policy-cel = ["policy-engine", "ppe/cel"]
+policy-opa = ["policy-engine", "ppe/opa"]
+policy-valkey = ["policy-engine", "ppe/valkey"]
+policy-secrets-vault = ["policy-engine", "ppe/secrets-vault"]
+# PPE's embedded request rate limiter. Experimental and outside PPE's semver
+# guarantees.
+policy-experimental-ratelimit = ["policy-engine", "ppe/experimental-ratelimit"]
 basic-auth-filter = [
     "dep:openssl",
     "dep:subtle",
@@ -119,6 +154,11 @@ url = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+# The policy tests mint HS256 JWTs through the system OpenSSL rather than
+# jsonwebtoken, whose crypto backend would unify into Policy's own copy.
+openssl = { workspace = true }
+# Backend-free: the FIPS startup tests install a rival provider to prove
+# Policy refuses it.
 jsonwebtoken = { workspace = true }
 # The filter's own tests dial real sockets through the sub-request client, so
 # they need a backend even though the library does not.

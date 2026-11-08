@@ -137,8 +137,7 @@ fn tcp_session_omitted_timeout_gets_default_and_forwards() {
 /// Start a backend that accepts connections and holds them open
 /// without responding, so sessions only end when the proxy ends them.
 fn start_holding_backend() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind holding backend");
-    let port = listener.local_addr().expect("holding backend port").port();
+    let (listener, port) = praxis_test_utils::bind_unique_port();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {

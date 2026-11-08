@@ -31,7 +31,8 @@ pub use security::{
 };
 #[cfg(feature = "policy-engine")]
 pub use security::{
-    PolicyFilter, PolicyPluginFactoryFn, PolicyResponseContext, PolicyResponseOutput, register_policy_plugin_factory,
+    PolicyFilter, PolicyPluginFactoryFn, PolicyResponseContext, PolicyResponseOutput, fips_crypto_blocker,
+    register_policy_plugin_factory,
 };
 #[cfg(feature = "iterative-request-router")]
 pub use traffic_management::IterativeRequestRouterFilter;

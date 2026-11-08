@@ -540,15 +540,31 @@ occupy those slots for up to 30 seconds. A configured
 
 ```yaml
 body_limits:
-  max_request_bytes: 10485760    # 10 MiB
-  max_response_bytes: 5242880    # 5 MiB
+  max_buffer_bytes: 67108864    # 64 MiB, per accumulated body
+  max_request_bytes: 10485760    # 10 MiB, cumulative request bytes
+  max_response_bytes: 5242880    # 5 MiB, cumulative response bytes
 ```
 
-Both default to 10 MiB (10,485,760 bytes) when
-omitted. Setting either to `null` removes the ceiling
+`max_request_bytes` and `max_response_bytes` default to
+10 MiB (10,485,760 bytes) when omitted. Setting either to
+`null` removes the ceiling
 but requires `insecure_options.allow_unbounded_body:
 true`; without that flag, startup fails with a
-validation error.
+validation error. `max_buffer_bytes` defaults to 64 MiB and can be
+raised or lowered with a positive integer byte count. Zero, null,
+and values beyond an addressable allocation are rejected. It caps
+static and runtime-selected buffering, nested pipelines, buffered
+subrequest responses, and iterative-router state. Incremental
+streams use only their cumulative transfer limits.
+
+For a 128 MiB buffered request, set `max_buffer_bytes: 134217728`,
+`max_request_bytes: 134217728`, and raise the relevant filter's
+inspection limit (for example `json_body_field.max_body_bytes`).
+Raise `max_response_bytes` too if responses need the extra capacity.
+The smallest applicable limit wins; `allow_unbounded_body` does not
+remove the buffering cap. Reloads update new requests while in-flight
+requests keep their pinned limits. This bounds accumulated bytes,
+not parsed-object memory or aggregate memory across concurrent requests.
 
 ## Metrics
 
@@ -810,8 +826,35 @@ In-flight requests have a grace period of
 then cancels remaining async tasks; the rest of the budget
 bounds the wait for blocking work. A setting of `60`
 therefore still gives requests at most five seconds to
-finish. Drain traffic before SIGTERM when requests need
-longer; see [Diagnostics](diagnostics.md#draining-before-shutdown).
+finish. This limit also applies to streaming responses and
+SSE; a stream that has not completed when the grace period
+ends can be cut short. Drain traffic before SIGTERM when
+requests need longer; see
+[Diagnostics](diagnostics.md#draining-before-shutdown).
+
+The full grace period is spent even when nothing is in
+flight. The requests cut when it ends are the
+long-running ones: streaming and SSE responses, slow
+uploads and downloads, and WebSocket or other upgraded
+connections. Clients of those see the connection or
+stream close before the request completes and should be
+ready to reconnect, retrying only idempotent requests.
+
+On Kubernetes, `terminationGracePeriodSeconds` only caps
+this window. A larger value does not extend it. A
+smaller one, once any `preStop` hook time is taken out,
+lets the kubelet kill the container before the grace
+period ends. Streams still open when the window ends are
+closed on every pod deletion, rolling update, and node
+drain.
+
+On the experimental hyper backend, HTTP listeners let
+in-flight connections finish for up to
+`shutdown_timeout_secs` minus a 1 s reserve, so
+`shutdown_timeout_secs: 1` leaves them no drain time.
+Active TCP forwarding stops as soon as the signal
+arrives. See
+[Hyper Backend](../architecture/hyper-backend.md#runtime-and-shutdown).
 
 Once runtime shutdown completes, Praxis flushes queued
 log lines and attempts to export pending OTLP spans, then

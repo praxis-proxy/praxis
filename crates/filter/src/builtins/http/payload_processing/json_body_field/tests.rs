@@ -964,6 +964,175 @@ async fn promotes_even_when_target_header_already_in_extras() {
     );
 }
 
+
+/// Generate large scalar, object and array values ignored by the selector.
+fn large_ignored_values() -> [String; 3] {
+    [
+        format!("\"{}\"", "x".repeat(2_097_152)),
+        format!(
+            "{{{}}}",
+            (0..10_000)
+                .map(|i| format!("\"k{i}\":{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        format!("[{}]", vec!["1234567890"; 20_000].join(",")),
+    ]
+}
+
+#[tokio::test]
+async fn distant_selectors_survive_large_ignored_values_and_duplicates() {
+    let filter = make_multi_filter(&[("model", "X-Model"), ("tenant", "X-Tenant")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    for filler in large_ignored_values() {
+        let input = format!(
+            r#"{{"model":"early","ignored":{filler},"nested":{{"model":"decoy"}},"\u006dodel":"late","tenant":"acme"}}"#
+        );
+        let reference: serde_json::Value = serde_json::from_str(&input).unwrap();
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let original = Bytes::from(input);
+        let mut body = Some(original.clone());
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(matches!(action, FilterAction::BodyDone));
+        assert_eq!(
+            body.as_ref(),
+            Some(&original),
+            "read-only extraction must preserve all bytes"
+        );
+        assert_eq!(
+            reference["model"], "late",
+            "serde_json backend uses the last equivalent key"
+        );
+        assert_eq!(ctx.extra_request_headers.len(), 2);
+        assert_eq!(ctx.extra_request_headers[0].1, reference["model"].as_str().unwrap());
+        assert_eq!(ctx.extra_request_headers[1].1, "acme");
+    }
+}
+
+#[tokio::test]
+async fn late_invalid_json_never_commits_partial_headers() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let padding = "x".repeat(1_048_576);
+    let prefix = format!(r#"{{"model":"protected","padding":"{padding}"}}"#);
+    let cases = [
+        format!("{prefix}{{}}"),
+        format!("{prefix}garbage"),
+        format!(r#"{{"model":"protected","padding":"{padding}""#),
+        format!(r#"{{"model":"protected","padding":"{padding}",}}"#),
+    ];
+    for input in cases {
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.extra_request_headers
+            .push(("X-Trusted".into(), "preserved".to_owned()));
+        let original = Bytes::from(input);
+        let mut body = Some(original.clone());
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(matches!(action, FilterAction::Continue));
+        assert_eq!(body.as_ref(), Some(&original));
+        assert_eq!(ctx.extra_request_headers.len(), 1, "no partial routing promotion");
+        assert_eq!(ctx.extra_request_headers[0].1, "preserved");
+    }
+}
+
+/// Header-boundary, escaping, control-byte and non-scalar cases.
+fn header_bound_cases() -> [(String, bool); 12] {
+    [
+        ("x".repeat(255), true),
+        ("x".repeat(256), true),
+        ("x".repeat(257), false),
+        ("é".repeat(128), true),
+        ("é".repeat(129), false),
+        ("\\u0078".repeat(256), true),
+        ("\\u0078".repeat(257), false),
+        ("bad\\rvalue".to_owned(), false),
+        ("bad\\nvalue".to_owned(), false),
+        ("bad\\u0000value".to_owned(), false),
+        ("bad\\u007fvalue".to_owned(), false),
+        (format!("{{\"huge\":\"{}\"}}", "x".repeat(1_048_576)), false),
+    ]
+}
+
+#[tokio::test]
+async fn decoded_header_bounds_and_unsafe_values_leave_safe_siblings() {
+    let filter = make_multi_filter(&[("model", "X-Model"), ("tenant", "X-Tenant")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    for (value, safe) in header_bound_cases() {
+        let token = if value.starts_with('{') {
+            value.clone()
+        } else {
+            format!("\"{value}\"")
+        };
+        let input = format!(r#"{{"model":{token},"tenant":"safe"}}"#);
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut body = Some(Bytes::from(input));
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(matches!(action, FilterAction::BodyDone));
+        assert_eq!(
+            ctx.extra_request_headers.len(),
+            if safe { 2 } else { 1 },
+            "value {value:?}"
+        );
+        assert_eq!(ctx.extra_request_headers.last().unwrap().1, "safe");
+        if safe {
+            assert!(ctx.extra_request_headers[0].1.len() <= 256);
+        }
+    }
+}
+
+#[tokio::test]
+async fn complete_prefix_promotes_only_after_valid_final_document() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    for (suffix, valid) in [(" \n\t", true), ("{}", false), ("junk", false)] {
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        let mut prefix = Some(Bytes::from_static(br#"{"model":"safe"}"#));
+        assert!(matches!(
+            filter.on_request_body(&mut ctx, &mut prefix, false).await.unwrap(),
+            FilterAction::Continue
+        ));
+        assert!(ctx.extra_request_headers.is_empty());
+        let mut complete = Some(Bytes::from(format!("{{\"model\":\"safe\"}}{suffix}")));
+        let action = filter.on_request_body(&mut ctx, &mut complete, true).await.unwrap();
+        assert_eq!(ctx.extra_request_headers.len(), usize::from(valid), "suffix {suffix:?}");
+        assert_eq!(matches!(action, FilterAction::BodyDone), valid);
+        if valid {
+            let repeated = filter.on_request_body(&mut ctx, &mut complete, true).await.unwrap();
+            assert!(matches!(repeated, FilterAction::BodyDone));
+            assert_eq!(
+                ctx.extra_request_headers.len(),
+                1,
+                "re-entry must not duplicate promotion"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_utf8_in_ignored_json_value_cannot_promote() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extra_request_headers.push(("X-Trusted".into(), "keep".to_owned()));
+    let original = Bytes::from_static(b"{\"model\":\"blue\",\"unused\":\"\xff\"}");
+    serde_json::from_slice::<serde_json::Value>(&original).expect_err("reference must reject invalid UTF-8");
+    let mut body = Some(original.clone());
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+    assert_eq!(body.as_ref(), Some(&original));
+    assert_eq!(ctx.extra_request_headers.len(), 1);
+    assert_eq!(ctx.extra_request_headers[0].1, "keep");
+
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from("{\"model\":\"blue\",\"unused\":\"café\"}"));
+    assert!(matches!(
+        filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::BodyDone
+    ));
+    assert_eq!(ctx.extra_request_headers[0].1, "blue");
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

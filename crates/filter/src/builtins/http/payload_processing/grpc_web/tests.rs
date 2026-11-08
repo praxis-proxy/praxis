@@ -50,6 +50,28 @@ fn from_config_rejects_a_zero_buffer() {
     );
 }
 
+#[test]
+fn from_config_accepts_addressable_buffer_overrides() {
+    let hard = praxis_core::config::MAX_BUFFER_BYTES;
+    for size in [67_108_865, hard - 1, hard, hard + 1, usize::MAX] {
+        let value = serde_yaml::from_str(&format!("max_buffer_bytes: {size}")).unwrap();
+        match GrpcWebFilter::from_config(&value) {
+            Ok(filter) => assert_eq!(
+                filter.request_body_mode(),
+                crate::BodyMode::StreamBuffer {
+                    max_bytes: Some(size.min(hard)),
+                }
+            ),
+            Err(error) => {
+                assert!(size > hard, "valid buffer limit rejected: {error}");
+                assert!(error.to_string().contains("addressable buffer maximum"));
+                continue;
+            },
+        }
+        assert!(size <= hard, "an oversized buffer configuration was accepted");
+    }
+}
+
 #[tokio::test]
 async fn a_grpc_web_request_is_rewritten_to_native_grpc() {
     let req = grpc_web_request("application/grpc-web+proto");
@@ -134,6 +156,42 @@ async fn a_text_request_body_is_base64_decoded() {
         Some(raw),
         "the upstream must receive raw gRPC frames, not base64"
     );
+}
+
+#[tokio::test]
+async fn preread_decodes_before_request_phase_creates_filter_state() {
+    let req = grpc_web_request("application/grpc-web-text");
+    let mut ctx = pipeline_context(&req);
+    let filter = filter("");
+    let mut body = Some(Bytes::from_static(b"AAABAgM="));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Release));
+    assert_eq!(body.as_deref(), Some(b"\0\0\x01\x02\x03".as_slice()));
+    let mut invalid = Some(Bytes::from_static(b"AAABAgM"));
+    let action = filter.on_request_body(&mut ctx, &mut invalid, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Reject(rejection) if rejection.status == 400));
+}
+
+#[tokio::test]
+async fn preread_leaves_disabled_or_unrelated_encodings_untouched() {
+    let req = grpc_web_request("application/grpc-web-text");
+    let mut ctx = pipeline_context(&req);
+    let binary_only = filter("encodings:\n  binary: true\n  text: false");
+    let mut body = Some(Bytes::from_static(b"not-base64!"));
+    assert!(matches!(
+        binary_only.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(body.as_deref(), Some(b"not-base64!".as_slice()));
+
+    let req = grpc_web_request("application/json");
+    let mut ctx = pipeline_context(&req);
+    let filter = filter("");
+    assert!(matches!(
+        filter.on_request_body(&mut ctx, &mut body, true).await.unwrap(),
+        FilterAction::Continue
+    ));
+    assert_eq!(body.as_deref(), Some(b"not-base64!".as_slice()));
 }
 
 #[tokio::test]
@@ -245,6 +303,31 @@ async fn text_trailers_are_base64_encoded() {
         encode_trailer_frame(&trailers).to_vec(),
         "decoding should recover the frame"
     );
+}
+
+#[tokio::test]
+async fn text_stream_carries_partial_groups_into_the_final_trailer_frame() {
+    let req = grpc_web_request("application/grpc-web-text");
+    let mut ctx = pipeline_context(&req);
+    let filter = filter("");
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    let input: Vec<u8> = (0..1_048_579_usize)
+        .map(|offset| u8::try_from(offset % 251).unwrap())
+        .collect();
+    let mut wire = Vec::new();
+    for chunk in input.chunks(4093) {
+        let mut body = Some(Bytes::copy_from_slice(chunk));
+        drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+        wire.extend_from_slice(body.as_deref().unwrap_or_default());
+    }
+    let mut trailers = http::HeaderMap::new();
+    let _previous = trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+    let frame = encode_trailer_frame(&trailers);
+    wire.extend_from_slice(&filter.on_response_trailers(&mut ctx, &mut trailers).unwrap().unwrap());
+    let decoded = base64::engine::general_purpose::STANDARD.decode(&wire).unwrap();
+    assert_eq!(&decoded[..input.len()], input);
+    assert_eq!(&decoded[input.len()..], frame.as_ref());
+    assert_eq!(wire.len(), decoded.len().div_ceil(3) * 4);
 }
 
 #[tokio::test]
