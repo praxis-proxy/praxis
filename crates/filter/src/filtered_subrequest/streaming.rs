@@ -290,12 +290,8 @@ impl FilteredStreamingBody {
     }
 
     /// Drop queued output if its reservation cannot be released before the deadline.
-    #[cfg_attr(
-        not(feature = "bandwidth"),
-        expect(clippy::unused_async, reason = "pacing is feature gated")
-    )]
+    #[cfg(feature = "bandwidth")]
     async fn wait_download(&mut self) -> Result<(), FilterError> {
-        #[cfg(feature = "bandwidth")]
         if let Err(error) =
             super::pace::pace_download(&mut self.continuation.extensions, self.continuation.step_deadline).await
         {
@@ -332,14 +328,9 @@ impl StreamingResponseBody for FilteredStreamingBody {
         loop {
             let next = self.read_upstream_chunk().await?;
 
-            match next {
+            let bytes = match next {
                 Ok(Some(chunk)) => match self.handle_upstream_chunk(chunk) {
-                    Ok(bytes) => {
-                        self.wait_download().await?;
-                        if bytes.is_some() {
-                            return Ok(bytes);
-                        }
-                    },
+                    Ok(bytes) => bytes,
                     Err(error) => return Box::pin(self.handle_filter_error(error)).await,
                 },
                 Ok(None) => {
@@ -347,10 +338,14 @@ impl StreamingResponseBody for FilteredStreamingBody {
                         crate::cancel_download_pace(&mut self.continuation.extensions);
                         return Err(error);
                     }
-                    self.wait_download().await?;
-                    return Ok(None);
+                    None
                 },
                 Err(e) => return Box::pin(self.handle_upstream_error(e)).await,
+            };
+            #[cfg(feature = "bandwidth")]
+            self.wait_download().await?;
+            if self.finished || bytes.is_some() {
+                return Ok(bytes);
             }
         }
     }
