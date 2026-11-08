@@ -286,10 +286,6 @@ fn filter_post_steps(
 }
 
 /// Whether an effect reads response content unavailable on metadata-only dispatch.
-#[expect(
-    clippy::too_many_lines,
-    reason = "the exhaustive effect classification keeps new PPE variants compiler-visible"
-)]
 fn effect_reads_response_content(effect: &Effect, metadata_plugins: &HashSet<String>) -> bool {
     match effect {
         Effect::FieldOp { path, .. } => content_key(path),
@@ -316,12 +312,10 @@ fn effect_reads_response_content(effect: &Effect, metadata_plugins: &HashSet<Str
                     .any(|effect| effect_reads_response_content(effect, metadata_plugins))
         },
         Effect::Plugin { name } => !metadata_plugins.contains(name),
-        Effect::Allow
-        | Effect::Deny { .. }
-        | Effect::Delegate(_)
-        | Effect::Elicit(_)
-        | Effect::Taint { .. }
-        | Effect::Restrict { .. } => false,
+        Effect::Allow | Effect::Deny { .. } | Effect::Taint { .. } | Effect::Restrict { .. } => false,
+        // Delegation and elicitation need their token/approval handlers, which
+        // are intentionally absent from the metadata-only response document.
+        Effect::Delegate(_) | Effect::Elicit(_) => true,
     }
 }
 
@@ -504,6 +498,27 @@ routes:
             .expect("filter policy")
             .expect("metadata rule remains");
         assert!(filtered.contains("custom.phase"));
+        assert!(filtered.contains("run(metadata)"));
+    }
+
+    #[test]
+    fn drops_handler_dependent_post_steps() {
+        let yaml = format!(
+            r#"{PLUGINS}
+routes:
+  - llm: "*"
+    authorization:
+      post_invocation:
+        - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation])"
+        - "require_approval(manager-approver, from: claim.manager, channel: \"ciba\", scope: \"args.amount <= 25000\", purpose: \"Approve a compensation adjustment\", timeout: 24h)"
+        - "run(metadata)"
+"#,
+        );
+        let filtered = metadata_only_policy(&yaml)
+            .expect("filter policy")
+            .expect("metadata rule remains");
+        assert!(!filtered.contains("delegate("));
+        assert!(!filtered.contains("require_approval("));
         assert!(filtered.contains("run(metadata)"));
     }
 }
