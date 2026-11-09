@@ -467,6 +467,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
             max_connections: None,
             name: "backend".to_owned(),
             protocol: ProtocolKind::default(),
+            upgrade_policy: None,
             tcp_session_timeout_ms: None,
             tcp_max_duration_secs: None,
             tls: None,

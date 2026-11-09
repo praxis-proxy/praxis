@@ -36,6 +36,11 @@ fn every_example_resolves_its_pipelines() {
                 continue;
             }
         }
+        // The Hyper adapter rejects this Pingora-only passthrough config.
+        #[cfg(feature = "hyper")]
+        if path.file_name().is_some_and(|name| name == "websocket.yaml") {
+            continue;
+        }
         #[cfg(not(feature = "tls-health-check"))]
         if path.file_name().is_some_and(|name| name == "tls-health-check.yaml") {
             continue;

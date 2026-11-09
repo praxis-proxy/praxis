@@ -14,7 +14,7 @@ use std::{collections::hash_map::DefaultHasher, hash::Hasher as _};
 
 use praxis_filter::{FilterAction, FilterError, FilterPipeline};
 #[cfg(feature = "pingora")]
-use tracing::{debug, error, warn};
+use tracing::{error, warn};
 
 use super::{super::context::PingoraRequestCtx, body_util::clamp_body_mode_to_ceiling};
 #[cfg(feature = "pingora")]
@@ -44,17 +44,13 @@ pub(super) async fn execute(
     upstream_response: &mut pingora_http::ResponseHeader,
     ctx: &mut PingoraRequestCtx,
 ) -> pingora_core::Result<()> {
-    if upstream_response.status == 101 && !request_has_upgrade(ctx) {
+    ctx.connection_upgraded = false;
+    if upstream_response.status == 101 && ctx.admitted_websocket.is_none() {
         error!("upstream sent unsolicited 101 without matching request Upgrade header");
-        return Err(pingora_core::Error::explain(
-            pingora_core::ErrorType::HTTPStatus(502),
-            "unsolicited 101 response from upstream",
-        ));
+        ctx.stamp_error_type("upgrade_unsolicited_101");
+        return Err(invalid_upgrade_response("unsolicited 101 response from upstream"));
     }
-    let is_upgrade_response = upstream_response.status == 101 && is_websocket_101(&upstream_response.headers);
-    if upstream_response.status == 101 && !is_upgrade_response {
-        debug!("101 response missing valid WebSocket Upgrade header; not marking as upgraded");
-    }
+    let is_upgrade_response = upstream_response.status == 101 && ctx.admitted_websocket.is_some();
     super::upstream_response::strip_hop_by_hop_response(upstream_response, is_upgrade_response);
     upstream_response.strip_reserved_internal();
     let mut resp = response_header_from_pingora(upstream_response);
@@ -62,7 +58,6 @@ pub(super) async fn execute(
     // fingerprint comparison is unnecessary — skip hashing the whole header
     // map on every response for listeners with no filters.
     let name_fingerprint_before = (!pipeline.is_empty()).then(|| header_name_fingerprint(&resp.headers));
-    ctx.connection_upgraded = is_upgrade_response;
     if super::fail_to_proxy::is_final_response(upstream_response) {
         ctx.upstream_response_status = Some(upstream_response.status.as_u16());
         praxis_core::subrequest::record_http_client_status(
@@ -88,6 +83,64 @@ pub(super) async fn execute(
     ctx.response_phase_done = true;
 
     let (result, filter_flagged_modification) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
+    if is_upgrade_response && resp.status != http::StatusCode::SWITCHING_PROTOCOLS {
+        ctx.stamp_error_type("upgrade_response_status_modified");
+        return Err(invalid_upgrade_response(
+            "a response filter changed the WebSocket switching status",
+        ));
+    }
+    if resp.status == http::StatusCode::SWITCHING_PROTOCOLS {
+        if !is_upgrade_response {
+            ctx.stamp_error_type("upgrade_synthesized_101");
+            return Err(invalid_upgrade_response(
+                "101 response was not accepted from the upstream",
+            ));
+        }
+        if let Some(required) = FilterPipeline::required_body_processing(&ctx.extensions) {
+            warn!(
+                listener = %ctx.listener_name,
+                filter = required.filter_name(),
+                filter_id = required.filter_id(),
+                phase = required.phase(),
+                "WebSocket 101 refused because it would bypass required body processing"
+            );
+            ctx.stamp_error_type("upgrade_requires_body_processing");
+            return Err(invalid_upgrade_response(
+                "WebSocket 101 conflicts with required HTTP body processing",
+            ));
+        }
+        let Some(offer) = ctx.admitted_websocket.as_ref() else {
+            ctx.stamp_error_type("upgrade_admission_missing");
+            return Err(invalid_upgrade_response(
+                "101 response has no admitted WebSocket request",
+            ));
+        };
+        let Some(request) = ctx.request_snapshot.as_ref() else {
+            ctx.stamp_error_type("upgrade_admission_missing");
+            return Err(invalid_upgrade_response(
+                "101 response has no forwarded request snapshot",
+            ));
+        };
+        if let Err(reason) = crate::http::upgrade::validate_forwarded_request(
+            offer,
+            &request.method,
+            &request.headers,
+            ctx.client_http_version.unwrap_or(http::Version::HTTP_11),
+        ) {
+            warn!(error = reason, "forwarded WebSocket offer no longer matches admission");
+            ctx.stamp_error_type("upgrade_request_modified");
+            return Err(invalid_upgrade_response(reason));
+        }
+        if let Err(reason) = crate::http::upgrade::validate_response(offer, &resp.headers) {
+            warn!(
+                error = reason,
+                "upstream WebSocket response failed handshake validation"
+            );
+            ctx.stamp_error_type("upgrade_response_invalid");
+            return Err(invalid_upgrade_response(reason));
+        }
+        ctx.connection_upgraded = true;
+    }
     let rewritten_is_bodyless = ctx
         .request_snapshot
         .as_ref()
@@ -436,26 +489,12 @@ fn header_name_fingerprint(headers: &http::HeaderMap) -> u64 {
 // Utilities
 // -----------------------------------------------------------------------------
 
-/// Whether the original client request included an `Upgrade` header.
-///
-/// Returns `false` when the request snapshot is missing (should not
-/// happen in normal flow since `request_filter` always sets it).
+/// Fail a malformed or otherwise inadmissible upstream upgrade with a 502.
 #[cfg(feature = "pingora")]
-fn request_has_upgrade(ctx: &PingoraRequestCtx) -> bool {
-    ctx.request_snapshot
-        .as_ref()
-        .is_some_and(|req| req.headers.contains_key(http::header::UPGRADE))
-}
-
-/// Whether a 101 response carries a valid `WebSocket` `Upgrade` header.
-///
-/// Returns `true` only when the response includes an `Upgrade` header
-/// whose value is exactly `websocket` (case-insensitive). A bare 101
-/// without proper `WebSocket` headers (e.g. from a buggy upstream)
-/// should not be treated as a successful upgrade.
-#[cfg(feature = "pingora")]
-fn is_websocket_101(headers: &http::HeaderMap) -> bool {
-    hop_by_hop::has_websocket_upgrade(headers) && headers.get("sec-websocket-accept").is_some()
+fn invalid_upgrade_response(reason: &'static str) -> Box<pingora_core::Error> {
+    let mut error = pingora_core::Error::explain(pingora_core::ErrorType::HTTPStatus(502), reason);
+    error.set_retry(false);
+    error
 }
 
 // -----------------------------------------------------------------------------
@@ -697,16 +736,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn websocket_101_rejects_a_filter_modified_client_offer() {
+        let pipeline = make_pipeline();
+        let mut resp = pingora_http::ResponseHeader::build(101, None).unwrap();
+        drop(resp.insert_header("upgrade", "websocket"));
+        drop(resp.insert_header("connection", "Upgrade"));
+        drop(resp.insert_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+        let mut ctx = make_upgrade_ctx();
+        if let Some(request) = ctx.request_snapshot.as_mut() {
+            drop(
+                request
+                    .headers
+                    .insert("sec-websocket-key", "YWJjZGVmZ2hpamtsbW5vcA==".parse().unwrap()),
+            );
+        }
+
+        assert!(execute(&pipeline, &mut resp, &mut ctx).await.is_err());
+        assert!(
+            !ctx.connection_upgraded,
+            "a response for a request that no longer matches admission must not open a tunnel"
+        );
+    }
+
+    #[tokio::test]
     async fn bare_101_without_upgrade_header_does_not_set_flag() {
         let pipeline = make_pipeline();
         let mut resp = pingora_http::ResponseHeader::build(101, None).unwrap();
         let mut ctx = make_upgrade_ctx();
 
-        execute(&pipeline, &mut resp, &mut ctx).await.unwrap();
+        assert!(execute(&pipeline, &mut resp, &mut ctx).await.is_err());
 
         assert!(
             !ctx.connection_upgraded,
-            "bare 101 without Upgrade header should not set connection_upgraded"
+            "bare 101 without Upgrade header must fail closed"
         );
     }
 
@@ -718,12 +780,9 @@ mod tests {
         drop(resp.insert_header("connection", "Upgrade"));
         let mut ctx = make_upgrade_ctx();
 
-        execute(&pipeline, &mut resp, &mut ctx).await.unwrap();
+        assert!(execute(&pipeline, &mut resp, &mut ctx).await.is_err());
 
-        assert!(
-            !ctx.connection_upgraded,
-            "non-WebSocket 101 (h2c) should not set connection_upgraded"
-        );
+        assert!(!ctx.connection_upgraded, "unsupported 101 protocols must fail closed");
     }
 
     #[tokio::test]
@@ -772,93 +831,6 @@ mod tests {
             !ctx.connection_upgraded,
             "unsolicited 101 must not set connection_upgraded"
         );
-    }
-
-    #[test]
-    fn request_has_upgrade_true_when_present() {
-        let ctx = make_upgrade_ctx();
-        assert!(request_has_upgrade(&ctx), "should detect Upgrade header in request");
-    }
-
-    #[test]
-    fn request_has_upgrade_false_when_absent() {
-        let ctx = make_ctx();
-        assert!(!request_has_upgrade(&ctx), "should return false when no Upgrade header");
-    }
-
-    #[test]
-    fn request_has_upgrade_false_when_no_snapshot() {
-        let ctx = PingoraRequestCtx::default();
-        assert!(
-            !request_has_upgrade(&ctx),
-            "should return false when request_snapshot is None"
-        );
-    }
-
-    #[test]
-    fn is_websocket_101_with_valid_header() {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(http::header::UPGRADE, "websocket".parse().unwrap());
-        headers.insert(
-            "sec-websocket-accept".parse::<http::header::HeaderName>().unwrap(),
-            "x".parse().unwrap(),
-        );
-        assert!(is_websocket_101(&headers), "should recognize lowercase websocket");
-    }
-
-    #[test]
-    fn is_websocket_101_case_insensitive() {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(http::header::UPGRADE, "WebSocket".parse().unwrap());
-        headers.insert(
-            "sec-websocket-accept".parse::<http::header::HeaderName>().unwrap(),
-            "x".parse().unwrap(),
-        );
-        assert!(is_websocket_101(&headers), "should recognize mixed-case WebSocket");
-    }
-
-    #[test]
-    fn is_websocket_101_missing_upgrade_header() {
-        let headers = http::HeaderMap::new();
-        assert!(
-            !is_websocket_101(&headers),
-            "missing Upgrade header should return false"
-        );
-    }
-
-    #[test]
-    fn is_websocket_101_missing_accept_header() {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(http::header::UPGRADE, "websocket".parse().unwrap());
-        assert!(
-            !is_websocket_101(&headers),
-            "missing Sec-WebSocket-Accept header should return false"
-        );
-    }
-
-    #[test]
-    fn is_websocket_101_with_whitespace() {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(http::header::UPGRADE, "  websocket  ".parse().unwrap());
-        headers.insert(
-            "sec-websocket-accept".parse::<http::header::HeaderName>().unwrap(),
-            "x".parse().unwrap(),
-        );
-        assert!(
-            is_websocket_101(&headers),
-            "padded websocket value should be recognized after trimming"
-        );
-    }
-
-    #[test]
-    fn is_websocket_101_wrong_protocol() {
-        let mut headers = http::HeaderMap::new();
-        headers.insert(http::header::UPGRADE, "h2c".parse().unwrap());
-        headers.insert(
-            "sec-websocket-accept".parse::<http::header::HeaderName>().unwrap(),
-            "x".parse().unwrap(),
-        );
-        assert!(!is_websocket_101(&headers), "h2c should not be treated as websocket");
     }
 
     // -------------------------------------------------------------------------
@@ -1017,7 +989,13 @@ mod tests {
         let mut headers = http::HeaderMap::new();
         headers.insert(http::header::UPGRADE, "websocket".parse().unwrap());
         headers.insert(http::header::CONNECTION, "Upgrade".parse().unwrap());
+        headers.insert("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==".parse().unwrap());
+        headers.insert("sec-websocket-version", "13".parse().unwrap());
         let mut ctx = PingoraRequestCtx::default();
+        ctx.admitted_websocket = Some(crate::http::upgrade::WebSocketOffer {
+            key: "dGhlIHNhbXBsZSBub25jZQ==".to_owned(),
+            subprotocols: Vec::new(),
+        });
         ctx.request_snapshot = Some(Request {
             method: http::Method::GET,
             uri: http::Uri::from_static("/"),

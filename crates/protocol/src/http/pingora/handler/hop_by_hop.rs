@@ -20,9 +20,6 @@ pub(crate) const REQUEST_HOP_BY_HOP: &[&str] = praxis_core::reserved_headers::HO
 /// [RFC 9110] hop-by-hop headers for upstream responses.
 pub(crate) const RESPONSE_HOP_BY_HOP: &[&str] = praxis_core::reserved_headers::RESPONSE_HOP_BY_HOP_HEADERS;
 
-#[cfg(feature = "pingora")]
-pub(crate) use praxis_core::next_hop_headers::has_websocket_upgrade;
-
 /// Strip hop-by-hop headers on a standalone [`HeaderMap`] (terminal responses).
 pub(crate) fn strip_hop_by_hop_header_map(headers: &mut HeaderMap, static_list: &[&str]) {
     strip_hop_by_hop(

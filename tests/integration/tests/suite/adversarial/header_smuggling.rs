@@ -117,6 +117,8 @@ fn hop_by_hop_upgrade_header_preserved_for_upgrade_requests() {
          Host: localhost\r\n\
          Upgrade: websocket\r\n\
          Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
          X-Normal: keep\r\n\
          \r\n";
     let raw = http_send(proxy.addr(), request);
@@ -327,10 +329,7 @@ fn multiple_upgrade_headers_handled_safely() {
     let raw = http_send(proxy.addr(), request);
     let status = parse_status(&raw);
 
-    assert!(
-        status == 200 || status == 400,
-        "multiple Upgrade headers should be handled safely (got {status})"
-    );
+    assert_eq!(status, 403, "multiple upgrade protocols should be rejected: {raw}");
 }
 
 #[test]

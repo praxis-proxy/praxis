@@ -78,6 +78,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `insecure_options.allow_private_upstreams` while a bound listener has
   an enabled block, is rejected. The CONNECT runtime is a follow-up
   change; the block is inert until it lands.
+- Listener `upgrade_policy` controls HTTP protocol upgrades by protocol. Pingora
+  preserves omitted-policy WebSocket passthrough, while explicit policies
+  default to denial; selected required HTTP body processing rejects an
+  incompatible WebSocket handshake before upstream dispatch. Hyper continues
+  to reject upgrades and refuses startup configurations that permit WebSocket
+  passthrough. See `docs/operating/websocket.md`.
 - An experimental network backend behind the `hyper` feature, off by
   default: the proxy data path, TCP forwarder, admin surface and sub-request
   client on hyper 1.x. See `docs/architecture/hyper-backend.md`.
@@ -184,6 +190,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `top_level_clusters: &[Cluster]` argument. Rust callers pass the
   config's top-level `clusters:` list, or `&[]` when none exists.
 
+### Changed
+
+- **Breaking:** `BodyAccess::ReadOnly` and `BodyAccess::ReadWrite` now require
+  an explicit `BodyRequirement::{Optional, Required}`. Custom Rust filters
+  must choose whether each body-processing responsibility may be skipped for
+  an opaque WebSocket upgrade.
+
 ### Removed
 
 - `KvStoreRegistry::get_or_create`, which silently created an in-memory
@@ -228,6 +241,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - A request header asserted from `secret.<name>` stays redacted in the
   views that request-body and response policy hooks receive, rather than
   reaching those plugins and PDPs in plaintext.
+- WebSocket passthrough no longer skips body processing declared as required
+  by a selected filter. Invalid, unsupported, denied, or unvalidated upstream
+  upgrade handshakes fail closed.
 
 - Request-body limit rejections log structured warnings and return JSON 413
   responses across buffering and streaming paths. Body-phase rejections
