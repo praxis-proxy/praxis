@@ -212,7 +212,8 @@ impl FilterPipeline {
     /// # Errors
     ///
     /// Returns [`FilterError`] if a [`StreamBuffer`] has no byte limit
-    /// and `allow_unbounded` is `false`.
+    /// and `allow_unbounded` is `false`, or if a buffered request's finite
+    /// `max_request` exceeds the default buffering cap.
     ///
     /// [`Stream`]: BodyMode::Stream
     /// [`SizeLimit`]: BodyMode::SizeLimit
@@ -237,12 +238,16 @@ impl FilterPipeline {
     /// Nested pipelines and filter-owned buffers receive the same cap.
     ///
     /// # Errors
-    /// Returns an error for an unbounded buffer without the insecure opt-in.
+    ///
+    /// Returns an error for an unbounded buffer without the insecure opt-in,
+    /// or when a statically buffered request's finite `max_request_bytes`
+    /// exceeds `max_buffer_bytes`, including in nested pipelines.
     pub fn configure_body_limits(
         &mut self,
         limits: &BodyLimitsConfig,
         allow_unbounded: bool,
     ) -> Result<(), FilterError> {
+        check_buffered_request_limits(self.body_capabilities.request_body_mode, limits)?;
         self.apply_nested_body_limits(limits, allow_unbounded)?;
         self.buffer_cap = limits.max_buffer_bytes.get();
         apply_filter_buffer_cap(&mut self.filters, self.buffer_cap);
@@ -911,6 +916,23 @@ fn visit_branch_nested_pipelines(filters: &mut [PipelineFilter], visitor: &mut d
 // -----------------------------------------------------------------------------
 // Body Limit Utilities
 // -----------------------------------------------------------------------------
+
+/// Reject a request transfer limit that a statically buffered pipeline cannot retain.
+fn check_buffered_request_limits(mode: BodyMode, limits: &BodyLimitsConfig) -> Result<(), FilterError> {
+    if matches!(mode, BodyMode::StreamBuffer { .. })
+        && let Some(max_request) = limits.max_request_bytes
+        && max_request > limits.max_buffer_bytes.get()
+    {
+        let buffer_cap = limits.max_buffer_bytes.get();
+        return Err(format!(
+            "body_limits.max_request_bytes ({max_request}) exceeds \
+             body_limits.max_buffer_bytes ({buffer_cap}) for a buffered request pipeline; \
+             lower max_request_bytes or raise max_buffer_bytes"
+        )
+        .into());
+    }
+    Ok(())
+}
 
 /// Tighten a body mode's size limit to the given ceiling.
 /// When `filter_declared` is true a filter explicitly chose Stream

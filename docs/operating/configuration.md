@@ -557,6 +557,15 @@ static and runtime-selected buffering, nested pipelines, buffered
 subrequest responses, and iterative-router state. Incremental
 streams use only their cumulative transfer limits.
 
+When a pipeline statically buffers requests (`StreamBuffer`), a finite
+`body_limits.max_request_bytes` must not exceed
+`body_limits.max_buffer_bytes`. Startup, config validation, and reload reject
+that combination with an error naming both fields and values. Lower the request
+limit or raise the buffer cap to accommodate it. This also applies to nested
+pipelines and filters that can release their buffer early. Streaming request
+pipelines may keep higher transfer limits, including when only responses buffer.
+A rejected reload leaves the running configuration intact.
+
 For a 128 MiB buffered request, set `max_buffer_bytes: 134217728`,
 `max_request_bytes: 134217728`, and raise the relevant filter's
 inspection limit (for example `json_body_field.max_body_bytes`).

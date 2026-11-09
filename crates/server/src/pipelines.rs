@@ -764,6 +764,49 @@ filter_chains:
     }
 
     #[test]
+    fn resolve_pipelines_rejects_incompatible_buffered_request_limits() {
+        let mut config = Config::from_yaml(
+            r#"
+body_limits:
+  max_buffer_bytes: 4096
+  max_request_bytes: 8192
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: json_body_field
+        field: model
+        header: x-praxis-model
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+        let registry = FilterRegistry::with_builtins();
+        for skip_validation in [false, true] {
+            config.insecure_options.skip_pipeline_validation = skip_validation;
+            config.insecure_options.allow_unbounded_body = skip_validation;
+            let result = resolve_pipelines(
+                &config,
+                &registry,
+                &empty_health_registry(),
+                &empty_kv_stores(),
+                &empty_session_stores(),
+                &empty_subrequest_client(),
+            );
+            let message = result
+                .err()
+                .expect("conflicting request limits must fail startup")
+                .to_string();
+            assert!(message.contains("body_limits.max_request_bytes (8192)"), "{message}");
+            assert!(message.contains("body_limits.max_buffer_bytes (4096)"), "{message}");
+        }
+    }
+
+    #[test]
     fn resolve_pipelines_applies_body_limits() {
         let config = Config::from_yaml(
             r#"

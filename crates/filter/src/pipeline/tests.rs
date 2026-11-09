@@ -2983,11 +2983,36 @@ fn apply_body_limits_cannot_override_finite_buffer_ceiling() {
 }
 
 #[test]
+fn configured_buffered_request_rejects_transfer_above_cap() {
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(8192),
+        ..praxis_core::config::BodyLimitsConfig::default()
+    };
+    for max_bytes in [None, Some(1024), Some(16_384)] {
+        for allow_unbounded in [false, true] {
+            let mut pipeline = make_pipeline(vec![Box::new(BidirectionalModeFilter {
+                mode: BodyMode::StreamBuffer { max_bytes },
+            })]);
+            let error = pipeline.configure_body_limits(&limits, allow_unbounded).unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("body_limits.max_request_bytes (8192)"), "{message}");
+            assert!(message.contains("body_limits.max_buffer_bytes (4096)"), "{message}");
+            assert_eq!(
+                pipeline.request_body_ceiling(),
+                None,
+                "invalid limits must not be applied"
+            );
+        }
+    }
+}
+
+#[test]
 fn configured_buffer_cap_combines_with_transfer_and_filter_limits() {
     use praxis_core::config::BodyLimitsConfig;
     for cap in [1, 65_537, 67_108_865, 1_073_741_824] {
         for requested in [None, Some(1), Some(cap), Some(usize::MAX)] {
-            for transfer in [None, Some(0), Some(17), Some(usize::MAX)] {
+            for transfer in [None, Some(0), Some(17), Some(cap - 1), Some(cap), Some(usize::MAX)] {
                 let limits = BodyLimitsConfig {
                     max_buffer_bytes: cap.try_into().unwrap(),
                     max_request_bytes: transfer,
@@ -2996,6 +3021,11 @@ fn configured_buffer_cap_combines_with_transfer_and_filter_limits() {
                 let mut pipeline = make_pipeline(vec![Box::new(BidirectionalModeFilter {
                     mode: BodyMode::StreamBuffer { max_bytes: requested },
                 })]);
+                if transfer.is_some_and(|bytes| bytes > cap) {
+                    let error = pipeline.configure_body_limits(&limits, true).unwrap_err();
+                    assert!(error.to_string().contains("body_limits.max_request_bytes"));
+                    continue;
+                }
                 pipeline.configure_body_limits(&limits, true).unwrap();
                 let effective = cap.min(requested.unwrap_or(cap)).min(transfer.unwrap_or(cap));
                 let expected = BodyMode::StreamBuffer {
@@ -3034,6 +3064,71 @@ fn configured_buffer_cap_combines_with_transfer_and_filter_limits() {
             assert_eq!(pipeline.body_capabilities().response_body_mode, mode);
         }
     }
+}
+
+#[test]
+fn configured_streaming_requests_allow_transfer_above_cap_with_buffered_responses() {
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(8192),
+        max_response_bytes: Some(16_384),
+    };
+    for request_body_mode in [BodyMode::Stream, BodyMode::SizeLimit { max_bytes: 32_768 }] {
+        for needs_request_body in [false, true] {
+            let mut pipeline = test_pipeline(
+                BodyCapabilities {
+                    request_body_mode,
+                    needs_request_body,
+                    response_body_mode: BodyMode::StreamBuffer {
+                        max_bytes: Some(32_768),
+                    },
+                    needs_response_body: true,
+                    ..BodyCapabilities::default()
+                },
+                vec![],
+            );
+            pipeline.configure_body_limits(&limits, false).unwrap();
+            let expected = if needs_request_body && request_body_mode == BodyMode::Stream {
+                BodyMode::Stream
+            } else {
+                BodyMode::SizeLimit { max_bytes: 8192 }
+            };
+            assert_eq!(pipeline.body_capabilities().request_body_mode, expected);
+            assert_eq!(pipeline.request_body_ceiling(), Some(8192));
+            assert_eq!(
+                pipeline.body_capabilities().response_body_mode,
+                BodyMode::StreamBuffer { max_bytes: Some(4096) },
+                "response buffering must still be clamped independently"
+            );
+        }
+    }
+}
+
+#[test]
+fn configured_buffered_request_rejects_nested_transfer_above_cap() {
+    let nested = make_pipeline(vec![Box::new(BoundedStreamBufferFilter { max_bytes: 8192 })]);
+    let mut parent = make_pipeline(vec![Box::new(NestedPipelineFilter { nested })]);
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(8192),
+        ..praxis_core::config::BodyLimitsConfig::default()
+    };
+    assert_eq!(parent.body_capabilities().request_body_mode, BodyMode::Stream);
+    let error = parent.configure_body_limits(&limits, true).unwrap_err();
+    assert!(error.to_string().contains("body_limits.max_request_bytes (8192)"));
+    assert_eq!(parent.request_body_ceiling(), None);
+}
+
+#[test]
+fn configured_buffered_request_rejects_transfer_above_cap_despite_early_release() {
+    let mut pipeline = make_pipeline(vec![Box::new(StreamBufferReleaseFilter { marker: b"release" })]);
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(8192),
+        ..praxis_core::config::BodyLimitsConfig::default()
+    };
+    let error = pipeline.configure_body_limits(&limits, false).unwrap_err();
+    assert!(error.to_string().contains("body_limits.max_request_bytes (8192)"));
 }
 
 #[test]
