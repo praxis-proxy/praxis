@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Update the Pingora fork dependencies to v0.11.4.
+
 ### Fixed
 
 - Poll TLS certificate, key, CA, and CRL files alongside filesystem
