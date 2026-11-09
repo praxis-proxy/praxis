@@ -1254,7 +1254,7 @@ impl crate::HttpFilter for IdentityBodyObserver {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -5223,9 +5223,9 @@ fn assert_policy_body_capabilities(
         })
     );
     let expected_access = if matches!(access, BodyAccessMode::ReadWrite) {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(crate::BodyRequirement::Required)
     } else {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(crate::BodyRequirement::Required)
     };
     assert_eq!(filter.request_body_access(), expected_access);
 }

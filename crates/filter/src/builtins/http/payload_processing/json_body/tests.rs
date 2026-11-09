@@ -72,7 +72,10 @@ fn parses_documented_extract_and_header_combo() {
         "#,
     );
     assert_eq!(filter.name(), "json_body");
-    assert_eq!(filter.request_body_access(), crate::BodyAccess::ReadWrite);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Required)
+    );
 }
 
 #[test]
@@ -88,7 +91,10 @@ fn from_ops_constructs_without_yaml() {
     })
     .unwrap();
     assert_eq!(filter.name(), "json_body");
-    assert_eq!(filter.request_body_access(), crate::BodyAccess::ReadWrite);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Required)
+    );
 }
 
 #[test]
@@ -479,7 +485,10 @@ fn request_body_access_none_when_only_response_ops() {
         "#,
     );
     assert_eq!(filter.request_body_access(), crate::BodyAccess::None);
-    assert_eq!(filter.response_body_access(), crate::BodyAccess::ReadWrite);
+    assert_eq!(
+        filter.response_body_access(),
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Required)
+    );
 }
 
 #[test]
@@ -509,7 +518,10 @@ fn allows_nested_extract_pointers() {
             metadata: user.id
         "#,
     );
-    assert_eq!(filter.request_body_access(), crate::BodyAccess::ReadOnly);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Required)
+    );
 }
 
 #[test]
@@ -532,7 +544,10 @@ fn extract_only_is_read_only() {
             metadata: original.model
         "#,
     );
-    assert_eq!(filter.request_body_access(), crate::BodyAccess::ReadOnly);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::BodyAccess::ReadOnly(crate::BodyRequirement::Required)
+    );
     assert_eq!(filter.response_body_access(), crate::BodyAccess::None);
 }
 
@@ -548,7 +563,10 @@ fn extract_plus_replace_is_read_write() {
             value: forced-model
         "#,
     );
-    assert_eq!(filter.request_body_access(), crate::BodyAccess::ReadWrite);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::BodyAccess::ReadWrite(crate::BodyRequirement::Required)
+    );
 }
 
 #[tokio::test]

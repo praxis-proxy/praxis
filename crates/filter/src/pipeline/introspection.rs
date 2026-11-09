@@ -210,8 +210,8 @@ fn body_info(access: BodyAccess, mode: BodyMode) -> BodyAccessInfo {
     BodyAccessInfo {
         access: match access {
             BodyAccess::None => "none",
-            BodyAccess::ReadOnly => "read_only",
-            BodyAccess::ReadWrite => "read_write",
+            BodyAccess::ReadOnly(_) => "read_only",
+            BodyAccess::ReadWrite(_) => "read_write",
         },
         mode: mode_name,
         max_bytes,
@@ -257,7 +257,10 @@ mod tests {
 
     #[test]
     fn body_info_maps_access_and_mode() {
-        let info = body_info(BodyAccess::ReadOnly, BodyMode::StreamBuffer { max_bytes: Some(64) });
+        let info = body_info(
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyMode::StreamBuffer { max_bytes: Some(64) },
+        );
         assert_eq!(info.access, "read_only", "ReadOnly maps to read_only");
         assert_eq!(info.mode, "stream_buffer", "StreamBuffer maps to stream_buffer");
         assert_eq!(info.max_bytes, Some(64), "max_bytes should round-trip");
@@ -314,12 +317,20 @@ mod tests {
             "no body access means request phase only"
         );
         assert_eq!(
-            http_phases(BodyAccess::ReadOnly, BodyAccess::None, &[]),
+            http_phases(
+                BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+                BodyAccess::None,
+                &[]
+            ),
             vec!["request", "request_body"],
             "request body access adds the request_body phase"
         );
         assert_eq!(
-            http_phases(BodyAccess::None, BodyAccess::ReadWrite, &[]),
+            http_phases(
+                BodyAccess::None,
+                BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
+                &[]
+            ),
             vec!["request", "response", "response_body"],
             "response body access adds response phases"
         );
@@ -332,12 +343,18 @@ mod tests {
         assert_eq!(stream.access, "none", "None access maps to its label");
         assert_eq!(stream.max_bytes, None, "Stream has no byte ceiling");
 
-        let buffered = body_info(BodyAccess::ReadOnly, BodyMode::StreamBuffer { max_bytes: Some(42) });
+        let buffered = body_info(
+            BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
+            BodyMode::StreamBuffer { max_bytes: Some(42) },
+        );
         assert_eq!(buffered.mode, "stream_buffer", "StreamBuffer maps to its label");
         assert_eq!(buffered.access, "read_only", "ReadOnly access maps to its label");
         assert_eq!(buffered.max_bytes, Some(42), "the configured ceiling is exposed");
 
-        let limited = body_info(BodyAccess::ReadWrite, BodyMode::SizeLimit { max_bytes: 7 });
+        let limited = body_info(
+            BodyAccess::ReadWrite(crate::BodyRequirement::Optional),
+            BodyMode::SizeLimit { max_bytes: 7 },
+        );
         assert_eq!(limited.mode, "size_limit", "SizeLimit maps to its label");
         assert_eq!(limited.access, "read_write", "ReadWrite access maps to its label");
         assert_eq!(limited.max_bytes, Some(7), "the configured limit is exposed");

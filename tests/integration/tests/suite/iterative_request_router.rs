@@ -3374,7 +3374,7 @@ impl HttpFilter for IntegrationCompletionEmissionAndBodyFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -3404,7 +3404,7 @@ impl HttpFilter for IntegrationHandledTerminationOrderFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -3436,7 +3436,7 @@ impl HttpFilter for IntegrationPerChunkEmissionFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -3463,7 +3463,7 @@ impl HttpFilter for IntegrationStreamCompletionFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -3496,7 +3496,7 @@ impl HttpFilter for IntegrationStreamTerminationFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -3682,7 +3682,7 @@ impl HttpFilter for ResponseProbeFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> BodyMode {
@@ -3781,7 +3781,7 @@ impl HttpFilter for BodyPromoterFilter {
     }
 
     fn request_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn request_body_mode(&self) -> BodyMode {
@@ -3867,9 +3867,9 @@ impl HttpFilter for AgenticLifecycleProbe {
 
     fn request_body_access(&self) -> BodyAccess {
         if matches!(self.role, ProbeRole::FinalModelRequest) {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
         } else {
-            BodyAccess::ReadOnly
+            BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
         }
     }
 
@@ -3957,7 +3957,7 @@ impl HttpFilter for AgenticLifecycleProbe {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadOnly
+        BodyAccess::ReadOnly(praxis_filter::BodyRequirement::Optional)
     }
 
     fn response_body_mode(&self) -> BodyMode {

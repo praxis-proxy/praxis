@@ -2107,8 +2107,8 @@ impl HttpFilter for PolicyFilter {
         // traffic out of this filter so the buffering cost is bounded
         // either way.
         match self.cfg.body_access {
-            BodyAccessMode::ReadOnly => BodyAccess::ReadOnly,
-            BodyAccessMode::ReadWrite => BodyAccess::ReadWrite,
+            BodyAccessMode::ReadOnly => BodyAccess::ReadOnly(crate::BodyRequirement::Required),
+            BodyAccessMode::ReadWrite => BodyAccess::ReadWrite(crate::BodyRequirement::Required),
         }
     }
 
@@ -2139,8 +2139,8 @@ impl HttpFilter for PolicyFilter {
 
     fn response_body_access(&self) -> BodyAccess {
         match self.cfg.body_access {
-            BodyAccessMode::ReadOnly => BodyAccess::ReadOnly,
-            BodyAccessMode::ReadWrite => BodyAccess::ReadWrite,
+            BodyAccessMode::ReadOnly => BodyAccess::ReadOnly(crate::BodyRequirement::Required),
+            BodyAccessMode::ReadWrite => BodyAccess::ReadWrite(crate::BodyRequirement::Required),
         }
     }
 
