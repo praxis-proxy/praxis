@@ -159,9 +159,92 @@ insecure_options:
     )
 }
 
+/// The shipped endpoint-selector shape — a trusted source presets the
+/// destination, so the load balancer never selects an endpoint — in front of
+/// a cluster capped at `max_connections`. The `headers` filter stands in for
+/// the external processing filter that would preset the destination in
+/// production.
+fn preset_endpoint_yaml(proxy_port: u16, backend_port: u16, max_connections: u32) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        request_set:
+          - name: x-gateway-destination
+            value: "127.0.0.1:{backend_port}"
+      - filter: endpoint_selector
+        source_header: x-gateway-destination
+        strip_header: true
+        required: true
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+            max_connections: {max_connections}
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[test]
+fn cluster_max_connections_sheds_a_preset_endpoint() {
+    let backend = start_holding_backend(None);
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&preset_endpoint_yaml(proxy_port, backend.port, 1)).unwrap();
+    let proxy = start_proxy(&config);
+
+    let held = hold_in_flight(proxy.addr(), "/hold", 1, &backend);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        503,
+        "a preset endpoint serving the routed cluster must be held to that cluster's ceiling"
+    );
+    assert_eq!(
+        parse_header(&raw, "Retry-After").as_deref(),
+        Some("1"),
+        "shedding a preset endpoint should carry Retry-After: 1 like any other shed request"
+    );
+
+    drop(held);
+}
+
+#[test]
+fn cluster_max_connections_releases_a_preset_endpoint_slot() {
+    let backend_guard = start_backend_with_shutdown("ok");
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&preset_endpoint_yaml(proxy_port, backend_guard.port(), 1)).unwrap();
+    let proxy = start_proxy(&config);
+
+    for attempt in 0..3 {
+        let (status, body) = http_get(proxy.addr(), "/", None);
+        assert_eq!(
+            status, 200,
+            "preset request {attempt} should reuse the one slot the previous one gave back"
+        );
+        assert_eq!(body, "ok", "preset request {attempt} should reach the backend");
+    }
+}
 
 #[test]
 fn cluster_max_connections_rejects_excess_with_503() {

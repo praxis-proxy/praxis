@@ -311,7 +311,9 @@ pub struct Cluster {
     /// A slot is held from endpoint selection until the response headers
     /// arrive, and released before the body streams, so a long streaming
     /// body stops occupying one at its headers. Retries within one request
-    /// share the slot that request admitted.
+    /// share the slot that request admitted. A request whose endpoint a
+    /// preceding filter preset (`endpoint_selector`) takes a slot too, as
+    /// long as a router placed it in this cluster.
     /// Session-affinity requests bypass this limit; use `max_connections`
     /// with a listener or runtime cap for a hard bound.
     /// HTTP clusters only. TCP clusters reject this field at startup; cap

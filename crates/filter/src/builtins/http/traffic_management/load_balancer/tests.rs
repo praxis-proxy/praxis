@@ -1872,9 +1872,196 @@ async fn max_connections_slot_returns_when_no_endpoint_is_selectable() {
     }
 }
 
+#[tokio::test]
+async fn max_connections_counts_a_preset_upstream() {
+    let lb = LoadBalancerFilter::new(&[capped_cluster("web", &["127.0.0.1:8080"], 1)]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut preset = crate::test_utils::make_filter_context(&req);
+    preset.cluster = Some(Arc::from("web"));
+    preset.upstream = Some(preset_upstream("10.0.0.7:8000"));
+    let action = lb.on_request(&mut preset).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the request filling the cap should be admitted, got {action:?}"
+    );
+    assert_eq!(
+        preset.upstream.as_ref().map(|upstream| upstream.address.as_ref()),
+        Some("10.0.0.7:8000"),
+        "admission must leave the preset address alone"
+    );
+    assert!(
+        preset.cluster_admission.is_some(),
+        "a preset upstream serving a capped cluster must hold that cluster's slot"
+    );
+
+    let mut second = crate::test_utils::make_filter_context(&req);
+    second.cluster = Some(Arc::from("web"));
+    let action = lb.on_request(&mut second).await.unwrap();
+    let FilterAction::Reject(rejection) = action else {
+        panic!("the slot the preset upstream took must shed the next request, got {action:?}");
+    };
+    assert_eq!(rejection.status, 503, "shedding should answer 503");
+}
+
+#[tokio::test]
+async fn max_connections_sheds_a_preset_upstream_past_the_cap() {
+    crate::test_utils::install_metrics_recorder();
+    let lb = LoadBalancerFilter::new(&[capped_cluster("preset-shed", &["127.0.0.1:8080"], 1)]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut first = crate::test_utils::make_filter_context(&req);
+    first.cluster = Some(Arc::from("preset-shed"));
+    drop(lb.on_request(&mut first).await.unwrap());
+
+    let mut preset = crate::test_utils::make_filter_context(&req);
+    preset.cluster = Some(Arc::from("preset-shed"));
+    preset.upstream = Some(preset_upstream("10.0.0.7:8000"));
+    let action = lb.on_request(&mut preset).await.unwrap();
+    let FilterAction::Reject(rejection) = action else {
+        panic!("a preset upstream to a full cluster must be shed, got {action:?}");
+    };
+    assert_eq!(rejection.status, 503, "shedding should answer 503");
+    assert!(
+        rejection
+            .headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case("Retry-After") && value == "1"),
+        "a shed preset upstream should carry Retry-After: 1 like any other shed request"
+    );
+    assert!(
+        preset.cluster_admission.is_none(),
+        "a shed request must not be left holding a slot"
+    );
+
+    let rendered = crate::test_utils::render_metrics();
+    assert!(
+        rendered.contains("praxis_cluster_overload_rejects_total{cluster=\"preset-shed\"}"),
+        "shedding a preset upstream should be counted under the cluster that shed it:\n{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn max_connections_preset_slot_returns_on_response() {
+    let lb = LoadBalancerFilter::new(&[capped_cluster("web", &["127.0.0.1:8080"], 1)]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut preset = crate::test_utils::make_filter_context(&req);
+    preset.cluster = Some(Arc::from("web"));
+    preset.upstream = Some(preset_upstream("10.0.0.7:8000"));
+    drop(lb.on_request(&mut preset).await.unwrap());
+    drop(lb.on_response(&mut preset).await.unwrap());
+
+    assert!(
+        preset
+            .cluster_admission
+            .as_ref()
+            .is_some_and(|lease| lease.is_released()),
+        "the response phase must hand a preset upstream's slot back"
+    );
+    let mut second = crate::test_utils::make_filter_context(&req);
+    second.cluster = Some(Arc::from("web"));
+    let action = lb.on_request(&mut second).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the released slot should admit the next request, got {action:?}"
+    );
+}
+
+#[tokio::test]
+async fn max_connections_preset_response_leaves_endpoint_counters_alone() {
+    let lb = LoadBalancerFilter::new(&[cluster_with_strategy(
+        "web",
+        &["127.0.0.1:8080"],
+        LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
+    )]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut selected = crate::test_utils::make_filter_context(&req);
+    selected.cluster = Some(Arc::from("web"));
+    drop(lb.on_request(&mut selected).await.unwrap());
+
+    // The preset request lands on the same address without going through
+    // the strategy, so it holds no endpoint counter to give back.
+    let mut preset = crate::test_utils::make_filter_context(&req);
+    preset.cluster = Some(Arc::from("web"));
+    preset.upstream = Some(preset_upstream("127.0.0.1:8080"));
+    drop(lb.on_request(&mut preset).await.unwrap());
+    drop(lb.on_response(&mut preset).await.unwrap());
+
+    assert_eq!(
+        least_connections_load(&lb, "web", "127.0.0.1:8080"),
+        Some(1),
+        "a preset upstream's response must not release the in-flight count of the request that selected it"
+    );
+}
+
+#[tokio::test]
+async fn max_connections_leaves_a_preset_upstream_without_a_cluster_alone() {
+    let lb = LoadBalancerFilter::new(&[capped_cluster("web", &["127.0.0.1:8080"], 1)]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+
+    let mut preset = crate::test_utils::make_filter_context(&req);
+    preset.upstream = Some(preset_upstream("10.0.0.7:8000"));
+    let action = lb.on_request(&mut preset).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a preset upstream outside any routed cluster passes through, got {action:?}"
+    );
+    assert!(
+        preset.cluster_admission.is_none(),
+        "with no routed cluster there is no ceiling to charge"
+    );
+
+    let mut routed = crate::test_utils::make_filter_context(&req);
+    routed.cluster = Some(Arc::from("web"));
+    let action = lb.on_request(&mut routed).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the unrouted request must not have spent the cluster's only slot, got {action:?}"
+    );
+}
+
+#[tokio::test]
+async fn max_connections_preset_upstream_keeps_an_existing_lease() {
+    let lb = LoadBalancerFilter::new(&[capped_cluster("web", &["127.0.0.1:8080"], 1)]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let state = Arc::clone(&lb.clusters.get("web").unwrap().retry_state);
+    let held = praxis_core::retry::AdmissionLease::claim(&state).expect("the first claim fits");
+
+    let mut preset = crate::test_utils::make_filter_context(&req);
+    preset.cluster = Some(Arc::from("web"));
+    preset.upstream = Some(preset_upstream("10.0.0.7:8000"));
+    preset.cluster_admission = Some(Arc::clone(&held));
+    let action = lb.on_request(&mut preset).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a request already admitted to the cluster must not be shed by its own slot, got {action:?}"
+    );
+    assert_eq!(
+        state.active_requests.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the request keeps the slot it holds rather than taking a second one"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// An [`Upstream`] a preceding filter preset, as `endpoint_selector` does.
+///
+/// [`Upstream`]: praxis_core::connectivity::Upstream
+fn preset_upstream(address: &str) -> praxis_core::connectivity::Upstream {
+    praxis_core::connectivity::Upstream {
+        address: Arc::from(address),
+        authority: None,
+        base_path: None,
+        connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+    }
+}
 
 /// A bare response header carrying `status`, for the response phase.
 fn response_with_status(status: u16) -> crate::context::Response {
@@ -1947,7 +2134,6 @@ fn cluster_with_strategy(name: &str, endpoints: &[&str], strategy: LoadBalancerS
     }
 }
 
-#[cfg(feature = "upstream-binding")]
 /// In-flight count the least-connections strategy tracks for `endpoint` in
 /// `cluster`, or `None` when the cluster is unknown or uses another strategy.
 fn least_connections_load(lb: &LoadBalancerFilter, cluster: &str, endpoint: &str) -> Option<usize> {
