@@ -96,7 +96,7 @@ pub(super) async fn execute(
     match run(pipeline, session, request, ctx).await {
         Ok(RequestHeadOutcome::Continue) => false,
         Ok(RequestHeadOutcome::Reject(rejection)) => {
-            ctx.stamp_error_type(metrics::ERROR_TYPE_FILTER_REJECT);
+            super::pipeline::stamp_body_rejection(ctx);
             ctx.request_snapshot = Some(request.clone());
             send_rejection_for(session, rejection, ctx).await;
             true

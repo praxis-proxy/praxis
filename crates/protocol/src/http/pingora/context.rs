@@ -11,6 +11,9 @@ use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, Tru
 use tokio::sync::OwnedSemaphorePermit;
 use tracing::Span;
 
+#[cfg(feature = "pingora")]
+use crate::http::upgrade::WebSocketOffer;
+
 // -----------------------------------------------------------------------------
 // PingoraRequestCtx
 // -----------------------------------------------------------------------------
@@ -36,6 +39,14 @@ use tracing::Span;
     )
 )]
 pub struct PingoraRequestCtx {
+    /// Listener that owns this request's pinned pipeline generation.
+    #[cfg(feature = "pingora")]
+    pub(crate) listener_name: ::metrics::SharedString,
+
+    /// Valid client WebSocket handshake admitted by this request's pinned pipeline.
+    #[cfg(feature = "pingora")]
+    pub(crate) admitted_websocket: Option<WebSocketOffer>,
+
     /// Connection permit from the per-listener semaphore.
     ///
     /// Held for the request's lifetime; released on drop,
@@ -624,6 +635,10 @@ impl Default for PingoraRequestCtx {
     )]
     fn default() -> Self {
         Self {
+            #[cfg(feature = "pingora")]
+            admitted_websocket: None,
+            #[cfg(feature = "pingora")]
+            listener_name: ::metrics::SharedString::const_str("unknown"),
             _connection_permit: None,
             _global_connection_permit: None,
             cached_body_done_indices: Vec::new(),
