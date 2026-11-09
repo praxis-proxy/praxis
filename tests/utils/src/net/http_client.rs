@@ -6,7 +6,7 @@
 use std::{
     io::{Read as _, Write as _},
     net::TcpStream,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 // -----------------------------------------------------------------------------
@@ -44,9 +44,33 @@ pub fn http_send_on_connection(stream: &mut TcpStream, request: &str) -> String 
 ///
 /// Returns I/O failures before any response, or an incomplete-response error
 /// after response bytes have arrived.
+#[cfg(test)]
 pub(crate) fn try_http_send_on_connection(stream: &mut TcpStream, request: &str) -> std::io::Result<String> {
     stream.write_all(request.as_bytes())?;
     let (data, result) = read_response(stream);
+    result.map_err(|error| {
+        if data.is_empty() {
+            error
+        } else {
+            std::io::Error::other(format!("incomplete HTTP response: {error}"))
+        }
+    })?;
+    Ok(String::from_utf8_lossy(&data).into_owned())
+}
+
+/// Send a request on an existing connection and read the response before
+/// `deadline`, keeping at most `max_body` body bytes.
+///
+/// A peer that drips bytes cannot extend the exchange past the deadline, and a
+/// response body larger than `max_body` is rejected instead of buffered.
+pub(crate) fn try_http_send_on_connection_until(
+    stream: &mut TcpStream,
+    request: &str,
+    deadline: Instant,
+    max_body: usize,
+) -> std::io::Result<String> {
+    stream.write_all(request.as_bytes())?;
+    let (data, result) = read_response_with(stream, Some(deadline), max_body);
     result.map_err(|error| {
         if data.is_empty() {
             error
@@ -76,21 +100,55 @@ fn read_full_response(stream: &mut TcpStream) -> String {
 
 /// Retains partial bytes for legacy callers while preserving I/O errors.
 fn read_response(stream: &mut TcpStream) -> (Vec<u8>, std::io::Result<()>) {
+    read_response_with(stream, None, usize::MAX)
+}
+
+/// Limits applied to one response read.
+#[derive(Clone, Copy)]
+struct ReadBudget {
+    /// Total deadline for the exchange, if any.
+    deadline: Option<Instant>,
+    /// Largest body the reader retains.
+    max_body: usize,
+}
+
+/// Reads a response with an optional total deadline and body limit.
+fn read_response_with(
+    stream: &mut TcpStream,
+    deadline: Option<Instant>,
+    max_body: usize,
+) -> (Vec<u8>, std::io::Result<()>) {
     let mut data = Vec::new();
     let mut buf = [0_u8; 4096];
     let header_end = loop {
         if let Some(pos) = data.windows(4).position(|window| window == b"\r\n\r\n") {
             break pos + 4;
         }
-        match stream.read(&mut buf) {
+        match read_chunk(stream, &mut buf, deadline) {
             Ok(0) if data.is_empty() => return (data, Ok(())),
             Ok(0) => return (data, Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))),
             Err(error) => return (data, Err(error)),
             Ok(count) => data.extend_from_slice(&buf[..count]),
         }
     };
-    let result = read_body(stream, &mut data, header_end);
+    let budget = ReadBudget { deadline, max_body };
+    let result = read_body(stream, &mut data, header_end, budget);
     (data, result)
+}
+
+/// Reads one chunk, bounding the wait by the remaining exchange deadline.
+fn read_chunk(stream: &mut TcpStream, buffer: &mut [u8], deadline: Option<Instant>) -> std::io::Result<usize> {
+    if let Some(deadline) = deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "response deadline exceeded",
+            ));
+        }
+        stream.set_read_timeout(Some(remaining))?;
+    }
+    stream.read(buffer)
 }
 
 /// Read the response body into `data`, using whatever framing the already-read
@@ -98,7 +156,7 @@ fn read_response(stream: &mut TcpStream) -> (Vec<u8>, std::io::Result<()>) {
 /// `Transfer-Encoding: chunked`, exactly `Content-Length` body bytes for a
 /// fixed-size body, and read-to-EOF otherwise (connection-close framing).
 /// Responses with status 204 or 304 finish at the end of their headers.
-fn read_body(stream: &mut TcpStream, data: &mut Vec<u8>, header_end: usize) -> std::io::Result<()> {
+fn read_body(stream: &mut TcpStream, data: &mut Vec<u8>, header_end: usize, budget: ReadBudget) -> std::io::Result<()> {
     let headers = String::from_utf8_lossy(&data[..header_end]).into_owned();
     if matches!(parse_status(&headers), 204 | 304) {
         return Ok(());
@@ -107,30 +165,57 @@ fn read_body(stream: &mut TcpStream, data: &mut Vec<u8>, header_end: usize) -> s
         let lower = line.to_lowercase();
         lower.starts_with("transfer-encoding:") && lower.contains("chunked")
     });
-    let content_length = headers
-        .lines()
-        .find(|l| l.to_lowercase().starts_with("content-length:"))
-        .and_then(|l| l.split_once(':').map(|(_, v)| v))
-        .and_then(|v| v.trim().parse::<usize>().ok());
+    let content_length = content_length(&headers);
 
     if is_chunked {
-        read_chunked(stream, data, header_end)
+        read_chunked(stream, data, header_end, budget)
     } else if let Some(len) = content_length {
-        read_framed(stream, data, |d| d.len().saturating_sub(header_end) >= len)
+        if len > budget.max_body {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "response body of {len} bytes exceeds the {}-byte limit",
+                    budget.max_body
+                ),
+            ));
+        }
+        read_framed(stream, data, header_end, budget, |d| {
+            d.len().saturating_sub(header_end) >= len
+        })
     } else {
-        read_until(stream, data, |_| false)
+        read_until(stream, data, header_end, budget, |_| false)
     }
 }
 
+/// Parses the declared body length, if the headers set one.
+fn content_length(headers: &str) -> Option<usize> {
+    headers
+        .lines()
+        .find(|line| line.to_lowercase().starts_with("content-length:"))
+        .and_then(|line| line.split_once(':').map(|(_, value)| value))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+}
+
 /// Reads through the last chunk and trailers without scanning chunk payloads.
-fn read_chunked(stream: &mut TcpStream, data: &mut Vec<u8>, header_end: usize) -> std::io::Result<()> {
+fn read_chunked(
+    stream: &mut TcpStream,
+    data: &mut Vec<u8>,
+    header_end: usize,
+    budget: ReadBudget,
+) -> std::io::Result<()> {
     let mut buffer = [0_u8; 4096];
     while !chunked_complete(&data[header_end..])? {
-        let count = stream.read(&mut buffer)?;
+        let count = read_chunk(stream, &mut buffer, budget.deadline)?;
         if count == 0 {
             return Err(std::io::ErrorKind::UnexpectedEof.into());
         }
         data.extend_from_slice(&buffer[..count]);
+        if data.len().saturating_sub(header_end) > budget.max_body {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("chunked response exceeds the {}-byte limit", budget.max_body),
+            ));
+        }
     }
     Ok(())
 }
@@ -182,8 +267,14 @@ fn chunk_size(line: &[u8]) -> std::io::Result<usize> {
 }
 
 /// Rejects EOF before a fixed-length response is complete.
-fn read_framed(stream: &mut TcpStream, data: &mut Vec<u8>, done: impl Fn(&[u8]) -> bool) -> std::io::Result<()> {
-    read_until(stream, data, &done)?;
+fn read_framed(
+    stream: &mut TcpStream,
+    data: &mut Vec<u8>,
+    body_start: usize,
+    budget: ReadBudget,
+    done: impl Fn(&[u8]) -> bool,
+) -> std::io::Result<()> {
+    read_until(stream, data, body_start, budget, &done)?;
     if done(data) {
         Ok(())
     } else {
@@ -194,10 +285,22 @@ fn read_framed(stream: &mut TcpStream, data: &mut Vec<u8>, done: impl Fn(&[u8]) 
 /// Read 4 KiB chunks from `stream` into `data` until `done` reports the message
 /// is complete or the stream ends. The caller's read timeout is the backstop
 /// for a misbehaving peer that never satisfies `done`.
-fn read_until(stream: &mut TcpStream, data: &mut Vec<u8>, done: impl Fn(&[u8]) -> bool) -> std::io::Result<()> {
+fn read_until(
+    stream: &mut TcpStream,
+    data: &mut Vec<u8>,
+    body_start: usize,
+    budget: ReadBudget,
+    done: impl Fn(&[u8]) -> bool,
+) -> std::io::Result<()> {
     let mut buf = [0_u8; 4096];
     while !done(data) {
-        match stream.read(&mut buf) {
+        if data.len().saturating_sub(body_start) > budget.max_body {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("response body exceeds the {}-byte limit", budget.max_body),
+            ));
+        }
+        match read_chunk(stream, &mut buf, budget.deadline) {
             Ok(0) => break,
             Err(error) => return Err(error),
             Ok(n) => data.extend_from_slice(&buf[..n]),

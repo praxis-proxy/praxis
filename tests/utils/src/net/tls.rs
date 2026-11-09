@@ -495,13 +495,21 @@ pub fn https_get_attempt(
     client_config: &Arc<ClientConfig>,
 ) -> Result<(u16, String), Box<dyn std::error::Error + Send + Sync>> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    https_get_attempt_on(&runtime, addr, path, client_config)
+    let request = runtime.block_on(async {
+        Box::pin(tokio::time::timeout(
+            DEFAULT_HTTP_TIMEOUT,
+            h2_get(addr, path, client_config, usize::MAX),
+        ))
+        .await
+    });
+    request.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?
 }
 
 /// Perform one HTTPS GET on a caller-owned runtime.
 ///
 /// Continuous load drivers own a single runtime so per-request setup does not
-/// dominate the load they generate.
+/// dominate the load they generate. Health responses are capped at a small
+/// body so a misbehaving peer cannot exhaust the test runner.
 ///
 /// # Errors
 ///
@@ -515,12 +523,15 @@ pub fn https_get_attempt_on(
     let request = runtime.block_on(async {
         Box::pin(tokio::time::timeout(
             DEFAULT_HTTP_TIMEOUT,
-            h2_get(addr, path, client_config),
+            h2_get(addr, path, client_config, HEALTH_BODY_LIMIT),
         ))
         .await
     });
     request.map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { error.into() })?
 }
+
+/// Largest health response body the continuous HTTPS worker retains.
+const HEALTH_BODY_LIMIT: usize = 64;
 
 /// Perform an HTTP/2 GET over TLS.
 #[expect(clippy::large_stack_frames, reason = "test utility with H2 handshake structs")]
@@ -528,6 +539,7 @@ async fn h2_get(
     addr: &str,
     path: &str,
     client_config: &Arc<ClientConfig>,
+    max_body: usize,
 ) -> Result<(u16, String), Box<dyn std::error::Error + Send + Sync>> {
     let tls = tls_connect(addr, client_config).await?;
 
@@ -538,7 +550,9 @@ async fn h2_get(
         }
     });
 
-    let request = http::Request::get(path).header("host", "localhost").body(())?;
+    let port = addr.rsplit_once(':').map_or("443", |(_, port)| port);
+    let mut request = http::Request::get(format!("https://localhost:{port}{path}")).body(())?;
+    *request.version_mut() = http::Version::HTTP_2;
 
     let (response_fut, _) = client.send_request(request, true)?;
     let response = response_fut.await?;
@@ -546,9 +560,11 @@ async fn h2_get(
     let mut body_stream = response.into_body();
 
     let mut body = Vec::new();
-    while let Some(chunk) = body_stream.data().await {
+    while body.len() < max_body {
+        let Some(chunk) = body_stream.data().await else { break };
         let data = chunk?;
-        body.extend_from_slice(&data);
+        let keep = (max_body - body.len()).min(data.len());
+        body.extend_from_slice(&data[..keep]);
         drop(body_stream.flow_control().release_capacity(data.len()));
     }
 

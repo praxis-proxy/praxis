@@ -9,13 +9,13 @@
 use std::{
     collections::BTreeMap,
     io::{BufRead as _, BufReader, Read as _, Write as _},
-    net::TcpStream,
+    net::{TcpStream, ToSocketAddrs as _},
     panic::AssertUnwindSafe,
     sync::{
         Arc, Barrier,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 // -----------------------------------------------------------------------------
@@ -34,6 +34,9 @@ const RECONNECT_BACKOFF: Duration = Duration::from_millis(50);
 
 /// Longest single sleep while waiting out [`RECONNECT_BACKOFF`].
 const RECONNECT_POLL: Duration = Duration::from_millis(10);
+
+/// Largest health response body a load worker retains.
+const HEALTH_BODY_LIMIT: usize = 64;
 
 // -----------------------------------------------------------------------------
 // LoadReport
@@ -271,13 +274,18 @@ fn spawn_worker(
 /// Runs persistent HTTP/1.1 keepalive requests until stopped.
 fn http1_worker(stop: &AtomicBool, report: &ContinuousLoadReport, endpoint: &str) {
     let mut stream = None;
+    let mut replay_pending = false;
     while !stop.load(Ordering::Relaxed) {
         let reused = stream.is_some();
+        if replay_pending {
+            report.http1_replays.fetch_add(1, Ordering::Relaxed);
+            replay_pending = false;
+        }
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| http1_request(endpoint, &mut stream)));
         match result {
             Ok(result) if reused && stale_http1_connection(&result) => {
                 stream = None;
-                report.http1_replays.fetch_add(1, Ordering::Relaxed);
+                replay_pending = true;
             },
             Ok(Ok(response)) => record_http1_response(report, &response, &mut stream),
             Ok(Err(error)) => {
@@ -350,18 +358,36 @@ fn http1_failure(response: &str) -> Option<String> {
 /// Sends one persistent HTTP/1.1 request, reconnecting when `stream` is unset.
 fn http1_request(endpoint: &str, stream: &mut Option<TcpStream>) -> std::io::Result<String> {
     if stream.is_none() {
-        let address = endpoint
-            .parse()
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
-        *stream = Some(TcpStream::connect_timeout(&address, IO_TIMEOUT)?);
+        *stream = Some(connect_endpoint(endpoint)?);
     }
     let stream = stream.as_mut().expect("connected stream");
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    crate::net::try_http_send_on_connection(
+    let deadline = Instant::now()
+        .checked_add(IO_TIMEOUT)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "exchange deadline overflows"))?;
+    crate::net::try_http_send_on_connection_until(
         stream,
         "GET /healthy HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+        deadline,
+        HEALTH_BODY_LIMIT,
     )
+}
+
+/// Resolves every address for the endpoint and connects to the first that answers.
+fn connect_endpoint(endpoint: &str) -> std::io::Result<TcpStream> {
+    let mut last_error = None;
+    for address in endpoint.to_socket_addrs()? {
+        match TcpStream::connect_timeout(&address, IO_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{endpoint} resolved to no addresses"),
+        )
+    }))
 }
 
 /// Checks status and the complete fixed-length health response body.
@@ -420,10 +446,15 @@ fn record_http2_failure(report: &ContinuousLoadReport, stop: &AtomicBool, replay
 
 /// Waits out [`RECONNECT_BACKOFF`], returning early once `stop` is set.
 fn reconnect_backoff(stop: &AtomicBool) {
+    reconnect_backoff_with(stop, std::thread::sleep);
+}
+
+/// Waits out [`RECONNECT_BACKOFF`] through `sleep`, returning early once stopped.
+fn reconnect_backoff_with(stop: &AtomicBool, mut sleep: impl FnMut(Duration)) {
     let mut remaining = RECONNECT_BACKOFF;
     while !remaining.is_zero() && !stop.load(Ordering::Relaxed) {
         let slice = remaining.min(RECONNECT_POLL);
-        std::thread::sleep(slice);
+        sleep(slice);
         remaining = remaining.saturating_sub(slice);
     }
 }
@@ -525,10 +556,12 @@ async fn http2_request(
         let response = response.await?;
         let status = response.status();
         let mut stream = response.into_body();
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.data().await {
+        let mut body = Vec::with_capacity(2);
+        while body.len() < 2 {
+            let Some(chunk) = stream.data().await else { break };
             let chunk = chunk?;
-            body.extend_from_slice(&chunk);
+            let keep = (2 - body.len()).min(chunk.len());
+            body.extend_from_slice(&chunk[..keep]);
             stream.flow_control().release_capacity(chunk.len())?;
         }
         if status != http::StatusCode::OK || body != b"ok" {
@@ -906,20 +939,18 @@ mod continuous_tests {
     }
 
     #[test]
-    fn reconnect_backoff_stops_early_and_otherwise_waits() {
+    fn reconnect_backoff_requests_no_sleep_when_stopped() {
         let stopped = AtomicBool::new(true);
-        let started = std::time::Instant::now();
-        reconnect_backoff(&stopped);
-        assert!(
-            started.elapsed() < RECONNECT_BACKOFF,
-            "a stopped worker must not wait to reconnect"
-        );
+        let mut sleeps = Vec::new();
+        reconnect_backoff_with(&stopped, |duration| sleeps.push(duration));
+        assert!(sleeps.is_empty(), "a stopped worker must not request a backoff sleep");
+
         let running = AtomicBool::new(false);
-        let started = std::time::Instant::now();
-        reconnect_backoff(&running);
-        assert!(
-            started.elapsed() >= RECONNECT_BACKOFF,
-            "a running worker must back off before reconnecting"
+        let mut total = Duration::ZERO;
+        reconnect_backoff_with(&running, |duration| total = total.saturating_add(duration));
+        assert_eq!(
+            total, RECONNECT_BACKOFF,
+            "a running worker must request the full backoff"
         );
     }
 }

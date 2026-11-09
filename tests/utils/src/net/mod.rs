@@ -24,7 +24,7 @@ pub use backend::{
     start_reused_connection_kill_backend, start_slow_backend, start_stateful_backend, start_tagged_header_echo_backend,
     start_uri_echo_backend, start_websocket_echo_backend,
 };
-pub(crate) use http_client::try_http_send_on_connection;
+pub(crate) use http_client::try_http_send_on_connection_until;
 pub use http_client::{
     GrpcCallResult, h2c_get, h2c_get_absolute, h2c_get_authority_only, h2c_grpc_call, http_delete, http_get,
     http_get_retry, http_get_v6, http_post, http_put_json, http_send, http_send_on_connection, json_post, parse_body,
