@@ -166,7 +166,7 @@ pub use load_balancing::slow_start::{SlowStartGeneration, SlowStartRegistry};
 #[cfg(feature = "upstream-binding")]
 pub use pipeline::catalog::{ClusterApplicationCatalog, ClusterApplicationMetadata, ClusterMetadataDeclaration};
 pub use pipeline::{
-    FilterPipeline, PipelineExtension,
+    FilterPipeline, PipelineExtension, RequiredBodyProcessing,
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
     subrequest::{IterationState, NextIterationBody},
 };

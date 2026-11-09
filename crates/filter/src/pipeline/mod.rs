@@ -50,6 +50,7 @@ pub(crate) mod subrequest;
 mod tcp;
 #[cfg(test)]
 mod test_filters;
+mod upgrade;
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -72,13 +73,14 @@ use std::sync::Arc;
 
 pub use extension::PipelineExtension;
 use praxis_core::{
-    config::{BodyLimitsConfig, FailureMode, InsecureOptions},
+    config::{BodyLimitsConfig, FailureMode, InsecureOptions, UpgradeAction, UpgradePolicy},
     health::HealthRegistry,
     id::IdGenerator,
     kv::KvStoreRegistry,
     time::TimeSource,
 };
 use tracing::{error, warn};
+pub use upgrade::RequiredBodyProcessing;
 
 use self::filter::PipelineFilter;
 use crate::{
@@ -107,6 +109,9 @@ use crate::{
     reason = "independent server-injected runtime toggles, not a state machine"
 )]
 pub struct FilterPipeline {
+    /// Listener-scoped upgrade permission pinned with this pipeline generation.
+    upgrade_policy: Option<UpgradePolicy>,
+
     /// Pre-computed body processing capabilities for this pipeline.
     body_capabilities: BodyCapabilities,
 
@@ -202,6 +207,39 @@ pub struct FilterPipeline {
     reason = "pipeline concerns are split across modules"
 )]
 impl FilterPipeline {
+    /// Record a validated, listener-permitted opaque upgrade before executing filter phases.
+    ///
+    /// Protocol adapters call this only after upgrade admission has accepted the request.
+    pub fn mark_opaque_upgrade_requested(extensions: &mut RequestExtensions) {
+        upgrade::mark_upgrade_requested(extensions);
+    }
+
+    /// Attach the listener's upgrade policy to this immutable pipeline generation.
+    pub fn set_upgrade_policy(&mut self, policy: Option<UpgradePolicy>) {
+        self.upgrade_policy = policy;
+    }
+
+    /// Whether a protocol upgrade is allowed by this pipeline's listener policy.
+    #[must_use]
+    pub fn permits_upgrade(&self, protocol: &str) -> bool {
+        self.upgrade_policy.as_ref().map_or_else(
+            || protocol.eq_ignore_ascii_case("websocket"),
+            |policy| policy.action_for(protocol) == UpgradeAction::Passthrough,
+        )
+    }
+
+    /// Whether the listener has an explicit upgrade policy.
+    #[must_use]
+    pub fn has_explicit_upgrade_policy(&self) -> bool {
+        self.upgrade_policy.is_some()
+    }
+
+    /// Return the first selected required body declaration recorded for a request.
+    #[must_use]
+    pub fn required_body_processing(extensions: &RequestExtensions) -> Option<RequiredBodyProcessing> {
+        upgrade::required_body_processing(extensions)
+    }
+
     /// Apply global body size ceilings.
     ///
     /// When no filter requires body access (mode is [`Stream`]),

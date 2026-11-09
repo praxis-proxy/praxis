@@ -244,6 +244,31 @@ pub(super) fn effective_request_body_phase(pf: &PipelineFilter) -> RequestBodyPh
     }
 }
 
+/// Return the access declaration that belongs to the request-body phase this
+/// filter actually runs in, together with its diagnostic phase name.
+pub(super) fn effective_request_body_requirement(pf: &PipelineFilter) -> (BodyAccess, &'static str) {
+    let AnyFilter::Http(filter) = &pf.filter else {
+        return (BodyAccess::None, "request_body");
+    };
+    match effective_request_body_phase(pf) {
+        RequestBodyPhase::None => (BodyAccess::None, "request_body"),
+        RequestBodyPhase::PreRead => (filter.request_body_access(), "request_body"),
+        RequestBodyPhase::BoundUpstream => {
+            #[cfg(feature = "bound-upstream-request-body")]
+            {
+                (
+                    filter.bound_upstream_request_body_access(),
+                    "bound_upstream_request_body",
+                )
+            }
+            #[cfg(not(feature = "bound-upstream-request-body"))]
+            {
+                (BodyAccess::None, "bound_upstream_request_body")
+            }
+        },
+    }
+}
+
 /// Indices of filters declaring response-trailer access.
 pub(super) fn response_trailer_filter_indices(filters: &[PipelineFilter]) -> Vec<usize> {
     filters
