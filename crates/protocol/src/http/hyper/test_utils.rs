@@ -199,7 +199,9 @@ fn act(action: Option<&Action>) -> Result<FilterAction, FilterError> {
 
 /// The body access a body hook needs.
 fn access(body: Option<&(BodyMode, BodyHook)>) -> BodyAccess {
-    body.map_or(BodyAccess::None, |_body| BodyAccess::ReadWrite)
+    body.map_or(BodyAccess::None, |_body| {
+        BodyAccess::ReadWrite(praxis_filter::BodyRequirement::Optional)
+    })
 }
 
 /// The body mode a body hook asks for.

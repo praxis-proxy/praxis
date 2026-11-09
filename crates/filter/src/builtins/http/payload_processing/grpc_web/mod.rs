@@ -242,7 +242,7 @@ impl HttpFilter for GrpcWebFilter {
         // The binary variant is byte-identical to native gRPC, so only
         // the base64 variant needs the body at all.
         if self.encodings.text {
-            BodyAccess::ReadWrite
+            BodyAccess::ReadWrite(crate::BodyRequirement::Required)
         } else {
             BodyAccess::None
         }
@@ -333,7 +333,7 @@ impl HttpFilter for GrpcWebFilter {
     }
 
     fn response_body_access(&self) -> BodyAccess {
-        BodyAccess::ReadWrite
+        BodyAccess::ReadWrite(crate::BodyRequirement::Required)
     }
 
     fn response_body_mode(&self) -> BodyMode {

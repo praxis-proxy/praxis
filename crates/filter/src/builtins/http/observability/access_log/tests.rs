@@ -1074,7 +1074,7 @@ fn response_body_access_is_read_only() {
     let filter = default_filter();
     assert_eq!(
         filter.response_body_access(),
-        BodyAccess::ReadOnly,
+        BodyAccess::ReadOnly(crate::BodyRequirement::Optional),
         "access_log should declare ReadOnly response body access"
     );
     assert_eq!(filter.request_body_access(), BodyAccess::None);
