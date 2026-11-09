@@ -70,7 +70,10 @@ fn validate_route(route: &LocalRoute) -> Result<(), FilterError> {
         return Err(fail("path", "must be an absolute URI path without a query or fragment"));
     }
     if matches!(&route.methods, LocalMethods::Explicit(methods) if methods.is_empty()) {
-        return Err(fail("methods", "must contain at least one method when explicitly configured"));
+        return Err(fail(
+            "methods",
+            "must contain at least one method when explicitly configured",
+        ));
     }
     if route.body != LocalBodyOwnership::Exclusive {
         return Err(fail("body", "must be exclusive"));
