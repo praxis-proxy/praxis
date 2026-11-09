@@ -19,9 +19,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Security
 
-- Replay local response-header appends without retaining discarded handler
-  values on policy denials or precommit 500 replacements. Appending a policy
-  cookie no longer leaks the handler's session cookie into the replacement.
 - LLM policies now apply HTTP authorization, delegation and request assertions
   to accepted unclassified requests without a model when
   `llm.require_model: false`. Adding a body to a discovery request no longer
@@ -34,27 +31,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- Experimental, off-by-default `local-http` handler contracts, mandatory
-  route/pipeline validation, and a fail-closed lifecycle coordinator tested
-  with bounded fake I/O. Live adapters reject these pipelines until local
-  transport serving lands. External policies can preserve explicit unchanged
-  response-header writes and absent removals across replacements through
+- Experimental, off-by-default `local-http` handler contracts with route and
+  pipeline validation. Pingora and Hyper adapters do not serve local handlers
+  yet, so startup and reload reject pipelines that declare local routes.
+  Custom policies can preserve explicit response-header writes and removals
+  across local response replacements through
   `local_http::record_response_header_effects`. See
   `docs/architecture/local-http.md`.
-
-### Fixed
-
-- Include `local-http` in the experimental feature startup warning.
-- Preserve local access-log eligibility from request processing when a later
-  header policy removes a header used by the logger's conditions.
-- Unmatched requests can use ordinary proxy processing in pipelines with
-  local HTTP routes, while matching or already-claimed requests remain local.
-- Local HTTP delivery cancels blocked response suppression and discards source
-  headers when replacing precommit failures with an empty 500.
-- Local HTTP header and CORS policies survive response replacement even when
-  their writes or removals leave the original headers unchanged.
-- Local CORS preflight responses keep their generated permissions through the
-  coordinator's response-policy unwind.
 
 ## [0.8.0] - 2026-11-06
 
