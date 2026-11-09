@@ -28,9 +28,9 @@ use praxis_test_utils::{
 /// The example under test.
 const EXAMPLE: &str = "observability/metric-label-sets.yaml";
 
-/// The last dimension the example disables, and so where the test appends
+/// The last dimension the example turns off, and so where the test appends
 /// its own.
-const LAST_DISABLED: &str = "      - endpoint\n";
+const LAST_DISABLED: &str = "    endpoint: false\n";
 
 /// How long a scrape may take to show a newly recorded series.
 const SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -113,7 +113,7 @@ fn example_yaml(port: u16, admin: u16, backend: u16) -> String {
         "shutdown_timeout_secs: 1\n{}",
         allow_loopback_endpoints(&patch_yaml(&yaml, port, &ports)).replacen(
             LAST_DISABLED,
-            &format!("{LAST_DISABLED}      - cluster\n"),
+            &format!("{LAST_DISABLED}    cluster: false\n"),
             1
         )
     );

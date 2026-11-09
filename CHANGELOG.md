@@ -475,7 +475,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   can send one.
 
 - An opt-in `status_code` label on `praxis_http_requests_total`, enabled
-  with `metrics.labels.enabled: [status_code]`. It separates an auth
+  with `metrics.labels.status_code: true`. It separates an auth
   rejection from a rate limit, which `status_class` reports as one `4xx`
   series. Codes outside the allowlist the proxy's own filters return
   collapse to their class, so the dimension stays at about seventeen
@@ -573,6 +573,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Breaking:** `metrics.labels` takes one `true`/`false` setting per
+  dimension instead of the `disabled` list. The list could only remove a
+  dimension, so the new off-by-default `status_code` would have needed a
+  second, opposite list; one setting per dimension adds it without adding
+  a config surface. Omitted dimensions keep their defaults. A config using
+  `disabled` is rejected at startup with a message naming its replacement;
+  configs that never set `metrics.labels` are unaffected. Migrate
+  `disabled: [route, endpoint]` to `route: false` and `endpoint: false`.
 - Clarify that the default Pingora shutdown grace period is capped at five
   seconds, including for streaming responses, regardless of a larger
   `shutdown_timeout_secs` value.

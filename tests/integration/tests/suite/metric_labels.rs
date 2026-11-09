@@ -68,10 +68,9 @@ admin:
   metrics_address: "127.0.0.1:{admin}"
 metrics:
   labels:
-    disabled:
-      - route
-      - endpoint
-      - cluster
+    route: false
+    endpoint: false
+    cluster: false
 listeners:
   - name: web
     address: "127.0.0.1:{port}"

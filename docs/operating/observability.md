@@ -65,10 +65,16 @@ an empty `module`, and out-of-range durations return 400 JSON errors.
 
 ## Metrics Reference
 
-HTTP request and TCP connection metrics are always on when admin is enabled;
-per-filter duration histograms are opt-in. Recorder upkeep runs every five
-seconds while admin is enabled, independent of scrapes, so histogram buffers
-drain even when nobody scrapes `/metrics`.
+Praxis records Prometheus metrics in three
+categories: HTTP request metrics, TCP connection
+metrics (both always on when admin is enabled), and
+per-filter duration summaries (opt-in).
+
+Recorder upkeep runs every five seconds whenever the
+admin endpoint is enabled. It is independent of
+Prometheus scrape traffic, so distribution buffers
+are drained even when `/metrics` is not being
+scraped.
 
 ### HTTP Request Metrics
 
@@ -97,12 +103,18 @@ leaving `status_class` in place, so existing queries
 keep working. It is off by default and bounded to an
 allowlist; see [Metric Label Sets](#metric-label-sets).
 
-#### `praxis_http_request_duration_seconds` (histogram)
+#### `praxis_http_request_duration_seconds` (summary)
 
 Wall-clock duration of completed HTTP requests in
 seconds. Uses the same label set as
 `praxis_http_requests_total`, except `status_code`,
 which it never carries.
+
+Exposed as a Prometheus summary with a `quantile`
+label (`0`, `0.5`, `0.9`, `0.95`, `0.99`, `0.999`,
+`1`), not as a bucketed histogram. Read a quantile
+directly; it cannot be re-aggregated across labels
+with `histogram_quantile`.
 
 #### `praxis_http_active_requests` (gauge)
 
@@ -271,10 +283,13 @@ pipeline routes to a cluster keeps that endpoint's configured address.
 Recorded for every TCP connection. Every TCP metric carries `listener`
 (listener name from config).
 
-#### `praxis_tcp_connection_duration_seconds` (histogram)
+#### `praxis_tcp_connection_duration_seconds` (summary)
 
-Connection lifetime from accept to close, in seconds. The `reason` label says
-why it closed:
+Wall-clock lifetime of a TCP connection from accept
+to close, in seconds. Exposed as a summary with a
+`quantile` label, not as a bucketed histogram.
+
+The `reason` label says why it closed:
 
 | `reason` | Meaning |
 | --------------------- | ---------------------------------------- |
@@ -318,19 +333,22 @@ decrement the gauge on the same path they log on. HTTP requests are in
 Most label dimensions are emitted by default. In
 large deployments the combination of dimensions can
 produce more time series than a Prometheus server
-should hold, so each can be turned off individually.
-A dimension that is off by default is turned on the
-same way, through `enabled`:
+should hold, so each takes its own `true`/`false`
+setting. A dimension that is off by default is turned
+on exactly the same way:
 
 ```yaml
 metrics:
   labels:
-    disabled:
-      - route
-      - endpoint
-    enabled:
-      - status_code
+    route: false
+    endpoint: false
+    status_code: true
 ```
+
+A dimension you leave out keeps the default below.
+Writing the value it already has changes nothing, so
+each dimension has one setting and the two can never
+disagree.
 
 | Dimension | Default | Grows with |
 | -------------- | ------- | ---------------------------------- |
@@ -342,15 +360,12 @@ metrics:
 | `status_class` | on | Bounded: six values |
 | `status_code` | off | Bounded: about seventeen values |
 
-Disabling a dimension drops it from every metric
+Turning a dimension off drops it from every metric
 that carries it; the metric itself stays available,
 with the series that differed only by that dimension
 collapsed into one. `endpoint` and `route` are the
 usual candidates, since they grow with traffic shape
-rather than with config size. Listing a dimension in
-both lists disables it: a contradictory
-configuration resolves to the lower-cardinality
-reading.
+rather than with config size.
 
 `status_code` appears only on
 `praxis_http_requests_total`. Codes the proxy's own
@@ -371,18 +386,46 @@ The exception is `cluster` on `praxis_upstream_healthy_endpoints` and
 dropping the label would collapse every cluster into one last-writer series.
 Disabling `cluster` keeps it on those two gauges.
 
-The label set is read once at startup; changing it needs a restart. Path
-templates are compiled at startup and indexed by segment count, so matching
-is one walk of the request's path segments, with no regular expressions.
+Label selection is read once at startup and is not
+hot-reloadable; changing the label set requires a
+restart.
+
+> **Changed:** this setting previously took a `disabled`
+> list. A list could only remove a dimension, so adding
+> the off-by-default `status_code` would have required a
+> second list doing the opposite. One setting per
+> dimension adds it without adding a config surface. A
+> config still using `disabled` is rejected at startup
+> with a message naming the replacement:
+>
+> ```yaml
+> metrics:
+>   labels:
+>     disabled: [route, endpoint]   # old
+> ```
+>
+> ```yaml
+> metrics:
+>   labels:
+>     route: false                  # new
+>     endpoint: false
+> ```
+
+Templates are compiled at startup and indexed by
+segment count, so matching costs one walk of the
+request's path segments and uses no regular
+expressions.
 
 ### Filter Duration Histograms
 
 Per-filter hook timing is opt-in with `metrics.filter_duration: true`; see
 [Metrics](configuration.md#metrics) for the setting and its startup warning.
 
-#### `praxis_filter_duration_seconds` (histogram)
+#### `praxis_filter_duration_seconds` (summary)
 
-Wall-clock duration of one filter hook call, in seconds.
+Wall-clock duration of a single filter hook
+invocation in seconds. Exposed as a summary with a
+`quantile` label, not as a bucketed histogram.
 
 | Label | Values |
 | -------- | ------------------------------ |
@@ -457,40 +500,87 @@ sum(rate(praxis_http_requests_total{status_class="5xx"}[5m]))
 sum(rate(praxis_http_requests_total[5m]))
 ```
 
-p99 latency per cluster. Change `0.99` for other percentiles, and drop
-`cluster` for the overall figure:
+### Request Latency Percentiles
+
+The duration metrics are summaries, so each quantile
+is already computed and is selected by its `quantile`
+label. There are no `_bucket` series and
+`histogram_quantile` does not apply.
+
+> **A quiet series reads as zero, not as absent.**
+> Each quantile is computed over a rolling **60-second**
+> window (three 20-second buckets). When a label
+> combination sees no traffic for that long, its
+> quantiles are published as `0` instead of
+> disappearing. On a dashboard that looks like latency
+> dropping to zero, not like traffic stopping.
+>
+> This matters because the default label set
+> (`method`, `status_class`, `route`, `cluster`) makes
+> many combinations, and most are idle at any scrape.
+> A per-route latency panel is the common place to get
+> caught.
+>
+> To get a value that goes absent instead of to zero,
+> use the mean from the counters, which are cumulative:
+>
+> ```promql
+> rate(praxis_http_request_duration_seconds_sum[5m])
+> /
+> rate(praxis_http_request_duration_seconds_count[5m])
+> ```
+>
+> That is a mean, not a percentile. Use the quantiles
+> for tail latency and this for "is it still moving",
+> or alert on `praxis_http_requests_total` rate so a
+> dead route is visible as missing traffic.
+
+p50 and p99 latency:
 
 ```promql
-histogram_quantile(0.99,
-  sum by (le, cluster) (
-    rate(praxis_http_request_duration_seconds_bucket[5m])
-  )
-)
+praxis_http_request_duration_seconds{quantile="0.5"}
+```
+
+```promql
+praxis_http_request_duration_seconds{quantile="0.99"}
+```
+
+Available quantiles are `0`, `0.5`, `0.9`, `0.95`,
+`0.99`, `0.999` and `1`.
+
+Each series is one label combination. To watch the
+worst one rather than reading them all:
+
+```promql
+max(praxis_http_request_duration_seconds{quantile="0.99"})
+```
+
+Summary quantiles cannot be averaged or summed across
+label combinations: the result would not be a
+quantile. Use `max` to find the worst case, or filter
+down to a single series.
+
+### Latency by Cluster
+
+p99 latency for one upstream cluster:
+
+```promql
+praxis_http_request_duration_seconds{quantile="0.99",cluster="backend"}
 ```
 
 The ten slowest filters at p95:
 
 ```promql
-topk(10,
-  histogram_quantile(0.95,
-    sum by (le, filter) (
-      rate(praxis_filter_duration_seconds_bucket[5m])
-    )
-  )
-)
+topk(10, praxis_filter_duration_seconds{quantile="0.95"})
 ```
 
 Request against response time for one filter:
 
 ```promql
-histogram_quantile(0.95,
-  sum by (le, phase) (
-    rate(
-      praxis_filter_duration_seconds_bucket{filter="router"}[5m]
-    )
-  )
-)
+praxis_filter_duration_seconds{quantile="0.95",filter="router"}
 ```
+
+The result has one series per `phase`.
 
 ## Access Logging
 
