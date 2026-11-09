@@ -13,9 +13,16 @@
     reason = "integration tests"
 )]
 
-use std::{io::Read as _, sync::Arc};
+use std::{
+    io::Read as _,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use praxis_tls::{CaConfig, ClientCertMode, ListenerTls, setup};
+use praxis_tls::{
+    CaConfig, CertKeyPair, ClientCertMode, ListenerTls, setup,
+    watcher::{CertWatcher, ClientVerifierReload},
+};
 use rcgen::{CertificateParams, Issuer, KeyPair};
 use rustls::{
     CertificateError, ClientConfig, ClientConnection, HandshakeKind, RootCertStore, ServerConnection,
@@ -263,6 +270,69 @@ fn crl_race(version: &'static SupportedProtocolVersion, mode: ClientCertMode) {
             "the connection must perform full authentication"
         );
     }
+}
+
+#[test]
+#[expect(clippy::disallowed_methods, reason = "the test waits through real polling intervals")]
+fn polling_reloads_the_listener_verifier_without_notifications() {
+    let fixture = Fixture::new(ClientCertMode::Require);
+    let server = setup::build_reloadable_server_config(&fixture.tls, false).expect("server");
+    let ca = fixture.tls.client_ca.clone().expect("client CA");
+    let verifier = server.verifier_handle.clone().expect("verifier");
+    // A missing certificate directory makes notify setup fail, leaving polling
+    // as the only reload path. The verifier itself still watches real files.
+    let missing = tempfile::tempdir().expect("temp dir").path().join("missing");
+    let pair = CertKeyPair {
+        cert_path: missing.join("cert.pem").to_string_lossy().into_owned(),
+        key_path: missing.join("key.pem").to_string_lossy().into_owned(),
+        default: false,
+        server_names: Vec::new(),
+    };
+    let reload = ClientVerifierReload {
+        ca_path: ca.ca_path,
+        crl_paths: ca.crl_paths,
+        mode: fixture.tls.client_cert_mode,
+        trusted_spiffe_ids: fixture.tls.trusted_spiffe_ids.clone(),
+        swap_handle: verifier,
+    };
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let watcher = CertWatcher::spawn(
+        Arc::clone(&server.cert_handle),
+        pair,
+        Some(reload),
+        shutdown,
+        server.startup_hashes.clone(),
+    );
+
+    let client = fixture.client(&TLS13, Some(&fixture.revoked));
+    assert!(
+        handshake(&server.config, &client, None).is_ok(),
+        "the client must be trusted before the CRL rotates"
+    );
+    fixture.revoke();
+
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(40))
+        .expect("deadline fits the clock");
+    let mut rejected = false;
+    let mut last = "no handshake completed".to_owned();
+    while Instant::now() < deadline {
+        match handshake(&server.config, &client, None) {
+            Err(rustls::Error::InvalidCertificate(CertificateError::Revoked)) => {
+                rejected = true;
+                break;
+            },
+            Ok(kind) => last = format!("accepted: {kind:?}"),
+            Err(error) => last = format!("error: {error}"),
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    stop.send(true).expect("stop the watcher");
+    drop(watcher.join());
+    assert!(
+        rejected,
+        "polling must install the revoked CRL on the listener verifier; last: {last}"
+    );
 }
 
 #[test]
