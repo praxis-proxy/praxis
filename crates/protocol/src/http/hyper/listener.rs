@@ -181,12 +181,8 @@ pub(super) fn register(
     shared: ListenerShared,
     cert_watcher_shutdowns: &mut Vec<watch::Sender<bool>>,
 ) -> Result<(), ProxyError> {
-    let socket = bind_listener_socket(&listener.address).map_err(|err| {
-        ProxyError::Config(format!(
-            "failed to bind HTTP listener {address}: {err}",
-            address = listener.address
-        ))
-    })?;
+    validate_upgrade_support(listener)?;
+    let socket = bind_http_listener(&listener.address)?;
     let acceptor = match &listener.tls {
         Some(tls) => {
             let (config, watcher) = crate::tls_setup::build_listener_tls(tls, &listener.address, "HTTP", true)?;
@@ -211,6 +207,27 @@ pub(super) fn register(
     runtime.add_required_service(&format!("http-proxy:{name}", name = listener.name), move |shutdown| {
         accept.run(socket, shutdown)
     });
+    Ok(())
+}
+
+/// Bind one HTTP listener socket with a listener-specific configuration error.
+fn bind_http_listener(address: &str) -> Result<TcpSocket, ProxyError> {
+    bind_listener_socket(address)
+        .map_err(|err| ProxyError::Config(format!("failed to bind HTTP listener {address}: {err}")))
+}
+
+/// Reject listener policies that ask Hyper to tunnel a WebSocket.
+fn validate_upgrade_support(listener: &Listener) -> Result<(), ProxyError> {
+    if listener
+        .upgrade_policy
+        .as_ref()
+        .is_some_and(praxis_core::config::UpgradePolicy::permits_websocket)
+    {
+        return Err(ProxyError::Config(format!(
+            "HTTP listener '{name}' cannot permit WebSocket passthrough with the Hyper backend",
+            name = listener.name
+        )));
+    }
     Ok(())
 }
 
@@ -536,6 +553,23 @@ mod tests {
                 "a keep-alive timeout of {millis} ms waits {seconds} s, as Pingora rounds it"
             );
         }
+    }
+
+    #[test]
+    fn websocket_passthrough_policy_is_rejected_at_startup() {
+        let error = register_listener(
+            r#"
+name: web
+address: "127.0.0.1:0"
+upgrade_policy:
+  default: deny
+  protocols:
+    websocket: passthrough
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("cannot permit WebSocket passthrough"));
     }
 
     #[test]

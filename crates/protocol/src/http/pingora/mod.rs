@@ -151,6 +151,7 @@ mod tests {
             name: name.to_owned(),
             address: "127.0.0.1:8080".to_owned(),
             protocol,
+            upgrade_policy: None,
             cluster: None,
             downstream_keepalive_timeout_ms: None,
             downstream_read_timeout_ms: None,

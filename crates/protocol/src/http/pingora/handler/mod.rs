@@ -128,6 +128,7 @@ pub use with_body::PingoraHttpHandler;
 ///     forward_proxy: None,
 ///     max_connections: None,
 ///     protocol: Default::default(),
+///     upgrade_policy: None,
 ///     tcp_session_timeout_ms: None,
 ///     tcp_max_duration_secs: None,
 ///     tls: None,
