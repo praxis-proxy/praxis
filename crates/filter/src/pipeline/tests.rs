@@ -3008,11 +3008,37 @@ fn configured_buffered_request_rejects_transfer_above_cap() {
 }
 
 #[test]
+fn configured_buffered_request_accepts_transfer_at_cap() {
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(4096),
+        ..praxis_core::config::BodyLimitsConfig::default()
+    };
+    let mut pipeline = make_pipeline(vec![Box::new(BoundedStreamBufferFilter { max_bytes: 8192 })]);
+    pipeline.configure_body_limits(&limits, false).unwrap();
+    assert_eq!(pipeline.selected_upstream_request_body_limit(), 4096);
+}
+
+#[test]
+fn configured_buffered_request_rejects_transfer_one_above_cap() {
+    let limits = praxis_core::config::BodyLimitsConfig {
+        max_buffer_bytes: 4096.try_into().unwrap(),
+        max_request_bytes: Some(4097),
+        ..praxis_core::config::BodyLimitsConfig::default()
+    };
+    let mut pipeline = make_pipeline(vec![Box::new(BoundedStreamBufferFilter { max_bytes: 8192 })]);
+    let error = pipeline.configure_body_limits(&limits, false).unwrap_err();
+    let message = error.to_string();
+    assert!(message.contains("body_limits.max_request_bytes (4097)"), "{message}");
+    assert!(message.contains("body_limits.max_buffer_bytes (4096)"), "{message}");
+}
+
+#[test]
 fn configured_buffer_cap_combines_with_transfer_and_filter_limits() {
     use praxis_core::config::BodyLimitsConfig;
     for cap in [1, 65_537, 67_108_865, 1_073_741_824] {
         for requested in [None, Some(1), Some(cap), Some(usize::MAX)] {
-            for transfer in [None, Some(0), Some(17), Some(cap - 1), Some(cap), Some(usize::MAX)] {
+            for transfer in [None, Some(0), Some(17.min(cap)), Some(cap - 1), Some(cap)] {
                 let limits = BodyLimitsConfig {
                     max_buffer_bytes: cap.try_into().unwrap(),
                     max_request_bytes: transfer,
@@ -3021,11 +3047,6 @@ fn configured_buffer_cap_combines_with_transfer_and_filter_limits() {
                 let mut pipeline = make_pipeline(vec![Box::new(BidirectionalModeFilter {
                     mode: BodyMode::StreamBuffer { max_bytes: requested },
                 })]);
-                if transfer.is_some_and(|bytes| bytes > cap) {
-                    let error = pipeline.configure_body_limits(&limits, true).unwrap_err();
-                    assert!(error.to_string().contains("body_limits.max_request_bytes"));
-                    continue;
-                }
                 pipeline.configure_body_limits(&limits, true).unwrap();
                 let effective = cap.min(requested.unwrap_or(cap)).min(transfer.unwrap_or(cap));
                 let expected = BodyMode::StreamBuffer {
