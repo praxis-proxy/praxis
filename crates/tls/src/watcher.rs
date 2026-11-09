@@ -13,6 +13,7 @@
 //! [`notify`]: notify
 
 use std::{
+    io::Read as _,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -33,8 +34,9 @@ use crate::{CertKeyPair, ClientCertMode, setup::loader};
 const DEBOUNCE_MS: u64 = 500; // 500 ms
 
 /// Backoff value after a successful reload. It only seeds the failure retry
-/// timer, which is idle after a success; new filesystem events always debounce
-/// for [`DEBOUNCE_MS`] and restart the backoff.
+/// timer, which is idle after a success; each newly detected change debounces
+/// for [`DEBOUNCE_MS`] and restarts the backoff, whether the filesystem
+/// reported it or the fallback poll found it.
 const MIN_SUCCESS_COOLDOWN_MS: u64 = 5_000; // 5 seconds
 
 /// Maximum backoff delay on consecutive reload failures.
@@ -42,6 +44,9 @@ const MAX_BACKOFF_MS: u64 = 60_000; // 60 seconds
 
 /// Fallback interval for filesystems whose atomic updates generate no events.
 const CERTIFICATE_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Chunk size for streaming a file digest, so large CRLs are never loaded whole.
+const DIGEST_BUFFER_BYTES: usize = 16 * 1024; // 16 KiB
 
 // Completed certificate polls on this thread. Tests use it to wait for an
 // explicit poll instead of inferring completion from a sleep. Thread-local
@@ -250,6 +255,7 @@ async fn watch_events(
             _ = certificate_poll.tick(), if !retry_pending => {
                 let observed = watched_file_hashes(&pair, verifier_reload.as_ref()).await;
                 if observed != file_hashes || observed.iter().any(Option::is_none) {
+                    backoff_ms = DEBOUNCE_MS;
                     retry_pending = !reload_tracked(&current, &pair, verifier_reload.as_ref(), &mut backoff_ms, &mut file_hashes).await;
                 }
                 #[cfg(test)]
@@ -464,8 +470,17 @@ fn file_hashes_now(pair: &CertKeyPair, verifier: Option<&ClientVerifierReload>) 
 ///
 /// The setup path uses it to snapshot the files before the startup load.
 pub(crate) fn file_digest(path: &str) -> Option<[u8; 32]> {
-    let contents = zeroize::Zeroizing::new(std::fs::read(path).ok()?);
-    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), &contents).ok()?;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = openssl::hash::Hasher::new(openssl::hash::MessageDigest::sha256()).ok()?;
+    let mut buffer = zeroize::Zeroizing::new(vec![0_u8; DIGEST_BUFFER_BYTES]);
+    loop {
+        let read = file.read(buffer.as_mut_slice()).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(buffer.get(..read)?).ok()?;
+    }
+    let digest = hasher.finish().ok()?;
     digest.as_ref().try_into().ok()
 }
 

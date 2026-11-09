@@ -62,11 +62,11 @@ fallback). See [tls-multi-cert].
 ### Certificate Hot-Reload
 
 Certificate hot-reload is enabled by default. Cert and
-key files are watched for changes. When modified (e.g. by
-certbot, cert-manager, or Vault PKI), the proxy atomically
-picks up the new certificate within 500ms. Existing
-connections are unaffected; only new TLS handshakes use the
-rotated certificate.
+key files are watched for changes. When a filesystem event
+is observed (e.g. from certbot, cert-manager, or Vault PKI),
+the proxy atomically picks up the new certificate after the
+500ms debounce. Existing connections are unaffected; only
+new TLS handshakes use the rotated certificate.
 
 To explicitly disable hot-reload, set `hot_reload: false`.
 Multi-cert SNI configs auto-disable hot-reload.
@@ -92,7 +92,11 @@ the certificate statically. See
 secret mounts, certbot, and cert-manager. A cert-manager
 rotation that writes a temp file and then renames it over
 the original triggers a single reload after the rename
-completes.
+completes. The 500ms figure is only the notification
+debounce: a filesystem that generates no event for an atomic
+update is detected by a ten-second fallback poll, so
+detection can take up to one poll interval plus the reload
+time.
 
 **Alternative: graceful restart.** Pingora supports
 graceful restart via SIGHUP with FD passing. This reloads
