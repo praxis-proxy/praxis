@@ -163,8 +163,11 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
     super::address::validate_address(&listener.address, &listener.name)?;
     validate_max_connections(listener)?;
 
+    validate_upgrade_policy(listener)?;
+
     if listener.protocol == ProtocolKind::Tcp {
         reject_forward_proxy_on_tcp(listener)?;
+        reject_http_only_fields(listener)?;
         validate_tcp_routing(listener)?;
     } else {
         reject_tcp_only_fields(listener)?;
@@ -188,6 +191,16 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
         super::timeouts::validate_tcp_max_duration(listener)?;
     }
 
+    Ok(())
+}
+
+/// Validate a listener's HTTP upgrade policy.
+fn validate_upgrade_policy(listener: &mut Listener) -> Result<(), ProxyError> {
+    if let Some(policy) = &mut listener.upgrade_policy {
+        policy
+            .validate()
+            .map_err(|err| ProxyError::Config(format!("listener '{name}': {err}", name = listener.name)))?;
+    }
     Ok(())
 }
 
@@ -215,6 +228,16 @@ fn reject_tcp_only_fields(listener: &Listener) -> Result<(), ProxyError> {
     tcp_only.iter().find(|(_, set)| *set).map_or(Ok(()), |(field, _)| {
         Err(ProxyError::Config(format!(
             "listener '{name}': '{field}' only applies to protocol: tcp",
+            name = listener.name
+        )))
+    })
+}
+
+/// Reject HTTP-only fields on a TCP listener instead of silently ignoring them.
+fn reject_http_only_fields(listener: &Listener) -> Result<(), ProxyError> {
+    listener.upgrade_policy.as_ref().map_or(Ok(()), |_| {
+        Err(ProxyError::Config(format!(
+            "listener '{name}': 'upgrade_policy' only applies to protocol: http",
             name = listener.name
         )))
     })
@@ -345,6 +368,114 @@ listeners:
                 "{field} on an HTTP listener should be rejected: {err}"
             );
         }
+    }
+
+    #[test]
+    fn http_listener_accepts_a_valid_upgrade_policy() {
+        let yaml = r#"
+name: web
+address: "127.0.0.1:8080"
+upgrade_policy:
+  default: deny
+  protocols:
+    WebSocket: passthrough
+"#;
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        let mut listeners = [listener];
+        validate_listeners(&mut listeners).unwrap();
+        let policy = listeners[0].upgrade_policy.as_ref().unwrap();
+        assert_eq!(
+            policy.action_for("websocket"),
+            crate::config::UpgradeAction::Passthrough
+        );
+    }
+
+    #[test]
+    fn invalid_upgrade_policy_is_rejected() {
+        for yaml in [
+            "name: web\naddress: \"127.0.0.1:8080\"\nupgrade_policy:\n  protocols:\n    h2c: passthrough\n",
+            "name: web\naddress: \"127.0.0.1:8080\"\nupgrade_policy:\n  protocols:\n    websocket: deny\n    WebSocket: passthrough\n",
+        ] {
+            let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+            let error = validate_listeners(&mut [listener]).unwrap_err();
+            assert!(
+                error.to_string().contains("upgrade"),
+                "expected an upgrade policy validation error, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_upgrade_protocol_rules_are_rejected_during_deserialization() {
+        let yaml = r#"
+name: web
+address: "127.0.0.1:8080"
+upgrade_policy:
+  protocols:
+    websocket: deny
+    websocket: passthrough
+"#;
+        let error = serde_yaml::from_str::<Listener>(yaml).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate upgrade protocol rule 'websocket'"),
+            "an exact duplicate rule must fail before it can overwrite a denial: {error}"
+        );
+    }
+
+    #[test]
+    fn upgrade_policy_allows_default_passthrough_for_adapter_gating() {
+        let yaml = "name: web\naddress: \"127.0.0.1:8080\"\nupgrade_policy:\n  default: passthrough\n";
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        let mut listeners = [listener];
+        validate_listeners(&mut listeners).unwrap();
+        let policy = listeners[0].upgrade_policy.as_ref().unwrap();
+        assert_eq!(
+            policy.action_for("websocket"),
+            crate::config::UpgradeAction::Passthrough
+        );
+        assert_eq!(policy.action_for("h2c"), crate::config::UpgradeAction::Passthrough);
+    }
+
+    #[test]
+    fn upgrade_policy_matches_names_case_insensitively_and_versions_exactly() {
+        let yaml = r#"
+name: web
+address: "127.0.0.1:8080"
+upgrade_policy:
+  default: passthrough
+  protocols:
+    Example/V1: deny
+"#;
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        let mut listeners = [listener];
+        validate_listeners(&mut listeners).unwrap();
+        let policy = listeners[0].upgrade_policy.as_ref().unwrap();
+        assert_eq!(policy.action_for("example/V1"), crate::config::UpgradeAction::Deny);
+        assert_eq!(
+            policy.action_for("EXAMPLE/v1"),
+            crate::config::UpgradeAction::Passthrough
+        );
+    }
+
+    #[test]
+    fn tcp_listener_rejects_http_upgrade_policy() {
+        let yaml = r#"
+name: db
+address: "127.0.0.1:5432"
+protocol: tcp
+upgrade_policy:
+  default: deny
+"#;
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        let error = validate_listeners(&mut [listener]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("'upgrade_policy' only applies to protocol: http"),
+            "got: {error}"
+        );
     }
 
     #[test]
@@ -606,6 +737,7 @@ filter_chains:
                 max_connections: None,
                 name: format!("l{i}"),
                 protocol: Default::default(),
+                upgrade_policy: None,
                 tcp_session_timeout_ms: None,
                 tcp_max_duration_secs: None,
                 tls: None,

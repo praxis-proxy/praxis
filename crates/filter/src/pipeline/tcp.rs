@@ -494,6 +494,7 @@ mod tests {
             .map(|(i, f)| crate::pipeline::filter::PipelineFilter::new(i, AnyFilter::Tcp(f), vec![], vec![]))
             .collect();
         FilterPipeline {
+            upgrade_policy: None,
             body_capabilities: BodyCapabilities::default(),
             compression: None,
             filters,

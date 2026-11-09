@@ -111,6 +111,9 @@ impl FilterPipeline {
                 trace!(filter = http_filter.name(), "request-head hook skipped by conditions");
                 continue;
             }
+            if let Some(rejection) = super::upgrade::select_filter_requirements(ctx, pf) {
+                return Ok(FilterAction::Reject(rejection));
+            }
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome = run_request_head_filter(
                 http_filter.as_ref(),
@@ -183,6 +186,9 @@ impl FilterPipeline {
             }
             if let Some(results) = pre_read_results.remove(http_filter.name()) {
                 ctx.filter_results.insert(http_filter.name(), results);
+            }
+            if let Some(rejection) = super::upgrade::select_filter_requirements(ctx, pf) {
+                return Ok(FilterAction::Reject(rejection));
             }
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome =
@@ -431,6 +437,9 @@ impl FilterPipeline {
             let Some(http_filter) = as_request_body_filter(pf, ctx, request_phase_tracked)? else {
                 continue;
             };
+            if let Some(rejection) = super::upgrade::select_request_body_requirement(ctx, pf.filter_id, http_filter) {
+                return Ok(FilterAction::Reject(rejection));
+            }
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome = run_request_body_filter(
                 http_filter,
@@ -527,6 +536,11 @@ impl FilterPipeline {
             let AnyFilter::Http(http_filter) = &pf.filter else {
                 continue;
             };
+            if let Some(rejection) =
+                super::upgrade::select_selected_upstream_requirement(ctx, pf.filter_id, http_filter.as_ref())
+            {
+                return Ok(FilterAction::Reject(rejection));
+            }
             ctx.current_filter_id = Some(pf.filter_id);
             let outcome = run_selected_upstream_request_body_filter(
                 http_filter.as_ref(),
@@ -641,6 +655,12 @@ impl FilterPipeline {
             let AnyFilter::Http(http_filter) = &pf.filter else {
                 continue;
             };
+            if let Some(rejection) =
+                super::upgrade::select_bound_upstream_requirement(ctx, pf.filter_id, http_filter.as_ref())
+            {
+                result = Ok(FilterAction::Reject(rejection));
+                break;
+            }
             ctx.current_filter_id = Some(pf.filter_id);
             body = body.filter(|bytes| !bytes.is_empty());
             let outcome = super::http_utils::run_bound_upstream_request_body_filter(
