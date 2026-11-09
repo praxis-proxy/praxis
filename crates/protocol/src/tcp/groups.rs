@@ -455,6 +455,7 @@ insecure_options:
             listeners: vec![Listener {
                 name: "orphan".to_owned(),
                 address: "0.0.0.0:9999".to_owned(),
+                upgrade_policy: None,
                 cluster: None,
                 downstream_keepalive_timeout_ms: None,
                 downstream_read_timeout_ms: None,
@@ -509,6 +510,7 @@ insecure_options:
             forward_proxy: None,
             max_connections: None,
             protocol: ProtocolKind::Tcp,
+            upgrade_policy: None,
             tcp_session_timeout_ms: None,
             tcp_max_duration_secs: None,
             tls: None,

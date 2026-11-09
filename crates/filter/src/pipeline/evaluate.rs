@@ -200,15 +200,11 @@ async fn execute_branch_filters(
         let AnyFilter::Http(http_filter) = &pf.filter else {
             continue;
         };
-        if !pf.conditions.is_empty()
-            && !should_execute_bound_selected(
-                &pf.conditions,
-                ctx.request,
-                ctx.bound_upstream_view(),
-                super::http_utils::ctx_selected_upstream(ctx),
-            )
-        {
+        if !branch_filter_selected(pf, ctx) {
             continue;
+        }
+        if let Some(rejection) = super::upgrade::select_filter_requirements(ctx, pf) {
+            return Ok(FilterAction::Reject(rejection));
         }
         ctx.current_filter_id = Some(pf.filter_id);
         let result = http_filter.on_request(ctx).await;
@@ -223,6 +219,17 @@ async fn execute_branch_filters(
         }
     }
     Ok(FilterAction::Continue)
+}
+
+/// Whether this branch filter's request conditions select its invocation.
+fn branch_filter_selected(pf: &PipelineFilter, ctx: &HttpFilterContext<'_>) -> bool {
+    pf.conditions.is_empty()
+        || should_execute_bound_selected(
+            &pf.conditions,
+            ctx.request,
+            ctx.bound_upstream_view(),
+            super::http_utils::ctx_selected_upstream(ctx),
+        )
 }
 
 /// Initialize correlation only after a branch is selected and its trace filter matches.

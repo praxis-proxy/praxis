@@ -204,6 +204,19 @@ pub(crate) fn resolve_pipelines_with_composition(
     let chains = expanded_chains.as_slices();
     let mut pipelines = HashMap::with_capacity(config.listeners.len());
     for listener in &config.listeners {
+        #[cfg(feature = "hyper")]
+        if listener
+            .upgrade_policy
+            .as_ref()
+            .is_some_and(praxis_core::config::UpgradePolicy::permits_websocket)
+        {
+            return Err(format!(
+                "HTTP listener '{name}' cannot permit WebSocket passthrough with the Hyper backend",
+                name = listener.name
+            )
+            .into());
+        }
+
         let mut entries = expanded_chains.for_listener(listener)?;
 
         validate_terminal_position(&entries, &listener.name)?;
@@ -222,6 +235,7 @@ pub(crate) fn resolve_pipelines_with_composition(
             &config.insecure_options,
             &config.clusters,
         )?;
+        pipeline.set_upgrade_policy(listener.upgrade_policy.clone());
         configure_pipeline(
             &mut pipeline,
             config,
