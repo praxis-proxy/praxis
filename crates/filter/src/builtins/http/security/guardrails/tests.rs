@@ -24,7 +24,7 @@ fn body_access_with_body_rules() {
     let f = make_filter(vec![body_contains("evil")]);
     assert_eq!(
         f.request_body_access(),
-        BodyAccess::ReadOnly,
+        BodyAccess::ReadOnly(crate::BodyRequirement::Required),
         "body rules need ReadOnly access"
     );
     assert_eq!(
@@ -49,6 +49,16 @@ fn body_access_without_body_rules() {
         f.request_body_mode(),
         BodyMode::Stream,
         "header-only rules use Stream mode"
+    );
+}
+
+#[test]
+fn flag_action_keeps_body_rules_required_for_downstream_enforcement() {
+    let f = make_flag_filter(vec![body_contains("DROP TABLE")]);
+    assert_eq!(
+        f.request_body_access(),
+        crate::body::BodyAccess::ReadOnly(crate::BodyRequirement::Required),
+        "flag results may feed a later enforcement branch, so body evaluation cannot be optional"
     );
 }
 
