@@ -60,16 +60,26 @@ impl FilterPipeline {
 /// Validate declarations without imposing the global buffering ceiling.
 fn validate_route(route: &LocalRoute) -> Result<(), FilterError> {
     let path = route.path.text();
-    if route.id.trim().is_empty()
-        || !path.starts_with('/')
-        || path.contains(['?', '#'])
-        || path.parse::<http::Uri>().is_err()
-        || matches!(&route.methods, LocalMethods::Explicit(methods) if methods.is_empty())
-        || route.body != LocalBodyOwnership::Exclusive
-        || route.request_limit == 0
-        || route.response_limit == 0
-    {
-        return Err(format!("local route '{}': require an ID, absolute path, nonempty methods, exclusive body, and positive finite u64 limits", route.id).into());
+    let fail = |field: &str, requirement: &str| {
+        FilterError::from(format!("local route '{}': {field} {requirement}", route.id))
+    };
+    if route.id.trim().is_empty() {
+        return Err(fail("id", "must not be empty"));
+    }
+    if !path.starts_with('/') || path.contains(['?', '#']) || path.parse::<http::Uri>().is_err() {
+        return Err(fail("path", "must be an absolute URI path without a query or fragment"));
+    }
+    if matches!(&route.methods, LocalMethods::Explicit(methods) if methods.is_empty()) {
+        return Err(fail("methods", "must contain at least one method when explicitly configured"));
+    }
+    if route.body != LocalBodyOwnership::Exclusive {
+        return Err(fail("body", "must be exclusive"));
+    }
+    if route.request_limit == 0 {
+        return Err(fail("request_limit", "must be positive"));
+    }
+    if route.response_limit == 0 {
+        return Err(fail("response_limit", "must be positive"));
     }
     Ok(())
 }
