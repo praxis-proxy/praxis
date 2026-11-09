@@ -17,6 +17,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Validate the final WebSocket handshake after response filters and reject
+  invalid or synthesized HTTP 101 responses before opening a tunnel.
+
 ### Added
 
 - Config loading warns when a deprecated filter or field is configured, naming

@@ -101,21 +101,7 @@ fn h2c_upgrade_via_connection_stripped() {
          Upgrade: h2c\r\n\r\n",
     );
     let status = parse_status(&raw);
-    assert!(
-        status == 200 || status == 400,
-        "h2c upgrade should succeed (stripped) or be rejected, \
-         got {status}"
-    );
-
-    if status == 200 {
-        let body = parse_body(&raw);
-        let body_lower = body.to_lowercase();
-        assert!(
-            !body_lower.contains("upgrade: h2c") && !body_lower.contains("upgrade:h2c"),
-            "h2c Upgrade header must be stripped to prevent \
-             h2c smuggling; echoed headers: {body}"
-        );
-    }
+    assert_eq!(status, 403, "unsupported h2c upgrades should be rejected: {raw}");
 }
 
 #[test]

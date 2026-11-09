@@ -49,6 +49,53 @@ fn stdout_sink_writes_ndjson_to_process_stdout() {
     );
 }
 
+#[test]
+#[cfg_attr(
+    coverage,
+    ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
+)]
+fn stdout_sink_records_client_ip_for_early_upgrade_refusal() {
+    let port = free_port();
+    let config = config(port).replace(
+        "    filter_chains: [main]\n",
+        "    upgrade_policy:\n      default: deny\n    filter_chains: [main]\n",
+    );
+    let mut proxy = PraxisProcess::spawn(&config, &addr(port));
+
+    let mut stream = TcpStream::connect(addr(port)).expect("connect to proxy");
+    stream
+        .write_all(
+            b"GET /health HTTP/1.1\r\n\
+              Host: test\r\n\
+              Connection: Upgrade\r\n\
+              Upgrade: websocket\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+              Sec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .expect("write WebSocket handshake");
+    let mut response = Vec::new();
+    let _read = stream.read_to_end(&mut response);
+
+    let mut logs = String::new();
+    for _ in 0..100 {
+        logs = proxy.logs();
+        if logs.contains(r#""status":"403""#) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    proxy.terminate();
+    assert!(
+        logs.contains(r#""status":"403""#),
+        "the refused handshake must produce a 403 access record:\n{logs}"
+    );
+    assert!(
+        logs.contains(r#""client_ip":"127.0.0.1""#),
+        "the fallback record must retain the downstream peer address:\n{logs}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

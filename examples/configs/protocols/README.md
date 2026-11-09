@@ -18,7 +18,7 @@ Protocol-specific configurations for HTTP/1.1, HTTP/2, gRPC, WebSocket, TCP, and
 
 **gRPC-Web**: Protocol translation between browser-based gRPC-Web clients and backend gRPC services.
 
-**WebSocket**: Bidirectional upgrade detection and forwarding. WebSocket connections bypass normal request/response filter phases after upgrade.
+**WebSocket**: Pingora can transparently pass through an explicitly permitted WebSocket handshake. Selected filters that declare required HTTP body processing cause the handshake to be rejected before upstream dispatch. After upgrade, frames bypass HTTP request/response filters; message inspection remains separate work.
 
 **TCP**: Raw TCP proxying for non-HTTP protocols with connection metrics and access logging.
 
